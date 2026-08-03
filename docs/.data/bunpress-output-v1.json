@@ -40,8 +40,8 @@
     },
     {
       "path": "advanced/verification/index.html",
-      "bytes": 161929,
-      "sha256": "29856fbf4e363b3fabdde497bedc25c3a4cf05bcf347cd88725c27950a6fbc42"
+      "bytes": 162229,
+      "sha256": "fda9f11d0d6280882f51ba1da3119df870705336ddef8918453b8ab0ee3eb9a9"
     },
     {
       "path": "api/index.html",
@@ -60,8 +60,8 @@
     },
     {
       "path": "benchmarks/index.html",
-      "bytes": 236132,
-      "sha256": "3ee3eeeeb28694f59ce9f6473926047c55d2be56188f8bad6e4d764280a886c9"
+      "bytes": 236288,
+      "sha256": "3e7014468c33173c0dfe8b4363763d2bfaac035fed7b2610bbdcadbc35984426"
     },
     {
       "path": "c-api/README/index.html",
@@ -75,8 +75,8 @@
     },
     {
       "path": "dependencies/index.html",
-      "bytes": 159795,
-      "sha256": "71636de76d450d5e37d1e91051d5e69ecf7c01f17568cd3e8b6bc5815239d5a0"
+      "bytes": 159486,
+      "sha256": "67b0581b74c9b9906ab1259ceb5f3db6429c727aedf7dde77c85eaf65f43fd50"
     },
     {
       "path": "dev-cache/index.html",
@@ -130,8 +130,8 @@
     },
     {
       "path": "guide/contributing/index.html",
-      "bytes": 160380,
-      "sha256": "1d29a43efd7cc062a62277dbf39d261d56324ba9f9a9fa11ecdd6786c8e31dd9"
+      "bytes": 160422,
+      "sha256": "d032b8e4e757b9b18f0e4d6238dca2cf2d91b28ca62b347844ff6cbfdea00498"
     },
     {
       "path": "guide/index.html",
@@ -165,8 +165,8 @@
     },
     {
       "path": "platforms/index.html",
-      "bytes": 152917,
-      "sha256": "098b8e1c06f0ce8703f2627d313a9e62a4097bf3859e70b25b19011255efb49c"
+      "bytes": 152923,
+      "sha256": "07abebfed123890026b205369ee56f9fbdefb222c81660212ef5b0d82da031ce"
     },
     {
       "path": "robots.txt",
@@ -200,8 +200,8 @@
     },
     {
       "path": "threads/limits/index.html",
-      "bytes": 209850,
-      "sha256": "e0b78b322d38250738b09d162abc0303db7b594e2f5f279c65d3308c35470f7b"
+      "bytes": 209856,
+      "sha256": "3862b1d67e7c750c1fe277b717a54430c2b615dfa3dcd397faffd664c091773c"
     },
     {
       "path": "threads/memory-model/index.html",
@@ -245,8 +245,8 @@
     },
     {
       "path": "threads/testing/index.html",
-      "bytes": 289254,
-      "sha256": "44be3b2cc337c46208d81b51f60963b2f9d347e1ca8aa9a464564e07ba0e8e5d"
+      "bytes": 290004,
+      "sha256": "76d2c299288959eb8facb0cfcb537a042baed21d962d9b1f28bcadd7a39c45e0"
     },
     {
       "path": "timers/index.html",
@@ -256,13 +256,13 @@
     {
       "path": "wasm-spec/index.html",
       "bytes": 165989,
-      "sha256": "f9517bf912deb13dce54a771a987a4d72e5fa977fee50512d13838a18ca01c4c"
+      "sha256": "500aa3a6be13fc4273d0b8c15b718138da22e9a17a6596d0fa6183d6bc456f1e"
     },
     {
       "path": "wasm/index.html",
-      "bytes": 279852,
-      "sha256": "65ee46ba189f9930ca0f5703ca14c0aa4429a154eefbdae71dc8344fa9b93230"
+      "bytes": 281352,
+      "sha256": "e3586ceb7b9b7781a3481d3871b760889b4d276be923d6b2c8776f74db9ebcb3"
     }
   ],
-  "tree_sha256": "eabb0a8d04ea550726224d306fb6df7c2ae342a4e4c883d4617667e983c6c0a3"
+  "tree_sha256": "06837ae0ac9852069efa29d6613cddb2d3c9b379609c5a5da5e7d91515f08efc"
 }

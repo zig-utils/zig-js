@@ -114,38 +114,13 @@
     {
       "id": "generated-standards-data",
       "class": "generated_data_acquisition_input",
-      "status": "migration_required",
+      "status": "allowed",
       "scope": "one-shot Unicode, CLDR, IANA, WHATWG, and Wasm table generators",
       "locator": "generator sources under tools/",
-      "pin": "several legacy generators still use moving URLs without checksums",
+      "pin": "generators accept operator-supplied local snapshots; the sole network acquisition tool pins exact revisions and SHA-256 for every archive",
       "license": "upstream data licenses",
       "affects_runtime_semantics": true,
-      "runtime_semantics": "Generated Zig tables are checked in and affect semantics; ordinary builds do not fetch them.",
-      "migration_issue": 497
-    },
-    {
-      "id": "python-tooling",
-      "class": "prohibited_unclassified",
-      "status": "migration_required",
-      "scope": "build, tests, audits, generators, benchmarks, and publication",
-      "locator": "python3 and tools/*.py",
-      "pin": "host interpreter; scripts are repository-owned",
-      "license": "platform supplied",
-      "affects_runtime_semantics": false,
-      "runtime_semantics": "Does not supply JavaScript semantics, but remains an unowned normal-workflow runtime.",
-      "migration_issue": 497
-    },
-    {
-      "id": "javascript-shell-tooling",
-      "class": "prohibited_unclassified",
-      "status": "migration_required",
-      "scope": "generators and bootstrap glue",
-      "locator": "Bun/Node and shell scripts under tools/ and scripts/",
-      "pin": "host runtimes; scripts are repository-owned",
-      "license": "platform supplied",
-      "affects_runtime_semantics": false,
-      "runtime_semantics": "Does not supply JavaScript semantics, but remains an unowned workflow runtime.",
-      "migration_issue": 497
+      "runtime_semantics": "Generated Zig tables are checked in and affect semantics; ordinary builds do not fetch them."
     },
     {
       "id": "bunpress-docs-toolchain",
@@ -160,15 +135,14 @@
     },
     {
       "id": "ci-bootstrap-actions",
-      "class": "prohibited_unclassified",
-      "status": "migration_required",
-      "scope": "GitHub Actions repository checkout",
-      "locator": "actions/checkout",
-      "pin": "workflow major tag; immutable revision migration remains required",
+      "class": "checksum_pinned_oracle",
+      "status": "allowed",
+      "scope": "GitHub Actions checkout, artifact upload, and release orchestration",
+      "locator": "actions/checkout, actions/upload-artifact, and stacksjs/action-releaser",
+      "pin": "checkout d23441a48e516b6c34aea4fa41551a30e30af803; upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02; action-releaser e925e292fd97978624d41cb513d7b1a5e120d693",
       "license": "third-party action licenses",
       "affects_runtime_semantics": false,
-      "runtime_semantics": "CI bootstrap only; cannot supply JavaScript semantics.",
-      "migration_issue": 497
+      "runtime_semantics": "CI bootstrap and publication only; cannot supply JavaScript semantics."
     },
     {
       "id": "pantry-docs-bootstrap",
@@ -184,14 +158,13 @@
     {
       "id": "pantry-release-bootstrap",
       "class": "owner_maintained_pinned_tooling",
-      "status": "migration_required",
+      "status": "allowed",
       "scope": "release publication bootstrap",
       "locator": "home-lang/pantry/packages/action",
-      "pin": "mutable main; immutable revision migration remains required",
+      "pin": "home-lang/pantry 75b5d0d7e01f9d0ace56c20fcdc73aee0e1dc3b5",
       "license": "MIT",
       "affects_runtime_semantics": false,
-      "runtime_semantics": "Owner-maintained release publication only; never part of libzig-js.",
-      "migration_issue": 497
+      "runtime_semantics": "Owner-maintained release publication only; never part of libzig-js."
     }
   ],
   "boundaries": {
@@ -229,10 +202,7 @@
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".py", "count": 0, "edge": "python-tooling" },
-      { "extension": ".mjs", "count": 0, "edge": "javascript-shell-tooling" },
-      { "extension": ".ts", "count": 59, "edge": "home-tool-runtime" },
-      { "extension": ".sh", "count": 0, "edge": "javascript-shell-tooling" }
+      { "extension": ".ts", "count": 59, "edge": "home-tool-runtime" }
     ],
     "network_capable_scripts": [
       { "path": "tools/wasm-spec/fetch.ts", "edge": "pinned-conformance-corpora" }
@@ -253,11 +223,11 @@
       { "manifest": "package.json", "name": "docs:data", "command": "~/Code/Home/lang/zig-out/bin/home-tool run scripts/gen-test262-data.ts", "edge": "home-tool-runtime" }
     ],
     "ci_actions": [
-      { "name": "actions/checkout@v6", "count": 32, "edge": "ci-bootstrap-actions" },
-      { "name": "actions/upload-artifact@v4", "count": 1, "edge": "ci-bootstrap-actions" },
-      { "name": "stacksjs/action-releaser@v1.2.9", "count": 1, "edge": "ci-bootstrap-actions" },
+      { "name": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", "count": 32, "edge": "ci-bootstrap-actions" },
+      { "name": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "count": 1, "edge": "ci-bootstrap-actions" },
+      { "name": "stacksjs/action-releaser@e925e292fd97978624d41cb513d7b1a5e120d693", "count": 1, "edge": "ci-bootstrap-actions" },
       { "name": "pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9", "count": 8, "edge": "pantry-docs-bootstrap" },
-      { "name": "home-lang/pantry/packages/action@main", "count": 1, "edge": "pantry-release-bootstrap" }
+      { "name": "home-lang/pantry/packages/action@75b5d0d7e01f9d0ace56c20fcdc73aee0e1dc3b5", "count": 1, "edge": "pantry-release-bootstrap" }
     ],
     "pinned_downloads": [
       { "url": "https://github.com/WebAssembly/wabt/releases/download/1.0.12/wabt-1.0.12-linux.tar.gz", "sha256": "540632382afd3e658761f2abb742e0504b4986ffcd127cef250fc843e46d9271", "occurrences": 1, "edge": "pinned-wasm-converters" },

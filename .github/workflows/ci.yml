@@ -321,23 +321,23 @@ jobs:
     steps:
       # build.zig.zon uses local-path deps (`../zig-regex`, `../zig-gc`), so the
       # sibling repos are checked out next to this one.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           path: zig-js
           # The exact-parent benchmark harness validates HEAD, HEAD^1, and a
           # non-parent HEAD~2 witness; retain precisely that ancestry in CI.
           fetch-depth: 3
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
           ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         if: matrix.home_tool == true
         with:
           repository: home-lang/home
@@ -482,15 +482,15 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           path: zig-js
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
           ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
@@ -547,20 +547,20 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           path: zig-js
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
           ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: home-lang/home
           path: Home/lang
@@ -599,20 +599,20 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           path: zig-js
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
           ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: home-lang/home
           path: Home/lang
@@ -648,15 +648,15 @@ jobs:
           - name: lifecycle
             profile: lifecycle
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           path: zig-js
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
           ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
@@ -692,15 +692,15 @@ jobs:
     name: test262-parallel
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           path: zig-js
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
           ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
@@ -737,32 +737,32 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           path: Libraries/zig-js
       # `docs-link-check` is a Zig build step, so configuration resolves the
       # same owned local-path package graph as every other repository target.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-regex
           path: Libraries/zig-regex
           ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
           path: Libraries/zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: stacksjs/bunpress
           path: Tools/bunpress
           ref: 1262895355142cb57ae7850dec7bf31cc5f5999d
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: stacksjs/stx
           path: Tools/stx
           ref: c215f1b82bdb40b983cf54f0182c7d959587f31d
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: stacksjs/ts-syntax-highlighter
           path: Libraries/ts-syntax-highlighter

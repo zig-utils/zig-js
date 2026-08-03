@@ -443,8 +443,10 @@ fn auditScripts(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void 
         defer walker.deinit();
         while (try walker.next(io)) |entry| {
             if (entry.kind != .file or std.mem.indexOf(u8, entry.path, "node_modules/") != null) continue;
+            if (expectedRuntime(entry.path) == null) continue;
             var extension_index: usize = undefined;
-            if (!hasScriptExtension(entry.path, inventory, &extension_index)) continue;
+            if (!hasScriptExtension(entry.path, inventory, &extension_index))
+                return fail("script '{s}/{s}' uses an unclassified runtime extension", .{ root, entry.path });
             actual[extension_index] += 1;
             const path = try std.fs.path.join(gpa, &.{ root, entry.path });
             defer gpa.free(path);

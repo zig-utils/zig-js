@@ -12,15 +12,15 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
       - name: Create Release
-        uses: stacksjs/action-releaser@v1.2.9
+        uses: stacksjs/action-releaser@e925e292fd97978624d41cb513d7b1a5e120d693
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to Pantry
-        uses: home-lang/pantry/packages/action@main
+        uses: home-lang/pantry/packages/action@75b5d0d7e01f9d0ace56c20fcdc73aee0e1dc3b5
         with:
           publish: zig
           install: 'false'

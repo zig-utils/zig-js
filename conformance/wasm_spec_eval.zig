@@ -1,6 +1,6 @@
 //! Evaluate one generated upstream WebAssembly specification script.
 //!
-//! The Python corpus driver owns WAST conversion and inventory generation; this
+//! The Home TypeScript corpus driver owns WAST conversion and inventory generation; this
 //! deliberately tiny executable keeps the measured engine path identical to an
 //! ordinary zig-js Context and prints the script's final JSON string verbatim.
 //! `WASM_SPEC_PROFILE=core-2-structural` enables the completed structural set;

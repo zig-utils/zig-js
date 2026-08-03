@@ -53,7 +53,7 @@ The integer kernel uses `i32x4.add/mul`; float uses `f32x4.add/mul`; shuffle rot
 
 ```sh
 zig build benchmark-comparison-bin -Doptimize=ReleaseFast
-python3 tools/wasm-simd-benchmark.py --samples 7 --lanes 8 \
+home-tool run tools/wasm-simd-benchmark.ts --samples 7 --lanes 8 \
   --raw-out docs/.data/wasm-simd-benchmark-YYYY-MM-DD.tsv \
   --markdown-out docs/.data/wasm-simd-benchmark-YYYY-MM-DD.md
 ```

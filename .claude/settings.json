@@ -40,7 +40,6 @@
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-c-api.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-objc-api.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-abi-profile.ts*)",
-      "Bash(python3 -m unittest tools/*)",
       "Bash(bun run docs:build*)",
       "Bash(bun run docs:data*)",
       "Bash(echo \"EXIT=$?\")"

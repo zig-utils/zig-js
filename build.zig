@@ -1898,7 +1898,7 @@ pub fn build(b: *std.Build) void {
     gc_profile_step.dependOn(&run_gc_profile.step);
 
     // Reproducible fragmentation evidence for explicit stop-the-world
-    // compaction. The Python driver alternates control/compact process order,
+    // compaction. The Home TypeScript driver alternates control/compact process order,
     // validates the heap/checksum contract, and optionally preserves raw TSV.
     const gc_compaction_runner = b.addExecutable(.{
         .name = "gc-compaction-benchmark-runner",

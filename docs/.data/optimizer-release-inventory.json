@@ -152,7 +152,7 @@
       },
       {
         "id": "pr249-terminal-release-safe",
-        "command": "python3 tools/pr249-terminal-execution.py --check",
+        "command": "home-tool run tools/pr249-terminal-execution.ts --check",
         "configuration": "ReleaseSafe serialized and no-GIL",
         "executables": 259,
         "promoted": 253,

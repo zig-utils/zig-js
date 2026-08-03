@@ -1,6 +1,6 @@
 //! Dependency-free documentation link and sidebar integrity gate (#497).
 //!
-//! The parser intentionally preserves the former Python gate's narrow syntax:
+//! The parser intentionally preserves the former documentation gate's narrow syntax:
 //! Markdown `[text](target)` destinations stop at whitespace or `)`, sidebar
 //! destinations come from literal `link: '...'` entries, fragments and query
 //! strings do not participate in file resolution, and external schemes are

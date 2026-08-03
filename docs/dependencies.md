@@ -58,20 +58,14 @@ explicit differential and benchmark executables; it never links into
 `libzig-js.a` or supplies engine semantics. Upstream corpora and Wasm converters
 are likewise oracle-only inputs to named targets, with git or SHA-256 pins.
 
-## Open migration edges
+## Tooling migration status
 
-The BunPress edge is fully classified: zig-js consumes its exact local source,
-CI pins the complete owned renderer graph, and BunPress declares, builds, and
-verifies its STX and syntax-highlighter workspaces from its own frozen lockfile.
-The remaining inventory deliberately records current violations instead of
-relabeling them as acceptable:
-
-- Python and legacy JavaScript tooling, unpinned generator acquisition, and
-  mutable checkout actions are owned by
-  [#497](https://github.com/zig-utils/zig-js/issues/497).
-
-Those entries have `migration_required` status. They remain visible and gated,
-but are not permanent exceptions to the owned-dependency target.
+The [#497](https://github.com/zig-utils/zig-js/issues/497) migration is complete.
+Every repository tool is TypeScript executed by owner-maintained Home, with
+zig-js as its default JavaScript engine and JSC as the explicit compatibility
+selection. CI actions use immutable commit identifiers. Standards-data
+generators accept operator-supplied local snapshots; the sole network-capable
+acquisition tool pins both the upstream revision and every archive SHA-256.
 
 The tool migration inventory classifies 58 executable tools: no `.py` or
 `.mjs`, 58 `.ts`, and no `.sh`. The documentation link gate has already moved to
@@ -79,11 +73,10 @@ the tested in-tree `docs-link-check` Zig executable and is no longer part of
 that migration set. Each remaining record identifies its role, inputs, outputs,
 subprocesses, caller/reference files, effective exit and diagnostic contract,
 ordering and schema requirements, network policy, and disposition. Durable
-tools are candidates for TypeScript execution on the owner-maintained Home
-engine after that runner contract is ready; the inventory does not require a
-one-for-one rewrite of every legacy script. The audit reads the Git index and
-rejects a missing or stale tool record, extension/runtime mismatch, unknown
-contract profile, or new caller/reference file. Tracked symlinks are not
+tools execute through the owner-maintained Home runtime. The audit reads the Git
+index and rejects a missing or stale tool record, extension/runtime mismatch,
+unknown contract profile, new caller/reference file, or reintroduction of a
+Python, MJS, or shell tool. Tracked symlinks are not
 followed because their real tracked targets are audited directly.
 
 The former system-libffi edge was removed by the owned Zig/assembly dispatcher
