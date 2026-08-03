@@ -65,8 +65,9 @@ relabeling them as acceptable:
 Those entries have `migration_required` status. They remain visible and gated,
 but are not permanent exceptions to the owned-dependency target.
 
-The tool migration inventory classifies all 71 current files: 59 `.py`, 8
-`.mjs`, 1 `.ts`, and 3 `.sh`. The documentation link gate has already moved to
+The tool migration inventory classifies 71 executable tools: 58 `.py`, 2
+`.mjs`, 8 `.ts`, and 3 `.sh`; shared TypeScript modules are counted separately
+by the dependency gate. The documentation link gate has already moved to
 the tested in-tree `docs-link-check` Zig executable and is no longer part of
 that migration set. Each remaining record identifies its role, inputs, outputs,
 subprocesses, caller/reference files, effective exit and diagnostic contract,

@@ -50,9 +50,10 @@ actually selected.
 | Units | `intl_units_data.zig` |
 | Segmentation | `unicode_grapheme_data.zig` |
 
-These are **generated** by the `tools/gen_*` scripts (`gen_cldr_*.mjs`,
-`gen_iana_offsets.mjs`, `gen_dn.py`, `gen_localeinfo.py`, `gen_units.py`,
-`gen_weekdata.py`, `gen_numbering.mjs`, `gen_grapheme.py`). Regenerate them from
+These are **generated** by the `tools/gen_*` scripts (`gen_cldr_*.ts`,
+`gen_iana_offsets.ts`, `gen_dn.py`, `gen_localeinfo.py`, `gen_units.py`,
+`gen_weekdata.py`, `gen_numbering.ts`, `gen_grapheme.py`). TypeScript generators
+run through `~/Code/Home/lang/zig-out/bin/home-tool`. Regenerate the tables from
 an upstream bump — never hand-edit the `.zig` tables.
 
 ## `Temporal`
