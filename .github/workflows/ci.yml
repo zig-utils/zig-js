@@ -354,6 +354,10 @@ jobs:
           packages: zig@0.17.0-dev
       - name: Ensure Zig is available
         run: python3 zig-js/tools/ensure-zig-ci.py
+      - name: Build zig-js public C API for Home
+        if: matrix.home_tool == true
+        working-directory: zig-js
+        run: zig build
       - name: Build pinned Home repository-tool runtime
         if: matrix.home_tool == true
         working-directory: Home/lang
