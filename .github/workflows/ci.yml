@@ -571,6 +571,9 @@ jobs:
       - name: Build the threads-test binary
         working-directory: zig-js
         run: zig build threads-test-bin
+      - name: Build zig-js public C API for Home
+        working-directory: zig-js
+        run: zig build home-tool-bootstrap
       - name: Build Home repository-tool runtime
         working-directory: Home/lang
         run: zig build home-tool -Dtool-js-engine=zig-js -Dzig-js-root="$GITHUB_WORKSPACE/zig-js"
@@ -624,6 +627,9 @@ jobs:
       - name: Build the threads-test binary (ReleaseSafe)
         working-directory: zig-js
         run: zig build threads-test-bin -Doptimize=ReleaseSafe
+      - name: Build zig-js public C API for Home
+        working-directory: zig-js
+        run: zig build home-tool-bootstrap
       - name: Build Home repository-tool runtime
         working-directory: Home/lang
         run: zig build home-tool -Dtool-js-engine=zig-js -Dzig-js-root="$GITHUB_WORKSPACE/zig-js"
