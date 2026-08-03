@@ -319,7 +319,7 @@ def main() -> int:
         "test/core/relaxed-simd/",
         "test/core/elem.wast",
         "test/core/linking.wast",
-        "tools/wasm-core3-drift.py",
+        "tools/wasm-core3-drift.ts",
         "core-main-shadow",
         "d7b37e4170d8315f2f1283aed4e8076591a9a333",
     )

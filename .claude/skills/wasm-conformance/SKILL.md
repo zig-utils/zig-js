@@ -58,7 +58,7 @@ zig build wasm-core-main-shadow       # non-blocking upstream-main drift
 zig build wasm-feature-profiles       # feature-gate matrix
 zig build wasm-feature-profiles-check # CI form
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-conformance-matrix.ts --write
-python3 tools/wasm-core3-drift.py          # report Core 3 upstream drift
+~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-core3-drift.ts
 python3 -m unittest tools/test_wasm_spec.py
 ```
 
