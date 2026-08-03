@@ -70,7 +70,7 @@ src/                 the engine
 conformance/         test262 + PR-249 thread corpus + wasm spec runners
 tests/               C / C++ / Objective-C embedding fixtures
 bench/               benchmark workloads and runners
-tools/               python + zig gates, generators, audits, profilers
+tools/               TypeScript + Zig gates, generators, audits, profilers
 docs/                the published documentation site (bunpress)
 docs/.data/          machine-readable evidence: run inventories, benchmark samples, matrices
 reference/           vendored upstream reference material (see the do-not-touch note below)
