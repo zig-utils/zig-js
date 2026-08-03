@@ -88,7 +88,7 @@ diagnostic rather than silently degrading.
 4. Regenerate the ten-profile matrix (`tools/wasm-conformance-matrix.ts`) with
    Home's native tool runner and,
    if the headline changes, the README status block via
-   `python3 tools/release-compatibility.py --update-readme`.
+   `home-tool run tools/release-compatibility.ts --update-readme`.
 5. Add the smoke filter to the CI matrix leg so the profile stays gated.
 
 ## 5. Threads and SIMD specifics

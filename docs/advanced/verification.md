@@ -100,8 +100,8 @@ optimizing-JIT backend/differential evidence).
 
 ```bash
 zig build release-compatibility                       # validate the matrix
-python3 tools/release-compatibility.py --release      # fail unless every gate is green
-python3 tools/release-compatibility.py --update-readme
+home-tool run tools/release-compatibility.ts --release      # fail unless every gate is green
+home-tool run tools/release-compatibility.ts --update-readme
 ```
 
 The README's "What Is Not Implemented" section is generated from that file, and

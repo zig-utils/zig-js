@@ -77,7 +77,7 @@ zig build wasm-exception-jsc-diff
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-objc-api.ts
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-abi-profile.ts
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/private-abi-tsan.ts
-python3 -m unittest tools/test_home_private_abi.py
+home-tool run tools/private-abi.ts --self-test
 ```
 
 Objective-C evidence matrix (macOS):
@@ -105,7 +105,7 @@ The exact CI leg list is in
    one exists.
 5. If the release matrix tracks the surface, refresh it:
    `zig build release-compatibility` and, when the headline moves,
-   `python3 tools/release-compatibility.py --update-readme`.
+   `home-tool run tools/release-compatibility.ts --update-readme`.
 
 ## 5. Related surfaces
 

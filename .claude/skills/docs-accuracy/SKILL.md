@@ -44,7 +44,7 @@ is how to apply it.
 
 | Marker | Generator |
 | --- | --- |
-| `<!-- release-compatibility:<section>:start/end -->` (overview, quickstart, status, use, build-test, notice, wasm-performance, gc-compaction) | `python3 tools/release-compatibility.py --update-readme` |
+| `<!-- release-compatibility:<section>:start/end -->` (overview, quickstart, status, use, build-test, notice, wasm-performance, gc-compaction) | `home-tool run tools/release-compatibility.ts --update-readme` |
 | `<!-- benchmark-comparison:start/end -->` | `home-tool run tools/benchmark-publication.ts …` |
 | `<!-- gc-generation:start/end -->` | `zig build gc-generation-benchmark -Dgc-generation-benchmark-update-readme=true` |
 | whole file: `docs/platforms.md` | `home-tool run tools/platform-release-matrix.ts` |
@@ -61,7 +61,7 @@ bun run docs:data -- --from /tmp/run.txt
 
 # 2. Release matrix + generated README sections
 zig build release-compatibility
-python3 tools/release-compatibility.py --update-readme
+home-tool run tools/release-compatibility.ts --update-readme
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/platform-release-matrix.ts
 
 # 3. Hunt stale claims

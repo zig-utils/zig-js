@@ -1426,8 +1426,10 @@ pub fn build(b: *std.Build) void {
     wasm_feature_profiles_step.dependOn(&wasm_conformance_matrix_cmd.step);
 
     const release_compatibility_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/release-compatibility.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/release-compatibility.ts",
     });
     const release_compatibility_step = b.step(
         "release-compatibility-check",
@@ -1448,8 +1450,10 @@ pub fn build(b: *std.Build) void {
     gc_relocation_inventory_step.dependOn(&gc_relocation_inventory_cmd.step);
 
     const release_ready_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/release-compatibility.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/release-compatibility.ts",
         "--release",
     });
     const release_ready_step = b.step(

@@ -33,8 +33,8 @@
       "runner_error": 0
     },
     "benchmark_comparison": {
-      "report": "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
-      "raw": "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+      "report": "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md",
+      "raw": "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv",
       "samples": 1540
     }
   },
@@ -48,8 +48,8 @@
         "docs/.data/platform-release-matrix-2026-07-28.json",
         "docs/platforms.md",
         ".github/workflows/ci.yml",
-        "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
-        "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv"
+        "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md",
+        "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv"
       ],
       "blockers": []
     },
@@ -138,8 +138,8 @@
       "evidence": [
         "docs/.data/optimizer-release-inventory.json",
         "docs/.data/jit-concurrency-2026-07-22.md",
-        "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
-        "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+        "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md",
+        "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv",
         "docs/optimizing-jit.md"
       ],
       "blockers": []
@@ -163,11 +163,11 @@
         "docs/threads/index.md",
         "include/JavaScriptCore/JavaScript.h",
         "include/zig-js/Extensions.h",
-        "tools/release-compatibility.py",
+        "tools/release-compatibility.ts",
         "tools/benchmark-publication.ts",
         "tools/benchmark-comparison.ts",
-        "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
-        "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+        "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md",
+        "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv",
         "tools/gc-compaction-benchmark.ts",
         "docs/.data/wasm-conformance-matrix.json",
         "docs/.data/wasm-simd-benchmark-2026-07-18.md",

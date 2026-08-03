@@ -117,7 +117,7 @@ Only after a real full run:
 ```bash
 zig build test262 -Doptimize=ReleaseFast > /tmp/run.txt 2>&1
 bun run docs:data -- --from /tmp/run.txt      # rewrites docs/.data/test262.json
-python3 tools/release-compatibility.py --update-readme
+home-tool run tools/release-compatibility.ts --update-readme
 bun run docs:build
 ```
 

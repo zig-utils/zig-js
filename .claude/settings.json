@@ -33,7 +33,7 @@
       "Bash(wc *)",
       "Bash(pgrep *)",
       "Bash(zig build docs-link-check*)",
-      "Bash(python3 tools/release-compatibility.py*)",
+      "Bash(*home-tool run tools/release-compatibility.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/platform-release-matrix.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-conformance-matrix.ts*)",
       "Bash(python3 tools/threads-reference-audit.py*)",

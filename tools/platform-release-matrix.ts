@@ -9,10 +9,10 @@ const ROOT =
 const path = (relative: string): string => `${ROOT}/${relative}`;
 const WORKFLOW = path(".github/workflows/ci.yml");
 const BENCHMARK_REPORT = path(
-  "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
+  "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md",
 );
 const BENCHMARK_RAW = path(
-  "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+  "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv",
 );
 const OUTPUT_JSON = path("docs/.data/platform-release-matrix-2026-07-28.json");
 const OUTPUT_MD = path("docs/platforms.md");
@@ -254,9 +254,9 @@ function buildMatrix(): any {
     generated_at: "2026-07-28",
     inputs: {
       ".github/workflows/ci.yml": digest(WORKFLOW),
-      "docs/.data/benchmark-comparison-2026-07-22-property-osr.md":
+      "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md":
         digest(BENCHMARK_REPORT),
-      "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv":
+      "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv":
         digest(BENCHMARK_RAW),
     },
     triggers: [
@@ -311,8 +311,8 @@ function buildMatrix(): any {
           os: metadata.OS,
           samples,
           evidence: [
-            "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
-            "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+            "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md",
+            "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv",
           ],
         },
       },
@@ -346,7 +346,7 @@ function renderMarkdown(matrix: any): string {
       "| platform | correctness | sanitizer | performance | evidence |",
       "| --- | --- | --- | --- | --- |",
       `| Linux x86_64 (\`ubuntu-latest\`) | gated (${matrix.summary.linux_gate_matrix_entries} CI matrix entries) | gated (TSan unit/fuzz/corpus legs) | not claimed | [workflow](../.github/workflows/ci.yml) |`,
-      `| macOS arm64 (\`Apple M3 Pro\`) | not release-gated | not release-gated | published (${mac.performance.samples} samples) | [report](.data/benchmark-comparison-2026-07-22-property-osr.md) · [raw](.data/benchmark-comparison-2026-07-22-property-osr.tsv) |`,
+      `| macOS arm64 (\`Apple M3 Pro\`) | not release-gated | not release-gated | published (${mac.performance.samples} samples) | [report](.data/benchmark-comparison-2026-07-29-precise-nursery.md) · [raw](.data/benchmark-comparison-2026-07-29-precise-nursery.tsv) |`,
       "",
       "## Unclaimed",
       "",

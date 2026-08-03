@@ -2,8 +2,8 @@
   "generated_at": "2026-07-28",
   "inputs": {
     ".github/workflows/ci.yml": "8e27f03a5557cb6c7b4f32821367e26fcf95315157285469b5e3f827737a3908",
-    "docs/.data/benchmark-comparison-2026-07-22-property-osr.md": "06ce734af1f10dba66e206c47a50b4dc475256a4f2dd4519d7d0f1e82993ff0e",
-    "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv": "291096a97ecf923fb09e244257eca2b5d0a14d4fb117885fed832f25829bae3b"
+    "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md": "b57fda6a0d69537a7fb8d4f6398654990a636a6e91ce08bfb39bab693f7a52ef",
+    "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv": "2cb69ec0559748664ae78cf9035a5882c874a4711ed13f00cb7e09da2f2e1547"
   },
   "kind": "zig_js_platform_release_matrix",
   "platforms": [
@@ -83,11 +83,11 @@
       "os": "macos",
       "performance": {
         "evidence": [
-          "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
-          "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv"
+          "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md",
+          "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv"
         ],
         "host": "Apple M3 Pro; 11 physical / 11 logical CPUs; 18.0 GiB",
-        "os": "macOS 27.0 (26A5368g)",
+        "os": "macOS 27.0 (26A5388g)",
         "samples": 1540,
         "status": "published"
       },

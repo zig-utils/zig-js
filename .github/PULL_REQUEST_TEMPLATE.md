@@ -24,7 +24,7 @@ Say "no regressions" only when you measured it. Docs-only changes:
 
 - [ ] `zig build test-parallel`
 - [ ] `zig build test262 -Doptimize=ReleaseFast` (or a `--diag` before/after diff)
-- [ ] `zig build threads-test` / `python3 tools/nogil-corpus-gate.py`
+- [ ] `zig build threads-test` / `home-tool run tools/nogil-corpus-gate.ts`
 - [ ] `zig build test -Dtsan=true`
 - [ ] `zig build threadfuzz -Dfuzz-iters=400`
 - [ ] The matching `*-audit` step (ABI surfaces)

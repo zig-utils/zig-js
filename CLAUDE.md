@@ -216,7 +216,7 @@ binding guardrail. In short:
 <!-- gc-generation:start --> … <!-- gc-generation:end -->
 ```
 
-They are written by `tools/release-compatibility.py --update-readme`,
+They are written by `home-tool run tools/release-compatibility.ts --update-readme`,
 `tools/benchmark-publication.ts`, `tools/gc-generation-benchmark.ts`, and
 `tools/platform-release-matrix.ts` (which owns `docs/platforms.md` wholesale).
 Change the evidence and re-run the generator; editing the rendered text by hand
