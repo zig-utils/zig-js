@@ -228,8 +228,10 @@ pub fn build(b: *std.Build) void {
     bun_private_abi_audit_step.dependOn(&bun_private_abi_audit_cmd.step);
 
     const private_jstype_abi_audit_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/private-jstype-abi.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/private-jstype-abi.ts",
     });
     if (home_source_root) |root| {
         if (bun_source_root) |bun_root| {
@@ -1674,7 +1676,7 @@ pub fn build(b: *std.Build) void {
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_object_churn_gc_profile.py" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_independent_object_churn_profile.py" });
     const shared_object_churn_ab_test = b.addSystemCommand(&.{ "python3", "tools/test_shared_object_churn_ab.py" });
-    const optimizer_release_inventory_check = b.addSystemCommand(&.{ "python3", "tools/optimizer-release-inventory.py" });
+    const optimizer_release_inventory_check = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/optimizer-release-inventory.ts" });
     const comparison_harness_test_step = b.step("benchmark-comparison-test", "Test benchmark matrix validation without running benchmarks");
     comparison_harness_test_step.dependOn(&comparison_harness_test.step);
     comparison_harness_test_step.dependOn(&comparison_publication_test.step);
