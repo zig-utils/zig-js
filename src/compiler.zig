@@ -202,12 +202,9 @@ fn nodeHasYield(node: *const ast.Node) bool {
 
 /// Does a `let`/`const` for-loop capture one of the loop's per-iteration binding
 /// names inside a nested closure in its head, test, update, or body? Such loops
-/// need a fresh binding created
-/// per iteration (CreatePerIterationEnvironment); the frame-slot VM lowering in
-/// `compileFor` reuses ONE slot across iterations, so every captured closure would
-/// see the final value (`var` semantics). When this returns true `compileFor`
-/// bails to the tree-walker, which binds per iteration correctly. `var` loops, and
-/// lexical loops whose closures never reference a loop name, keep the fast VM path.
+/// need a fresh binding created per iteration (CreatePerIterationEnvironment).
+/// Captured supported heads use environment cells; `var` loops and lexical loops
+/// whose closures never reference a loop name keep the fast frame-slot VM path.
 /// Whether a loop `body` declares a block-scoped (`let`/`const`) binding that a
 /// closure in the body captures — which needs a fresh per-iteration binding the
 /// VM's single flat frame slot can't provide (all iterations' closures would
@@ -247,6 +244,39 @@ fn forLoopCapturesLexical(init_node: *const ast.Node, cond: ?*const ast.Node, up
     return forLoopBindingCaptured(init_node, init_node, cond, update, body);
 }
 
+fn patternHasEvaluationExpressions(pattern: *const ast.Node) bool {
+    return switch (pattern.*) {
+        .identifier => false,
+        .obj_pattern => |object| blk: {
+            for (object.props) |property| {
+                if (property.key_expr != null or property.default != null or patternHasEvaluationExpressions(property.target)) break :blk true;
+            }
+            if (object.rest) |rest| if (patternHasEvaluationExpressions(rest)) break :blk true;
+            break :blk false;
+        },
+        .arr_pattern => |array| blk: {
+            for (array.elems) |element| {
+                if (element.default != null) break :blk true;
+                if (element.target) |target| if (patternHasEvaluationExpressions(target)) break :blk true;
+            }
+            if (array.rest) |rest| if (patternHasEvaluationExpressions(rest)) break :blk true;
+            break :blk false;
+        },
+        else => true,
+    };
+}
+
+fn loopHeadPatternHasEvaluationExpressions(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .destructure_decl => |declaration| declaration.kind != .@"var" and patternHasEvaluationExpressions(declaration.pattern),
+        .decl_group => |group| blk: {
+            for (group) |declaration| if (loopHeadPatternHasEvaluationExpressions(declaration)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 fn forLoopBindingCaptured(binding_node: *const ast.Node, whole_head: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) bool {
     return switch (binding_node.*) {
         .var_decl => |d| d.kind != .@"var" and
@@ -268,19 +298,24 @@ fn forLoopBindingCaptured(binding_node: *const ast.Node, whole_head: *const ast.
     };
 }
 
-fn patternNameCapturedInForOf(target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) bool {
-    return switch (target.*) {
-        .identifier => |name| (if (var_init) |initializer| nameRefInClosure(initializer, name, false) else false) or
+fn forOfCapturesLexical(target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) bool {
+    return patternNameCapturedInForOf(target, target, var_init, iterable, body);
+}
+
+fn patternNameCapturedInForOf(binding: *const ast.Node, whole_target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) bool {
+    return switch (binding.*) {
+        .identifier => |name| nameRefInClosure(whole_target, name, false) or
+            (if (var_init) |initializer| nameRefInClosure(initializer, name, false) else false) or
             nameRefInClosure(iterable, name, false) or nameRefInClosure(body, name, false),
         .obj_pattern => |pattern| blk: {
-            for (pattern.props) |property| if (patternNameCapturedInForOf(property.target, var_init, iterable, body)) break :blk true;
-            if (pattern.rest) |rest| if (patternNameCapturedInForOf(rest, var_init, iterable, body)) break :blk true;
+            for (pattern.props) |property| if (patternNameCapturedInForOf(property.target, whole_target, var_init, iterable, body)) break :blk true;
+            if (pattern.rest) |rest| if (patternNameCapturedInForOf(rest, whole_target, var_init, iterable, body)) break :blk true;
             break :blk false;
         },
         .arr_pattern => |pattern| blk: {
             for (pattern.elems) |element| if (element.target) |element_target|
-                if (patternNameCapturedInForOf(element_target, var_init, iterable, body)) break :blk true;
-            if (pattern.rest) |rest| if (patternNameCapturedInForOf(rest, var_init, iterable, body)) break :blk true;
+                if (patternNameCapturedInForOf(element_target, whole_target, var_init, iterable, body)) break :blk true;
+            if (pattern.rest) |rest| if (patternNameCapturedInForOf(rest, whole_target, var_init, iterable, body)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -1299,6 +1334,7 @@ pub const Compiler = struct {
     fn loopHeadSupportsEnvironment(node: *const Node) bool {
         return switch (node.*) {
             .var_decl => |decl| decl.kind != .@"var",
+            .destructure_decl => |decl| decl.kind != .@"var" and patternSupportsEnvironment(decl.pattern),
             .decl_group => |decls| blk: {
                 if (decls.len == 0) break :blk false;
                 for (decls) |decl| if (!loopHeadSupportsEnvironment(decl)) break :blk false;
@@ -1308,6 +1344,41 @@ pub const Compiler = struct {
         };
     }
 
+    fn patternSupportsEnvironment(pattern: *const Node) bool {
+        return switch (pattern.*) {
+            .identifier => true,
+            .obj_pattern => |object| blk: {
+                for (object.props) |property| if (!patternSupportsEnvironment(property.target)) break :blk false;
+                if (object.rest) |rest| if (!patternSupportsEnvironment(rest)) break :blk false;
+                break :blk true;
+            },
+            .arr_pattern => |array| blk: {
+                for (array.elems) |element| if (element.target) |target|
+                    if (!patternSupportsEnvironment(target)) break :blk false;
+                if (array.rest) |rest| if (!patternSupportsEnvironment(rest)) break :blk false;
+                break :blk true;
+            },
+            else => false,
+        };
+    }
+
+    fn markEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        const scope = self.scope orelse return;
+        switch (pattern.*) {
+            .identifier => |name| try scope.addEnvironmentLexical(self.arena, name, immutable),
+            .obj_pattern => |object| {
+                for (object.props) |property| try self.markEnvironmentLexicalPattern(property.target, immutable);
+                if (object.rest) |rest| try self.markEnvironmentLexicalPattern(rest, immutable);
+            },
+            .arr_pattern => |array| {
+                for (array.elems) |element| if (element.target) |target|
+                    try self.markEnvironmentLexicalPattern(target, immutable);
+                if (array.rest) |rest| try self.markEnvironmentLexicalPattern(rest, immutable);
+            },
+            else => return error.Unsupported,
+        }
+    }
+
     fn markEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
         const scope = self.scope orelse return;
         switch (node.*) {
@@ -1315,7 +1386,27 @@ pub const Compiler = struct {
                 if (decl.kind == .@"var") return error.Unsupported;
                 try scope.addEnvironmentLexical(self.arena, decl.name, decl.kind == .@"const");
             },
+            .destructure_decl => |decl| {
+                if (decl.kind == .@"var") return error.Unsupported;
+                try self.markEnvironmentLexicalPattern(decl.pattern, decl.kind == .@"const");
+            },
             .decl_group => |decls| for (decls) |decl| try self.markEnvironmentLexicalNode(decl),
+            else => return error.Unsupported,
+        }
+    }
+
+    fn emitDeclareEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        switch (pattern.*) {
+            .identifier => |name| try self.emitDeclareEnvironmentLexicalName(name, immutable),
+            .obj_pattern => |object| {
+                for (object.props) |property| try self.emitDeclareEnvironmentLexicalPattern(property.target, immutable);
+                if (object.rest) |rest| try self.emitDeclareEnvironmentLexicalPattern(rest, immutable);
+            },
+            .arr_pattern => |array| {
+                for (array.elems) |element| if (element.target) |target|
+                    try self.emitDeclareEnvironmentLexicalPattern(target, immutable);
+                if (array.rest) |rest| try self.emitDeclareEnvironmentLexicalPattern(rest, immutable);
+            },
             else => return error.Unsupported,
         }
     }
@@ -1330,7 +1421,27 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.load_undefined, 0);
                 _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(decl.name), if (decl.kind == .@"const") 4 else 3);
             },
+            .destructure_decl => |decl| {
+                if (decl.kind == .@"var") return error.Unsupported;
+                try self.emitDeclareEnvironmentLexicalPattern(decl.pattern, decl.kind == .@"const");
+            },
             .decl_group => |decls| for (decls) |decl| try self.emitDeclareEnvironmentLexicalNode(decl),
+            else => return error.Unsupported,
+        }
+    }
+
+    fn emitLoadEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node) CompileError!void {
+        switch (pattern.*) {
+            .identifier => |name| _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
+            .obj_pattern => |object| {
+                for (object.props) |property| try self.emitLoadEnvironmentLexicalPattern(property.target);
+                if (object.rest) |rest| try self.emitLoadEnvironmentLexicalPattern(rest);
+            },
+            .arr_pattern => |array| {
+                for (array.elems) |element| if (element.target) |target|
+                    try self.emitLoadEnvironmentLexicalPattern(target);
+                if (array.rest) |rest| try self.emitLoadEnvironmentLexicalPattern(rest);
+            },
             else => return error.Unsupported,
         }
     }
@@ -1341,7 +1452,35 @@ pub const Compiler = struct {
                 if (decl.kind == .@"var") return error.Unsupported;
                 _ = try self.chunk.emit(.load_var, try self.chunk.addName(decl.name));
             },
+            .destructure_decl => |decl| {
+                if (decl.kind == .@"var") return error.Unsupported;
+                try self.emitLoadEnvironmentLexicalPattern(decl.pattern);
+            },
             .decl_group => |decls| for (decls) |decl| try self.emitLoadEnvironmentLexicalNode(decl),
+            else => return error.Unsupported,
+        }
+    }
+
+    fn emitDefineEnvironmentLexicalPatternReverse(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        switch (pattern.*) {
+            .identifier => |name| _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (immutable) 2 else 1),
+            .obj_pattern => |object| {
+                if (object.rest) |rest| try self.emitDefineEnvironmentLexicalPatternReverse(rest, immutable);
+                var index = object.props.len;
+                while (index > 0) {
+                    index -= 1;
+                    try self.emitDefineEnvironmentLexicalPatternReverse(object.props[index].target, immutable);
+                }
+            },
+            .arr_pattern => |array| {
+                if (array.rest) |rest| try self.emitDefineEnvironmentLexicalPatternReverse(rest, immutable);
+                var index = array.elems.len;
+                while (index > 0) {
+                    index -= 1;
+                    if (array.elems[index].target) |target|
+                        try self.emitDefineEnvironmentLexicalPatternReverse(target, immutable);
+                }
+            },
             else => return error.Unsupported,
         }
     }
@@ -1351,6 +1490,10 @@ pub const Compiler = struct {
             .var_decl => |decl| {
                 if (decl.kind == .@"var") return error.Unsupported;
                 _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(decl.name), if (decl.kind == .@"const") 2 else 1);
+            },
+            .destructure_decl => |decl| {
+                if (decl.kind == .@"var") return error.Unsupported;
+                try self.emitDefineEnvironmentLexicalPatternReverse(decl.pattern, decl.kind == .@"const");
             },
             .decl_group => |decls| {
                 var index = decls.len;
@@ -1379,6 +1522,33 @@ pub const Compiler = struct {
         try self.emitDeclareEnvironmentLexicalName(name, immutable);
     }
 
+    fn emitFreshEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        _ = try self.chunk.emit(.exit_block, 0);
+        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitDeclareEnvironmentLexicalPattern(pattern, immutable);
+    }
+
+    fn patternUsesEnvironment(self: *Compiler, pattern: *const Node) bool {
+        return switch (pattern.*) {
+            .identifier => |name| switch (self.resolve(name)) {
+                .environment => true,
+                else => false,
+            },
+            .obj_pattern => |object| blk: {
+                for (object.props) |property| if (!self.patternUsesEnvironment(property.target)) break :blk false;
+                if (object.rest) |rest| if (!self.patternUsesEnvironment(rest)) break :blk false;
+                break :blk true;
+            },
+            .arr_pattern => |array| blk: {
+                for (array.elems) |element| if (element.target) |target|
+                    if (!self.patternUsesEnvironment(target)) break :blk false;
+                if (array.rest) |rest| if (!self.patternUsesEnvironment(rest)) break :blk false;
+                break :blk true;
+            },
+            else => false,
+        };
+    }
+
     /// CreatePerIterationEnvironment for a classic for-head: snapshot the old
     /// bindings on the operand stack, replace the current Environment Record by
     /// a fresh child of the same outer environment, then initialize the fresh
@@ -1393,6 +1563,7 @@ pub const Compiler = struct {
     fn nodeDeclaresLexical(node: *const Node) bool {
         return switch (node.*) {
             .var_decl => |decl| decl.kind != .@"var",
+            .destructure_decl => |decl| decl.kind != .@"var",
             .decl_group => |decls| for (decls) |decl| {
                 if (nodeDeclaresLexical(decl)) break true;
             } else false,
@@ -1461,9 +1632,10 @@ pub const Compiler = struct {
                 if (d.dispose != 0) _ = try self.chunk.emit(.register_disposable, if (d.dispose == 2) 1 else 0);
             },
             .destructure_decl => |d| {
-                if (self.scope != null) return error.Unsupported;
+                const environment_pattern = self.scope != null and self.patternUsesEnvironment(d.pattern);
+                if (self.scope != null and !environment_pattern) return error.Unsupported;
                 if (nodeHasYield(d.pattern)) {
-                    if (d.kind != .@"var") return error.Unsupported;
+                    if (d.kind != .@"var" or environment_pattern) return error.Unsupported;
                     try self.emitPatternVarDecls(d.pattern);
                     try self.compileDestructuringAssign(d.pattern, d.init);
                     _ = try self.chunk.emit(.pop, 0);
@@ -1793,11 +1965,13 @@ pub const Compiler = struct {
         // A captured lexical head uses a real declarative Environment Record:
         // closures capture that record, and the update edge replaces it with a
         // value-copied record per CreatePerIterationEnvironment. Uncaptured heads
-        // retain O(1) frame slots. Destructuring heads and labeled cross-loop
-        // jumps stay on the exact fallback until their unwind metadata lands.
+        // retain O(1) frame slots. Destructuring default/computed evaluation,
+        // yield-bearing patterns, and labeled cross-loop jumps stay on the exact
+        // fallback until their lowering/unwind metadata lands.
         if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
         const captured_head = if (init_node) |ini| forLoopCapturesLexical(ini, cond, update, body) else false;
-        if (captured_head and (!loopHeadSupportsEnvironment(init_node.?) or stmtHasLabeledJump(body)))
+        if (captured_head and (!loopHeadSupportsEnvironment(init_node.?) or nodeHasYield(init_node.?) or
+            loopHeadPatternHasEvaluationExpressions(init_node.?) or stmtHasLabeledJump(body)))
             return error.Unsupported;
         if (loopBodyCapturesLexical(body)) return error.Unsupported;
         const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
@@ -1819,7 +1993,7 @@ pub const Compiler = struct {
             if (!captured_head) try self.emitLexicalInitializersForNode(ini);
             // The init clause is a declaration statement (var_decl, or a group of
             // them for multiple declarators) or a bare expression.
-            if (ini.* == .var_decl or ini.* == .block or ini.* == .decl_group) {
+            if (ini.* == .var_decl or ini.* == .destructure_decl or ini.* == .block or ini.* == .decl_group) {
                 try self.compileStmt(ini);
             } else {
                 try self.compileExpr(ini);
@@ -1890,10 +2064,11 @@ pub const Compiler = struct {
             try self.compileAssignPattern(target, src);
             return;
         }
-        // `bind_pattern` destructures into the live environment, which is the
-        // binding scope only in env-mode (generators/async). A slot-allocated
-        // (frame-mode) function keeps falling back to the tree-walker.
-        if (self.scope != null) return error.Unsupported;
+        // `bind_pattern` destructures into the live environment. That is the
+        // binding scope in env-mode and for a captured head whose static names
+        // were deliberately mapped to the active per-iteration environment. An
+        // ordinary slot-allocated pattern still falls back to the tree-walker.
+        if (self.scope != null and !force_environment) return error.Unsupported;
         const pi = try self.chunk.addPattern(target);
         const mode: u32 = if (decl_kind) |k| switch (k) {
             .@"var" => 0,
@@ -1907,20 +2082,29 @@ pub const Compiler = struct {
         // A captured simple lexical target uses a fresh declarative Environment
         // Record for every iterator result. That is the ForIn/OfBodyEvaluation
         // binding cell the closure captures; an uncaptured identifier stays in a
-        // frame slot. Destructuring targets and labeled cross-loop jumps retain
-        // the exact fallback until their environment-unwind lowering is complete.
+        // frame slot. Destructuring default/computed evaluation, yield-bearing
+        // patterns, and labeled cross-loop jumps retain the exact fallback until
+        // their lowering/unwind metadata is complete.
         const captured_binding = if (decl_kind) |kind|
-            kind != .@"var" and patternNameCapturedInForOf(target, var_init, iterable, body)
+            kind != .@"var" and forOfCapturesLexical(target, var_init, iterable, body)
         else
             false;
-        if (captured_binding and (target.* != .identifier or stmtHasLabeledJump(body))) return error.Unsupported;
-        const lexical_scope = self.scope != null and if (decl_kind) |kind| kind != .@"var" and target.* == .identifier else false;
+        if (captured_binding and (!patternSupportsEnvironment(target) or nodeHasYield(target) or
+            patternHasEvaluationExpressions(target) or stmtHasLabeledJump(body))) return error.Unsupported;
+        const lexical_scope = self.scope != null and if (decl_kind) |kind|
+            kind != .@"var" and (target.* == .identifier or captured_binding)
+        else
+            false;
         if (lexical_scope) {
             try self.pushLexicalScope();
-            if (captured_binding)
-                try self.scope.?.addEnvironmentLexical(self.arena, target.identifier, decl_kind.? == .@"const")
-            else
+            if (captured_binding) {
+                if (target.* == .identifier)
+                    try self.scope.?.addEnvironmentLexical(self.arena, target.identifier, decl_kind.? == .@"const")
+                else
+                    try self.markEnvironmentLexicalPattern(target, decl_kind.? == .@"const");
+            } else {
                 _ = try self.scope.?.addLexical(self.arena, target.identifier, decl_kind.? == .@"const");
+            }
         }
         defer if (lexical_scope) self.popLexicalScope();
         const it_name = try self.freshTemp();
@@ -1928,11 +2112,14 @@ pub const Compiler = struct {
 
         // ForIn/OfHeadEvaluation creates lexical head bindings before evaluating
         // the RHS, so `for (let x of x)` observes x's TDZ rather than an outer x.
-        if (decl_kind) |kind| if (kind != .@"var" and target.* == .identifier) {
-            if (captured_binding) {
-                _ = try self.chunk.emit(.enter_block, 0);
-                try self.emitDeclareEnvironmentLexicalName(target.identifier, kind == .@"const");
-            } else try self.emitLexicalInitializer(target.identifier);
+        if (captured_binding) {
+            _ = try self.chunk.emit(.enter_block, 0);
+            if (target.* == .identifier)
+                try self.emitDeclareEnvironmentLexicalName(target.identifier, decl_kind.? == .@"const")
+            else
+                try self.emitDeclareEnvironmentLexicalPattern(target, decl_kind.? == .@"const");
+        } else if (decl_kind) |kind| if (kind != .@"var" and target.* == .identifier) {
+            try self.emitLexicalInitializer(target.identifier);
         };
 
         if (var_init) |ini| {
@@ -1987,8 +2174,12 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.load_false, 0);
         try self.emitStore(done_name);
         _ = try self.chunk.emit(.pop, 0);
-        if (captured_binding)
-            try self.emitFreshEnvironmentLexicalName(target.identifier, decl_kind.? == .@"const");
+        if (captured_binding) {
+            if (target.* == .identifier)
+                try self.emitFreshEnvironmentLexicalName(target.identifier, decl_kind.? == .@"const")
+            else
+                try self.emitFreshEnvironmentLexicalPattern(target, decl_kind.? == .@"const");
+        }
         // bind r.value to the loop target (identifier or destructuring pattern)
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));

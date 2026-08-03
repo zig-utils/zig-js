@@ -9990,7 +9990,8 @@ test "per-iteration lexical bindings survive closure capture (VM lowering)" {
         \\  return L.map(function (f) { return f(); }).join(",");
         \\})()
     );
-    // for-of with a destructuring target: both names bind per iteration.
+    // for-of with a destructuring target: both names bind in one fresh
+    // environment per iteration.
     try expectEvalStr("3,7",
         \\(function () {
         \\  var L = [];
@@ -9998,10 +9999,20 @@ test "per-iteration lexical bindings survive closure capture (VM lowering)" {
         \\  return L.map(function (f) { return f(); }).join(",");
         \\})()
     );
+    // A closure constructed by a pattern default still takes the exact
+    // tree-walker path until pattern evaluation can prepare nested bytecode
+    // templates; it must never be admitted and fail later in required mode.
+    try expectEvalStr("9,10",
+        \\(function () {
+        \\  var reads = [];
+        \\  for (let [value, read = function () { return value; }] of [[9], [10]]) reads.push(read);
+        \\  return reads.map(function (read) { return read(); }).join(",");
+        \\})()
+    );
     // Generator bodies are environment-mode bytecode. Their suspend/resume
     // state retains the active iteration environment across each yield, then
     // renews it before the update/next iterator result.
-    try expectEvalStr("0,1,2|3,4",
+    try expectEvalStr("0,1,2|3,4|5:6,7:8",
         \\(function () {
         \\  function* classic() {
         \\    var reads = [];
@@ -10013,9 +10024,18 @@ test "per-iteration lexical bindings survive closure capture (VM lowering)" {
         \\    for (const value of [3, 4]) { reads.push(function () { return value; }); yield value; }
         \\    return reads.map(function (read) { return read(); }).join(",");
         \\  }
+        \\  function* pairs() {
+        \\    var reads = [];
+        \\    for (const [left, right] of [[5, 6], [7, 8]]) {
+        \\      reads.push(function () { return left + ":" + right; });
+        \\      yield left;
+        \\    }
+        \\    return reads.map(function (read) { return read(); }).join(",");
+        \\  }
         \\  var a = classic(); a.next(); a.next(); a.next(); var ar = a.next().value;
         \\  var b = values(); b.next(); b.next(); var br = b.next().value;
-        \\  return ar + "|" + br;
+        \\  var c = pairs(); c.next(); c.next(); var cr = c.next().value;
+        \\  return ar + "|" + br + "|" + cr;
         \\})()
     );
 
@@ -10060,8 +10080,14 @@ test "async VM loop-head captures survive suspension" {
         \\  for (let i = 0; i < 3; i++) { classic.push(function () { return i; }); await 0; }
         \\  var values = [];
         \\  for (const value of [4, 5]) { values.push(function () { return value; }); await 0; }
+        \\  var pairs = [];
+        \\  for (const [left, right] of [[6, 7], [8, 9]]) {
+        \\    pairs.push(function () { return left + right; });
+        \\    await 0;
+        \\  }
         \\  return classic.map(function (read) { return read(); }).join(",") + "|" +
-        \\         values.map(function (read) { return read(); }).join(",");
+        \\         values.map(function (read) { return read(); }).join(",") + "|" +
+        \\         pairs.map(function (read) { return read(); }).join(",");
         \\}
         \\async function* generate() {
         \\  var reads = [];
@@ -10078,7 +10104,7 @@ test "async VM loop-head captures survive suspension" {
         \\}
         \\run();
     );
-    try std.testing.expectEqualStrings("0,1,2|4,5|6,7", (try ctx.evaluate("asyncIterationResult")).asStr());
+    try std.testing.expectEqualStrings("0,1,2|4,5|13,17|6,7", (try ctx.evaluate("asyncIterationResult")).asStr());
 }
 
 test "empty statements + class-declaration sequencing" {
@@ -19037,6 +19063,58 @@ test "forced tree-walker and required bytecode preserve lexical binding identity
         \\}
         \\capturedLoopHeadTdz();
     , "iterationTdzTrace.join('|')");
+}
+
+test "forced bytecode preserves captured destructuring loop heads" {
+    try verifyForcedPlainDifferential(
+        \\globalThis.patternTrace = [];
+        \\function classicPattern() {
+        \\  var reads = [];
+        \\  for (let [left, right] = [0, 10]; left < 3; left++, right--)
+        \\    reads.push(function () { return left + ":" + right; });
+        \\  patternTrace.push(reads.map(function (read) { return read(); }).join(","));
+        \\}
+        \\classicPattern();
+    , "patternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.patternTrace = [];
+        \\function arrayPattern() {
+        \\  var reads = [];
+        \\  for (const [left, right] of [[1, 2], [3, 4]])
+        \\    reads.push(function () { return left + right; });
+        \\  patternTrace.push(reads.map(function (read) { return read(); }).join(","));
+        \\}
+        \\arrayPattern();
+    , "patternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.patternTrace = [];
+        \\function objectPattern() {
+        \\  var reads = [];
+        \\  for (let {value, ...rest} of [{value: 5, tail: 6}, {value: 7, tail: 8}])
+        \\    reads.push(function () { return value + rest.tail; });
+        \\  patternTrace.push(reads.map(function (read) { return read(); }).join(","));
+        \\}
+        \\objectPattern();
+    , "patternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.patternTrace = [];
+        \\function patternTdz() {
+        \\  let classic = [1];
+        \\  try {
+        \\    for (let [classic] = classic; false;) { (function () { return classic; }); }
+        \\  } catch (error) { patternTrace.push("classic:" + error.name); }
+        \\  patternTrace.push("outer:" + classic[0]);
+        \\  let values = [[2]];
+        \\  try {
+        \\    for (let [values] of values) { (function () { return values; }); }
+        \\  } catch (error) { patternTrace.push("of:" + error.name); }
+        \\  patternTrace.push("outer-of:" + values[0][0]);
+        \\}
+        \\patternTdz();
+    , "patternTrace.join('|')");
 }
 
 fn verifyForcedPlainDifferential(source: []const u8, state_expression: []const u8) !void {

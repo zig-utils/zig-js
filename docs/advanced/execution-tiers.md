@@ -48,11 +48,13 @@ local/captured loads. Proven initialized hot loops keep the ordinary opcodes,
 while checked stores preserve `const` immutability. Forward lexical reads
 therefore execute with the same exception semantics in the VM and tree-walker.
 
-Captured simple bindings in classic `for` and `for-of` heads use fresh
+Captured identifier bindings and yield-free destructuring bindings without
+default/computed evaluation in classic `for` and `for-of` heads use fresh
 per-iteration declarative environments; uncaptured heads keep the slot fast path.
-Captured destructuring heads, captured lexicals declared inside a repeated loop
-body, and labeled jumps that cross more than one such environment retain the
-exact tree-walker path until their environment-unwind metadata is explicit.
+Destructuring default/computed evaluation, captured lexicals declared inside a
+repeated loop body, and labeled jumps that cross more than one such environment
+retain the exact tree-walker path until their lowering and environment-unwind
+metadata are explicit.
 
 ## The practical consequence: divergence
 
