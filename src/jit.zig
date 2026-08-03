@@ -1044,7 +1044,11 @@ pub const Owner = struct {
             const owner = self.owner;
             const epoch = self.epoch;
             self.* = undefined;
-            if (epoch.active.fetchSub(1, .acq_rel) == 1) owner.reclaimRetiredEpochs();
+            // Teardown owns reclamation after its idle wait. Entering the
+            // opportunistic reclaimer while invalidation is active can queue
+            // behind teardown's lock, then resume after Owner storage is reset.
+            if (epoch.active.fetchSub(1, .acq_rel) == 1 and !owner.invalidating.load(.acquire))
+                owner.reclaimRetiredEpochs();
         }
     };
 
