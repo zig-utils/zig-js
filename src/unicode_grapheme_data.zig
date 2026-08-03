@@ -1,5 +1,5 @@
 //! GENERATED from UCD GraphemeBreakProperty.txt, emoji-data.txt, and
-//! DerivedCoreProperties.txt (InCB) — tools/gen_grapheme.py. Sorted ranges
+//! DerivedCoreProperties.txt (InCB) — tools/gen_grapheme.ts. Sorted ranges
 //! for the UAX #29 extended grapheme cluster algorithm.
 
 pub const Class = enum { other, cr, lf, control, extend, zwj, ri, prepend, spacingmark, l, v, t, lv, lvt };

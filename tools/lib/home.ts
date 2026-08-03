@@ -10,6 +10,10 @@ export function readText(path: string): string {
   return Home.readTextFile(path);
 }
 
+export function writeText(path: string, contents: string): void {
+  Home.writeTextFile(path, contents);
+}
+
 export function run(argv: string[]): { exitCode: number | null; stdout: string; stderr: string } {
   return Home.spawnSync(argv);
 }

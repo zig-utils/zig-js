@@ -1,5 +1,5 @@
 //! GENERATED from the Unicode Character Database (UnicodeData.txt +
-//! CompositionExclusions.txt). Do not edit by hand; see tools/gen_norm.py.
+//! CompositionExclusions.txt). Do not edit by hand; see tools/gen_norm.ts.
 //! Canonical/compatibility decomposition, combining classes, and primary
 //! composites for String.prototype.normalize (NFC/NFD/NFKC/NFKD).
 

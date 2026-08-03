@@ -52,7 +52,7 @@ actually selected.
 
 These are **generated** by the `tools/gen_*` scripts (`gen_cldr_*.ts`,
 `gen_iana_offsets.ts`, `gen_dn.ts`, `gen_localeinfo.ts`, `gen_units.ts`,
-`gen_weekdata.ts`, `gen_numbering.ts`, `gen_grapheme.py`). TypeScript generators
+`gen_weekdata.ts`, `gen_numbering.ts`, `gen_grapheme.ts`). TypeScript generators
 run through `~/Code/Home/lang/zig-out/bin/home-tool`. Regenerate the tables from
 an upstream bump — never hand-edit the `.zig` tables.
 

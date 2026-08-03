@@ -4,7 +4,7 @@
 //! then (for the composing forms) canonical composition. Hangul syllables are
 //! (de)composed algorithmically; every other mapping, the combining classes, and
 //! the primary-composite set come from the generated `unicode_normalize_data.zig`
-//! table (built from the UCD by tools/gen_norm.py).
+//! table (built from the UCD by tools/gen_norm.ts).
 
 const std = @import("std");
 const data = @import("unicode_normalize_data.zig");
