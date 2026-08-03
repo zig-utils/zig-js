@@ -244,7 +244,7 @@
       { "manifest": "package.json", "name": "docs:build", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts build --outdir ./dist --check-manifest docs/.data/bunpress-output-v1.json", "edge": "bunpress-docs-toolchain" },
       { "manifest": "package.json", "name": "docs:manifest", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts build --outdir ./dist --manifest docs/.data/bunpress-output-v1.json", "edge": "bunpress-docs-toolchain" },
       { "manifest": "package.json", "name": "docs:preview", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts preview --outdir ./dist", "edge": "bunpress-docs-toolchain" },
-      { "manifest": "package.json", "name": "docs:data", "command": "bun scripts/gen-test262-data.ts", "edge": "javascript-shell-tooling" }
+      { "manifest": "package.json", "name": "docs:data", "command": "~/Code/Home/lang/zig-out/bin/home-tool run scripts/gen-test262-data.ts", "edge": "home-tool-runtime" }
     ],
     "ci_actions": [
       { "name": "actions/checkout@v6", "count": 25, "edge": "ci-bootstrap-actions" },

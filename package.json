@@ -8,7 +8,7 @@
     "docs:build": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts build --outdir ./dist --check-manifest docs/.data/bunpress-output-v1.json",
     "docs:manifest": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts build --outdir ./dist --manifest docs/.data/bunpress-output-v1.json",
     "docs:preview": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts preview --outdir ./dist",
-    "docs:data": "bun scripts/gen-test262-data.ts"
+    "docs:data": "~/Code/Home/lang/zig-out/bin/home-tool run scripts/gen-test262-data.ts"
   },
   "devDependencies": {
     "@stacksjs/bunpress": "file:../../Tools/bunpress/packages/bunpress"
