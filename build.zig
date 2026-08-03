@@ -1692,7 +1692,7 @@ pub fn build(b: *std.Build) void {
     const representative_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-benchmark.ts", "--self-test" });
     const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
-    const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
+    const generation_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-generation-benchmark.ts", "--self-test" });
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/object-churn-gc-profile.ts", "--self-test" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-object-churn-profile.ts", "--self-test" });
     const shared_object_churn_ab_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/shared-object-churn-ab.ts", "--self-test" });
@@ -1904,7 +1904,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
-    const run_gc_generation = b.addSystemCommand(&.{ "python3", "tools/gc-generation-benchmark.py" });
+    const run_gc_generation = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-generation-benchmark.ts" });
     run_gc_generation.addArtifactArg(gc_generation_runner);
     if (b.option(usize, "gc-generation-benchmark-samples", "GC generation samples per matrix row")) |samples|
         run_gc_generation.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
