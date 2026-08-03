@@ -5,6 +5,7 @@ declare const Home: {
   readFileHex(path: string): string;
   writeFileHex(path: string, contents: string): void;
   fileExists(path: string): boolean;
+  cpuCount(): number;
   spawnSync(
     argv: string[],
     options?: RunOptions,
@@ -33,6 +34,10 @@ export function writeText(path: string, contents: string): void {
 
 export function fileExists(path: string): boolean {
   return Home.fileExists(path);
+}
+
+export function cpuCount(): number {
+  return Home.cpuCount();
 }
 
 export function readHex(path: string): string {

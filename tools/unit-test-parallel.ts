@@ -1,5 +1,5 @@
 /** Run the zig-js unit suite as parallel shards against one built binary. */
-import { fileExists, readText, run } from "./lib/home";
+import { cpuCount, fileExists, readText, run } from "./lib/home";
 declare const __filename: string;
 function requireValue(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -69,6 +69,10 @@ function selfTest(): void {
     result.failures.length === 2 && result.slow[0][1] === "beta",
     "diagnostic aggregation failed",
   );
+  requireValue(
+    Number.isInteger(cpuCount()) && cpuCount() > 0,
+    "Home CPU count is invalid",
+  );
   requireValue(quote("a'b") === `'a'"'"'b'`, "shell quoting failed");
   console.log("unit-test-parallel self-test: ok");
 }
@@ -77,7 +81,11 @@ function main(): void {
   if (args.length === 1 && args[0] === "--self-test") return selfTest();
   requireValue(args.length > 0, "test binary is required");
   const binary = args[0],
-    options: any = { jobs: 1, logDir: ".zig-cache/unit-shards", slowest: 10 };
+    options: any = {
+      jobs: Math.max(1, cpuCount() - 1),
+      logDir: ".zig-cache/unit-shards",
+      slowest: 10,
+    };
   for (let index = 1; index < args.length; index += 1) {
     const name = args[index],
       value = args[++index];

@@ -342,7 +342,7 @@ jobs:
         with:
           repository: home-lang/home
           path: Home/lang
-          ref: 2e5791e7415b85689ab2f88cbcc789881e9eb6ee
+          ref: d01469e9dd90e84cf9434b056390dcb4667b18bc
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@0.17.0-dev
@@ -564,7 +564,7 @@ jobs:
         with:
           repository: home-lang/home
           path: Home/lang
-          ref: 2e5791e7415b85689ab2f88cbcc789881e9eb6ee
+          ref: d01469e9dd90e84cf9434b056390dcb4667b18bc
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@0.17.0-dev
@@ -616,7 +616,7 @@ jobs:
         with:
           repository: home-lang/home
           path: Home/lang
-          ref: 2e5791e7415b85689ab2f88cbcc789881e9eb6ee
+          ref: d01469e9dd90e84cf9434b056390dcb4667b18bc
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@0.17.0-dev
