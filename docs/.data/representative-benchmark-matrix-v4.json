@@ -1,0 +1,48 @@
+{
+  "schema_version": 4,
+  "matrix_id": "zig-js-representative-v4",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 460,
+  "history_policy": "This version hash-inherits every V3 decision and adds the existing owned fixed-width SIMD runner as one versioned family. Any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v3",
+    "path": "docs/.data/representative-benchmark-matrix-v3.json",
+    "sha256": "d6c9fd413ae07415999c5bda12d609dfc531c58a73eb52f3483453e6c86d42e8",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "tier_attribution",
+      "pending_metric_panels"
+    ]
+  },
+  "change": "Moves wasm_simd from deferred to scored rows using the existing integer i32x4 export and its same-module scalar checksum oracle. The structural variant reverses JavaScript invocation order without changing the Wasm export or input multiset.",
+  "implemented_families_append": [
+    {
+      "family": "wasm_simd",
+      "source": "bench/wasm_simd_comparison.js",
+      "base": "wasm_representative_simd",
+      "variant": "wasm_representative_simd_variant",
+      "surface": "owned fixed-width i32x4 WebAssembly arithmetic with an equivalent scalar export in the same module",
+      "jobs": {"full": 200, "quick": 1},
+      "checksums": {
+        "base": {
+          "quick": [53071818, 212527273, 2127192798, 2669520876],
+          "full": [5406673232, 11859341201, 23274729574, 36513932764]
+        },
+        "variant": {
+          "quick": [53071818, 212527273, 2127192798, 2669520876],
+          "full": [5406673232, 11859341201, 23274729574, 36513932764]
+        }
+      },
+      "oracle": "The same embedded module exports integer_scalar; the existing Wasm SIMD harness rejects SIMD/scalar and cross-engine checksum disagreement before publication.",
+      "anti_specialization": "Base traverses jobs in ascending order; the variant uses a distinct wrapper, identifiers, loop condition, accumulator, and descending order over the identical per-job SIMD inputs. Both call the same i32x4 export and must retain equal tier attribution."
+    }
+  ],
+  "deferred_families_remove": ["wasm_simd"]
+}

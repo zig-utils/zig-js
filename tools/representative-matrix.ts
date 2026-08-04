@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v3.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v4.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -16,9 +16,9 @@ const unique = (values: any[]) => new Set(values).size === values.length;
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version === 2 || child.schema_version === 3, "unsupported representative matrix schema");
+  requireValue(child.schema_version === 2 || child.schema_version === 3 || child.schema_version === 4, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
-  const expectedParent = child.schema_version === 2 ? "zig-js-representative-v1" : "zig-js-representative-v2";
+  const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
   requireValue(Home.fileExists(parentPath), "representative parent manifest does not exist");
   requireValue(digest(parentPath) === parent.sha256, `representative parent manifest changed after v${child.schema_version} froze`);
@@ -34,13 +34,13 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
 
   const additions = child.implemented_families_append,
     removals = child.deferred_families_remove;
-  requireValue(Array.isArray(additions) && additions.length > 0, "v3 must append at least one implemented family");
-  requireValue(Array.isArray(removals) && removals.length === additions.length && unique(removals), "v3 deferred-family removal inventory is invalid");
+  requireValue(Array.isArray(additions) && additions.length > 0, `v${child.schema_version} must append at least one implemented family`);
+  requireValue(Array.isArray(removals) && removals.length === additions.length && unique(removals), `v${child.schema_version} deferred-family removal inventory is invalid`);
   const deferredNames = inherited.deferred_families.map((entry: any) => entry.family),
     addedNames = additions.map((entry: any) => entry.family);
-  requireValue(unique(addedNames), "v3 appended family is duplicated");
-  requireValue(addedNames.every((name: string) => removals.indexOf(name) >= 0), "v3 must remove every appended family from the deferred inventory");
-  requireValue(removals.every((name: string) => deferredNames.indexOf(name) >= 0), "v3 removes a family that was not deferred");
+  requireValue(unique(addedNames), `v${child.schema_version} appended family is duplicated`);
+  requireValue(addedNames.every((name: string) => removals.indexOf(name) >= 0), `v${child.schema_version} must remove every appended family from the deferred inventory`);
+  requireValue(removals.every((name: string) => deferredNames.indexOf(name) >= 0), `v${child.schema_version} removes a family that was not deferred`);
   return {
     ...inherited,
     ...child,
@@ -49,7 +49,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version === 1 || manifest.schema_version === 2 || manifest.schema_version === 3, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version === 1 || manifest.schema_version === 2 || manifest.schema_version === 3 || manifest.schema_version === 4, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");

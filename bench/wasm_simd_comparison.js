@@ -87,6 +87,10 @@ function benchmarkFunction(name) {
     return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.integer_scalar, 20000, jobs, lane); };
   if (name === "wasm_representative_scalar_variant")
     return function (jobs, lane) { return benchmarkWasmKernelReverse(wasmSimdExports.integer_scalar, 20000, jobs, lane); };
+  if (name === "wasm_representative_simd")
+    return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.integer_simd, 20000, jobs, lane); };
+  if (name === "wasm_representative_simd_variant")
+    return function (jobs, lane) { return benchmarkWasmKernelReverse(wasmSimdExports.integer_simd, 20000, jobs, lane); };
   if (name === "wasm_float_simd")
     return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.float_simd, 20000, jobs, lane); };
   if (name === "wasm_float_scalar")
