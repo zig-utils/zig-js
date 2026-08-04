@@ -141,6 +141,15 @@ raw artifact. Its 108 snapshots name exact revision
 `2c7c4f31025ffb793dc474ffe6847f1705f1dc76` and retain every native-code and
 heap field for all 36 workloads.
 
+The full-work schema-3 runtime-dispatch evidence is the
+[`representative-tier-attribution-v9-schema-v3-2026-08-04.md`](.data/representative-tier-attribution-v9-schema-v3-2026-08-04.md)
+report and its
+[`representative-tier-attribution-v9-schema-v3-2026-08-04.json`](.data/representative-tier-attribution-v9-schema-v3-2026-08-04.json)
+raw artifact. Its 108 snapshots name exact implementation revision
+`e6b7dc42ed973737f937de6279cb567e25857c2d`, preserve the complete execution,
+admission, native-code, and heap inventories, and record nonzero invocation
+dispatches for all six Wasm base/variant rows.
+
 Attribution is deliberately outside the timing rows. Normal contexts retain a
 null telemetry pointer, while the sidecar opts in to atomic counters. A full
 published representative report therefore preserves both its ordinary timing
