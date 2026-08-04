@@ -1,0 +1,47 @@
+{
+  "schema_version": 3,
+  "matrix_id": "zig-js-representative-v3",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 460,
+  "history_policy": "This version hash-inherits every v2 timing, input, attribution, and acceptance decision. It adds the existing owned Wasm scalar runner as one versioned family; any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v2",
+    "path": "docs/.data/representative-benchmark-matrix-v2.json",
+    "sha256": "972b6b8cecab397cf182e943b6e1cda25ff3b74a57a370744d090007be7c38f8",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "tier_attribution",
+      "pending_metric_panels"
+    ]
+  },
+  "change": "Moves wasm_scalar from the explicit deferred inventory into scored rows using the existing byte-identical zig-js/JavaScriptCore source and scalar export. The structural variant reverses JavaScript invocation order while preserving the exact Wasm function, iteration multiset, and checksum.",
+  "implemented_families_append": [
+    {
+      "family": "wasm_scalar",
+      "source": "bench/wasm_simd_comparison.js",
+      "base": "wasm_representative_scalar",
+      "variant": "wasm_representative_scalar_variant",
+      "surface": "owned scalar WebAssembly i32 arithmetic with module compilation/instantiation inside cold setup and invocation-only warm timing",
+      "jobs": {"full": 160, "quick": 1},
+      "checksums": {
+        "base": {
+          "quick": [53071818, 212527273, 2127192798, 2669520876],
+          "full": [2280960320, 4561920641, 9123841286, 18247682588]
+        },
+        "variant": {
+          "quick": [53071818, 212527273, 2127192798, 2669520876],
+          "full": [2280960320, 4561920641, 9123841286, 18247682588]
+        }
+      },
+      "anti_specialization": "Base traverses jobs in ascending order; the variant uses a distinct wrapper, identifiers, loop condition, accumulator, and descending order over the identical per-job Wasm inputs. Both call the same scalar export and must retain equal tier attribution."
+    }
+  ],
+  "deferred_families_remove": ["wasm_scalar"]
+}

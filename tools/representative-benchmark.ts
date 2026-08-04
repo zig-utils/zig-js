@@ -455,7 +455,7 @@ function main(): void {
   ensurePublishable(info, Boolean(options.raw || options.tierAttribution || options.markdown));
   requireValue(
     (!options.raw && !options.markdown) || Boolean(options.tierAttribution),
-    "v2 raw/report publication requires --tier-attribution-out",
+    "representative raw/report publication requires --tier-attribution-out",
   );
   const rows = collect(
     args[0],

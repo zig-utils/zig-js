@@ -9,12 +9,27 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v2.json`. V2 hash-inherits every frozen V1 timing/input decision and adds a separate opt-in tier-attribution sidecar; implemented rows and explicitly deferred families remain visible separately, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v3.json`. V3 hash-inherits V2 (which inherited every frozen V1 timing/input decision), retains the opt-in tier-attribution sidecar, and adds the owned scalar WebAssembly runner without changing the accepted SIMD report. Implemented rows and explicit deferrals remain visible separately, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
+
+## Representative scalar WebAssembly row
+
+V3 moves `wasm_scalar` from the deferred inventory into the scored matrix. Both
+engines evaluate the exact existing `bench/wasm_simd_comparison.js` bytes and
+instantiate the same embedded module. Warm rows time only the selected scalar
+export after the inherited ten-call warmup; cold rows include source evaluation,
+module compilation and instantiation, invocation, context teardown, and worker
+join. The base and structural variant call the same `i32` export with the same
+input multiset in ascending versus descending order, so the harness requires
+identical frozen checksums and equivalent tier attribution.
+
+The separate accepted Wasm SIMD report remains immutable evidence. SIMD and
+shared-memory representative families stay explicit deferrals until their
+full subpanels and feature contracts join a later matrix version.
 
 ## Representative tier attribution
 

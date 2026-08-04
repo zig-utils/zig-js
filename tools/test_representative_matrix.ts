@@ -10,7 +10,8 @@ function rejects(name: string, mutate: (value: any) => void, pattern: string): v
 }
 validate(clone());
 rejects("missing family", value => value.deferred_families.pop(), "exactly cover");
-rejects("missing dispatch", value => { value.implemented_families[0].variant = "representative_absent_variant"; }, "absent from representative source dispatch");
+rejects("missing dispatch", value => { value.implemented_families[0].variant = "representative_absent_variant"; }, "absent from declared source dispatch");
+rejects("missing declared source", value => { value.implemented_families[0].source = "bench/absent.js"; }, "workload source does not exist");
 rejects("checksum lanes", value => value.implemented_families[0].checksums.base.full.pop(), "checksums must match lanes");
 rejects("shared JSC", value => value.modes.shared.engines.push("JavaScriptCore"), "must not construct a JSC ratio");
-console.log("representative matrix structural tests: 5/5 passed");
+console.log("representative matrix structural tests: 6/6 passed");

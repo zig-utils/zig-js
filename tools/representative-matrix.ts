@@ -3,8 +3,8 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v2.json";
-const sourcePath = ROOT + "/bench/representative_comparison.js";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v3.json";
+const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
   const result = run(["shasum", "-a", "256", path]);
@@ -16,23 +16,40 @@ const unique = (values: any[]) => new Set(values).size === values.length;
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version === 2, "unsupported representative matrix schema");
+  requireValue(child.schema_version === 2 || child.schema_version === 3, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
-  requireValue(parent.matrix_id === "zig-js-representative-v1", "v2 must inherit representative v1");
+  const expectedParent = child.schema_version === 2 ? "zig-js-representative-v1" : "zig-js-representative-v2";
+  requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
   requireValue(Home.fileExists(parentPath), "representative parent manifest does not exist");
-  requireValue(digest(parentPath) === parent.sha256, "representative parent manifest changed after v2 froze");
-  const inherited = JSON.parse(readText(parentPath));
+  requireValue(digest(parentPath) === parent.sha256, `representative parent manifest changed after v${child.schema_version} froze`);
+  const inherited = loadManifest(parentPath, root);
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   validate(inherited, root);
-  requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), "v2 inherited-field inventory is invalid");
+  requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
-    requireValue(Object.prototype.hasOwnProperty.call(inherited, name), "v2 inherits unknown parent field: " + name);
-    requireValue(!Object.prototype.hasOwnProperty.call(child, name), "v2 rewrites inherited field: " + name);
+    requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
+    requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
-  return { ...inherited, ...child };
+  if (child.schema_version === 2) return { ...inherited, ...child };
+
+  const additions = child.implemented_families_append,
+    removals = child.deferred_families_remove;
+  requireValue(Array.isArray(additions) && additions.length > 0, "v3 must append at least one implemented family");
+  requireValue(Array.isArray(removals) && removals.length === additions.length && unique(removals), "v3 deferred-family removal inventory is invalid");
+  const deferredNames = inherited.deferred_families.map((entry: any) => entry.family),
+    addedNames = additions.map((entry: any) => entry.family);
+  requireValue(unique(addedNames), "v3 appended family is duplicated");
+  requireValue(addedNames.every((name: string) => removals.indexOf(name) >= 0), "v3 must remove every appended family from the deferred inventory");
+  requireValue(removals.every((name: string) => deferredNames.indexOf(name) >= 0), "v3 removes a family that was not deferred");
+  return {
+    ...inherited,
+    ...child,
+    implemented_families: inherited.implemented_families.concat(additions),
+    deferred_families: inherited.deferred_families.filter((entry: any) => removals.indexOf(entry.family) < 0),
+  };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version === 1 || manifest.schema_version === 2, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version === 1 || manifest.schema_version === 2 || manifest.schema_version === 3, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -55,15 +72,19 @@ export function validate(manifest: any, root = ROOT): void {
   const coverage = new Set(implementedNames.concat(deferredNames));
   requireValue(coverage.size === required.length && required.every((name: string) => coverage.has(name)), "implemented/deferred inventory must exactly cover required_families");
   for (const entry of deferred) requireValue(typeof entry.reason === "string" && entry.reason.length > 0, "deferred family lacks a reason: " + JSON.stringify(entry));
-  const source = readText(root + "/bench/representative_comparison.js"), workloads: string[] = [];
+  const sources: Record<string, string> = {}, workloads: string[] = [];
   for (const entry of implemented) {
     requireValue(Number.isInteger(entry.jobs.full) && entry.jobs.full > 0, "invalid full jobs: " + JSON.stringify(entry));
     requireValue(Number.isInteger(entry.jobs.quick) && entry.jobs.quick > 0 && entry.jobs.quick < entry.jobs.full, "invalid quick jobs: " + JSON.stringify(entry));
     for (const role of ["base", "variant"]) {
       const workload = entry[role];
-      requireValue(typeof workload === "string" && workload.startsWith("representative_"), `invalid ${role} workload: ${JSON.stringify(entry)}`);
+      requireValue(typeof workload === "string" && workload.length > 0, `invalid ${role} workload: ${JSON.stringify(entry)}`);
       requireValue(workloads.indexOf(workload) < 0, "duplicate workload id: " + workload); workloads.push(workload);
-      requireValue(source.indexOf(`"${workload}"`) >= 0, "workload is absent from representative source dispatch: " + workload);
+      const sourceName = entry.source || defaultSourcePath,
+        path = root + "/" + sourceName;
+      requireValue(Home.fileExists(path), "workload source does not exist: " + sourceName);
+      const source = sources[sourceName] ||= readText(path);
+      requireValue(source.indexOf(`"${workload}"`) >= 0, "workload is absent from declared source dispatch: " + workload);
       for (const scale of ["full", "quick"]) {
         const values = entry.checksums[role][scale];
         requireValue(Array.isArray(values) && values.length === lanes.length, `${workload} ${scale} checksums must match lanes`);
@@ -78,15 +99,15 @@ export function validate(manifest: any, root = ROOT): void {
   requireValue(same(Object.keys(modes).sort(), ["independent_cold", "independent_steady", "shared", "single_warm"]), "v1 mode inventory changed");
   requireValue(same(modes.shared.engines, ["zig-js"]), "shared mode must not construct a JSC ratio");
   requireValue(Array.isArray(manifest.pending_metric_panels), "pending metric inventory must remain explicit");
-  if (manifest.schema_version === 2) {
+  if (manifest.schema_version >= 2) {
     const attribution = manifest.tier_attribution || {};
-    requireValue(same(attribution.phases || [], ["configuration", "warmup", "invocation"]), "v2 tier phases changed");
+    requireValue(same(attribution.phases || [], ["configuration", "warmup", "invocation"]), "representative tier phases changed");
     requireValue(same(attribution.metrics || [], [
       "tree_walker_entries", "vm_entries", "baseline_entries", "optimizer_entries", "optimizer_osr_entries", "deoptimizations",
       "environment_allocations", "bytecode_admissions_by_reason", "baseline_publications", "optimizer_publications", "generated_code_bytes",
-    ]), "v2 tier metric inventory changed");
-    requireValue(typeof attribution.equivalence === "string" && attribution.equivalence.length > 0, "v2 lacks tier equivalence rule");
-    requireValue(typeof attribution.timing_isolation === "string" && attribution.timing_isolation.length > 0, "v2 lacks timing isolation rule");
+    ]), "representative tier metric inventory changed");
+    requireValue(typeof attribution.equivalence === "string" && attribution.equivalence.length > 0, "representative matrix lacks tier equivalence rule");
+    requireValue(typeof attribution.timing_isolation === "string" && attribution.timing_isolation.length > 0, "representative matrix lacks timing isolation rule");
     for (const workload of workloads) {
       const result = run(["rg", "-l", "-F", workload, root + "/src"]);
       requireValue(result.exitCode === 1, result.exitCode === 0

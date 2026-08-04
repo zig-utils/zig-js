@@ -65,11 +65,28 @@ function benchmarkWasmKernel(kernel, iterations, jobs, lane) {
   return total;
 }
 
+// The representative-matrix variant preserves the exact Wasm calls and inputs
+// while changing the JavaScript traversal shape and invocation order. Integer
+// scalar exports have no retained state, so reversing the calls is observable
+// only to tier selection and benchmark recognizers, never to the checksum.
+function benchmarkWasmKernelReverse(kernel, iterations, jobs, lane) {
+  var aggregate = lane;
+  for (var remaining = jobs; remaining > 0; remaining = remaining - 1) {
+    var job = remaining - 1;
+    aggregate = aggregate + kernel(iterations + ((job + lane) & 15));
+  }
+  return aggregate;
+}
+
 function benchmarkFunction(name) {
   if (name === "wasm_integer_simd")
     return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.integer_simd, 20000, jobs, lane); };
   if (name === "wasm_integer_scalar")
     return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.integer_scalar, 20000, jobs, lane); };
+  if (name === "wasm_representative_scalar")
+    return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.integer_scalar, 20000, jobs, lane); };
+  if (name === "wasm_representative_scalar_variant")
+    return function (jobs, lane) { return benchmarkWasmKernelReverse(wasmSimdExports.integer_scalar, 20000, jobs, lane); };
   if (name === "wasm_float_simd")
     return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.float_simd, 20000, jobs, lane); };
   if (name === "wasm_float_scalar")
