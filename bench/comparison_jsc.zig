@@ -35,6 +35,9 @@ const representative_workload_source: [:0]const u8 = @embedFile("representative_
 const wasm_simd_workload_source: [:0]const u8 = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source: [:0]const u8 = @embedFile("wasm_threads_comparison.js");
 const invocation: [:0]const u8 = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
+// Promise workloads finish during JSEvaluateScript's host checkpoint. Read the
+// checksum only after that checkpoint; synchronous rows retain one evaluation.
+const checkpoint_checksum: [:0]const u8 = "__benchmarkReadChecksum(__benchmarkJobs, 1, __benchmarkLane, false)";
 const warmup_calls = 10;
 
 const Mode = enum { single, independent_steady, independent_cold };
@@ -88,7 +91,7 @@ fn configure(
     workload: []const u8,
     jobs: usize,
     lane: usize,
-) !void {
+) !bool {
     const source_bytes = if (std.mem.startsWith(u8, workload, "wasm_threads_"))
         wasm_threads_workload_source
     else if (std.mem.startsWith(u8, workload, "wasm_"))
@@ -98,11 +101,17 @@ fn configure(
     else
         workload_source;
     _ = try evaluate(ctx, source_bytes);
-    const source = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkPrepare = undefined; globalThis.__benchmarkFinish = undefined; globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkInvoke = function(jobs, lane) {{ if (globalThis.__benchmarkPrepare) globalThis.__benchmarkPrepare(jobs, 1, lane, false); var result = globalThis.__benchmarkSelected(jobs, lane); return globalThis.__benchmarkFinish ? globalThis.__benchmarkFinish(jobs, 1, lane, false) : result; }}; globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
+    const source = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkPrepare = undefined; globalThis.__benchmarkFinish = undefined; globalThis.__benchmarkReadChecksum = undefined; globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkInvoke = function(jobs, lane) {{ if (globalThis.__benchmarkPrepare) globalThis.__benchmarkPrepare(jobs, 1, lane, false); var result = globalThis.__benchmarkSelected(jobs, lane); return globalThis.__benchmarkFinish ? globalThis.__benchmarkFinish(jobs, 1, lane, false) : result; }}; globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
         workload, jobs, lane,
     }, 0);
     defer allocator.free(source);
     _ = try evaluate(ctx, source);
+    return try evaluate(ctx, "typeof globalThis.__benchmarkReadChecksum === 'function' ? 1 : 0") == 1;
+}
+
+fn invoke(ctx: JSGlobalContextRef, checkpoint: bool) !f64 {
+    const result = try evaluate(ctx, invocation);
+    return if (checkpoint) try evaluate(ctx, checkpoint_checksum) else result;
 }
 
 fn warm(
@@ -111,11 +120,12 @@ fn warm(
     warm_jobs: usize,
     jobs: usize,
     lane: usize,
+    checkpoint: bool,
 ) !void {
     const warm_config = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ warm_jobs, lane }, 0);
     defer allocator.free(warm_config);
     _ = try evaluate(ctx, warm_config);
-    for (0..warmup_calls) |_| _ = try evaluate(ctx, invocation);
+    for (0..warmup_calls) |_| _ = try invoke(ctx, checkpoint);
     const restore = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ jobs, lane }, 0);
     defer allocator.free(restore);
     _ = try evaluate(ctx, restore);
@@ -146,12 +156,12 @@ fn runSingle(
 ) !void {
     const ctx = JSGlobalContextCreate(null) orelse return error.JavaScriptCoreFailure;
     defer JSGlobalContextRelease(ctx);
-    try configure(allocator, ctx, workload, jobs, 0);
-    try warm(allocator, ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
+    const checkpoint = try configure(allocator, ctx, workload, jobs, 0);
+    try warm(allocator, ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
 
     for (0..samples) |sample| {
         const started = nowNs(io);
-        const checksum = try evaluate(ctx, invocation);
+        const checksum = try invoke(ctx, checkpoint);
         const elapsed: u64 = @intCast(nowNs(io) - started);
         try printRow(writer, .single, workload, 1, jobs, sample, elapsed, checksum);
     }
@@ -165,12 +175,12 @@ fn steadyLaneMain(lane: *SteadyLane) void {
         return;
     };
     defer JSGlobalContextRelease(ctx);
-    configure(allocator, ctx, lane.workload, lane.jobs, lane.lane) catch {
+    const checkpoint = configure(allocator, ctx, lane.workload, lane.jobs, lane.lane) catch {
         lane.failed.store(true, .release);
         lane.ready.post(lane.io);
         return;
     };
-    warm(allocator, ctx, @max(@as(usize, 1), lane.jobs / 10), lane.jobs, lane.lane) catch {
+    warm(allocator, ctx, @max(@as(usize, 1), lane.jobs / 10), lane.jobs, lane.lane, checkpoint) catch {
         lane.failed.store(true, .release);
         lane.ready.post(lane.io);
         return;
@@ -180,7 +190,7 @@ fn steadyLaneMain(lane: *SteadyLane) void {
     while (true) {
         lane.start.waitUncancelable(lane.io);
         if (lane.stop.load(.acquire)) return;
-        lane.checksum = evaluate(ctx, invocation) catch {
+        lane.checksum = invoke(ctx, checkpoint) catch {
             lane.failed.store(true, .release);
             lane.done.post(lane.io);
             return;
@@ -250,11 +260,11 @@ fn coldLaneMain(lane: *ColdLane) void {
         return;
     };
     defer JSGlobalContextRelease(ctx);
-    configure(allocator, ctx, lane.workload, lane.jobs, lane.lane) catch {
+    const checkpoint = configure(allocator, ctx, lane.workload, lane.jobs, lane.lane) catch {
         lane.failed.store(true, .release);
         return;
     };
-    lane.checksum = evaluate(ctx, invocation) catch {
+    lane.checksum = invoke(ctx, checkpoint) catch {
         lane.failed.store(true, .release);
         return;
     };

@@ -1,0 +1,53 @@
+{
+  "schema_version": 6,
+  "matrix_id": "zig-js-representative-v6",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 460,
+  "history_policy": "This version hash-inherits every V5 decision and adds the owned Promise, async-function, and microtask-checkpoint family. Any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v5",
+    "path": "docs/.data/representative-benchmark-matrix-v5.json",
+    "sha256": "4367669139b2b7605ce85ef3113a3c0f7a29ddf57de056a5d4cc6902ac73ebc8",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "tier_attribution",
+      "pending_metric_panels",
+      "additional_panels"
+    ]
+  },
+  "change": "Moves promises_async_microtasks from deferred to implemented. Both public runners time the workload invocation, their normal host microtask checkpoint, and a generic post-checkpoint checksum read; synchronous historical rows retain their original one-evaluation path.",
+  "implemented_families_append": [
+    {
+      "family": "promises_async_microtasks",
+      "source": "bench/representative_comparison.js",
+      "base": "representative_async_microtasks",
+      "variant": "representative_async_microtasks_variant",
+      "surface": "Promise reactions, chained reactions, thenable assimilation, and two-stage async/await continuation draining",
+      "completion": {
+        "kind": "host_microtask_checkpoint",
+        "checksum_hook": "__benchmarkReadChecksum",
+        "timed_boundary": "Invocation, the public runner's normal end-of-script microtask checkpoint, and an exact checksum read after the checkpoint are timed together on both engines."
+      },
+      "jobs": {"full": 60000, "quick": 8},
+      "checksums": {
+        "base": {
+          "quick": [2104, 5136, 13984, 40768],
+          "full": [115069600, 230140352, 460285312, 920578560]
+        },
+        "variant": {
+          "quick": [2104, 5136, 13984, 40768],
+          "full": [115069600, 230140352, 460285312, 920578560]
+        }
+      },
+      "anti_specialization": "Base and variant traverse the scheduling call graph in opposite order while retaining the same four independent Promise/async continuation shapes. The exact input multiset, callback count, job count, work, and final commutative checksum remain equal."
+    }
+  ],
+  "deferred_families_remove": ["promises_async_microtasks"]
+}

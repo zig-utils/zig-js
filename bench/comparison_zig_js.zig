@@ -21,6 +21,9 @@ const representative_workload_source = @embedFile("representative_comparison.js"
 const wasm_simd_workload_source = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source = @embedFile("wasm_threads_comparison.js");
 const invocation = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
+// Promise workloads finish during evaluate's host checkpoint. Read their
+// checksum only after that checkpoint; synchronous rows retain one evaluation.
+const checkpoint_checksum = "__benchmarkReadChecksum(__benchmarkJobs, 1, __benchmarkLane, false)";
 const warmup_calls = 10;
 // Every measured context uses the same process-wide production allocator.
 // libc malloc keeps reusable slabs between contexts instead of translating
@@ -222,7 +225,7 @@ fn printGcTelemetryRow(
     });
 }
 
-fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !void {
+fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !bool {
     const source_bytes = if (std.mem.startsWith(u8, workload, "wasm_threads_"))
         wasm_threads_workload_source
     else if (std.mem.startsWith(u8, workload, "wasm_"))
@@ -232,16 +235,22 @@ fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !
     else
         workload_source;
     _ = try ctx.evaluate(source_bytes);
-    const source = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkPrepare = undefined; globalThis.__benchmarkFinish = undefined; globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkInvoke = function(jobs, lane) {{ if (globalThis.__benchmarkPrepare) globalThis.__benchmarkPrepare(jobs, 1, lane, false); var result = globalThis.__benchmarkSelected(jobs, lane); return globalThis.__benchmarkFinish ? globalThis.__benchmarkFinish(jobs, 1, lane, false) : result; }}; globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
+    const source = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkPrepare = undefined; globalThis.__benchmarkFinish = undefined; globalThis.__benchmarkReadChecksum = undefined; globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkInvoke = function(jobs, lane) {{ if (globalThis.__benchmarkPrepare) globalThis.__benchmarkPrepare(jobs, 1, lane, false); var result = globalThis.__benchmarkSelected(jobs, lane); return globalThis.__benchmarkFinish ? globalThis.__benchmarkFinish(jobs, 1, lane, false) : result; }}; globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
         workload, jobs, lane,
     });
     _ = try ctx.evaluate(source);
+    return (try ctx.evaluate("typeof globalThis.__benchmarkReadChecksum === 'function' ? 1 : 0")).toNumber() == 1;
 }
 
-fn warm(ctx: *js.Context, warm_jobs: usize, jobs: usize, lane: usize) !void {
+fn invoke(ctx: *js.Context, checkpoint: bool) !js.Value {
+    const result = try ctx.evaluate(invocation);
+    return if (checkpoint) try ctx.evaluate(checkpoint_checksum) else result;
+}
+
+fn warm(ctx: *js.Context, warm_jobs: usize, jobs: usize, lane: usize, checkpoint: bool) !void {
     const warm_config = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ warm_jobs, lane });
     _ = try ctx.evaluate(warm_config);
-    for (0..warmup_calls) |_| _ = try ctx.evaluate(invocation);
+    for (0..warmup_calls) |_| _ = try invoke(ctx, checkpoint);
     const restore = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ jobs, lane });
     _ = try ctx.evaluate(restore);
 }
@@ -263,12 +272,12 @@ fn runSingle(
         },
     });
     defer ctx.destroy();
-    try configure(ctx, workload, jobs, 0);
-    try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
+    const checkpoint = try configure(ctx, workload, jobs, 0);
+    try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
 
     for (0..samples) |sample| {
         const started = nowNs(io);
-        const result = try ctx.evaluate(invocation);
+        const result = try invoke(ctx, checkpoint);
         const elapsed: u64 = @intCast(nowNs(io) - started);
         try printRow(writer, .single, workload, 1, jobs, sample, elapsed, result.toNumber());
     }
@@ -291,11 +300,11 @@ fn runAttribution(
         },
     });
     defer ctx.destroy();
-    try configure(ctx, workload, jobs, 0);
+    const checkpoint = try configure(ctx, workload, jobs, 0);
     try printTierAttributionRow(writer, workload, jobs, "configuration", 0, ctx.tierAttributionSnapshot());
-    try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
+    try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
     try printTierAttributionRow(writer, workload, jobs, "warmup", 0, ctx.tierAttributionSnapshot());
-    const result = try ctx.evaluate(invocation);
+    const result = try invoke(ctx, checkpoint);
     try printTierAttributionRow(writer, workload, jobs, "invocation", result.toNumber(), ctx.tierAttributionSnapshot());
     _ = io;
 }
@@ -314,12 +323,12 @@ fn steadyLaneMain(lane: *SteadyLane) void {
         return;
     };
     defer ctx.destroy();
-    configure(ctx, lane.workload, lane.jobs, lane.lane) catch {
+    const checkpoint = configure(ctx, lane.workload, lane.jobs, lane.lane) catch {
         lane.failed.store(true, .release);
         lane.ready.post(lane.io);
         return;
     };
-    warm(ctx, @max(@as(usize, 1), lane.jobs / 10), lane.jobs, lane.lane) catch {
+    warm(ctx, @max(@as(usize, 1), lane.jobs / 10), lane.jobs, lane.lane, checkpoint) catch {
         lane.failed.store(true, .release);
         lane.ready.post(lane.io);
         return;
@@ -329,7 +338,7 @@ fn steadyLaneMain(lane: *SteadyLane) void {
     while (true) {
         lane.start.waitUncancelable(lane.io);
         if (lane.stop.load(.acquire)) return;
-        const result = ctx.evaluate(invocation) catch {
+        const result = invoke(ctx, checkpoint) catch {
             lane.failed.store(true, .release);
             lane.done.post(lane.io);
             return;
@@ -406,11 +415,11 @@ fn coldLaneMain(lane: *ColdLane) void {
         return;
     };
     defer ctx.destroy();
-    configure(ctx, lane.workload, lane.jobs, lane.lane) catch {
+    const checkpoint = configure(ctx, lane.workload, lane.jobs, lane.lane) catch {
         lane.failed.store(true, .release);
         return;
     };
-    const result = ctx.evaluate(invocation) catch {
+    const result = invoke(ctx, checkpoint) catch {
         lane.failed.store(true, .release);
         return;
     };
@@ -478,13 +487,13 @@ fn runShared(
         },
     });
     defer ctx.destroy();
-    try configure(ctx, workload, jobs, 0);
+    const checkpoint = try configure(ctx, workload, jobs, 0);
     _ = try ctx.evaluate(shared_harness);
     const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
         jobs, lanes,
     });
     if (!std.mem.eql(u8, workload, "wasm_threads_wait_notify")) {
-        try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
+        try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
         // Warm the actual Thread lifecycle, then complete one collect/reuse
         // cycle before sample zero. One shared invocation only armed the first
         // cooperative collection, leaving the first recorded sample slower than

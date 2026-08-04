@@ -16,4 +16,6 @@ rejects("checksum lanes", value => value.implemented_families[0].checksums.base.
 rejects("shared JSC", value => value.modes.shared.engines.push("JavaScriptCore"), "must not construct a JSC ratio");
 rejects("invalid shared ruling", value => { value.implemented_families[0].shared = "sometimes"; }, "invalid shared-mode ruling");
 rejects("missing capability gate", value => { value.additional_panels.find((entry: any) => entry.kind === "zig_js_capability").feature_gate.JavaScriptCore.expected = "accept"; }, "lacks an exact JavaScriptCore feature gate");
-console.log("representative matrix structural tests: 8/8 passed");
+rejects("invalid completion boundary", value => { value.implemented_families.find((entry: any) => entry.completion).completion.kind = "polling"; }, "unknown completion boundary");
+rejects("renamed checkpoint hook", value => { value.implemented_families.find((entry: any) => entry.completion).completion.checksum_hook = "readLater"; }, "generic checksum hook");
+console.log("representative matrix structural tests: 10/10 passed");

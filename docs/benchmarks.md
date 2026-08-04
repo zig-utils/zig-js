@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v5.json`. V5 hash-inherits the complete V1–V4 chain, retains the opt-in tier-attribution sidecar, and adds owned scalar, fixed-width SIMD, non-shared memory, scalar-memory-oracle, and shared-memory capability rows without rewriting accepted historical reports. Implemented rows and explicit deferrals remain visible separately, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v6.json`. V6 hash-inherits the complete V1–V5 chain, retains the opt-in tier-attribution sidecar, and adds owned Promise/async/microtask rows after the WebAssembly scalar, fixed-width SIMD, non-shared memory, scalar-memory-oracle, and shared-memory capability rows. Accepted historical reports are not rewritten, implemented rows and explicit deferrals remain visible separately, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -42,6 +42,23 @@ constructed.
 The separate accepted Wasm SIMD and Threads reports remain immutable historical
 evidence. V5 integrates their owned workload contracts into the representative
 matrix without copying their old timing numbers or rewriting their reports.
+
+## Representative Promise and microtask row
+
+V6 completes `promises_async_microtasks` with identical source bytes covering
+direct and chained Promise reactions, thenable assimilation, and a two-stage
+`async`/`await` continuation. Each runner invokes the workload through its
+public evaluation API, lets that API perform its normal end-of-script microtask
+checkpoint, and reads the exact checksum through the same generic hook. All
+three actions are inside the timed boundary. Workloads without the hook retain
+their historical one-evaluation path.
+
+The base and structural variant enqueue the same continuation graph in opposite
+orders and must produce identical frozen checksums. The full job count is sized
+against JavaScriptCore's faster direct row so it clears the 50 ms floor; a slow
+zig-js row remains visible rather than weakening the workload. The shared-realm
+panel uses per-lane state prepared before thread creation, and `Thread.join()`
+observes each worker only after its own microtask queue has drained.
 
 ## Representative tier attribution
 

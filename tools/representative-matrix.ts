@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v5.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v6.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -16,7 +16,7 @@ const unique = (values: any[]) => new Set(values).size === values.length;
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version === 2 || child.schema_version === 3 || child.schema_version === 4 || child.schema_version === 5, "unsupported representative matrix schema");
+  requireValue(child.schema_version === 2 || child.schema_version === 3 || child.schema_version === 4 || child.schema_version === 5 || child.schema_version === 6, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -50,7 +50,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version === 1 || manifest.schema_version === 2 || manifest.schema_version === 3 || manifest.schema_version === 4 || manifest.schema_version === 5, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version === 1 || manifest.schema_version === 2 || manifest.schema_version === 3 || manifest.schema_version === 4 || manifest.schema_version === 5 || manifest.schema_version === 6, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -78,14 +78,14 @@ export function validate(manifest: any, root = ROOT): void {
     requireValue(Number.isInteger(entry.jobs.full) && entry.jobs.full > 0, "invalid full jobs: " + JSON.stringify(entry));
     requireValue(Number.isInteger(entry.jobs.quick) && entry.jobs.quick > 0 && entry.jobs.quick < entry.jobs.full, "invalid quick jobs: " + JSON.stringify(entry));
     requireValue(entry.shared === undefined || typeof entry.shared === "boolean", "invalid shared-mode ruling: " + JSON.stringify(entry));
+    const sourceName = entry.source || defaultSourcePath,
+      path = root + "/" + sourceName;
+    requireValue(Home.fileExists(path), "workload source does not exist: " + sourceName);
+    const source = sources[sourceName] ||= readText(path);
     for (const role of ["base", "variant"]) {
       const workload = entry[role];
       requireValue(typeof workload === "string" && workload.length > 0, `invalid ${role} workload: ${JSON.stringify(entry)}`);
       requireValue(workloads.indexOf(workload) < 0, "duplicate workload id: " + workload); workloads.push(workload);
-      const sourceName = entry.source || defaultSourcePath,
-        path = root + "/" + sourceName;
-      requireValue(Home.fileExists(path), "workload source does not exist: " + sourceName);
-      const source = sources[sourceName] ||= readText(path);
       requireValue(source.indexOf(`"${workload}"`) >= 0, "workload is absent from declared source dispatch: " + workload);
       for (const scale of ["full", "quick"]) {
         const values = entry.checksums[role][scale];
@@ -94,6 +94,12 @@ export function validate(manifest: any, root = ROOT): void {
       }
     }
     requireValue(entry.base !== entry.variant, "base and variant must differ: " + entry.family);
+    if (entry.completion !== undefined) {
+      requireValue(entry.completion.kind === "host_microtask_checkpoint", "unknown completion boundary: " + JSON.stringify(entry));
+      requireValue(entry.completion.checksum_hook === "__benchmarkReadChecksum", "checkpoint workload must use the generic checksum hook");
+      requireValue(typeof entry.completion.timed_boundary === "string" && entry.completion.timed_boundary.length > 0, "checkpoint workload lacks a timed boundary");
+      requireValue(source.indexOf(`globalThis.${entry.completion.checksum_hook}`) >= 0, "checkpoint checksum hook is absent from declared source");
+    }
   }
   const additionalPanels = manifest.additional_panels || [];
   requireValue(Array.isArray(additionalPanels), "additional panel inventory must be a list");

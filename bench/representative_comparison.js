@@ -256,6 +256,80 @@ function representativeApplicationMix(jobs, lane, variant) {
   return total;
 }
 
+var representativeAsyncStates = [];
+
+function representativeAsyncPrepare(jobs, lanes, lane, shared) {
+  representativeAsyncStates = [];
+  var count = shared ? lanes : lane + 1;
+  for (var index = 0; index < count; index = index + 1)
+    representativeAsyncStates.push({ total: 0 });
+}
+
+function representativeAsyncChecksum(jobs, lanes, lane, shared) {
+  var total = 0;
+  if (shared) {
+    for (var index = 0; index < lanes; index = index + 1)
+      total = total + representativeAsyncStates[index].total;
+  } else {
+    total = representativeAsyncStates[lane].total;
+  }
+  return total;
+}
+
+function representativeDirectReaction(cell, seed) {
+  Promise.resolve().then(function () {
+    cell.total = cell.total + (seed & 255);
+  });
+}
+
+function representativePromiseChain(cell, seed) {
+  Promise.resolve(seed).then(function (value) {
+    return value + 3;
+  }).then(function (value) {
+    cell.total = cell.total + (value & 511);
+  });
+}
+
+async function representativeAsyncContinuation(cell, seed) {
+  var value = await Promise.resolve(seed);
+  value = await Promise.resolve(value + 7);
+  cell.total = cell.total + (value & 1023);
+}
+
+function representativeThenable(cell, seed) {
+  Promise.resolve({
+    then: function (resolve) { resolve(seed + 11); }
+  }).then(function (value) {
+    cell.total = cell.total + (value & 2047);
+  });
+}
+
+function representativeAsyncWork(jobs, lane, variant) {
+  var cell = representativeAsyncStates[lane];
+  for (var job = 0; job < jobs; job = job + 1) {
+    var seed = job * 17 + lane * 29 + 1;
+    if (variant) {
+      representativeThenable(cell, seed);
+      representativeAsyncContinuation(cell, seed);
+      representativePromiseChain(cell, seed);
+      representativeDirectReaction(cell, seed);
+    } else {
+      representativeDirectReaction(cell, seed);
+      representativePromiseChain(cell, seed);
+      representativeAsyncContinuation(cell, seed);
+      representativeThenable(cell, seed);
+    }
+  }
+  return 0;
+}
+
+function representativeSelectAsync(variant) {
+  globalThis.__benchmarkPrepare = representativeAsyncPrepare;
+  globalThis.__benchmarkFinish = representativeAsyncChecksum;
+  globalThis.__benchmarkReadChecksum = representativeAsyncChecksum;
+  return function (jobs, lane) { return representativeAsyncWork(jobs, lane, variant); };
+}
+
 function benchmarkFunction(name) {
   if (name === "representative_strings") return function (jobs, lane) { return representativeStrings(jobs, lane, 0); };
   if (name === "representative_strings_variant") return function (jobs, lane) { return representativeStrings(jobs, lane, 1); };
@@ -281,6 +355,8 @@ function benchmarkFunction(name) {
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
   if (name === "representative_application_mix_variant") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 1); };
+  if (name === "representative_async_microtasks") return representativeSelectAsync(0);
+  if (name === "representative_async_microtasks_variant") return representativeSelectAsync(1);
   throw new Error("unknown representative benchmark workload: " + name);
 }
 
