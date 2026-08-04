@@ -2409,11 +2409,15 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         }
     }
     if (o.hostClassHooks()) |hooks| if (hooks.get) |get| {
+        self.recordExecutionTier(.host_callbacks);
         switch (try get(@ptrCast(self), o, key)) {
             .unhandled => {},
             .value => |v| {
                 const configurable = if (hooks.attributes) |attributes|
-                    if (try attributes(@ptrCast(self), o, key)) |attr| attr.configurable else true
+                    if (blk: {
+                        self.recordExecutionTier(.host_callbacks);
+                        break :blk try attributes(@ptrCast(self), o, key);
+                    }) |attr| attr.configurable else true
                 else
                     true;
                 return dataDescriptor(self, v, .{

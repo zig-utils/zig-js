@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v8.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v9.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -16,7 +16,7 @@ const unique = (values: any[]) => new Set(values).size === values.length;
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 8, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 9, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -31,6 +31,11 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
   if (child.schema_version === 2) return { ...inherited, ...child };
+  if (child.schema_version === 9) {
+    requireValue(child.tier_attribution && typeof child.tier_attribution === "object", "v9 must replace the attribution contract");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v9 changes attribution only");
+    return { ...inherited, ...child };
+  }
 
   const additions = child.implemented_families_append,
     removals = child.deferred_families_remove;
@@ -50,7 +55,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 8, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 9, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -159,10 +164,18 @@ export function validate(manifest: any, root = ROOT): void {
   if (manifest.schema_version >= 2) {
     const attribution = manifest.tier_attribution || {};
     requireValue(same(attribution.phases || [], ["configuration", "warmup", "invocation"]), "representative tier phases changed");
-    requireValue(same(attribution.metrics || [], [
-      "tree_walker_entries", "vm_entries", "baseline_entries", "optimizer_entries", "optimizer_osr_entries", "deoptimizations",
-      "environment_allocations", "bytecode_admissions_by_reason", "baseline_publications", "optimizer_publications", "generated_code_bytes",
-    ]), "representative tier metric inventory changed");
+    const expectedMetrics = manifest.schema_version >= 9
+      ? [
+        "tree_walker_entries", "vm_entries", "vm_dispatches", "vm_quick_kernel_hits", "baseline_entries", "optimizer_entries",
+        "optimizer_osr_entries", "deoptimizations", "runtime_operation_calls", "host_callbacks", "wasm_dispatches",
+        "environment_allocations", "bytecode_admissions_by_reason", "baseline_publications", "optimizer_publications", "generated_code_bytes",
+        "native_code_lifetime_by_state", "heap_live_bytes", "heap_collections",
+      ]
+      : [
+        "tree_walker_entries", "vm_entries", "baseline_entries", "optimizer_entries", "optimizer_osr_entries", "deoptimizations",
+        "environment_allocations", "bytecode_admissions_by_reason", "baseline_publications", "optimizer_publications", "generated_code_bytes",
+      ];
+    requireValue(same(attribution.metrics || [], expectedMetrics), "representative tier metric inventory changed");
     requireValue(typeof attribution.equivalence === "string" && attribution.equivalence.length > 0, "representative matrix lacks tier equivalence rule");
     requireValue(typeof attribution.timing_isolation === "string" && attribution.timing_isolation.length > 0, "representative matrix lacks timing isolation rule");
     for (const workload of workloads) {

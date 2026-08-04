@@ -1411,6 +1411,7 @@ fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
     const previous = active_wasm_interp;
     active_wasm_interp = @ptrCast(self);
     defer active_wasm_interp = previous;
+    self.recordExecutionTier(.wasm_dispatches);
     exec.callFuncInstSlots(owner.func, slot_args, slot_results, &diag) catch |err| switch (err) {
         error.Trap => return throwWasmTrap(self, diag.message(), owner.runtime_error_proto),
         error.Exception => return error.Throw,
@@ -1474,6 +1475,7 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
         const previous = active_wasm_interp;
         active_wasm_interp = @ptrCast(self);
         defer active_wasm_interp = previous;
+        self.recordExecutionTier(.wasm_dispatches);
         exec.callFuncInstSlots(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
             error.Trap => return throwWasmTrap(self, diag.message(), owner.runtime_error_proto),
             error.Exception => return error.Throw,
@@ -2879,7 +2881,10 @@ test "wasm api corpus harness invokes float functions bit-exactly" {
     const hidden = try ordinary.evaluate("typeof __wasmSpecInvokeBits === 'undefined'");
     try std.testing.expect(hidden.isBoolean() and hidden.asBool());
 
-    const store = try context.Context.createWithTestingOptions(std.testing.allocator, .{ .wasm_spec_bit_exact = true });
+    const store = try context.Context.createWithTestingOptions(std.testing.allocator, .{
+        .wasm_spec_bit_exact = true,
+        .profile_execution_tiers = true,
+    });
     defer store.destroy();
     const result = try store.evaluate(
         \\var bytes = new Uint8Array([
@@ -2894,6 +2899,7 @@ test "wasm api corpus harness invokes float functions bit-exactly" {
         \\__wasmSpecInvokeBits(exports.f64, '9221120237041090561') === '9221120237041090561';
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
+    try std.testing.expectEqual(@as(u64, 2), store.tierAttributionSnapshot().execution.count(.wasm_dispatches));
 }
 
 test "wasm api corpus harness preserves raw v128 functions and globals" {

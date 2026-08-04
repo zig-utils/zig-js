@@ -21728,6 +21728,7 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
     if (!obj.isCallableObject()) return null;
     // C-ABI host callbacks run directly across the FFI boundary.
     if (obj.hostCallback()) |cb| {
+        c.recordExecutionTier(.host_callbacks);
         const result = cb(ctx, function, this_ref, argc, argv, exception);
         if (result) |ref| {
             _ = valueArgFrom(c, ref, exception) orelse return null;

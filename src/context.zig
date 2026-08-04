@@ -4411,6 +4411,12 @@ pub const Context = struct {
         return self.bytecode_admission_inventory.snapshot();
     }
 
+    /// Record an embedding boundary that executes without constructing an
+    /// Interpreter, such as a direct public-C-API host-function call.
+    pub inline fn recordExecutionTier(self: *Context, metric: interp.ExecutionTierMetric) void {
+        if (self.profile_execution_tiers) self.execution_tier_inventory.record(metric);
+    }
+
     pub const TierAttributionSnapshot = struct {
         execution: interp.ExecutionTierSnapshot,
         admissions: interp.BytecodeAdmissionSnapshot,
@@ -19919,7 +19925,7 @@ test "bytecode admission inventory merges concurrent realm records" {
     try std.testing.expectEqual(@as(u64, 0), snapshot.count(.program_compiled));
 }
 
-test "tier attribution is opt-in and separates tree walker VM native and environments" {
+test "tier attribution is opt-in and separates execution runtime and host boundaries" {
     const ordinary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ordinary.destroy();
     _ = try ordinary.evaluate(
@@ -19929,8 +19935,13 @@ test "tier attribution is opt-in and separates tree walker VM native and environ
     const ordinary_snapshot = ordinary.tierAttributionSnapshot();
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.tree_walker_entries));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.vm_entries));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.vm_dispatches));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.vm_quick_kernel_hits));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.baseline_entries));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.optimizer_entries));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.runtime_operation_calls));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.host_callbacks));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.wasm_dispatches));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.environment_allocations));
 
     const profiled_tree = try Context.createWith(std.testing.allocator, .{
@@ -19953,7 +19964,7 @@ test "tier attribution is opt-in and separates tree walker VM native and environ
         .bytecode_execution_mode = .required,
     });
     defer profiled_vm.destroy();
-    try std.testing.expectEqual(@as(f64, 1600), (try profiled_vm.evaluate(
+    try std.testing.expectEqual(@as(f64, 28_095_328), (try profiled_vm.evaluate(
         \\function hotPoint(point) {
         \\  "use strict";
         \\  let sum = 0;
@@ -19965,11 +19976,25 @@ test "tier attribution is opt-in and separates tree walker VM native and environ
         \\var profileResult = 0;
         \\for (var warm = 0; warm < 10; warm = warm + 1)
         \\  profileResult = profileResult + hotPoint(profilePoint);
-        \\profileResult;
+        \\function quickKernel() {
+        \\  const object = { a: 0, b: 1, c: 2, d: 3 };
+        \\  let i = 0;
+        \\  while (i < 8) {
+        \\    object.a = (object.a + i) % 1000003;
+        \\    object.b = object.b + 1;
+        \\    object.c = object.a + object.b;
+        \\    object.d = object.c - object.b;
+        \\    i = i + 1;
+        \\  }
+        \\  return object.a * 1000000 + object.b * 10000 + object.c * 100 + object.d;
+        \\}
+        \\profileResult + quickKernel();
     )).asNum());
     const snapshot = profiled_vm.tierAttributionSnapshot();
     try std.testing.expectEqual(@as(u64, 0), snapshot.execution.count(.tree_walker_entries));
     try std.testing.expect(snapshot.execution.count(.vm_entries) > 0);
+    try std.testing.expect(snapshot.execution.count(.vm_dispatches) > 0);
+    try std.testing.expect(snapshot.execution.count(.vm_quick_kernel_hits) > 0);
     try std.testing.expect(snapshot.heap.live_bytes > 0);
     try std.testing.expectEqual(snapshot.generated_code_bytes, snapshot.native_code.live_bytes);
     if (jit.supported and builtin.cpu.arch == .aarch64) {
@@ -19978,6 +20003,28 @@ test "tier attribution is opt-in and separates tree walker VM native and environ
         try std.testing.expect(snapshot.generated_code_bytes > 0);
         try std.testing.expect(snapshot.native_code.live_artifacts > 0);
     }
+
+    const Host = struct {
+        fn finish(_: *value.CApiObjectOwner) void {}
+        fn callable(_: *const value.Object) bool {
+            return true;
+        }
+        fn call(_: *anyopaque, _: *value.Object, _: Value, _: []const Value) value.HostError!Value {
+            return Value.num(9);
+        }
+        const hooks: value.HostClassHooks = .{ .is_callable = callable, .call = call };
+    };
+    const profiled_host = try Context.createWith(std.testing.allocator, .{ .profile_execution_tiers = true });
+    defer profiled_host.destroy();
+    var host_machine = profiled_host.interpreter();
+    const host_object = (try host_machine.newObject()).asObj();
+    const host_owner = try profiled_host.createCApiObjectOwner(@ptrCast(profiled_host), Host.finish);
+    try host_object.setCApiObjectClass(profiled_host.arena(), host_owner, &Host.hooks);
+    try std.testing.expectEqual(@as(f64, 9), (try host_machine.callValue(Value.obj(host_object), &.{})).asNum());
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        profiled_host.tierAttributionSnapshot().execution.count(.host_callbacks),
+    );
 }
 
 test "vm admission: strict named-property loops reach the optimizer" {

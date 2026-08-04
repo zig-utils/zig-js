@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v8.json`. V8 hash-inherits the complete V1–V7 chain, retains the opt-in tier-attribution sidecar, and completes the workload inventory with an owned static-module/dynamic-import cold-lifecycle capability family. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v9.json`. V9 hash-inherits every V8 workload, mode, job count, checksum, timing boundary, engine-availability ruling, and acceptance decision while versioning the opt-in runtime-attribution inventory. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -114,7 +114,7 @@ all 36 base/variant workloads at exact revision
 `a1b5c3932c5a49a996da59ca9c20a852938975d4`; the earlier V2 artifact remains
 unchanged as historical evidence.
 
-New sidecars use schema version 2 and add phase-boundary `native_code` and
+Schema-version-2 sidecars add phase-boundary `native_code` and
 `heap` objects. Native-code state distinguishes live mappings, currently
 retired mappings, cumulative reclamation, and each invalidation/fallback class.
 Heap state reports precise-collector live bytes, the last full-collection
@@ -123,6 +123,15 @@ and counters; they are not process RSS, allocation throughput, or GC-pause
 percentiles, and the report labels them separately from timing measurements.
 Schema-1 artifacts remain valid and are never rewritten to synthesize fields
 that their runners did not capture.
+
+Schema-version-3 sidecars use the V9 matrix contract and add exact VM
+instruction dispatches, successful VM quick-kernel entries, native-tier runtime
+operation entries, embedding host-callback invocations, and Wasm export
+dispatches. The collector rejects an incomplete execution inventory and
+requires every Wasm family to record invocation-phase Wasm dispatch. These are
+monotonic phase counters, not timings or sampled estimates. Ordinary contexts
+still retain the null attribution pointer; scored timing rows do not enable the
+counter sidecar.
 
 The full-work schema-2 evidence is the
 [`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)

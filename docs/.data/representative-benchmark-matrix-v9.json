@@ -1,0 +1,61 @@
+{
+  "schema_version": 9,
+  "matrix_id": "zig-js-representative-v9",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 461,
+  "history_policy": "This version hash-inherits every V8 workload, mode, jobs, checksum, timing boundary, engine-availability, and acceptance decision. It versions only the opt-in attribution inventory; any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v8",
+    "path": "docs/.data/representative-benchmark-matrix-v8.json",
+    "sha256": "5f6e438371e64e2a8e223fcb12dd002f830283d218811c0166e95f107c36930e",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "pending_metric_panels",
+      "additional_panels"
+    ]
+  },
+  "change": "Adds exact opt-in VM dispatch, VM quick-kernel, native runtime-operation, embedding host-callback, and WebAssembly export-dispatch counters. It also makes the already-versioned native-code lifetime and precise-heap fields explicit in the matrix contract. Timing rows remain uninstrumented.",
+  "tier_attribution": {
+    "runner_mode": "attribution",
+    "scope": "one fresh zig-js context per workload and structural variant",
+    "phases": ["configuration", "warmup", "invocation"],
+    "warmup": "the inherited ten reduced-work calls",
+    "invocation": "one inherited full-work call with the frozen jobs and lane-zero input",
+    "metrics": [
+      "tree_walker_entries",
+      "vm_entries",
+      "vm_dispatches",
+      "vm_quick_kernel_hits",
+      "baseline_entries",
+      "optimizer_entries",
+      "optimizer_osr_entries",
+      "deoptimizations",
+      "runtime_operation_calls",
+      "host_callbacks",
+      "wasm_dispatches",
+      "environment_allocations",
+      "bytecode_admissions_by_reason",
+      "baseline_publications",
+      "optimizer_publications",
+      "generated_code_bytes",
+      "native_code_lifetime_by_state",
+      "heap_live_bytes",
+      "heap_collections"
+    ],
+    "equivalence": "For warmup and invocation independently, each base/variant pair must select the same non-empty set of tree-walker, VM, baseline, optimizer, optimizer-OSR, and deoptimization paths and allocate exactly the same number of environments. Exact tier and runtime counters remain visible rather than normalized away; every Wasm workload must record an invocation-phase Wasm dispatch.",
+    "timing_isolation": "Attribution uses fresh opt-in contexts outside every scored timing row; normal contexts retain null telemetry and perform no profiling atomics.",
+    "recognizer_audit": {
+      "scope": ["src"],
+      "prohibited": "Every representative workload identifier is absent from engine source. Identifiers exist only in the owned workload, manifest, and benchmark tooling."
+    }
+  }
+}

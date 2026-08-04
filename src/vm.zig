@@ -3709,6 +3709,7 @@ fn nativeArrayPushGrow(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) 
     const inputs: []const Value = @ptrCast(frame.scratch.?[first .. first + count]);
     if (!Interpreter.isIntrinsicArrayPush(inputs[0]))
         return @backingInt(jit.NativeOperationStatus.host_trap);
+    vm.recordExecutionTier(.runtime_operation_calls);
     if (builtin.is_test) {
         _ = optimizer_native_array_narrow_callbacks.fetchAdd(1, .monotonic);
         if (inputs[1].isObject()) if (inputs[1].asObj().elementsState()) |elements| {
@@ -4135,6 +4136,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     if (first > jit.numeric_scratch_capacity or count > jit.numeric_scratch_capacity - first)
         return @backingInt(jit.NativeOperationStatus.host_trap);
     const inputs = frame.scratch.?[first .. first + count];
+    vm.recordExecutionTier(.runtime_operation_calls);
     if (descriptor.bytecode_op == @backingInt(bc.Op.to_numeric) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, vm.toNumericPrimitive(Value.fromRawBits(inputs[0])));
     if ((descriptor.bytecode_op == @backingInt(bc.Op.neg) or
@@ -4845,7 +4847,13 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
     defer arena.deinit();
     var env = Environment{ .arena = arena.allocator(), .fn_scope = true };
     const root_shape = try Shape.createRoot(arena.allocator());
-    var machine = Interpreter{ .arena = arena.allocator(), .env = &env, .root_shape = root_shape };
+    var inventory = interp.ExecutionTierInventory{};
+    var machine = Interpreter{
+        .arena = arena.allocator(),
+        .env = &env,
+        .root_shape = root_shape,
+        .execution_tier_inventory = &inventory,
+    };
     const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{.{
         .bytecode_op = @backingInt(bc.Op.to_numeric),
         .first_input = 0,
@@ -4869,6 +4877,7 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
         nativeOperationDispatch(&frame, 0),
     );
     try std.testing.expectEqual(Value.num(42).rawBits(), frame.operation_value_bits);
+    try std.testing.expectEqual(@as(u64, 1), inventory.snapshot().count(.runtime_operation_calls));
     try std.testing.expectEqual(
         @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 1),
@@ -5786,6 +5795,12 @@ fn runChunk(
     const location_execution = chunk.debug_nodes.len != 0;
     const debug_execution = location_execution and
         (vm.debug_statement_hook != null or vm.host_statement_hook != null or vm.profile_statement_hook != null);
+    // One atomic per instruction would make the profiling mode perturb the
+    // dispatch loop it is measuring. Accumulate exactly within this activation
+    // and publish once on every return/error path instead.
+    const execution_inventory = vm.execution_tier_inventory;
+    var vm_dispatches: u64 = 0;
+    defer if (execution_inventory) |inventory| inventory.recordMany(.vm_dispatches, vm_dispatches);
     // Parallel-mode flag hoisted out of the hot loop: in the default engine this
     // is false, so frame slots and monomorphic property IC hits avoid locks and
     // repeated atomic mode loads. Shared/concurrent-GC contexts enable the flag
@@ -5817,6 +5832,7 @@ fn runChunk(
                 vm.serviceGcSafepoint();
             }
         }
+        if (execution_inventory != null) vm_dispatches += 1;
         const inst = code[ip];
         ip += 1;
         switch (inst.op) {
@@ -5918,6 +5934,7 @@ fn runChunk(
                         const steps_until_budget = vm.step_budget - vm.steps;
                         const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
                         if (try tryQuickNumericCallLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
+                            vm.recordExecutionTier(.vm_quick_kernel_hits);
                             vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
                             continue;
@@ -5944,6 +5961,7 @@ fn runChunk(
                             exec.ip = start;
                         }
                         if (try tryQuickArrayLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
+                            vm.recordExecutionTier(.vm_quick_kernel_hits);
                             if (builtin.is_test) switch (plan.*) {
                                 .object_allocation => _ = quick_object_allocation_first_entry_steps.cmpxchgStrong(
                                     std.math.maxInt(u64),
@@ -6012,12 +6030,14 @@ fn runChunk(
                     const steps_until_budget = vm.step_budget - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
                     if (tryQuickPropertyKernel(chunk, cf, start, max_extra_steps, parallel_sync)) |quick| {
+                        vm.recordExecutionTier(.vm_quick_kernel_hits);
                         vm.steps += quick.extra_steps;
                         ip = quick.next_ip;
                         continue;
                     }
                     if (!parallel_sync) {
                         if (tryNumericPropertyUpdate(chunk, cf, start, max_extra_steps)) |quick| {
+                            vm.recordExecutionTier(.vm_quick_kernel_hits);
                             vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
                             continue;
@@ -6578,6 +6598,7 @@ fn runChunk(
                 if (!debug_execution) {
                     if (jsPlainFunction(callee)) |function| {
                         if (try tryQuickArgumentsCall(vm, function, stack.items[base..])) |result| {
+                            vm.recordExecutionTier(.vm_quick_kernel_hits);
                             stack.shrinkRetainingCapacity(base - 1);
                             try stack.append(stack_alloc, result);
                             continue;
@@ -6587,6 +6608,7 @@ fn runChunk(
                 if (!debug_execution) {
                     if (jsChunkFn(callee)) |func| {
                         if (try tryQuickNumericRecurrence(vm, func, stack.items[base..], parallel_sync)) |result| {
+                            vm.recordExecutionTier(.vm_quick_kernel_hits);
                             stack.shrinkRetainingCapacity(base - 1);
                             try stack.append(stack_alloc, result);
                             continue;

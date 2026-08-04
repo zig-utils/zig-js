@@ -55,6 +55,13 @@ const tierMetrics = [
   "optimizer_osr_entries",
   "deoptimizations",
 ];
+const runtimeMetrics = [
+  "vm_dispatches",
+  "vm_quick_kernel_hits",
+  "runtime_operation_calls",
+  "host_callbacks",
+  "wasm_dispatches",
+];
 const nativeCodeMetrics = [
   "live_artifacts",
   "live_bytes",
@@ -241,6 +248,11 @@ export function validate(
         `non-integral attribution for ${workload}`,
       );
       requireValue(
+        JSON.stringify(Object.keys(row.execution).sort()) ===
+          JSON.stringify([...tierMetrics, ...runtimeMetrics, "environment_allocations"].sort()),
+        `execution attribution inventory drift for ${workload}`,
+      );
+      requireValue(
         JSON.stringify(Object.keys(row.native_code).sort()) ===
           JSON.stringify([...nativeCodeMetrics].sort()),
         `native-code attribution inventory drift for ${workload}`,
@@ -257,6 +269,13 @@ export function validate(
       group[2].checksum === family.checksums[role][scale][lane],
       `${workload} attribution checksum ${group[2].checksum} does not match frozen ${family.checksums[role][scale][lane]}`,
     );
+    if (family.family.startsWith("wasm_")) {
+      requireValue(
+        (group[2].execution.wasm_dispatches || 0) >
+          (group[1].execution.wasm_dispatches || 0),
+        `${workload} invocation recorded no WebAssembly dispatches`,
+      );
+    }
   }
   const phaseDeltas = deltas(rows),
     byWorkload: Record<string, TierDelta[]> = {};
@@ -306,6 +325,24 @@ export function render(
   }
   rows.push(
     "",
+    `${heading}${heading} Runtime dispatch`,
+    "",
+    "Counts are exact successful or entered runtime boundaries for each phase; they are not sampled estimates.",
+    "",
+    "| family | phase | base VM dispatches | variant VM dispatches | base quick kernels | variant quick kernels | base runtime ops | variant runtime ops | base host callbacks | variant host callbacks | base Wasm dispatches | variant Wasm dispatches |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const family of manifest.implemented_families) {
+    for (const phase of ["warmup", "invocation"] as const) {
+      const base = byWorkload[family.base].find((row) => row.phase === phase)!,
+        variant = byWorkload[family.variant].find((row) => row.phase === phase)!;
+      rows.push(
+        `| \`${family.family}\` | ${phase} | ${base.execution.vm_dispatches || 0} | ${variant.execution.vm_dispatches || 0} | ${base.execution.vm_quick_kernel_hits || 0} | ${variant.execution.vm_quick_kernel_hits || 0} | ${base.execution.runtime_operation_calls || 0} | ${variant.execution.runtime_operation_calls || 0} | ${base.execution.host_callbacks || 0} | ${variant.execution.host_callbacks || 0} | ${base.execution.wasm_dispatches || 0} | ${variant.execution.wasm_dispatches || 0} |`,
+      );
+    }
+  }
+  rows.push(
+    "",
     `${heading}${heading} Native-code and heap state`,
     "",
     "These values are phase-boundary gauges or cumulative counters, not timing-row measurements.",
@@ -337,7 +374,7 @@ export function artifact(
   runner: string,
 ): any {
   return {
-    schema_version: 2,
+    schema_version: 3,
     matrix_id: manifest.matrix_id,
     quick,
     environment: info,
@@ -361,10 +398,15 @@ function syntheticRows(manifest: any): TierSnapshot[] {
         execution: {
           tree_walker_entries: 0,
           vm_entries: index + 1,
+          vm_dispatches: index + 10,
+          vm_quick_kernel_hits: index,
           baseline_entries: 0,
           optimizer_entries: index,
           optimizer_osr_entries: 0,
           deoptimizations: 0,
+          runtime_operation_calls: index,
+          host_callbacks: 0,
+          wasm_dispatches: family.family.startsWith("wasm_") ? index : 0,
           environment_allocations: index,
         },
         admissions: { program_compiled: index + 1 },
@@ -416,7 +458,15 @@ export function selfTest(): void {
   const heap = JSON.parse(JSON.stringify(rows));
   delete heap[0].heap.collections;
   expectFailure(() => validate(heap, manifest, true), "heap attribution inventory drift");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier equivalence, environment parity, native-code lifetime, and heap state verified");
+  const execution = JSON.parse(JSON.stringify(rows));
+  delete execution[0].execution.vm_dispatches;
+  expectFailure(() => validate(execution, manifest, true), "execution attribution inventory drift");
+  const wasm = JSON.parse(JSON.stringify(rows));
+  const wasmIndex = workloadEntries(manifest).findIndex(([family]) => family.family.startsWith("wasm_"));
+  wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
+    wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
+  expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime inventory, environment parity, native-code lifetime, and heap state verified");
 }
 
 function main(): void {

@@ -1001,15 +1001,21 @@ pub const BytecodeAdmissionInventory = struct {
 };
 
 /// Opt-in execution attribution for benchmarks and causal profiles. These are
-/// activation/entry counters rather than timings: ordinary contexts keep the
-/// inventory pointer null so scored paths pay only the predictable null check.
+/// activation/dispatch counters rather than timings: ordinary contexts keep
+/// the inventory pointer null so scored paths pay only the predictable null
+/// check.
 pub const ExecutionTierMetric = enum(u8) {
     tree_walker_entries,
     vm_entries,
+    vm_dispatches,
+    vm_quick_kernel_hits,
     baseline_entries,
     optimizer_entries,
     optimizer_osr_entries,
     deoptimizations,
+    runtime_operation_calls,
+    host_callbacks,
+    wasm_dispatches,
     environment_allocations,
 };
 
@@ -1030,6 +1036,10 @@ pub const ExecutionTierInventory = struct {
 
     pub fn record(self: *ExecutionTierInventory, metric: ExecutionTierMetric) void {
         _ = self.counts[@backingInt(metric)].fetchAdd(1, .monotonic);
+    }
+
+    pub fn recordMany(self: *ExecutionTierInventory, metric: ExecutionTierMetric, count: u64) void {
+        _ = self.counts[@backingInt(metric)].fetchAdd(count, .monotonic);
     }
 
     pub fn snapshot(self: *const ExecutionTierInventory) ExecutionTierSnapshot {
@@ -6449,6 +6459,7 @@ pub const Interpreter = struct {
                 try self.stackGuard();
                 self.depth += 1;
                 defer self.depth -= 1;
+                self.recordExecutionTier(.host_callbacks);
                 return call(@ptrCast(self), obj, this_val, args);
             }
         };
@@ -6461,6 +6472,7 @@ pub const Interpreter = struct {
             const saved_native = self.active_native;
             self.active_native = obj;
             defer self.active_native = saved_native;
+            if (obj.hostCallback() != null) self.recordExecutionTier(.host_callbacks);
             // A plain [[Call]] has new.target = undefined; without this reset a
             // native that guards construction (e.g. `Symbol`, `BigInt`) called from
             // inside a constructor would see the enclosing ctor's new.target and
@@ -7249,8 +7261,10 @@ pub const Interpreter = struct {
         }
         if (obj.errorCtor()) |name| return self.makeErrorWithArgsNT(name, args, new_target);
         if (obj.hostClassHooks()) |hooks| if (hooks.construct) |construct_callback| {
-            if (hooks.is_constructor != null and hooks.is_constructor.?(obj))
+            if (hooks.is_constructor != null and hooks.is_constructor.?(obj)) {
+                self.recordExecutionTier(.host_callbacks);
                 return construct_callback(@ptrCast(self), obj, args);
+            }
         };
         if (obj.native) |nf| {
             // Most built-ins aren't constructors; only flagged ones are `new`-able.
@@ -11188,6 +11202,7 @@ pub const Interpreter = struct {
         var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
         var seen_strings: std.StringHashMapUnmanaged(void) = .empty;
         if (t.hostClassHooks()) |hooks| if (hooks.own_keys) |own_keys| {
+            self.recordExecutionTier(.host_callbacks);
             for (try own_keys(@ptrCast(self), t)) |k| {
                 if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                 if (value.isRealSymbolKey(k)) {
@@ -11637,6 +11652,7 @@ pub const Interpreter = struct {
                         return own.value;
                     }
                     if (c.hostClassHooks()) |hooks| if (hooks.get) |get| {
+                        self.recordExecutionTier(.host_callbacks);
                         switch (try get(@ptrCast(self), c, key)) {
                             .unhandled => {},
                             .value => |v| return v,
@@ -12479,6 +12495,7 @@ pub const Interpreter = struct {
                 break;
             }
             if (c.hostClassHooks()) |hooks| if (hooks.set) |set| {
+                self.recordExecutionTier(.host_callbacks);
                 switch (try set(@ptrCast(self), c, key, v)) {
                     .unhandled => {},
                     .declined => return true,
@@ -12603,6 +12620,7 @@ pub const Interpreter = struct {
             }
         }
         if (o.hostClassHooks()) |hooks| if (hooks.delete) |delete| {
+            self.recordExecutionTier(.host_callbacks);
             switch (try delete(@ptrCast(self), o, key)) {
                 .unhandled => {},
                 .accepted => |accepted| return accepted,
@@ -13501,6 +13519,7 @@ pub const Interpreter = struct {
         }
         if (objectHasOwn(o, key)) return true;
         if (o.hostClassHooks()) |hooks| if (hooks.has) |has| {
+            self.recordExecutionTier(.host_callbacks);
             return try has(@ptrCast(self), o, key);
         };
         return false;
@@ -13527,6 +13546,7 @@ pub const Interpreter = struct {
             if (p.isString() and std.mem.eql(u8, key, "length")) return false;
         }
         if (!objectHasOwn(o, key)) if (o.hostClassHooks()) |hooks| if (hooks.has) |has| {
+            self.recordExecutionTier(.host_callbacks);
             _ = try has(@ptrCast(self), o, key);
         };
         return objectHasOwn(o, key) and o.getAttr(key).enumerable and
@@ -13541,6 +13561,7 @@ pub const Interpreter = struct {
         if (objectHasOwn(o, key)) return o.getAttr(key).enumerable and
             !(o.is_array and std.mem.eql(u8, key, "length"));
         if (o.hostClassHooks()) |hooks| if (hooks.attributes) |attributes| {
+            self.recordExecutionTier(.host_callbacks);
             return if (try attributes(@ptrCast(self), o, key)) |attr| attr.enumerable else false;
         };
         return false;
@@ -16088,6 +16109,7 @@ pub const Interpreter = struct {
             }
         }
         if (o.hostClassHooks()) |hooks| if (hooks.convert) |convert| {
+            self.recordExecutionTier(.host_callbacks);
             const converted = try convert(@ptrCast(self), o, if (hint == .string) .string else .number);
             if (!converted.isObject() or converted.asObj().is_symbol or converted.asObj().is_bigint)
                 return converted;
@@ -16558,6 +16580,7 @@ pub const Interpreter = struct {
             }
             if (objectHasOwn(c, key)) return true;
             if (c.hostClassHooks()) |hooks| if (hooks.has) |has| {
+                self.recordExecutionTier(.host_callbacks);
                 if (try has(@ptrCast(self), c, key)) return true;
             };
             cur = self.effectiveProto(c);
@@ -16593,6 +16616,7 @@ pub const Interpreter = struct {
             }
         }
         if (r.asObj().hostClassHooks()) |hooks| if (hooks.has_instance) |has_instance| {
+            self.recordExecutionTier(.host_callbacks);
             return has_instance(@ptrCast(self), r.asObj(), l);
         };
         if (!r.asObj().isCallableObject())
