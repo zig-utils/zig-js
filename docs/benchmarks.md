@@ -149,6 +149,29 @@ Writing raw or Markdown representative evidence without the attribution
 sidecar is rejected. As with every benchmark here, the quick command validates
 the harness and frozen checksums but is not publication evidence.
 
+## Instrumentation overhead
+
+[`tools/instrumentation-overhead.ts`](../tools/instrumentation-overhead.ts),
+exposed as `zig build instrumentation-overhead`, alternates fresh-process
+`single`/`single_profiled` pairs from one ReleaseFast runner and rejects any
+workload, job-count, sample-index, or frozen-checksum mismatch. The raw artifact
+retains wall time, process user/system CPU, peak RSS, retired instructions,
+cycles, and voluntary/involuntary context switches for every sample, including
+logical-work normalization. No sample is discarded or reordered.
+
+```sh
+zig build instrumentation-overhead \
+  -Dinstrumentation-overhead-raw-out=docs/.data/instrumentation-overhead-YYYY-MM-DD.json \
+  -Dinstrumentation-overhead-markdown-out=docs/.data/instrumentation-overhead-YYYY-MM-DD.md
+```
+
+The two states execute the exact same binary, so the fixture records that
+binary's hash and size but does not pretend the runtime toggle measures
+compile-time support size. Retained RSS is unavailable after the fresh process
+exits, and single-thread lock contention is not applicable; both boundaries are
+encoded explicitly rather than as zero. Quick mode uses two reduced-work pairs
+to validate the harness and is never publication evidence.
+
 ## Stable attribution and exact-parent A/Bs
 
 [`performance-attribution-schema-v1.json`](.data/performance-attribution-schema-v1.json)

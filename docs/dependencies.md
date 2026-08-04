@@ -67,8 +67,8 @@ selection. CI actions use immutable commit identifiers. Standards-data
 generators accept operator-supplied local snapshots; the sole network-capable
 acquisition tool pins both the upstream revision and every archive SHA-256.
 
-The tool migration inventory classifies 58 executable tools: no `.py` or
-`.mjs`, 58 `.ts`, and no `.sh`. The documentation link gate has already moved to
+The tool migration inventory classifies 59 executable tools: no `.py` or
+`.mjs`, 59 `.ts`, and no `.sh`. The documentation link gate has already moved to
 the tested in-tree `docs-link-check` Zig executable and is no longer part of
 that migration set. Each remaining record identifies its role, inputs, outputs,
 subprocesses, caller/reference files, effective exit and diagnostic contract,

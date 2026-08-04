@@ -1755,6 +1755,7 @@ pub fn build(b: *std.Build) void {
     const representative_matrix_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/test_representative_matrix.ts" });
     const representative_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-benchmark.ts", "--self-test" });
     const representative_tier_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-tier-attribution.ts", "--self-test" });
+    const instrumentation_overhead_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/instrumentation-overhead.ts", "--self-test" });
     const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
     const generation_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-generation-benchmark.ts", "--self-test" });
@@ -1770,6 +1771,7 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&representative_matrix_test.step);
     comparison_harness_test_step.dependOn(&representative_benchmark_test.step);
     comparison_harness_test_step.dependOn(&representative_tier_attribution_test.step);
+    comparison_harness_test_step.dependOn(&instrumentation_overhead_test.step);
     comparison_harness_test_step.dependOn(&performance_attribution_test.step);
     comparison_harness_test_step.dependOn(&exact_parent_regression_test.step);
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
@@ -1784,6 +1786,7 @@ pub fn build(b: *std.Build) void {
     const comparison_step = b.step("benchmark-comparison", "Compare zig-js direct/independent/shared throughput with system JavaScriptCore (macOS)");
     const representative_step = b.step("representative-benchmark", "Run the versioned representative zig-js / system-JSC matrix (macOS)");
     const representative_attribution_step = b.step("representative-tier-attribution", "Record representative base/variant execution-tier attribution (macOS)");
+    const instrumentation_overhead_step = b.step("instrumentation-overhead", "Measure disabled/enabled execution-attribution overhead (macOS)");
     const comparison_bin_step = b.step("benchmark-comparison-bin", "Build the zig-js and system-JSC comparison runners (macOS)");
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{
@@ -1857,6 +1860,20 @@ pub fn build(b: *std.Build) void {
         if (b.option([]const u8, "representative-tier-attribution-markdown-out", "Write the representative tier-attribution report to this Markdown path")) |path|
             run_representative_attribution.addArgs(&.{ "--markdown-out", path });
         representative_attribution_step.dependOn(&run_representative_attribution.step);
+
+        const run_instrumentation_overhead = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/instrumentation-overhead.ts" });
+        run_instrumentation_overhead.addArtifactArg(comparison_zig_js);
+        if (b.option(bool, "instrumentation-overhead-quick", "Use reduced work and two overhead pairs") orelse false)
+            run_instrumentation_overhead.addArg("--quick");
+        if (b.option(usize, "instrumentation-overhead-pairs", "Alternating disabled/enabled overhead pairs")) |pairs|
+            run_instrumentation_overhead.addArgs(&.{ "--pairs", b.fmt("{d}", .{pairs}) });
+        if (b.option([]const u8, "instrumentation-overhead-workload", "Representative workload used by the overhead fixture")) |workload|
+            run_instrumentation_overhead.addArgs(&.{ "--workload", workload });
+        if (b.option([]const u8, "instrumentation-overhead-raw-out", "Write raw instrumentation-overhead samples to this JSON path")) |path|
+            run_instrumentation_overhead.addArgs(&.{ "--raw-out", path });
+        if (b.option([]const u8, "instrumentation-overhead-markdown-out", "Write the instrumentation-overhead report to this Markdown path")) |path|
+            run_instrumentation_overhead.addArgs(&.{ "--markdown-out", path });
+        instrumentation_overhead_step.dependOn(&run_instrumentation_overhead.step);
 
         const run_wasm_threads_benchmark = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-threads-benchmark.ts" });
         run_wasm_threads_benchmark.addArtifactArg(comparison_zig_js);

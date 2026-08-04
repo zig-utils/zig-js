@@ -50,7 +50,7 @@ const shared_harness =
     \\};
 ;
 
-const Mode = enum { single, independent_steady, independent_cold, shared, attribution, module_cold, module_attribution };
+const Mode = enum { single, single_profiled, independent_steady, independent_cold, shared, attribution, module_cold, module_attribution };
 
 const SteadyLane = struct {
     io: std.Io,
@@ -285,12 +285,14 @@ fn runSingle(
     allocator: std.mem.Allocator,
     io: std.Io,
     writer: *std.Io.Writer,
+    mode: Mode,
     workload: []const u8,
     jobs: usize,
     samples: usize,
 ) !void {
     const ctx = try js.Context.createWith(allocator, .{
         .enable_gc = true,
+        .profile_execution_tiers = mode == .single_profiled,
         .wasm_features = .{
             .nontrapping_float_to_int = true,
             .fixed_width_simd = true,
@@ -305,7 +307,7 @@ fn runSingle(
         const started = nowNs(io);
         const result = try invoke(ctx, checkpoint);
         const elapsed: u64 = @intCast(nowNs(io) - started);
-        try printRow(writer, .single, workload, 1, jobs, sample, elapsed, result.toNumber());
+        try printRow(writer, mode, workload, 1, jobs, sample, elapsed, result.toNumber());
     }
 }
 
@@ -643,7 +645,7 @@ pub fn main(init: std.process.Init) !void {
     const workload = args[2];
     const jobs = try std.fmt.parseUnsigned(usize, args[3], 10);
     const samples = try std.fmt.parseUnsigned(usize, args[4], 10);
-    const lanes = if (mode == .single or mode == .attribution or mode == .module_attribution)
+    const lanes = if (mode == .single or mode == .single_profiled or mode == .attribution or mode == .module_attribution)
         1
     else if (args.len >= 6)
         try std.fmt.parseUnsigned(usize, args[5], 10)
@@ -661,7 +663,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     switch (mode) {
-        .single => try runSingle(benchmark_context_allocator, init.io, stdout, workload, jobs, samples),
+        .single, .single_profiled => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples),
         .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry),
