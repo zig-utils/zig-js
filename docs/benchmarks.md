@@ -114,6 +114,16 @@ all 36 base/variant workloads at exact revision
 `a1b5c3932c5a49a996da59ca9c20a852938975d4`; the earlier V2 artifact remains
 unchanged as historical evidence.
 
+New sidecars use schema version 2 and add phase-boundary `native_code` and
+`heap` objects. Native-code state distinguishes live mappings, currently
+retired mappings, cumulative reclamation, and each invalidation/fallback class.
+Heap state reports precise-collector live bytes, the last full-collection
+baseline, and cumulative collection counts. These are engine residency gauges
+and counters; they are not process RSS, allocation throughput, or GC-pause
+percentiles, and the report labels them separately from timing measurements.
+Schema-1 artifacts remain valid and are never rewritten to synthesize fields
+that their runners did not capture.
+
 Attribution is deliberately outside the timing rows. Normal contexts retain a
 null telemetry pointer, while the sidecar opts in to atomic counters. A full
 published representative report therefore preserves both its ordinary timing

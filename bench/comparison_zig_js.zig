@@ -154,10 +154,27 @@ fn printTierAttributionRow(
         const reason: js.BytecodeAdmissionReason = @fromBackingInt(@intCast(field_value));
         try writer.print("\"{s}\":{d}", .{ name, snapshot.admissions.count(reason) });
     }
-    try writer.print("}},\"baseline_publications\":{d},\"optimizer_publications\":{d},\"generated_code_bytes\":{d}}}\n", .{
+    try writer.print("}},\"baseline_publications\":{d},\"optimizer_publications\":{d},\"generated_code_bytes\":{d},\"native_code\":{{\"live_artifacts\":{d},\"live_bytes\":{d},\"retired_artifacts\":{d},\"retired_bytes_current\":{d},\"reclaimed_artifacts\":{d},\"reclaimed_bytes_total\":{d},\"shape_invalidation_events\":{d},\"shape_retired_artifacts\":{d},\"shape_survivor_artifacts\":{d},\"shape_retired_bytes\":{d},\"full_invalidation_events\":{d},\"unknown_shape_invalidation_events\":{d},\"shape_fallback_events\":{d}}},\"heap\":{{\"live_bytes\":{d},\"last_full_collection_bytes\":{d},\"collections\":{d},\"full_collections\":{d}}}}}\n", .{
         snapshot.baseline_publications,
         snapshot.optimizer_publications,
         snapshot.generated_code_bytes,
+        snapshot.native_code.live_artifacts,
+        snapshot.native_code.live_bytes,
+        snapshot.native_code.retired_artifacts,
+        snapshot.native_code.retired_bytes_current,
+        snapshot.native_code.reclaimed_artifacts,
+        snapshot.native_code.reclaimed_bytes_total,
+        snapshot.native_code.shape_invalidation_events,
+        snapshot.native_code.shape_retired_artifacts,
+        snapshot.native_code.shape_survivor_artifacts,
+        snapshot.native_code.shape_retired_bytes,
+        snapshot.native_code.full_invalidation_events,
+        snapshot.native_code.unknown_shape_invalidation_events,
+        snapshot.native_code.shape_fallback_events,
+        snapshot.heap.live_bytes,
+        snapshot.heap.last_full_collection_bytes,
+        snapshot.heap.collections,
+        snapshot.heap.full_collections,
     });
 }
 

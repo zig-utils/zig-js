@@ -25,6 +25,8 @@ export type TierSnapshot = {
   baseline_publications: number;
   optimizer_publications: number;
   generated_code_bytes: number;
+  native_code: CounterMap;
+  heap: CounterMap;
 };
 export type TierDelta = {
   workload: string;
@@ -36,6 +38,8 @@ export type TierDelta = {
   baseline_publications: number;
   optimizer_publications: number;
   generated_code_bytes: number;
+  native_code: CounterMap;
+  heap: CounterMap;
 };
 
 const phases: TierSnapshot["phase"][] = [
@@ -50,6 +54,27 @@ const tierMetrics = [
   "optimizer_entries",
   "optimizer_osr_entries",
   "deoptimizations",
+];
+const nativeCodeMetrics = [
+  "live_artifacts",
+  "live_bytes",
+  "retired_artifacts",
+  "retired_bytes_current",
+  "reclaimed_artifacts",
+  "reclaimed_bytes_total",
+  "shape_invalidation_events",
+  "shape_retired_artifacts",
+  "shape_survivor_artifacts",
+  "shape_retired_bytes",
+  "full_invalidation_events",
+  "unknown_shape_invalidation_events",
+  "shape_fallback_events",
+];
+const heapMetrics = [
+  "live_bytes",
+  "last_full_collection_bytes",
+  "collections",
+  "full_collections",
 ];
 
 function requireValue(condition: boolean, message: string): void {
@@ -141,6 +166,8 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
     baseline_publications: 0,
     optimizer_publications: 0,
     generated_code_bytes: 0,
+    native_code: Object.fromEntries(nativeCodeMetrics.map((name) => [name, 0])),
+    heap: Object.fromEntries(heapMetrics.map((name) => [name, 0])),
   };
 }
 
@@ -167,6 +194,8 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         optimizer_publications:
           row.optimizer_publications - before.optimizer_publications,
         generated_code_bytes: row.generated_code_bytes,
+        native_code: row.native_code,
+        heap: row.heap,
       });
       requireValue(
         row.baseline_publications >= before.baseline_publications &&
@@ -206,8 +235,20 @@ export function validate(
       requireValue(
         Number.isInteger(row.checksum) &&
           Object.values(row.execution).every(Number.isInteger) &&
-          Object.values(row.admissions).every(Number.isInteger),
+          Object.values(row.admissions).every(Number.isInteger) &&
+          Object.values(row.native_code).every(Number.isInteger) &&
+          Object.values(row.heap).every(Number.isInteger),
         `non-integral attribution for ${workload}`,
+      );
+      requireValue(
+        JSON.stringify(Object.keys(row.native_code).sort()) ===
+          JSON.stringify([...nativeCodeMetrics].sort()),
+        `native-code attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        JSON.stringify(Object.keys(row.heap).sort()) ===
+          JSON.stringify([...heapMetrics].sort()),
+        `heap attribution inventory drift for ${workload}`,
       );
     });
     const lane = manifest.lanes.indexOf(1),
@@ -263,6 +304,24 @@ export function render(
       );
     }
   }
+  rows.push(
+    "",
+    `${heading}${heading} Native-code and heap state`,
+    "",
+    "These values are phase-boundary gauges or cumulative counters, not timing-row measurements.",
+    "",
+    "| family | phase | base live code bytes | variant live code bytes | base heap live bytes | variant heap live bytes | base collections | variant collections |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const family of manifest.implemented_families) {
+    for (const phase of ["warmup", "invocation"] as const) {
+      const base = byWorkload[family.base].find((row) => row.phase === phase)!,
+        variant = byWorkload[family.variant].find((row) => row.phase === phase)!;
+      rows.push(
+        `| \`${family.family}\` | ${phase} | ${base.native_code.live_bytes} | ${variant.native_code.live_bytes} | ${base.heap.live_bytes} | ${variant.heap.live_bytes} | ${base.heap.collections} | ${variant.heap.collections} |`,
+      );
+    }
+  }
   if (rawPath) {
     const name = rawPath.split("/").pop();
     rows.push("", `Raw attribution: [\`${name}\`](${name})`);
@@ -278,7 +337,7 @@ export function artifact(
   runner: string,
 ): any {
   return {
-    schema_version: 1,
+    schema_version: 2,
     matrix_id: manifest.matrix_id,
     quick,
     environment: info,
@@ -312,6 +371,12 @@ function syntheticRows(manifest: any): TierSnapshot[] {
         baseline_publications: 0,
         optimizer_publications: index > 0 ? 1 : 0,
         generated_code_bytes: index > 0 ? 4096 : 0,
+        native_code: Object.fromEntries(
+          nativeCodeMetrics.map((name) => [name, name === "live_bytes" && index > 0 ? 4096 : 0]),
+        ),
+        heap: Object.fromEntries(
+          heapMetrics.map((name) => [name, name === "live_bytes" ? 8192 + index : 0]),
+        ),
       }),
     );
   }
@@ -345,7 +410,13 @@ export function selfTest(): void {
   const checksum = JSON.parse(JSON.stringify(rows));
   checksum[2].checksum += 1;
   expectFailure(() => validate(checksum, manifest, true), "does not match frozen");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier equivalence, and environment parity verified");
+  const nativeCode = JSON.parse(JSON.stringify(rows));
+  delete nativeCode[0].native_code.live_bytes;
+  expectFailure(() => validate(nativeCode, manifest, true), "native-code attribution inventory drift");
+  const heap = JSON.parse(JSON.stringify(rows));
+  delete heap[0].heap.collections;
+  expectFailure(() => validate(heap, manifest, true), "heap attribution inventory drift");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier equivalence, environment parity, native-code lifetime, and heap state verified");
 }
 
 function main(): void {

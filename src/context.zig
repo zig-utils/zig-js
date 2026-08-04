@@ -4417,18 +4417,54 @@ pub const Context = struct {
         baseline_publications: u64,
         optimizer_publications: u64,
         generated_code_bytes: usize,
+        native_code: NativeCodeAttributionSnapshot,
+        heap: RuntimeHeapAccounting,
     };
 
-    /// Phase-boundary attribution snapshot. Every component is monotonic and
-    /// atomic; benchmark callers take snapshots only after their workers join.
-    pub fn tierAttributionSnapshot(self: *const Context) TierAttributionSnapshot {
+    pub const NativeCodeAttributionSnapshot = struct {
+        live_artifacts: usize,
+        live_bytes: usize,
+        retired_artifacts: usize,
+        retired_bytes_current: usize,
+        reclaimed_artifacts: usize,
+        reclaimed_bytes_total: usize,
+        shape_invalidation_events: u64,
+        shape_retired_artifacts: u64,
+        shape_survivor_artifacts: u64,
+        shape_retired_bytes: u64,
+        full_invalidation_events: u64,
+        unknown_shape_invalidation_events: u64,
+        shape_fallback_events: u64,
+    };
+
+    /// Phase-boundary attribution snapshot. Counters are monotonic while live
+    /// byte/artifact fields are gauges; every shared component is read through
+    /// its atomic/accounting snapshot after benchmark workers have joined.
+    pub fn tierAttributionSnapshot(self: *Context) TierAttributionSnapshot {
         const owner = self.shared_jit_owner orelse &self.jit_owner;
+        const code = owner.stats();
         return .{
             .execution = self.execution_tier_inventory.snapshot(),
             .admissions = self.bytecode_admission_inventory.snapshot(),
             .baseline_publications = owner.baselinePublications(),
             .optimizer_publications = owner.optimizerPublications(),
-            .generated_code_bytes = owner.stats().live_bytes,
+            .generated_code_bytes = code.live_bytes,
+            .native_code = .{
+                .live_artifacts = code.live_artifacts,
+                .live_bytes = code.live_bytes,
+                .retired_artifacts = code.retired_artifacts,
+                .retired_bytes_current = code.retired_bytes,
+                .reclaimed_artifacts = code.reclaimed_artifacts,
+                .reclaimed_bytes_total = code.reclaimed_bytes,
+                .shape_invalidation_events = code.shape_invalidation_events,
+                .shape_retired_artifacts = code.shape_retired_artifacts,
+                .shape_survivor_artifacts = code.shape_survivor_artifacts,
+                .shape_retired_bytes = code.shape_retired_bytes,
+                .full_invalidation_events = code.full_invalidation_events,
+                .unknown_shape_invalidation_events = code.unknown_shape_invalidation_events,
+                .shape_fallback_events = code.shape_fallback_events,
+            },
+            .heap = self.runtimeHeapAccounting(),
         };
     }
 
@@ -19934,10 +19970,13 @@ test "tier attribution is opt-in and separates tree walker VM native and environ
     const snapshot = profiled_vm.tierAttributionSnapshot();
     try std.testing.expectEqual(@as(u64, 0), snapshot.execution.count(.tree_walker_entries));
     try std.testing.expect(snapshot.execution.count(.vm_entries) > 0);
+    try std.testing.expect(snapshot.heap.live_bytes > 0);
+    try std.testing.expectEqual(snapshot.generated_code_bytes, snapshot.native_code.live_bytes);
     if (jit.supported and builtin.cpu.arch == .aarch64) {
         try std.testing.expect(snapshot.execution.count(.optimizer_entries) > 0);
         try std.testing.expect(snapshot.optimizer_publications > 0);
         try std.testing.expect(snapshot.generated_code_bytes > 0);
+        try std.testing.expect(snapshot.native_code.live_artifacts > 0);
     }
 }
 
