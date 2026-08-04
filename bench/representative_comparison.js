@@ -370,6 +370,10 @@ function representativeTemporalAvailability() {
     typeof Temporal.Duration === "function" ? 1 : 0;
 }
 
+function representativeModulePublicProbe() {
+  return eval("import { value } from './dependency.js'; value;");
+}
+
 function benchmarkFunction(name) {
   if (name === "representative_strings") return function (jobs, lane) { return representativeStrings(jobs, lane, 0); };
   if (name === "representative_strings_variant") return function (jobs, lane) { return representativeStrings(jobs, lane, 1); };
@@ -400,6 +404,7 @@ function benchmarkFunction(name) {
   if (name === "representative_temporal") return function (jobs, lane) { return representativeTemporal(jobs, lane, 0); };
   if (name === "representative_temporal_variant") return function (jobs, lane) { return representativeTemporal(jobs, lane, 1); };
   if (name === "representative_temporal_availability") return function () { return representativeTemporalAvailability(); };
+  if (name === "representative_module_public_probe") return function () { return representativeModulePublicProbe(); };
   throw new Error("unknown representative benchmark workload: " + name);
 }
 

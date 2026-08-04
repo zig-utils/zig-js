@@ -92,11 +92,14 @@ export function collect(
     const family = entry[0],
       workload = entry[2];
     const jobs = jobsFor(family, quick);
+    const mode = family.availability && family.availability.attribution_mode
+      ? family.availability.attribution_mode
+      : "attribution";
     const command = [
       "env",
       "LC_ALL=C",
       runner,
-      "attribution",
+      mode,
       workload,
       String(jobs),
       "1",

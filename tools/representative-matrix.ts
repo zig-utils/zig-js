@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v7.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v8.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -16,7 +16,7 @@ const unique = (values: any[]) => new Set(values).size === values.length;
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 7, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 8, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -50,7 +50,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 7, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 8, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -102,12 +102,21 @@ export function validate(manifest: any, root = ROOT): void {
     }
     if (entry.availability !== undefined) {
       const availability = entry.availability;
-      requireValue(availability.kind === "zig_js_capability", "unknown availability boundary: " + JSON.stringify(entry));
+      requireValue(availability.kind === "zig_js_capability" || availability.kind === "zig_js_module_capability", "unknown availability boundary: " + JSON.stringify(entry));
       requireValue(same(availability.engines || [], ["zig-js"]), "availability-gated family must remain zig-js-only");
-      requireValue(same(availability.modes || [], ["single", "shared"]), "availability-gated family mode inventory changed");
-      requireValue(typeof availability.probe_workload === "string" && source.indexOf(`"${availability.probe_workload}"`) >= 0, "availability probe is absent from declared source dispatch");
-      requireValue(availability.checksums && availability.checksums["zig-js"] === 1 && availability.checksums.JavaScriptCore === 0, "availability profile must require zig-js=1 and JavaScriptCore=0");
       requireValue(availability.JavaScriptCore && typeof availability.JavaScriptCore.result === "string" && availability.JavaScriptCore.result.length > 0, "availability-gated family lacks a JavaScriptCore result");
+      if (availability.kind === "zig_js_capability") {
+        requireValue(same(availability.modes || [], ["single", "shared"]), "availability-gated family mode inventory changed");
+        requireValue(typeof availability.probe_workload === "string" && source.indexOf(`"${availability.probe_workload}"`) >= 0, "availability probe is absent from declared source dispatch");
+        requireValue(availability.checksums && availability.checksums["zig-js"] === 1 && availability.checksums.JavaScriptCore === 0, "availability profile must require zig-js=1 and JavaScriptCore=0");
+      } else {
+        requireValue(same(availability.modes || [], ["module_cold"]), "module capability mode inventory changed");
+        requireValue(availability.attribution_mode === "module_attribution", "module capability lacks its attribution mode");
+        const probePath = root + "/" + availability.probe_source;
+        requireValue(Home.fileExists(probePath) && readText(probePath).indexOf(`"${availability.probe_workload}"`) >= 0, "module capability probe is absent from declared source dispatch");
+        requireValue(availability.JavaScriptCore.expected === "reject" && typeof availability.JavaScriptCore.stderr_contains === "string" && availability.JavaScriptCore.stderr_contains.length > 0, "module capability lacks an exact JavaScriptCore rejection gate");
+        requireValue(typeof availability.public_api_inventory === "string" && availability.public_api_inventory.length > 0, "module capability lacks its public API inventory");
+      }
     }
   }
   const additionalPanels = manifest.additional_panels || [];

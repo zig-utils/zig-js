@@ -35,7 +35,9 @@ export function workloadEntries(manifest: any): any[] {
 export const jobsFor = (family: any, quick: boolean): number =>
   family.jobs[quick ? "quick" : "full"];
 const isCapabilityFamily = (family: any): boolean =>
-  family.availability && family.availability.kind === "zig_js_capability";
+  Boolean(family.availability);
+const isModuleCapability = (family: any): boolean =>
+  family.availability && family.availability.kind === "zig_js_module_capability";
 export function collect(
   zigJs: string,
   jsc: string,
@@ -55,6 +57,18 @@ export function collect(
     const jobs = jobsFor(family, quick);
     if (isCapabilityFamily(family)) {
       const availability = family.availability;
+      if (isModuleCapability(family)) {
+        const gate = availability.JavaScriptCore,
+          probe = run([jsc, "single", availability.probe_workload, "1", "1"]);
+        requireValue(
+          probe.exitCode !== 0 && probe.stderr.indexOf(gate.stderr_contains) >= 0,
+          `JavaScriptCore module gate changed: exit=${probe.exitCode} stderr=${JSON.stringify(probe.stderr)}`,
+        );
+        for (const workload of [family.base, family.variant])
+          for (const lane of allLanes)
+            rows.push(...runCase(zigJs, ["module_cold", workload, String(jobs), String(samples), String(lane)]));
+        continue;
+      }
       for (const [engine, binary] of [["zig-js", zigJs], ["JavaScriptCore", jsc]]) {
         const probe = runCase(binary, ["single", availability.probe_workload, "1", "1"]);
         requireValue(
@@ -184,6 +198,12 @@ export function validate(
   for (const family of manifest.implemented_families) {
     const jobs = jobsFor(family, quick);
     if (isCapabilityFamily(family)) {
+      if (isModuleCapability(family)) {
+        for (const workload of [family.base, family.variant])
+          for (const lane of allLanes)
+            expected.add(JSON.stringify(["zig-js", "module_cold", workload, lane, jobs]));
+        continue;
+      }
       for (const workload of [family.base, family.variant])
         expected.add(JSON.stringify(["zig-js", "single", workload, 1, jobs]));
       for (const lane of allLanes)
@@ -396,9 +416,17 @@ export function render(
     );
     for (const family of capabilityFamilies) {
       const jobs = rows.find((row) => row.workload === family.base)!.jobs;
-      for (const [role, workload] of [["base", family.base], ["variant", family.variant]]) {
-        const elapsed = medianMs(groups, ["zig-js", "single", workload, 1, jobs]);
-        lines.push(`| \`${family.family}\` | \`${role}\` | \`single\` | 1 | ${jobs} | ${elapsed.toFixed(3)} | N/A |`);
+      if (isModuleCapability(family)) {
+        for (const [role, workload] of [["base", family.base], ["variant", family.variant]])
+          for (const lane of allLanes) {
+            const elapsed = medianMs(groups, ["zig-js", "module_cold", workload, lane, jobs]);
+            lines.push(`| \`${family.family}\` | \`${role}\` | \`module_cold\` | ${lane} | ${jobs} | ${elapsed.toFixed(3)} | N/A |`);
+          }
+      } else {
+        for (const [role, workload] of [["base", family.base], ["variant", family.variant]]) {
+          const elapsed = medianMs(groups, ["zig-js", "single", workload, 1, jobs]);
+          lines.push(`| \`${family.family}\` | \`${role}\` | \`single\` | 1 | ${jobs} | ${elapsed.toFixed(3)} | N/A |`);
+        }
       }
       lines.push(`| \`${family.family}\` | feature gate | — | — | — | supported | ${family.availability.JavaScriptCore.result} |`);
     }
@@ -446,12 +474,20 @@ export function render(
     "## Coverage boundary",
     "",
     `Implemented families in this version: ${manifest.implemented_families.length}.`,
-    "The following pre-registered families are explicit deferrals, not passes or exclusions:",
-    "",
   );
-  manifest.deferred_families.forEach((entry: any) =>
-    lines.push(`- \`${entry.family}\` — ${entry.reason}`),
-  );
+  if (manifest.deferred_families.length === 0) {
+    lines.push(
+      "All pre-registered workload families are implemented in this version.",
+    );
+  } else {
+    lines.push(
+      "The following pre-registered families are explicit deferrals, not passes or exclusions:",
+      "",
+    );
+    manifest.deferred_families.forEach((entry: any) =>
+      lines.push(`- \`${entry.family}\` — ${entry.reason}`),
+    );
+  }
   lines.push(
     "",
     "The original ten-kernel compatibility panel remains separately collected and hash-pinned by the manifest.",
@@ -496,10 +532,15 @@ function syntheticRows(
             checksum,
           });
       };
+    if (isModuleCapability(family)) {
+      for (const role of ["base", "variant"])
+        for (const lane of allLanes)
+          add("zig-js", "module_cold", family[role], role, lane);
+      continue;
+    }
     for (const role of ["base", "variant"]) {
       add("zig-js", "single", family[role], role, 1);
-      if (!isCapabilityFamily(family))
-        add("JavaScriptCore", "single", family[role], role, 1);
+      if (!isCapabilityFamily(family)) add("JavaScriptCore", "single", family[role], role, 1);
     }
     for (const lane of allLanes) {
       if (family.shared !== false)

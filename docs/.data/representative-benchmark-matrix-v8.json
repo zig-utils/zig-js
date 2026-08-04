@@ -1,0 +1,63 @@
+{
+  "schema_version": 8,
+  "matrix_id": "zig-js-representative-v8",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 460,
+  "history_policy": "This version hash-inherits every V7 decision and adds the owned static-module/dynamic-import graph as a cold-lifecycle capability family. Any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v7",
+    "path": "docs/.data/representative-benchmark-matrix-v7.json",
+    "sha256": "2768d427c0a13bafc79cb5635e4e2d7a3fd3b916da5fe6c01e3b22c0cfbed102",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "tier_attribution",
+      "pending_metric_panels",
+      "additional_panels"
+    ]
+  },
+  "change": "Moves modules_dynamic_import from deferred to an implemented zig-js cold-lifecycle capability family. The system JSC public runner must reject the exact module-syntax probe before JSC is reported as N/A; its installed public SDK headers expose script evaluation but no module-loader entry point.",
+  "implemented_families_append": [
+    {
+      "family": "modules_dynamic_import",
+      "source": "bench/representative_modules.zig",
+      "base": "representative_modules_dynamic",
+      "variant": "representative_modules_dynamic_variant",
+      "surface": "cold context creation, host resolution, static module graph load/link/evaluation, top-level await of dynamic import, microtask settlement, checksum read, context teardown, and OS-thread join",
+      "shared": false,
+      "availability": {
+        "kind": "zig_js_module_capability",
+        "engines": ["zig-js"],
+        "modes": ["module_cold"],
+        "attribution_mode": "module_attribution",
+        "probe_source": "bench/representative_comparison.js",
+        "probe_workload": "representative_module_public_probe",
+        "JavaScriptCore": {
+          "expected": "reject",
+          "stderr_contains": "JavaScriptException",
+          "result": "N/A: system JSC public JSGlobalContext exposes script evaluation but no public module-loader API"
+        },
+        "public_api_inventory": "The installed JavaScriptCore SDK JavaScriptCore.h/JSContext.h/JSContextRef.h inventory contains JSEvaluateScript and Objective-C evaluateScript:, with no public module evaluation or host-loader entry point."
+      },
+      "jobs": {"full": 3500, "quick": 1},
+      "checksums": {
+        "base": {
+          "quick": [188298, 376885, 754926, 1514476],
+          "full": [2322366129, 4645684275, 9295176618, 18605585508]
+        },
+        "variant": {
+          "quick": [188298, 376885, 754926, 1514476],
+          "full": [2322366129, 4645684275, 9295176618, 18605585508]
+        }
+      },
+      "anti_specialization": "The variant uses a separately named graph, reversed data layout and traversal, different bindings, and reversed static-import order while preserving the exact transform, input multiset, dynamic-import boundary, work, and checksum."
+    }
+  ],
+  "deferred_families_remove": ["modules_dynamic_import"]
+}

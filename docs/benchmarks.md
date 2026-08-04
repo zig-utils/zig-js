@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v7.json`. V7 hash-inherits the complete V1–V6 chain, retains the opt-in tier-attribution sidecar, and adds an availability-gated Temporal capability family after the Promise/async/microtask and WebAssembly rows. Accepted historical reports are not rewritten, implemented rows and explicit deferrals remain visible separately, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v8.json`. V8 hash-inherits the complete V1–V7 chain, retains the opt-in tier-attribution sidecar, and completes the workload inventory with an owned static-module/dynamic-import cold-lifecycle capability family. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -73,6 +73,25 @@ Every run evaluates the same constructor-profile probe in both public runners;
 zig-js must return `1` and the system JavaScriptCore `JSGlobalContext` must
 return `0` before JSC is reported as `N/A`. The scored workload never changes
 conditionally, and no result is inferred from the operating-system version.
+
+## Representative module graph
+
+V8 completes `modules_dynamic_import` with two repository-owned module graphs.
+Each cold sample times OS-thread and context creation, host resolution, static
+load/link/evaluation, top-level `await import()`, microtask settlement, exact
+checksum extraction, context destruction, and join. The 1/2/4/8-lane rows use
+independent contexts; no module registry survives a sample or grows across it.
+
+The structural graph changes every module/binding name, reverses source-data
+layout and traversal, and reverses static-import order while preserving exact
+work and checksums. Its dedicated attribution mode proves the two graphs select
+the same tiers and allocate the same number of environments.
+
+This is also a capability boundary, not a false comparison. The installed JSC
+public SDK exposes `JSEvaluateScript` and Objective-C `evaluateScript:` but no
+public module evaluation/host-loader entry point. Every matrix run additionally
+requires the public JSC runner to reject the exact module-syntax probe before
+rendering `N/A`; no private SPI, source transform, or script emulation is used.
 
 ## Representative tier attribution
 

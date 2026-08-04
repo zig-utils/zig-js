@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const js = @import("js");
+const representative_modules = @import("representative_modules.zig");
 
 const workload_source = @embedFile("comparison.js");
 const representative_workload_source = @embedFile("representative_comparison.js");
@@ -49,7 +50,7 @@ const shared_harness =
     \\};
 ;
 
-const Mode = enum { single, independent_steady, independent_cold, shared, attribution };
+const Mode = enum { single, independent_steady, independent_cold, shared, attribution, module_cold, module_attribution };
 
 const SteadyLane = struct {
     io: std.Io,
@@ -65,6 +66,14 @@ const SteadyLane = struct {
 };
 
 const ColdLane = struct {
+    workload: []const u8,
+    jobs: usize,
+    lane: usize,
+    failed: std.atomic.Value(bool) = .init(false),
+    checksum: f64 = 0,
+};
+
+const ModuleLane = struct {
     workload: []const u8,
     jobs: usize,
     lane: usize,
@@ -468,6 +477,96 @@ fn runIndependentCold(
     }
 }
 
+fn configureModuleGlobals(ctx: *js.Context, jobs: usize, lane: usize) !void {
+    const source = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d}; globalThis.__representativeModuleChecksum = 0;", .{ jobs, lane });
+    _ = try ctx.evaluate(source);
+}
+
+fn evaluateModuleWorkload(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !f64 {
+    const profile = representative_modules.profile(workload) orelse return error.InvalidWorkload;
+    try configureModuleGlobals(ctx, jobs, lane);
+    _ = try ctx.evaluateModule(profile.entry_path, profile.entry_source, profile.host());
+    return (try ctx.evaluate("globalThis.__representativeModuleChecksum")).toNumber();
+}
+
+fn moduleLaneMain(lane: *ModuleLane) void {
+    const ctx = js.Context.createWith(benchmark_context_allocator, .{ .enable_gc = true }) catch {
+        lane.failed.store(true, .release);
+        return;
+    };
+    lane.checksum = evaluateModuleWorkload(ctx, lane.workload, lane.jobs, lane.lane) catch {
+        lane.failed.store(true, .release);
+        ctx.destroy();
+        return;
+    };
+    ctx.destroy();
+}
+
+fn runModuleCold(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+    samples: usize,
+    lane_count: usize,
+) !void {
+    _ = representative_modules.profile(workload) orelse return error.InvalidWorkload;
+    const lanes = try allocator.alloc(ModuleLane, lane_count);
+    defer allocator.free(lanes);
+    const threads = try allocator.alloc(std.Thread, lane_count);
+    defer allocator.free(threads);
+
+    for (0..samples) |sample| {
+        for (lanes, 0..) |*lane, lane_index| lane.* = .{
+            .workload = workload,
+            .jobs = jobs,
+            .lane = lane_index,
+        };
+
+        const started = nowNs(io);
+        var spawned: usize = 0;
+        for (lanes) |*lane| {
+            threads[spawned] = std.Thread.spawn(.{}, moduleLaneMain, .{lane}) catch |err| {
+                for (threads[0..spawned]) |thread| thread.join();
+                return err;
+            };
+            spawned += 1;
+        }
+        for (threads) |thread| thread.join();
+        const elapsed: u64 = @intCast(nowNs(io) - started);
+
+        var checksum: f64 = 0;
+        for (lanes) |*lane| {
+            if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
+            checksum += lane.checksum;
+        }
+        try printRow(writer, .module_cold, workload, lane_count, jobs, sample, elapsed, checksum);
+    }
+}
+
+fn runModuleAttribution(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+) !void {
+    const profile = representative_modules.profile(workload) orelse return error.InvalidWorkload;
+    const ctx = try js.Context.createWith(allocator, .{
+        .enable_gc = true,
+        .profile_execution_tiers = true,
+    });
+    defer ctx.destroy();
+    try printTierAttributionRow(writer, workload, jobs, "configuration", 0, ctx.tierAttributionSnapshot());
+    try configureModuleGlobals(ctx, jobs, 0);
+    try printTierAttributionRow(writer, workload, jobs, "warmup", 0, ctx.tierAttributionSnapshot());
+    _ = try ctx.evaluateModule(profile.entry_path, profile.entry_source, profile.host());
+    const checksum = (try ctx.evaluate("globalThis.__representativeModuleChecksum")).toNumber();
+    try printTierAttributionRow(writer, workload, jobs, "invocation", checksum, ctx.tierAttributionSnapshot());
+    _ = io;
+}
+
 fn runShared(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -527,7 +626,7 @@ pub fn main(init: std.process.Init) !void {
     const workload = args[2];
     const jobs = try std.fmt.parseUnsigned(usize, args[3], 10);
     const samples = try std.fmt.parseUnsigned(usize, args[4], 10);
-    const lanes = if (mode == .single or mode == .attribution)
+    const lanes = if (mode == .single or mode == .attribution or mode == .module_attribution)
         1
     else if (args.len >= 6)
         try std.fmt.parseUnsigned(usize, args[5], 10)
@@ -536,7 +635,7 @@ pub fn main(init: std.process.Init) !void {
     const gc_telemetry = args.len == 7 and std.mem.eql(u8, args[6], "--gc-telemetry");
     if (args.len == 7 and !gc_telemetry) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
-    if (mode == .attribution and samples != 1) return error.InvalidArguments;
+    if ((mode == .attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
     if (std.mem.eql(u8, workload, "wasm_threads_wait_notify") and
         (mode != .shared or lanes < 2 or lanes % 2 != 0)) return error.InvalidArguments;
@@ -550,6 +649,8 @@ pub fn main(init: std.process.Init) !void {
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry),
         .attribution => try runAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
+        .module_cold => try runModuleCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
+        .module_attribution => try runModuleAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
     }
     try stdout.flush();
 }
