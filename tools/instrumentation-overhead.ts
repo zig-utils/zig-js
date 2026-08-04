@@ -133,6 +133,9 @@ export function summarize(samples: Sample[]): any {
 export function validateArtifact(artifact: any): void {
   requireValue(artifact.schema_version === 1 && artifact.profile_id === "zig-js-instrumentation-overhead-v1", "overhead schema identity drift");
   requireValue(artifact.metadata && artifact.metadata.pairs >= 2, "overhead metadata is incomplete");
+  requireValue(["diagnostic", "quiet_reference"].includes(artifact.metadata.host_class), "overhead host class is invalid");
+  if (artifact.metadata.host_class === "quiet_reference")
+    requireValue(artifact.metadata.environment.Power.includes("AC Power"), "quiet-reference overhead evidence requires AC power");
   requireValue(/^[0-9a-f]{64}$/.test(artifact.metadata.runner_sha256), "runner hash is invalid");
   requireValue(Number.isInteger(artifact.metadata.runner_size_bytes) && artifact.metadata.runner_size_bytes > 0, "runner size is invalid");
   const samples: Sample[] = artifact.samples;
@@ -166,6 +169,7 @@ export function render(artifact: any, rawPath = ""): string {
     `- zig-gc: \`${environment["zig-gc"]}\``,
     `- zig-regex: \`${environment["zig-regex"]}\``,
     `- power: ${environment.Power}`,
+    `- host class: \`${metadata_.host_class}\``,
     `- runner: \`${metadata_.runner_sha256}\` (${metadata_.runner_size_bytes} bytes; one binary for both states)`,
     `- workload source: \`${metadata_.workload_source}\` (SHA-256 \`${metadata_.workload_source_sha256}\`)`,
     `- sampling: ${metadata_.pairs} alternating disabled/enabled pairs; no discarded samples`,
@@ -183,6 +187,8 @@ export function render(artifact: any, rawPath = ""): string {
     "",
     "Retained RSS is unavailable because each measurement exits after one sample. Lock contention is not applicable to this single-thread fixture. Both states use the exact same runner, so this runtime-toggle A/B does not claim to measure compile-time support code size.",
   );
+  if (metadata_.host_class === "diagnostic")
+    rows.push("", "This is diagnostic evidence. It does not establish a negligible-overhead publication claim; that requires an explicitly selected quiet reference host on AC power.");
   if (rawPath) rows.push("", `Raw samples: [\`${rawPath.split("/").pop()}\`](${rawPath.split("/").pop()})`);
   rows.push("");
   return rows.join("\n");
@@ -214,7 +220,7 @@ export function selfTest(): void {
   const samples = syntheticSamples(), artifact = {
     schema_version: 1,
     profile_id: "zig-js-instrumentation-overhead-v1",
-    metadata: { pairs: 2, runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", workload_source: "bench/representative_comparison.js", workload_source_sha256: "b".repeat(64), jobs: 110, expected_checksum: 5864992, revision: "c".repeat(40), environment: { Date: "2026-08-04", Host: "fixture", OS: "fixture", Zig: "fixture", "zig-gc": "d".repeat(40), "zig-regex": "e".repeat(40), Power: "fixture" } },
+    metadata: { pairs: 2, host_class: "diagnostic", runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", workload_source: "bench/representative_comparison.js", workload_source_sha256: "b".repeat(64), jobs: 110, expected_checksum: 5864992, revision: "c".repeat(40), environment: { Date: "2026-08-04", Host: "fixture", OS: "fixture", Zig: "fixture", "zig-gc": "d".repeat(40), "zig-regex": "e".repeat(40), Power: "Battery Power" } },
     samples,
     summary: summarize(samples),
     boundaries: { retained_rss: { status: "unavailable" }, contention: { status: "not_applicable" }, code_size: { status: "same_binary" } },
@@ -223,6 +229,8 @@ export function selfTest(): void {
   requireValue(render(artifact, "docs/.data/fixture.json").includes("Raw samples: [`fixture.json`](fixture.json)"), "report provenance drift");
   const order = JSON.parse(JSON.stringify(artifact)); order.samples[2].identity.state = "disabled";
   expectFailure(() => validateArtifact(order), "order drift");
+  const reference = JSON.parse(JSON.stringify(artifact)); reference.metadata.host_class = "quiet_reference";
+  expectFailure(() => validateArtifact(reference), "requires AC power");
   console.log("OK instrumentation overhead self-test: parsing, alternation, checksums, metrics, and explicit boundaries verified");
 }
 
@@ -242,7 +250,7 @@ function main(): void {
   if (args.length === 1 && args[0] === "--self-test") { selfTest(); return; }
   const runner = args[0];
   requireValue(Boolean(runner) && Home.fileExists(runner), "instrumentation overhead runner does not exist");
-  let manifestPath = DEFAULT_MANIFEST, workload = "representative_json", pairs = 7, rawOut = "", markdownOut = "", quick = false;
+  let manifestPath = DEFAULT_MANIFEST, workload = "representative_json", pairs = 7, hostClass = "diagnostic", rawOut = "", markdownOut = "", quick = false;
   for (let index = 1; index < args.length; index += 1) {
     const name = args[index];
     if (name === "--quick") quick = true;
@@ -251,6 +259,7 @@ function main(): void {
       if (name === "--manifest") manifestPath = value;
       else if (name === "--workload") workload = value;
       else if (name === "--pairs") pairs = Number(value);
+      else if (name === "--host-class") hostClass = value;
       else if (name === "--raw-out") rawOut = value;
       else if (name === "--markdown-out") markdownOut = value;
       else throw new Error(`unknown argument: ${name}`);
@@ -258,6 +267,7 @@ function main(): void {
   }
   if (quick && pairs === 7) pairs = 2;
   requireValue(Boolean(rawOut) === Boolean(markdownOut), "raw and Markdown overhead outputs must be written together");
+  requireValue(["diagnostic", "quiet_reference"].includes(hostClass), "host class must be diagnostic or quiet_reference");
   const manifest = loadManifest(manifestPath); validateManifest(manifest);
   const resolved = resolveWorkload(manifest, workload, quick), info = metadata();
   ensurePublishable(info, Boolean(rawOut));
@@ -267,6 +277,7 @@ function main(): void {
     profile_id: "zig-js-instrumentation-overhead-v1",
     metadata: {
       environment: info,
+      host_class: hostClass,
       revision: info["zig-js"],
       runner_sha256: sha256File(runner),
       runner_size_bytes: size,

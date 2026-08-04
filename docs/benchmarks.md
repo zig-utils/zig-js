@@ -172,6 +172,11 @@ exits, and single-thread lock contention is not applicable; both boundaries are
 encoded explicitly rather than as zero. Quick mode uses two reduced-work pairs
 to validate the harness and is never publication evidence.
 
+Runs default to `diagnostic`. A negligible-overhead publication claim requires
+`-Dinstrumentation-overhead-host-class=quiet_reference`; that classification
+fails closed unless the captured power state is AC. Battery/hosted results stay
+visible as diagnostic artifacts and cannot satisfy the reference-host gate.
+
 ## Stable attribution and exact-parent A/Bs
 
 [`performance-attribution-schema-v1.json`](.data/performance-attribution-schema-v1.json)
