@@ -9,9 +9,16 @@ import {
 } from "./benchmark-comparison";
 import {
   DEFAULT_MANIFEST,
+  loadManifest,
   validate as validateManifest,
 } from "./representative-matrix";
-import { readText, writeText } from "./lib/home";
+import {
+  artifact as tierArtifact,
+  collect as collectTierAttribution,
+  render as renderTierAttribution,
+  validate as validateTierAttribution,
+} from "./representative-tier-attribution";
+import { writeText } from "./lib/home";
 // Inventory-visible module edges: tools/benchmark-comparison.ts and tools/representative-matrix.ts.
 declare const __filename: string;
 function requireValue(condition: boolean, message: string): void {
@@ -368,7 +375,7 @@ function expectFailure(action: () => void, pattern: string): void {
   throw new Error(`expected failure containing ${pattern}`);
 }
 export function selfTest(): void {
-  const manifest = JSON.parse(readText(DEFAULT_MANIFEST));
+  const manifest = loadManifest(DEFAULT_MANIFEST);
   validate(syntheticRows(manifest), manifest, 1, [2, 4, 8], true);
   const missing = syntheticRows(manifest);
   missing.pop();
@@ -421,11 +428,12 @@ function main(): void {
       else if (name === "--samples") options.samples = Number(value);
       else if (name === "--lanes") options.lanes = value;
       else if (name === "--raw-out") options.raw = value;
+      else if (name === "--tier-attribution-out") options.tierAttribution = value;
       else if (name === "--markdown-out") options.markdown = value;
       else throw new Error(`unknown argument: ${name}`);
     }
   }
-  const manifest = JSON.parse(readText(options.manifest));
+  const manifest = loadManifest(options.manifest);
   validateManifest(manifest);
   const lanes = [
     ...new Set(options.lanes.split(",").filter(Boolean).map(Number)),
@@ -444,7 +452,11 @@ function main(): void {
     "runner does not exist",
   );
   const info = metadata();
-  ensurePublishable(info, Boolean(options.raw || options.markdown));
+  ensurePublishable(info, Boolean(options.raw || options.tierAttribution || options.markdown));
+  requireValue(
+    (!options.raw && !options.markdown) || Boolean(options.tierAttribution),
+    "v2 raw/report publication requires --tier-attribution-out",
+  );
   const rows = collect(
     args[0],
     args[1],
@@ -454,8 +466,16 @@ function main(): void {
     options.quick,
   );
   validate(rows, manifest, samples, lanes, options.quick);
-  const report = render(rows, manifest, lanes, options.raw || null, info);
+  const tierSnapshots = collectTierAttribution(args[0], manifest, options.quick),
+    tierDeltas = validateTierAttribution(tierSnapshots, manifest, options.quick),
+    report = render(rows, manifest, lanes, options.raw || null, info) + "\n" +
+      renderTierAttribution(tierDeltas, manifest, "##", options.tierAttribution || null);
   if (options.raw) writeRaw(options.raw, rows);
+  if (options.tierAttribution)
+    writeText(
+      options.tierAttribution,
+      JSON.stringify(tierArtifact(tierSnapshots, manifest, options.quick, info, args[0]), null, 2) + "\n",
+    );
   if (options.markdown) writeText(options.markdown, report);
   process.stdout.write(report);
 }

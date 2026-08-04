@@ -2809,6 +2809,10 @@ pub const Context = struct {
     /// Per-realm bytecode admission telemetry. Atomic counters preserve exact
     /// reasons when shared-realm workers create functions concurrently.
     bytecode_admission_inventory: interp.BytecodeAdmissionInventory = .{},
+    /// Opt-in benchmark/profile attribution. Ordinary contexts leave recording
+    /// disabled and do not add atomics to scored execution paths.
+    profile_execution_tiers: bool = false,
+    execution_tier_inventory: interp.ExecutionTierInventory = .{},
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
     /// Guards the script-id/list and statement-location registry only in a
@@ -3303,6 +3307,10 @@ pub const Context = struct {
         /// Explicit post-MVP WebAssembly gates. All are disabled by default;
         /// enabling an unfinished feature produces an implementation diagnostic.
         wasm_features: wasm_types.Features = .{},
+        /// Collect exact tree-walker, VM, native-tier, deoptimization, and
+        /// environment-allocation counts. Use a separate attribution run rather
+        /// than enabling this on a performance-timing context.
+        profile_execution_tiers: bool = false,
     };
 
     /// Test/conformance-only creation knobs. These model harness flags such as
@@ -3310,6 +3318,7 @@ pub const Context = struct {
     /// of the stable embedder options surface.
     pub const TestingOptions = struct {
         enable_jit: bool = true,
+        profile_execution_tiers: bool = false,
         /// Force plain synchronous execution through one tier for exact
         /// differentials. `required` throws instead of silently accepting a
         /// compiler or template fallback as VM coverage.
@@ -3867,6 +3876,7 @@ pub const Context = struct {
             .parallel_js = want_parallel,
             .heap_limit_bytes = options.heap_limit_bytes,
             .wasm_features = options.wasm_features,
+            .profile_execution_tiers = options.profile_execution_tiers,
         });
     }
 
@@ -3891,6 +3901,7 @@ pub const Context = struct {
             .shared_jit_owner = primary.shared_jit_owner orelse &primary.jit_owner,
             .enable_jit = primary.enable_jit,
             .bytecode_execution_mode = primary.bytecode_execution_mode,
+            .profile_execution_tiers = primary.profile_execution_tiers,
             .owner_thread = primary.owner_thread,
             .sab_retains = .{ .gpa = allocator },
             .env = .{ .arena = a, .fn_scope = true },
@@ -3980,6 +3991,7 @@ pub const Context = struct {
         return createWithTestingOptionsForSharedOwner(primary.host_gpa, .{
             .enable_jit = primary.enable_jit,
             .bytecode_execution_mode = primary.bytecode_execution_mode,
+            .profile_execution_tiers = primary.profile_execution_tiers,
             .enable_gc = true,
             .wasm_features = primary.wasm_features,
         }, primary);
@@ -4056,6 +4068,7 @@ pub const Context = struct {
             .shared_jit_owner = if (shared_owner) |owner| owner.shared_jit_owner orelse &owner.jit_owner else null,
             .enable_jit = options.enable_jit,
             .bytecode_execution_mode = options.bytecode_execution_mode,
+            .profile_execution_tiers = options.profile_execution_tiers,
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = context_gpa },
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
@@ -4303,6 +4316,7 @@ pub const Context = struct {
             .profile_statement_ctx = self.profile_statement_ctx,
             .profile_statement_hook = self.profile_statement_hook,
             .bytecode_admission_inventory = &self.bytecode_admission_inventory,
+            .execution_tier_inventory = if (self.profile_execution_tiers) &self.execution_tier_inventory else null,
             .bytecode_execution_mode = self.bytecode_execution_mode,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
@@ -4395,6 +4409,27 @@ pub const Context = struct {
 
     pub fn bytecodeAdmissionSnapshot(self: *const Context) interp.BytecodeAdmissionSnapshot {
         return self.bytecode_admission_inventory.snapshot();
+    }
+
+    pub const TierAttributionSnapshot = struct {
+        execution: interp.ExecutionTierSnapshot,
+        admissions: interp.BytecodeAdmissionSnapshot,
+        baseline_publications: u64,
+        optimizer_publications: u64,
+        generated_code_bytes: usize,
+    };
+
+    /// Phase-boundary attribution snapshot. Every component is monotonic and
+    /// atomic; benchmark callers take snapshots only after their workers join.
+    pub fn tierAttributionSnapshot(self: *const Context) TierAttributionSnapshot {
+        const owner = self.shared_jit_owner orelse &self.jit_owner;
+        return .{
+            .execution = self.execution_tier_inventory.snapshot(),
+            .admissions = self.bytecode_admission_inventory.snapshot(),
+            .baseline_publications = owner.baselinePublications(),
+            .optimizer_publications = owner.optimizerPublications(),
+            .generated_code_bytes = owner.stats().live_bytes,
+        };
     }
 
     fn registerDebugLocationsLocked(
@@ -7381,17 +7416,20 @@ pub const Context = struct {
         const outcome: interp.EvalError!value.Value = admission: {
             if (self.bytecode_execution_mode == .tree_walker) {
                 self.bytecode_admission_inventory.record(.program_forced_tree_walker);
+                machine.recordExecutionTier(.tree_walker_entries);
                 break :admission machine.eval(prog);
             }
             if (self.debug_statement_hook != null) {
                 self.bytecode_admission_inventory.record(.program_debugger);
                 if (self.bytecode_execution_mode == .required)
                     break :admission machine.throwError("InternalError", "required bytecode program is blocked by debugger execution");
+                machine.recordExecutionTier(.tree_walker_entries);
                 break :admission machine.eval(prog);
             }
             if (self.bytecode_execution_mode != .required) {
                 if (scriptTreeWalkPolicy(owned_source)) |reason| {
                     self.bytecode_admission_inventory.record(reason);
+                    machine.recordExecutionTier(.tree_walker_entries);
                     break :admission machine.eval(prog);
                 }
             }
@@ -7404,6 +7442,7 @@ pub const Context = struct {
                     self.bytecode_admission_inventory.record(interp.programRejectionAdmission(reason));
                     if (self.bytecode_execution_mode == .required)
                         break :admission machine.throwError("InternalError", "required bytecode program was rejected by the compiler");
+                    machine.recordExecutionTier(.tree_walker_entries);
                     break :admission machine.eval(prog);
                 },
             }
@@ -19842,6 +19881,64 @@ test "bytecode admission inventory merges concurrent realm records" {
     try std.testing.expectEqual(@as(u64, 40_000), snapshot.count(.plain_compiled));
     try std.testing.expectEqual(@as(u64, 40_000), snapshot.count(.plain_rejected_temporal_dead_zone));
     try std.testing.expectEqual(@as(u64, 0), snapshot.count(.program_compiled));
+}
+
+test "tier attribution is opt-in and separates tree walker VM native and environments" {
+    const ordinary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ordinary.destroy();
+    _ = try ordinary.evaluate(
+        \\function ordinaryTree() { return arguments[0]; }
+        \\try { ordinaryTree(1); } catch (error) {}
+    );
+    const ordinary_snapshot = ordinary.tierAttributionSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.tree_walker_entries));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.vm_entries));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.baseline_entries));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.optimizer_entries));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.environment_allocations));
+
+    const profiled_tree = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .profile_execution_tiers = true,
+    });
+    defer profiled_tree.destroy();
+    try std.testing.expectEqual(@as(f64, 4), (try profiled_tree.evaluate(
+        \\function treeEntry() { return arguments[0]; }
+        \\try { treeEntry(4); } catch (error) {}
+    )).asNum());
+    const tree_snapshot = profiled_tree.tierAttributionSnapshot();
+    try std.testing.expect(tree_snapshot.execution.count(.tree_walker_entries) >= 2);
+    try std.testing.expect(tree_snapshot.execution.count(.environment_allocations) > 0);
+
+    const profiled_vm = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = true,
+        .enable_gc = true,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer profiled_vm.destroy();
+    try std.testing.expectEqual(@as(f64, 1600), (try profiled_vm.evaluate(
+        \\function hotPoint(point) {
+        \\  "use strict";
+        \\  let sum = 0;
+        \\  for (let index = 0; index < 16; index = index + 1)
+        \\    sum = sum + point.x + point.y;
+        \\  return sum;
+        \\}
+        \\globalThis.profilePoint = { x: 4, y: 6 };
+        \\var profileResult = 0;
+        \\for (var warm = 0; warm < 10; warm = warm + 1)
+        \\  profileResult = profileResult + hotPoint(profilePoint);
+        \\profileResult;
+    )).asNum());
+    const snapshot = profiled_vm.tierAttributionSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), snapshot.execution.count(.tree_walker_entries));
+    try std.testing.expect(snapshot.execution.count(.vm_entries) > 0);
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        try std.testing.expect(snapshot.execution.count(.optimizer_entries) > 0);
+        try std.testing.expect(snapshot.optimizer_publications > 0);
+        try std.testing.expect(snapshot.generated_code_bytes > 0);
+    }
 }
 
 test "vm admission: strict named-property loops reach the optimizer" {

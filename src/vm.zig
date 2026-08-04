@@ -4463,6 +4463,7 @@ fn runNativeWithPublishedRoots(
         .scratch_slot_count = std.math.cast(u8, native.max_stack_depth) orelse 0,
     };
     defer vm.gc_native_roots = saved;
+    vm.recordExecutionTier(if (native.kind == .optimizer) .optimizer_entries else .baseline_entries);
     return native.run(frame);
 }
 
@@ -4605,6 +4606,7 @@ fn resumeNativeFinallyDispatch(
     switch (kind) {
         .normal => {
             exec.ip = native_frame.exit_ip + 1;
+            vm.recordExecutionTier(.deoptimizations);
             return .deoptimized;
         },
         .throw => {
@@ -4621,6 +4623,7 @@ fn resumeNativeFinallyDispatch(
                     try exec.stack.append(vm.arena, Value.num(@floatFromInt(@backingInt(Completion.throw))));
                     exec.ip = handler.finally_pc;
                 }
+                vm.recordExecutionTier(.deoptimizations);
                 return .deoptimized;
             }
             return error.Throw;
@@ -4628,6 +4631,7 @@ fn resumeNativeFinallyDispatch(
         .ret => {
             if (try unwindToFinally(vm, null, exec, completion_value, .ret)) |finally_ip| {
                 exec.ip = finally_ip;
+                vm.recordExecutionTier(.deoptimizations);
                 return .deoptimized;
             }
             return .{ .complete = completion_value };
@@ -4635,6 +4639,7 @@ fn resumeNativeFinallyDispatch(
         .break_, .continue_ => {
             if (try unwindToFinally(vm, null, exec, completion_value, kind)) |finally_ip| {
                 exec.ip = finally_ip;
+                vm.recordExecutionTier(.deoptimizations);
                 return .deoptimized;
             }
             if (!completion_value.isNumber()) return error.OutOfMemory;
@@ -4644,6 +4649,7 @@ fn resumeNativeFinallyDispatch(
                 return error.OutOfMemory;
             unwindEnvironmentToDepth(vm, null, exec, exec.abrupt_environment_depth);
             exec.ip = @intFromFloat(target);
+            vm.recordExecutionTier(.deoptimizations);
             return .deoptimized;
         },
     }
@@ -5288,6 +5294,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
                 target,
                 vm.arena,
             )) return error.OutOfMemory;
+            vm.recordExecutionTier(.deoptimizations);
             break :operation_exception .deoptimized;
         },
         .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue => |status| {
@@ -5300,6 +5307,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
             const metadata = native.deopt orelse return error.OutOfMemory;
             if (!try reconstructNativeSideExit(metadata, &native_frame, live_slots, &scratch, target, vm.arena))
                 return error.OutOfMemory;
+            vm.recordExecutionTier(.deoptimizations);
             break :side_exit .deoptimized;
         },
     };
@@ -5347,6 +5355,7 @@ fn tryRunOsrNative(
         .invalidation_generation = native.invalidation_generation,
         .expected_invalidation_generation = native.expected_invalidation_generation,
     };
+    vm.recordExecutionTier(.optimizer_osr_entries);
     return switch (runNativeWithPublishedRoots(vm, native, &native_frame)) {
         .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
         .throw => error.Throw,
@@ -5362,6 +5371,7 @@ fn tryRunOsrNative(
                 exec,
                 vm.arena,
             )) return error.OutOfMemory;
+            vm.recordExecutionTier(.deoptimizations);
             break :operation_exception .deoptimized;
         },
         .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue => |status| {
@@ -5371,6 +5381,7 @@ fn tryRunOsrNative(
             const deopt = native.deopt orelse return error.OutOfMemory;
             if (!try reconstructNativeSideExit(deopt, &native_frame, slots, &scratch, exec, vm.arena))
                 return error.OutOfMemory;
+            vm.recordExecutionTier(.deoptimizations);
             break :side_exit .deoptimized;
         },
     };
@@ -5398,6 +5409,7 @@ fn tryRunUnmanagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slot
         .invalidation_generation = native.invalidation_generation,
         .expected_invalidation_generation = native.expected_invalidation_generation,
     };
+    vm.recordExecutionTier(if (native.kind == .optimizer) .optimizer_entries else .baseline_entries);
     return switch (native.run(&native_frame)) {
         .complete => Value.fromRawBits(native_frame.result_bits),
         else => {
@@ -5653,6 +5665,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    vm.recordExecutionTier(.vm_entries);
     chunk.optimizer_tier.beginProfiling();
     chunk.optimizer_profile.observeEntry();
     var optimizer_delta = jit.OptimizerProfile.Delta{};

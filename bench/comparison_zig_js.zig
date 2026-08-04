@@ -6,6 +6,7 @@
 //!   bench-comparison-zig-js independent_cold <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes> --gc-telemetry
+//!   bench-comparison-zig-js attribution <workload> <jobs> 1
 //!
 //! Independent modes use one creator-thread-affine context per OS worker. In
 //! steady mode worker/context setup and warm-up are outside every timed sample;
@@ -45,7 +46,7 @@ const shared_harness =
     \\};
 ;
 
-const Mode = enum { single, independent_steady, independent_cold, shared };
+const Mode = enum { single, independent_steady, independent_cold, shared, attribution };
 
 const SteadyLane = struct {
     io: std.Io,
@@ -114,6 +115,37 @@ fn printRow(
 ) !void {
     try writer.print("zig-js\t{s}\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.0}\n", .{
         @tagName(mode), workload, lanes, jobs, sample, elapsed_ns, checksum,
+    });
+}
+
+fn printTierAttributionRow(
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+    phase: []const u8,
+    checksum: f64,
+    snapshot: js.Context.TierAttributionSnapshot,
+) !void {
+    try writer.print("{{\"kind\":\"zig-js-tier-attribution\",\"workload\":\"{s}\",\"jobs\":{d},\"phase\":\"{s}\",\"checksum\":{d:.0},\"execution\":{{", .{
+        workload, jobs, phase, checksum,
+    });
+    const execution_info = @typeInfo(js.ExecutionTierMetric).@"enum";
+    inline for (execution_info.field_names, execution_info.field_values, 0..) |name, field_value, index| {
+        if (index != 0) try writer.writeByte(',');
+        const metric: js.ExecutionTierMetric = @fromBackingInt(@intCast(field_value));
+        try writer.print("\"{s}\":{d}", .{ name, snapshot.execution.count(metric) });
+    }
+    try writer.writeAll("},\"admissions\":{");
+    const admission_info = @typeInfo(js.BytecodeAdmissionReason).@"enum";
+    inline for (admission_info.field_names, admission_info.field_values, 0..) |name, field_value, index| {
+        if (index != 0) try writer.writeByte(',');
+        const reason: js.BytecodeAdmissionReason = @fromBackingInt(@intCast(field_value));
+        try writer.print("\"{s}\":{d}", .{ name, snapshot.admissions.count(reason) });
+    }
+    try writer.print("}},\"baseline_publications\":{d},\"optimizer_publications\":{d},\"generated_code_bytes\":{d}}}\n", .{
+        snapshot.baseline_publications,
+        snapshot.optimizer_publications,
+        snapshot.generated_code_bytes,
     });
 }
 
@@ -240,6 +272,32 @@ fn runSingle(
         const elapsed: u64 = @intCast(nowNs(io) - started);
         try printRow(writer, .single, workload, 1, jobs, sample, elapsed, result.toNumber());
     }
+}
+
+fn runAttribution(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+) !void {
+    const ctx = try js.Context.createWith(allocator, .{
+        .enable_gc = true,
+        .profile_execution_tiers = true,
+        .wasm_features = .{
+            .nontrapping_float_to_int = true,
+            .fixed_width_simd = true,
+            .threads = true,
+        },
+    });
+    defer ctx.destroy();
+    try configure(ctx, workload, jobs, 0);
+    try printTierAttributionRow(writer, workload, jobs, "configuration", 0, ctx.tierAttributionSnapshot());
+    try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
+    try printTierAttributionRow(writer, workload, jobs, "warmup", 0, ctx.tierAttributionSnapshot());
+    const result = try ctx.evaluate(invocation);
+    try printTierAttributionRow(writer, workload, jobs, "invocation", result.toNumber(), ctx.tierAttributionSnapshot());
+    _ = io;
 }
 
 fn steadyLaneMain(lane: *SteadyLane) void {
@@ -460,7 +518,7 @@ pub fn main(init: std.process.Init) !void {
     const workload = args[2];
     const jobs = try std.fmt.parseUnsigned(usize, args[3], 10);
     const samples = try std.fmt.parseUnsigned(usize, args[4], 10);
-    const lanes = if (mode == .single)
+    const lanes = if (mode == .single or mode == .attribution)
         1
     else if (args.len >= 6)
         try std.fmt.parseUnsigned(usize, args[5], 10)
@@ -469,6 +527,7 @@ pub fn main(init: std.process.Init) !void {
     const gc_telemetry = args.len == 7 and std.mem.eql(u8, args[6], "--gc-telemetry");
     if (args.len == 7 and !gc_telemetry) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
+    if (mode == .attribution and samples != 1) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
     if (std.mem.eql(u8, workload, "wasm_threads_wait_notify") and
         (mode != .shared or lanes < 2 or lanes % 2 != 0)) return error.InvalidArguments;
@@ -481,6 +540,7 @@ pub fn main(init: std.process.Init) !void {
         .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry),
+        .attribution => try runAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
     }
     try stdout.flush();
 }

@@ -1754,6 +1754,7 @@ pub fn build(b: *std.Build) void {
     const comparison_publication_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/benchmark-publication.ts", "--self-test" });
     const representative_matrix_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/test_representative_matrix.ts" });
     const representative_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-benchmark.ts", "--self-test" });
+    const representative_tier_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-tier-attribution.ts", "--self-test" });
     const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
     const generation_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-generation-benchmark.ts", "--self-test" });
@@ -1768,6 +1769,7 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&comparison_publication_test.step);
     comparison_harness_test_step.dependOn(&representative_matrix_test.step);
     comparison_harness_test_step.dependOn(&representative_benchmark_test.step);
+    comparison_harness_test_step.dependOn(&representative_tier_attribution_test.step);
     comparison_harness_test_step.dependOn(&performance_attribution_test.step);
     comparison_harness_test_step.dependOn(&exact_parent_regression_test.step);
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
@@ -1781,6 +1783,7 @@ pub fn build(b: *std.Build) void {
 
     const comparison_step = b.step("benchmark-comparison", "Compare zig-js direct/independent/shared throughput with system JavaScriptCore (macOS)");
     const representative_step = b.step("representative-benchmark", "Run the versioned representative zig-js / system-JSC matrix (macOS)");
+    const representative_attribution_step = b.step("representative-tier-attribution", "Record representative base/variant execution-tier attribution (macOS)");
     const comparison_bin_step = b.step("benchmark-comparison-bin", "Build the zig-js and system-JSC comparison runners (macOS)");
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{
@@ -1837,10 +1840,23 @@ pub fn build(b: *std.Build) void {
         if (b.option([]const u8, "representative-benchmark-raw-out", "Write raw representative samples to this TSV path")) |path| {
             run_representative.addArgs(&.{ "--raw-out", path });
         }
+        if (b.option([]const u8, "representative-benchmark-tier-attribution-out", "Write representative tier-attribution snapshots to this JSON path")) |path| {
+            run_representative.addArgs(&.{ "--tier-attribution-out", path });
+        }
         if (b.option([]const u8, "representative-benchmark-markdown-out", "Write the representative report to this Markdown path")) |path| {
             run_representative.addArgs(&.{ "--markdown-out", path });
         }
         representative_step.dependOn(&run_representative.step);
+
+        const run_representative_attribution = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-tier-attribution.ts", "--runner" });
+        run_representative_attribution.addArtifactArg(comparison_zig_js);
+        if (b.option(bool, "representative-tier-attribution-quick", "Use reduced representative jobs for tier attribution") orelse false)
+            run_representative_attribution.addArg("--quick");
+        if (b.option([]const u8, "representative-tier-attribution-out", "Write raw representative tier-attribution snapshots to this JSON path")) |path|
+            run_representative_attribution.addArgs(&.{ "--out", path });
+        if (b.option([]const u8, "representative-tier-attribution-markdown-out", "Write the representative tier-attribution report to this Markdown path")) |path|
+            run_representative_attribution.addArgs(&.{ "--markdown-out", path });
+        representative_attribution_step.dependOn(&run_representative_attribution.step);
 
         const run_wasm_threads_benchmark = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-threads-benchmark.ts" });
         run_wasm_threads_benchmark.addArtifactArg(comparison_zig_js);

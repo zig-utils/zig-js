@@ -1,0 +1,56 @@
+{
+  "schema_version": 2,
+  "matrix_id": "zig-js-representative-v2",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 460,
+  "history_policy": "This version inherits every workload, mode, jobs, warmup, checksum, timing floor, and deferred-family decision from immutable v1. Any later workload, timed-boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v1",
+    "path": "docs/.data/representative-benchmark-matrix-v1.json",
+    "sha256": "748716adc6ac7a21e397b9c0fcc194658a3e1af7ec61ab38ef88273248f8a308",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families"
+    ]
+  },
+  "change": "Adds a separate opt-in tier-attribution sidecar; scored timing contexts remain uninstrumented.",
+  "tier_attribution": {
+    "runner_mode": "attribution",
+    "scope": "one fresh zig-js context per workload and structural variant",
+    "phases": ["configuration", "warmup", "invocation"],
+    "warmup": "the inherited ten reduced-work calls",
+    "invocation": "one inherited full-work call with the frozen jobs and lane-zero input",
+    "metrics": [
+      "tree_walker_entries",
+      "vm_entries",
+      "baseline_entries",
+      "optimizer_entries",
+      "optimizer_osr_entries",
+      "deoptimizations",
+      "environment_allocations",
+      "bytecode_admissions_by_reason",
+      "baseline_publications",
+      "optimizer_publications",
+      "generated_code_bytes"
+    ],
+    "equivalence": "For warmup and invocation independently, each base/variant pair must select the same non-empty set of tree-walker, VM, baseline, optimizer, optimizer-OSR, and deoptimization paths and allocate exactly the same number of environments. Exact counters remain visible rather than normalized away.",
+    "timing_isolation": "Attribution uses fresh opt-in contexts outside every scored timing row; normal contexts retain null telemetry and perform no profiling atomics.",
+    "recognizer_audit": {
+      "scope": ["src"],
+      "prohibited": "Every representative workload identifier is absent from engine source. Identifiers exist only in the owned workload, manifest, and benchmark tooling."
+    }
+  },
+  "pending_metric_panels": [
+    {"metrics": ["cpu_time_ns", "peak_rss_bytes", "retained_rss_bytes", "allocations", "allocated_bytes", "gc_pause_p50_ns", "gc_pause_p95_ns", "gc_pause_max_ns", "tier_up_ns", "deoptimization_ns"], "issue": 461},
+    {"metrics": ["cycles", "instructions", "cache_misses", "energy_joules", "thermal_state"], "issue": 503},
+    {"metrics": ["independent_suite_results", "additional_engine_results"], "issue": 504}
+  ]
+}

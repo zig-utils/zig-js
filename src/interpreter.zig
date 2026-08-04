@@ -1000,6 +1000,45 @@ pub const BytecodeAdmissionInventory = struct {
     }
 };
 
+/// Opt-in execution attribution for benchmarks and causal profiles. These are
+/// activation/entry counters rather than timings: ordinary contexts keep the
+/// inventory pointer null so scored paths pay only the predictable null check.
+pub const ExecutionTierMetric = enum(u8) {
+    tree_walker_entries,
+    vm_entries,
+    baseline_entries,
+    optimizer_entries,
+    optimizer_osr_entries,
+    deoptimizations,
+    environment_allocations,
+};
+
+pub const execution_tier_metric_count = std.meta.fieldNames(ExecutionTierMetric).len;
+
+pub const ExecutionTierSnapshot = struct {
+    counts: [execution_tier_metric_count]u64,
+
+    pub fn count(self: *const ExecutionTierSnapshot, metric: ExecutionTierMetric) u64 {
+        return self.counts[@backingInt(metric)];
+    }
+};
+
+/// Context-owned and race-safe for shared-realm attribution runs. Recording is
+/// monotonic observational state and never changes an execution decision.
+pub const ExecutionTierInventory = struct {
+    counts: [execution_tier_metric_count]std.atomic.Value(u64) = @splat(.init(0)),
+
+    pub fn record(self: *ExecutionTierInventory, metric: ExecutionTierMetric) void {
+        _ = self.counts[@backingInt(metric)].fetchAdd(1, .monotonic);
+    }
+
+    pub fn snapshot(self: *const ExecutionTierInventory) ExecutionTierSnapshot {
+        var result: ExecutionTierSnapshot = undefined;
+        for (&self.counts, 0..) |*count, index| result.counts[index] = count.load(.monotonic);
+        return result;
+    }
+};
+
 pub fn programRejectionAdmission(reason: Compiler.ProgramRejection) BytecodeAdmissionReason {
     return switch (reason) {
         .invalid_root => .program_invalid_root,
@@ -1256,6 +1295,8 @@ pub const Interpreter = struct {
     /// Realm-owned monotonic admission counts. Atomic because no-GIL workers
     /// can create functions concurrently in one Context.
     bytecode_admission_inventory: ?*BytecodeAdmissionInventory = null,
+    /// Null unless a benchmark/profile explicitly requests attribution.
+    execution_tier_inventory: ?*ExecutionTierInventory = null,
     /// Test-only forced tier contract inherited from the Context. Production
     /// contexts always use `automatic`.
     bytecode_execution_mode: BytecodeExecutionMode = .automatic,
@@ -5048,6 +5089,10 @@ pub const Interpreter = struct {
         if (self.bytecode_admission_inventory) |inventory| inventory.record(reason);
     }
 
+    pub fn recordExecutionTier(self: *Interpreter, metric: ExecutionTierMetric) void {
+        if (self.execution_tier_inventory) |inventory| inventory.record(metric);
+    }
+
     pub fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {
         // The closure keeps `closure` (and its whole ancestor chain) reachable, so
         // an enclosing `for (let …)` loop must give each iteration its own binding
@@ -6689,6 +6734,7 @@ pub const Interpreter = struct {
         // generator; an unlowerable body falls through to the inert stub below.
         if (func.is_generator and func.is_async and func.gen_chunk != null)
             return vm.makeAsyncGenerator(self, func, args, this_val);
+        self.recordExecutionTier(.tree_walker_entries);
         try self.stackGuard();
         self.depth += 1;
         defer self.depth -= 1;

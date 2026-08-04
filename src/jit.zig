@@ -952,6 +952,9 @@ pub const Owner = struct {
     /// case that compiled and was immediately invalidated still exercised the
     /// tier (#429).
     optimizer_publications: std.atomic.Value(u64) = .init(0),
+    /// Lifetime baseline publications, paired with optimizer_publications for
+    /// opt-in execution attribution. This changes only at code publication.
+    baseline_publications: std.atomic.Value(u64) = .init(0),
     /// Lifetime counts of optimizer call-link publication and reset, on the
     /// same footing and for the same reason as `optimizer_publications`: a
     /// PR-249 witness whose premise is concurrent slow-path call linking cannot
@@ -1473,8 +1476,16 @@ pub const Owner = struct {
     fn accountPublished(self: *Owner, code: *const CompiledCode) void {
         _ = self.live_artifacts.fetchAdd(1, .monotonic);
         _ = self.live_bytes.fetchAdd(code.memory.mapping.len, .monotonic);
-        if (code.kind == .optimizer) _ = self.optimizer_publications.fetchAdd(1, .monotonic);
+        if (code.kind == .optimizer)
+            _ = self.optimizer_publications.fetchAdd(1, .monotonic)
+        else
+            _ = self.baseline_publications.fetchAdd(1, .monotonic);
         self.watchPublishedShapes(code);
+    }
+
+    /// How many baseline-tier artifacts this owner has ever published.
+    pub fn baselinePublications(self: *const Owner) u64 {
+        return self.baseline_publications.load(.acquire);
     }
 
     /// How many optimizing-tier artifacts this owner has ever published.

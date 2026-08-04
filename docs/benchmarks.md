@@ -9,12 +9,41 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v1.json`. Implemented rows and explicitly deferred families remain visible separately; quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v2.json`. V2 hash-inherits every frozen V1 timing/input decision and adds a separate opt-in tier-attribution sidecar; implemented rows and explicitly deferred families remain visible separately, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
+
+## Representative tier attribution
+
+The V2 representative contract records tree-walker, bytecode-VM, baseline,
+optimizer, optimizer-OSR, deoptimization, bytecode-admission, generated-code,
+and environment-allocation observations in fresh zig-js contexts. It snapshots
+configuration, the inherited ten-call reduced-work warmup, and one full-work
+invocation separately. Every base/structural-variant pair must select the same
+non-empty tier set during warmup and invocation; exact counts remain visible so
+the equivalence gate cannot normalize an unexpected fallback away. Each pair
+must also allocate exactly the same number of environments in each phase, so a
+variant cannot hide an unnecessary heap scope behind otherwise equal tiers.
+
+Attribution is deliberately outside the timing rows. Normal contexts retain a
+null telemetry pointer, while the sidecar opts in to atomic counters. A full
+published representative report therefore preserves both its ordinary timing
+TSV and its attribution JSON:
+
+```sh
+zig build representative-tier-attribution -Drepresentative-tier-attribution-quick=true
+zig build representative-benchmark \
+  -Drepresentative-benchmark-raw-out=docs/.data/representative-benchmark-YYYY-MM-DD.tsv \
+  -Drepresentative-benchmark-tier-attribution-out=docs/.data/representative-tier-attribution-YYYY-MM-DD.json \
+  -Drepresentative-benchmark-markdown-out=docs/.data/representative-benchmark-YYYY-MM-DD.md
+```
+
+Writing raw or Markdown representative evidence without the attribution
+sidecar is rejected. As with every benchmark here, the quick command validates
+the harness and frozen checksums but is not publication evidence.
 
 ## Stable attribution and exact-parent A/Bs
 

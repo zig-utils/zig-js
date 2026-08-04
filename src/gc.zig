@@ -4244,11 +4244,13 @@ pub fn allocObj(arena: std.mem.Allocator) std.mem.Allocator.Error!*Object {
 /// runtime side buffers owned by these cells are now either traced as ordinary
 /// fields or recorded as GC-owned backing stores and released by finalizers.
 fn allocCell(comptime T: type, kind: CellKind, arena: std.mem.Allocator) std.mem.Allocator.Error!*T {
-    if (active_heap) |h| {
+    const cell = if (active_heap) |h| blk: {
         const heap: *Heap = @ptrCast(@alignCast(h));
-        return heap.create(T, kind);
-    }
-    return arena.create(T);
+        break :blk try heap.create(T, kind);
+    } else try arena.create(T);
+    if (kind == .environment) if (active_interpreter) |machine|
+        machine.recordExecutionTier(.environment_allocations);
+    return cell;
 }
 
 pub fn allocEnv(arena: std.mem.Allocator) std.mem.Allocator.Error!*Environment {

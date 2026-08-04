@@ -1,8 +1,7 @@
 /** Structural tests for the representative performance-matrix contract. */
-import { DEFAULT_MANIFEST, validate } from "./representative-matrix.ts";
-import { readText } from "./lib/home";
+import { DEFAULT_MANIFEST, loadManifest, validate } from "./representative-matrix.ts";
 
-const original = JSON.parse(readText(DEFAULT_MANIFEST));
+const original = loadManifest(DEFAULT_MANIFEST);
 const clone = () => JSON.parse(JSON.stringify(original));
 function rejects(name: string, mutate: (value: any) => void, pattern: string): void {
   const value = clone(); mutate(value);
