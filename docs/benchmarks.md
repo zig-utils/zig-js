@@ -105,7 +105,7 @@ the equivalence gate cannot normalize an unexpected fallback away. Each pair
 must also allocate exactly the same number of environments in each phase, so a
 variant cannot hide an unnecessary heap scope behind otherwise equal tiers.
 
-The current full-work V8 evidence is the
+The first full-work V8 tier-only evidence is the
 [`representative-tier-attribution-v8-2026-08-04.md`](.data/representative-tier-attribution-v8-2026-08-04.md)
 report and its
 [`representative-tier-attribution-v8-2026-08-04.json`](.data/representative-tier-attribution-v8-2026-08-04.json)
@@ -123,6 +123,14 @@ and counters; they are not process RSS, allocation throughput, or GC-pause
 percentiles, and the report labels them separately from timing measurements.
 Schema-1 artifacts remain valid and are never rewritten to synthesize fields
 that their runners did not capture.
+
+The full-work schema-2 evidence is the
+[`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)
+report and its
+[`representative-tier-attribution-v8-schema-v2-2026-08-04.json`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.json)
+raw artifact. Its 108 snapshots name exact revision
+`2c7c4f31025ffb793dc474ffe6847f1705f1dc76` and retain every native-code and
+heap field for all 36 workloads.
 
 Attribution is deliberately outside the timing rows. Normal contexts retain a
 null telemetry pointer, while the sidecar opts in to atomic counters. A full
