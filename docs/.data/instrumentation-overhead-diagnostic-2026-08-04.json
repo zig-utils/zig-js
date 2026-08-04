@@ -1,0 +1,397 @@
+{
+  "schema_version": 1,
+  "profile_id": "zig-js-instrumentation-overhead-v1",
+  "metadata": {
+    "environment": {
+      "Date": "2026-08-04",
+      "Host": "Apple M3 Pro; 11 physical / 11 logical CPUs; 18.0 GiB",
+      "OS": "macOS 27.0 (26A5388g)",
+      "Zig": "0.17.0-dev.1441+d5181a9c9",
+      "zig-js": "2fa97532c28dda7391b9ce1d083852495d10c92f",
+      "zig-gc": "c89a10fc4454bfba3d28183cfa7fade08fab8aa4",
+      "zig-regex": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe",
+      "JavaScriptCore": "system framework 22625.1.24.11.2",
+      "Power": "Now drawing from 'Battery Power' -InternalBattery-0 (id=22151267) 56%; discharging; (no estimate) present: true"
+    },
+    "host_class": "diagnostic",
+    "revision": "2fa97532c28dda7391b9ce1d083852495d10c92f",
+    "runner_sha256": "3bebcb0f1694c8e9d36fdd98ee1881037c3300e0ad747e8d5a6a1d7df76cc439",
+    "runner_size_bytes": 9235240,
+    "workload": "representative_json",
+    "workload_source": "bench/representative_comparison.js",
+    "workload_source_sha256": "8ebd7f2eac703336c36d323cb1ef304bbccfb16d1c5cf2832e65a63a90ed5911",
+    "jobs": 2200,
+    "expected_checksum": 324952086,
+    "pairs": 7,
+    "timed_boundary": "one warmed single-context invocation; process CPU and peak RSS cover the fresh runner process"
+  },
+  "samples": [
+    {
+      "identity": {
+        "pair_sample": 0,
+        "order": 0,
+        "state": "disabled",
+        "mode": "single",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 585334584,
+        "process_cpu_user_ns": 1110000000,
+        "process_cpu_system_ns": 80000000,
+        "peak_rss_bytes": 1426325504,
+        "instructions": 19619283369,
+        "cycles": 4246581576,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 118
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 0,
+        "order": 1,
+        "state": "enabled",
+        "mode": "single_profiled",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 568206916,
+        "process_cpu_user_ns": 1070000000,
+        "process_cpu_system_ns": 70000000,
+        "peak_rss_bytes": 1426309120,
+        "instructions": 19623468744,
+        "cycles": 4180613410,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 62
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 1,
+        "order": 0,
+        "state": "enabled",
+        "mode": "single_profiled",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 570081250,
+        "process_cpu_user_ns": 1070000000,
+        "process_cpu_system_ns": 70000000,
+        "peak_rss_bytes": 1426227200,
+        "instructions": 19616596793,
+        "cycles": 4189780891,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 10
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 1,
+        "order": 1,
+        "state": "disabled",
+        "mode": "single",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 559776916,
+        "process_cpu_user_ns": 1060000000,
+        "process_cpu_system_ns": 80000000,
+        "peak_rss_bytes": 1426243584,
+        "instructions": 19621063455,
+        "cycles": 4168655862,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 59
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 2,
+        "order": 0,
+        "state": "disabled",
+        "mode": "single",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 571610916,
+        "process_cpu_user_ns": 1070000000,
+        "process_cpu_system_ns": 80000000,
+        "peak_rss_bytes": 1426210816,
+        "instructions": 19622375814,
+        "cycles": 4180677189,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 53
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 2,
+        "order": 1,
+        "state": "enabled",
+        "mode": "single_profiled",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 562196292,
+        "process_cpu_user_ns": 1060000000,
+        "process_cpu_system_ns": 70000000,
+        "peak_rss_bytes": 1426227200,
+        "instructions": 19619550618,
+        "cycles": 4164333834,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 42
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 3,
+        "order": 0,
+        "state": "enabled",
+        "mode": "single_profiled",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 564681875,
+        "process_cpu_user_ns": 1070000000,
+        "process_cpu_system_ns": 80000000,
+        "peak_rss_bytes": 1426292736,
+        "instructions": 19618376010,
+        "cycles": 4195159837,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 74
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 3,
+        "order": 1,
+        "state": "disabled",
+        "mode": "single",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 574391792,
+        "process_cpu_user_ns": 1070000000,
+        "process_cpu_system_ns": 70000000,
+        "peak_rss_bytes": 1426259968,
+        "instructions": 19621650239,
+        "cycles": 4173652834,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 69
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 4,
+        "order": 0,
+        "state": "disabled",
+        "mode": "single",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 567219000,
+        "process_cpu_user_ns": 1060000000,
+        "process_cpu_system_ns": 80000000,
+        "peak_rss_bytes": 1426259968,
+        "instructions": 19619405938,
+        "cycles": 4163733610,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 11
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 4,
+        "order": 1,
+        "state": "enabled",
+        "mode": "single_profiled",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 567723917,
+        "process_cpu_user_ns": 1060000000,
+        "process_cpu_system_ns": 80000000,
+        "peak_rss_bytes": 1426243584,
+        "instructions": 19621017255,
+        "cycles": 4152445798,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 61
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 5,
+        "order": 0,
+        "state": "enabled",
+        "mode": "single_profiled",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 611501292,
+        "process_cpu_user_ns": 1130000000,
+        "process_cpu_system_ns": 80000000,
+        "peak_rss_bytes": 1426292736,
+        "instructions": 19624501961,
+        "cycles": 4302130460,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 518
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 5,
+        "order": 1,
+        "state": "disabled",
+        "mode": "single",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 578731500,
+        "process_cpu_user_ns": 1090000000,
+        "process_cpu_system_ns": 70000000,
+        "peak_rss_bytes": 1426243584,
+        "instructions": 19615038913,
+        "cycles": 4187514921,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 78
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 6,
+        "order": 0,
+        "state": "disabled",
+        "mode": "single",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 601453250,
+        "process_cpu_user_ns": 1230000000,
+        "process_cpu_system_ns": 110000000,
+        "peak_rss_bytes": 1426358272,
+        "instructions": 19653016838,
+        "cycles": 4528601384,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 1440
+      }
+    },
+    {
+      "identity": {
+        "pair_sample": 6,
+        "order": 1,
+        "state": "enabled",
+        "mode": "single_profiled",
+        "workload": "representative_json",
+        "jobs": 2200,
+        "checksum": 324952086
+      },
+      "metrics": {
+        "wall_time_ns": 581257417,
+        "process_cpu_user_ns": 1100000000,
+        "process_cpu_system_ns": 80000000,
+        "peak_rss_bytes": 1426259968,
+        "instructions": 19620119346,
+        "cycles": 4203449583,
+        "voluntary_context_switches": 0,
+        "involuntary_context_switches": 83
+      }
+    }
+  ],
+  "summary": {
+    "wall_time_ns": {
+      "disabled_median": 574391792,
+      "enabled_median": 568206916,
+      "enabled_over_disabled": 0.9892323043501986,
+      "disabled_per_job": 261087.1781818182,
+      "enabled_per_job": 258275.8709090909
+    },
+    "process_cpu_user_ns": {
+      "disabled_median": 1070000000,
+      "enabled_median": 1070000000,
+      "enabled_over_disabled": 1,
+      "disabled_per_job": 486363.63636363635,
+      "enabled_per_job": 486363.63636363635
+    },
+    "process_cpu_system_ns": {
+      "disabled_median": 80000000,
+      "enabled_median": 80000000,
+      "enabled_over_disabled": 1,
+      "disabled_per_job": 36363.63636363636,
+      "enabled_per_job": 36363.63636363636
+    },
+    "peak_rss_bytes": {
+      "disabled_median": 1426259968,
+      "enabled_median": 1426259968,
+      "enabled_over_disabled": 1,
+      "disabled_per_job": 648299.9854545455,
+      "enabled_per_job": 648299.9854545455
+    },
+    "instructions": {
+      "disabled_median": 19621063455,
+      "enabled_median": 19620119346,
+      "enabled_over_disabled": 0.9999518828833022,
+      "disabled_per_job": 8918665.206818182,
+      "enabled_per_job": 8918236.066363636
+    },
+    "cycles": {
+      "disabled_median": 4180677189,
+      "enabled_median": 4189780891,
+      "enabled_over_disabled": 1.0021775663578985,
+      "disabled_per_job": 1900307.8131818182,
+      "enabled_per_job": 1904445.8595454546
+    },
+    "voluntary_context_switches": {
+      "disabled_median": 0,
+      "enabled_median": 0,
+      "enabled_over_disabled": null,
+      "disabled_per_job": 0,
+      "enabled_per_job": 0
+    },
+    "involuntary_context_switches": {
+      "disabled_median": 69,
+      "enabled_median": 62,
+      "enabled_over_disabled": 0.8985507246376812,
+      "disabled_per_job": 0.031363636363636364,
+      "enabled_per_job": 0.028181818181818183
+    }
+  },
+  "boundaries": {
+    "retained_rss": {
+      "status": "unavailable",
+      "reason": "the fresh runner process exits after each sample"
+    },
+    "contention": {
+      "status": "not_applicable",
+      "reason": "the fixture uses one JavaScript thread and one context"
+    },
+    "code_size": {
+      "status": "same_binary",
+      "value": 9235240,
+      "reason": "runtime-disabled and runtime-enabled states execute the exact same binary"
+    }
+  }
+}

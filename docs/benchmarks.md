@@ -177,6 +177,15 @@ Runs default to `diagnostic`. A negligible-overhead publication claim requires
 fails closed unless the captured power state is AC. Battery/hosted results stay
 visible as diagnostic artifacts and cannot satisfy the reference-host gate.
 
+The first full-work diagnostic is the seven-pair
+[`instrumentation-overhead-diagnostic-2026-08-04.md`](.data/instrumentation-overhead-diagnostic-2026-08-04.md)
+report with
+[`instrumentation-overhead-diagnostic-2026-08-04.json`](.data/instrumentation-overhead-diagnostic-2026-08-04.json)
+raw samples. It names exact revision
+`2fa97532c28dda7391b9ce1d083852495d10c92f` and its battery/discharging power
+state; it validates the complete collection path but makes no negligible-cost
+claim.
+
 ## Stable attribution and exact-parent A/Bs
 
 [`performance-attribution-schema-v1.json`](.data/performance-attribution-schema-v1.json)
