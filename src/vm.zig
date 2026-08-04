@@ -7515,11 +7515,19 @@ fn continueAsyncDisposal(vm: *Interpreter, state: *AsyncDisposeCompletion, rejec
 }
 
 fn completeAsyncWithDisposal(vm: *Interpreter, g: *Generator, result_value: Value, pending: ?Value) EvalError!void {
+    var combined_pending = pending;
+    if (g.env.dispose_pending) |earlier| {
+        g.env.dispose_pending = null;
+        if (pending) |this_err|
+            combined_pending = try suppressDisposeError(vm, earlier, this_err)
+        else
+            combined_pending = earlier;
+    }
     const state = try vm.arena.create(AsyncDisposeCompletion);
     state.* = .{
         .gen = g,
         .index = g.env.disposables.items.len,
-        .pending = pending,
+        .pending = combined_pending,
         .result_value = result_value,
     };
     try continueAsyncDisposal(vm, state, null);
@@ -7545,6 +7553,10 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
                 // An awaited rejection: route to a handler, else reject the result.
                 if (!try injectThrowAt(vm, g, val)) {
                     g.done = true;
+                    if (g.env.disposables.items.len > 0 or g.env.dispose_pending != null) {
+                        try completeAsyncWithDisposal(vm, g, Value.undef(), val);
+                        return;
+                    }
                     try promise.reject(vm, resultPromise(g), val);
                     return;
                 }
@@ -7588,7 +7600,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         const reason = vm.exception;
         vm.exception = Value.undef();
         // DisposeResources for the body's `using` resources, threading the error.
-        if (g.env.disposables.items.len > 0) {
+        if (g.env.disposables.items.len > 0 or g.env.dispose_pending != null) {
             try completeAsyncWithDisposal(vm, g, Value.undef(), reason);
             return;
         }
@@ -7605,6 +7617,10 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
             const reason = vm.exception;
             vm.exception = Value.undef();
             g.done = true;
+            if (g.env.disposables.items.len > 0 or g.env.dispose_pending != null) {
+                try completeAsyncWithDisposal(vm, g, Value.undef(), reason);
+                return;
+            }
             try promise.reject(vm, resultPromise(g), reason);
             return;
         };
@@ -7622,7 +7638,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     }
     g.done = true;
     // DisposeResources for the body's top-level `using` resources at completion.
-    if (g.env.disposables.items.len > 0) {
+    if (g.env.disposables.items.len > 0 or g.env.dispose_pending != null) {
         try completeAsyncWithDisposal(vm, g, v, null);
         return;
     }
@@ -8224,6 +8240,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .name = tmpl.name,
         .source = tmpl.source,
         .bytecode_admission_reason = admission_reason,
+        .bytecode_execution_mode = vm.bytecode_execution_mode,
         .uses_arguments = tmpl.uses_arguments,
         .is_generator = tmpl.is_generator,
         .is_async = tmpl.is_async,
@@ -8233,6 +8250,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .chunk = if (tmpl.is_generator or tmpl.is_async) null else tmpl.chunk,
         .vm_inline_calls_safe = if (tmpl.chunk) |compiled| interp.vmChunkAllowsInlineCalls(compiled) else false,
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
+        .async_chunk = if (tmpl.is_async and !tmpl.is_generator) tmpl.chunk else null,
         .frame = frame,
         .local_count = tmpl.local_count,
         .is_method = tmpl.is_method,
@@ -8353,6 +8371,7 @@ const Activation = struct {
     saved_imo: ?*value.Object,
     saved_cur_module: []const u8,
     saved_eval_nt: bool,
+    saved_bytecode_execution_mode: interp.BytecodeExecutionMode,
     saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
     saved_debug_call_frame: ?*interp.DebugCallFrame,
     saved_stack_trace_call_frame: ?*interp.StackTraceCallFrame,
@@ -8414,6 +8433,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_imo = undefined,
         .saved_cur_module = undefined,
         .saved_eval_nt = undefined,
+        .saved_bytecode_execution_mode = undefined,
         .saved_pm = undefined,
         .saved_debug_call_frame = undefined,
         .saved_stack_trace_call_frame = undefined,
@@ -8456,6 +8476,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_imo = vm.import_meta_obj,
         .saved_cur_module = vm.cur_module,
         .saved_eval_nt = vm.direct_eval_new_target_allowed,
+        .saved_bytecode_execution_mode = vm.bytecode_execution_mode,
         .saved_pm = vm.current_private_map,
         .saved_debug_call_frame = vm.debug_call_frame,
         .saved_stack_trace_call_frame = vm.stack_trace_call_frame,
@@ -8481,6 +8502,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     if (func.realm_global) |global| vm.global_object = global;
     vm.new_target = if (func.is_arrow) func.arrow_new_target else new_target;
     vm.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
+    vm.bytecode_execution_mode = func.bytecode_execution_mode;
     vm.import_meta_slot = func.import_meta_slot;
     vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
     vm.cur_module = func.module_referrer;
@@ -8543,6 +8565,7 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.import_meta_obj = act.saved_imo;
     vm.cur_module = act.saved_cur_module;
     vm.direct_eval_new_target_allowed = act.saved_eval_nt;
+    vm.bytecode_execution_mode = act.saved_bytecode_execution_mode;
     vm.current_private_map = act.saved_pm;
     vm.debug_call_frame = act.saved_debug_call_frame;
     vm.stack_trace_call_frame = act.saved_stack_trace_call_frame;
@@ -8560,6 +8583,7 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_imo = src.saved_imo;
     dst.saved_cur_module = src.saved_cur_module;
     dst.saved_eval_nt = src.saved_eval_nt;
+    dst.saved_bytecode_execution_mode = src.saved_bytecode_execution_mode;
     dst.saved_pm = src.saved_pm;
     dst.saved_debug_call_frame = src.saved_debug_call_frame;
     dst.saved_stack_trace_call_frame = src.saved_stack_trace_call_frame;

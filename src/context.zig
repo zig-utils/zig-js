@@ -7247,6 +7247,17 @@ pub const Context = struct {
     /// Fast path: compile to bytecode and run on the VM. Programs that use
     /// constructs the compiler doesn't lower yet fall back to the tree-walker,
     /// so behavior is identical either way — the VM just handles the hot subset.
+    ///
+    /// Conformance runners may change the forced tier after installing their
+    /// own host-side assertion scaffolding. Keeping this test-only switch on
+    /// Context makes that boundary explicit without exposing it in Options.
+    pub fn setBytecodeExecutionModeForTesting(self: *Context, mode: interp.BytecodeExecutionMode) void {
+        if (self.gil) |g| if (!self.parallel_js) g.acquire();
+        defer if (self.gil) |g| if (!self.parallel_js) g.release();
+        self.assertOwnerThread();
+        self.bytecode_execution_mode = mode;
+    }
+
     pub fn evaluate(self: *Context, source: []const u8) RunError!value.Value {
         return self.evaluateWithThis(source, Value.obj(self.global_object));
     }
@@ -18593,7 +18604,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
     );
     _ = try ctx.evaluate(
         \\globalThis.templateDefault = function templateDefault(value = 1) { return value; };
-        \\globalThis.templateUnsupported = function templateUnsupported() {
+        \\globalThis.templateAccessor = function templateAccessor() {
         \\  return ({ get x() { return 1; } }).x;
         \\};
     );
@@ -18616,7 +18627,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
     }
     const template_expected = [_]struct { name: []const u8, reason: interp.BytecodeAdmissionReason }{
         .{ .name = "templateDefault", .reason = .template_plain_rejected_parameter_prologue },
-        .{ .name = "templateUnsupported", .reason = .template_plain_rejected_unsupported_lowering },
+        .{ .name = "templateAccessor", .reason = .template_plain_compiled },
     };
     for (template_expected) |entry| {
         const function_value = ctx.global_object.getOwn(entry.name) orelse return error.TestUnexpectedResult;
@@ -18724,7 +18735,7 @@ test "required bytecode rejects an uncompiled function instead of counting fallb
     const exception = ctx.exception orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("InternalError", exception.asObj().errorName());
     try std.testing.expectEqualStrings(
-        "required bytecode function has no compiled chunk",
+        "required bytecode plain function 'needsParameterPrologue' has no compiled chunk (template_plain_rejected_parameter_prologue)",
         exception.asObj().getOwn("message").?.asStr(),
     );
     const inventory = ctx.bytecodeAdmissionSnapshot();
@@ -19469,6 +19480,107 @@ test "moving GC preserves required-bytecode catch pattern environments" {
     ctx.collectGarbage();
     const after = try ctx.evaluate("catchPatternReads.reduce(function (sum, read) { return sum + read(); }, 0)");
     try std.testing.expectEqual(@as(f64, 192190), after.asNum());
+}
+
+test "required bytecode lowers object accessors consumed by catch rest" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var getterCalls = 0;
+        \\var setterValue = 0;
+        \\var source = {
+        \\  get value() { getterCalls += 1; return 2; },
+        \\  set written(value) { setterValue = value; }
+        \\};
+        \\source.written = 7;
+        \\var copied;
+        \\try { throw source; } catch ({...rest}) { copied = rest.value; }
+        \\copied + ":" + getterCalls + ":" + setterValue;
+    );
+    try std.testing.expectEqualStrings("2:1:7", result.asStr());
+}
+
+test "required bytecode program retains async function templates" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\var observed = "pending";
+        \\var overrideRejection = async function() {
+        \\  try { await Promise.reject("early"); }
+        \\  finally { return "override"; }
+        \\};
+        \\overrideRejection().then(function(value) { observed = value; });
+    );
+    const result = try ctx.evaluate("drainMicrotasks(); observed;");
+    try std.testing.expectEqualStrings("override", result.asStr());
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), inventory.count(.template_async_compiled));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_async_fallback));
+}
+
+test "required bytecode async disposal suppresses errors in reverse order" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\var disposalResult = "pending";
+        \\var firstDisposeError = new Error("sync");
+        \\var secondDisposeError = new Error("async");
+        \\async function disposeInReverseOrder() {
+        \\  using first = { [Symbol.dispose]() { throw firstDisposeError; } };
+        \\  await using second = { async [Symbol.asyncDispose]() { throw secondDisposeError; } };
+        \\}
+        \\disposeInReverseOrder().then(
+        \\  function() { disposalResult = "resolved"; },
+        \\  function(error) {
+        \\    disposalResult = [
+        \\      error instanceof SuppressedError,
+        \\      error.error === firstDisposeError,
+        \\      error.suppressed === secondDisposeError
+        \\    ].join(":");
+        \\  }
+        \\);
+    );
+    const result = try ctx.evaluate("drainMicrotasks(); disposalResult;");
+    try std.testing.expectEqualStrings("true:true:true", result.asStr());
+}
+
+test "required bytecode preserves automatic host helper provenance" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_jit = false });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\function hostHelper() {
+        \\  arguments;
+        \\  return function nestedHostHelper() { arguments; return 17; };
+        \\}
+        \\function compiledHostHelper() {
+        \\  "use strict";
+        \\  return function compiledNestedHostHelper() { return 23; };
+        \\}
+    );
+    const compiled_host_value = ctx.global_object.getOwn("compiledHostHelper") orelse return error.TestUnexpectedResult;
+    const compiled_host: *interp.Function = @ptrCast(@alignCast(compiled_host_value.asObj().jsFunction() orelse return error.TestUnexpectedResult));
+    try std.testing.expect(compiled_host.chunk != null);
+    ctx.setBytecodeExecutionModeForTesting(.required);
+    const result = try ctx.evaluate("hostHelper()();");
+    try std.testing.expectEqual(@as(f64, 17), result.asNum());
+    _ = try ctx.evaluate("globalThis.compiledNestedFromHost = compiledHostHelper();");
+    const nested_value = ctx.global_object.getOwn("compiledNestedFromHost") orelse return error.TestUnexpectedResult;
+    const nested: *interp.Function = @ptrCast(@alignCast(nested_value.asObj().jsFunction() orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(interp.BytecodeExecutionMode.automatic, nested.bytecode_execution_mode);
+    try std.testing.expectEqual(@as(f64, 23), (try ctx.evaluate("compiledNestedFromHost();")).asNum());
 }
 
 fn verifyForcedPlainDifferential(source: []const u8, state_expression: []const u8) !void {

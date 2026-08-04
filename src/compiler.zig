@@ -3256,16 +3256,14 @@ pub const Compiler = struct {
                     // Object spread lowers everywhere (`init_spread` is the same
                     // CopyDataProperties helper the tree-walker uses), so a nested
                     // non-generator function that spreads (`*g(){ yield {...(()=>({...x}))()} }`)
-                    // no longer bails the whole generator. Accessor (get/set) props
-                    // are still lowered only inside a generator (where lowering is
-                    // mandatory); plain code keeps the tree-walker's fuller path.
+                    // no longer bails the whole generator. Accessors share the
+                    // same DefineProperty path in every bytecode mode.
                     if (p.is_spread or p.accessor != .none) {
                         if (p.is_spread) {
                             try self.compileExpr(p.value); // CopyDataProperties source
                             _ = try self.chunk.emit(.init_spread, 0);
                             continue;
                         }
-                        if (!self.in_generator) return error.Unsupported;
                         // Getter/setter: push key, push the function, install.
                         if (p.key_expr) |ke| {
                             try self.compileExpr(ke);
@@ -3619,17 +3617,14 @@ pub const Compiler = struct {
     }
 
     fn compileFunction(self: *Compiler, fnode: *const ast.FunctionNode, named_expr: bool) CompileError!u32 {
-        // Async functions tree-walk (the Promise runtime isn't lowered yet), so
-        // bail here to force the fallback for any program that defines one.
-        if (fnode.is_async) return error.Unsupported;
-        // A nested generator runs env-mode and captures the enclosing scope BY
+        // Suspendable functions run env-mode and capture the enclosing scope BY
         // NAME (load_var). If the enclosing function is frame-mode (tiered), its
-        // locals live in frame slots the generator's environment chain can't see,
-        // so the capture would read a stale/global value. Force the enclosing
-        // function to the tree-walker, where those locals live in the Environment.
-        // (An env-mode enclosing scope — self.scope == null — captures correctly.)
-        if (fnode.is_generator and self.scope != null) return error.Unsupported;
-        if (!fnode.is_generator and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
+        // locals live in frame slots the suspendable function's Environment chain
+        // can't see, so the capture would read a stale/global value. Force that
+        // enclosing function to the tree-walker. A program/env-mode scope captures
+        // correctly and can retain the compiled generator/async template.
+        if ((fnode.is_generator or fnode.is_async) and self.scope != null) return error.Unsupported;
+        if (!fnode.is_generator and !fnode.is_async and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
         if (!fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
@@ -3645,6 +3640,10 @@ pub const Compiler = struct {
         const sub: ?*Chunk = if (fnode.is_generator) blk: {
             const compiled = try Compiler.compileGenerator(self.arena, fnode, self.debug_checkpoints);
             template_admission = .generator_compiled;
+            break :blk compiled;
+        } else if (fnode.is_async) blk: {
+            const compiled = try Compiler.compileAsync(self.arena, fnode, self.debug_checkpoints);
+            template_admission = .async_compiled;
             break :blk compiled;
         } else blk: {
             const compiled = try self.arena.create(Chunk);
@@ -3702,7 +3701,7 @@ pub const Compiler = struct {
             template_admission = .plain_compiled;
             break :blk compiled;
         };
-        if (fnode.is_generator) {
+        if (fnode.is_generator or fnode.is_async) {
             for (fnode.params) |p| _ = try scope.addLocal(self.arena, p.name, false, false);
         }
         const tmpl = try self.arena.create(bc.FnTemplate);

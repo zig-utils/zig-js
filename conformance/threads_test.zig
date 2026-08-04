@@ -1075,6 +1075,7 @@ pub fn main(init: std.process.Init) !void {
     // `-Dthreads-case=<path>` to probe a single file safely).
     var parallel_js = false;
     var force_no_jit = false;
+    var require_bytecode = false;
     var sweep = false;
     var list_mode = false;
     var one: ?[]const u8 = null;
@@ -1090,6 +1091,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, a, "no-jit")) {
             force_no_jit = true;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "required-bytecode")) {
+            require_bytecode = true;
             continue;
         }
         if (std.mem.eql(u8, a, "sweep")) sweep = true;
@@ -1236,7 +1241,12 @@ pub fn main(init: std.process.Init) !void {
         defer if (inventory_path != null) {
             execution_records.append(gpa, .{
                 .name = name,
-                .mode = if (parallel_js) "parallel-js" else "serialized",
+                .mode = if (require_bytecode)
+                    (if (parallel_js) "parallel-js-required-bytecode" else "serialized-required-bytecode")
+                else if (parallel_js)
+                    "parallel-js"
+                else
+                    "serialized",
                 .result = if (skipped != skipped_before)
                     "skip"
                 else if (failed != failed_before)
@@ -1324,6 +1334,11 @@ pub fn main(init: std.process.Init) !void {
             try buf.appendSlice(gpa, "\n");
             try buf.appendSlice(gpa, harness_src);
             try buf.appendSlice(gpa, "\n");
+            // The shared assertions and shell primitives are host scaffolding.
+            // A required-bytecode witness installs them automatically, then
+            // forces the exact corpus case (including case-specific workloads)
+            // through the VM so unsupported case code cannot hide in fallback.
+            const case_source_offset = buf.items.len;
             if (usesBenchHarness(name)) {
                 try buf.appendSlice(gpa, bench_harness_src);
                 try buf.appendSlice(gpa, "\n");
@@ -1357,6 +1372,7 @@ pub fn main(init: std.process.Init) !void {
             const heap_limit_bytes = heapLimitBytesForCase(name);
             const options = js.Context.TestingOptions{
                 .enable_jit = !force_no_jit and std.mem.indexOf(u8, directive, "--useJIT=0") == null,
+                .bytecode_execution_mode = .automatic,
                 .enable_threads = enable_threads,
                 .enable_gc = heap_limit_bytes != null or parallel_js or std.mem.indexOf(u8, test_src, "gc()") != null,
                 // No step ceiling: these are deliberately long stress scripts,
@@ -1382,6 +1398,18 @@ pub fn main(init: std.process.Init) !void {
             };
             defer ctx.destroy();
 
+            const case_source = if (require_bytecode) required: {
+                _ = ctx.evaluate(buf.items[0..case_source_offset]) catch |eval_err| {
+                    const case_ms = elapsedMs(case_started_ns, nowNs(io));
+                    recordSlowCase(&slowest, name, case_ms);
+                    std.debug.print("  FAIL  {s} ({d} ms, harness setup: {s})\n", .{ name, case_ms, @errorName(eval_err) });
+                    failed += 1;
+                    continue;
+                };
+                ctx.setBytecodeExecutionModeForTesting(.required);
+                break :required buf.items[case_source_offset..];
+            } else buf.items;
+
             // The 500ms watchdog: arms a stop flag the engine's park quanta and
             // step checkpoints poll (the engine's termination request).
             var stop = std.atomic.Value(bool).init(false);
@@ -1397,7 +1425,7 @@ pub fn main(init: std.process.Init) !void {
                 watchdog = std.Thread.spawn(.{}, Dog.run, .{&stop}) catch null;
             }
             defer if (watchdog) |w| w.join();
-            if (ctx.evaluate(buf.items)) |_| {
+            if (ctx.evaluate(case_source)) |_| {
                 if (expect_termination) {
                     const case_ms = elapsedMs(case_started_ns, nowNs(io));
                     recordSlowCase(&slowest, name, case_ms);

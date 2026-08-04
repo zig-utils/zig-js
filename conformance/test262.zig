@@ -128,6 +128,8 @@ const Outcome = enum {
     fail_other, // valid: host failure (OOM, worker crash, …)
 };
 
+const BytecodeMode = enum { automatic, tree_walker, required };
+
 /// One-char wire encoding of an `Outcome` for the worker→parent stream.
 fn outcomeChar(o: Outcome) u8 {
     return switch (o) {
@@ -372,19 +374,30 @@ fn safeHarnessIncludeName(name: []const u8) bool {
 }
 
 fn runOne(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8) Outcome {
-    return runOneDetail(gpa, io, harness, abs_path, src, null);
+    return runOneDetail(gpa, io, harness, abs_path, src, null, .automatic);
 }
 
 /// Like `runOne`, but when `detail` is non-null it captures a short human-readable
 /// reason for a valid-test failure (the thrown error's `Name: message`, or the
 /// parse error name) so the `--diag` mode can cluster failures by cause.
-fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, detail: ?*std.ArrayListUnmanaged(u8)) Outcome {
+fn runOneDetail(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    harness: *Harness,
+    abs_path: []const u8,
+    src: []const u8,
+    detail: ?*std.ArrayListUnmanaged(u8),
+    bytecode_mode: BytecodeMode,
+) Outcome {
     const meta = parseMeta(src);
     if (meta.unsupported_flag) return .skip;
-    if (meta.is_module) return runModule(gpa, io, harness, abs_path, src, meta, detail);
+    if (meta.is_module) return runModule(gpa, io, harness, abs_path, src, meta, detail, bytecode_mode);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(gpa);
+    var harness_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer harness_buf.deinit(gpa);
+    const harness_target = if (bytecode_mode == .automatic) &buf else &harness_buf;
     // `onlyStrict` tests carry no directive of their own — the harness supplies
     // it. Prepended before everything so the whole program (harness included)
     // is strict-mode code, as the spec requires.
@@ -399,27 +412,27 @@ fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path:
         const sta = harness.get("sta.js");
         const ass = harness.get("assert.js");
         if (sta != null and ass != null) {
-            buf.appendSlice(gpa, sta.?) catch return .skip;
-            buf.append(gpa, '\n') catch return .skip;
-            buf.appendSlice(gpa, ass.?) catch return .skip;
-            buf.append(gpa, '\n') catch return .skip;
+            harness_target.appendSlice(gpa, sta.?) catch return .skip;
+            harness_target.append(gpa, '\n') catch return .skip;
+            harness_target.appendSlice(gpa, ass.?) catch return .skip;
+            harness_target.append(gpa, '\n') catch return .skip;
         } else {
-            buf.appendSlice(gpa, harness_shim) catch return .skip;
+            harness_target.appendSlice(gpa, harness_shim) catch return .skip;
         }
         var i: usize = 0;
         while (i < meta.includes_n) : (i += 1) {
             const inc = harnessIncludeOverride(abs_path, meta.includes[i]) orelse
                 harness.get(meta.includes[i]) orelse return .skip; // can't load → skip
-            buf.appendSlice(gpa, inc) catch return .skip;
-            buf.append(gpa, '\n') catch return .skip;
+            harness_target.appendSlice(gpa, inc) catch return .skip;
+            harness_target.append(gpa, '\n') catch return .skip;
         }
         // Async tests signal completion via `$DONE`, defined in
         // doneprintHandle.js — which the harness auto-provides for the `async`
         // flag rather than listing in `includes:`.
         if (meta.is_async) {
             if (harness.get("doneprintHandle.js")) |dph| {
-                buf.appendSlice(gpa, dph) catch return .skip;
-                buf.append(gpa, '\n') catch return .skip;
+                harness_target.appendSlice(gpa, dph) catch return .skip;
+                harness_target.append(gpa, '\n') catch return .skip;
             }
         }
     }
@@ -437,8 +450,10 @@ fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path:
         .enable_gc = true,
         .parallel_gc = true,
         .parallel_js = true,
+        .bytecode_execution_mode = .automatic,
     } else .{
         .main_can_block = !meta.can_block_false,
+        .bytecode_execution_mode = .automatic,
     }) catch return .skip;
     defer ctx.destroy();
 
@@ -453,6 +468,18 @@ fn runOneDetail(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path:
     ctx.mod_host = .{ .ctx = &host, .load = modLoad };
     ctx.mod_cache = &imp_cache;
     ctx.script_referrer = abs_path;
+
+    if (bytecode_mode != .automatic) {
+        _ = ctx.evaluate(harness_buf.items) catch |err| {
+            if (detail) |d| captureDetail(gpa, ctx, err, d);
+            return .fail_other;
+        };
+        ctx.setBytecodeExecutionModeForTesting(switch (bytecode_mode) {
+            .automatic => unreachable,
+            .tree_walker => .tree_walker,
+            .required => .required,
+        });
+    }
 
     if (ctx.evaluate(buf.items)) |_| {
         if (meta.negative) return .fail_negative;
@@ -580,7 +607,7 @@ fn runDiag(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8
         const abs_path = maybe_abs orelse entry.basename;
         var detail: std.ArrayListUnmanaged(u8) = .empty;
         defer detail.deinit(gpa);
-        const o = runOneDetail(gpa, io, &harness, abs_path, src, &detail);
+        const o = runOneDetail(gpa, io, &harness, abs_path, src, &detail, .automatic);
         if (o == .pass or o == .pass_negative) {
             n_pass += 1;
             continue;
@@ -598,6 +625,60 @@ fn runDiag(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8
     var sb: [128]u8 = undefined;
     const summary = std.fmt.bufPrint(&sb, "# {s}: {d} fail, {d} pass\n", .{ sub, n_fail, n_pass }) catch return;
     out.writeStreamingAll(io, summary) catch {};
+}
+
+/// Run one checked-in positive test twice: with plain synchronous functions
+/// forced onto the tree walker, then with every eligible program/template
+/// required to compile. The test262 assertions (including `$DONE`) are the
+/// result, exception, side-effect, and async-order oracle; `required` turns any
+/// compiler/template fallback into a hard failure instead of false VM coverage.
+fn runVmWitness(gpa: std.mem.Allocator, io: std.Io, root: []const u8, relative_path: []const u8) !void {
+    const out = std.Io.File.stdout();
+    if (!std.mem.endsWith(u8, relative_path, ".js") or
+        std.mem.endsWith(u8, relative_path, "_FIXTURE.js") or
+        shouldRemovePathFromConfiguredCorpus(relative_path, relative_path) or
+        shouldExcludePath(relative_path, relative_path) or
+        shouldSkipPath(relative_path, relative_path))
+    {
+        return error.Test262Failures;
+    }
+    const abs_path = resolveUnderRoot(gpa, root, relative_path) orelse return error.Test262Failures;
+    defer gpa.free(abs_path);
+    const src = std.Io.Dir.cwd().readFileAlloc(io, abs_path, gpa, .limited(max_test_source_bytes)) catch
+        return error.Test262Failures;
+    defer gpa.free(src);
+    if (parseMeta(src).negative) return error.Test262Failures;
+
+    const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return error.Test262Failures;
+    defer gpa.free(harness_path);
+    var harness = Harness{ .io = io, .gpa = gpa, .dir = std.Io.Dir.cwd().openDir(io, harness_path, .{}) catch null };
+    defer harness.deinit();
+
+    const modes = [_]BytecodeMode{ .tree_walker, .required };
+    var outcomes: [modes.len]Outcome = undefined;
+    for (modes, 0..) |mode, index| {
+        var detail: std.ArrayListUnmanaged(u8) = .empty;
+        defer detail.deinit(gpa);
+        outcomes[index] = runOneDetail(gpa, io, &harness, abs_path, src, &detail, mode);
+        if (outcomes[index] != .pass) {
+            var line_buf: [1024]u8 = undefined;
+            const line = std.fmt.bufPrint(&line_buf, "VM witness FAIL {s} ({s}: {s})\n", .{
+                relative_path,
+                @tagName(mode),
+                detail.items,
+            }) catch "VM witness FAIL\n";
+            out.writeStreamingAll(io, line) catch {};
+            return error.Test262Failures;
+        }
+    }
+    if (outcomes[0] != outcomes[1]) return error.Test262Failures;
+    var line_buf: [1024]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "VM witness PASS {s} (tree-walker={s}, required-bytecode={s})\n", .{
+        relative_path,
+        @tagName(outcomes[0]),
+        @tagName(outcomes[1]),
+    }) catch "VM witness PASS\n";
+    out.writeStreamingAll(io, line) catch {};
 }
 
 /// Host state for the module loader: read a fixture relative to the importing
@@ -664,7 +745,16 @@ fn modLoad(ctx: *anyopaque, referrer: []const u8, specifier: []const u8, out_pat
 
 /// Run a `flags: [module]` test: install the harness in the global scope, then
 /// link + evaluate the test body as a Module against its sibling fixtures.
-fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []const u8, src: []const u8, meta: Meta, detail: ?*std.ArrayListUnmanaged(u8)) Outcome {
+fn runModule(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    harness: *Harness,
+    abs_path: []const u8,
+    src: []const u8,
+    meta: Meta,
+    detail: ?*std.ArrayListUnmanaged(u8),
+    bytecode_mode: BytecodeMode,
+) Outcome {
     if (meta.negative_resolution and !moduleRootParses(gpa, src)) return .fail_negative;
     // `-Dtest262-parallel-js` runs every test in a GIL-free parallel context:
     // the test JS is single-threaded, so this doesn't probe concurrency races,
@@ -678,8 +768,10 @@ fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []
         .enable_gc = true,
         .parallel_gc = true,
         .parallel_js = true,
+        .bytecode_execution_mode = .automatic,
     } else .{
         .main_can_block = !meta.can_block_false,
+        .bytecode_execution_mode = .automatic,
     }) catch return .skip;
     defer ctx.destroy();
     if (!meta.raw) {
@@ -707,6 +799,13 @@ fn runModule(gpa: std.mem.Allocator, io: std.Io, harness: *Harness, abs_path: []
             }
         }
         _ = ctx.evaluate(hbuf.items) catch {};
+    }
+    if (bytecode_mode != .automatic) {
+        ctx.setBytecodeExecutionModeForTesting(switch (bytecode_mode) {
+            .automatic => unreachable,
+            .tree_walker => .tree_walker,
+            .required => .required,
+        });
     }
     const root_abs = std.fs.path.resolve(gpa, &.{build_options.root}) catch return .skip;
     defer gpa.free(root_abs);
@@ -1070,6 +1169,15 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, mode, "--eval")) {
             const path = args.next() orelse return;
             return runEval(gpa, io, path);
+        }
+        if (std.mem.eql(u8, mode, "--vm-witness")) {
+            var count: usize = 0;
+            while (args.next()) |path| {
+                try runVmWitness(gpa, io, root, path);
+                count += 1;
+            }
+            if (count == 0) return error.Test262Failures;
+            return;
         }
         if (std.mem.eql(u8, mode, "--list-skips")) {
             return runListSkips(gpa, io, root);

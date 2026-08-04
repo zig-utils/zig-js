@@ -1653,6 +1653,42 @@ pub fn build(b: *std.Build) void {
     const test262_bin_step = b.step("test262-bin", "Build the test262 runner exe only (no run)");
     test262_bin_step.dependOn(&test262_install.step);
 
+    // Real-corpus forced-tier witnesses for #465. test262 assertions provide
+    // result/exception/side-effect/async-order oracles; required-bytecode turns
+    // every compiler or nested-template fallback into a hard failure. PR-249
+    // cases run with JIT disabled in both serialized and no-GIL modes. Chain the
+    // three runners so their process cleanup can never interfere.
+    const run_test262_vm_witness = b.addRunArtifact(test262);
+    run_test262_vm_witness.addArgs(&.{
+        "--vm-witness",
+        "test/language/statements/try/dstr/obj-ptrn-rest-getter.js",
+        "test/language/statements/try/dstr/ary-init-iter-close.js",
+        "test/language/expressions/async-function/try-reject-finally-return.js",
+        "test/staging/explicit-resource-management/await-using-mixed-throws-suppressed-error-from-sync-and-async-disposals.js",
+    });
+    const run_threads_vm_witness = b.addRunArtifact(threads_test);
+    run_threads_vm_witness.addArgs(&.{
+        "required-bytecode",
+        "no-jit",
+        "one",
+        "lifecycle/join-semantics.js",
+    });
+    run_threads_vm_witness.step.dependOn(&run_test262_vm_witness.step);
+    const run_threads_vm_witness_parallel = b.addRunArtifact(threads_test);
+    run_threads_vm_witness_parallel.addArgs(&.{
+        "parallel-js",
+        "required-bytecode",
+        "no-jit",
+        "one",
+        "lifecycle/join-semantics.js",
+    });
+    run_threads_vm_witness_parallel.step.dependOn(&run_threads_vm_witness.step);
+    const vm_corpus_witness_step = b.step(
+        "vm-corpus-witness",
+        "Run forced tree-walker/VM test262 and serialized/no-GIL PR-249 witnesses",
+    );
+    vm_corpus_witness_step.dependOn(&run_threads_vm_witness_parallel.step);
+
     // THROWAWAY parse-failure diagnostic.
     const diag = b.addExecutable(.{
         .name = "diag",

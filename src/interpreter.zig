@@ -1066,6 +1066,11 @@ pub const Function = struct {
     /// Exact bytecode admission decision retained on the function for causal
     /// profiles. `.synthetic` is reserved for host/test-created Function cells.
     bytecode_admission_reason: BytecodeAdmissionReason = .synthetic,
+    /// Tier contract active when this function's source was evaluated. A
+    /// conformance runner may install automatic host helpers before evaluating
+    /// required corpus code; later calls must preserve each function's own
+    /// provenance rather than inherit the caller's current harness mode.
+    bytecode_execution_mode: BytecodeExecutionMode = .automatic,
     /// Compiled body for the bytecode VM. Set by `makeFunction` (and the VM's
     /// `make_closure`) via `compilePlainFunction` when a plain function's body
     /// lowers to bytecode — see `plainFunctionPolicyRejection` — so tree-walk-
@@ -2824,6 +2829,16 @@ pub const Interpreter = struct {
         self.exception = try self.makeError(name, message);
         try self.notifyDebuggerException(false);
         return error.Throw;
+    }
+
+    fn throwMissingRequiredChunk(self: *Interpreter, func: *const Function, kind: []const u8) EvalError {
+        const function_name = if (func.name.len == 0) "<anonymous>" else func.name;
+        const message = try std.fmt.allocPrint(self.arena, "required bytecode {s} function '{s}' has no compiled chunk ({s})", .{
+            kind,
+            function_name,
+            @tagName(func.bytecode_admission_reason),
+        });
+        return self.throwError("InternalError", message);
     }
 
     /// Raise an engine-originated exception that WebAssembly `try_table` must
@@ -5050,6 +5065,7 @@ pub const Interpreter = struct {
             .name = fnode.name,
             .definition_location = self.debug_current_location,
             .source = fnode.source,
+            .bytecode_execution_mode = self.bytecode_execution_mode,
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
@@ -6567,6 +6583,9 @@ pub const Interpreter = struct {
     /// `callFunction` with an explicit `new.target` (set by `construct`; a plain
     /// call passes undefined). Arrow functions inherit the enclosing new.target.
     fn callFunctionNT(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+        const saved_bytecode_execution_mode = self.bytecode_execution_mode;
+        self.bytecode_execution_mode = func.bytecode_execution_mode;
+        defer self.bytecode_execution_mode = saved_bytecode_execution_mode;
         // Under `parallel_js` the concurrent parallel marker does NOT conservatively
         // scan a running peer's native stack, so `func` — reachable only through this
         // thread's stack while the call is in flight — can be swept mid-call and its
@@ -6596,6 +6615,8 @@ pub const Interpreter = struct {
             // by promise settlement (spec-correct await ordering). Otherwise fall
             // back to the synchronous-settling tree-walk model below.
             if (func.async_chunk) |_| return vm.runAsync(self, func, args, this_val);
+            if (func.bytecode_execution_mode == .required)
+                return self.throwMissingRequiredChunk(func, "async");
             const result = try promise.newPromise(self);
             const rp: *promise.Promise = @ptrCast(@alignCast(result.promiseData().?));
             if (self.callPlain(func, args, this_val, new_target)) |rv| {
@@ -6625,8 +6646,8 @@ pub const Interpreter = struct {
             return throwClassConstructorCallError(self, func);
         if (!func.is_generator and !func.is_async) {
             if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
-            if (self.bytecode_execution_mode == .required)
-                return self.throwError("InternalError", "required bytecode function has no compiled chunk");
+            if (func.bytecode_execution_mode == .required)
+                return self.throwMissingRequiredChunk(func, "plain");
         }
         var cur_func = func;
         var cur_args = args;
@@ -6643,8 +6664,8 @@ pub const Interpreter = struct {
             if (next_func.is_generator or next_func.is_async or next_func.is_class_constructor)
                 return self.callValue(tail.callee, tail.args);
             if (next_func.chunk) |fchunk| return vm.runFunction(self, next_func, fchunk, tail.args, Value.undef(), Value.undef());
-            if (self.bytecode_execution_mode == .required)
-                return self.throwError("InternalError", "required bytecode function has no compiled chunk");
+            if (next_func.bytecode_execution_mode == .required)
+                return self.throwMissingRequiredChunk(next_func, "plain");
             cur_func = next_func;
             cur_args = tail.args;
             cur_this = Value.undef();
