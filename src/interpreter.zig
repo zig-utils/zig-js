@@ -11761,41 +11761,7 @@ pub const Interpreter = struct {
             }
         }
         if (rest) |rest_target| {
-            const rest_obj = try self.newObject();
-            if (val.isObject()) {
-                // Object rest copies only enumerable own properties, in
-                // [[OwnPropertyKeys]] order. That includes dense array indexes and
-                // symbol keys, not just named shape slots.
-                const vo = val.asObj();
-                const keys = try self.objectOwnKeysList(vo);
-                outer: for (keys) |k| {
-                    if (value.isPrivateKey(k)) continue;
-                    for (consumed.items) |c| {
-                        if (std.mem.eql(u8, c, k)) continue :outer;
-                    }
-                    const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ val, try self.keyToValue(k) });
-                    if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
-                    // Copy via [[Get]] so an accessor's getter runs (and a data
-                    // property's value is read), landing as a plain data prop.
-                    try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
-                }
-            } else if (val.isString()) {
-                // ToObject(string): a String exotic object whose own *enumerable*
-                // properties are its UTF-16 index chars (`{...r} = "foo"` ⇒
-                // r = {0:"f",1:"o",2:"o"}; `length` is non-enumerable). Other
-                // primitives (number/boolean/symbol/bigint) have no own enumerable
-                // properties, so their rest object is correctly empty.
-                const s = val.asStr();
-                const n = utf16LenOfString(s);
-                var i: usize = 0;
-                outer_str: while (i < n) : (i += 1) {
-                    const k = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-                    for (consumed.items) |c| {
-                        if (std.mem.eql(u8, c, k)) continue :outer_str;
-                    }
-                    try self.setProp(rest_obj.asObj(), k, try self.elementAt(val, i));
-                }
-            }
+            const rest_obj = try self.copyObjectRest(val, consumed.items);
             // A declaration binds the rest name; an assignment writes through the
             // target reference — which may be a member (`({...obj.y} = …)`), so it
             // runs a setter / honors a const binding like any other assignment.
@@ -11805,6 +11771,54 @@ pub const Interpreter = struct {
                 try self.assignTo(rest_target, rest_obj);
             }
         }
+    }
+
+    /// CopyDataProperties for object binding-rest. Excluded keys have already
+    /// undergone ToPropertyKey, so this helper performs no user-visible coercion.
+    fn copyObjectRest(self: *Interpreter, val: Value, excluded: []const []const u8) EvalError!Value {
+        if (val.isUndefined() or val.isNull())
+            return self.throwError("TypeError", "cannot destructure null or undefined");
+        const rest_obj = try self.newObject();
+        if (val.isObject()) {
+            // Object rest copies only enumerable own properties, in
+            // [[OwnPropertyKeys]] order. That includes dense array indexes and
+            // symbol keys, not just named shape slots.
+            const vo = val.asObj();
+            const keys = try self.objectOwnKeysList(vo);
+            outer: for (keys) |k| {
+                if (value.isPrivateKey(k)) continue;
+                for (excluded) |excluded_key| {
+                    if (std.mem.eql(u8, excluded_key, k)) continue :outer;
+                }
+                const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ val, try self.keyToValue(k) });
+                if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
+                // Copy via [[Get]] so an accessor's getter runs (and a data
+                // property's value is read), landing as a plain data prop.
+                try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
+            }
+        } else if (val.isString()) {
+            // ToObject(string): a String exotic object whose own *enumerable*
+            // properties are its UTF-16 index chars (`{...r} = "foo"` ⇒
+            // r = {0:"f",1:"o",2:"o"}; `length` is non-enumerable). Other
+            // primitives (number/boolean/symbol/bigint) have no own enumerable
+            // properties, so their rest object is correctly empty.
+            const n = utf16LenOfString(val.asStr());
+            var i: usize = 0;
+            outer_str: while (i < n) : (i += 1) {
+                const k = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+                for (excluded) |excluded_key| {
+                    if (std.mem.eql(u8, excluded_key, k)) continue :outer_str;
+                }
+                try self.setProp(rest_obj.asObj(), k, try self.elementAt(val, i));
+            }
+        }
+        return rest_obj;
+    }
+
+    pub fn objectRestVM(self: *Interpreter, val: Value, excluded_values: []const Value) EvalError!Value {
+        var excluded: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (excluded_values) |key| try excluded.append(self.arena, try self.keyOf(key));
+        return self.copyObjectRest(val, excluded.items);
     }
 
     fn destructureArray(self: *Interpreter, elems: []ast.ArrPatElem, rest: ?*Node, val: Value, declare: bool) EvalError!void {

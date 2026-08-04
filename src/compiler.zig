@@ -221,8 +221,7 @@ fn loopBodyCapturesLexical(body: *const ast.Node) bool {
 }
 
 /// Captured declarations can use a declarative environment at the block that
-/// owns them. Yield-free destructuring is exact when its keys/defaults need no
-/// evaluation; nested loops establish their own repeated-body root.
+/// owns them. Nested loops establish their own repeated-body root.
 fn repeatedBodyCapturesSupported(node: *const ast.Node, body: *const ast.Node) bool {
     return switch (node.*) {
         .var_decl => true,
@@ -233,7 +232,7 @@ fn repeatedBodyCapturesSupported(node: *const ast.Node, body: *const ast.Node) b
         },
         .destructure_decl => |declaration| blk: {
             const captured = declaration.kind != .@"var" and patternNameCaptured(declaration.pattern, body);
-            break :blk !captured or (!nodeHasYield(declaration.pattern) and !patternHasEvaluationExpressions(declaration.pattern));
+            break :blk !captured or patternSupportsEnvironmentNode(declaration.pattern);
         },
         .block => |statements| blk: {
             for (statements) |statement| if (!repeatedBodyCapturesSupported(statement, body)) break :blk false;
@@ -260,6 +259,24 @@ fn repeatedBodyCapturesSupported(node: *const ast.Node, body: *const ast.Node) b
         // Nested iteration statements compile their own body with a new root.
         .while_stmt, .do_while_stmt, .for_stmt, .for_in => true,
         else => true,
+    };
+}
+
+fn patternSupportsEnvironmentNode(pattern: *const ast.Node) bool {
+    return switch (pattern.*) {
+        .identifier => true,
+        .obj_pattern => |object| blk: {
+            for (object.props) |property| if (!patternSupportsEnvironmentNode(property.target)) break :blk false;
+            if (object.rest) |rest| if (!patternSupportsEnvironmentNode(rest)) break :blk false;
+            break :blk true;
+        },
+        .arr_pattern => |array| blk: {
+            for (array.elems) |element| if (element.target) |target|
+                if (!patternSupportsEnvironmentNode(target)) break :blk false;
+            if (array.rest) |rest| if (!patternSupportsEnvironmentNode(rest)) break :blk false;
+            break :blk true;
+        },
+        else => false,
     };
 }
 
@@ -316,17 +333,6 @@ fn patternHasEvaluationExpressions(pattern: *const ast.Node) bool {
             break :blk false;
         },
         else => true,
-    };
-}
-
-fn loopHeadPatternHasEvaluationExpressions(node: *const ast.Node) bool {
-    return switch (node.*) {
-        .destructure_decl => |declaration| declaration.kind != .@"var" and patternHasEvaluationExpressions(declaration.pattern),
-        .decl_group => |group| blk: {
-            for (group) |declaration| if (loopHeadPatternHasEvaluationExpressions(declaration)) break :blk true;
-            break :blk false;
-        },
-        else => false,
     };
 }
 
@@ -1441,21 +1447,7 @@ pub const Compiler = struct {
     }
 
     fn patternSupportsEnvironment(pattern: *const Node) bool {
-        return switch (pattern.*) {
-            .identifier => true,
-            .obj_pattern => |object| blk: {
-                for (object.props) |property| if (!patternSupportsEnvironment(property.target)) break :blk false;
-                if (object.rest) |rest| if (!patternSupportsEnvironment(rest)) break :blk false;
-                break :blk true;
-            },
-            .arr_pattern => |array| blk: {
-                for (array.elems) |element| if (element.target) |target|
-                    if (!patternSupportsEnvironment(target)) break :blk false;
-                if (array.rest) |rest| if (!patternSupportsEnvironment(rest)) break :blk false;
-                break :blk true;
-            },
-            else => false,
-        };
+        return patternSupportsEnvironmentNode(pattern);
     }
 
     fn markEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
@@ -1741,6 +1733,13 @@ pub const Compiler = struct {
             .destructure_decl => |d| {
                 const environment_pattern = self.scope != null and self.patternUsesEnvironment(d.pattern);
                 if (self.scope != null and !environment_pattern) return error.Unsupported;
+                if (environment_pattern and patternHasEvaluationExpressions(d.pattern)) {
+                    try self.compileExpr(d.init);
+                    const src = try self.freshTemp();
+                    try self.emitDefine(src);
+                    try self.compilePattern(d.pattern, src, .{ .environment_lexical = d.kind == .@"const" });
+                    return;
+                }
                 if (nodeHasYield(d.pattern)) {
                     if (d.kind != .@"var" or environment_pattern) return error.Unsupported;
                     try self.emitPatternVarDecls(d.pattern);
@@ -2135,13 +2134,11 @@ pub const Compiler = struct {
         // A captured lexical head uses a real declarative Environment Record:
         // closures capture that record, and the update edge replaces it with a
         // value-copied record per CreatePerIterationEnvironment. Uncaptured heads
-        // retain O(1) frame slots. Destructuring default/computed evaluation,
-        // yield-bearing patterns stay on the exact fallback until their
-        // lowering lands.
+        // retain O(1) frame slots. Environment-backed patterns lower their
+        // defaults and computed keys as bytecode in the active binding scope.
         if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
         const captured_head = if (init_node) |ini| forLoopCapturesLexical(ini, cond, update, body) else false;
-        if (captured_head and (!loopHeadSupportsEnvironment(init_node.?) or nodeHasYield(init_node.?) or
-            loopHeadPatternHasEvaluationExpressions(init_node.?)))
+        if (captured_head and !loopHeadSupportsEnvironment(init_node.?))
             return error.Unsupported;
         if (loopBodyCapturesLexical(body) and !repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
         const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
@@ -2234,6 +2231,12 @@ pub const Compiler = struct {
             try self.compileAssignPattern(target, src);
             return;
         }
+        if (force_environment and patternHasEvaluationExpressions(target)) {
+            const src = try self.freshTemp();
+            try self.emitDefine(src);
+            try self.compilePattern(target, src, .{ .environment_lexical = decl_kind.? == .@"const" });
+            return;
+        }
         // `bind_pattern` destructures into the live environment. That is the
         // binding scope in env-mode and for a captured head whose static names
         // were deliberately mapped to the active per-iteration environment. An
@@ -2252,15 +2255,14 @@ pub const Compiler = struct {
         // A captured simple lexical target uses a fresh declarative Environment
         // Record for every iterator result. That is the ForIn/OfBodyEvaluation
         // binding cell the closure captures; an uncaptured identifier stays in a
-        // frame slot. Destructuring default/computed evaluation, yield-bearing
-        // patterns retain the exact fallback until their lowering is complete.
+        // frame slot. Environment-backed patterns lower defaults and computed
+        // keys directly, so every iterator result initializes the fresh record.
         const captured_binding = if (decl_kind) |kind|
             kind != .@"var" and forOfCapturesLexical(target, var_init, iterable, body)
         else
             false;
         if (loopBodyCapturesLexical(body) and !repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
-        if (captured_binding and (!patternSupportsEnvironment(target) or nodeHasYield(target) or
-            patternHasEvaluationExpressions(target))) return error.Unsupported;
+        if (captured_binding and !patternSupportsEnvironment(target)) return error.Unsupported;
         const lexical_scope = self.scope != null and if (decl_kind) |kind|
             kind != .@"var" and (target.* == .identifier or captured_binding)
         else
@@ -2439,10 +2441,19 @@ pub const Compiler = struct {
         }
     }
 
+    const PatternMode = union(enum) {
+        assignment,
+        environment_lexical: bool,
+    };
+
     fn compileAssignPattern(self: *Compiler, pattern: *Node, src: []const u8) CompileError!void {
+        try self.compilePattern(pattern, src, .assignment);
+    }
+
+    fn compilePattern(self: *Compiler, pattern: *Node, src: []const u8, mode: PatternMode) CompileError!void {
         switch (pattern.*) {
-            .arr_pattern => |p| try self.compileArrayAssign(p.elems, p.rest, src),
-            .obj_pattern => |p| try self.compileObjectAssign(p.props, p.rest, src),
+            .arr_pattern => |p| try self.compileArrayPattern(p.elems, p.rest, src, mode),
+            .obj_pattern => |p| try self.compileObjectPattern(p.props, p.rest, src, mode),
             else => return error.Unsupported,
         }
     }
@@ -2450,19 +2461,27 @@ pub const Compiler = struct {
     /// Assign the value held in temp `val` to a destructuring target — an
     /// identifier, a member reference (whose base/key were already evaluated
     /// into `ref`), or a nested pattern.
-    fn compileAssignToTarget(self: *Compiler, target: *Node, val: []const u8) CompileError!void {
+    fn compilePatternTarget(self: *Compiler, target: *Node, val: []const u8, mode: PatternMode) CompileError!void {
         switch (target.*) {
             .identifier => |name| {
                 try self.emitLoad(val);
-                try self.emitStore(name);
-                _ = try self.chunk.emit(.pop, 0);
+                switch (mode) {
+                    .environment_lexical => |immutable| {
+                        _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (immutable) 2 else 1);
+                    },
+                    .assignment => {
+                        try self.emitStore(name);
+                        _ = try self.chunk.emit(.pop, 0);
+                    },
+                }
             },
             .arr_pattern, .obj_pattern => {
-                // A yield-free nested pattern reuses the tree-walker (handles
-                // RequireObjectCoercible and every edge case); a yield-bearing
-                // one recurses into bytecode.
-                if (nodeHasYield(target)) {
-                    try self.compileAssignPattern(target, val);
+                // Environment-backed binding patterns stay entirely in bytecode:
+                // defaults and computed keys must run in the current activation.
+                // Assignment patterns retain the compact tree-walker operation
+                // unless a suspension point requires resumable lowering.
+                if (mode == .environment_lexical or nodeHasYield(target)) {
+                    try self.compilePattern(target, val, mode);
                 } else {
                     try self.emitLoad(val);
                     const pi = try self.chunk.addPattern(target);
@@ -2471,6 +2490,13 @@ pub const Compiler = struct {
             },
             else => return error.Unsupported, // member handled separately (ordered ref eval)
         }
+    }
+
+    fn emitPatternDefault(self: *Compiler, default: *Node, target: *Node, val: []const u8) CompileError!void {
+        try self.compileExpr(default);
+        if (target.* == .identifier) try self.emitNamedEval(default, target.identifier);
+        try self.emitStore(val);
+        _ = try self.chunk.emit(.pop, 0);
     }
 
     /// Pre-evaluate a member target's base (and computed key) into fresh temps,
@@ -2524,7 +2550,7 @@ pub const Compiler = struct {
     /// IteratorClose when destructuring stops before exhausting the iterator —
     /// on a normal early stop AND on an abrupt completion (a `yield` resumed
     /// with `.return()`/`.throw()` mid-destructure), via a finally handler.
-    fn compileArrayAssign(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, src: []const u8) CompileError!void {
+    fn compileArrayPattern(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, src: []const u8, mode: PatternMode) CompileError!void {
         const none = std.math.maxInt(u32);
         try self.emitLoad(src);
         _ = try self.chunk.emit(.iter_of, 0);
@@ -2538,7 +2564,7 @@ pub const Compiler = struct {
         // completion (return/throw injected at an embedded yield) still closes
         // the iterator before propagating.
         const ph = try self.chunk.emitAB(.push_handler, none, none);
-        try self.compileArrayAssignBody(elems, rest, it, done);
+        try self.compileArrayPatternBody(elems, rest, it, done, mode);
         _ = try self.chunk.emit(.pop_handler, 0);
         _ = try self.chunk.emit(.push_completion, 0); // normal completion
         // The normal path falls straight into the finally body (which the abrupt
@@ -2554,11 +2580,11 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.end_finally, 0);
     }
 
-    fn compileArrayAssignBody(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, it: []const u8, done: []const u8) CompileError!void {
+    fn compileArrayPatternBody(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, it: []const u8, done: []const u8, mode: PatternMode) CompileError!void {
         for (elems) |elem| {
             // Spec order: evaluate the target reference first, then step the
             // iterator. Only member targets carry an observable reference eval.
-            const ref = try self.preEvalMemberRef(elem.target);
+            const ref = if (mode == .assignment) try self.preEvalMemberRef(elem.target) else null;
             // ev = undefined; if (!done) { r = it.next(); if (r.done) done = true else ev = r.value }
             const ev = try self.freshTemp();
             _ = try self.chunk.emit(.load_undefined, 0);
@@ -2595,17 +2621,20 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.load_undefined, 0);
                 _ = try self.chunk.emit(.eq_strict, 0);
                 const has_val = try self.chunk.emit(.jump_if_false, 0);
-                try self.compileExpr(d);
-                try self.emitStore(ev);
-                _ = try self.chunk.emit(.pop, 0);
+                if (elem.target) |target|
+                    try self.emitPatternDefault(d, target, ev)
+                else {
+                    try self.compileExpr(d);
+                    _ = try self.chunk.emit(.pop, 0);
+                }
                 self.chunk.patchToHere(has_val);
             }
             // assign ev to the target
             if (elem.target) |t| {
-                if (t.* == .member) {
+                if (mode == .assignment and t.* == .member) {
                     try self.storeMemberRef(t, ref.?, ev);
                 } else {
-                    try self.compileAssignToTarget(t, ev);
+                    try self.compilePatternTarget(t, ev, mode);
                 }
             }
         }
@@ -2613,7 +2642,7 @@ pub const Compiler = struct {
         if (rest) |rest_target| {
             // Spec order: evaluate the rest target reference (may yield) BEFORE
             // collecting the remaining elements.
-            const rref = try self.preEvalMemberRef(rest_target);
+            const rref = if (mode == .assignment) try self.preEvalMemberRef(rest_target) else null;
             // rest = []; while (!done) { r = it.next(); if (r.done) { done=true; break } rest.push(r.value) }
             const ra = try self.freshTemp();
             _ = try self.chunk.emit(.new_array, 0);
@@ -2645,27 +2674,41 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.jump, @intCast(top));
             self.chunk.patchToHere(to_end);
             self.chunk.patchToHere(to_end2);
-            if (rest_target.* == .member)
+            if (mode == .assignment and rest_target.* == .member)
                 try self.storeMemberRef(rest_target, rref.?, ra)
             else
-                try self.compileAssignToTarget(rest_target, ra);
+                try self.compilePatternTarget(rest_target, ra, mode);
         }
         // The enclosing finally handler performs IteratorClose when `!done`.
     }
 
     /// `{ k0: t0 = d0, ... } = src` (assignment form, in a generator).
-    fn compileObjectAssign(self: *Compiler, props: []const ast.ObjPatProp, rest: ?*ast.Node, src: []const u8) CompileError!void {
-        if (rest != null) return error.Unsupported; // object rest in a yield pattern → tree-walk fallback
+    fn compileObjectPattern(self: *Compiler, props: []const ast.ObjPatProp, rest: ?*ast.Node, src: []const u8, mode: PatternMode) CompileError!void {
+        if (mode == .assignment and rest != null) return error.Unsupported;
+        try self.emitLoad(src);
+        _ = try self.chunk.emit(.require_object_coercible, 0);
+        var excluded: std.ArrayListUnmanaged([]const u8) = .empty;
         for (props) |prop| {
             // PropertyName (may be computed and yield), then the target reference.
-            const ref = try self.preEvalMemberRef(prop.target);
+            const ref = if (mode == .assignment) try self.preEvalMemberRef(prop.target) else null;
             const ev = try self.freshTemp();
             // ev = src[key]
-            try self.emitLoad(src);
             if (prop.key_expr) |ke| {
                 try self.compileExpr(ke);
+                _ = try self.chunk.emit(.to_property_key, 0);
+                const key = try self.freshTemp();
+                try self.emitDefine(key);
+                try excluded.append(self.arena, key);
+                try self.emitLoad(src);
+                try self.emitLoad(key);
                 _ = try self.chunk.emit(.get_index, 0);
             } else {
+                const key = try self.freshTemp();
+                const ci = try self.chunk.addConst(try Value.strAlloc(self.arena, try value_mod.encodeStringKey(self.arena, prop.key)));
+                _ = try self.chunk.emit(.load_const, ci);
+                try self.emitDefine(key);
+                try excluded.append(self.arena, key);
+                try self.emitLoad(src);
                 _ = try self.chunk.emit(.get_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, prop.key)));
             }
             try self.emitDefine(ev);
@@ -2675,15 +2718,21 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.load_undefined, 0);
                 _ = try self.chunk.emit(.eq_strict, 0);
                 const has_val = try self.chunk.emit(.jump_if_false, 0);
-                try self.compileExpr(d);
-                try self.emitStore(ev);
-                _ = try self.chunk.emit(.pop, 0);
+                try self.emitPatternDefault(d, prop.target, ev);
                 self.chunk.patchToHere(has_val);
             }
-            if (prop.target.* == .member)
+            if (mode == .assignment and prop.target.* == .member)
                 try self.storeMemberRef(prop.target, ref.?, ev)
             else
-                try self.compileAssignToTarget(prop.target, ev);
+                try self.compilePatternTarget(prop.target, ev, mode);
+        }
+        if (rest) |rest_target| {
+            try self.emitLoad(src);
+            for (excluded.items) |key| try self.emitLoad(key);
+            _ = try self.chunk.emit(.object_rest, @intCast(excluded.items.len));
+            const rest_value = try self.freshTemp();
+            try self.emitDefine(rest_value);
+            try self.compilePatternTarget(rest_target, rest_value, mode);
         }
     }
 

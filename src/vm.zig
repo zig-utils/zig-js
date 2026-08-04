@@ -6093,6 +6093,11 @@ fn runChunk(
             .to_numeric => {
                 try stack.append(stack_alloc, try vm.toNumericPrimitive(stack.pop().?));
             },
+            .require_object_coercible => {
+                const input = stack.pop().?;
+                if (input.isNull() or input.isUndefined())
+                    return vm.throwError("TypeError", "cannot destructure null or undefined");
+            },
             .to_property_key => {
                 // ToPropertyKey: coerce once (runs the key's toString/valueOf)
                 // before the property value is evaluated, while preserving a
@@ -6268,6 +6273,14 @@ fn runChunk(
                     if (f.is_method) f.home_object = obj.asObj();
                 }
                 try vm.defineLiteralDataProp(obj.asObj(), try propKey(vm, key), v); // CreateDataProperty (a computed `__proto__` is a normal own prop)
+            },
+            .object_rest => {
+                const excluded_count: usize = inst.a;
+                const excluded_start = stack.items.len - excluded_count;
+                const source_index = excluded_start - 1;
+                const result = try vm.objectRestVM(stack.items[source_index], stack.items[excluded_start..]);
+                stack.shrinkRetainingCapacity(source_index);
+                try stack.append(stack_alloc, result);
             },
             .init_spread => {
                 const src = stack.pop().?;

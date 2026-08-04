@@ -19132,6 +19132,78 @@ test "forced bytecode preserves captured destructuring loop heads" {
         \\}
         \\patternTdz();
     , "patternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.patternTrace = [];
+        \\function defaultsAndComputedKeys() {
+        \\  var reads = [], keyCalls = 0;
+        \\  function key() {
+        \\    return { toString: function () { keyCalls++; return "value"; } };
+        \\  }
+        \\  for (const {[key()]: value = 5, missing: named = function () {}, ...rest}
+        \\       of [{value: 2, tail: 7}, {tail: 9}]) {
+        \\    reads.push(function () { return value + ":" + named.name + ":" + rest.tail; });
+        \\  }
+        \\  patternTrace.push(reads.map(function (read) { return read(); }).join(","));
+        \\  patternTrace.push("keys:" + keyCalls);
+        \\}
+        \\defaultsAndComputedKeys();
+    , "patternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.patternTrace = [];
+        \\function nestedDefaultsAndOrdering() {
+        \\  var reads = [];
+        \\  for (let [left = 1, {value: right = left + 1} = {}] = [];
+        \\       left < 3; left++, right++) {
+        \\    reads.push(function () { return left + ":" + right; });
+        \\  }
+        \\  patternTrace.push(reads.map(function (read) { return read(); }).join(","));
+        \\  var keyRan = false;
+        \\  function markKey() { keyRan = true; return "x"; }
+        \\  try {
+        \\    for (const {[markKey()]: value} of [null])
+        \\      (function () { return value; });
+        \\  } catch (error) { patternTrace.push(error.name + ":key=" + keyRan); }
+        \\}
+        \\nestedDefaultsAndOrdering();
+    , "patternTrace.join('|')");
+}
+
+test "captured destructuring loop evaluation survives generator and async suspension" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    try std.testing.expectEqualStrings("key", (try ctx.evaluate(
+        \\function* suspendedPattern() {
+        \\  var reads = [];
+        \\  for (const {[yield "key"]: value = yield "default", ...rest} of [{tail: 4}])
+        \\    reads.push(function () { return value + rest.tail; });
+        \\  return reads[0]();
+        \\}
+        \\var suspended = suspendedPattern();
+        \\suspended.next().value;
+    )).asStr());
+    try std.testing.expectEqualStrings("default", (try ctx.evaluate("suspended.next('missing').value")).asStr());
+    try std.testing.expectEqual(@as(f64, 11), (try ctx.evaluate("suspended.next(7).value")).asNum());
+
+    const async_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_jit = false });
+    defer async_ctx.destroy();
+    _ = try async_ctx.evaluate(
+        \\globalThis.asyncPatternResult = "pending";
+        \\async function asyncPattern() {
+        \\  var reads = [];
+        \\  for (const {[await Promise.resolve("missing")]: value = await Promise.resolve(8), ...rest}
+        \\       of [{tail: 5}])
+        \\    reads.push(function () { return value + rest.tail; });
+        \\  asyncPatternResult = reads[0]();
+        \\}
+        \\asyncPattern();
+    );
+    try std.testing.expectEqual(@as(f64, 13), (try async_ctx.evaluate("asyncPatternResult")).asNum());
 }
 
 test "forced bytecode preserves repeated body lexical identity and abrupt unwind" {
@@ -19239,6 +19311,13 @@ test "forced bytecode preserves repeated body lexical identity and abrupt unwind
         \\    }
         \\  }
         \\  bodyTrace.push("objects:" + nestedObjects.map(function (read) { return read(); }).join(","));
+        \\  var evaluatedPatterns = [], patternKeys = 0;
+        \\  function patternKey() { patternKeys++; return "missing"; }
+        \\  for (var ep = 0; ep < 2; ep++) {
+        \\    const {[patternKey()]: value = ep, ...rest} = {tail: ep + 25};
+        \\    evaluatedPatterns.push(function () { return value + ":" + rest.tail; });
+        \\  }
+        \\  bodyTrace.push("evaluated:" + evaluatedPatterns.map(function (read) { return read(); }).join(",") + ":keys=" + patternKeys);
         \\  var labeled = [];
         \\  outer: for (let head = 0; head < 4; head++) {
         \\    let body = head + 30;

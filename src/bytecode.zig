@@ -332,6 +332,7 @@ pub const Op = enum(u8) {
     to_numeric, // ToNumeric(pop) -> Number or BigInt (the postfix `x++` old value)
     inc, // ToNumeric(pop) then +1 of the matching numeric type
     dec, // ToNumeric(pop) then -1 of the matching numeric type
+    require_object_coercible, // pop; throw for null/undefined before an object binding pattern evaluates keys
     to_property_key, // ToPropertyKey(pop) -> the property-key string (runs toString once)
     name_anon, // NamedEvaluation: name the top-of-stack anonymous function (operand a: name)
 
@@ -375,6 +376,7 @@ pub const Op = enum(u8) {
     init_prop, // operand a: name index; pop value, define own data prop on object at top, leave object
     init_proto, // pop value; if object/null set it as the [[Prototype]] of object at top (the `__proto__: v` colon form), leave object
     init_prop_computed, // pop key, pop value, set on object at top, leave object
+    object_rest, // operand a: excluded-key count; pop keys then source, push CopyDataProperties result
     init_spread, // pop source, CopyDataProperties into object at top, leave object
     init_getter, // pop fn, pop key; install getter on object at top, leave object
     init_setter, // pop fn, pop key; install setter on object at top, leave object
