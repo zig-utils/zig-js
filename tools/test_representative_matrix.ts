@@ -18,4 +18,6 @@ rejects("invalid shared ruling", value => { value.implemented_families[0].shared
 rejects("missing capability gate", value => { value.additional_panels.find((entry: any) => entry.kind === "zig_js_capability").feature_gate.JavaScriptCore.expected = "accept"; }, "lacks an exact JavaScriptCore feature gate");
 rejects("invalid completion boundary", value => { value.implemented_families.find((entry: any) => entry.completion).completion.kind = "polling"; }, "unknown completion boundary");
 rejects("renamed checkpoint hook", value => { value.implemented_families.find((entry: any) => entry.completion).completion.checksum_hook = "readLater"; }, "generic checksum hook");
-console.log("representative matrix structural tests: 10/10 passed");
+rejects("invalid availability modes", value => { value.implemented_families.find((entry: any) => entry.availability).availability.modes.push("independent_cold"); }, "mode inventory changed");
+rejects("false JSC availability", value => { value.implemented_families.find((entry: any) => entry.availability).availability.checksums.JavaScriptCore = 1; }, "must require zig-js=1 and JavaScriptCore=0");
+console.log("representative matrix structural tests: 12/12 passed");

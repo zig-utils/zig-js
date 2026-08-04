@@ -34,6 +34,8 @@ export function workloadEntries(manifest: any): any[] {
 }
 export const jobsFor = (family: any, quick: boolean): number =>
   family.jobs[quick ? "quick" : "full"];
+const isCapabilityFamily = (family: any): boolean =>
+  family.availability && family.availability.kind === "zig_js_capability";
 export function collect(
   zigJs: string,
   jsc: string,
@@ -51,6 +53,21 @@ export function collect(
   };
   for (const family of manifest.implemented_families) {
     const jobs = jobsFor(family, quick);
+    if (isCapabilityFamily(family)) {
+      const availability = family.availability;
+      for (const [engine, binary] of [["zig-js", zigJs], ["JavaScriptCore", jsc]]) {
+        const probe = runCase(binary, ["single", availability.probe_workload, "1", "1"]);
+        requireValue(
+          probe.length === 1 && probe[0].checksum === availability.checksums[engine],
+          `${engine} availability profile changed for ${family.family}`,
+        );
+      }
+      for (const workload of [family.base, family.variant])
+        rows.push(...runCase(zigJs, ["single", workload, String(jobs), String(samples)]));
+      for (const lane of allLanes)
+        rows.push(...runCase(zigJs, ["shared", family.base, String(jobs), String(samples), String(lane)]));
+      continue;
+    }
     for (const workload of [family.base, family.variant])
       runPair(["single", workload, String(jobs), String(samples)]);
     for (const lane of allLanes) {
@@ -166,6 +183,13 @@ export function validate(
     expected = new Set<string>();
   for (const family of manifest.implemented_families) {
     const jobs = jobsFor(family, quick);
+    if (isCapabilityFamily(family)) {
+      for (const workload of [family.base, family.variant])
+        expected.add(JSON.stringify(["zig-js", "single", workload, 1, jobs]));
+      for (const lane of allLanes)
+        expected.add(JSON.stringify(["zig-js", "shared", family.base, lane, jobs]));
+      continue;
+    }
     for (const workload of [family.base, family.variant])
       for (const engine of ["zig-js", "JavaScriptCore"])
         expected.add(JSON.stringify([engine, "single", workload, 1, jobs]));
@@ -292,6 +316,7 @@ export function render(
     "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
   );
   for (const [family, role, workload] of workloadEntries(manifest)) {
+    if (isCapabilityFamily(family)) continue;
     const jobs = rows.find((row) => row.workload === workload)!.jobs,
       zigKey = ["zig-js", "single", workload, 1, jobs],
       jscKey = ["JavaScriptCore", "single", workload, 1, jobs],
@@ -313,6 +338,7 @@ export function render(
       "| --- | ---: | ---: | ---: | ---: | ---: |",
     );
     for (const family of manifest.implemented_families) {
+      if (isCapabilityFamily(family)) continue;
       const workload = family.base,
         jobs = rows.find((row) => row.workload === workload)!.jobs;
       for (const lane of allLanes) {
@@ -355,6 +381,26 @@ export function render(
       lines.push(
         `| \`${family.family}\` | ${lane} | ${jobs} | ${elapsed.toFixed(3)} | ${((lane * one) / elapsed).toFixed(2)}x |`,
       );
+    }
+  }
+  const capabilityFamilies = manifest.implemented_families.filter(isCapabilityFamily);
+  if (capabilityFamilies.length > 0) {
+    lines.push(
+      "",
+      "## Availability-gated capability families",
+      "",
+      "These rows are scored only where the required public surface exists. Every run verifies the declared engine profile; no unavailable-engine ratio is constructed.",
+      "",
+      "| family | workload | mode | lanes | jobs/lane | zig-js median (ms) | JSC |",
+      "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    );
+    for (const family of capabilityFamilies) {
+      const jobs = rows.find((row) => row.workload === family.base)!.jobs;
+      for (const [role, workload] of [["base", family.base], ["variant", family.variant]]) {
+        const elapsed = medianMs(groups, ["zig-js", "single", workload, 1, jobs]);
+        lines.push(`| \`${family.family}\` | \`${role}\` | \`single\` | 1 | ${jobs} | ${elapsed.toFixed(3)} | N/A |`);
+      }
+      lines.push(`| \`${family.family}\` | feature gate | — | — | — | supported | ${family.availability.JavaScriptCore.result} |`);
     }
   }
   if ((manifest.additional_panels || []).length > 0) {
@@ -452,11 +498,13 @@ function syntheticRows(
       };
     for (const role of ["base", "variant"]) {
       add("zig-js", "single", family[role], role, 1);
-      add("JavaScriptCore", "single", family[role], role, 1);
+      if (!isCapabilityFamily(family))
+        add("JavaScriptCore", "single", family[role], role, 1);
     }
     for (const lane of allLanes) {
       if (family.shared !== false)
         add("zig-js", "shared", family.base, "base", lane);
+      if (isCapabilityFamily(family)) continue;
       for (const engine of ["zig-js", "JavaScriptCore"]) {
         add(engine, "independent_steady", family.base, "base", lane);
         add(engine, "independent_cold", family.base, "base", lane);

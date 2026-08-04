@@ -1,0 +1,58 @@
+{
+  "schema_version": 7,
+  "matrix_id": "zig-js-representative-v7",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 460,
+  "history_policy": "This version hash-inherits every V6 decision and adds Temporal as an explicitly availability-gated capability family. Any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v6",
+    "path": "docs/.data/representative-benchmark-matrix-v6.json",
+    "sha256": "8d2d57fdeb5e695dedb3a178131b3a9dd2f3e077ea01bf86e86648eb0dee3650",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "tier_attribution",
+      "pending_metric_panels",
+      "additional_panels"
+    ]
+  },
+  "change": "Moves temporal from deferred to an implemented zig-js capability family. Every run proves the declared availability profile (zig-js exposes the required constructors and system JSC does not) before reporting JavaScriptCore as N/A rather than conditionally changing the scored workload.",
+  "implemented_families_append": [
+    {
+      "family": "temporal",
+      "source": "bench/representative_comparison.js",
+      "base": "representative_temporal",
+      "variant": "representative_temporal_variant",
+      "surface": "Temporal.PlainDate construction/addition, Temporal.Instant parse/addition, and Temporal.Duration construction/total over deterministic ISO/UTC inputs",
+      "availability": {
+        "kind": "zig_js_capability",
+        "engines": ["zig-js"],
+        "modes": ["single", "shared"],
+        "probe_workload": "representative_temporal_availability",
+        "checksums": {"zig-js": 1, "JavaScriptCore": 0},
+        "JavaScriptCore": {
+          "result": "N/A: system JSC public JSGlobalContext does not expose the required Temporal namespace"
+        }
+      },
+      "jobs": {"full": 650, "quick": 1},
+      "checksums": {
+        "base": {
+          "quick": [2024285077, 4048580155, 8097200014, 16196319644],
+          "full": [1316758963519, 2633524427688, 5267074565576, 10535396784152]
+        },
+        "variant": {
+          "quick": [2024285077, 4048580155, 8097200014, 16196319644],
+          "full": [1316758963519, 2633524427688, 5267074565576, 10535396784152]
+        }
+      },
+      "anti_specialization": "Separate forward and reverse implementations change identifiers, object property order, operation order, and loop direction while applying the same date and instant deltas and producing the same exact checksum."
+    }
+  ],
+  "deferred_families_remove": ["temporal"]
+}

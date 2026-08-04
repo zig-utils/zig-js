@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v6.json`. V6 hash-inherits the complete V1–V5 chain, retains the opt-in tier-attribution sidecar, and adds owned Promise/async/microtask rows after the WebAssembly scalar, fixed-width SIMD, non-shared memory, scalar-memory-oracle, and shared-memory capability rows. Accepted historical reports are not rewritten, implemented rows and explicit deferrals remain visible separately, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v7.json`. V7 hash-inherits the complete V1–V6 chain, retains the opt-in tier-attribution sidecar, and adds an availability-gated Temporal capability family after the Promise/async/microtask and WebAssembly rows. Accepted historical reports are not rewritten, implemented rows and explicit deferrals remain visible separately, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -59,6 +59,20 @@ against JavaScriptCore's faster direct row so it clears the 50 ms floor; a slow
 zig-js row remains visible rather than weakening the workload. The shared-realm
 panel uses per-lane state prepared before thread creation, and `Thread.join()`
 observes each worker only after its own microtask queue has drained.
+
+## Representative Temporal row
+
+V7 scores deterministic ISO/UTC `Temporal.PlainDate`, `Temporal.Instant`, and
+`Temporal.Duration` construction and arithmetic in zig-js direct and
+shared-realm modes. Separate forward and reverse implementations change loop
+direction, identifiers, property order, and operation order while retaining
+identical inputs, work, and frozen checksums.
+
+This is an availability-gated capability family, not a cross-engine ratio.
+Every run evaluates the same constructor-profile probe in both public runners;
+zig-js must return `1` and the system JavaScriptCore `JSGlobalContext` must
+return `0` before JSC is reported as `N/A`. The scored workload never changes
+conditionally, and no result is inferred from the operating-system version.
 
 ## Representative tier attribution
 

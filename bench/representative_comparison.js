@@ -330,6 +330,46 @@ function representativeSelectAsync(variant) {
   return function (jobs, lane) { return representativeAsyncWork(jobs, lane, variant); };
 }
 
+function representativeTemporalForward(job, lane) {
+  var date = new Temporal.PlainDate(2024 + (job & 3), 1 + (lane % 12), 1 + (job % 20));
+  var instant = Temporal.Instant.from("2024-01-01T00:00:00Z");
+  for (var step = 0; step < 48; step = step + 1) {
+    var delta = (step % 7) + 1;
+    date = date.add({ days: delta });
+    instant = instant.add({ milliseconds: delta * 13 });
+  }
+  var duration = Temporal.Duration.from({ hours: 3, minutes: 17, seconds: lane + (job & 7) });
+  return date.year * 1000000 + date.month * 10000 + date.day * 100 +
+    (instant.epochMilliseconds % 1000000) + duration.total({ unit: "seconds" });
+}
+
+function representativeTemporalReverse(job, lane) {
+  var calendarDate = new Temporal.PlainDate(2024 + (job & 3), 1 + (lane % 12), 1 + (job % 20));
+  var timelinePoint = Temporal.Instant.from("2024-01-01T00:00:00Z");
+  for (var cursor = 47; cursor >= 0; cursor = cursor - 1) {
+    var increment = (cursor % 7) + 1;
+    timelinePoint = timelinePoint.add({ milliseconds: increment * 13 });
+    calendarDate = calendarDate.add({ days: increment });
+  }
+  var span = Temporal.Duration.from({ seconds: lane + (job & 7), minutes: 17, hours: 3 });
+  return calendarDate.year * 1000000 + calendarDate.month * 10000 + calendarDate.day * 100 +
+    (timelinePoint.epochMilliseconds % 1000000) + span.total({ unit: "seconds" });
+}
+
+function representativeTemporal(jobs, lane, variant) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1)
+    total = total + (variant ? representativeTemporalReverse(job, lane) : representativeTemporalForward(job, lane));
+  return total;
+}
+
+function representativeTemporalAvailability() {
+  return typeof Temporal === "object" &&
+    typeof Temporal.PlainDate === "function" &&
+    typeof Temporal.Instant === "function" &&
+    typeof Temporal.Duration === "function" ? 1 : 0;
+}
+
 function benchmarkFunction(name) {
   if (name === "representative_strings") return function (jobs, lane) { return representativeStrings(jobs, lane, 0); };
   if (name === "representative_strings_variant") return function (jobs, lane) { return representativeStrings(jobs, lane, 1); };
@@ -357,6 +397,9 @@ function benchmarkFunction(name) {
   if (name === "representative_application_mix_variant") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 1); };
   if (name === "representative_async_microtasks") return representativeSelectAsync(0);
   if (name === "representative_async_microtasks_variant") return representativeSelectAsync(1);
+  if (name === "representative_temporal") return function (jobs, lane) { return representativeTemporal(jobs, lane, 0); };
+  if (name === "representative_temporal_variant") return function (jobs, lane) { return representativeTemporal(jobs, lane, 1); };
+  if (name === "representative_temporal_availability") return function () { return representativeTemporalAvailability(); };
   throw new Error("unknown representative benchmark workload: " + name);
 }
 
