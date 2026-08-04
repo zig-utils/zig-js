@@ -60,8 +60,8 @@
     },
     {
       "path": "benchmarks/index.html",
-      "bytes": 244853,
-      "sha256": "f7e5eebaea1869eaf5d80e0ae46b763d2ba38007ec578a87e08c30ba171c838b"
+      "bytes": 245525,
+      "sha256": "bc37fd980972a80798226e4bfb9e053a3b66fbdc65f793a24c016d4ad0831748"
     },
     {
       "path": "c-api/README/index.html",
@@ -264,5 +264,5 @@
       "sha256": "e3586ceb7b9b7781a3481d3871b760889b4d276be923d6b2c8776f74db9ebcb3"
     }
   ],
-  "tree_sha256": "f2f4f781bda8006a046bab823cb429ed0b018aa2470e1bfa64ef1c0036a3ce33"
+  "tree_sha256": "e1958753f57eb533f725784da35006c712a05a35b0a32a564d4cc3d927c5ed75"
 }

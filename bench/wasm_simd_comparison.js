@@ -103,5 +103,11 @@ function benchmarkFunction(name) {
     return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.memory_simd, 20000, jobs, lane); };
   if (name === "wasm_memory_scalar")
     return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.memory_scalar, 20000, jobs, lane); };
+  if (name === "wasm_representative_memory")
+    return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.memory_simd, 20000, jobs, lane); };
+  if (name === "wasm_representative_memory_variant")
+    return function (jobs, lane) { return benchmarkWasmKernelReverse(wasmSimdExports.memory_simd, 20000, jobs, lane); };
+  if (name === "wasm_representative_memory_scalar")
+    return function (jobs, lane) { return benchmarkWasmKernel(wasmSimdExports.memory_scalar, 20000, jobs, lane); };
   throw new Error("unknown WebAssembly SIMD benchmark workload: " + name);
 }

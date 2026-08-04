@@ -1,0 +1,89 @@
+{
+  "schema_version": 5,
+  "matrix_id": "zig-js-representative-v5",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 460,
+  "history_policy": "This version hash-inherits every V4 decision and adds the complete owned WebAssembly memory surface as one family plus explicit scalar-oracle and shared-memory capability subpanels. Any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v4",
+    "path": "docs/.data/representative-benchmark-matrix-v4.json",
+    "sha256": "88e8effa193069d17df513ebea11b0b19e7adee72671abaf0208b68f4ac3b677",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "tier_attribution",
+      "pending_metric_panels",
+      "additional_panels"
+    ]
+  },
+  "change": "Moves wasm_memory from deferred to implemented. Cross-engine rows use the existing non-shared v128 memory export, a separately scored scalar-memory oracle uses the equivalent same-module export, and a zig-js-only shared-memory atomic panel requires the system-JSC rejection probe before reporting N/A.",
+  "implemented_families_append": [
+    {
+      "family": "wasm_memory",
+      "source": "bench/wasm_simd_comparison.js",
+      "base": "wasm_representative_memory",
+      "variant": "wasm_representative_memory_variant",
+      "surface": "owned fixed-width v128 load/store arithmetic over non-shared linear memory",
+      "shared": false,
+      "shared_ruling": "One non-shared Wasm instance is not invoked concurrently; the wasm_memory_shared_atomic capability panel owns shared-memory execution.",
+      "jobs": {"full": 180, "quick": 1},
+      "checksums": {
+        "base": {
+          "quick": [799960010, 1600000021, 3200320062, 6401920332],
+          "full": [144098906456, 288198132937, 576397546038, 1152800213244]
+        },
+        "variant": {
+          "quick": [799960010, 1600000021, 3200320062, 6401920332],
+          "full": [144098906456, 288198132937, 576397546038, 1152800213244]
+        }
+      },
+      "anti_specialization": "Base traverses jobs in ascending order; the variant uses a distinct wrapper, identifiers, loop condition, accumulator, and descending order over identical v128 memory inputs. The export reinitializes its memory before every call, so call order cannot alter the checksum."
+    }
+  ],
+  "additional_panels_append": [
+    {
+      "id": "wasm_memory_scalar_oracle",
+      "kind": "cross_engine_oracle",
+      "source": "bench/wasm_simd_comparison.js",
+      "workload": "wasm_representative_memory_scalar",
+      "engines": ["zig-js", "JavaScriptCore"],
+      "modes": ["single", "independent_steady", "independent_cold"],
+      "lanes": [1, 2, 4, 8],
+      "jobs": {"full": 120, "quick": 1},
+      "checksums": {
+        "quick": [799960010, 1600000021, 3200320062, 6401920332],
+        "full": [96064657104, 192129954321, 384262469222, 768535181788]
+      },
+      "boundary": "The same module and memory algorithm use scalar i32 loads/stores; source evaluation, module lifecycle, and timing boundaries match the cross-engine family rows."
+    },
+    {
+      "id": "wasm_memory_shared_atomic",
+      "kind": "zig_js_capability",
+      "source": "bench/wasm_threads_comparison.js",
+      "workload": "wasm_threads_representative_memory_shared",
+      "engines": ["zig-js"],
+      "modes": ["single", "shared"],
+      "lanes": [1, 2, 4, 8],
+      "jobs": {"full": 850000, "quick": 10},
+      "checksums": {
+        "quick": [10, 20, 40, 80],
+        "full": [850000, 1700000, 3400000, 6800000]
+      },
+      "feature_gate": {
+        "JavaScriptCore": {
+          "expected": "reject",
+          "stderr_contains": "JavaScriptException",
+          "result": "N/A: system JSC public JSGlobalContext rejects the shared-memory/atomic module"
+        }
+      },
+      "boundary": "One worker invokes the shared-memory atomic export on the owner thread; 2/4/8-worker rows time zig-js shared-realm Thread construction, concurrent disjoint atomic updates on one instance, joins, and exact final validation."
+    }
+  ],
+  "deferred_families_remove": ["wasm_memory"]
+}

@@ -18,7 +18,7 @@ import {
   render as renderTierAttribution,
   validate as validateTierAttribution,
 } from "./representative-tier-attribution";
-import { writeText } from "./lib/home";
+import { run, writeText } from "./lib/home";
 // Inventory-visible module edges: tools/benchmark-comparison.ts and tools/representative-matrix.ts.
 declare const __filename: string;
 function requireValue(condition: boolean, message: string): void {
@@ -62,15 +62,51 @@ export function collect(
           String(samples),
           String(lane),
         ]);
-      rows.push(
-        ...runCase(zigJs, [
-          "shared",
-          family.base,
-          String(jobs),
-          String(samples),
-          String(lane),
-        ]),
+      if (family.shared !== false)
+        rows.push(
+          ...runCase(zigJs, [
+            "shared",
+            family.base,
+            String(jobs),
+            String(samples),
+            String(lane),
+          ]),
+        );
+    }
+  }
+  for (const panel of manifest.additional_panels || []) {
+    const jobs = jobsFor(panel, quick);
+    if (panel.kind === "cross_engine_oracle") {
+      runPair(["single", panel.workload, String(jobs), String(samples)]);
+      for (const lane of allLanes)
+        for (const mode of ["independent_steady", "independent_cold"])
+          runPair([
+            mode,
+            panel.workload,
+            String(jobs),
+            String(samples),
+            String(lane),
+          ]);
+    } else {
+      const gate = panel.feature_gate.JavaScriptCore,
+        probe = run([jsc, "single", panel.workload, "1", "1"]);
+      requireValue(
+        probe.exitCode !== 0 && probe.stderr.indexOf(gate.stderr_contains) >= 0,
+        `JavaScriptCore feature gate changed for ${panel.workload}: exit=${probe.exitCode} stderr=${JSON.stringify(probe.stderr)}`,
       );
+      rows.push(
+        ...runCase(zigJs, ["single", panel.workload, String(jobs), String(samples)]),
+      );
+      for (const lane of lanes)
+        rows.push(
+          ...runCase(zigJs, [
+            "shared",
+            panel.workload,
+            String(jobs),
+            String(samples),
+            String(lane),
+          ]),
+        );
     }
   }
   return rows;
@@ -92,6 +128,17 @@ export function expectedChecksum(
             : "";
       requireValue(Boolean(scale), `unsupported jobs for ${workload}: ${jobs}`);
       return family.checksums[role][scale][laneIndex];
+    }
+  for (const panel of manifest.additional_panels || [])
+    if (panel.workload === workload) {
+      const scale =
+        jobs === panel.jobs.full
+          ? "full"
+          : jobs === panel.jobs.quick
+            ? "quick"
+            : "";
+      requireValue(Boolean(scale), `unsupported jobs for ${workload}: ${jobs}`);
+      return panel.checksums[scale][laneIndex];
     }
   throw new Error(`unknown workload: ${workload}`);
 }
@@ -123,12 +170,28 @@ export function validate(
       for (const engine of ["zig-js", "JavaScriptCore"])
         expected.add(JSON.stringify([engine, "single", workload, 1, jobs]));
     for (const lane of allLanes) {
-      expected.add(
-        JSON.stringify(["zig-js", "shared", family.base, lane, jobs]),
-      );
+      if (family.shared !== false)
+        expected.add(
+          JSON.stringify(["zig-js", "shared", family.base, lane, jobs]),
+        );
       for (const engine of ["zig-js", "JavaScriptCore"])
         for (const mode of ["independent_steady", "independent_cold"])
           expected.add(JSON.stringify([engine, mode, family.base, lane, jobs]));
+    }
+  }
+  for (const panel of manifest.additional_panels || []) {
+    const jobs = jobsFor(panel, quick);
+    if (panel.kind === "cross_engine_oracle") {
+      for (const engine of panel.engines)
+        expected.add(JSON.stringify([engine, "single", panel.workload, 1, jobs]));
+      for (const lane of allLanes)
+        for (const engine of panel.engines)
+          for (const mode of ["independent_steady", "independent_cold"])
+            expected.add(JSON.stringify([engine, mode, panel.workload, lane, jobs]));
+    } else {
+      expected.add(JSON.stringify(["zig-js", "single", panel.workload, 1, jobs]));
+      for (const lane of lanes)
+        expected.add(JSON.stringify(["zig-js", "shared", panel.workload, lane, jobs]));
     }
   }
   const actual = new Set(Object.keys(groups));
@@ -277,6 +340,7 @@ export function render(
     "| --- | ---: | ---: | ---: | ---: |",
   );
   for (const family of manifest.implemented_families) {
+    if (family.shared === false) continue;
     const workload = family.base,
       jobs = rows.find((row) => row.workload === workload)!.jobs,
       one = medianMs(groups, ["zig-js", "shared", workload, 1, jobs]);
@@ -291,6 +355,44 @@ export function render(
       lines.push(
         `| \`${family.family}\` | ${lane} | ${jobs} | ${elapsed.toFixed(3)} | ${((lane * one) / elapsed).toFixed(2)}x |`,
       );
+    }
+  }
+  if ((manifest.additional_panels || []).length > 0) {
+    lines.push(
+      "",
+      "## Additional frozen subpanels",
+      "",
+      "These rows use separately declared programming-model boundaries. A capability row never constructs a ratio against an unavailable JavaScriptCore surface.",
+      "",
+      "| panel | mode | lanes | jobs/lane | zig-js median (ms) | JSC median (ms) | zig-js / JSC throughput |",
+      "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    );
+    for (const panel of manifest.additional_panels || []) {
+      const jobs = rows.find((row) => row.workload === panel.workload)!.jobs;
+      if (panel.kind === "cross_engine_oracle") {
+        const variants: any[][] = [["single", 1]];
+        for (const mode of ["independent_steady", "independent_cold"])
+          for (const lane of allLanes) variants.push([mode, lane]);
+        for (const [mode, lane] of variants) {
+          const zig = medianMs(groups, ["zig-js", mode, panel.workload, lane, jobs]),
+            jsc = medianMs(groups, ["JavaScriptCore", mode, panel.workload, lane, jobs]);
+          lines.push(
+            `| \`${panel.id}\` | \`${mode}\` | ${lane} | ${jobs} | ${zig.toFixed(3)} | ${jsc.toFixed(3)} | ${(jsc / zig).toFixed(2)}x |`,
+          );
+        }
+      } else {
+        const variants: any[][] = [["single", 1], ...lanes.map((lane) => ["shared", lane])];
+        for (const [mode, lane] of variants) {
+          const zig = medianMs(groups, ["zig-js", mode, panel.workload, lane, jobs]);
+          lines.push(
+            `| \`${panel.id}\` | \`${mode}\` | ${lane} | ${jobs} | ${zig.toFixed(3)} | N/A | N/A |`,
+          );
+        }
+        const gate = panel.feature_gate.JavaScriptCore;
+        lines.push(
+          `| \`${panel.id}\` | feature gate | — | — | supported | ${gate.result} | no public equivalent |`,
+        );
+      }
     }
   }
   lines.push(
@@ -353,11 +455,39 @@ function syntheticRows(
       add("JavaScriptCore", "single", family[role], role, 1);
     }
     for (const lane of allLanes) {
-      add("zig-js", "shared", family.base, "base", lane);
+      if (family.shared !== false)
+        add("zig-js", "shared", family.base, "base", lane);
       for (const engine of ["zig-js", "JavaScriptCore"]) {
         add(engine, "independent_steady", family.base, "base", lane);
         add(engine, "independent_cold", family.base, "base", lane);
       }
+    }
+  }
+  for (const panel of manifest.additional_panels || []) {
+    const jobs = panel.jobs[scale],
+      add = (engine: string, mode: string, lanes: number) => {
+        const checksum = panel.checksums[scale][manifest.lanes.indexOf(lanes)];
+        for (let sample = 0; sample < samples; sample += 1)
+          rows.push({
+            engine,
+            mode,
+            workload: panel.workload,
+            lanes,
+            jobs,
+            sample,
+            elapsed_ns: elapsedNs + sample,
+            checksum,
+          });
+      };
+    if (panel.kind === "cross_engine_oracle") {
+      for (const engine of panel.engines) add(engine, "single", 1);
+      for (const lane of allLanes)
+        for (const engine of panel.engines)
+          for (const mode of ["independent_steady", "independent_cold"])
+            add(engine, mode, lane);
+    } else {
+      add("zig-js", "single", 1);
+      for (const lane of [2, 4, 8]) add("zig-js", "shared", lane);
     }
   }
   return rows;

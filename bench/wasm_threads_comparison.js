@@ -60,6 +60,8 @@ function benchmarkFunction(name) {
     return configureThreadsBenchmark(wasmThreadsExports.atomic_cas, false);
   if (name === "wasm_threads_atomic_disjoint")
     return configureThreadsBenchmark(wasmThreadsExports.atomic_disjoint, true);
+  if (name === "wasm_threads_representative_memory_shared")
+    return configureThreadsBenchmark(wasmThreadsExports.atomic_disjoint, true);
   if (name === "wasm_threads_wait_notify")
     return configureWaitNotifyBenchmark();
   throw new Error("unknown WebAssembly Threads benchmark workload: " + name);

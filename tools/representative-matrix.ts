@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v4.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v5.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -16,7 +16,7 @@ const unique = (values: any[]) => new Set(values).size === values.length;
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version === 2 || child.schema_version === 3 || child.schema_version === 4, "unsupported representative matrix schema");
+  requireValue(child.schema_version === 2 || child.schema_version === 3 || child.schema_version === 4 || child.schema_version === 5, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -46,10 +46,11 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
     ...child,
     implemented_families: inherited.implemented_families.concat(additions),
     deferred_families: inherited.deferred_families.filter((entry: any) => removals.indexOf(entry.family) < 0),
+    additional_panels: (inherited.additional_panels || []).concat(child.additional_panels_append || []),
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version === 1 || manifest.schema_version === 2 || manifest.schema_version === 3 || manifest.schema_version === 4, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version === 1 || manifest.schema_version === 2 || manifest.schema_version === 3 || manifest.schema_version === 4 || manifest.schema_version === 5, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -76,6 +77,7 @@ export function validate(manifest: any, root = ROOT): void {
   for (const entry of implemented) {
     requireValue(Number.isInteger(entry.jobs.full) && entry.jobs.full > 0, "invalid full jobs: " + JSON.stringify(entry));
     requireValue(Number.isInteger(entry.jobs.quick) && entry.jobs.quick > 0 && entry.jobs.quick < entry.jobs.full, "invalid quick jobs: " + JSON.stringify(entry));
+    requireValue(entry.shared === undefined || typeof entry.shared === "boolean", "invalid shared-mode ruling: " + JSON.stringify(entry));
     for (const role of ["base", "variant"]) {
       const workload = entry[role];
       requireValue(typeof workload === "string" && workload.length > 0, `invalid ${role} workload: ${JSON.stringify(entry)}`);
@@ -92,6 +94,37 @@ export function validate(manifest: any, root = ROOT): void {
       }
     }
     requireValue(entry.base !== entry.variant, "base and variant must differ: " + entry.family);
+  }
+  const additionalPanels = manifest.additional_panels || [];
+  requireValue(Array.isArray(additionalPanels), "additional panel inventory must be a list");
+  requireValue(unique(additionalPanels.map((entry: any) => entry.id)), "additional panel id is duplicated");
+  for (const entry of additionalPanels) {
+    requireValue(typeof entry.id === "string" && entry.id.length > 0, "additional panel lacks an id");
+    requireValue(typeof entry.workload === "string" && workloads.indexOf(entry.workload) < 0, "additional panel workload is invalid or duplicated: " + JSON.stringify(entry));
+    workloads.push(entry.workload);
+    const sourceName = entry.source,
+      path = root + "/" + sourceName;
+    requireValue(typeof sourceName === "string" && Home.fileExists(path), "additional panel source does not exist: " + sourceName);
+    const source = sources[sourceName] ||= readText(path);
+    requireValue(source.indexOf(`"${entry.workload}"`) >= 0, "additional panel workload is absent from declared source dispatch: " + entry.workload);
+    requireValue(Number.isInteger(entry.jobs.full) && entry.jobs.full > 0, "invalid additional panel full jobs: " + JSON.stringify(entry));
+    requireValue(Number.isInteger(entry.jobs.quick) && entry.jobs.quick > 0 && entry.jobs.quick < entry.jobs.full, "invalid additional panel quick jobs: " + JSON.stringify(entry));
+    for (const scale of ["full", "quick"]) {
+      const values = entry.checksums[scale];
+      requireValue(Array.isArray(values) && values.length === lanes.length, `${entry.workload} ${scale} checksums must match lanes`);
+      requireValue(values.every((value: any) => Number.isInteger(value) && value >= 0 && value < 9007199254740992), `${entry.workload} ${scale} checksum is not an exact non-negative integer`);
+    }
+    requireValue(same(entry.lanes || [], lanes), "additional panel lanes must be exactly 1/2/4/8");
+    if (entry.kind === "cross_engine_oracle") {
+      requireValue(same(entry.engines || [], ["zig-js", "JavaScriptCore"]), "cross-engine panel engine inventory changed");
+      requireValue(same(entry.modes || [], ["single", "independent_steady", "independent_cold"]), "cross-engine panel mode inventory changed");
+    } else {
+      requireValue(entry.kind === "zig_js_capability", "unknown additional panel kind: " + entry.kind);
+      requireValue(same(entry.engines || [], ["zig-js"]), "capability panel must remain zig-js-only");
+      requireValue(same(entry.modes || [], ["single", "shared"]), "capability panel mode inventory changed");
+      const gate = entry.feature_gate && entry.feature_gate.JavaScriptCore;
+      requireValue(gate && gate.expected === "reject" && typeof gate.stderr_contains === "string" && gate.stderr_contains.length > 0, "capability panel lacks an exact JavaScriptCore feature gate");
+    }
   }
   requireValue(manifest.protocol.minimum_full_median_ns === 50000000, "v1 must retain the 50 ms timing floor");
   requireValue(manifest.protocol.full_samples === 7, "v1 must retain seven full samples");

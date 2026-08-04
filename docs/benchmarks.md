@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v4.json`. V4 hash-inherits V3 (and the complete V1/V2 chain), retains the opt-in tier-attribution sidecar, and adds owned scalar and fixed-width SIMD WebAssembly rows without rewriting the accepted SIMD report. Implemented rows and explicit deferrals remain visible separately, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v5.json`. V5 hash-inherits the complete V1–V4 chain, retains the opt-in tier-attribution sidecar, and adds owned scalar, fixed-width SIMD, non-shared memory, scalar-memory-oracle, and shared-memory capability rows without rewriting accepted historical reports. Implemented rows and explicit deferrals remain visible separately, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -19,7 +19,7 @@ None is an application benchmark or a universal engine score. They are small, in
 ## Representative WebAssembly rows
 
 V3 moves `wasm_scalar` from the deferred inventory into the scored matrix; V4
-does the same for `wasm_simd`. Both
+does the same for `wasm_simd`, and V5 completes `wasm_memory`. Both
 engines evaluate the exact existing `bench/wasm_simd_comparison.js` bytes and
 instantiate the same embedded module. Warm rows time only the selected export
 export after the inherited ten-call warmup; cold rows include source evaluation,
@@ -30,10 +30,18 @@ the harness requires identical frozen checksums and equivalent tier
 attribution. The SIMD export also retains the scalar export in the same module
 as its checksum oracle.
 
-The separate accepted Wasm SIMD report remains immutable evidence. SIMD and
-scalar results there remain separate historical panels; shared-memory remains
-an explicit deferral until its full subpanels and feature contract join a later
-matrix version.
+The memory family keeps non-shared `v128` load/store rows on direct and
+independent-context modes. It deliberately does not invoke one non-shared
+instance concurrently. A separate cross-engine subpanel scores the equivalent
+scalar-memory export, while a zig-js capability subpanel runs disjoint atomics
+over a genuinely shared module at 1/2/4/8 workers. Before that capability row
+can report JavaScriptCore as `N/A`, every run re-probes the system JSC runner
+and requires its documented `JavaScriptException`; no false throughput ratio is
+constructed.
+
+The separate accepted Wasm SIMD and Threads reports remain immutable historical
+evidence. V5 integrates their owned workload contracts into the representative
+matrix without copying their old timing numbers or rewriting their reports.
 
 ## Representative tier attribution
 
