@@ -153,13 +153,21 @@ export function validateArtifact(artifact: any): void {
   requireValue(artifact.boundaries.code_size.status === "same_binary", "runtime toggle must identify the same binary");
 }
 
-export function render(artifact: any): string {
-  const summary = artifact.summary, metadata_ = artifact.metadata;
+export function render(artifact: any, rawPath = ""): string {
+  const summary = artifact.summary, metadata_ = artifact.metadata, environment = metadata_.environment;
   const rows = [
     `# Instrumentation overhead — ${metadata_.workload}`,
     "",
+    `- date: ${environment.Date}`,
+    `- host: ${environment.Host}`,
+    `- OS: ${environment.OS}`,
+    `- Zig: ${environment.Zig}`,
     `- zig-js: \`${metadata_.revision}\``,
+    `- zig-gc: \`${environment["zig-gc"]}\``,
+    `- zig-regex: \`${environment["zig-regex"]}\``,
+    `- power: ${environment.Power}`,
     `- runner: \`${metadata_.runner_sha256}\` (${metadata_.runner_size_bytes} bytes; one binary for both states)`,
+    `- workload source: \`${metadata_.workload_source}\` (SHA-256 \`${metadata_.workload_source_sha256}\`)`,
     `- sampling: ${metadata_.pairs} alternating disabled/enabled pairs; no discarded samples`,
     `- logical work: ${metadata_.jobs} jobs; frozen checksum ${metadata_.expected_checksum}`,
     `- timed boundary: ${metadata_.timed_boundary}`,
@@ -174,8 +182,9 @@ export function render(artifact: any): string {
   rows.push(
     "",
     "Retained RSS is unavailable because each measurement exits after one sample. Lock contention is not applicable to this single-thread fixture. Both states use the exact same runner, so this runtime-toggle A/B does not claim to measure compile-time support code size.",
-    "",
   );
+  if (rawPath) rows.push("", `Raw samples: [\`${rawPath.split("/").pop()}\`](${rawPath.split("/").pop()})`);
+  rows.push("");
   return rows.join("\n");
 }
 
@@ -205,12 +214,13 @@ export function selfTest(): void {
   const samples = syntheticSamples(), artifact = {
     schema_version: 1,
     profile_id: "zig-js-instrumentation-overhead-v1",
-    metadata: { pairs: 2, runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", jobs: 110, expected_checksum: 5864992 },
+    metadata: { pairs: 2, runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", workload_source: "bench/representative_comparison.js", workload_source_sha256: "b".repeat(64), jobs: 110, expected_checksum: 5864992, revision: "c".repeat(40), environment: { Date: "2026-08-04", Host: "fixture", OS: "fixture", Zig: "fixture", "zig-gc": "d".repeat(40), "zig-regex": "e".repeat(40), Power: "fixture" } },
     samples,
     summary: summarize(samples),
     boundaries: { retained_rss: { status: "unavailable" }, contention: { status: "not_applicable" }, code_size: { status: "same_binary" } },
   };
   validateArtifact(artifact);
+  requireValue(render(artifact, "docs/.data/fixture.json").includes("Raw samples: [`fixture.json`](fixture.json)"), "report provenance drift");
   const order = JSON.parse(JSON.stringify(artifact)); order.samples[2].identity.state = "disabled";
   expectFailure(() => validateArtifact(order), "order drift");
   console.log("OK instrumentation overhead self-test: parsing, alternation, checksums, metrics, and explicit boundaries verified");
@@ -277,7 +287,7 @@ function main(): void {
     },
   };
   validateArtifact(artifact);
-  const report = render(artifact);
+  const report = render(artifact, rawOut);
   if (rawOut) { writeText(rawOut, JSON.stringify(artifact, null, 2) + "\n"); writeText(markdownOut, report); }
   process.stdout.write(report);
 }
