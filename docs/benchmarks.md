@@ -105,6 +105,15 @@ the equivalence gate cannot normalize an unexpected fallback away. Each pair
 must also allocate exactly the same number of environments in each phase, so a
 variant cannot hide an unnecessary heap scope behind otherwise equal tiers.
 
+The current full-work V8 evidence is the
+[`representative-tier-attribution-v8-2026-08-04.md`](.data/representative-tier-attribution-v8-2026-08-04.md)
+report and its
+[`representative-tier-attribution-v8-2026-08-04.json`](.data/representative-tier-attribution-v8-2026-08-04.json)
+raw artifact. It records configuration, warmup, and invocation snapshots for
+all 36 base/variant workloads at exact revision
+`a1b5c3932c5a49a996da59ca9c20a852938975d4`; the earlier V2 artifact remains
+unchanged as historical evidence.
+
 Attribution is deliberately outside the timing rows. Normal contexts retain a
 null telemetry pointer, while the sidecar opts in to atomic counters. A full
 published representative report therefore preserves both its ordinary timing
