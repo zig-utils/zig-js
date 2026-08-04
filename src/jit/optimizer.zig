@@ -419,7 +419,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     if (code.len > std.math.maxInt(u32)) return error.UnsupportedChunk;
     // Environment-unwinding jumps mutate interpreter-owned lexical state. They
     // remain exact bytecode exits until native frame states carry that depth.
-    for (code) |instruction| if (instruction.op == .jump_env or instruction.op == .push_handler_outer)
+    for (code) |instruction| if (instruction.op == .jump_env or instruction.op == .push_handler_catch or instruction.op == .push_handler_outer)
         return error.UnsupportedChunk;
 
     const starts = try allocator.alloc(bool, code.len);
@@ -551,6 +551,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .def_var, .def_lex, .bind_pattern, .enter_with, .register_disposable, .iter_close => .{ .required = 1, .removed = 1, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler, .abrupt_break, .abrupt_continue, .enter_block, .exit_block, .exit_with, .init_local_lexical => .{ .required = 0, .removed = 0, .added = 0 },
+        .push_handler_catch => .{ .required = 1, .removed = 0, .added = 0 },
         .push_completion => .{ .required = 0, .removed = 0, .added = 2 },
         .call, .call_eval, .new_call, .tail_call, .tail_call_eval => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
         .call_method, .tail_call_method => .{ .required = inst.b +| 1, .removed = inst.b +| 1, .added = 1 },

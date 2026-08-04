@@ -19206,6 +19206,43 @@ test "captured destructuring loop evaluation survives generator and async suspen
     try std.testing.expectEqual(@as(f64, 13), (try async_ctx.evaluate("asyncPatternResult")).asNum());
 }
 
+test "catch destructuring binding survives generator and async suspension" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    try std.testing.expectEqualStrings("key", (try ctx.evaluate(
+        \\globalThis.catchSuspendTrace = [];
+        \\function* suspendedCatchPattern() {
+        \\  try { throw {tail: 4}; }
+        \\  catch ({[yield "key"]: value = yield "default", ...rest}) {
+        \\    return value + rest.tail;
+        \\  } finally { catchSuspendTrace.push("finally"); }
+        \\}
+        \\var suspendedCatch = suspendedCatchPattern();
+        \\suspendedCatch.next().value;
+    )).asStr());
+    try std.testing.expectEqualStrings("default", (try ctx.evaluate("suspendedCatch.next('missing').value")).asStr());
+    try std.testing.expectEqual(@as(f64, 11), (try ctx.evaluate("suspendedCatch.next(7).value")).asNum());
+    try std.testing.expectEqualStrings("finally", (try ctx.evaluate("catchSuspendTrace.join(',')")).asStr());
+
+    const async_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_jit = false });
+    defer async_ctx.destroy();
+    _ = try async_ctx.evaluate(
+        \\globalThis.asyncCatchPatternResult = "pending";
+        \\async function asyncCatchPattern() {
+        \\  try { throw {tail: 5}; }
+        \\  catch ({[await Promise.resolve("missing")]: value = await Promise.resolve(8), ...rest}) {
+        \\    asyncCatchPatternResult = value + rest.tail;
+        \\  }
+        \\}
+        \\asyncCatchPattern();
+    );
+    try std.testing.expectEqual(@as(f64, 13), (try async_ctx.evaluate("asyncCatchPatternResult")).asNum());
+}
+
 test "forced bytecode preserves repeated body lexical identity and abrupt unwind" {
     try verifyForcedPlainDifferential(
         \\globalThis.bodyTrace = [];
@@ -19406,6 +19443,34 @@ test "moving GC preserves required-bytecode repeated body environments" {
     try std.testing.expectEqualStrings("0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19", after.asStr());
 }
 
+test "moving GC preserves required-bytecode catch pattern environments" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    const before = try ctx.evaluate(
+        \\globalThis.catchPatternReads = [];
+        \\function makeCatchPatternReads() {
+        \\  for (var index = 0; index < 20; index++) {
+        \\    try { throw {value: {number: index}, tail: index + 100}; }
+        \\    catch ({value, ...rest}) {
+        \\      catchPatternReads.push(function () { return value.number * 1000 + rest.tail; });
+        \\      if (index % 3 === 0) gc();
+        \\    }
+        \\  }
+        \\}
+        \\makeCatchPatternReads();
+        \\catchPatternReads.reduce(function (sum, read) { return sum + read(); }, 0);
+    );
+    try std.testing.expectEqual(@as(f64, 192190), before.asNum());
+    ctx.collectGarbage();
+    const after = try ctx.evaluate("catchPatternReads.reduce(function (sum, read) { return sum + read(); }, 0)");
+    try std.testing.expectEqual(@as(f64, 192190), after.asNum());
+}
+
 fn verifyForcedPlainDifferential(source: []const u8, state_expression: []const u8) !void {
     const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
     var results: [modes.len]u64 = undefined;
@@ -19460,6 +19525,106 @@ test "forced tier differential covers catch, class, and method home-object scope
         \\}
         \\forcedCatch(7);
     , "catchTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.catchScopeTrace = [];
+        \\function catchScopeAdmissionWitness() { return 1; }
+        \\catchScopeAdmissionWitness();
+        \\try { throw 5; } catch (scopedCatch) { catchScopeTrace.push("inside:" + scopedCatch); }
+        \\try { scopedCatch; } catch (error) { catchScopeTrace.push("outside:" + error.name); }
+    , "catchScopeTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.catchPatternTrace = [];
+        \\function forcedCatchPatterns() {
+        \\  "use strict";
+        \\  var reads = [], keyCalls = 0;
+        \\  function key() {
+        \\    return { toString: function () { keyCalls++; return "code"; } };
+        \\  }
+        \\  for (var index = 0; index < 2; index++) {
+        \\    try { throw {code: index, tail: index + 10}; }
+        \\    catch ({[key()]: code = 7, missing: named = function () {}, nested: {value = code + 1} = {}, ...meta}) {
+        \\      reads.push(function () { return code + ":" + named.name + ":" + value + ":" + meta.tail; });
+        \\    } finally { catchPatternTrace.push("finally:" + index); }
+        \\  }
+        \\  catchPatternTrace.push(reads.map(function (read) { return read(); }).join(","));
+        \\  catchPatternTrace.push("keys:" + keyCalls);
+        \\}
+        \\forcedCatchPatterns();
+    , "catchPatternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.catchPatternTrace = [];
+        \\function catchPatternTdz() {
+        \\  "use strict";
+        \\  try {
+        \\    try { throw {}; } catch ({left = right, right = 1}) {}
+        \\  } catch (error) { catchPatternTrace.push("tdz:" + error.name); }
+        \\}
+        \\catchPatternTdz();
+    , "catchPatternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.catchPatternTrace = [];
+        \\function failBinding() {
+        \\  "use strict";
+        \\  try {
+        \\    try { throw {}; }
+        \\    catch ({missing = doesNotExist()}) { catchPatternTrace.push("body"); }
+        \\    finally { catchPatternTrace.push("binding-finally"); }
+        \\  } catch (error) { catchPatternTrace.push("binding:" + error.name); }
+        \\}
+        \\failBinding();
+    , "catchPatternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.catchPatternTrace = [];
+        \\function closeFailedCatchPattern() {
+        \\  "use strict";
+        \\  var iterable = {
+        \\    [Symbol.iterator]: function () {
+        \\      return {
+        \\        next: function () { return {value: undefined, done: false}; },
+        \\        return: function () { catchPatternTrace.push("close"); return {}; }
+        \\      };
+        \\    }
+        \\  };
+        \\  try {
+        \\    try { throw iterable; }
+        \\    catch ([value = missingCatchDefault()]) { catchPatternTrace.push("body"); }
+        \\    finally { catchPatternTrace.push("iterator-finally"); }
+        \\  } catch (error) { catchPatternTrace.push("iterator:" + error.name); }
+        \\}
+        \\closeFailedCatchPattern();
+    , "catchPatternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.catchPatternTrace = [];
+        \\function abruptCatchPatterns() {
+        \\  "use strict";
+        \\  for (var index = 0; index < 4; index++) {
+        \\    try { throw {value: index}; }
+        \\    catch ({value}) {
+        \\      catchPatternTrace.push("catch:" + value);
+        \\      if (value === 0) continue;
+        \\      if (value === 2) break;
+        \\    } finally { catchPatternTrace.push("abrupt-finally:" + index); }
+        \\  }
+        \\}
+        \\abruptCatchPatterns();
+    , "catchPatternTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.catchPatternTrace = [];
+        \\function returnThroughFinally() {
+        \\  "use strict";
+        \\  try { throw {value: 13}; }
+        \\  catch ({value}) { return value; }
+        \\  finally { catchPatternTrace.push("return-finally"); }
+        \\}
+        \\catchPatternTrace.push("return:" + returnThroughFinally());
+    , "catchPatternTrace.join('|')");
 
     try verifyForcedPlainDifferential(
         \\globalThis.classTrace = [];

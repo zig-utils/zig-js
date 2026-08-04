@@ -6918,13 +6918,14 @@ fn runChunk(
                 try vm.notifyDebuggerException(false);
                 return error.Throw;
             },
-            .push_handler, .push_handler_outer => {
+            .push_handler, .push_handler_catch, .push_handler_outer => {
                 const outer = inst.op == .push_handler_outer;
                 if (outer and (exec.environment_depth == 0 or vm.env.parent == null)) return error.OutOfMemory;
+                if (inst.op == .push_handler_catch and stack.items.len == 0) return error.OutOfMemory;
                 try exec.handlers.append(handlers_alloc, .{
                     .catch_pc = inst.a,
                     .finally_pc = inst.b,
-                    .stack_depth = @intCast(stack.items.len),
+                    .stack_depth = @intCast(stack.items.len - @intFromBool(inst.op == .push_handler_catch)),
                     .environment = if (outer) vm.env.parent.? else vm.env,
                     .environment_depth = if (outer) exec.environment_depth - 1 else exec.environment_depth,
                 });

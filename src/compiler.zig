@@ -111,6 +111,17 @@ const FnScope = struct {
         return self.addBinding(arena, bindings, name, true, immutable);
     }
 
+    fn addLexicalChecked(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!u32 {
+        const bindings = self.lexical_scopes.getLast().?;
+        const slot = try self.addLexical(arena, name, immutable);
+        const binding = bindings.getPtr(name).?;
+        if (!binding.tdz_checked) {
+            binding.tdz_checked = true;
+            try self.lexical_slots.append(arena, slot);
+        }
+        return slot;
+    }
+
     fn addEnvironmentLexical(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!void {
         const bindings = self.lexical_scopes.getLast().?;
         if (bindings.contains(name)) return;
@@ -246,7 +257,7 @@ fn repeatedBodyCapturesSupported(node: *const ast.Node, body: *const ast.Node) b
                 if (statement.catch_block) |catch_block| patternNameCaptured(catch_param, catch_block) else false
             else
                 false;
-            if (captured_catch and statement.catch_param.?.* != .identifier) break :blk false;
+            if (captured_catch and !patternSupportsEnvironmentNode(statement.catch_param.?)) break :blk false;
             break :blk repeatedBodyCapturesSupported(statement.block, body) and
                 (if (statement.catch_block) |catch_block| repeatedBodyCapturesSupported(catch_block, body) else true) and
                 (if (statement.finally_block) |finally_block| repeatedBodyCapturesSupported(finally_block, body) else true);
@@ -1467,6 +1478,39 @@ pub const Compiler = struct {
         }
     }
 
+    fn predeclareCheckedLexicalPattern(self: *Compiler, pattern: *const Node) CompileError!void {
+        const scope = self.scope orelse return error.Unsupported;
+        switch (pattern.*) {
+            .identifier => |name| _ = try scope.addLexicalChecked(self.arena, name, false),
+            .obj_pattern => |object| {
+                for (object.props) |property| try self.predeclareCheckedLexicalPattern(property.target);
+                if (object.rest) |rest| try self.predeclareCheckedLexicalPattern(rest);
+            },
+            .arr_pattern => |array| {
+                for (array.elems) |element| if (element.target) |target|
+                    try self.predeclareCheckedLexicalPattern(target);
+                if (array.rest) |rest| try self.predeclareCheckedLexicalPattern(rest);
+            },
+            else => return error.Unsupported,
+        }
+    }
+
+    fn emitLexicalInitializersForPattern(self: *Compiler, pattern: *const Node) CompileError!void {
+        switch (pattern.*) {
+            .identifier => |name| try self.emitLexicalInitializer(name),
+            .obj_pattern => |object| {
+                for (object.props) |property| try self.emitLexicalInitializersForPattern(property.target);
+                if (object.rest) |rest| try self.emitLexicalInitializersForPattern(rest);
+            },
+            .arr_pattern => |array| {
+                for (array.elems) |element| if (element.target) |target|
+                    try self.emitLexicalInitializersForPattern(target);
+                if (array.rest) |rest| try self.emitLexicalInitializersForPattern(rest);
+            },
+            else => return error.Unsupported,
+        }
+    }
+
     fn markEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
         const scope = self.scope orelse return;
         switch (node.*) {
@@ -1917,13 +1961,59 @@ pub const Compiler = struct {
         }
     }
 
-    /// `try { B } [catch (e) { C }] [finally { F }]` for the generator VM. A
-    /// handler records the catch and/or finally targets; the VM unwinds to it
-    /// on a throw. Only an identifier/elided catch binding is lowered.
-    fn compileTry(self: *Compiler, t: *const ast.TryNode) CompileError!void {
-        if (t.catch_param) |p| {
-            if (p.* != .identifier) return error.Unsupported; // destructuring catch → unsupported
+    fn catchPatternUsesEnvironment(self: *Compiler, pattern: *Node, catch_block: *Node) bool {
+        if (self.scope == null) return true;
+        return if (self.repeated_body_root != null)
+            patternNameCaptured(pattern, catch_block)
+        else
+            false;
+    }
+
+    /// Create every catch-pattern binding before BindingInitialization begins.
+    /// Captured bindings need a real Environment Record so repeated catches give
+    /// closures fresh cells; uncaptured function-local bindings stay in checked
+    /// frame slots and are reset to TDZ on every entry.
+    fn prepareCatchPattern(self: *Compiler, pattern: *Node, catch_block: *Node) CompileError!bool {
+        const environment = self.catchPatternUsesEnvironment(pattern, catch_block);
+        if (environment) {
+            try self.markEnvironmentLexicalPattern(pattern, false);
+            try self.emitEnterEnvironment();
+            // A lone identifier is initialized immediately from the incoming
+            // exception and cannot observe its own pre-initialization state.
+            // Destructuring defaults/computed keys can observe sibling TDZs, so
+            // only patterns need the predeclared marker-backed bindings.
+            if (pattern.* != .identifier)
+                try self.emitDeclareEnvironmentLexicalPattern(pattern, false);
+        } else if (pattern.* == .identifier) {
+            // A simple catch binding has no initializer expression that can
+            // observe another binding in the catch scope, so it needs no TDZ
+            // sentinel in a function-local frame slot.
+            const scope = self.scope.?;
+            _ = try scope.addLexical(self.arena, pattern.identifier, false);
+        } else {
+            try self.predeclareCheckedLexicalPattern(pattern);
+            try self.emitLexicalInitializersForPattern(pattern);
         }
+        return environment;
+    }
+
+    /// Consume the catch value on top of the operand stack and initialize a
+    /// destructuring catch parameter from it in spec evaluation order.
+    fn compileCatchPattern(self: *Compiler, pattern: *Node, environment: bool) CompileError!void {
+        const source = try self.freshTemp();
+        try self.emitDefine(source);
+        const mode: PatternMode = if (environment) .{ .environment_lexical = false } else .lexical;
+        if (pattern.* == .identifier)
+            try self.compilePatternTarget(pattern, source, mode)
+        else
+            try self.compilePattern(pattern, source, mode);
+    }
+
+    /// `try { B } [catch (binding) { C }] [finally { F }]` for the generator
+    /// VM. A handler records the catch and/or finally targets; the VM unwinds to
+    /// it on a throw. Catch BindingInitialization is emitted as ordinary
+    /// bytecode, including defaults, computed keys, nested patterns and rest.
+    fn compileTry(self: *Compiler, t: *const ast.TryNode) CompileError!void {
         const none = std.math.maxInt(u32);
 
         if (t.finally_block == null) {
@@ -1939,19 +2029,15 @@ pub const Compiler = struct {
             {
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
-                const captured_catch = if (self.repeated_body_root) |_| if (t.catch_param) |parameter|
-                    patternNameCaptured(parameter, catch_block)
-                else
-                    false else false;
                 if (t.catch_param) |p| {
-                    if (captured_catch) {
-                        if (self.scope) |scope| try scope.addEnvironmentLexical(self.arena, p.identifier, false);
-                        try self.emitEnterEnvironment();
-                    } else if (self.scope) |scope| _ = try scope.addLexical(self.arena, p.identifier, false);
-                    try self.emitDefine(p.identifier);
-                } else _ = try self.chunk.emit(.pop, 0);
-                try self.compileStmt(catch_block);
-                if (captured_catch) try self.emitExitEnvironment();
+                    const environment = try self.prepareCatchPattern(p, catch_block);
+                    try self.compileCatchPattern(p, environment);
+                    try self.compileStmt(catch_block);
+                    if (environment) try self.emitExitEnvironment();
+                } else {
+                    _ = try self.chunk.emit(.pop, 0);
+                    try self.compileStmt(catch_block);
+                }
             }
             self.chunk.patchToHere(skip);
             return;
@@ -1974,28 +2060,25 @@ pub const Compiler = struct {
             try self.pushLexicalScope();
             defer self.popLexicalScope();
             catch_start = self.chunk.here();
-            const captured_catch = if (self.repeated_body_root) |_| if (t.catch_param) |parameter|
-                patternNameCaptured(parameter, cb)
-            else
-                false else false;
-            // Consume the thrown exception (bind it, or discard it) BEFORE pushing
-            // the finally-only handler, so that handler records the post-binding
-            // stack depth. Otherwise a `return` inside the catch unwinds to a depth
-            // that still counts the (now-consumed) exception and over-shrinks the
-            // operand stack. The binding is always a plain identifier (destructuring
-            // catch params are rejected above), so it can't throw before the guard.
+            var catch_environment = false;
             if (t.catch_param) |p| {
-                if (captured_catch) {
-                    if (self.scope) |scope| try scope.addEnvironmentLexical(self.arena, p.identifier, false);
-                    try self.emitEnterEnvironment();
-                } else if (self.scope) |scope| _ = try scope.addLexical(self.arena, p.identifier, false);
-                try self.emitDefine(p.identifier);
-            } else _ = try self.chunk.emit(.pop, 0);
-            // A throw inside the catch body must still run the finally.
-            ph2 = try self.chunk.emitAB(if (captured_catch) .push_handler_outer else .push_handler, none, none);
-            try self.compileStmt(cb);
-            _ = try self.chunk.emit(.pop_handler, 0);
-            if (captured_catch) try self.emitExitEnvironment();
+                // BindingInitialization may allocate or call user code and throw.
+                // Install the finally-only handler first. The catch-specific form
+                // records the depth below the incoming exception, which the
+                // binding consumes, so every abrupt completion resumes the
+                // finally with a clean operand stack.
+                ph2 = try self.chunk.emitAB(.push_handler_catch, none, none);
+                catch_environment = try self.prepareCatchPattern(p, cb);
+                try self.compileCatchPattern(p, catch_environment);
+                try self.compileStmt(cb);
+                _ = try self.chunk.emit(.pop_handler, 0);
+                if (catch_environment) try self.emitExitEnvironment();
+            } else {
+                _ = try self.chunk.emit(.pop, 0);
+                ph2 = try self.chunk.emitAB(.push_handler, none, none);
+                try self.compileStmt(cb);
+                _ = try self.chunk.emit(.pop_handler, 0);
+            }
             _ = try self.chunk.emit(.push_completion, 0); // normal completion of the catch body
         }
 
@@ -2443,6 +2526,7 @@ pub const Compiler = struct {
 
     const PatternMode = union(enum) {
         assignment,
+        lexical,
         environment_lexical: bool,
     };
 
@@ -2466,6 +2550,7 @@ pub const Compiler = struct {
             .identifier => |name| {
                 try self.emitLoad(val);
                 switch (mode) {
+                    .lexical => try self.emitDefineForce(name),
                     .environment_lexical => |immutable| {
                         _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (immutable) 2 else 1);
                     },
@@ -2480,7 +2565,7 @@ pub const Compiler = struct {
                 // defaults and computed keys must run in the current activation.
                 // Assignment patterns retain the compact tree-walker operation
                 // unless a suspension point requires resumable lowering.
-                if (mode == .environment_lexical or nodeHasYield(target)) {
+                if (mode != .assignment or nodeHasYield(target)) {
                     try self.compilePattern(target, val, mode);
                 } else {
                     try self.emitLoad(val);

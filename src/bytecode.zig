@@ -440,6 +440,7 @@ pub const Op = enum(u8) {
 
     // --- exception handling (generator VM) ---
     push_handler, // operand a: catch-block PC (or u32 max = none), b: finally-block PC (or none)
+    push_handler_catch, // same targets; catch value stays on stack, but recorded unwind depth excludes it
     push_handler_outer, // same targets; record the parent environment/depth for a captured catch binding
     pop_handler, // discard the topmost handler (on normal exit from a try block)
     push_completion, // operand a: completion kind (0 = normal); push [undefined, kind] for a finally block

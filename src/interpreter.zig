@@ -15797,6 +15797,25 @@ pub const Interpreter = struct {
 
     // ---- try / catch / finally --------------------------------------------
 
+    /// CatchClauseEvaluation, including parameter BindingInitialization. Keep
+    /// the catch Environment Record active for the body and restore the outer
+    /// environment for every completion, including a default/computed-key throw.
+    fn evalCatchClause(self: *Interpreter, parameter: ?*Node, block: *Node, exception: Value, reserved_environment: ?*Environment) EvalError!Value {
+        const saved_environment = self.env;
+        defer self.env = saved_environment;
+        if (parameter) |pattern| {
+            const catch_environment = reserved_environment orelse blk: {
+                const environment = try gc_mod.allocEnv(self.arena);
+                self.initEnvironment(environment, self.env, false);
+                break :blk environment;
+            };
+            self.env = catch_environment;
+            if (pattern.* == .identifier) catch_environment.is_catch_param = true;
+            try self.bindPattern(pattern, exception, true);
+        }
+        return self.eval(block);
+    }
+
     fn evalTry(self: *Interpreter, t: *ast.TryNode) EvalError!Value {
         // Evaluate the try block (and catch, on a caught throw), capturing its
         // completion — a value, a pending signal (break/continue/return), or a
@@ -15836,31 +15855,16 @@ pub const Interpreter = struct {
                 const exc = self.exception;
                 self.exception = Value.undef();
                 self.debug_exception_origin_notified = false;
-                const saved = try_env;
                 self.env = try_env;
-                // Bind the catch target (identifier or destructuring pattern)
-                // into a dedicated catch scope. A simple identifier binding is
-                // Annex B.3.5-exempt from the eval var-conflict check. With an
-                // ES2019 optional catch binding (`catch { ... }`, no parameter)
-                // nothing is bound, so the catch-scope environment is pure
-                // overhead — the catch block establishes its own block scope for
-                // any lexical declarations. Skip the allocation in that case.
-                if (t.catch_param) |p| {
-                    const catch_env = reserved_catch_env orelse blk: {
-                        const env = try gc_mod.allocEnv(self.arena);
-                        self.initEnvironment(env, self.env, false);
-                        break :blk env;
-                    };
-                    self.env = catch_env;
-                    if (p.* == .identifier) catch_env.is_catch_param = true;
-                    try self.bindPattern(p, exc, true);
-                }
-                const catch_result = self.eval(t.catch_block.?);
-                self.env = saved;
+                // CatchClauseEvaluation includes parameter BindingInitialization.
+                // Its defaults/computed keys can throw; that abrupt completion is
+                // held exactly like a catch-body throw so an enclosing finally
+                // still runs before it propagates.
+                const catch_result = self.evalCatchClause(t.catch_param, t.catch_block.?, exc, reserved_catch_env);
                 if (catch_result) |v| {
                     result = v;
                 } else |cerr| {
-                    held_err = cerr;
+                    held_err = self.catchableOutOfMemory(cerr);
                     held_exc = self.exception;
                 }
             } else {
