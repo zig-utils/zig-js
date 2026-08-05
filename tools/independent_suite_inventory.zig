@@ -257,10 +257,137 @@ fn parseAndValidate(gpa: std.mem.Allocator, source: []const u8) !void {
     try validateInventory(parsed.value);
 }
 
+fn trimLine(value: []const u8) []const u8 {
+    return std.mem.trim(u8, value, " \t\r\n");
+}
+
+fn runGit(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) ![]u8 {
+    const completed = std.process.run(gpa, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+        .expand_arg0 = .expand,
+    }) catch |err| return fail("cannot run bounded git command: {t}", .{err});
+    defer gpa.free(completed.stderr);
+    switch (completed.term) {
+        .exited => |code| if (code != 0) {
+            defer gpa.free(completed.stdout);
+            return fail("git command failed ({d}): {s}", .{ code, trimLine(completed.stderr) });
+        },
+        else => {
+            defer gpa.free(completed.stdout);
+            return fail("git command did not exit normally", .{});
+        },
+    }
+    return completed.stdout;
+}
+
+fn gitAt(gpa: std.mem.Allocator, io: std.Io, checkout: []const u8, args: []const []const u8) ![]u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "git", "-C", checkout });
+    try argv.appendSlice(gpa, args);
+    return runGit(gpa, io, argv.items);
+}
+
+fn isWithin(path: []const u8, parent: []const u8) bool {
+    if (std.mem.eql(u8, path, parent)) return true;
+    if (!std.mem.startsWith(u8, path, parent) or path.len <= parent.len) return false;
+    return std.fs.path.isSep(path[parent.len]);
+}
+
+fn verifyFile(gpa: std.mem.Allocator, io: std.Io, checkout: []const u8, suite_id: []const u8, file: FilePin) !void {
+    const path = try std.fs.path.join(gpa, &.{ checkout, file.path });
+    defer gpa.free(path);
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(16 * 1024 * 1024)) catch |err|
+        return fail("suite '{s}' cannot read pinned file '{s}': {t}", .{ suite_id, file.path, err });
+    defer gpa.free(source);
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(source, &digest, .{});
+    const actual = std.fmt.bytesToHex(digest, .lower);
+    if (!std.mem.eql(u8, &actual, file.sha256))
+        return fail("suite '{s}' file '{s}' SHA-256 drift: expected {s}, got {s}", .{ suite_id, file.path, file.sha256, actual });
+}
+
+fn verifyCheckout(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory, suite_id: []const u8, checkout_arg: []const u8) !usize {
+    var suite: ?Suite = null;
+    for (inventory.suites) |candidate| {
+        if (std.mem.eql(u8, candidate.id, suite_id)) suite = candidate;
+    }
+    const selected = suite orelse return fail("unknown suite id '{s}'", .{suite_id});
+
+    const checkout = std.Io.Dir.cwd().realPathFileAlloc(io, checkout_arg, gpa) catch |err|
+        return fail("cannot resolve checkout '{s}': {t}", .{ checkout_arg, err });
+    defer gpa.free(checkout);
+
+    const common_dir_raw = try gitAt(gpa, io, ".", &.{ "rev-parse", "--path-format=absolute", "--git-common-dir" });
+    defer gpa.free(common_dir_raw);
+    const common_dir = trimLine(common_dir_raw);
+    const repository_root = std.fs.path.dirname(common_dir) orelse return fail("cannot resolve zig-js repository root from '{s}'", .{common_dir});
+    if (isWithin(checkout, repository_root))
+        return fail("suite checkout '{s}' is inside zig-js repository '{s}'", .{ checkout, repository_root });
+
+    const remote_raw = try gitAt(gpa, io, checkout, &.{ "remote", "get-url", "origin" });
+    defer gpa.free(remote_raw);
+    if (!std.mem.eql(u8, trimLine(remote_raw), selected.source.repository))
+        return fail("suite '{s}' origin drift: expected {s}, got {s}", .{ suite_id, selected.source.repository, trimLine(remote_raw) });
+
+    const identity_raw = try gitAt(gpa, io, checkout, &.{ "rev-parse", "HEAD", "HEAD^{tree}" });
+    defer gpa.free(identity_raw);
+    var lines = std.mem.splitScalar(u8, trimLine(identity_raw), '\n');
+    const revision = lines.next() orelse "";
+    const tree = lines.next() orelse "";
+    if (lines.next() != null or !std.mem.eql(u8, revision, selected.source.revision) or !std.mem.eql(u8, tree, selected.source.tree))
+        return fail("suite '{s}' identity drift: expected {s}/{s}, got {s}/{s}", .{ suite_id, selected.source.revision, selected.source.tree, revision, tree });
+
+    const status_raw = try gitAt(gpa, io, checkout, &.{ "status", "--porcelain=v1", "--untracked-files=all" });
+    defer gpa.free(status_raw);
+    if (trimLine(status_raw).len != 0) return fail("suite '{s}' checkout is dirty: {s}", .{ suite_id, trimLine(status_raw) });
+
+    var verified: usize = 0;
+    try verifyFile(gpa, io, checkout, suite_id, .{ .path = selected.top_level_license.path, .sha256 = selected.top_level_license.sha256 });
+    verified += 1;
+    for (selected.harness_files) |file| {
+        try verifyFile(gpa, io, checkout, suite_id, file);
+        verified += 1;
+    }
+    for (selected.rows) |row| for (row.files) |file| {
+        try verifyFile(gpa, io, checkout, suite_id, file);
+        verified += 1;
+    };
+    return verified;
+}
+
 pub fn main(init: std.process.Init) !void {
     const source = try std.Io.Dir.cwd().readFileAlloc(init.io, inventory_path, init.gpa, .limited(max_inventory_bytes));
     defer init.gpa.free(source);
-    try parseAndValidate(init.gpa, source);
+    const parsed = try std.json.parseFromSlice(Inventory, init.gpa, source, .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    try validateInventory(parsed.value);
+
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    _ = args.next();
+    if (args.next()) |command| {
+        if (!std.mem.eql(u8, command, "--verify-checkout")) {
+            std.debug.print("usage: independent-suite-audit [--verify-checkout <suite-id> <path>]\n", .{});
+            std.process.exit(2);
+        }
+        const suite_id = args.next() orelse {
+            std.debug.print("independent-suite audit: --verify-checkout requires a suite id and path\n", .{});
+            std.process.exit(2);
+        };
+        const checkout = args.next() orelse {
+            std.debug.print("independent-suite audit: --verify-checkout requires a suite id and path\n", .{});
+            std.process.exit(2);
+        };
+        if (args.next() != null) {
+            std.debug.print("independent-suite audit: unexpected trailing argument\n", .{});
+            std.process.exit(2);
+        }
+        const files = try verifyCheckout(init.gpa, init.io, parsed.value, suite_id, checkout);
+        std.debug.print("independent-suite checkout ok: {s} at exact revision/tree with {d} pinned files\n", .{ suite_id, files });
+        return;
+    }
     std.debug.print("independent-suite audit ok: frozen candidate suites, 17 Octane results, and 5 engine pin contracts classified\n", .{});
 }
 
@@ -284,4 +411,11 @@ test "pins and exclusion reasons fail closed" {
     const bad_exclusion = try std.mem.replaceOwned(u8, std.testing.allocator, source, "External execution is permitted, but the first subset does not yet specify GPL notice retention in its evidence package.", "");
     defer std.testing.allocator.free(bad_exclusion);
     try std.testing.expectError(error.IndependentSuiteInventoryFailed, parseAndValidate(std.testing.allocator, bad_exclusion));
+}
+
+test "checkout containment rejects the repository and accepts siblings" {
+    try std.testing.expect(isWithin("/work/zig-js", "/work/zig-js"));
+    try std.testing.expect(isWithin("/work/zig-js/external", "/work/zig-js"));
+    try std.testing.expect(!isWithin("/work/zig-js-other", "/work/zig-js"));
+    try std.testing.expect(!isWithin("/tmp/octane", "/work/zig-js"));
 }

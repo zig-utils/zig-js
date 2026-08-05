@@ -39,6 +39,13 @@ pub fn build(b: *std.Build) void {
     });
     const run_independent_suite_audit = b.addRunArtifact(independent_suite_audit);
     run_independent_suite_audit.setCwd(b.path("."));
+    if (b.option([]const u8, "independent-suite-checkout", "Out-of-tree suite checkout to verify offline")) |checkout| {
+        run_independent_suite_audit.addArgs(&.{
+            "--verify-checkout",
+            b.option([]const u8, "independent-suite-id", "Pinned suite inventory id") orelse "octane-2-retired",
+            checkout,
+        });
+    }
     const independent_suite_audit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/independent_suite_inventory.zig"),

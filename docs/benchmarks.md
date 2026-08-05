@@ -348,7 +348,19 @@ are audited. Candidate status is not execution evidence.
 
 ```sh
 zig build independent-suite-audit
+git clone --filter=blob:none --no-checkout \
+  https://github.com/chromium/octane.git /absolute/outside/zig-js/octane
+git -C /absolute/outside/zig-js/octane checkout --detach \
+  570ad1ccfe86e3eecba0636c8f932ac08edec517
+zig build independent-suite-audit \
+  -Dindependent-suite-id=octane-2-retired \
+  -Dindependent-suite-checkout=/absolute/outside/zig-js/octane
 ```
+
+Only the explicit `git clone` acquisition uses the network. Checkout and
+verification are offline; the verifier rejects a checkout inside zig-js, the
+wrong origin/commit/tree, a dirty tree, a missing file, or any pinned-file
+SHA-256 mismatch. It never acquires the suite itself.
 
 ## Stable attribution and exact-parent A/Bs
 
