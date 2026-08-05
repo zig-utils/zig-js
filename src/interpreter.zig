@@ -1749,6 +1749,11 @@ pub const Interpreter = struct {
     /// match, read by `RegExp.input`/`$_`/`lastMatch`/`$&`/`lastParen`/`$+`/
     /// `leftContext`/`$\``/`rightContext`/`$'`/`$1`..`$9`.
     re_legacy: RegExpLegacy = .{},
+    /// Matching scratch is interpreter-local even when RegExp objects and their
+    /// immutable compiled programs belong to a shared realm. This both avoids
+    /// rebuilding the Thompson VM for every `exec` and prevents worker threads
+    /// from sharing mutable matcher state.
+    regex_matchers: std.AutoHashMapUnmanaged(*regex.Regex, regex.Regex.Matcher) = .empty,
     signal: Signal = .none,
     ret_value: Value = Value.undef(),
     /// The `this` binding for the currently-executing function (undefined at
@@ -8978,6 +8983,12 @@ pub const Interpreter = struct {
         return compiled;
     }
 
+    fn regexMatcher(self: *Interpreter, re: *regex.Regex) EvalError!*regex.Regex.Matcher {
+        const entry = try self.regex_matchers.getOrPut(self.arena, re);
+        if (!entry.found_existing) entry.value_ptr.* = re.matcher();
+        return entry.value_ptr;
+    }
+
     /// Whether `o` is the `%RegExp.prototype%` intrinsic (which the source/flags
     /// accessors special-case: they return "(?:)" / "" / undefined rather than
     /// throwing).
@@ -9054,8 +9065,11 @@ pub const Interpreter = struct {
             }
             const start = byteOffsetForUtf16IndexA(search_input, start_units, ascii);
             const re = try self.compileRegex(o);
-            const found = re.findFrom(search_input, start) catch null;
-            if (found) |m| {
+            const matcher = try self.regexMatcher(re);
+            const found = matcher.findFrom(search_input, start) catch null;
+            if (found) |match| {
+                var m = match;
+                defer m.deinit(self.arena);
                 // Sticky matches must begin exactly at lastIndex.
                 if (sticky and m.start != start) {
                     try self.setRegExpLastIndex(o, 0);
@@ -9107,8 +9121,11 @@ pub const Interpreter = struct {
         }
         const start = byteOffsetForUtf16IndexA(search_input, start_units, ascii);
         const re = try self.compileRegex(o);
-        const found = re.findFrom(search_input, start) catch null;
-        if (found) |m| {
+        const matcher = try self.regexMatcher(re);
+        const found = matcher.findFrom(search_input, start) catch null;
+        if (found) |match| {
+            var m = match;
+            defer m.deinit(self.arena);
             if (sticky and m.start != start) {
                 try self.setRegExpLastIndex(o, 0);
                 return false;
@@ -9511,8 +9528,11 @@ pub const Interpreter = struct {
         }
         const start = cursor.byteForUtf16(search_input, start_units);
         const re = try self.compileRegex(o);
-        const found = re.findFrom(search_input, start) catch null;
-        if (found) |m| {
+        const matcher = try self.regexMatcher(re);
+        const found = matcher.findFrom(search_input, start) catch null;
+        if (found) |match| {
+            var m = match;
+            defer m.deinit(self.arena);
             if (sticky and m.start != start) {
                 try self.setRegExpLastIndex(o, 0);
                 return Value.nul();
@@ -15344,16 +15364,22 @@ pub const Interpreter = struct {
             // the String.prototype.split(@@split) algorithm.
             if (args[0].isObject() and args[0].asObj().behavior.is_regex) {
                 const re = try self.compileRegex(args[0].asObj());
+                const matcher = try self.regexMatcher(re);
                 if (lim == 0) return result;
                 if (s.len == 0) {
                     // Empty input: [""] unless the pattern matches the empty string.
-                    if ((re.find(s) catch null) == null) try out.append(self.arena, try Value.strAlloc(self.arena, s));
+                    if (matcher.find(s) catch null) |match| {
+                        var m = match;
+                        defer m.deinit(self.arena);
+                    } else try out.append(self.arena, try Value.strAlloc(self.arena, s));
                     return result;
                 }
                 var p: usize = 0; // end of the previous piece
                 var q: usize = 0; // scan cursor
                 while (q < s.len) {
-                    const m = re.find(s[q..]) catch null orelse break;
+                    const match = matcher.find(s[q..]) catch null orelse break;
+                    var m = match;
+                    defer m.deinit(self.arena);
                     const m_start = q + m.start;
                     const m_end = q + m.end;
                     if (m_end == p) { // empty match flush against the last split — skip
@@ -15476,11 +15502,14 @@ pub const Interpreter = struct {
                 const ro = arg0(args).asObj();
                 const g = all or std.mem.indexOfScalar(u8, ro.regexFlags(), 'g') != null;
                 const re = try self.compileRegex(ro);
+                const matcher = try self.regexMatcher(re);
                 const template: []const u8 = if (is_func) "" else try self.toStringWtf8(repl_val);
                 var last: usize = 0; // end of the last copied region
                 var search: usize = 0; // absolute scan cursor
                 while (search <= s.len) {
-                    const m = re.find(s[search..]) catch null orelse break;
+                    const match = matcher.find(s[search..]) catch null orelse break;
+                    var m = match;
+                    defer m.deinit(self.arena);
                     const mstart = search + m.start;
                     const mend = search + m.end;
                     try buf.appendSlice(a, s[last..mstart]);
@@ -49177,6 +49206,37 @@ test "RegExp constructor treats escaped class hyphen as literal" {
     try std.testing.expect((try evalSource(a,
         \\new RegExp("[A-Za-z.\\-_]+").test("Porto-Novo")
     )).asBool());
+}
+
+test "RegExp exec reuses interpreter-local Thompson matcher scratch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var parser = try Parser.init(a,
+        \\const input = "id=418; state=ready; id=73; state=waiting; id=905; state=done";
+        \\const expression = /id=(\d+);\s+state=([a-z]+)/g;
+        \\let total = 0;
+        \\for (let i = 0; i < 64; i++) {
+        \\  expression.lastIndex = 0;
+        \\  let match;
+        \\  while ((match = expression.exec(input)) !== null)
+        \\    total += Number(match[1]) + match[2].length;
+        \\}
+        \\total
+    );
+    const prog = try parser.parseProgram();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    try installGlobals(&env, root_shape);
+    var interp = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    const tdz = try a.create(value.Object);
+    tdz.* = .{};
+    interp.tdz_marker = tdz;
+
+    try std.testing.expectEqual(@as(f64, 90_368), (try interp.eval(prog)).asNum());
+    try std.testing.expectEqual(@as(usize, 1), interp.regex_matchers.count());
+    var matchers = interp.regex_matchers.valueIterator();
+    try std.testing.expect(matchers.next().?.vm_cell != null);
 }
 
 test "Intl.DateTimeFormat German numeric date pattern" {
