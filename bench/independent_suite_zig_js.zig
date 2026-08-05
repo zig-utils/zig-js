@@ -29,6 +29,25 @@ const SourceIdentity = struct {
     sha256: []const u8,
 };
 
+const SourceDependencyIdentity = struct {
+    id: []const u8,
+    path: []const u8,
+    revision: []const u8,
+    repository: []const u8,
+    clean: bool,
+};
+
+const VerifiedSourceIdentity = struct {
+    dependencies: [2]SourceDependencyIdentity,
+
+    fn deinit(self: *VerifiedSourceIdentity, gpa: std.mem.Allocator) void {
+        for (self.dependencies) |dependency| {
+            gpa.free(dependency.path);
+            gpa.free(dependency.revision);
+        }
+    }
+};
+
 const EventKind = enum { result, @"error", score };
 const RunMode = enum { score, attribution };
 
@@ -138,6 +157,7 @@ const EngineIdentity = struct {
     executable_path: []const u8,
     executable_sha256: []const u8,
     source_revision: ?[]const u8,
+    source_dependencies: []const SourceDependencyIdentity,
     version_output: []const u8 = "zig-js repository-built independent-suite runner schema 1",
     argv: []const []const u8,
     environment: []const []const u8,
@@ -450,7 +470,39 @@ fn runGit(gpa: std.mem.Allocator, io: std.Io, argv: []const []const u8) ![]u8 {
     return completed.stdout;
 }
 
-fn verifySourceIdentity(gpa: std.mem.Allocator, io: std.Io, revision: []const u8) !void {
+fn verifyDependencyIdentity(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    id: []const u8,
+    candidate: []const u8,
+    repository: []const u8,
+    ssh_repository: []const u8,
+) !SourceDependencyIdentity {
+    const path = try std.Io.Dir.cwd().realPathFileAlloc(io, candidate, gpa);
+    errdefer gpa.free(path);
+    const revision_raw = try runGit(gpa, io, &.{ "git", "-C", path, "rev-parse", "HEAD" });
+    defer gpa.free(revision_raw);
+    const revision = trimLine(revision_raw);
+    if (sourceRevision(revision) == null) return error.InvalidSourceRevision;
+    const revision_copy = try gpa.dupe(u8, revision);
+    errdefer gpa.free(revision_copy);
+    const remote_raw = try runGit(gpa, io, &.{ "git", "-C", path, "remote", "get-url", "origin" });
+    defer gpa.free(remote_raw);
+    const remote_url = trimLine(remote_raw);
+    if (!std.mem.eql(u8, remote_url, repository) and !std.mem.eql(u8, remote_url, ssh_repository)) {
+        std.debug.print("independent-suite runner: source dependency '{s}' origin mismatch: {s}\n", .{ id, remote_url });
+        return error.SourceDependencyOriginMismatch;
+    }
+    const status_raw = try runGit(gpa, io, &.{ "git", "-C", path, "status", "--porcelain=v1", "--untracked-files=all" });
+    defer gpa.free(status_raw);
+    if (trimLine(status_raw).len != 0) {
+        std.debug.print("independent-suite runner: source dependency '{s}' is dirty: {s}\n", .{ id, trimLine(status_raw) });
+        return error.DirtySourceDependency;
+    }
+    return .{ .id = id, .path = path, .revision = revision_copy, .repository = repository, .clean = true };
+}
+
+fn verifySourceIdentity(gpa: std.mem.Allocator, io: std.Io, revision: []const u8) !VerifiedSourceIdentity {
     if (sourceRevision(revision) == null) return error.InvalidSourceRevision;
     const head_raw = try runGit(gpa, io, &.{ "git", "rev-parse", "HEAD" });
     defer gpa.free(head_raw);
@@ -464,6 +516,26 @@ fn verifySourceIdentity(gpa: std.mem.Allocator, io: std.Io, revision: []const u8
         std.debug.print("independent-suite runner: zig-js worktree is dirty: {s}\n", .{trimLine(status_raw)});
         return error.DirtySourceWorktree;
     }
+
+    const root_raw = try runGit(gpa, io, &.{ "git", "rev-parse", "--show-toplevel" });
+    defer gpa.free(root_raw);
+    const specs = [_]struct { id: []const u8, relative_path: []const u8, repository: []const u8, ssh_repository: []const u8 }{
+        .{ .id = "zig-regex", .relative_path = "../zig-regex", .repository = "https://github.com/zig-utils/zig-regex.git", .ssh_repository = "git@github.com:zig-utils/zig-regex.git" },
+        .{ .id = "zig-gc", .relative_path = "../zig-gc", .repository = "https://github.com/zig-utils/zig-gc.git", .ssh_repository = "git@github.com:zig-utils/zig-gc.git" },
+    };
+    var identity: VerifiedSourceIdentity = undefined;
+    var initialized: usize = 0;
+    errdefer for (identity.dependencies[0..initialized]) |dependency| {
+        gpa.free(dependency.path);
+        gpa.free(dependency.revision);
+    };
+    for (specs, 0..) |spec, index| {
+        const candidate = try std.fs.path.join(gpa, &.{ trimLine(root_raw), spec.relative_path });
+        defer gpa.free(candidate);
+        identity.dependencies[index] = try verifyDependencyIdentity(gpa, io, spec.id, candidate, spec.repository, spec.ssh_repository);
+        initialized += 1;
+    }
+    return identity;
 }
 
 fn verifyEnvironment(environ: *std.process.Environ.Map) !void {
@@ -493,6 +565,7 @@ fn runSample(
     own_sources: bool,
     mode: RunMode,
     revision: []const u8,
+    source_dependencies: []const SourceDependencyIdentity,
     argv: []const []const u8,
 ) !bool {
     var state = AdapterState{ .gpa = gpa, .sources = sources };
@@ -576,6 +649,7 @@ fn runSample(
             .executable_path = identity.path,
             .executable_sha256 = identity.sha256,
             .source_revision = sourceRevision(revision),
+            .source_dependencies = source_dependencies,
             .argv = argv,
             .environment = &environment,
         },
@@ -650,8 +724,12 @@ fn selfTest(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, argv: []
         .{ .path = base_path, .sha256 = "self-test", .bytes = fixture_base },
         .{ .path = fixture_row.path, .sha256 = "self-test", .bytes = fixture_workload },
     };
-    const scored = try runSample(gpa, io, writer, fixture_row, sources, false, .score, "self-test", argv);
-    const attributed = try runSample(gpa, io, writer, fixture_row, sources, false, .attribution, "self-test", argv);
+    const fixture_dependencies = [_]SourceDependencyIdentity{
+        .{ .id = "zig-regex", .path = "/self-test/zig-regex", .revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .repository = "https://github.com/zig-utils/zig-regex.git", .clean = true },
+        .{ .id = "zig-gc", .path = "/self-test/zig-gc", .revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .repository = "https://github.com/zig-utils/zig-gc.git", .clean = true },
+    };
+    const scored = try runSample(gpa, io, writer, fixture_row, sources, false, .score, "self-test", &fixture_dependencies, argv);
+    const attributed = try runSample(gpa, io, writer, fixture_row, sources, false, .attribution, "self-test", &fixture_dependencies, argv);
     return scored and attributed;
 }
 
@@ -683,7 +761,8 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
     try verifyEnvironment(init.environ_map);
-    try verifySourceIdentity(init.gpa, init.io, argv[4]);
+    var source_identity = try verifySourceIdentity(init.gpa, init.io, argv[4]);
+    defer source_identity.deinit(init.gpa);
     const checkout = try std.Io.Dir.cwd().realPathFileAlloc(init.io, argv[1], init.gpa);
     defer init.gpa.free(checkout);
     var sources_handed_off = false;
@@ -694,7 +773,7 @@ pub fn main(init: std.process.Init) !void {
     const sources = [2]LoadedSource{ base, workload };
     // `runSample` owns both buffers from this point, including on error.
     sources_handed_off = true;
-    const valid = try runSample(init.gpa, init.io, stdout, row.*, sources, true, mode, argv[4], argv);
+    const valid = try runSample(init.gpa, init.io, stdout, row.*, sources, true, mode, argv[4], &source_identity.dependencies, argv);
     try stdout.flush();
     if (!valid) std.process.exit(1);
 }

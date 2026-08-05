@@ -253,7 +253,7 @@
       "kind": "repository_built",
       "disposition": "required",
       "adapter_status": "minimal_shell_v1_implemented",
-      "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "source_revision", "argv", "environment"]
+      "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "source_revision", "source_dependencies", "argv", "environment"]
     },
     {
       "id": "system-jsc",

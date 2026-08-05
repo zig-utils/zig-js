@@ -382,8 +382,12 @@ zig build independent-suite-zig-js \
 The run step first performs the full checkout audit, then the runner repeats
 the selected file checksums. It also rejects a dirty zig-js worktree, a source
 revision other than the exact current `HEAD`, and an environment other than
-`TZ=UTC`, `LC_ALL=C`, and `LANG=C`. Each schema-1 JSON line retains the runner
-path and SHA-256, argv/environment, applicable row and licenses, exact loaded
+`TZ=UTC`, `LC_ALL=C`, and `LANG=C`. Because zig-js links its sibling path
+dependencies, the runner also rejects dirty `zig-regex` or `zig-gc` worktrees
+or a noncanonical origin and retains each dependency's resolved path, exact
+revision, canonical repository, and clean status. Each schema-1 JSON line
+retains those complete source inputs, the runner path and SHA-256,
+argv/environment, applicable row and licenses, exact loaded
 sources, the evaluation-step budget and termination owner, pass/failure/skip
 fields, all upstream and auxiliary outputs, the raw outer wall/CPU/peak-RSS
 sample, explicit single-sample dispersion status, output validation, and both
