@@ -11625,6 +11625,26 @@ test "Error.prototype.stack accessor" {
     try expectEvalStr("set stack", "Object.getOwnPropertyDescriptor(Error.prototype, 'stack').set.name");
     // The getter returns a string for an Error receiver, undefined otherwise.
     try expectEvalStr("string", "typeof new Error('x').stack");
+    try std.testing.expect((try evalIn(
+        \\var caught;
+        \\function outer() { inner(); }
+        \\function inner() { try { null(); } catch (e) { caught = e; } }
+        \\outer();
+        \\var full = caught.stack;
+        \\var innerFrame = full.indexOf("\n    at inner");
+        \\var outerFrame = full.indexOf("\n    at outer");
+        \\Error.stackTraceLimit = 1;
+        \\var limited = caught.stack;
+        \\full.indexOf("TypeError: value is not a function") === 0 &&
+        \\innerFrame > 0 && outerFrame > innerFrame &&
+        \\limited.indexOf("\n    at inner") > 0 && limited.indexOf("\n    at outer") === -1
+    )).asBool());
+    try expectEvalStr("Error: x\n    at <eval> (fixture.js:7)",
+        \\var e = new Error("x");
+        \\e.sourceURL = "fixture.js";
+        \\e.startingLineNumber = 7;
+        \\e.stack
+    );
     try std.testing.expect((try evalIn("({ __proto__: new Error('y') }).stack === undefined")).asBool());
     // The setter installs an own { writable, enumerable, configurable } data
     // property shadowing the accessor (SetterThatIgnoresPrototypeProperties).

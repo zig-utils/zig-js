@@ -18387,7 +18387,8 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 
 /// `Error.prototype.stack` getter (V8-style): a string for a receiver that has
 /// `[[ErrorData]]` (an Error instance), otherwise undefined. The trace content
-/// is implementation-defined; we return `"name: message"`.
+/// is implementation-defined; materialize the structured frames captured when
+/// the Error was created rather than discarding their function/source identity.
 fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -18409,6 +18410,8 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         name
     else
         try std.mem.concat(self.arena, u8, &.{ name, ": ", message });
+    // Preserve the JavaScriptCore-shaped Error constructor metadata boundary:
+    // explicit sourceURL/startingLineNumber owns the formatted eval location.
     if (obj.getOwn("sourceURL")) |source_v| {
         if (source_v.isString()) {
             if (obj.getOwn("startingLineNumber")) |line_v| {
@@ -18424,6 +18427,40 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
                 }
             }
         }
+    }
+    const frames = obj.errorStackFrames();
+    if (frames.len > 0) {
+        const frame_limit = self.selectedStackTraceLimit();
+        if (frame_limit == 0) return try Value.strAlloc(self.arena, first_line);
+        var stack: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer stack.deinit(self.arena);
+        try stack.appendSlice(self.arena, first_line);
+        for (frames[0..@min(frames.len, frame_limit)]) |frame| {
+            try stack.appendSlice(self.arena, "\n    at ");
+            const function_name = if (frame.function_name.len > 0)
+                frame.function_name
+            else switch (frame.code_type) {
+                .eval => "<eval>",
+                .module => "<module>",
+                .global => "<global>",
+                .wasm => "<wasm>",
+                .constructor => "<constructor>",
+                else => "<anonymous>",
+            };
+            try stack.appendSlice(self.arena, function_name);
+            if (frame.source_url.len > 0 or frame.line_zero_based >= 0) {
+                try stack.append(self.arena, ' ');
+                try stack.append(self.arena, '(');
+                try stack.appendSlice(self.arena, if (frame.source_url.len > 0) frame.source_url else "<anonymous>");
+                if (frame.line_zero_based >= 0) {
+                    try tfmt(self, &stack, ":{d}", .{@as(i64, frame.line_zero_based) + 1});
+                    if (frame.column_zero_based >= 0)
+                        try tfmt(self, &stack, ":{d}", .{@as(i64, frame.column_zero_based) + 1});
+                }
+                try stack.append(self.arena, ')');
+            }
+        }
+        return try Value.strOwned(self.arena, try stack.toOwnedSlice(self.arena));
     }
     return try Value.strAlloc(self.arena, first_line);
 }
