@@ -22,6 +22,7 @@ export type TierSnapshot = {
   checksum: number;
   execution: CounterMap;
   admissions: CounterMap;
+  synchronization: CounterMap;
   baseline_publications: number;
   optimizer_publications: number;
   generated_code_bytes: number;
@@ -35,6 +36,7 @@ export type TierDelta = {
   checksum: number;
   execution: CounterMap;
   admissions: CounterMap;
+  synchronization: CounterMap;
   baseline_publications: number;
   optimizer_publications: number;
   generated_code_bytes: number;
@@ -61,6 +63,52 @@ const runtimeMetrics = [
   "runtime_operation_calls",
   "host_callbacks",
   "wasm_dispatches",
+];
+const synchronizationMetrics = [
+  "thread_join_parks",
+  "lock_contentions",
+  "lock_wait_parks",
+  "async_hold_queued",
+  "condition_async_waits",
+  "condition_async_settled",
+  "condition_waits",
+  "condition_wait_parks",
+  "property_waits",
+  "property_wait_parks",
+  "property_wait_async_enqueued",
+  "property_wait_async_settled",
+  "task_pump_empty",
+  "task_pump_jobs",
+  "task_pump_async_hold_jobs",
+  "task_pump_condition_jobs",
+  "condition_queue_grows",
+  "condition_queue_compactions",
+  "worker_channel_pushes",
+  "worker_channel_pops",
+  "worker_channel_empty_pops",
+  "worker_channel_closes",
+  "arena_lock_acquires",
+  "arena_lock_contentions",
+  "arena_lock_spins",
+  "env_lock_acquires",
+  "env_lock_contentions",
+  "env_lock_spins",
+  "object_backing_lock_acquires",
+  "object_backing_lock_contentions",
+  "object_backing_lock_spins",
+  "object_property_lock_acquires",
+  "object_property_lock_contentions",
+  "object_property_lock_spins",
+  "object_element_lock_acquires",
+  "object_element_lock_contentions",
+  "object_element_lock_spins",
+  "worker_runs",
+  "worker_run_ns",
+  "worker_run_ns_max",
+  "thread_join_wait_ns",
+  "lock_wait_ns",
+  "condition_wait_ns",
+  "property_wait_ns",
 ];
 const nativeCodeMetrics = [
   "live_artifacts",
@@ -160,6 +208,14 @@ function subtractMap(after: CounterMap, before: CounterMap): CounterMap {
   return result;
 }
 
+function subtractSynchronization(after: CounterMap, before: CounterMap): CounterMap {
+  const result = subtractMap(after, before);
+  // Maxima are cumulative gauges, not additive counters. Preserve the exact
+  // phase-boundary gauge instead of manufacturing a difference of maxima.
+  result.worker_run_ns_max = after.worker_run_ns_max || 0;
+  return result;
+}
+
 function emptySnapshot(row: TierSnapshot): TierSnapshot {
   return {
     ...row,
@@ -169,6 +225,9 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
     ),
     admissions: Object.fromEntries(
       Object.keys(row.admissions).map((name) => [name, 0]),
+    ),
+    synchronization: Object.fromEntries(
+      synchronizationMetrics.map((name) => [name, 0]),
     ),
     baseline_publications: 0,
     optimizer_publications: 0,
@@ -196,6 +255,7 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         checksum: row.checksum,
         execution: subtractMap(row.execution, before.execution),
         admissions: subtractMap(row.admissions, before.admissions),
+        synchronization: subtractSynchronization(row.synchronization, before.synchronization),
         baseline_publications:
           row.baseline_publications - before.baseline_publications,
         optimizer_publications:
@@ -243,6 +303,7 @@ export function validate(
         Number.isInteger(row.checksum) &&
           Object.values(row.execution).every(Number.isInteger) &&
           Object.values(row.admissions).every(Number.isInteger) &&
+          Object.values(row.synchronization).every(Number.isInteger) &&
           Object.values(row.native_code).every(Number.isInteger) &&
           Object.values(row.heap).every(Number.isInteger),
         `non-integral attribution for ${workload}`,
@@ -251,6 +312,20 @@ export function validate(
         JSON.stringify(Object.keys(row.execution).sort()) ===
           JSON.stringify([...tierMetrics, ...runtimeMetrics, "environment_allocations"].sort()),
         `execution attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        JSON.stringify(Object.keys(row.synchronization).sort()) ===
+          JSON.stringify([...synchronizationMetrics].sort()),
+        `synchronization attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        row.synchronization.worker_run_ns >= row.synchronization.worker_run_ns_max &&
+          row.synchronization.arena_lock_acquires >= row.synchronization.arena_lock_contentions &&
+          row.synchronization.env_lock_acquires >= row.synchronization.env_lock_contentions &&
+          row.synchronization.object_backing_lock_acquires >= row.synchronization.object_backing_lock_contentions &&
+          row.synchronization.object_property_lock_acquires >= row.synchronization.object_property_lock_contentions &&
+          row.synchronization.object_element_lock_acquires >= row.synchronization.object_element_lock_contentions,
+        `synchronization attribution is incoherent for ${workload}`,
       );
       requireValue(
         JSON.stringify(Object.keys(row.native_code).sort()) ===
@@ -343,6 +418,36 @@ export function render(
   }
   rows.push(
     "",
+    `${heading}${heading} Synchronization and worker lifecycle`,
+    "",
+    "Phase rows are deltas from process-global opt-in counters. Single-context rows can legitimately report zero; zero is measured, not a substitute for unavailable telemetry.",
+    "",
+    "| family | phase | base contentions | variant contentions | base wait | variant wait | base worker runs | variant worker runs | base worker CPU | variant worker CPU |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  const contentions = (row: TierDelta): number =>
+    [
+      "lock_contentions",
+      "arena_lock_contentions",
+      "env_lock_contentions",
+      "object_backing_lock_contentions",
+      "object_property_lock_contentions",
+      "object_element_lock_contentions",
+    ].reduce((sum, name) => sum + (row.synchronization[name] || 0), 0);
+  const waitNs = (row: TierDelta): number =>
+    ["thread_join_wait_ns", "lock_wait_ns", "condition_wait_ns", "property_wait_ns"]
+      .reduce((sum, name) => sum + (row.synchronization[name] || 0), 0);
+  for (const family of manifest.implemented_families) {
+    for (const phase of ["warmup", "invocation"] as const) {
+      const base = byWorkload[family.base].find((row) => row.phase === phase)!,
+        variant = byWorkload[family.variant].find((row) => row.phase === phase)!;
+      rows.push(
+        `| \`${family.family}\` | ${phase} | ${contentions(base)} | ${contentions(variant)} | ${waitNs(base)} ns | ${waitNs(variant)} ns | ${base.synchronization.worker_runs || 0} | ${variant.synchronization.worker_runs || 0} | ${base.synchronization.worker_run_ns || 0} ns | ${variant.synchronization.worker_run_ns || 0} ns |`,
+      );
+    }
+  }
+  rows.push(
+    "",
     `${heading}${heading} Native-code and heap state`,
     "",
     "These values are phase-boundary gauges or cumulative counters, not timing-row measurements.",
@@ -374,7 +479,7 @@ export function artifact(
   runner: string,
 ): any {
   return {
-    schema_version: 3,
+    schema_version: 4,
     matrix_id: manifest.matrix_id,
     quick,
     environment: info,
@@ -410,6 +515,9 @@ function syntheticRows(manifest: any): TierSnapshot[] {
           environment_allocations: index,
         },
         admissions: { program_compiled: index + 1 },
+        synchronization: Object.fromEntries(
+          synchronizationMetrics.map((name) => [name, name === "worker_runs" ? index : 0]),
+        ),
         baseline_publications: 0,
         optimizer_publications: index > 0 ? 1 : 0,
         generated_code_bytes: index > 0 ? 4096 : 0,
@@ -461,12 +569,24 @@ export function selfTest(): void {
   const execution = JSON.parse(JSON.stringify(rows));
   delete execution[0].execution.vm_dispatches;
   expectFailure(() => validate(execution, manifest, true), "execution attribution inventory drift");
+  const synchronization = JSON.parse(JSON.stringify(rows));
+  delete synchronization[0].synchronization.lock_wait_ns;
+  expectFailure(
+    () => validate(synchronization, manifest, true),
+    "synchronization attribution inventory drift",
+  );
+  const incoherentSynchronization = JSON.parse(JSON.stringify(rows));
+  incoherentSynchronization[0].synchronization.arena_lock_contentions = 1;
+  expectFailure(
+    () => validate(incoherentSynchronization, manifest, true),
+    "synchronization attribution is incoherent",
+  );
   const wasm = JSON.parse(JSON.stringify(rows));
   const wasmIndex = workloadEntries(manifest).findIndex(([family]) => family.family.startsWith("wasm_"));
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime inventory, environment parity, native-code lifetime, and heap state verified");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/synchronization inventory, environment parity, native-code lifetime, and heap state verified");
 }
 
 function main(): void {
