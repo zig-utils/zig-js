@@ -9,7 +9,7 @@ import {
   loadManifest,
   validate as validateManifest,
 } from "./representative-matrix";
-import { run, writeText } from "./lib/home";
+import { fileExists, readText, run, writeText } from "./lib/home";
 
 declare const __filename: string;
 
@@ -60,6 +60,11 @@ export type TierDelta = {
   native_code: CounterMap;
   heap: CounterMap;
   process: ProcessResourceSnapshot;
+};
+type CollectionSegment = {
+  first_snapshot: number;
+  snapshot_count: number;
+  environment: Record<string, string>;
 };
 
 type GcPauseSamples = {
@@ -283,9 +288,15 @@ export function collect(
   runner: string,
   manifest: any,
   quick: boolean,
+  initialRows: TierSnapshot[] = [],
+  checkpoint?: (rows: TierSnapshot[]) => void,
 ): TierSnapshot[] {
-  const rows: TierSnapshot[] = [];
-  for (const entry of workloadEntries(manifest)) {
+  const entries = workloadEntries(manifest),
+    rows: TierSnapshot[] = initialRows.slice();
+  validateRows(rows, manifest, quick, false);
+  const completedEntries = rows.length / phases.length;
+  for (let entryIndex = completedEntries; entryIndex < entries.length; entryIndex += 1) {
+    const entry = entries[entryIndex];
     const jobs = jobsFor(entry.owner, quick);
     const command = [
       "env",
@@ -304,7 +315,11 @@ export function collect(
       completed.exitCode === 0,
       completed.stderr || `attribution runner exited ${completed.exitCode}`,
     );
-    rows.push(...parseSnapshots(completed.stdout));
+    const result = parseSnapshots(completed.stdout);
+    requireValue(result.length === phases.length, `incomplete runner result for ${entry.workload}`);
+    rows.push(...result);
+    validateRows(rows, manifest, quick, false);
+    if (checkpoint) checkpoint(rows);
   }
   return rows;
 }
@@ -481,17 +496,20 @@ function entryChecksum(entry: any, manifest: any, quick: boolean): number {
 const deltaKey = (workload: string, mode: string, lanes: number): string =>
   `${workload}\u0000${mode}\u0000${lanes}`;
 
-export function validate(
+function validateRows(
   rows: TierSnapshot[],
   manifest: any,
   quick: boolean,
+  complete: boolean,
 ): TierDelta[] {
   const entries = workloadEntries(manifest);
   requireValue(
-    rows.length === entries.length * phases.length,
-    `attribution row count ${rows.length} does not match ${entries.length * phases.length}`,
+    rows.length % phases.length === 0 && rows.length <= entries.length * phases.length &&
+      (!complete || rows.length === entries.length * phases.length),
+    `attribution row count ${rows.length} does not match a valid ${entries.length * phases.length}-row prefix`,
   );
-  for (let index = 0; index < entries.length; index += 1) {
+  const completedEntries = rows.length / phases.length;
+  for (let index = 0; index < completedEntries; index += 1) {
     const entry = entries[index],
       group = rows.slice(index * phases.length, (index + 1) * phases.length),
       jobs = jobsFor(entry.owner, quick),
@@ -617,7 +635,7 @@ export function validate(
   }
   const phaseDeltas = deltas(rows),
     byWorkload: Record<string, TierDelta[]> = {};
-  entries.forEach((entry, index) => {
+  entries.slice(0, completedEntries).forEach((entry, index) => {
     if (entry.mode !== "shared") return;
     const invocation = phaseDeltas[index * phases.length + 2];
     requireValue(
@@ -634,8 +652,11 @@ export function validate(
     ]];
     if (family.shared !== false) for (const lanes of manifest.lanes) modes.push(["shared", lanes]);
     for (const [mode, lanes] of modes) for (const phase of ["warmup", "invocation"] as const) {
-      const base = byWorkload[deltaKey(family.base, mode, lanes)].find((row) => row.phase === phase)!,
-        variant = byWorkload[deltaKey(family.variant, mode, lanes)].find((row) => row.phase === phase)!;
+      const baseRows = byWorkload[deltaKey(family.base, mode, lanes)],
+        variantRows = byWorkload[deltaKey(family.variant, mode, lanes)];
+      if (!baseRows || !variantRows) continue;
+      const base = baseRows.find((row) => row.phase === phase)!,
+        variant = variantRows.find((row) => row.phase === phase)!;
       requireValue(signature(base).length > 0, `${family.base} selected no execution tier`);
       requireValue(
         signature(base) === signature(variant),
@@ -650,6 +671,14 @@ export function validate(
     }
   }
   return phaseDeltas;
+}
+
+export function validate(
+  rows: TierSnapshot[],
+  manifest: any,
+  quick: boolean,
+): TierDelta[] {
+  return validateRows(rows, manifest, quick, true);
 }
 
 export function render(
@@ -893,15 +922,90 @@ export function artifact(
   quick: boolean,
   info: Record<string, string>,
   runner: string,
+  complete = true,
+  collectionSegments: CollectionSegment[] = [{
+    first_snapshot: 0,
+    snapshot_count: snapshots.length,
+    environment: info,
+  }],
 ): any {
   return {
-    schema_version: 8,
+    schema_version: 9,
     matrix_id: manifest.matrix_id,
     quick,
+    complete,
     environment: info,
     runner_sha256: commandOutput(["shasum", "-a", "256", runner]).split(/\s+/)[0],
+    collection_segments: collectionSegments,
     snapshots,
   };
+}
+
+const stableEnvironmentFields = [
+  "Host",
+  "OS",
+  "Zig",
+  "zig-js",
+  "zig-gc",
+  "zig-regex",
+  "JavaScriptCore",
+];
+
+function validateCheckpoint(
+  raw: any,
+  manifest: any,
+  quick: boolean,
+  info: Record<string, string>,
+  runner: string,
+): void {
+  requireValue(raw?.schema_version === 9, "checkpoint schema is not version 9");
+  requireValue(raw.matrix_id === manifest.matrix_id, "checkpoint matrix identity drift");
+  requireValue(raw.quick === quick, "checkpoint quick/full mode drift");
+  requireValue(typeof raw.complete === "boolean", "checkpoint completion state is missing");
+  requireValue(
+    raw.runner_sha256 === commandOutput(["shasum", "-a", "256", runner]).split(/\s+/)[0],
+    "checkpoint runner binary drift",
+  );
+  requireValue(Array.isArray(raw.snapshots), "checkpoint snapshots are missing");
+  validateRows(raw.snapshots, manifest, quick, raw.complete);
+  const segments = raw.collection_segments;
+  requireValue(Array.isArray(segments) && segments.length > 0, "checkpoint collection segments are missing");
+  requireValue(
+    JSON.stringify(raw.environment) === JSON.stringify(segments[0].environment),
+    "checkpoint initial environment drift",
+  );
+  let covered = 0;
+  for (const segment of segments) {
+    requireValue(
+      Number.isInteger(segment.first_snapshot) && segment.first_snapshot === covered &&
+        Number.isInteger(segment.snapshot_count) && segment.snapshot_count >= 0,
+      "checkpoint collection segment is not contiguous",
+    );
+    requireValue(
+      segment.environment && typeof segment.environment === "object" &&
+        !Array.isArray(segment.environment),
+      "checkpoint collection segment environment is missing",
+    );
+    ensurePublishable(segment.environment, true);
+    for (const field of stableEnvironmentFields) {
+      requireValue(
+        segment.environment[field] === segments[0].environment[field],
+        `checkpoint collection environment drift: ${field}`,
+      );
+    }
+    covered += segment.snapshot_count;
+  }
+  requireValue(covered === raw.snapshots.length, "checkpoint collection segments do not cover snapshots");
+  for (const field of stableEnvironmentFields) {
+    requireValue(info[field] === raw.environment[field], `current checkpoint environment drift: ${field}`);
+  }
+}
+
+function atomicWrite(path: string, contents: string): void {
+  const temporary = `${path}.tmp`;
+  writeText(temporary, contents);
+  const moved = run(["mv", "-f", temporary, path]);
+  requireValue(moved.exitCode === 0, moved.stderr || `cannot replace ${path}`);
 }
 
 function syntheticRows(manifest: any): TierSnapshot[] {
@@ -1085,13 +1189,53 @@ export function selfTest(): void {
   const wrongLanes = JSON.parse(JSON.stringify(rows));
   wrongLanes[sharedIndex * phases.length].lanes += 1;
   expectFailure(() => validate(wrongLanes, manifest, true), "unexpected lanes");
+  expectFailure(
+    () => validateRows(rows.slice(0, phases.length + 1), manifest, true, false),
+    "valid 510-row prefix",
+  );
+  const checkpointInfo: Record<string, string> = {
+    Date: "2026-08-04",
+    Host: "test host",
+    OS: "test OS",
+    Zig: "test Zig",
+    "zig-js": "0".repeat(40),
+    "zig-gc": "1".repeat(40),
+    "zig-regex": "2".repeat(40),
+    JavaScriptCore: "test JSC",
+    Power: "battery 90%",
+  };
+  const prefix = rows.slice(0, phases.length),
+    checkpoint = artifact(prefix, manifest, true, checkpointInfo, __filename, false, [{
+      first_snapshot: 0,
+      snapshot_count: prefix.length,
+      environment: checkpointInfo,
+    }]),
+    resumedInfo = { ...checkpointInfo, Date: "2026-08-05", Power: "AC Power" };
+  validateCheckpoint(checkpoint, manifest, true, resumedInfo, __filename);
+  const uncovered = JSON.parse(JSON.stringify(checkpoint));
+  uncovered.collection_segments[0].snapshot_count -= 1;
+  expectFailure(
+    () => validateCheckpoint(uncovered, manifest, true, resumedInfo, __filename),
+    "do not cover snapshots",
+  );
+  const prematureComplete = JSON.parse(JSON.stringify(checkpoint));
+  prematureComplete.complete = true;
+  expectFailure(
+    () => validateCheckpoint(prematureComplete, manifest, true, resumedInfo, __filename),
+    "valid 510-row prefix",
+  );
+  const changedRevision = { ...resumedInfo, "zig-js": "3".repeat(40) };
+  expectFailure(
+    () => validateCheckpoint(checkpoint, manifest, true, changedRevision, __filename),
+    "current checkpoint environment drift: zig-js",
+  );
   const wasm = JSON.parse(JSON.stringify(rows));
   const wasmIndex = workloadEntries(manifest).findIndex((entry) =>
     entry.owner.family?.startsWith("wasm_") || entry.workload.startsWith("wasm_"));
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/allocation/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier-up, and deoptimization latency verified");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/allocation/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier transitions, and exact checkpoint/resume identity verified");
 }
 
 function main(): void {
@@ -1122,12 +1266,53 @@ function main(): void {
   validateManifest(manifest);
   const info = metadata();
   ensurePublishable(info, Boolean(output || markdown));
-  const snapshots = collect(runner, manifest, quick),
-    phaseDeltas = validate(snapshots, manifest, quick),
+  let snapshots: TierSnapshot[] = [],
+    collectionSegments: CollectionSegment[] = [],
+    resumedComplete = false;
+  if (output && fileExists(output)) {
+    const checkpoint = JSON.parse(readText(output));
+    validateCheckpoint(checkpoint, manifest, quick, info, runner);
+    snapshots = checkpoint.snapshots;
+    collectionSegments = checkpoint.collection_segments;
+    resumedComplete = checkpoint.complete;
+  }
+  const expectedSnapshots = workloadEntries(manifest).length * phases.length;
+  if (!resumedComplete && snapshots.length < expectedSnapshots) {
+    const segment: CollectionSegment = {
+      first_snapshot: snapshots.length,
+      snapshot_count: 0,
+      environment: info,
+    };
+    collectionSegments.push(segment);
+    snapshots = collect(runner, manifest, quick, snapshots, (rows) => {
+      segment.snapshot_count = rows.length - segment.first_snapshot;
+      if (output) atomicWrite(
+        output,
+        JSON.stringify(artifact(
+          rows,
+          manifest,
+          quick,
+          collectionSegments[0].environment,
+          runner,
+          false,
+          collectionSegments,
+        ), null, 2) + "\n",
+      );
+    });
+  }
+  const phaseDeltas = validate(snapshots, manifest, quick),
     report = render(phaseDeltas, manifest, "#", output || null),
-    rawArtifact = artifact(snapshots, manifest, quick, info, runner);
-  if (output) writeText(output, JSON.stringify(rawArtifact, null, 2) + "\n");
-  if (markdown) writeText(markdown, report);
+    rawArtifact = artifact(
+      snapshots,
+      manifest,
+      quick,
+      collectionSegments[0]?.environment || info,
+      runner,
+      true,
+      collectionSegments.length ? collectionSegments : undefined,
+    );
+  if (output) atomicWrite(output, JSON.stringify(rawArtifact, null, 2) + "\n");
+  if (markdown) atomicWrite(markdown, report);
   process.stdout.write(report);
 }
 

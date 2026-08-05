@@ -183,6 +183,17 @@ inventories, and base/variant tier and environment-allocation equivalence at
 each lane count. Families whose frozen contract says `shared: false` remain
 excluded; the collector does not manufacture a shared result for them.
 
+Schema-version-9 sidecars retain the V14 workload and metric contract and add
+durable collection identity. After each complete three-phase execution, the
+collector validates the entire ordered prefix and atomically replaces an
+explicit `complete: false` checkpoint. A later invocation resumes only when
+the matrix, quick/full mode, runner binary, host, OS, Zig, zig-js, zig-gc,
+zig-regex, and JavaScriptCore identities match exactly. Date and power state
+remain visible per collection segment instead of being normalized away. Only
+a complete 510-snapshot inventory can transition to `complete: true` and
+produce the Markdown report; a killed process can therefore neither publish a
+partial artifact nor force already-validated workloads to run again.
+
 The full-work schema-2 evidence is the
 [`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)
 report and its
