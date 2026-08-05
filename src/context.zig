@@ -10752,6 +10752,22 @@ test "RegExp.escape escapes pattern text" {
     )).asBool());
 }
 
+test "RegExp ordinary character classes allow unescaped opening brackets" {
+    try expectEvalStr("true|true|true|false|true|SyntaxError",
+        \\[
+        \\  /^[\s[]?shapgvba/.test("shapgvba"),
+        \\  /^[\s[]?shapgvba/.test("[shapgvba"),
+        \\  /^[\s[]?shapgvba/.test("\tshapgvba"),
+        \\  /^[\s[]?shapgvba/.test("xshapgvba"),
+        \\  /[[]/u.test("["),
+        \\  (function() {
+        \\    try { new RegExp("[[]", "v"); return "accepted"; }
+        \\    catch (e) { return e.name; }
+        \\  })()
+        \\].join("|")
+    );
+}
+
 test "RegExp source and toString escape line terminators canonically" {
     try std.testing.expect((try evalIn(
         \\function same(re, source) {
