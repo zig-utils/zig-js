@@ -1803,6 +1803,68 @@ pub fn build(b: *std.Build) void {
     const independent_suite_zig_js_bin_step = b.step("independent-suite-zig-js-bin", "Build the isolated zig-js independent-suite adapter");
     independent_suite_zig_js_bin_step.dependOn(&install_independent_suite_zig_js.step);
 
+    // The system-JSC adapter is a distinct executable linked only to the real
+    // platform framework. This preserves the cross-engine symbol boundary even
+    // though zig-js exports a public JSC-shaped C API of its own.
+    const independent_suite_jsc_bin_step = b.step("independent-suite-jsc-bin", "Build the isolated system-JSC independent-suite adapter (macOS)");
+    const independent_suite_jsc_step = b.step("independent-suite-jsc", "Run one pinned Octane row through the isolated system-JSC adapter (macOS)");
+    const independent_suite_jsc_self_test_step = b.step("independent-suite-jsc-self-test", "Test the isolated system-JSC adapter when available");
+    const independent_suite_octane_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/independent_suite_octane.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_independent_suite_octane_tests = b.addRunArtifact(independent_suite_octane_tests);
+    independent_suite_jsc_self_test_step.dependOn(&run_independent_suite_octane_tests.step);
+    if (target.result.os.tag == .macos) {
+        const independent_suite_jsc = b.addExecutable(.{
+            .name = "independent-suite-jsc",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/independent_suite_jsc.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+            }),
+        });
+        independent_suite_jsc.root_module.linkFramework("JavaScriptCore", .{});
+        const install_independent_suite_jsc = b.addInstallArtifact(independent_suite_jsc, .{});
+        independent_suite_jsc_bin_step.dependOn(&install_independent_suite_jsc.step);
+        const self_test = b.addRunArtifact(independent_suite_jsc);
+        self_test.addArg("--self-test");
+        self_test.setEnvironmentVariable("TZ", "UTC");
+        self_test.setEnvironmentVariable("LC_ALL", "C");
+        self_test.setEnvironmentVariable("LANG", "C");
+        independent_suite_jsc_self_test_step.dependOn(&self_test.step);
+        if (independent_suite_checkout) |checkout| {
+            if (b.option([]const u8, "independent-suite-jsc-adapter-revision", "Exact zig-js source revision represented by the system-JSC adapter")) |revision| {
+                const run = b.addRunArtifact(independent_suite_jsc);
+                run.setEnvironmentVariable("TZ", "UTC");
+                run.setEnvironmentVariable("LC_ALL", "C");
+                run.setEnvironmentVariable("LANG", "C");
+                run.addArgs(&.{
+                    checkout,
+                    b.option([]const u8, "independent-suite-row", "Applicable independent-suite row id") orelse "richards",
+                    revision,
+                });
+                run.step.dependOn(&run_independent_suite_audit.step);
+                independent_suite_jsc_step.dependOn(&run.step);
+            } else {
+                const missing_revision = b.addFail("independent-suite-jsc requires -Dindependent-suite-jsc-adapter-revision=<40-hex-commit>");
+                independent_suite_jsc_step.dependOn(&missing_revision.step);
+            }
+        } else {
+            const missing_checkout = b.addFail("independent-suite-jsc requires -Dindependent-suite-checkout=<verified-out-of-tree-path>");
+            independent_suite_jsc_step.dependOn(&missing_checkout.step);
+        }
+    } else {
+        const unsupported_bin = b.addFail("independent-suite-jsc-bin requires the macOS system JavaScriptCore framework");
+        independent_suite_jsc_bin_step.dependOn(&unsupported_bin.step);
+        const unsupported_run = b.addFail("independent-suite-jsc requires the macOS system JavaScriptCore framework");
+        independent_suite_jsc_step.dependOn(&unsupported_run.step);
+    }
+
     const independent_suite_zig_js_revision = b.option([]const u8, "independent-suite-zig-js-revision", "Exact zig-js source revision represented by the runner");
     const independent_suite_zig_js_step = b.step("independent-suite-zig-js", "Run one pinned Octane row through the isolated zig-js adapter");
     if (independent_suite_checkout) |checkout| {
@@ -1906,6 +1968,7 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&run_independent_suite_audit_tests.step);
     comparison_harness_test_step.dependOn(&independent_suite_zig_js_self_test.step);
     comparison_harness_test_step.dependOn(&independent_suite_collector_self_test.step);
+    comparison_harness_test_step.dependOn(independent_suite_jsc_self_test_step);
     const optimizer_release_inventory_step = b.step("optimizer-release-inventory-check", "Validate the optimizer backend, correctness, sanitizer, and performance evidence");
     optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);
 

@@ -242,6 +242,8 @@ fn validateInventory(inventory: Inventory) !void {
                 return fail("engine '{s}' classification is incomplete", .{id});
             if (std.mem.eql(u8, id, "zig-js") and !std.mem.eql(u8, engine.adapter_status, "minimal_shell_v1_implemented"))
                 return fail("zig-js independent-suite adapter status drift", .{});
+            if (std.mem.eql(u8, id, "system-jsc") and !std.mem.eql(u8, engine.adapter_status, "minimal_shell_v1_implemented_macos"))
+                return fail("system-JSC independent-suite adapter status drift", .{});
             if (!contains(engine.required_run_metadata, "executable_path") or
                 !contains(engine.required_run_metadata, "executable_sha256") or
                 !contains(engine.required_run_metadata, "version_output") or

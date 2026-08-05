@@ -193,7 +193,7 @@
     ],
     "build_links": [
       { "kind": "framework", "name": "Foundation", "count": 4, "edge": "macos-sdk-foundation" },
-      { "kind": "framework", "name": "JavaScriptCore", "count": 1, "edge": "system-javascriptcore" }
+      { "kind": "framework", "name": "JavaScriptCore", "count": 2, "edge": "system-javascriptcore" }
     ],
     "system_commands": [
       { "name": "xcrun", "count": 4, "edge": "macos-sdk-foundation" },

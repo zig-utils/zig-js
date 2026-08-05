@@ -257,7 +257,7 @@
       "id": "system-jsc",
       "kind": "platform_framework",
       "disposition": "required_when_available",
-      "adapter_status": "planned",
+      "adapter_status": "minimal_shell_v1_implemented_macos",
       "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "framework_version", "argv", "environment"]
     },
     {

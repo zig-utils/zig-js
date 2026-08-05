@@ -393,10 +393,33 @@ tier/admission counters, compilation/deoptimization timing, and
 GC/allocation/pause summaries; its wall time and upstream score are diagnostic,
 not scored performance.
 
-One invocation is a compatibility and adapter diagnostic, not publishable
+On macOS, the corresponding system-JavaScriptCore adapter is a different
+executable linked only to the platform framework. Both engine runners import
+one frozen Octane path/checksum/license/result table, but each owns its context,
+`load`/`print` callbacks, source evaluation, output capture, and JSON report.
+zig-js's JSC-shaped public exports are never linked into the framework runner.
+
+```sh
+zig build independent-suite-jsc-bin
+zig build independent-suite-jsc \
+  -Dindependent-suite-checkout=/absolute/outside/zig-js/octane \
+  -Dindependent-suite-row=richards \
+  -Dindependent-suite-jsc-adapter-revision=$(git rev-parse HEAD)
+```
+
+The system-JSC schema-1 child records the adapter executable path/hash, exact
+adapter source revision, framework bundle version, macOS build, argv and
+environment. Current macOS releases provide JavaScriptCore code through the
+dyld shared cache rather than a standalone framework binary, so that boundary
+is explicit instead of inventing a binary hash. The public C API provides no
+exact per-context tier/compilation/deoptimization or GC/allocation/pause
+counters; those fields are `unavailable_public_api`, never zero. Framework
+samples are score-only and remain separate from zig-js attribution samples.
+
+A single adapter invocation is a compatibility diagnostic, not publishable
 performance evidence. The
 [`independent-suite-collector.ts`](../tools/independent-suite-collector.ts)
-repeated collection path is a separate, lossless layer:
+zig-js repeated collection path is a separate, lossless layer:
 
 ```sh
 zig build independent-suite-collect \
