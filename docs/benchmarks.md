@@ -158,6 +158,16 @@ raw artifact. Its 108 snapshots name exact implementation revision
 admission, native-code, and heap inventories, and record nonzero invocation
 dispatches for all six Wasm base/variant rows.
 
+The full-work schema-4 synchronization evidence is the
+[`representative-tier-attribution-v10-schema-v4-2026-08-04.md`](.data/representative-tier-attribution-v10-schema-v4-2026-08-04.md)
+report and its
+[`representative-tier-attribution-v10-schema-v4-2026-08-04.json`](.data/representative-tier-attribution-v10-schema-v4-2026-08-04.json)
+raw artifact. Its 108 snapshots name exact implementation revision
+`539cdb0b7a63431b33985104ec91e88b95ac6c1c`. The single-context lane-zero
+workloads record exact environment and object lock acquisitions while their
+contention, wait, and worker deltas measure zero; shared-lane attribution is a
+separate result and is not inferred from these runs.
+
 Attribution is deliberately outside the timing rows. Normal contexts retain a
 null telemetry pointer, while the sidecar opts in to atomic counters. A full
 published representative report therefore preserves both its ordinary timing
