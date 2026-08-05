@@ -212,7 +212,8 @@ fn validateInventory(inventory: Inventory) !void {
         if (std.mem.eql(u8, suite.id, "octane-2-retired")) {
             if (result_names.count() != 17 or suite_applicable_results != 6)
                 return fail("Octane inventory has {d} results / {d} candidates, expected 17 / 6", .{ result_names.count(), suite_applicable_results });
-            if (suite.adapter.allowed_host_globals.len != 2 or
+            if (!std.mem.eql(u8, suite.adapter.status, "minimal_shell_v1_implemented") or
+                suite.adapter.allowed_host_globals.len != 2 or
                 !contains(suite.adapter.allowed_host_globals, "load") or !contains(suite.adapter.allowed_host_globals, "print"))
                 return fail("Octane minimal shell adapter boundary drift", .{});
         } else if (std.mem.eql(u8, suite.id, "jetstream-3-alpha")) {
@@ -231,6 +232,8 @@ fn validateInventory(inventory: Inventory) !void {
             found = true;
             if (engine.kind.len == 0 or engine.disposition.len == 0 or engine.adapter_status.len == 0)
                 return fail("engine '{s}' classification is incomplete", .{id});
+            if (std.mem.eql(u8, id, "zig-js") and !std.mem.eql(u8, engine.adapter_status, "minimal_shell_v1_implemented"))
+                return fail("zig-js independent-suite adapter status drift", .{});
             if (!contains(engine.required_run_metadata, "executable_path") or
                 !contains(engine.required_run_metadata, "executable_sha256") or
                 !contains(engine.required_run_metadata, "version_output") or

@@ -362,6 +362,43 @@ verification are offline; the verifier rejects a checkout inside zig-js, the
 wrong origin/commit/tree, a dirty tree, a missing file, or any pinned-file
 SHA-256 mismatch. It never acquires the suite itself.
 
+The owned zig-js adapter runs one selected row in a fresh, separate process. It
+adds only `load` and `print` to the normal engine globals, installs both through
+the supported embedding environment/global-object boundary, and evaluates the
+verified upstream `base.js` and workload bytes without transformation. The
+adapter callback protocol records exact upstream result, error, score, and
+auxiliary-print strings; an unsupported or failing workload remains a failed
+row rather than disappearing from the candidate set.
+
+```sh
+zig build independent-suite-zig-js-bin
+zig build independent-suite-zig-js \
+  -Dindependent-suite-checkout=/absolute/outside/zig-js/octane \
+  -Dindependent-suite-row=richards \
+  -Dindependent-suite-mode=score \
+  -Dindependent-suite-zig-js-revision=$(git rev-parse HEAD)
+```
+
+The run step first performs the full checkout audit, then the runner repeats
+the selected file checksums. It also rejects a dirty zig-js worktree, a source
+revision other than the exact current `HEAD`, and an environment other than
+`TZ=UTC`, `LC_ALL=C`, and `LANG=C`. Each schema-1 JSON line retains the runner
+path and SHA-256, argv/environment, applicable row and licenses, exact loaded
+sources, pass/failure/skip fields, all upstream and auxiliary outputs, the raw
+outer wall/CPU/peak-RSS sample, explicit single-sample dispersion status,
+output validation, and both timing boundaries. `score` mode leaves execution
+instrumentation off and marks tier, allocator, and pause fields as not measured
+rather than emitting fake zeros. `attribution` mode enables the complete named
+tier/admission counters, compilation/deoptimization timing, and
+GC/allocation/pause summaries; its wall time and upstream score are diagnostic,
+not scored performance.
+
+One invocation is a compatibility and adapter diagnostic, not publishable
+performance evidence. A future repeated-sample collector must preserve every
+schema-1 child and compute dispersion without rewriting or dropping failures;
+cross-engine publication additionally requires the inventoried executable and
+version pins for each separate engine process.
+
 ## Stable attribution and exact-parent A/Bs
 
 [`performance-attribution-schema-v1.json`](.data/performance-attribution-schema-v1.json)
