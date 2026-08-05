@@ -26,6 +26,32 @@ pub fn build(b: *std.Build) void {
     const dependency_audit_step = b.step("dependency-audit", "Reject unclassified dependency, link, fetch, and tooling edges");
     dependency_audit_step.dependOn(&run_dependency_audit.step);
 
+    // Independent suites remain explicit operator inputs outside the tree. This
+    // offline gate validates their exact source/file pins, license/applicability
+    // decisions, adapter limits, and per-run engine identity contract (#504).
+    const independent_suite_audit = b.addExecutable(.{
+        .name = "independent-suite-audit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/independent_suite_inventory.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_independent_suite_audit = b.addRunArtifact(independent_suite_audit);
+    run_independent_suite_audit.setCwd(b.path("."));
+    const independent_suite_audit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/independent_suite_inventory.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_independent_suite_audit_tests = b.addRunArtifact(independent_suite_audit_tests);
+    run_independent_suite_audit_tests.setCwd(b.path("."));
+    const independent_suite_audit_step = b.step("independent-suite-audit", "Validate pinned out-of-tree suite and engine inventory");
+    independent_suite_audit_step.dependOn(&run_independent_suite_audit.step);
+    independent_suite_audit_step.dependOn(&run_independent_suite_audit_tests.step);
+
     // Offline documentation integrity gate (#497). Keep the executable and its
     // malformed-input tests on the same step so CI never runs an untested parser.
     const docs_link_check = b.addExecutable(.{
@@ -1780,6 +1806,8 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&object_churn_gc_profile_test.step);
     comparison_harness_test_step.dependOn(&independent_object_churn_profile_test.step);
     comparison_harness_test_step.dependOn(&shared_object_churn_ab_test.step);
+    comparison_harness_test_step.dependOn(&run_independent_suite_audit.step);
+    comparison_harness_test_step.dependOn(&run_independent_suite_audit_tests.step);
     const optimizer_release_inventory_step = b.step("optimizer-release-inventory-check", "Validate the optimizer backend, correctness, sanitizer, and performance evidence");
     optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);
 

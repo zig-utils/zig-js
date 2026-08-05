@@ -330,6 +330,26 @@ raw samples. It names exact revision
 state; it validates the complete collection path but makes no negligible-cost
 claim.
 
+## Independent suites and additional engines
+
+The frozen [independent-suite inventory](./.data/independent-suite-inventory-v1.json)
+keeps external benchmark candidates outside this repository and outside ordinary
+build/runtime dependencies. It records exact repository/tree/file pins,
+per-row license and applicability decisions, host-adapter limits, and the run
+metadata required to pin zig-js, system JSC, V8, SpiderMonkey, or QuickJS.
+
+The first applicable candidate is a six-result diagnostic subset of the 17
+Octane 2 results. Octane is explicitly retired, so it can corroborate narrow
+peak-throughput behavior but cannot support a modern-web or representative-suite
+claim. Every unselected result remains visible with its license, host, or output
+validation reason. JetStream 3 alpha is inventoried but excluded until its exact
+subtests, mixed licenses, npm preparation, compressed assets, and shell boundary
+are audited. Candidate status is not execution evidence.
+
+```sh
+zig build independent-suite-audit
+```
+
 ## Stable attribution and exact-parent A/Bs
 
 [`performance-attribution-schema-v1.json`](.data/performance-attribution-schema-v1.json)

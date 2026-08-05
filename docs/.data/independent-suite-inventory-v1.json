@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "inventory_id": "zig-js-independent-suite-inventory-v1",
+  "status": "frozen_candidate_inventory",
+  "owner_issue": 504,
+  "policy": {
+    "checkout_location": "operator_path_outside_repository",
+    "acquisition_network": "explicit_operator_only",
+    "execution_network": "forbidden",
+    "ordinary_build_dependency": false,
+    "runtime_dependency": false,
+    "vendored_suite_files": false,
+    "source_transforms": "forbidden",
+    "row_policy": "Every upstream result is applicable_candidate or excluded with a reason; validation or performance failure never deletes a row.",
+    "publication_policy": "Candidate status is not execution evidence. Publication requires exact suite, engine, adapter, executable, environment, raw samples, failures, skips, outputs, and timed boundaries."
+  },
+  "suites": [
+    {
+      "id": "octane-2-retired",
+      "title": "Octane 2",
+      "source": {
+        "repository": "https://github.com/chromium/octane.git",
+        "revision": "570ad1ccfe86e3eecba0636c8f932ac08edec517",
+        "tree": "e40d5c8489d05e384f32ed064d1f5286e9c236f3"
+      },
+      "maintenance": {
+        "status": "retired",
+        "evidence": "https://v8.dev/blog/retiring-octane",
+        "claim_boundary": "Diagnostic peak-throughput corroboration only; never a modern-web or broad-representativeness claim."
+      },
+      "assessment": {
+        "determinism": "The pinned base harness resets Math.random to its deterministic generator before each suite; individual timing scores remain sampled performance data.",
+        "workload_coverage": "Legacy compute, object, RegExp, compiler, emulator, and generated asm.js peak-throughput workloads; no modern modules, async applications, or browser loading stack.",
+        "run_duration": "Unmeasured until the owned adapter completes full exact-output validation on each engine.",
+        "host_api_requirements": ["load", "print", "Date.now", "optional performance.now fallback"]
+      },
+      "top_level_license": {
+        "spdx": "BSD-3-Clause",
+        "path": "LICENSE",
+        "sha256": "cf853177951c6de1b17c029b66edf71f8b194cca1722339a7b5def4e8165aaaa",
+        "per_row_audit_required": true
+      },
+      "harness_files": [
+        {"path":"base.js","sha256":"216612c2e7096a02b3e52b57e9cf9351bbaf180d60938d5c60b85fd756232733"},
+        {"path":"run.js","sha256":"b4b10b05e3ccefd6f49d57763ec67ef746c3e7c093ed0fdd602c7f126af5c12f"}
+      ],
+      "adapter": {
+        "status": "minimal_shell_candidate",
+        "allowed_host_globals": ["load", "print"],
+        "source_transform": false,
+        "timed_boundary": "The upstream BenchmarkSuite timing and score boundary remains unchanged; process wall/CPU/RSS are additional outer measurements.",
+        "output_contract": "Retain each named upstream result and final suite score; do not use the aggregate to hide a row."
+      },
+      "rows": [
+        {
+          "id": "richards",
+          "upstream_results": ["Richards"],
+          "disposition": "applicable_candidate",
+          "files": [{"path":"richards.js","sha256":"1246a64a24b931158bf01c24640343259fa74b0226e73bad630bd1f686aa0fa7"}],
+          "licenses": ["BSD-3-Clause"],
+          "host_requirements": []
+        },
+        {
+          "id": "regexp",
+          "upstream_results": ["RegExp"],
+          "disposition": "applicable_candidate",
+          "files": [{"path":"regexp.js","sha256":"a292d6047900c5296ea9e2628453832cc3bfe397e49fddade8aff7b5876c8263"}],
+          "licenses": ["BSD-3-Clause"],
+          "host_requirements": []
+        },
+        {
+          "id": "splay",
+          "upstream_results": ["Splay", "SplayLatency"],
+          "disposition": "applicable_candidate",
+          "files": [{"path":"splay.js","sha256":"f9a6a60d8f205908f5542ad1180abc1902dcdab3dcb4278017c5ce179ee123f7"}],
+          "licenses": ["BSD-3-Clause"],
+          "host_requirements": ["performance.now or Date.now fallback"]
+        },
+        {
+          "id": "navier_stokes",
+          "upstream_results": ["NavierStokes"],
+          "disposition": "applicable_candidate",
+          "files": [{"path":"navier-stokes.js","sha256":"27926de809451c60b0c49a4185c08f97081310d0db166a30c1d202fb656556a2"}],
+          "licenses": ["MIT"],
+          "host_requirements": []
+        },
+        {
+          "id": "box2d",
+          "upstream_results": ["Box2D"],
+          "disposition": "applicable_candidate",
+          "files": [{"path":"box2d.js","sha256":"83b10c280f004e7b156a9e04d09ce4109892ea92788f7c6c963f7fadf29c7bd4"}],
+          "licenses": ["Zlib"],
+          "host_requirements": []
+        },
+        {
+          "id": "deltablue",
+          "upstream_results": ["DeltaBlue"],
+          "disposition": "excluded",
+          "files": [{"path":"deltablue.js","sha256":"6c4784e82f3e8f5c18306d289653d08b17b38838f1bac16b38611d7318fa5a36"}],
+          "licenses": ["GPL-2.0-or-later"],
+          "host_requirements": [],
+          "exclusion_reason": "External execution is permitted, but the first subset does not yet specify GPL notice retention in its evidence package."
+        },
+        {
+          "id": "crypto",
+          "upstream_results": ["Crypto"],
+          "disposition": "excluded",
+          "files": [{"path":"crypto.js","sha256":"b01b6b3fe534327fdef05131162927bc5508f100a3208e185d0c5a4efb200a39"}],
+          "licenses": ["NOASSERTION"],
+          "host_requirements": [],
+          "exclusion_reason": "The embedded jsbn and base64 components need a file-level SPDX and notice audit before evidence is retained."
+        },
+        {
+          "id": "raytrace",
+          "upstream_results": ["RayTrace"],
+          "disposition": "excluded",
+          "files": [{"path":"raytrace.js","sha256":"64b8ff90969966dd69659100e28754976dfc3e9a4f8ee55b9232f974c66ed08c"}],
+          "licenses": ["NOASSERTION"],
+          "host_requirements": [],
+          "exclusion_reason": "The source says MIT-style but does not carry an exact SPDX license; provenance must be resolved before selection."
+        },
+        {
+          "id": "earley_boyer",
+          "upstream_results": ["EarleyBoyer"],
+          "disposition": "excluded",
+          "files": [{"path":"earley-boyer.js","sha256":"8dd28a505f7e705642f86816232b012fd3c770ec8afc9f719ce89ce772dab347"}],
+          "licenses": ["NOASSERTION"],
+          "host_requirements": [],
+          "exclusion_reason": "The generated Scheme2JS source has no file license header in the pinned tree."
+        },
+        {
+          "id": "pdfjs",
+          "upstream_results": ["PdfJS"],
+          "disposition": "excluded",
+          "files": [{"path":"pdfjs.js","sha256":"ced89e66a178a4b63a69ea33fc6f47d405bf9bd379817be25f060a4b2dcce351"}],
+          "licenses": ["GPL-2.0-or-later"],
+          "host_requirements": ["bundled mock DOM and canvas"],
+          "exclusion_reason": "The first subset does not yet specify GPL notice retention or validate the bundled mock-DOM output boundary."
+        },
+        {
+          "id": "mandreel",
+          "upstream_results": ["Mandreel", "MandreelLatency"],
+          "disposition": "excluded",
+          "files": [{"path":"mandreel.js","sha256":"fc4a9516e8899bb33df63a69db30797959a138d33233e9fb1ccc57cb91dcd164"}],
+          "licenses": ["BSD-3-Clause"],
+          "host_requirements": ["typed arrays", "asm.js-compatible semantics"],
+          "exclusion_reason": "The generated asm.js provenance, latency score, and exact output oracle need an owned validation fixture."
+        },
+        {
+          "id": "gameboy",
+          "upstream_results": ["Gameboy"],
+          "disposition": "excluded",
+          "files": [
+            {"path":"gbemu-part1.js","sha256":"67ae8c639b7acc5ebbcf0995c8b68821251a629f72c604e74cae8526c8e85965"},
+            {"path":"gbemu-part2.js","sha256":"acd923e085cf70fce8a15b1420d1fa489bd8315e4a8c066775aeaa7104e609d3"}
+          ],
+          "licenses": ["GPL-2.0-only"],
+          "host_requirements": ["typed arrays", "conditional DOM and audio paths"],
+          "exclusion_reason": "The multipart GPL workload and conditional browser paths need notice packaging and an exact shell-path audit."
+        },
+        {
+          "id": "code_load",
+          "upstream_results": ["CodeLoad"],
+          "disposition": "excluded",
+          "files": [{"path":"code-load.js","sha256":"32fd38d49bb8794b40e947c70c0c51276bfc2588833a8451a25b1b2bfccad96c"}],
+          "licenses": ["NOASSERTION"],
+          "host_requirements": ["eval", "bundled mock DOM"],
+          "exclusion_reason": "Embedded Closure and jQuery-derived sources need a complete license inventory and the eval/global output needs an owned oracle."
+        },
+        {
+          "id": "zlib",
+          "upstream_results": ["zlib"],
+          "disposition": "excluded",
+          "files": [
+            {"path":"zlib.js","sha256":"d8c4bca32e84b38f573d3ee50a38b194afc9fb4e2f79754d952524bff01a898c"},
+            {"path":"zlib-data.js","sha256":"b8d093321289574f36116e933e2b3b211bb98df9fe3e761ffb1be550d0e82aed"}
+          ],
+          "licenses": ["BSD-3-Clause", "Zlib"],
+          "host_requirements": ["typed arrays", "asm.js-compatible semantics"],
+          "exclusion_reason": "Generated Emscripten provenance, the data payload, and the exact output oracle need an owned validation fixture."
+        },
+        {
+          "id": "typescript",
+          "upstream_results": ["Typescript"],
+          "disposition": "excluded",
+          "files": [
+            {"path":"typescript.js","sha256":"fbc5ec16d9c60b1bdcca7e7b9f66fba2fe46c0e04da64088203052e47922ff21"},
+            {"path":"typescript-input.js","sha256":"e23d2fe7b3df9dc069c720ab3fb112006c235d0eb416556ecde7c3a2766a0396"},
+            {"path":"typescript-compiler.js","sha256":"9e99fe0ddfe48a2462eca622ade1e1ddd13bf49f8e461a6c53463bbbc1d5363a"}
+          ],
+          "licenses": ["BSD-3-Clause", "Apache-2.0"],
+          "host_requirements": ["eval"],
+          "exclusion_reason": "The embedded compiler/input license notices, compilation output, and eval boundary need an owned validation fixture."
+        }
+      ]
+    },
+    {
+      "id": "jetstream-3-alpha",
+      "title": "JetStream 3 alpha",
+      "source": {
+        "repository": "https://github.com/WebKit/JetStream.git",
+        "revision": "7769b693502fa80f28a97bbfacd3296e0513acc5",
+        "tree": "bf8daa81a8af5390154db715ce1bd620816bdab6"
+      },
+      "maintenance": {
+        "status": "active_alpha",
+        "evidence": "https://github.com/WebKit/JetStream/blob/7769b693502fa80f28a97bbfacd3296e0513acc5/README.md",
+        "claim_boundary": "Inventory only; the alpha suite is not selected and produces no zig-js result."
+      },
+      "assessment": {
+        "determinism": "Not yet audited per subtest; the upstream driver controls iterations and scoring.",
+        "workload_coverage": "Current JavaScript and WebAssembly suite with browser and shell modes; exact applicable subtests are unresolved.",
+        "run_duration": "Unmeasured because no subtest is selected.",
+        "host_api_requirements": ["load/read/print shell APIs", "npm preparation", "decompressed or compressed assets"]
+      },
+      "top_level_license": {
+        "spdx": "BSD-2-Clause",
+        "path": "LICENSE",
+        "sha256": "ad07794655eb9c73f377d610d9fb30d6173b5e15209bd04944edcff5fec512e8",
+        "per_row_audit_required": true
+      },
+      "harness_files": [
+        {"path":"README.md","sha256":"04c2fea1d9cc18b6e0c6a022c5f07ce22147ee6f5812fcb9455d917e0d8d1a7b"},
+        {"path":"cli.js","sha256":"f58e6ec48ddacd58ee70e5df09303228165889308b5e597d26a7c917767649cf"},
+        {"path":"package.json","sha256":"321908723f385c772516f6c49c935545bf7ec38eaca0399c65b5a6a0e4d95f11"},
+        {"path":"utils/shell-config.js","sha256":"9a83000be5e6526a3c26a414fc3a23043e57ef8e4cd67aaff459066a2c347bca"}
+      ],
+      "adapter": {
+        "status": "excluded_pending_audit",
+        "allowed_host_globals": [],
+        "source_transform": false,
+        "timed_boundary": "Not established.",
+        "output_contract": "No result is accepted until every selected upstream subtest and score component is inventoried."
+      },
+      "rows": [
+        {
+          "id": "full_suite",
+          "upstream_results": ["unresolved_subtest_inventory"],
+          "disposition": "excluded",
+          "files": [],
+          "licenses": ["NOASSERTION"],
+          "host_requirements": ["load/read/print shell APIs", "npm preparation", "compressed assets", "JavaScript and WebAssembly"],
+          "exclusion_reason": "The pinned alpha tree has mixed per-workload licensing, npm preparation, compressed assets, and an unresolved exact shell subtest inventory."
+        }
+      ]
+    }
+  ],
+  "engines": [
+    {
+      "id": "zig-js",
+      "kind": "repository_built",
+      "disposition": "required",
+      "adapter_status": "planned",
+      "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "source_revision", "argv", "environment"]
+    },
+    {
+      "id": "system-jsc",
+      "kind": "platform_framework",
+      "disposition": "required_when_available",
+      "adapter_status": "planned",
+      "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "framework_version", "argv", "environment"]
+    },
+    {
+      "id": "v8",
+      "kind": "independently_installed",
+      "disposition": "optional",
+      "adapter_status": "planned",
+      "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "source_revision", "argv", "environment"]
+    },
+    {
+      "id": "spidermonkey",
+      "kind": "independently_installed",
+      "disposition": "optional",
+      "adapter_status": "planned",
+      "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "source_revision", "argv", "environment"]
+    },
+    {
+      "id": "quickjs",
+      "kind": "independently_installed",
+      "disposition": "optional",
+      "adapter_status": "planned",
+      "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "source_revision", "argv", "environment"]
+    }
+  ],
+  "evidence_contract": {
+    "retained_row_fields": ["suite", "row", "engine", "status", "failure", "skip_reason", "raw_samples", "dispersion", "validated_output", "timed_boundary"],
+    "aggregate_policy": "Every applicable row remains visible beside any official or geometric aggregate.",
+    "host_adapter_policy": "Adapters may provide documented shell globals and result capture only; they may not rewrite workload logic, inputs, iteration counts, timing, or expected output.",
+    "engine_isolation": "Each engine executes in a separate process and executable; zig-js exports never interpose on another engine."
+  }
+}
