@@ -28,6 +28,8 @@ const ROW_SOURCES: Record<string, { path: string; sha256: string }> = {
   box2d: { path: "box2d.js", sha256: "83b10c280f004e7b156a9e04d09ce4109892ea92788f7c6c963f7fadf29c7bd4" },
 };
 const REQUIRED_ENVIRONMENT = ["TZ=UTC", "LC_ALL=C", "LANG=C", "network=forbidden"];
+const EVALUATION_STEP_BUDGET = "18446744073709551615";
+const TERMINATION_BOUNDARY = "external_process_timeout";
 const SUITE_REVISION = "570ad1ccfe86e3eecba0636c8f932ac08edec517";
 const SUITE_TREE = "e40d5c8489d05e384f32ed064d1f5286e9c236f3";
 type Mode = "score" | "attribution";
@@ -92,6 +94,8 @@ export function validateChild(child: any, expected: { runner: string; checkout: 
   requireValue(JSON.stringify(child.engine.environment) === JSON.stringify(REQUIRED_ENVIRONMENT), "child environment drift");
   requireValue(child.adapter?.id === "zig-js-octane-minimal-shell-v1" && child.adapter.source_transform === false, "child adapter boundary drift");
   requireValue(JSON.stringify(child.adapter.host_globals) === JSON.stringify(["load", "print"]), "child host-global boundary drift");
+  requireValue(child.adapter.evaluation_step_budget === EVALUATION_STEP_BUDGET, "child evaluation-step budget drift");
+  requireValue(child.adapter.termination_boundary === TERMINATION_BOUNDARY, "child termination boundary drift");
   requireValue(JSON.stringify(child.adapter.loaded_sources) === JSON.stringify([BASE_SOURCE, ROW_SOURCES[expected.row]]), "child source identity drift");
   requireValue(Array.isArray(child.raw_samples) && child.raw_samples.length === 1, "child raw-sample cardinality drift");
   const raw = child.raw_samples[0];
@@ -289,6 +293,7 @@ function materialize(state: any, complete: boolean): any {
     artifact_policy: {
       checkpoint: "atomically replaced after every child process",
       output_location: "outside the zig-js worktree so child clean-revision verification remains exact",
+      execution_guard: `child evaluation-step budget ${EVALUATION_STEP_BUDGET}; collector per-process timeout owns termination`,
       failed_child_retention: "raw stdout, parsed JSON when available, stderr, exit status, timeout state, and contract validation are never dropped",
       aggregate: "unavailable unless collection is complete and every applicable row passes",
     },
@@ -377,7 +382,7 @@ function syntheticChild(row: string, mode: Mode, status: "passed" | "failed", ru
     schema_version: 1, kind: "zig-js-independent-suite-sample", suite: "octane-2-retired", suite_revision: SUITE_REVISION, suite_tree: SUITE_TREE,
     row, licenses: ROW_LICENSES[row], mode, publication_status: "diagnostic_single_sample",
     engine: { id: "zig-js", executable_path: runner, executable_sha256: "b".repeat(64), source_revision: revision, version_output: "fixture", argv: expectedArgv(runner, checkout, row, mode, revision), environment: REQUIRED_ENVIRONMENT, separate_process: true },
-    adapter: { id: "zig-js-octane-minimal-shell-v1", host_globals: ["load", "print"], source_transform: false, loaded_sources: [BASE_SOURCE, ROW_SOURCES[row]] },
+    adapter: { id: "zig-js-octane-minimal-shell-v1", host_globals: ["load", "print"], source_transform: false, evaluation_step_budget: EVALUATION_STEP_BUDGET, termination_boundary: TERMINATION_BOUNDARY, loaded_sources: [BASE_SOURCE, ROW_SOURCES[row]] },
     status, failure: passed ? null : "fixture failure", skip_reason: null,
     upstream_outputs: passed ? [...ROW_RESULTS[row].map((name) => ({ kind: "result", name, value: "100" })), { kind: "score", name: "selected-geometric-aggregate", value: "200" }] : [{ kind: "error", name: ROW_RESULTS[row][0], value: "fixture failure" }],
     auxiliary_outputs: [], raw_samples: [{ index: 0, mode, instrumentation_enabled: mode === "attribution", outer_wall_ns: 100, cpu_user_ns: 80, cpu_system_ns: 20, peak_rss_bytes_before: 10, peak_rss_bytes_after: 20 }],
@@ -411,6 +416,8 @@ export function selfTest(): void {
   requireValue(complete.aggregate.status === "available" && complete.aggregate.per_sample.length === 2, "complete aggregate was not computed");
   const drift = JSON.parse(JSON.stringify(complete)); drift.rows[0].raw_samples.score[0].parsed_child.engine.executable_sha256 = "e".repeat(64);
   expectFailure(() => validateArtifact(drift), "identity changed");
+  const guardDrift = JSON.parse(JSON.stringify(complete)); guardDrift.rows[0].raw_samples.score[0].parsed_child.adapter.evaluation_step_budget = "500000000";
+  expectFailure(() => validateArtifact(guardDrift), "evaluation-step budget drift");
   const temporary = temporaryDirectory("zig-js-independent-suite-collector");
   try {
     const output = `${temporary}/artifact.json`, written = checkpoint(state, output, true);

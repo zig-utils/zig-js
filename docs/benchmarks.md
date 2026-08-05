@@ -384,12 +384,17 @@ the selected file checksums. It also rejects a dirty zig-js worktree, a source
 revision other than the exact current `HEAD`, and an environment other than
 `TZ=UTC`, `LC_ALL=C`, and `LANG=C`. Each schema-1 JSON line retains the runner
 path and SHA-256, argv/environment, applicable row and licenses, exact loaded
-sources, pass/failure/skip fields, all upstream and auxiliary outputs, the raw
-outer wall/CPU/peak-RSS sample, explicit single-sample dispersion status,
-output validation, and both timing boundaries. `score` mode leaves execution
-instrumentation off and marks tier, allocator, and pause fields as not measured
-rather than emitting fake zeros. `attribution` mode enables the complete named
-tier/admission counters, compilation/deoptimization timing, and
+sources, the evaluation-step budget and termination owner, pass/failure/skip
+fields, all upstream and auxiliary outputs, the raw outer wall/CPU/peak-RSS
+sample, explicit single-sample dispersion status, output validation, and both
+timing boundaries. The adapter uniformly sets its harness-owned step budget to
+unsigned-64 maximum for every row and mode because these pinned workloads are
+finite; it does not change source, input, iteration count, or timing logic. The
+collector's retained per-child process timeout owns termination, while ordinary
+embedding contexts keep the engine's default runaway guard. `score` mode leaves
+execution instrumentation off and marks tier, allocator, and pause fields as
+not measured rather than emitting fake zeros. `attribution` mode enables the
+complete named tier/admission counters, compilation/deoptimization timing, and
 GC/allocation/pause summaries; its wall time and upstream score are diagnostic,
 not scored performance.
 

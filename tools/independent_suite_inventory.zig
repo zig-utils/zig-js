@@ -46,6 +46,8 @@ const Adapter = struct {
     status: []const u8,
     allowed_host_globals: []const []const u8,
     source_transform: bool,
+    evaluation_step_budget: ?[]const u8 = null,
+    termination_boundary: ?[]const u8 = null,
     timed_boundary: []const u8,
     output_contract: []const u8,
 };
@@ -96,6 +98,7 @@ const EvidenceContract = struct {
     retained_row_fields: []const []const u8,
     aggregate_policy: []const u8,
     host_adapter_policy: []const u8,
+    termination_policy: []const u8,
     engine_isolation: []const u8,
     child_schema_version: u32,
     collection_schema_version: u32,
@@ -224,6 +227,9 @@ fn validateInventory(inventory: Inventory) !void {
                 suite.adapter.allowed_host_globals.len != 2 or
                 !contains(suite.adapter.allowed_host_globals, "load") or !contains(suite.adapter.allowed_host_globals, "print"))
                 return fail("Octane minimal shell adapter boundary drift", .{});
+            if (!std.mem.eql(u8, suite.adapter.evaluation_step_budget orelse "", "18446744073709551615") or
+                !std.mem.eql(u8, suite.adapter.termination_boundary orelse "", "external_process_timeout"))
+                return fail("Octane execution guard boundary drift", .{});
         } else if (std.mem.eql(u8, suite.id, "jetstream-3-alpha")) {
             if (suite_applicable_results != 0) return fail("JetStream alpha cannot gain an applicable row in frozen V1", .{});
         } else return fail("unrecognized suite '{s}' in frozen V1", .{suite.id});
@@ -257,10 +263,11 @@ fn validateInventory(inventory: Inventory) !void {
     }
 
     const evidence = inventory.evidence_contract;
-    for ([_][]const u8{ "suite", "row", "engine", "status", "failure", "skip_reason", "raw_samples", "dispersion", "validated_output", "timed_boundary" }) |field| {
+    for ([_][]const u8{ "suite", "row", "engine", "adapter", "status", "failure", "skip_reason", "raw_samples", "dispersion", "validated_output", "timed_boundary" }) |field| {
         if (!contains(evidence.retained_row_fields, field)) return fail("evidence contract omits '{s}'", .{field});
     }
-    if (evidence.aggregate_policy.len == 0 or evidence.host_adapter_policy.len == 0 or evidence.engine_isolation.len == 0)
+    if (evidence.aggregate_policy.len == 0 or evidence.host_adapter_policy.len == 0 or
+        evidence.termination_policy.len == 0 or evidence.engine_isolation.len == 0)
         return fail("evidence boundary is incomplete", .{});
     if (evidence.child_schema_version != 1 or evidence.collection_schema_version != 1 or
         evidence.minimum_score_samples < 2 or evidence.minimum_attribution_samples < 1)

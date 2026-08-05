@@ -169,6 +169,8 @@ const Report = struct {
         id: []const u8 = "zig-js-octane-minimal-shell-v1",
         host_globals: []const []const u8 = &.{ "load", "print" },
         source_transform: bool = false,
+        evaluation_step_budget: []const u8 = "18446744073709551615",
+        termination_boundary: []const u8 = "external_process_timeout",
         loaded_sources: []const SourceIdentity,
     },
     status: []const u8,
@@ -503,9 +505,13 @@ fn runSample(
 
     const before = processSnapshot();
     const started = nowNs(io);
-    const ctx = try js.Context.createWith(std.heap.c_allocator, .{
+    // The pinned rows are finite, while the product default is an embedder
+    // runaway guard. The collector owns termination for this isolated harness
+    // with a per-process timeout, uniformly across rows and modes.
+    const ctx = try js.Context.createWithTestingOptions(std.heap.c_allocator, .{
         .enable_gc = true,
         .profile_execution_tiers = mode == .attribution,
+        .step_budget = std.math.maxInt(u64),
     });
     defer ctx.destroy();
     state.context = ctx;

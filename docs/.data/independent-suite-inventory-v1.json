@@ -48,6 +48,8 @@
         "status": "minimal_shell_v1_implemented",
         "allowed_host_globals": ["load", "print"],
         "source_transform": false,
+        "evaluation_step_budget": "18446744073709551615",
+        "termination_boundary": "external_process_timeout",
         "timed_boundary": "The upstream BenchmarkSuite timing and score boundary remains unchanged; process wall/CPU/RSS are additional outer measurements.",
         "output_contract": "Retain each named upstream result and final suite score; do not use the aggregate to hide a row."
       },
@@ -283,9 +285,10 @@
     }
   ],
   "evidence_contract": {
-    "retained_row_fields": ["suite", "row", "engine", "status", "failure", "skip_reason", "raw_samples", "dispersion", "validated_output", "timed_boundary"],
+    "retained_row_fields": ["suite", "row", "engine", "adapter", "status", "failure", "skip_reason", "raw_samples", "dispersion", "validated_output", "timed_boundary"],
     "aggregate_policy": "Every applicable row remains visible beside any official or geometric aggregate.",
     "host_adapter_policy": "Adapters may provide documented shell globals and result capture only; they may not rewrite workload logic, inputs, iteration counts, timing, or expected output.",
+    "termination_policy": "The isolated zig-js harness uniformly sets its evaluation-step budget to unsigned-64 maximum for every row and mode; the collector's retained per-child external process timeout owns termination.",
     "engine_isolation": "Each engine executes in a separate process and executable; zig-js exports never interpose on another engine.",
     "child_schema_version": 1,
     "collection_schema_version": 1,
