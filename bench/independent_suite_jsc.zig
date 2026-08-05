@@ -357,7 +357,11 @@ fn driverSource(gpa: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(gpa,
         \\BenchmarkSuite.RunSuites({{
         \\  NotifyResult: function(name, result) {{ print("{s}", "result", name, result); }},
-        \\  NotifyError: function(name, error) {{ print("{s}", "error", name, String(error)); }},
+        \\  NotifyError: function(name, error) {{
+        \\    var detail = String(error);
+        \\    try {{ if (error && typeof error.stack === "string") detail = error.stack; }} catch (_) {{}}
+        \\    print("{s}", "error", name, detail);
+        \\  }},
         \\  NotifyScore: function(score) {{ print("{s}", "score", "selected-geometric-aggregate", score); }}
         \\}});
     , .{ octane.protocol_marker, octane.protocol_marker, octane.protocol_marker });
