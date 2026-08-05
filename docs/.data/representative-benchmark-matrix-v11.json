@@ -22,7 +22,7 @@
       "additional_panels"
     ]
   },
-  "change": "Adds exact successful Context backing allocation/growth/release operations and bytes, logical GC-cell fresh/reused/relocation/delegated allocation and free counts/bytes, and the raw nanosecond duration of every completed minor/full collection. The two allocation domains remain separate, pause sample overflow rejects the artifact, and scored timing rows remain uninstrumented.",
+  "change": "Adds exact successful Context backing allocation/growth/release operations and bytes, logical GC-cell fresh/reused/relocation/delegated allocation and free counts with issued size-class storage bytes, and the raw nanosecond duration of every completed minor/full collection. The two allocation domains remain separate, pause sample overflow rejects the artifact, and scored timing rows remain uninstrumented.",
   "tier_attribution": {
     "runner_mode": "attribution",
     "scope": "one fresh zig-js process and context per workload and structural variant; Context backing attribution begins after the profiler storage itself is allocated and before arena/Context construction",

@@ -146,8 +146,9 @@ counts successful Context backing allocations/growth/releases and their exact
 bytes from before arena and Context construction; the profiler storage itself
 is deliberately outside its accounting boundary. Separate GC-cell counters
 retain fresh, reused, relocation, and delegated logical cell issuance so a slab
-refill is never double-counted as every cell it serves. Every completed minor
-and full collection appends its raw nanosecond pause to bounded owned storage;
+refill is never double-counted as every cell it serves. Cell bytes use the exact
+issued size-class storage, matching the storage bytes recorded when cells are
+freed. Every completed minor and full collection appends its raw nanosecond pause to bounded owned storage;
 sample overflow rejects the artifact. Reports derive p50/p95/max with the
 nearest-rank method and use `none`, not zero, when a phase completes no cycle.
 Ordinary contexts keep the original allocator chain and allocate no pause

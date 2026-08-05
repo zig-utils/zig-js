@@ -1632,20 +1632,20 @@ pub const GcCellBacking = struct {
             for (0..target) |chunk_idx|
                 if (self.takeFreedSlotFromChunkLocked(idx, chunk_idx)) |ptr| {
                     if (self.runtime_attribution_profiler) |profile|
-                        profile.recordCellAllocation(len, .relocation);
+                        profile.recordCellAllocation(bucket_sizes[idx], .relocation);
                     return @ptrCast(ptr);
                 };
             for (0..target) |chunk_idx|
                 if (self.bumpFreshSlotInChunkLocked(idx, chunk_idx)) |ptr| {
                     if (self.runtime_attribution_profiler) |profile|
-                        profile.recordCellAllocation(len, .relocation);
+                        profile.recordCellAllocation(bucket_sizes[idx], .relocation);
                     return @ptrCast(ptr);
                 };
             return null;
         }
         const ptr = self.takeFreedSlotLocked(idx) orelse self.bumpFreshSlotLocked(idx) orelse return null;
         if (self.runtime_attribution_profiler) |profile|
-            profile.recordCellAllocation(len, .relocation);
+            profile.recordCellAllocation(bucket_sizes[idx], .relocation);
         return @ptrCast(ptr);
     }
 
@@ -1696,7 +1696,7 @@ pub const GcCellBacking = struct {
             if (self.parallel and ptr != null and self.parallel_cell_tracking_enabled.load(.monotonic))
                 self.recordParallelCellAllocation(len);
             if (ptr != null) if (self.runtime_attribution_profiler) |profile|
-                profile.recordCellAllocation(len, kind);
+                profile.recordCellAllocation(bucket_sizes[idx], kind);
             return ptr;
         }
         self.acquireInner();
@@ -2081,7 +2081,11 @@ pub const GcCellBacking = struct {
 };
 
 test "GC cell backing recycles aligned cell slabs and delegates side storage" {
-    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    var profile = RuntimeAttributionProfiler{ .inner = std.testing.allocator };
+    var backing = GcCellBacking{
+        .inner = std.testing.allocator,
+        .runtime_attribution_profiler = &profile,
+    };
     defer backing.deinit();
     const a = backing.allocator();
 
@@ -2109,6 +2113,19 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     const side = try a.alignedAlloc(u8, .@"8", 200);
     try std.testing.expect(@intFromPtr(side.ptr) != @intFromPtr(first_ptr));
     a.free(side);
+
+    const allocation = profile.snapshot().allocation;
+    const expected_cell_bytes =
+        2 * GcCellBacking.bucket_sizes[GcCellBacking.bucketIndex(200, .@"16").?] +
+        2 * GcCellBacking.bucket_sizes[GcCellBacking.bucketIndex(48, .@"16").?] +
+        2 * GcCellBacking.bucket_sizes[GcCellBacking.bucketIndex(1500, .@"16").?] +
+        side.len;
+    try std.testing.expectEqual(@as(u64, 7), allocation.gc_cell_allocations);
+    try std.testing.expectEqual(@as(u64, 3), allocation.gc_cell_fresh_allocations);
+    try std.testing.expectEqual(@as(u64, 3), allocation.gc_cell_reused_allocations);
+    try std.testing.expectEqual(@as(u64, 1), allocation.gc_cell_delegated_allocations);
+    try std.testing.expectEqual(@as(u64, @intCast(expected_cell_bytes)), allocation.gc_cell_bytes);
+    try std.testing.expectEqual(allocation.gc_cell_bytes, allocation.gc_cell_freed_bytes);
 }
 
 test "GC cell backing lazily bumps fresh chunk slots before using reuse bitmaps" {
