@@ -42,6 +42,30 @@ const eager_native_tier_entry_threshold: u32 = 1;
 const optimizer_tier_entry_threshold: u64 = 8;
 const inline_call_depth_limit: u8 = 32;
 
+fn tierTimingStarted(vm: *const Interpreter) i96 {
+    if (vm.execution_tier_inventory == null) return 0;
+    return std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+}
+
+fn tierTimingElapsed(started_ns: i96) u64 {
+    return @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds - started_ns, 0));
+}
+
+fn recordBaselineTierUp(vm: *Interpreter, started_ns: i96, succeeded: bool) void {
+    if (vm.execution_tier_inventory) |inventory|
+        inventory.recordBaselineTierUp(tierTimingElapsed(started_ns), succeeded);
+}
+
+fn recordOptimizerTierUp(vm: *Interpreter, started_ns: i96, succeeded: bool) void {
+    if (vm.execution_tier_inventory) |inventory|
+        inventory.recordOptimizerTierUp(tierTimingElapsed(started_ns), succeeded);
+}
+
+fn recordDeoptimization(vm: *Interpreter, started_ns: i96) void {
+    if (vm.execution_tier_inventory) |inventory|
+        inventory.recordDeoptimization(tierTimingElapsed(started_ns));
+}
+
 fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
     if (func.is_arrow) return func.arrow_this;
     if (func.is_strict) return this_val;
@@ -4585,6 +4609,7 @@ fn resumeNativeFinallyDispatch(
     scratch: []const u64,
     exec: *Exec,
     status: jit.ExitStatus,
+    recovery_started_ns: i96,
 ) EvalError!NativeRunOutcome {
     const metadata = native.deopt orelse return error.OutOfMemory;
     if (!try reconstructNativeSideExit(metadata, native_frame, slots, scratch, exec, vm.arena))
@@ -4608,7 +4633,7 @@ fn resumeNativeFinallyDispatch(
     switch (kind) {
         .normal => {
             exec.ip = native_frame.exit_ip + 1;
-            vm.recordExecutionTier(.deoptimizations);
+            recordDeoptimization(vm, recovery_started_ns);
             return .deoptimized;
         },
         .throw => {
@@ -4625,7 +4650,7 @@ fn resumeNativeFinallyDispatch(
                     try exec.stack.append(vm.arena, Value.num(@floatFromInt(@backingInt(Completion.throw))));
                     exec.ip = handler.finally_pc;
                 }
-                vm.recordExecutionTier(.deoptimizations);
+                recordDeoptimization(vm, recovery_started_ns);
                 return .deoptimized;
             }
             return error.Throw;
@@ -4633,7 +4658,7 @@ fn resumeNativeFinallyDispatch(
         .ret => {
             if (try unwindToFinally(vm, null, exec, completion_value, .ret)) |finally_ip| {
                 exec.ip = finally_ip;
-                vm.recordExecutionTier(.deoptimizations);
+                recordDeoptimization(vm, recovery_started_ns);
                 return .deoptimized;
             }
             return .{ .complete = completion_value };
@@ -4641,7 +4666,7 @@ fn resumeNativeFinallyDispatch(
         .break_, .continue_ => {
             if (try unwindToFinally(vm, null, exec, completion_value, kind)) |finally_ip| {
                 exec.ip = finally_ip;
-                vm.recordExecutionTier(.deoptimizations);
+                recordDeoptimization(vm, recovery_started_ns);
                 return .deoptimized;
             }
             if (!completion_value.isNumber()) return error.OutOfMemory;
@@ -4651,7 +4676,7 @@ fn resumeNativeFinallyDispatch(
                 return error.OutOfMemory;
             unwindEnvironmentToDepth(vm, null, exec, exec.abrupt_environment_depth);
             exec.ip = @intFromFloat(target);
-            vm.recordExecutionTier(.deoptimizations);
+            recordDeoptimization(vm, recovery_started_ns);
             return .deoptimized;
         },
     }
@@ -4664,7 +4689,13 @@ test "vm: native finally dispatch resumes every completion exactly once" {
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .execution_tier_inventory = &inventory,
+    };
     const cases = [_]struct { kind: Completion, value: f64 }{
         .{ .kind = .normal, .value = 40 },
         .{ .kind = .throw, .value = 41 },
@@ -4728,6 +4759,12 @@ test "vm: native finally dispatch resumes every completion exactly once" {
         error.OutOfMemory,
         tryRunManagedNative(&machine, &malformed, &malformed_slots, &malformed_exec),
     );
+    const execution = inventory.snapshot();
+    const timing = inventory.timingSnapshot();
+    try std.testing.expectEqual(@as(u64, 3), execution.count(.deoptimizations));
+    try std.testing.expectEqual(execution.count(.deoptimizations), timing.deoptimizations);
+    try std.testing.expect(timing.deoptimization_ns > 0);
+    try std.testing.expect(timing.deoptimization_ns >= timing.deoptimization_ns_max);
 }
 
 test "vm: native finally abrupt completions continue through an outer finally" {
@@ -5287,7 +5324,12 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .invalidation_generation = native.invalidation_generation,
         .expected_invalidation_generation = native.expected_invalidation_generation,
     };
-    return switch (runNativeWithPublishedRoots(vm, native, &native_frame)) {
+    const status = runNativeWithPublishedRoots(vm, native, &native_frame);
+    const recovery_started_ns = switch (status) {
+        .operation_exception, .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue, .side_exit => tierTimingStarted(vm),
+        else => 0,
+    };
+    return switch (status) {
         .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
         .throw => error.Throw,
         .stop => error.OutOfMemory,
@@ -5303,12 +5345,12 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
                 target,
                 vm.arena,
             )) return error.OutOfMemory;
-            vm.recordExecutionTier(.deoptimizations);
+            recordDeoptimization(vm, recovery_started_ns);
             break :operation_exception .deoptimized;
         },
-        .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue => |status| {
+        .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue => |exit_status| {
             const target = exec orelse return error.OutOfMemory;
-            return resumeNativeFinallyDispatch(vm, native, &native_frame, live_slots, &scratch, target, status);
+            return resumeNativeFinallyDispatch(vm, native, &native_frame, live_slots, &scratch, target, exit_status, recovery_started_ns);
         },
         .side_exit => side_exit: {
             std.debug.assert(native.has_side_exits);
@@ -5316,7 +5358,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
             const metadata = native.deopt orelse return error.OutOfMemory;
             if (!try reconstructNativeSideExit(metadata, &native_frame, live_slots, &scratch, target, vm.arena))
                 return error.OutOfMemory;
-            vm.recordExecutionTier(.deoptimizations);
+            recordDeoptimization(vm, recovery_started_ns);
             break :side_exit .deoptimized;
         },
     };
@@ -5365,7 +5407,12 @@ fn tryRunOsrNative(
         .expected_invalidation_generation = native.expected_invalidation_generation,
     };
     vm.recordExecutionTier(.optimizer_osr_entries);
-    return switch (runNativeWithPublishedRoots(vm, native, &native_frame)) {
+    const status = runNativeWithPublishedRoots(vm, native, &native_frame);
+    const recovery_started_ns = switch (status) {
+        .operation_exception, .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue, .side_exit => tierTimingStarted(vm),
+        else => 0,
+    };
+    return switch (status) {
         .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
         .throw => error.Throw,
         .stop => error.OutOfMemory,
@@ -5380,17 +5427,17 @@ fn tryRunOsrNative(
                 exec,
                 vm.arena,
             )) return error.OutOfMemory;
-            vm.recordExecutionTier(.deoptimizations);
+            recordDeoptimization(vm, recovery_started_ns);
             break :operation_exception .deoptimized;
         },
-        .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue => |status| {
-            return resumeNativeFinallyDispatch(vm, native, &native_frame, slots, &scratch, exec, status);
+        .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue => |exit_status| {
+            return resumeNativeFinallyDispatch(vm, native, &native_frame, slots, &scratch, exec, exit_status, recovery_started_ns);
         },
         .side_exit => side_exit: {
             const deopt = native.deopt orelse return error.OutOfMemory;
             if (!try reconstructNativeSideExit(deopt, &native_frame, slots, &scratch, exec, vm.arena))
                 return error.OutOfMemory;
-            vm.recordExecutionTier(.deoptimizations);
+            recordDeoptimization(vm, recovery_started_ns);
             break :side_exit .deoptimized;
         },
     };
@@ -5452,7 +5499,7 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     return execLoop(vm, &exec, chunk, frame, null);
 }
 
-fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk, prefer_managed_baseline: bool) ?*const jit.CompiledCode {
+fn loadOrCompileOptimizer(vm: *Interpreter, owner: *jit.Owner, chunk: *Chunk, prefer_managed_baseline: bool) ?*const jit.CompiledCode {
     // A managed baseline artifact already owns the whole loop, including exact
     // checkpoint accounting. The generic optimizer region currently expands
     // the same loop into finer-grained guarded operations and can be much
@@ -5468,7 +5515,9 @@ fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk, prefer_managed_basel
         optimizer_tier_entry_threshold,
     )) |claim_value| {
         var claim = claim_value;
+        const tier_up_started_ns = tierTimingStarted(vm);
         var compiled = optimizer_compiler.compile(chunk) catch |err| {
+            recordOptimizerTierUp(vm, tier_up_started_ns, false);
             if (err == error.OutOfMemory) {
                 chunk.optimizer_tier.invalidate();
             } else {
@@ -5478,11 +5527,13 @@ fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk, prefer_managed_basel
             return null;
         };
         _ = owner.adoptOptimizerAndPublish(&chunk.optimizer_tier, claim.claim, compiled) catch {
+            recordOptimizerTierUp(vm, tier_up_started_ns, false);
             compiled.deinit();
             chunk.optimizer_tier.invalidate();
             claim.release();
             return null;
         };
+        recordOptimizerTierUp(vm, tier_up_started_ns, true);
         claim.release();
         artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode);
     };
@@ -5548,7 +5599,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     const owner = vm.jit_owner orelse return null;
 
     if (!nativeExecutionPermitted(vm, owner)) return null;
-    if (loadOrCompileOptimizer(owner, chunk, vm.prefer_managed_baseline)) |artifact| {
+    if (loadOrCompileOptimizer(vm, owner, chunk, vm.prefer_managed_baseline)) |artifact| {
         if (!nativeExecutionPermitted(vm, owner)) return null;
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
         switch (try tryExecuteNative(vm, artifact, frame, exec)) {
@@ -5573,17 +5624,21 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         native_tier_entry_threshold;
     if (code == null) if (owner.claimCompilation(&chunk.tier, tier_threshold)) |claim_value| {
         var claim = claim_value;
+        const tier_up_started_ns = tierTimingStarted(vm);
         var compiled = jit_compiler.compile(chunk) catch {
+            recordBaselineTierUp(vm, tier_up_started_ns, false);
             chunk.tier.publishRejected();
             claim.release();
             return null;
         };
         _ = owner.adoptAndPublish(&chunk.tier, compiled) catch |err| {
+            recordBaselineTierUp(vm, tier_up_started_ns, false);
             compiled.deinit();
             if (err == error.Invalidated) chunk.tier.invalidate() else chunk.tier.publishRejected();
             claim.release();
             return null;
         };
+        recordBaselineTierUp(vm, tier_up_started_ns, true);
         claim.release();
         code = chunk.tier.loadCode();
     };
@@ -5617,7 +5672,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     const copy_count = @min(args.len, parameter_count);
     @memcpy(slots[0..copy_count], args[0..copy_count]);
 
-    const optimizer_artifact = loadOrCompileOptimizer(owner, chunk, vm.prefer_managed_baseline);
+    const optimizer_artifact = loadOrCompileOptimizer(vm, owner, chunk, vm.prefer_managed_baseline);
     const baseline_artifact = chunk.tier.loadCode();
     if (!nativeExecutionPermitted(vm, owner)) return null;
     if (optimizer_artifact == null and baseline_artifact == null) return null;

@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v12.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v13.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -16,7 +16,7 @@ const unique = (values: any[]) => new Set(values).size === values.length;
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 12, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 13, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -55,7 +55,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 12, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 13, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -161,7 +161,16 @@ export function validate(manifest: any, root = ROOT): void {
   requireValue(same(Object.keys(modes).sort(), ["independent_cold", "independent_steady", "shared", "single_warm"]), "v1 mode inventory changed");
   requireValue(same(modes.shared.engines, ["zig-js"]), "shared mode must not construct a JSC ratio");
   requireValue(Array.isArray(manifest.pending_metric_panels), "pending metric inventory must remain explicit");
-  if (manifest.schema_version >= 12) {
+  if (manifest.schema_version >= 13) {
+    const pending = manifest.pending_metric_panels;
+    requireValue(
+      pending.length === 2 &&
+        same(pending[0]?.metrics || [], ["cycles", "instructions", "cache_misses", "energy_joules", "thermal_state"]) &&
+        same(pending[1]?.metrics || [], ["independent_suite_results", "additional_engine_results"]) &&
+        pending[0]?.issue === 503 && pending[1]?.issue === 504,
+      "V13 pending metric inventory does not remove the completed issue-461 panel",
+    );
+  } else if (manifest.schema_version >= 12) {
     const pending = manifest.pending_metric_panels;
     requireValue(
       same(pending[0]?.metrics || [], ["tier_up_ns", "deoptimization_ns"]) &&
@@ -179,7 +188,16 @@ export function validate(manifest: any, root = ROOT): void {
   if (manifest.schema_version >= 2) {
     const attribution = manifest.tier_attribution || {};
     requireValue(same(attribution.phases || [], ["configuration", "warmup", "invocation"]), "representative tier phases changed");
-    const expectedMetrics = manifest.schema_version >= 12
+    const expectedMetrics = manifest.schema_version >= 13
+      ? [
+        "tree_walker_entries", "vm_entries", "vm_dispatches", "vm_quick_kernel_hits", "baseline_entries", "optimizer_entries",
+        "optimizer_osr_entries", "deoptimizations", "runtime_operation_calls", "host_callbacks", "wasm_dispatches",
+        "environment_allocations", "bytecode_admissions_by_reason", "baseline_publications", "optimizer_publications", "generated_code_bytes",
+        "native_code_lifetime_by_state", "heap_live_bytes", "heap_collections", "synchronization_by_path", "worker_lifecycle",
+        "context_backing_allocations", "gc_cell_allocations", "gc_pause_samples", "process_cpu_time_by_mode", "peak_rss_bytes", "retained_rss_bytes",
+        "tier_up_attempts_and_time", "deoptimization_time",
+      ]
+      : manifest.schema_version >= 12
       ? [
         "tree_walker_entries", "vm_entries", "vm_dispatches", "vm_quick_kernel_hits", "baseline_entries", "optimizer_entries",
         "optimizer_osr_entries", "deoptimizations", "runtime_operation_calls", "host_callbacks", "wasm_dispatches",

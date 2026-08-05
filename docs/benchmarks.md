@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v12.json`. V12 hash-inherits every V11 workload, mode, job count, checksum, timing boundary, engine-availability ruling, and acceptance decision while versioning fresh-process CPU and resident-memory attribution. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v13.json`. V13 hash-inherits every V12 workload, mode, job count, checksum, timing boundary, engine-availability ruling, and acceptance decision while versioning tier-up and deoptimization latency. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -162,6 +162,15 @@ gauges. The invocation retained value is sampled after the workload host
 checkpoint and before Context destruction, so it is neither allocator-requested
 bytes nor the process-exit peak. These resource queries remain outside scored
 timing rows.
+
+Schema-version-7 sidecars use the V13 contract. Successful and failed baseline
+and optimizer attempts record total/max latency from an accepted compilation
+claim through publication outcome. Deoptimization latency begins only after
+native code returns a recoverable exit and ends when the bytecode interpreter's
+continuation is fully reconstructed, excluding native execution before the
+exit. Counts tie successful attempts to published artifacts and reconstructed
+exits to the deoptimization execution counter. Ordinary contexts retain a null
+attribution pointer and perform none of these clock reads.
 
 The full-work schema-2 evidence is the
 [`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)

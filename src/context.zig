@@ -4740,6 +4740,7 @@ pub const Context = struct {
 
     pub const TierAttributionSnapshot = struct {
         execution: interp.ExecutionTierSnapshot,
+        timing: interp.TierTimingSnapshot,
         admissions: interp.BytecodeAdmissionSnapshot,
         baseline_publications: u64,
         optimizer_publications: u64,
@@ -4773,6 +4774,7 @@ pub const Context = struct {
         const code = owner.stats();
         return .{
             .execution = self.execution_tier_inventory.snapshot(),
+            .timing = self.execution_tier_inventory.timingSnapshot(),
             .admissions = self.bytecode_admission_inventory.snapshot(),
             .baseline_publications = owner.baselinePublications(),
             .optimizer_publications = owner.optimizerPublications(),
@@ -20282,6 +20284,8 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.host_callbacks));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.wasm_dispatches));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.environment_allocations));
+    inline for (comptime std.meta.fieldNames(interp.TierTimingSnapshot)) |name|
+        try std.testing.expectEqual(@as(u64, 0), @field(ordinary_snapshot.timing, name));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.runtime.allocation.backing_allocations);
     try std.testing.expectEqual(@as(usize, 0), ordinary_snapshot.runtime.minor_pauses.len);
     try std.testing.expectEqual(@as(usize, 0), ordinary_snapshot.runtime.full_pauses.len);
@@ -20351,6 +20355,18 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
         try std.testing.expect(snapshot.optimizer_publications > 0);
         try std.testing.expect(snapshot.generated_code_bytes > 0);
         try std.testing.expect(snapshot.native_code.live_artifacts > 0);
+        try std.testing.expectEqual(snapshot.baseline_publications, snapshot.timing.baseline_tier_ups);
+        try std.testing.expectEqual(snapshot.optimizer_publications, snapshot.timing.optimizer_tier_ups);
+        try std.testing.expectEqual(
+            snapshot.timing.baseline_attempts,
+            snapshot.timing.baseline_tier_ups + snapshot.timing.baseline_failures,
+        );
+        try std.testing.expectEqual(
+            snapshot.timing.optimizer_attempts,
+            snapshot.timing.optimizer_tier_ups + snapshot.timing.optimizer_failures,
+        );
+        try std.testing.expect(snapshot.timing.baseline_tier_up_ns >= snapshot.timing.baseline_tier_up_ns_max);
+        try std.testing.expect(snapshot.timing.optimizer_tier_up_ns >= snapshot.timing.optimizer_tier_up_ns_max);
     }
 
     const Host = struct {

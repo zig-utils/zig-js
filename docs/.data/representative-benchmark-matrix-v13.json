@@ -1,0 +1,80 @@
+{
+  "schema_version": 13,
+  "matrix_id": "zig-js-representative-v13",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 461,
+  "history_policy": "This version hash-inherits every V12 workload, mode, jobs, checksum, timing boundary, engine-availability, acceptance, allocation, GC-pause, CPU, and resident-memory decision. It versions successful/failed tier-up and deoptimization latency and removes the completed issue-461 metric panel; any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v12",
+    "path": "docs/.data/representative-benchmark-matrix-v12.json",
+    "sha256": "605f506fb7b0b04b461a1bd7ff09e4e23c7ca57bb6116b1b0cfda7ee66bdaeff",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels"
+    ]
+  },
+  "change": "Adds successful and failed baseline/optimizer tier-up attempt counts, total/max nanoseconds from accepted compilation claim through publication outcome, and deoptimization total/max nanoseconds from a recoverable native exit through fully reconstructed interpreter continuation. Native execution before the exit is excluded, ordinary contexts perform no timing queries, and the issue-461 metric inventory is complete.",
+  "tier_attribution": {
+    "runner_mode": "attribution",
+    "scope": "one fresh zig-js process and context per workload and structural variant; all attribution remains opt-in and outside scored timing rows",
+    "phases": ["configuration", "warmup", "invocation"],
+    "warmup": "the inherited ten reduced-work calls",
+    "invocation": "one inherited full-work call with the frozen jobs and lane-zero input; retained RSS is sampled after its host checkpoint and before Context destruction",
+    "metrics": [
+      "tree_walker_entries",
+      "vm_entries",
+      "vm_dispatches",
+      "vm_quick_kernel_hits",
+      "baseline_entries",
+      "optimizer_entries",
+      "optimizer_osr_entries",
+      "deoptimizations",
+      "runtime_operation_calls",
+      "host_callbacks",
+      "wasm_dispatches",
+      "environment_allocations",
+      "bytecode_admissions_by_reason",
+      "baseline_publications",
+      "optimizer_publications",
+      "generated_code_bytes",
+      "native_code_lifetime_by_state",
+      "heap_live_bytes",
+      "heap_collections",
+      "synchronization_by_path",
+      "worker_lifecycle",
+      "context_backing_allocations",
+      "gc_cell_allocations",
+      "gc_pause_samples",
+      "process_cpu_time_by_mode",
+      "peak_rss_bytes",
+      "retained_rss_bytes",
+      "tier_up_attempts_and_time",
+      "deoptimization_time"
+    ],
+    "equivalence": "For warmup and invocation independently, each base/variant pair must select the same non-empty set of tree-walker, VM, baseline, optimizer, optimizer-OSR, and deoptimization paths and allocate exactly the same number of environments. Exact tier, timing, runtime, synchronization, allocation, GC-pause, process CPU, resident-memory, and worker values remain visible rather than normalized away; every Wasm workload must record an invocation-phase Wasm dispatch.",
+    "timing_isolation": "Attribution uses fresh opt-in processes and contexts outside every scored timing row; ordinary contexts retain a null execution-attribution pointer and therefore perform no tier-up, deoptimization, or process-resource clock queries.",
+    "recognizer_audit": {
+      "scope": ["src"],
+      "prohibited": "Every representative workload identifier is absent from engine source. Identifiers exist only in the owned workload, manifest, and benchmark tooling."
+    }
+  },
+  "pending_metric_panels": [
+    {
+      "metrics": ["cycles", "instructions", "cache_misses", "energy_joules", "thermal_state"],
+      "issue": 503
+    },
+    {
+      "metrics": ["independent_suite_results", "additional_engine_results"],
+      "issue": 504
+    }
+  ]
+}

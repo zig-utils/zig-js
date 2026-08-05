@@ -27,6 +27,7 @@ export type TierSnapshot = {
   phase: "configuration" | "warmup" | "invocation";
   checksum: number;
   execution: CounterMap;
+  timing: CounterMap;
   admissions: CounterMap;
   synchronization: CounterMap;
   allocation: CounterMap;
@@ -44,6 +45,7 @@ export type TierDelta = {
   phase: TierSnapshot["phase"];
   checksum: number;
   execution: CounterMap;
+  timing: CounterMap;
   admissions: CounterMap;
   synchronization: CounterMap;
   allocation: CounterMap;
@@ -82,6 +84,25 @@ const runtimeMetrics = [
   "runtime_operation_calls",
   "host_callbacks",
   "wasm_dispatches",
+];
+const timingMetrics = [
+  "baseline_attempts",
+  "baseline_tier_ups",
+  "baseline_tier_up_ns",
+  "baseline_tier_up_ns_max",
+  "baseline_failures",
+  "baseline_failure_ns",
+  "baseline_failure_ns_max",
+  "optimizer_attempts",
+  "optimizer_tier_ups",
+  "optimizer_tier_up_ns",
+  "optimizer_tier_up_ns_max",
+  "optimizer_failures",
+  "optimizer_failure_ns",
+  "optimizer_failure_ns_max",
+  "deoptimizations",
+  "deoptimization_ns",
+  "deoptimization_ns_max",
 ];
 const synchronizationMetrics = [
   "thread_join_parks",
@@ -259,6 +280,21 @@ function subtractSynchronization(after: CounterMap, before: CounterMap): Counter
   return result;
 }
 
+function subtractTiming(after: CounterMap, before: CounterMap): CounterMap {
+  const result: CounterMap = {};
+  for (const name of timingMetrics) {
+    const current = after[name] || 0,
+      previous = before[name] || 0;
+    if (name.endsWith("_max")) {
+      result[name] = current;
+      continue;
+    }
+    requireValue(current >= previous, `${name} timing counter regressed`);
+    result[name] = current - previous;
+  }
+  return result;
+}
+
 function subtractAllocation(after: CounterMap, before: CounterMap): CounterMap {
   const result: CounterMap = {};
   for (const name of allocationMetrics) {
@@ -315,6 +351,7 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
     execution: Object.fromEntries(
       Object.keys(row.execution).map((name) => [name, 0]),
     ),
+    timing: Object.fromEntries(timingMetrics.map((name) => [name, 0])),
     admissions: Object.fromEntries(
       Object.keys(row.admissions).map((name) => [name, 0]),
     ),
@@ -349,6 +386,7 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         phase: row.phase,
         checksum: row.checksum,
         execution: subtractMap(row.execution, before.execution),
+        timing: subtractTiming(row.timing, before.timing),
         admissions: subtractMap(row.admissions, before.admissions),
         synchronization: subtractSynchronization(row.synchronization, before.synchronization),
         allocation: subtractAllocation(row.allocation, before.allocation),
@@ -400,6 +438,7 @@ export function validate(
       requireValue(
         Number.isInteger(row.checksum) &&
           Object.values(row.execution).every(Number.isInteger) &&
+          Object.values(row.timing).every(Number.isInteger) &&
           Object.values(row.admissions).every(Number.isInteger) &&
           Object.values(row.synchronization).every(Number.isInteger) &&
           Object.values(row.allocation).every(Number.isInteger) &&
@@ -416,6 +455,24 @@ export function validate(
         JSON.stringify(Object.keys(row.execution).sort()) ===
           JSON.stringify([...tierMetrics, ...runtimeMetrics, "environment_allocations"].sort()),
         `execution attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        JSON.stringify(Object.keys(row.timing).sort()) ===
+          JSON.stringify([...timingMetrics].sort()),
+        `tier timing inventory drift for ${workload}`,
+      );
+      requireValue(
+        row.timing.baseline_attempts === row.timing.baseline_tier_ups + row.timing.baseline_failures &&
+          row.timing.optimizer_attempts === row.timing.optimizer_tier_ups + row.timing.optimizer_failures &&
+          row.timing.baseline_tier_ups === row.baseline_publications &&
+          row.timing.optimizer_tier_ups === row.optimizer_publications &&
+          row.timing.deoptimizations === row.execution.deoptimizations &&
+          row.timing.baseline_tier_up_ns >= row.timing.baseline_tier_up_ns_max &&
+          row.timing.baseline_failure_ns >= row.timing.baseline_failure_ns_max &&
+          row.timing.optimizer_tier_up_ns >= row.timing.optimizer_tier_up_ns_max &&
+          row.timing.optimizer_failure_ns >= row.timing.optimizer_failure_ns_max &&
+          row.timing.deoptimization_ns >= row.timing.deoptimization_ns_max,
+        `tier timing attribution is incoherent for ${workload}`,
       );
       requireValue(
         JSON.stringify(Object.keys(row.synchronization).sort()) ===
@@ -536,6 +593,28 @@ export function render(
         variant = byWorkload[family.variant].find((row) => row.phase === phase)!;
       rows.push(
         `| \`${family.family}\` | ${phase} | \`${signature(base)}\` | \`${signature(variant)}\` | ${base.execution.environment_allocations || 0} | ${variant.execution.environment_allocations || 0} |`,
+      );
+    }
+  }
+  rows.push(
+    "",
+    `${heading}${heading} Tier-up and deoptimization latency`,
+    "",
+    "Tier-up time starts after a successful compilation claim and ends when code publication succeeds or the attempt is rejected. Deoptimization time starts when native code returns a recoverable exit and ends after the interpreter continuation is fully reconstructed; it excludes native execution before the exit.",
+    "",
+    "| family | phase | base tier-ups | variant tier-ups | base tier-up time | variant tier-up time | base deopts | variant deopts | base deopt time | variant deopt time |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const family of manifest.implemented_families) {
+    for (const phase of ["warmup", "invocation"] as const) {
+      const base = byWorkload[family.base].find((row) => row.phase === phase)!,
+        variant = byWorkload[family.variant].find((row) => row.phase === phase)!,
+        baseTierUps = base.timing.baseline_tier_ups + base.timing.optimizer_tier_ups,
+        variantTierUps = variant.timing.baseline_tier_ups + variant.timing.optimizer_tier_ups,
+        baseTierUpNs = base.timing.baseline_tier_up_ns + base.timing.optimizer_tier_up_ns,
+        variantTierUpNs = variant.timing.baseline_tier_up_ns + variant.timing.optimizer_tier_up_ns;
+      rows.push(
+        `| \`${family.family}\` | ${phase} | ${baseTierUps} | ${variantTierUps} | ${baseTierUpNs} ns | ${variantTierUpNs} ns | ${base.timing.deoptimizations} | ${variant.timing.deoptimizations} | ${base.timing.deoptimization_ns} ns | ${variant.timing.deoptimization_ns} ns |`,
       );
     }
   }
@@ -687,7 +766,7 @@ export function artifact(
   runner: string,
 ): any {
   return {
-    schema_version: 6,
+    schema_version: 7,
     matrix_id: manifest.matrix_id,
     quick,
     environment: info,
@@ -721,6 +800,25 @@ function syntheticRows(manifest: any): TierSnapshot[] {
           host_callbacks: 0,
           wasm_dispatches: family.family.startsWith("wasm_") ? index : 0,
           environment_allocations: index,
+        },
+        timing: {
+          baseline_attempts: 0,
+          baseline_tier_ups: 0,
+          baseline_tier_up_ns: 0,
+          baseline_tier_up_ns_max: 0,
+          baseline_failures: 0,
+          baseline_failure_ns: 0,
+          baseline_failure_ns_max: 0,
+          optimizer_attempts: index > 0 ? 1 : 0,
+          optimizer_tier_ups: index > 0 ? 1 : 0,
+          optimizer_tier_up_ns: index > 0 ? 10 : 0,
+          optimizer_tier_up_ns_max: index > 0 ? 10 : 0,
+          optimizer_failures: 0,
+          optimizer_failure_ns: 0,
+          optimizer_failure_ns_max: 0,
+          deoptimizations: 0,
+          deoptimization_ns: 0,
+          deoptimization_ns_max: 0,
         },
         admissions: { program_compiled: index + 1 },
         synchronization: Object.fromEntries(
@@ -814,6 +912,12 @@ export function selfTest(): void {
   const execution = JSON.parse(JSON.stringify(rows));
   delete execution[0].execution.vm_dispatches;
   expectFailure(() => validate(execution, manifest, true), "execution attribution inventory drift");
+  const timing = JSON.parse(JSON.stringify(rows));
+  delete timing[0].timing.deoptimization_ns;
+  expectFailure(() => validate(timing, manifest, true), "tier timing inventory drift");
+  const incoherentTiming = JSON.parse(JSON.stringify(rows));
+  incoherentTiming[1].timing.optimizer_attempts += 1;
+  expectFailure(() => validate(incoherentTiming, manifest, true), "tier timing attribution is incoherent");
   const synchronization = JSON.parse(JSON.stringify(rows));
   delete synchronization[0].synchronization.lock_wait_ns;
   expectFailure(
@@ -843,7 +947,7 @@ export function selfTest(): void {
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/synchronization/allocation/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, and RSS verified");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/allocation/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier-up, and deoptimization latency verified");
 }
 
 function main(): void {

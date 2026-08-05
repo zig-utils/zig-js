@@ -1029,10 +1029,58 @@ pub const ExecutionTierSnapshot = struct {
     }
 };
 
+pub const TierTimingSnapshot = struct {
+    baseline_attempts: u64 = 0,
+    baseline_tier_ups: u64 = 0,
+    baseline_tier_up_ns: u64 = 0,
+    baseline_tier_up_ns_max: u64 = 0,
+    baseline_failures: u64 = 0,
+    baseline_failure_ns: u64 = 0,
+    baseline_failure_ns_max: u64 = 0,
+    optimizer_attempts: u64 = 0,
+    optimizer_tier_ups: u64 = 0,
+    optimizer_tier_up_ns: u64 = 0,
+    optimizer_tier_up_ns_max: u64 = 0,
+    optimizer_failures: u64 = 0,
+    optimizer_failure_ns: u64 = 0,
+    optimizer_failure_ns_max: u64 = 0,
+    deoptimizations: u64 = 0,
+    deoptimization_ns: u64 = 0,
+    deoptimization_ns_max: u64 = 0,
+};
+
 /// Context-owned and race-safe for shared-realm attribution runs. Recording is
 /// monotonic observational state and never changes an execution decision.
 pub const ExecutionTierInventory = struct {
     counts: [execution_tier_metric_count]std.atomic.Value(u64) = @splat(.init(0)),
+    timing: AtomicTierTiming = .{},
+
+    const AtomicTierTiming = struct {
+        baseline_attempts: std.atomic.Value(u64) = .init(0),
+        baseline_tier_ups: std.atomic.Value(u64) = .init(0),
+        baseline_tier_up_ns: std.atomic.Value(u64) = .init(0),
+        baseline_tier_up_ns_max: std.atomic.Value(u64) = .init(0),
+        baseline_failures: std.atomic.Value(u64) = .init(0),
+        baseline_failure_ns: std.atomic.Value(u64) = .init(0),
+        baseline_failure_ns_max: std.atomic.Value(u64) = .init(0),
+        optimizer_attempts: std.atomic.Value(u64) = .init(0),
+        optimizer_tier_ups: std.atomic.Value(u64) = .init(0),
+        optimizer_tier_up_ns: std.atomic.Value(u64) = .init(0),
+        optimizer_tier_up_ns_max: std.atomic.Value(u64) = .init(0),
+        optimizer_failures: std.atomic.Value(u64) = .init(0),
+        optimizer_failure_ns: std.atomic.Value(u64) = .init(0),
+        optimizer_failure_ns_max: std.atomic.Value(u64) = .init(0),
+        deoptimizations: std.atomic.Value(u64) = .init(0),
+        deoptimization_ns: std.atomic.Value(u64) = .init(0),
+        deoptimization_ns_max: std.atomic.Value(u64) = .init(0),
+    };
+
+    fn recordMax(counter: *std.atomic.Value(u64), sample: u64) void {
+        var observed = counter.load(.monotonic);
+        while (sample > observed) {
+            observed = counter.cmpxchgWeak(observed, sample, .monotonic, .monotonic) orelse break;
+        }
+    }
 
     pub fn record(self: *ExecutionTierInventory, metric: ExecutionTierMetric) void {
         _ = self.counts[@backingInt(metric)].fetchAdd(1, .monotonic);
@@ -1042,9 +1090,49 @@ pub const ExecutionTierInventory = struct {
         _ = self.counts[@backingInt(metric)].fetchAdd(count, .monotonic);
     }
 
+    pub fn recordBaselineTierUp(self: *ExecutionTierInventory, elapsed_ns: u64, succeeded: bool) void {
+        _ = self.timing.baseline_attempts.fetchAdd(1, .monotonic);
+        if (succeeded) {
+            _ = self.timing.baseline_tier_ups.fetchAdd(1, .monotonic);
+            _ = self.timing.baseline_tier_up_ns.fetchAdd(elapsed_ns, .monotonic);
+            recordMax(&self.timing.baseline_tier_up_ns_max, elapsed_ns);
+        } else {
+            _ = self.timing.baseline_failures.fetchAdd(1, .monotonic);
+            _ = self.timing.baseline_failure_ns.fetchAdd(elapsed_ns, .monotonic);
+            recordMax(&self.timing.baseline_failure_ns_max, elapsed_ns);
+        }
+    }
+
+    pub fn recordOptimizerTierUp(self: *ExecutionTierInventory, elapsed_ns: u64, succeeded: bool) void {
+        _ = self.timing.optimizer_attempts.fetchAdd(1, .monotonic);
+        if (succeeded) {
+            _ = self.timing.optimizer_tier_ups.fetchAdd(1, .monotonic);
+            _ = self.timing.optimizer_tier_up_ns.fetchAdd(elapsed_ns, .monotonic);
+            recordMax(&self.timing.optimizer_tier_up_ns_max, elapsed_ns);
+        } else {
+            _ = self.timing.optimizer_failures.fetchAdd(1, .monotonic);
+            _ = self.timing.optimizer_failure_ns.fetchAdd(elapsed_ns, .monotonic);
+            recordMax(&self.timing.optimizer_failure_ns_max, elapsed_ns);
+        }
+    }
+
+    pub fn recordDeoptimization(self: *ExecutionTierInventory, elapsed_ns: u64) void {
+        self.record(.deoptimizations);
+        _ = self.timing.deoptimizations.fetchAdd(1, .monotonic);
+        _ = self.timing.deoptimization_ns.fetchAdd(elapsed_ns, .monotonic);
+        recordMax(&self.timing.deoptimization_ns_max, elapsed_ns);
+    }
+
     pub fn snapshot(self: *const ExecutionTierInventory) ExecutionTierSnapshot {
         var result: ExecutionTierSnapshot = undefined;
         for (&self.counts, 0..) |*count, index| result.counts[index] = count.load(.monotonic);
+        return result;
+    }
+
+    pub fn timingSnapshot(self: *const ExecutionTierInventory) TierTimingSnapshot {
+        var result: TierTimingSnapshot = .{};
+        inline for (comptime std.meta.fieldNames(TierTimingSnapshot)) |name|
+            @field(result, name) = @field(self.timing, name).load(.monotonic);
         return result;
     }
 };

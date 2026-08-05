@@ -191,6 +191,11 @@ fn printTierAttributionRow(
         const metric: js.ExecutionTierMetric = @fromBackingInt(@intCast(field_value));
         try writer.print("\"{s}\":{d}", .{ name, snapshot.execution.count(metric) });
     }
+    try writer.writeAll("},\"timing\":{");
+    inline for (comptime std.meta.fieldNames(@TypeOf(snapshot.timing)), 0..) |name, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\":{d}", .{ name, @field(snapshot.timing, name) });
+    }
     try writer.writeAll("},\"admissions\":{");
     const admission_info = @typeInfo(js.BytecodeAdmissionReason).@"enum";
     inline for (admission_info.field_names, admission_info.field_values, 0..) |name, field_value, index| {
