@@ -10768,6 +10768,30 @@ test "RegExp ordinary character classes allow unescaped opening brackets" {
     );
 }
 
+test "RegExp literals ignore an enclosing constructor new.target" {
+    try expectEvalStr("true|true|true|true|^ba|^ba",
+        \\function FunctionCtor() {
+        \\  function inspect(re) {
+        \\    return [re instanceof RegExp, Object.getPrototypeOf(re) === RegExp.prototype, typeof re.exec === "function", re.source];
+        \\  }
+        \\  this.result = inspect(/^ba/);
+        \\}
+        \\class ClassCtor {
+        \\  constructor() { this.re = /^ba/; }
+        \\}
+        \\var functionResult = new FunctionCtor().result;
+        \\var classRe = new ClassCtor().re;
+        \\[
+        \\  functionResult[0],
+        \\  functionResult[1],
+        \\  functionResult[2],
+        \\  classRe instanceof RegExp && Object.getPrototypeOf(classRe) === RegExp.prototype && typeof classRe.exec === "function",
+        \\  functionResult[3],
+        \\  classRe.source
+        \\].join("|")
+    );
+}
+
 test "RegExp source and toString escape line terminators canonically" {
     try std.testing.expect((try evalIn(
         \\function same(re, source) {

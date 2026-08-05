@@ -1477,7 +1477,7 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
         const fv = if (pattern_is_regexp) try self.getProperty(a0, "flags") else Value.undef();
         break :blk if (fv.isUndefined()) "" else try self.toStringV(fv);
     };
-    return self.makeRegex(pattern, flags);
+    return self.makeRegexFromConstructor(pattern, flags);
 }
 
 pub fn objectGetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {

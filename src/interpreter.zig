@@ -8906,7 +8906,7 @@ pub const Interpreter = struct {
         return null;
     }
 
-    pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
+    fn makeRegexWithConstructorTarget(self: *Interpreter, pattern: []const u8, flags: []const u8, constructor_target: ?*value.Object) EvalError!Value {
         try self.validateRegExpFlags(flags);
         const o = (try self.newObject()).asObj();
         o.behavior.is_regex = true;
@@ -8921,10 +8921,10 @@ pub const Interpreter = struct {
         regex_state.flags = try self.arena.dupe(u8, flags);
         try self.setProp(o, "lastIndex", Value.num(0));
         try o.setAttr(self.arena, "lastIndex", .{ .writable = true, .enumerable = false, .configurable = false });
-        if (self.new_target.isObject()) {
+        if (constructor_target) |target| {
             // GetPrototypeFromConstructor: new.target.prototype, or new.target's
             // realm's %RegExp.prototype% when that is not an Object.
-            o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "RegExp"));
+            o.setProtoAtomic(try self.ctorRealmIntrinsicProto(target, "RegExp"));
         } else if (self.env.get("RegExp")) |c| {
             if (c.isObject()) o.setProtoAtomic(try self.protoObject(c.asObj()));
         }
@@ -8933,6 +8933,23 @@ pub const Interpreter = struct {
         // methods recompile on demand).
         _ = try self.compileRegex(o);
         return Value.obj(o);
+    }
+
+    /// RegExpCreate and a RegularExpressionLiteral always allocate from the
+    /// current realm's intrinsic. An enclosing constructor's `new.target` is
+    /// unrelated and must not become the literal/internal RegExp prototype.
+    pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
+        return self.makeRegexWithConstructorTarget(pattern, flags, null);
+    }
+
+    /// RegExp constructor allocation uses its actual `new.target` when invoked
+    /// with `new`; a plain call falls back to the current realm intrinsic.
+    pub fn makeRegexFromConstructor(self: *Interpreter, pattern: []const u8, flags: []const u8) EvalError!Value {
+        return self.makeRegexWithConstructorTarget(
+            pattern,
+            flags,
+            if (self.new_target.isObject()) self.new_target.asObj() else null,
+        );
     }
 
     fn validateRegExpFlags(self: *Interpreter, flags: []const u8) EvalError!void {
