@@ -199,6 +199,18 @@ raw artifact. Its 108 snapshots name exact implementation revision
 the raw histories of 1,953 completed collections with zero overflow, and match
 every minor/full sample inventory to the corresponding heap collection counters.
 
+The full-work schema-6 process-resource evidence is the
+[`representative-tier-attribution-v12-schema-v6-2026-08-04.md`](.data/representative-tier-attribution-v12-schema-v6-2026-08-04.md)
+report and its
+[`representative-tier-attribution-v12-schema-v6-2026-08-04.json`](.data/representative-tier-attribution-v12-schema-v6-2026-08-04.json)
+raw artifact. Its 108 snapshots name exact implementation revision
+`00b5e00f2064687b7fdf9f1f7ca34445922d8340` and retain all four process-resource
+fields. In the regexp invocation rows, the structural variant records
+23,789,570,528 retained Context backing bytes but 2,986,147,840 live resident
+bytes and a 3,172,679,680-byte fresh-process peak; the base records 160,907,264
+live resident bytes. These are separate measured domains, not conversions of
+allocator counters into RSS.
+
 Attribution is deliberately outside the timing rows. Normal contexts retain a
 null telemetry pointer, while the sidecar opts in to atomic counters. A full
 published representative report therefore preserves both its ordinary timing
