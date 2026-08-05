@@ -394,10 +394,41 @@ GC/allocation/pause summaries; its wall time and upstream score are diagnostic,
 not scored performance.
 
 One invocation is a compatibility and adapter diagnostic, not publishable
-performance evidence. A future repeated-sample collector must preserve every
-schema-1 child and compute dispersion without rewriting or dropping failures;
-cross-engine publication additionally requires the inventoried executable and
-version pins for each separate engine process.
+performance evidence. The
+[`independent-suite-collector.ts`](../tools/independent-suite-collector.ts)
+repeated collection path is a separate, lossless layer:
+
+```sh
+zig build independent-suite-collect \
+  -Dindependent-suite-checkout=/absolute/outside/zig-js/octane \
+  -Dindependent-suite-zig-js-revision=$(git rev-parse HEAD) \
+  -Dindependent-suite-collection-out=/tmp/zig-js-octane-collection.json
+```
+
+The output path is required to be absolute and outside the zig-js worktree.
+That keeps every child process's clean-source proof valid while the collector
+atomically replaces the durable artifact after each child. Score rounds rotate
+the five applicable rows by sample index, and every score and attribution
+sample is a fresh adapter process. Attribution samples remain separate from the
+uninstrumented score samples.
+
+The schema-1 collection retains each child's raw stdout, parsed JSON when
+available, stderr, exit status, timeout state, and contract-validation result.
+Failed and malformed children are never discarded. Dispersion is the median,
+range, arithmetic mean, and sample relative standard deviation of only
+contract-valid passed score children; the artifact lists every failed or
+invalid sample index beside those statistics. The selected six-result geometric
+score is unavailable unless collection is complete and all five applicable
+rows pass. The command therefore writes the complete failure artifact and then
+returns nonzero while any row fails.
+
+Two score samples and one separate attribution sample per row are the structural
+minimum. Suite-specific publication eligibility requires at least seven score
+samples per row, an all-passing complete matrix, and an explicitly selected
+`quiet_reference` host observed on AC power. Even then, the geometric value is
+labeled as the selected non-browser subset, never the full official Octane or a
+browser score. Cross-engine publication additionally requires the inventoried
+executable and version pins for each separate engine process.
 
 ## Stable attribution and exact-parent A/Bs
 

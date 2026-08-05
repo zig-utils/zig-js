@@ -97,6 +97,14 @@ const EvidenceContract = struct {
     aggregate_policy: []const u8,
     host_adapter_policy: []const u8,
     engine_isolation: []const u8,
+    child_schema_version: u32,
+    collection_schema_version: u32,
+    minimum_score_samples: u32,
+    minimum_attribution_samples: u32,
+    checkpoint_policy: []const u8,
+    dispersion_policy: []const u8,
+    aggregate_failure_policy: []const u8,
+    publication_policy: []const u8,
 };
 
 const Inventory = struct {
@@ -252,6 +260,12 @@ fn validateInventory(inventory: Inventory) !void {
     }
     if (evidence.aggregate_policy.len == 0 or evidence.host_adapter_policy.len == 0 or evidence.engine_isolation.len == 0)
         return fail("evidence boundary is incomplete", .{});
+    if (evidence.child_schema_version != 1 or evidence.collection_schema_version != 1 or
+        evidence.minimum_score_samples < 2 or evidence.minimum_attribution_samples < 1)
+        return fail("independent-suite collection schema/sample contract drift", .{});
+    if (evidence.checkpoint_policy.len == 0 or evidence.dispersion_policy.len == 0 or
+        evidence.aggregate_failure_policy.len == 0 or evidence.publication_policy.len == 0)
+        return fail("independent-suite collection evidence policy is incomplete", .{});
 }
 
 fn parseAndValidate(gpa: std.mem.Allocator, source: []const u8) !void {

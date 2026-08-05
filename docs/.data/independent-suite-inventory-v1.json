@@ -286,6 +286,14 @@
     "retained_row_fields": ["suite", "row", "engine", "status", "failure", "skip_reason", "raw_samples", "dispersion", "validated_output", "timed_boundary"],
     "aggregate_policy": "Every applicable row remains visible beside any official or geometric aggregate.",
     "host_adapter_policy": "Adapters may provide documented shell globals and result capture only; they may not rewrite workload logic, inputs, iteration counts, timing, or expected output.",
-    "engine_isolation": "Each engine executes in a separate process and executable; zig-js exports never interpose on another engine."
+    "engine_isolation": "Each engine executes in a separate process and executable; zig-js exports never interpose on another engine.",
+    "child_schema_version": 1,
+    "collection_schema_version": 1,
+    "minimum_score_samples": 2,
+    "minimum_attribution_samples": 1,
+    "checkpoint_policy": "The collector atomically replaces an artifact outside the zig-js worktree after every child process, preserving raw stdout, parsed JSON when available, stderr, exit status, timeout state, and contract validation.",
+    "dispersion_policy": "Only contract-valid passed score children contribute statistics; failed and invalid children remain retained and identified beside the valid-only dispersion.",
+    "aggregate_failure_policy": "No selected-subset geometric aggregate exists until collection is complete and every applicable row passes.",
+    "publication_policy": "Suite-specific evidence requires at least seven score samples per row, a complete all-passing matrix, and an explicitly selected quiet reference host on AC power; otherwise the artifact is diagnostic."
   }
 }

@@ -1803,9 +1803,10 @@ pub fn build(b: *std.Build) void {
     const independent_suite_zig_js_bin_step = b.step("independent-suite-zig-js-bin", "Build the isolated zig-js independent-suite adapter");
     independent_suite_zig_js_bin_step.dependOn(&install_independent_suite_zig_js.step);
 
+    const independent_suite_zig_js_revision = b.option([]const u8, "independent-suite-zig-js-revision", "Exact zig-js source revision represented by the runner");
     const independent_suite_zig_js_step = b.step("independent-suite-zig-js", "Run one pinned Octane row through the isolated zig-js adapter");
     if (independent_suite_checkout) |checkout| {
-        if (b.option([]const u8, "independent-suite-zig-js-revision", "Exact zig-js source revision represented by the runner")) |revision| {
+        if (independent_suite_zig_js_revision) |revision| {
             const run_independent_suite_zig_js = b.addRunArtifact(independent_suite_zig_js);
             run_independent_suite_zig_js.setEnvironmentVariable("TZ", "UTC");
             run_independent_suite_zig_js.setEnvironmentVariable("LC_ALL", "C");
@@ -1825,6 +1826,46 @@ pub fn build(b: *std.Build) void {
     } else {
         const missing_checkout = b.addFail("independent-suite-zig-js requires -Dindependent-suite-checkout=<verified-out-of-tree-path>");
         independent_suite_zig_js_step.dependOn(&missing_checkout.step);
+    }
+
+    // The collector keeps every child process result and atomically checkpoints
+    // an out-of-tree artifact after each sample. A failed applicable row makes
+    // the final aggregate unavailable and the step nonzero, after preserving
+    // the complete failure record.
+    const independent_suite_collector_self_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-suite-collector.ts", "--self-test" });
+    const independent_suite_collect_step = b.step("independent-suite-collect", "Collect repeated isolated Octane samples into a durable external artifact");
+    if (independent_suite_checkout) |checkout| {
+        if (independent_suite_zig_js_revision) |revision| {
+            if (b.option([]const u8, "independent-suite-collection-out", "Absolute artifact path outside the zig-js worktree")) |output| {
+                const collect = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-suite-collector.ts" });
+                collect.addArtifactArg(independent_suite_zig_js);
+                collect.addArgs(&.{
+                    checkout,
+                    revision,
+                    "--output",
+                    output,
+                    "--score-samples",
+                    b.fmt("{d}", .{b.option(u32, "independent-suite-score-samples", "Repeated score samples per applicable row") orelse 7}),
+                    "--attribution-samples",
+                    b.fmt("{d}", .{b.option(u32, "independent-suite-attribution-samples", "Separate attribution samples per applicable row") orelse 1}),
+                    "--host-class",
+                    b.option([]const u8, "independent-suite-host-class", "Collection host class: diagnostic or quiet_reference") orelse "diagnostic",
+                    "--timeout-ms",
+                    b.fmt("{d}", .{b.option(u32, "independent-suite-timeout-ms", "Timeout for each isolated child process") orelse 900_000}),
+                });
+                collect.step.dependOn(&run_independent_suite_audit.step);
+                independent_suite_collect_step.dependOn(&collect.step);
+            } else {
+                const missing_output = b.addFail("independent-suite-collect requires -Dindependent-suite-collection-out=<absolute-path-outside-zig-js>");
+                independent_suite_collect_step.dependOn(&missing_output.step);
+            }
+        } else {
+            const missing_revision = b.addFail("independent-suite-collect requires -Dindependent-suite-zig-js-revision=<40-hex-commit>");
+            independent_suite_collect_step.dependOn(&missing_revision.step);
+        }
+    } else {
+        const missing_checkout = b.addFail("independent-suite-collect requires -Dindependent-suite-checkout=<verified-out-of-tree-path>");
+        independent_suite_collect_step.dependOn(&missing_checkout.step);
     }
 
     // Reproducible engine comparison against the system JavaScriptCore. The
@@ -1864,6 +1905,7 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&run_independent_suite_audit.step);
     comparison_harness_test_step.dependOn(&run_independent_suite_audit_tests.step);
     comparison_harness_test_step.dependOn(&independent_suite_zig_js_self_test.step);
+    comparison_harness_test_step.dependOn(&independent_suite_collector_self_test.step);
     const optimizer_release_inventory_step = b.step("optimizer-release-inventory-check", "Validate the optimizer backend, correctness, sanitizer, and performance evidence");
     optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);
 
