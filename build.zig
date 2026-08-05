@@ -1786,7 +1786,7 @@ pub fn build(b: *std.Build) void {
     const comparison_step = b.step("benchmark-comparison", "Compare zig-js direct/independent/shared throughput with system JavaScriptCore (macOS)");
     const representative_step = b.step("representative-benchmark", "Run the versioned representative zig-js / system-JSC matrix (macOS)");
     const representative_attribution_step = b.step("representative-tier-attribution", "Record representative base/variant execution-tier attribution (macOS)");
-    const instrumentation_overhead_step = b.step("instrumentation-overhead", "Measure disabled/enabled execution-attribution overhead (macOS)");
+    const instrumentation_overhead_step = b.step("instrumentation-overhead", "Measure execution-attribution overhead and counter capabilities (macOS)");
     const comparison_bin_step = b.step("benchmark-comparison-bin", "Build the zig-js and system-JSC comparison runners (macOS)");
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{

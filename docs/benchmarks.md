@@ -291,6 +291,18 @@ retains wall time, process user/system CPU, peak RSS, retired instructions,
 cycles, and voluntary/involuntary context switches for every sample, including
 logical-work normalization. No sample is discarded or reordered.
 
+Schema v2 (with historical schema-v1 artifacts left unchanged) keeps each OS
+counter as a status-bearing observation: `measured`,
+`unavailable`, or `permission_denied`. Before the alternating workload pairs it
+runs the same number of `/usr/bin/time -l /usr/bin/true` no-op probes, then
+compares their raw counter dispersion with the disabled known-work samples.
+Five-percent relative standard deviation separates `stable` from `noisy`;
+zero-mean or insufficient observations are `indeterminate`, never silently
+stable. The artifact also records that macOS `time -l` exposes no multiplexing
+metadata and inventories branches/misses, cache/TLB misses, migrations,
+scheduler wait, frequency, thermal state, energy, and peak power as explicit
+unavailable capabilities rather than zero-valued measurements.
+
 ```sh
 zig build instrumentation-overhead \
   -Dinstrumentation-overhead-raw-out=docs/.data/instrumentation-overhead-YYYY-MM-DD.json \
