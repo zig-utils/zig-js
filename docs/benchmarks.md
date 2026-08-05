@@ -220,6 +220,18 @@ bytes and a 3,172,679,680-byte fresh-process peak; the base records 160,907,264
 live resident bytes. These are separate measured domains, not conversions of
 allocator counters into RSS.
 
+The full-work schema-7 tier-transition evidence is the
+[`representative-tier-attribution-v13-schema-v7-2026-08-04.md`](.data/representative-tier-attribution-v13-schema-v7-2026-08-04.md)
+report and its
+[`representative-tier-attribution-v13-schema-v7-2026-08-04.json`](.data/representative-tier-attribution-v13-schema-v7-2026-08-04.json)
+raw artifact. Its 108 snapshots name exact implementation revision
+`f0546ee8a39898d07de7209aae08d3495ac4915f` and retain 17 timing fields. Across
+the 36 fresh processes, the final snapshots contain 272 baseline/optimizer
+attempts: 54 successful publications and 218 rejected attempts. Successful
+tier-up work totals 6,678,959 ns. The same snapshots record 9,841,288 fully
+reconstructed deoptimizations totaling 209,630,978 ns; publication and
+deoptimization counts match their independent owner/execution counters.
+
 Attribution is deliberately outside the timing rows. Normal contexts retain a
 null telemetry pointer, while the sidecar opts in to atomic counters. A full
 published representative report therefore preserves both its ordinary timing
