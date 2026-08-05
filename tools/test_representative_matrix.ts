@@ -22,4 +22,7 @@ rejects("invalid availability modes", value => { value.implemented_families.find
 rejects("false JSC availability", value => { value.implemented_families.find((entry: any) => entry.availability).availability.checksums.JavaScriptCore = 1; }, "must require zig-js=1 and JavaScriptCore=0");
 rejects("missing module attribution", value => { value.implemented_families.find((entry: any) => entry.availability && entry.availability.kind === "zig_js_module_capability").availability.attribution_mode = "attribution"; }, "lacks its attribution mode");
 rejects("missing module API inventory", value => { value.implemented_families.find((entry: any) => entry.availability && entry.availability.kind === "zig_js_module_capability").availability.public_api_inventory = ""; }, "lacks its public API inventory");
-console.log("representative matrix structural tests: 14/14 passed");
+rejects("missing shared attribution runner", value => value.tier_attribution.runner_modes.splice(1, 1), "runner-mode inventory drift");
+rejects("shared attribution lanes", value => value.tier_attribution.shared_lanes.pop(), "shared attribution lanes drift");
+rejects("missing attribution coverage", value => { value.tier_attribution.workload_coverage = ""; }, "complete workload coverage");
+console.log("representative matrix structural tests: 17/17 passed");

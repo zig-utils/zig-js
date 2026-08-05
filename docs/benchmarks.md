@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v13.json`. V13 hash-inherits every V12 workload, mode, job count, checksum, timing boundary, engine-availability ruling, and acceptance decision while versioning tier-up and deoptimization latency. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v14.json`. V14 hash-inherits every V13 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, and pending-panel decision while extending opt-in attribution coverage to all owned workloads and supported shared rows. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -171,6 +171,17 @@ continuation is fully reconstructed, excluding native execution before the
 exit. Counts tie successful attempts to published artifacts and reconstructed
 exits to the deoptimization execution counter. Ordinary contexts retain a null
 attribution pointer and perform none of these clock reads.
+
+Schema-version-8 sidecars use the V14 contract. In addition to the inherited
+single-context and module rows, they cover both additional-panel workloads and
+every supported shared-realm family/panel row at the frozen 1/2/4/8 lane
+counts. Shared configuration, warmup, and invocation snapshots use the exact
+scored shared harness. The invocation boundary is observed only after every
+real JavaScript `Thread` joins, and validation requires exactly one worker run
+per lane, the frozen lane-specific checksum, complete GC/allocation/process
+inventories, and base/variant tier and environment-allocation equivalence at
+each lane count. Families whose frozen contract says `shared: false` remain
+excluded; the collector does not manufacture a shared result for them.
 
 The full-work schema-2 evidence is the
 [`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)

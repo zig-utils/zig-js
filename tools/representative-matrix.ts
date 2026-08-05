@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v13.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v14.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -16,7 +16,7 @@ const unique = (values: any[]) => new Set(values).size === values.length;
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 13, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 14, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -55,7 +55,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 13, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 14, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -187,6 +187,17 @@ export function validate(manifest: any, root = ROOT): void {
   }
   if (manifest.schema_version >= 2) {
     const attribution = manifest.tier_attribution || {};
+    if (manifest.schema_version >= 14) {
+      requireValue(
+        same(attribution.runner_modes || [], ["attribution", "shared_attribution", "module_attribution"]),
+        "V14 attribution runner-mode inventory drift",
+      );
+      requireValue(same(attribution.shared_lanes || [], lanes), "V14 shared attribution lanes drift");
+      requireValue(
+        typeof attribution.workload_coverage === "string" && attribution.workload_coverage.length > 0,
+        "V14 attribution lacks complete workload coverage",
+      );
+    }
     requireValue(same(attribution.phases || [], ["configuration", "warmup", "invocation"]), "representative tier phases changed");
     const expectedMetrics = manifest.schema_version >= 13
       ? [

@@ -7,6 +7,7 @@
 //!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes> --gc-telemetry
 //!   bench-comparison-zig-js attribution <workload> <jobs> 1
+//!   bench-comparison-zig-js shared_attribution <workload> <jobs> 1 <lanes>
 //!
 //! Independent modes use one creator-thread-affine context per OS worker. In
 //! steady mode worker/context setup and warm-up are outside every timed sample;
@@ -50,7 +51,7 @@ const shared_harness =
     \\};
 ;
 
-const Mode = enum { single, single_profiled, independent_steady, independent_cold, shared, attribution, module_cold, module_attribution };
+const Mode = enum { single, single_profiled, independent_steady, independent_cold, shared, attribution, shared_attribution, module_cold, module_attribution };
 
 const SteadyLane = struct {
     io: std.Io,
@@ -175,15 +176,17 @@ fn printRow(
 
 fn printTierAttributionRow(
     writer: *std.Io.Writer,
+    mode: []const u8,
     workload: []const u8,
+    lanes: usize,
     jobs: usize,
     phase: []const u8,
     checksum: f64,
     snapshot: js.Context.TierAttributionSnapshot,
     process: ProcessResourceSnapshot,
 ) !void {
-    try writer.print("{{\"kind\":\"zig-js-tier-attribution\",\"workload\":\"{s}\",\"jobs\":{d},\"phase\":\"{s}\",\"checksum\":{d:.0},\"execution\":{{", .{
-        workload, jobs, phase, checksum,
+    try writer.print("{{\"kind\":\"zig-js-tier-attribution\",\"mode\":\"{s}\",\"workload\":\"{s}\",\"lanes\":{d},\"jobs\":{d},\"phase\":\"{s}\",\"checksum\":{d:.0},\"execution\":{{", .{
+        mode, workload, lanes, jobs, phase, checksum,
     });
     const execution_info = @typeInfo(js.ExecutionTierMetric).@"enum";
     inline for (execution_info.field_names, execution_info.field_values, 0..) |name, field_value, index| {
@@ -410,15 +413,15 @@ fn runAttribution(
     const checkpoint = try configure(ctx, workload, jobs, 0);
     const configuration = ctx.tierAttributionSnapshot();
     const configuration_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, workload, jobs, "configuration", 0, configuration, configuration_process);
+    try printTierAttributionRow(writer, "single", workload, 1, jobs, "configuration", 0, configuration, configuration_process);
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
     const warmed = ctx.tierAttributionSnapshot();
     const warmed_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, workload, jobs, "warmup", 0, warmed, warmed_process);
+    try printTierAttributionRow(writer, "single", workload, 1, jobs, "warmup", 0, warmed, warmed_process);
     const result = try invoke(ctx, checkpoint);
     const invoked = ctx.tierAttributionSnapshot();
     const invoked_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, workload, jobs, "invocation", result.toNumber(), invoked, invoked_process);
+    try printTierAttributionRow(writer, "single", workload, 1, jobs, "invocation", result.toNumber(), invoked, invoked_process);
     _ = io;
 }
 
@@ -666,16 +669,62 @@ fn runModuleAttribution(
     defer ctx.destroy();
     const configuration = ctx.tierAttributionSnapshot();
     const configuration_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, workload, jobs, "configuration", 0, configuration, configuration_process);
+    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "configuration", 0, configuration, configuration_process);
     try configureModuleGlobals(ctx, jobs, 0);
     const warmed = ctx.tierAttributionSnapshot();
     const warmed_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, workload, jobs, "warmup", 0, warmed, warmed_process);
+    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "warmup", 0, warmed, warmed_process);
     _ = try ctx.evaluateModule(profile.entry_path, profile.entry_source, profile.host());
     const checksum = (try ctx.evaluate("globalThis.__representativeModuleChecksum")).toNumber();
     const invoked = ctx.tierAttributionSnapshot();
     const invoked_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, workload, jobs, "invocation", checksum, invoked, invoked_process);
+    try printTierAttributionRow(writer, "module_cold", workload, 1, jobs, "invocation", checksum, invoked, invoked_process);
+    _ = io;
+}
+
+fn runSharedAttribution(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+    lanes: usize,
+) !void {
+    js.jsthread.resetContentionStats();
+    defer js.jsthread.disableContentionStats();
+    const ctx = try js.Context.createWith(allocator, .{
+        .enable_threads = true,
+        .profile_execution_tiers = true,
+        .wasm_features = .{
+            .nontrapping_float_to_int = true,
+            .fixed_width_simd = true,
+            .threads = true,
+        },
+    });
+    defer ctx.destroy();
+    const checkpoint = try configure(ctx, workload, jobs, 0);
+    _ = try ctx.evaluate(shared_harness);
+    const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
+        jobs, lanes,
+    });
+    const configuration = ctx.tierAttributionSnapshot();
+    const configuration_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "configuration", 0, configuration, configuration_process);
+
+    if (!std.mem.eql(u8, workload, "wasm_threads_wait_notify")) {
+        try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
+        // Match the scored shared-mode lifecycle boundary: warm real workers,
+        // then complete the first cooperative collection/reuse cycle.
+        for (0..2) |_| _ = try evaluateShared(ctx, shared_invocation);
+    }
+    const warmed = ctx.tierAttributionSnapshot();
+    const warmed_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "warmup", 0, warmed, warmed_process);
+
+    const result = try evaluateShared(ctx, shared_invocation);
+    const invoked = ctx.tierAttributionSnapshot();
+    const invoked_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "invocation", result.toNumber(), invoked, invoked_process);
     _ = io;
 }
 
@@ -747,10 +796,10 @@ pub fn main(init: std.process.Init) !void {
     const gc_telemetry = args.len == 7 and std.mem.eql(u8, args[6], "--gc-telemetry");
     if (args.len == 7 and !gc_telemetry) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
-    if ((mode == .attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
+    if ((mode == .attribution or mode == .shared_attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
     if (std.mem.eql(u8, workload, "wasm_threads_wait_notify") and
-        (mode != .shared or lanes < 2 or lanes % 2 != 0)) return error.InvalidArguments;
+        ((mode != .shared and mode != .shared_attribution) or lanes < 2 or lanes % 2 != 0)) return error.InvalidArguments;
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
@@ -761,6 +810,7 @@ pub fn main(init: std.process.Init) !void {
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry),
         .attribution => try runAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
+        .shared_attribution => try runSharedAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs, lanes),
         .module_cold => try runModuleCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .module_attribution => try runModuleAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
     }

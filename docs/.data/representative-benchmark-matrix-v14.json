@@ -1,0 +1,106 @@
+{
+  "schema_version": 14,
+  "matrix_id": "zig-js-representative-v14",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 461,
+  "history_policy": "This version hash-inherits every V13 workload, scored mode, jobs, checksum, timing boundary, engine-availability, acceptance, attribution metric, and pending-panel decision. It expands only the opt-in attribution coverage to every repository-owned workload and every supported 1/2/4/8-lane shared-realm row; any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v13",
+    "path": "docs/.data/representative-benchmark-matrix-v13.json",
+    "sha256": "b7e8593ca492a7562304a8efe6842d0d4a21a779e6875057a8dade6631de2bb3",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels"
+    ]
+  },
+  "change": "Adds exact configuration/warmup/invocation attribution for both additional-panel workloads and for every supported family/additional-panel shared row at the frozen 1/2/4/8 lane counts. Shared invocation snapshots are captured only after every real JavaScript Thread has joined and must record exactly one worker run per lane.",
+  "tier_attribution": {
+    "runner_modes": [
+      "attribution",
+      "shared_attribution",
+      "module_attribution"
+    ],
+    "scope": "one fresh zig-js process and context per workload, structural variant, execution mode, and lane count; all attribution remains opt-in and outside scored timing rows",
+    "workload_coverage": "all 18 base/variant families plus every additional panel; families with shared=false retain their exact frozen exclusion",
+    "shared_lanes": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "phases": [
+      "configuration",
+      "warmup",
+      "invocation"
+    ],
+    "warmup": "single and module rows retain their inherited boundary; shared rows retain the scored shared-mode warmup, including real Thread lifecycle warmup and the first cooperative collection/reuse cycle",
+    "invocation": "one inherited full-work call at the frozen jobs and lane input; shared snapshots occur after all lane Threads join, and retained RSS is sampled after the workload host checkpoint and before Context destruction",
+    "metrics": [
+      "tree_walker_entries",
+      "vm_entries",
+      "vm_dispatches",
+      "vm_quick_kernel_hits",
+      "baseline_entries",
+      "optimizer_entries",
+      "optimizer_osr_entries",
+      "deoptimizations",
+      "runtime_operation_calls",
+      "host_callbacks",
+      "wasm_dispatches",
+      "environment_allocations",
+      "bytecode_admissions_by_reason",
+      "baseline_publications",
+      "optimizer_publications",
+      "generated_code_bytes",
+      "native_code_lifetime_by_state",
+      "heap_live_bytes",
+      "heap_collections",
+      "synchronization_by_path",
+      "worker_lifecycle",
+      "context_backing_allocations",
+      "gc_cell_allocations",
+      "gc_pause_samples",
+      "process_cpu_time_by_mode",
+      "peak_rss_bytes",
+      "retained_rss_bytes",
+      "tier_up_attempts_and_time",
+      "deoptimization_time"
+    ],
+    "equivalence": "For warmup and invocation independently at each supported mode/lane count, every base/variant pair must select the same non-empty set of tree-walker, VM, baseline, optimizer, optimizer-OSR, and deoptimization paths and allocate exactly the same number of environments. Every shared invocation must record exactly one worker run per lane. Exact tier, timing, runtime, synchronization, allocation, GC-pause, process CPU, resident-memory, and worker values remain visible rather than normalized away; every Wasm workload must record an invocation-phase Wasm dispatch.",
+    "timing_isolation": "Attribution uses fresh opt-in processes and contexts outside every scored timing row; ordinary contexts retain a null execution-attribution pointer and therefore perform no tier-up, deoptimization, or process-resource clock queries.",
+    "recognizer_audit": {
+      "scope": [
+        "src"
+      ],
+      "prohibited": "Every representative workload identifier is absent from engine source. Identifiers exist only in the owned workload, manifest, and benchmark tooling."
+    }
+  },
+  "pending_metric_panels": [
+    {
+      "metrics": [
+        "cycles",
+        "instructions",
+        "cache_misses",
+        "energy_joules",
+        "thermal_state"
+      ],
+      "issue": 503
+    },
+    {
+      "metrics": [
+        "independent_suite_results",
+        "additional_engine_results"
+      ],
+      "issue": 504
+    }
+  ]
+}

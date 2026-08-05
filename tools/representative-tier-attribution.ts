@@ -22,7 +22,9 @@ export type ProcessResourceSnapshot = {
 };
 export type TierSnapshot = {
   kind: "zig-js-tier-attribution";
+  mode: "single" | "shared" | "module_cold";
   workload: string;
+  lanes: number;
   jobs: number;
   phase: "configuration" | "warmup" | "invocation";
   checksum: number;
@@ -40,7 +42,9 @@ export type TierSnapshot = {
   process: ProcessResourceSnapshot;
 };
 export type TierDelta = {
+  mode: TierSnapshot["mode"];
   workload: string;
+  lanes: number;
   jobs: number;
   phase: TierSnapshot["phase"];
   checksum: number;
@@ -203,8 +207,57 @@ function requireValue(condition: boolean, message: string): void {
 function workloadEntries(manifest: any): any[] {
   const result: any[] = [];
   for (const family of manifest.implemented_families) {
-    result.push([family, "base", family.base]);
-    result.push([family, "variant", family.variant]);
+    const singleMode = family.availability?.attribution_mode === "module_attribution"
+      ? "module_cold"
+      : "single";
+    for (const role of ["base", "variant"]) {
+      result.push({
+        owner: family,
+        ownerKind: "family",
+        role,
+        workload: family[role],
+        mode: singleMode,
+        runnerMode: family.availability?.attribution_mode || "attribution",
+        lanes: 1,
+      });
+    }
+  }
+  for (const panel of manifest.additional_panels || []) {
+    result.push({
+      owner: panel,
+      ownerKind: "panel",
+      role: "panel",
+      workload: panel.workload,
+      mode: "single",
+      runnerMode: "attribution",
+      lanes: 1,
+    });
+  }
+  for (const family of manifest.implemented_families) {
+    if (family.shared === false) continue;
+    for (const role of ["base", "variant"]) for (const lanes of manifest.lanes) {
+      result.push({
+        owner: family,
+        ownerKind: "family",
+        role,
+        workload: family[role],
+        mode: "shared",
+        runnerMode: "shared_attribution",
+        lanes,
+      });
+    }
+  }
+  for (const panel of manifest.additional_panels || []) {
+    if (!(panel.modes || []).includes("shared")) continue;
+    for (const lanes of manifest.lanes) result.push({
+      owner: panel,
+      ownerKind: "panel",
+      role: "panel",
+      workload: panel.workload,
+      mode: "shared",
+      runnerMode: "shared_attribution",
+      lanes,
+    });
   }
   return result;
 }
@@ -233,21 +286,17 @@ export function collect(
 ): TierSnapshot[] {
   const rows: TierSnapshot[] = [];
   for (const entry of workloadEntries(manifest)) {
-    const family = entry[0],
-      workload = entry[2];
-    const jobs = jobsFor(family, quick);
-    const mode = family.availability && family.availability.attribution_mode
-      ? family.availability.attribution_mode
-      : "attribution";
+    const jobs = jobsFor(entry.owner, quick);
     const command = [
       "env",
       "LC_ALL=C",
       runner,
-      mode,
-      workload,
+      entry.runnerMode,
+      entry.workload,
       String(jobs),
       "1",
     ];
+    if (entry.runnerMode === "shared_attribution") command.push(String(entry.lanes));
     console.error(`+ ${command.join(" ")}`);
     const completed = run(command);
     if (completed.stderr) process.stderr.write(completed.stderr);
@@ -377,11 +426,14 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
     let before = emptySnapshot(group[0]);
     for (const row of group) {
       requireValue(
-        row.workload === group[0].workload && row.jobs === group[0].jobs,
+        row.mode === group[0].mode && row.workload === group[0].workload &&
+          row.lanes === group[0].lanes && row.jobs === group[0].jobs,
         "attribution phase identity drift",
       );
       result.push({
+        mode: row.mode,
         workload: row.workload,
+        lanes: row.lanes,
         jobs: row.jobs,
         phase: row.phase,
         checksum: row.checksum,
@@ -417,6 +469,18 @@ function signature(row: TierDelta): string {
     .join("+");
 }
 
+function entryChecksum(entry: any, manifest: any, quick: boolean): number {
+  const scale = quick ? "quick" : "full",
+    lane = manifest.lanes.indexOf(entry.lanes);
+  requireValue(lane >= 0, `unknown lane count ${entry.lanes}`);
+  return entry.ownerKind === "family"
+    ? entry.owner.checksums[entry.role][scale][lane]
+    : entry.owner.checksums[scale][lane];
+}
+
+const deltaKey = (workload: string, mode: string, lanes: number): string =>
+  `${workload}\u0000${mode}\u0000${lanes}`;
+
 export function validate(
   rows: TierSnapshot[],
   manifest: any,
@@ -428,11 +492,14 @@ export function validate(
     `attribution row count ${rows.length} does not match ${entries.length * phases.length}`,
   );
   for (let index = 0; index < entries.length; index += 1) {
-    const [family, role, workload] = entries[index],
+    const entry = entries[index],
       group = rows.slice(index * phases.length, (index + 1) * phases.length),
-      jobs = jobsFor(family, quick);
+      jobs = jobsFor(entry.owner, quick),
+      workload = entry.workload;
     group.forEach((row, phaseIndex) => {
+      requireValue(row.mode === entry.mode, `unexpected mode for ${workload}`);
       requireValue(row.workload === workload, `unexpected workload ${row.workload}`);
+      requireValue(row.lanes === entry.lanes, `unexpected lanes for ${workload}`);
       requireValue(row.jobs === jobs, `unexpected jobs for ${workload}`);
       requireValue(row.phase === phases[phaseIndex], `unexpected phase for ${workload}`);
       requireValue(
@@ -536,13 +603,11 @@ export function validate(
         `native-code attribution inventory drift for ${workload}`,
       );
     });
-    const lane = manifest.lanes.indexOf(1),
-      scale = quick ? "quick" : "full";
     requireValue(
-      group[2].checksum === family.checksums[role][scale][lane],
-      `${workload} attribution checksum ${group[2].checksum} does not match frozen ${family.checksums[role][scale][lane]}`,
+      group[2].checksum === entryChecksum(entry, manifest, quick),
+      `${workload} attribution checksum ${group[2].checksum} does not match frozen ${entryChecksum(entry, manifest, quick)}`,
     );
-    if (family.family.startsWith("wasm_")) {
+    if (entry.owner.family?.startsWith("wasm_") || workload.startsWith("wasm_")) {
       requireValue(
         (group[2].execution.wasm_dispatches || 0) >
           (group[1].execution.wasm_dispatches || 0),
@@ -552,21 +617,35 @@ export function validate(
   }
   const phaseDeltas = deltas(rows),
     byWorkload: Record<string, TierDelta[]> = {};
-  phaseDeltas.forEach((row) => (byWorkload[row.workload] ||= []).push(row));
+  entries.forEach((entry, index) => {
+    if (entry.mode !== "shared") return;
+    const invocation = phaseDeltas[index * phases.length + 2];
+    requireValue(
+      invocation.synchronization.worker_runs === entry.lanes,
+      `${entry.workload} shared/${entry.lanes}-lane invocation recorded ${invocation.synchronization.worker_runs} worker runs`,
+    );
+  });
+  phaseDeltas.forEach((row) =>
+    (byWorkload[deltaKey(row.workload, row.mode, row.lanes)] ||= []).push(row));
   for (const family of manifest.implemented_families) {
-    for (const phase of ["warmup", "invocation"] as const) {
-      const base = byWorkload[family.base].find((row) => row.phase === phase)!,
-        variant = byWorkload[family.variant].find((row) => row.phase === phase)!;
+    const modes: Array<[TierSnapshot["mode"], number]> = [[
+      family.availability?.attribution_mode === "module_attribution" ? "module_cold" : "single",
+      1,
+    ]];
+    if (family.shared !== false) for (const lanes of manifest.lanes) modes.push(["shared", lanes]);
+    for (const [mode, lanes] of modes) for (const phase of ["warmup", "invocation"] as const) {
+      const base = byWorkload[deltaKey(family.base, mode, lanes)].find((row) => row.phase === phase)!,
+        variant = byWorkload[deltaKey(family.variant, mode, lanes)].find((row) => row.phase === phase)!;
       requireValue(signature(base).length > 0, `${family.base} selected no execution tier`);
       requireValue(
         signature(base) === signature(variant),
-        `${family.family} ${phase} tier attribution differs: base=${signature(base)} variant=${signature(variant)}`,
+        `${family.family} ${mode}/${lanes}-lane ${phase} tier attribution differs: base=${signature(base)} variant=${signature(variant)}`,
       );
       const baseEnvironments = base.execution.environment_allocations || 0,
         variantEnvironments = variant.execution.environment_allocations || 0;
       requireValue(
         baseEnvironments === variantEnvironments,
-        `${family.family} ${phase} environment allocations differ: base=${baseEnvironments} variant=${variantEnvironments}`,
+        `${family.family} ${mode}/${lanes}-lane ${phase} environment allocations differ: base=${baseEnvironments} variant=${variantEnvironments}`,
       );
     }
   }
@@ -586,7 +665,8 @@ export function render(
     "| --- | --- | --- | --- | ---: | ---: |",
   ];
   const byWorkload: Record<string, TierDelta[]> = {};
-  deltas_.forEach((row) => (byWorkload[row.workload] ||= []).push(row));
+  deltas_.filter((row) => row.mode !== "shared")
+    .forEach((row) => (byWorkload[row.workload] ||= []).push(row));
   for (const family of manifest.implemented_families) {
     for (const phase of ["warmup", "invocation"] as const) {
       const base = byWorkload[family.base].find((row) => row.phase === phase)!,
@@ -594,6 +674,21 @@ export function render(
       rows.push(
         `| \`${family.family}\` | ${phase} | \`${signature(base)}\` | \`${signature(variant)}\` | ${base.execution.environment_allocations || 0} | ${variant.execution.environment_allocations || 0} |`,
       );
+    }
+  }
+  if ((manifest.additional_panels || []).length) {
+    rows.push(
+      "",
+      `${heading}${heading} Additional workload panels`,
+      "",
+      "These repository-owned #460 workloads use the same complete single-context attribution inventory; they are not silently omitted from the family report.",
+      "",
+      "| panel | workload | tiers | checksum |",
+      "| --- | --- | --- | ---: |",
+    );
+    for (const panel of manifest.additional_panels) {
+      const invocation = byWorkload[panel.workload].find((row) => row.phase === "invocation")!;
+      rows.push(`| \`${panel.id}\` | \`${panel.workload}\` | \`${signature(invocation)}\` | ${invocation.checksum} |`);
     }
   }
   rows.push(
@@ -689,7 +784,7 @@ export function render(
     "",
     "Phase rows are deltas from process-global opt-in counters. Single-context rows can legitimately report zero; zero is measured, not a substitute for unavailable telemetry.",
     "",
-    "| family | phase | base contentions | variant contentions | base wait | variant wait | base worker runs | variant worker runs | base worker CPU | variant worker CPU |",
+    "| family | phase | base contentions | variant contentions | base wait | variant wait | base worker runs | variant worker runs | base worker time | variant worker time |",
     "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   );
   const contentions = (row: TierDelta): number =>
@@ -751,6 +846,40 @@ export function render(
       );
     }
   }
+  const sharedByKey: Record<string, TierDelta[]> = {};
+  deltas_.filter((row) => row.mode === "shared")
+    .forEach((row) => (sharedByKey[deltaKey(row.workload, row.mode, row.lanes)] ||= []).push(row));
+  rows.push(
+    "",
+    `${heading}${heading} Shared-realm attribution`,
+    "",
+    "Each row is the invocation delta after the scored shared-mode warmup boundary. Worker work, joins, contention, GC, allocation, CPU, and resident memory are observed in the same fresh profiled process after every spawned worker has joined.",
+    "",
+    "| family | lanes | base tiers | variant tiers | base contentions | variant contentions | base wait | variant wait | base worker runs | variant worker runs | base CPU | variant CPU | base retained RSS | variant retained RSS |",
+    "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const family of manifest.implemented_families) {
+    if (family.shared === false) continue;
+    for (const lanes of manifest.lanes) {
+      const base = sharedByKey[deltaKey(family.base, "shared", lanes)].find((row) => row.phase === "invocation")!,
+        variant = sharedByKey[deltaKey(family.variant, "shared", lanes)].find((row) => row.phase === "invocation")!,
+        baseCpu = base.process.cpu_user_ns + base.process.cpu_system_ns,
+        variantCpu = variant.process.cpu_user_ns + variant.process.cpu_system_ns;
+      rows.push(
+        `| \`${family.family}\` | ${lanes} | \`${signature(base)}\` | \`${signature(variant)}\` | ${contentions(base)} | ${contentions(variant)} | ${waitNs(base)} ns | ${waitNs(variant)} ns | ${base.synchronization.worker_runs || 0} | ${variant.synchronization.worker_runs || 0} | ${baseCpu} ns | ${variantCpu} ns | ${base.process.retained_rss_bytes} bytes | ${variant.process.retained_rss_bytes} bytes |`,
+      );
+    }
+  }
+  for (const panel of manifest.additional_panels || []) {
+    if (!(panel.modes || []).includes("shared")) continue;
+    for (const lanes of manifest.lanes) {
+      const row = sharedByKey[deltaKey(panel.workload, "shared", lanes)].find((entry) => entry.phase === "invocation")!,
+        cpu = row.process.cpu_user_ns + row.process.cpu_system_ns;
+      rows.push(
+        `| \`${panel.id}\` | ${lanes} | \`${signature(row)}\` | n/a | ${contentions(row)} | n/a | ${waitNs(row)} ns | n/a | ${row.synchronization.worker_runs || 0} | n/a | ${cpu} ns | n/a | ${row.process.retained_rss_bytes} bytes | n/a |`,
+      );
+    }
+  }
   if (rawPath) {
     const name = rawPath.split("/").pop();
     rows.push("", `Raw attribution: [\`${name}\`](${name})`);
@@ -766,7 +895,7 @@ export function artifact(
   runner: string,
 ): any {
   return {
-    schema_version: 7,
+    schema_version: 8,
     matrix_id: manifest.matrix_id,
     quick,
     environment: info,
@@ -777,13 +906,15 @@ export function artifact(
 
 function syntheticRows(manifest: any): TierSnapshot[] {
   const rows: TierSnapshot[] = [];
-  for (const [family, role, workload] of workloadEntries(manifest)) {
-    const jobs = jobsFor(family, true),
-      checksum = family.checksums[role].quick[manifest.lanes.indexOf(1)];
+  for (const entry of workloadEntries(manifest)) {
+    const jobs = jobsFor(entry.owner, true),
+      checksum = entryChecksum(entry, manifest, true);
     phases.forEach((phase, index) =>
       rows.push({
         kind: "zig-js-tier-attribution",
-        workload,
+        mode: entry.mode,
+        workload: entry.workload,
+        lanes: entry.lanes,
         jobs,
         phase,
         checksum: phase === "invocation" ? checksum : 0,
@@ -798,7 +929,7 @@ function syntheticRows(manifest: any): TierSnapshot[] {
           deoptimizations: 0,
           runtime_operation_calls: index,
           host_callbacks: 0,
-          wasm_dispatches: family.family.startsWith("wasm_") ? index : 0,
+          wasm_dispatches: entry.owner.family?.startsWith("wasm_") || entry.workload.startsWith("wasm_") ? index : 0,
           environment_allocations: index,
         },
         timing: {
@@ -822,7 +953,10 @@ function syntheticRows(manifest: any): TierSnapshot[] {
         },
         admissions: { program_compiled: index + 1 },
         synchronization: Object.fromEntries(
-          synchronizationMetrics.map((name) => [name, name === "worker_runs" ? index : 0]),
+          synchronizationMetrics.map((name) => [
+            name,
+            name === "worker_runs" && entry.mode === "shared" ? index * entry.lanes : 0,
+          ]),
         ),
         allocation: Object.fromEntries(allocationMetrics.map((name) => {
           if (name === "backing_allocations" || name === "backing_allocation_bytes" ||
@@ -871,7 +1005,9 @@ function expectFailure(action: () => void, pattern: string): void {
 
 export function selfTest(): void {
   const manifest = loadManifest(DEFAULT_MANIFEST),
+    entries = workloadEntries(manifest),
     rows = syntheticRows(manifest);
+  requireValue(entries.length === 170 && rows.length === 510, "V14 attribution coverage drift");
   validate(rows, manifest, true);
   const mismatch = JSON.parse(JSON.stringify(rows));
   mismatch[4].execution.tree_walker_entries = 1;
@@ -942,8 +1078,16 @@ export function selfTest(): void {
   const overflowingGc = JSON.parse(JSON.stringify(rows));
   overflowingGc[0].gc_pauses.minor_overflow = 1;
   expectFailure(() => validate(overflowingGc, manifest, true), "GC pause attribution is incomplete");
+  const sharedIndex = entries.findIndex((entry) => entry.mode === "shared");
+  const missingWorker = JSON.parse(JSON.stringify(rows));
+  missingWorker[sharedIndex * phases.length + 2].synchronization.worker_runs -= 1;
+  expectFailure(() => validate(missingWorker, manifest, true), "worker runs");
+  const wrongLanes = JSON.parse(JSON.stringify(rows));
+  wrongLanes[sharedIndex * phases.length].lanes += 1;
+  expectFailure(() => validate(wrongLanes, manifest, true), "unexpected lanes");
   const wasm = JSON.parse(JSON.stringify(rows));
-  const wasmIndex = workloadEntries(manifest).findIndex(([family]) => family.family.startsWith("wasm_"));
+  const wasmIndex = workloadEntries(manifest).findIndex((entry) =>
+    entry.owner.family?.startsWith("wasm_") || entry.workload.startsWith("wasm_"));
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
