@@ -181,6 +181,15 @@ workloads record exact environment and object lock acquisitions while their
 contention, wait, and worker deltas measure zero; shared-lane attribution is a
 separate result and is not inferred from these runs.
 
+The full-work schema-5 allocation/GC-pause evidence is the
+[`representative-tier-attribution-v11-schema-v5-2026-08-04.md`](.data/representative-tier-attribution-v11-schema-v5-2026-08-04.md)
+report and its
+[`representative-tier-attribution-v11-schema-v5-2026-08-04.json`](.data/representative-tier-attribution-v11-schema-v5-2026-08-04.json)
+raw artifact. Its 108 snapshots name exact implementation revision
+`4ceaa61eb5298ffd9c4824c100ad3b5dc01d7634`, retain 16 allocation fields and
+the raw histories of 1,953 completed collections with zero overflow, and match
+every minor/full sample inventory to the corresponding heap collection counters.
+
 Attribution is deliberately outside the timing rows. Normal contexts retain a
 null telemetry pointer, while the sidecar opts in to atomic counters. A full
 published representative report therefore preserves both its ordinary timing
