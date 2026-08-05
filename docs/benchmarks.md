@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v14.json`. V14 hash-inherits every V13 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, and pending-panel decision while extending opt-in attribution coverage to all owned workloads and supported shared rows. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v15.json`. V15 hash-inherits every V14 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, shared-lane coverage, and pending-panel decision while moving peak/current resident measurements into one Mach accounting domain. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -193,6 +193,16 @@ remain visible per collection segment instead of being normalized away. Only
 a complete 510-snapshot inventory can transition to `complete: true` and
 produce the Markdown report; a killed process can therefore neither publish a
 partial artifact nor force already-validated workloads to run again.
+
+Schema-version-10 sidecars use the V15 contract and retain schema 9's exact
+checkpoint/resume rules. CPU remains cumulative `getrusage` user/system time.
+Peak and current resident bytes now come from `task_vm_info`'s
+`resident_size_peak` and `resident_size` fields in the same kernel snapshot.
+Darwin declares non-CPU `rusage` fields implementation-defined, and a real
+memory-pressure run demonstrated that `ru_maxrss` can be lower than Mach's
+simultaneous current-resident gauge. V15 preserves the valid peak/current
+ordering by measuring both in one documented Mach accounting domain rather
+than dropping the coherence gate.
 
 The full-work schema-2 evidence is the
 [`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)

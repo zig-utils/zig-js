@@ -1,0 +1,107 @@
+{
+  "schema_version": 15,
+  "matrix_id": "zig-js-representative-v15",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 461,
+  "history_policy": "This version hash-inherits every V14 workload, scored mode, jobs, checksum, timing boundary, engine-availability, acceptance, attribution metric, shared-lane coverage, and pending-panel decision. It replaces only the process peak-resident source so peak and retained bytes come from one Mach task_vm_info snapshot; any later workload, boundary, jobs, checksum, metric source, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v14",
+    "path": "docs/.data/representative-benchmark-matrix-v14.json",
+    "sha256": "4af6863399c9f33b59cb88335ead91818ac731e0fec29ceb79ff60a3836c149c",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels"
+    ]
+  },
+  "change": "Replaces implementation-defined getrusage ru_maxrss with task_vm_info resident_size_peak. Peak and retained resident bytes now come from the same kernel call and accounting domain, preserving the valid peak >= current invariant under memory pressure while CPU remains cumulative getrusage user/system time.",
+  "tier_attribution": {
+    "runner_modes": [
+      "attribution",
+      "shared_attribution",
+      "module_attribution"
+    ],
+    "scope": "one fresh zig-js process and context per workload, structural variant, execution mode, and lane count; all attribution remains opt-in and outside scored timing rows",
+    "workload_coverage": "all 18 base/variant families plus every additional panel; families with shared=false retain their exact frozen exclusion",
+    "shared_lanes": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "phases": [
+      "configuration",
+      "warmup",
+      "invocation"
+    ],
+    "warmup": "single and module rows retain their inherited boundary; shared rows retain the scored shared-mode warmup, including real Thread lifecycle warmup and the first cooperative collection/reuse cycle",
+    "invocation": "one inherited full-work call at the frozen jobs and lane input; shared snapshots occur after all lane Threads join, and current/peak resident bytes are sampled together after the workload host checkpoint and before Context destruction",
+    "process_resident_source": "Mach task_vm_info resident_size_peak/resident_size from one snapshot",
+    "metrics": [
+      "tree_walker_entries",
+      "vm_entries",
+      "vm_dispatches",
+      "vm_quick_kernel_hits",
+      "baseline_entries",
+      "optimizer_entries",
+      "optimizer_osr_entries",
+      "deoptimizations",
+      "runtime_operation_calls",
+      "host_callbacks",
+      "wasm_dispatches",
+      "environment_allocations",
+      "bytecode_admissions_by_reason",
+      "baseline_publications",
+      "optimizer_publications",
+      "generated_code_bytes",
+      "native_code_lifetime_by_state",
+      "heap_live_bytes",
+      "heap_collections",
+      "synchronization_by_path",
+      "worker_lifecycle",
+      "context_backing_allocations",
+      "gc_cell_allocations",
+      "gc_pause_samples",
+      "process_cpu_time_by_mode",
+      "peak_rss_bytes",
+      "retained_rss_bytes",
+      "tier_up_attempts_and_time",
+      "deoptimization_time"
+    ],
+    "equivalence": "For warmup and invocation independently at each supported mode/lane count, every base/variant pair must select the same non-empty set of tree-walker, VM, baseline, optimizer, optimizer-OSR, and deoptimization paths and allocate exactly the same number of environments. Every shared invocation must record exactly one worker run per lane. Exact tier, timing, runtime, synchronization, allocation, GC-pause, process CPU, resident-memory, and worker values remain visible rather than normalized away; every Wasm workload must record an invocation-phase Wasm dispatch.",
+    "timing_isolation": "Attribution uses fresh opt-in processes and contexts outside every scored timing row; ordinary contexts retain a null execution-attribution pointer and therefore perform no tier-up, deoptimization, or process-resource clock queries.",
+    "recognizer_audit": {
+      "scope": [
+        "src"
+      ],
+      "prohibited": "Every representative workload identifier is absent from engine source. Identifiers exist only in the owned workload, manifest, and benchmark tooling."
+    }
+  },
+  "pending_metric_panels": [
+    {
+      "metrics": [
+        "cycles",
+        "instructions",
+        "cache_misses",
+        "energy_joules",
+        "thermal_state"
+      ],
+      "issue": 503
+    },
+    {
+      "metrics": [
+        "independent_suite_results",
+        "additional_engine_results"
+      ],
+      "issue": 504
+    }
+  ]
+}

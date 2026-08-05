@@ -25,4 +25,5 @@ rejects("missing module API inventory", value => { value.implemented_families.fi
 rejects("missing shared attribution runner", value => value.tier_attribution.runner_modes.splice(1, 1), "runner-mode inventory drift");
 rejects("shared attribution lanes", value => value.tier_attribution.shared_lanes.pop(), "shared attribution lanes drift");
 rejects("missing attribution coverage", value => { value.tier_attribution.workload_coverage = ""; }, "complete workload coverage");
-console.log("representative matrix structural tests: 17/17 passed");
+rejects("resident source drift", value => { value.tier_attribution.process_resident_source = "mixed APIs"; }, "process resident source drift");
+console.log("representative matrix structural tests: 18/18 passed");

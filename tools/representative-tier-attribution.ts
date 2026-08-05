@@ -841,7 +841,7 @@ export function render(
     "",
     `${heading}${heading} Process CPU and resident memory`,
     "",
-    "CPU values are exact getrusage deltas for the fresh runner process. Peak RSS is the cumulative Darwin ru_maxrss gauge; retained RSS is Mach resident_size sampled at the phase boundary. The invocation retained value is captured after the workload host checkpoint and before Context destruction.",
+    "CPU values are exact getrusage deltas for the fresh runner process. Peak and retained RSS are Mach task_vm_info resident_size_peak/resident_size gauges captured in one phase-boundary snapshot. The invocation values are captured after the workload host checkpoint and before Context destruction.",
     "",
     "| family | phase | base CPU | variant CPU | base peak RSS | variant peak RSS | base retained RSS | variant retained RSS |",
     "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -930,7 +930,7 @@ export function artifact(
   }],
 ): any {
   return {
-    schema_version: 9,
+    schema_version: 10,
     matrix_id: manifest.matrix_id,
     quick,
     complete,
@@ -958,7 +958,7 @@ function validateCheckpoint(
   info: Record<string, string>,
   runner: string,
 ): void {
-  requireValue(raw?.schema_version === 9, "checkpoint schema is not version 9");
+  requireValue(raw?.schema_version === 10, "checkpoint schema is not version 10");
   requireValue(raw.matrix_id === manifest.matrix_id, "checkpoint matrix identity drift");
   requireValue(raw.quick === quick, "checkpoint quick/full mode drift");
   requireValue(typeof raw.complete === "boolean", "checkpoint completion state is missing");
@@ -1111,7 +1111,7 @@ export function selfTest(): void {
   const manifest = loadManifest(DEFAULT_MANIFEST),
     entries = workloadEntries(manifest),
     rows = syntheticRows(manifest);
-  requireValue(entries.length === 170 && rows.length === 510, "V14 attribution coverage drift");
+  requireValue(entries.length === 170 && rows.length === 510, "V15 attribution coverage drift");
   validate(rows, manifest, true);
   const mismatch = JSON.parse(JSON.stringify(rows));
   mismatch[4].execution.tree_walker_entries = 1;

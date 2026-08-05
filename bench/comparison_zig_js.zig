@@ -106,21 +106,23 @@ fn processResourceSnapshot() !ProcessResourceSnapshot {
         @as(std.c.task_info_t, @ptrCast(&vm_info)),
         &info_count,
     );
-    const resident_info_count = std.math.divCeil(
+    const resident_peak_info_count = std.math.divCeil(
         usize,
-        @offsetOf(std.c.task_vm_info_data_t, "resident_size") + @sizeOf(std.c.mach_vm_size_t),
+        @offsetOf(std.c.task_vm_info_data_t, "resident_size_peak") + @sizeOf(std.c.mach_vm_size_t),
         @sizeOf(std.c.natural_t),
     ) catch unreachable;
     // Older Darwin kernels may return fewer trailing task_vm_info fields than
-    // the build SDK declares. resident_size is an early, stable field; require
-    // that exact prefix instead of fields this measurement never reads.
-    if (task_result != 0 or info_count < resident_info_count) return error.ProcessResourceUnavailable;
+    // the build SDK declares. Both resident fields are in the original prefix;
+    // require exactly through resident_size_peak instead of fields this
+    // measurement never reads.
+    if (task_result != 0 or info_count < resident_peak_info_count) return error.ProcessResourceUnavailable;
     return .{
         .cpu_user_ns = timevalNs(usage.utime),
         .cpu_system_ns = timevalNs(usage.stime),
-        // Darwin reports ru_maxrss in bytes. Keep the same kernel field used by
-        // /usr/bin/time -l, while retained RSS is the live Mach task gauge.
-        .peak_rss_bytes = @intCast(usage.maxrss),
+        // Keep peak and current resident size in one Mach accounting domain.
+        // Darwin documents all non-CPU rusage fields as implementation-defined;
+        // ru_maxrss can diverge from task_vm_info.resident_size under pressure.
+        .peak_rss_bytes = @intCast(vm_info.resident_size_peak),
         .retained_rss_bytes = @intCast(vm_info.resident_size),
     };
 }
