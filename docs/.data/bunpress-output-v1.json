@@ -10,13 +10,13 @@
     },
     {
       "path": "abi/README/index.html",
-      "bytes": 259178,
-      "sha256": "1d9e56389746cfa9a91296f718e715a3c1b29fa835f9834fa5cb6cafad203c2c"
+      "bytes": 262786,
+      "sha256": "7cf144258a7d7f02e246011f0af7f480b51f5cf47f8c172e39288d4c0dd138da"
     },
     {
       "path": "advanced/debugging/index.html",
-      "bytes": 172246,
-      "sha256": "9fee9a11a60a7a198073e0535576dd9b046e35aad26b38c398436e7bc3d63a56"
+      "bytes": 176040,
+      "sha256": "558e19308bd797484d828a8418de2280620337ba9ef14c7e8daa5daaaf38b00f"
     },
     {
       "path": "advanced/embedding/index.html",
@@ -25,8 +25,8 @@
     },
     {
       "path": "advanced/execution-tiers/index.html",
-      "bytes": 164869,
-      "sha256": "96fe4478b342615d92a50b8ef929c1179c290611569988fcb97f2d341b8de326"
+      "bytes": 165589,
+      "sha256": "5a7306018c818c8a3e635cde80bdd2584092e1bf9ee892b8600f9c5c3eff1a5d"
     },
     {
       "path": "advanced/index.html",
@@ -35,18 +35,18 @@
     },
     {
       "path": "advanced/memory-and-gc/index.html",
-      "bytes": 167591,
-      "sha256": "28a46a19ba5a27459a06d2f125a48c7d8ae3b4ef68d6dca05692d7916b1f00a1"
+      "bytes": 168551,
+      "sha256": "270b831efa0b5e6cb14feefe1dc4c9b397404a8b71abf6cf468f17ceaf7e4c65"
     },
     {
       "path": "advanced/verification/index.html",
-      "bytes": 162229,
-      "sha256": "fda9f11d0d6280882f51ba1da3119df870705336ddef8918453b8ab0ee3eb9a9"
+      "bytes": 162709,
+      "sha256": "2c71ab0406861f329845dac21e9638a8c87f24c8b758bd94e9a1ae9b5957210b"
     },
     {
       "path": "api/index.html",
-      "bytes": 229409,
-      "sha256": "56c47a51c9edbd8a64680b834d415be9327b7a2a55208cbb46e19f56e33bd1a5"
+      "bytes": 229651,
+      "sha256": "5b4da807f61b8a8bfc7e3f49794c58ca092941dacd5bb2afe018bfab165d7309"
     },
     {
       "path": "architecture/index.html",
@@ -60,8 +60,8 @@
     },
     {
       "path": "benchmarks/index.html",
-      "bytes": 265495,
-      "sha256": "db27dc539f72be746d8b76cabeec80d63c193b340d051a0e702f9bf095fc942b"
+      "bytes": 274461,
+      "sha256": "e8b58ce5d9fe2f455314e63db28e598317ddee210b07a5a5e3a9b172c6fd86f8"
     },
     {
       "path": "c-api/README/index.html",
@@ -75,13 +75,13 @@
     },
     {
       "path": "dependencies/index.html",
-      "bytes": 159486,
-      "sha256": "a11b1aeb326d69e88ed2214777399d2ddb9bc3e5d6a255e2320015676a564956"
+      "bytes": 159582,
+      "sha256": "c407ed0a94eb40197b435c353930fbbc87a9b8cb6bb7d8b4cdaa9048e5422183"
     },
     {
       "path": "dev-cache/index.html",
-      "bytes": 162694,
-      "sha256": "aff04e74ec8e9a9580484a2c41c883ae3158a72d598161d9df5f44c52718c1f2"
+      "bytes": 164028,
+      "sha256": "4633aa2233e01ac5aa18456aa42dfb0ea4e00a9dacdf8acb1b68fb865befc571"
     },
     {
       "path": "DOCS_ACCURACY_PLAN/index.html",
@@ -125,13 +125,13 @@
     },
     {
       "path": "guide/building/index.html",
-      "bytes": 166689,
-      "sha256": "71e5c647dcc6bc580fd59eff99097a5f4c1b686a2715c70f5c3c1a0114b868e4"
+      "bytes": 169137,
+      "sha256": "b83fd54475b7745abfaa14beb6e6b301d9200371d32e69e10de8c894fdbebf03"
     },
     {
       "path": "guide/contributing/index.html",
-      "bytes": 160422,
-      "sha256": "d032b8e4e757b9b18f0e4d6238dca2cf2d91b28ca62b347844ff6cbfdea00498"
+      "bytes": 161430,
+      "sha256": "5d803d359c8e9aa3787572e61589568c2306e81203f271b839332ae07e897ed0"
     },
     {
       "path": "guide/index.html",
@@ -140,8 +140,8 @@
     },
     {
       "path": "HOME_INTEGRATION/index.html",
-      "bytes": 185327,
-      "sha256": "a05b5bab0dd16902a2c37795acc8d81ba22e09b6473462fac260ffd464ad339c"
+      "bytes": 185619,
+      "sha256": "30c584d8f93d89bf9284f18dcfc1ef7569cd025ab726f974fc0df6b0f0a5b44c"
     },
     {
       "path": "index.html",
@@ -155,13 +155,13 @@
     },
     {
       "path": "objc-api/README/index.html",
-      "bytes": 158446,
-      "sha256": "a9a1d147fb466bb5c95bb3962e896a47823e2b1af9fc593588caa02f14d67463"
+      "bytes": 160660,
+      "sha256": "25dbd31413aa02edc29776ea2fff736fe4d200652e343a3979ec3bfa264e9835"
     },
     {
       "path": "optimizing-jit/index.html",
-      "bytes": 207520,
-      "sha256": "adc74366a7eee99a1367c09e1e8f3970a9dde5a29c2da9e0d44c14c94829300d"
+      "bytes": 214672,
+      "sha256": "254c69ffc014fa0823d32a138dbf041814de08d576451031e390b59a1b27aaea"
     },
     {
       "path": "platforms/index.html",
@@ -180,8 +180,8 @@
     },
     {
       "path": "threads/api/index.html",
-      "bytes": 182758,
-      "sha256": "cb7eaf690d071ffe33709c83836f6fb1aad3698bffd6f88b518c492e9727104f"
+      "bytes": 189722,
+      "sha256": "06c6fe451688bf228303914b1f2fdc3569b1103a466eec02a5ce9aadc97994b2"
     },
     {
       "path": "threads/bindings/index.html",
@@ -190,8 +190,8 @@
     },
     {
       "path": "threads/gc-relocation/index.html",
-      "bytes": 178486,
-      "sha256": "1a1d35981358e8638f9e6daf6e27cc0fdcd184d415631a3a08cf84871a6cbe5d"
+      "bytes": 179398,
+      "sha256": "e8c73837aca7126fb34b1aafe7f8a45a4f569237bfabe9104cd9aa040b60eb8b"
     },
     {
       "path": "threads/index.html",
@@ -245,8 +245,8 @@
     },
     {
       "path": "threads/testing/index.html",
-      "bytes": 290004,
-      "sha256": "76d2c299288959eb8facb0cfcb537a042baed21d962d9b1f28bcadd7a39c45e0"
+      "bytes": 302100,
+      "sha256": "b1c3594c12bba7b709f38b84df5cf8384a3f0c5909866c8e6a8b328ea02241b1"
     },
     {
       "path": "timers/index.html",
@@ -255,14 +255,14 @@
     },
     {
       "path": "wasm-spec/index.html",
-      "bytes": 165989,
-      "sha256": "500aa3a6be13fc4273d0b8c15b718138da22e9a17a6596d0fa6183d6bc456f1e"
+      "bytes": 167095,
+      "sha256": "43d4139d22ec20892dad140a3f274c9c08d14ddca786e26c705987082a8b275e"
     },
     {
       "path": "wasm/index.html",
-      "bytes": 281352,
-      "sha256": "e3586ceb7b9b7781a3481d3871b760889b4d276be923d6b2c8776f74db9ebcb3"
+      "bytes": 293036,
+      "sha256": "796181527b872553988eb930dd4a79104fbc1c5edc916b370e71d552106bb2a1"
     }
   ],
-  "tree_sha256": "200e11a42ca210bf19085d9dd87fb93605721df4bd7d3890b44269e25b81fc5c"
+  "tree_sha256": "17ad43b2d539240b48797c46f371a81e92921c4280ad97f48a3a881beb25dc6c"
 }
