@@ -160,7 +160,7 @@ fn printTierAttributionRow(
         if (index != 0) try writer.writeByte(',');
         try writer.print("\"{s}\":{d}", .{ name, @field(synchronization, name) });
     }
-    try writer.print("}},\"baseline_publications\":{d},\"optimizer_publications\":{d},\"generated_code_bytes\":{d},\"native_code\":{{\"live_artifacts\":{d},\"live_bytes\":{d},\"retired_artifacts\":{d},\"retired_bytes_current\":{d},\"reclaimed_artifacts\":{d},\"reclaimed_bytes_total\":{d},\"shape_invalidation_events\":{d},\"shape_retired_artifacts\":{d},\"shape_survivor_artifacts\":{d},\"shape_retired_bytes\":{d},\"full_invalidation_events\":{d},\"unknown_shape_invalidation_events\":{d},\"shape_fallback_events\":{d}}},\"heap\":{{\"live_bytes\":{d},\"last_full_collection_bytes\":{d},\"collections\":{d},\"full_collections\":{d}}}}}\n", .{
+    try writer.print("}},\"baseline_publications\":{d},\"optimizer_publications\":{d},\"generated_code_bytes\":{d},\"native_code\":{{\"live_artifacts\":{d},\"live_bytes\":{d},\"retired_artifacts\":{d},\"retired_bytes_current\":{d},\"reclaimed_artifacts\":{d},\"reclaimed_bytes_total\":{d},\"shape_invalidation_events\":{d},\"shape_retired_artifacts\":{d},\"shape_survivor_artifacts\":{d},\"shape_retired_bytes\":{d},\"full_invalidation_events\":{d},\"unknown_shape_invalidation_events\":{d},\"shape_fallback_events\":{d}}},\"heap\":{{\"live_bytes\":{d},\"last_full_collection_bytes\":{d},\"collections\":{d},\"full_collections\":{d}}}", .{
         snapshot.baseline_publications,
         snapshot.optimizer_publications,
         snapshot.generated_code_bytes,
@@ -182,6 +182,22 @@ fn printTierAttributionRow(
         snapshot.heap.collections,
         snapshot.heap.full_collections,
     });
+    try writer.writeAll(",\"allocation\":{");
+    inline for (comptime std.meta.fieldNames(@TypeOf(snapshot.runtime.allocation)), 0..) |name, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\":{d}", .{ name, @field(snapshot.runtime.allocation, name) });
+    }
+    try writer.writeAll("},\"gc_pauses\":{\"minor_ns\":[");
+    for (snapshot.runtime.minor_pauses.values[0..snapshot.runtime.minor_pauses.len], 0..) |pause_ns, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("{d}", .{pause_ns});
+    }
+    try writer.print("],\"minor_overflow\":{d},\"full_ns\":[", .{snapshot.runtime.minor_pauses.overflow});
+    for (snapshot.runtime.full_pauses.values[0..snapshot.runtime.full_pauses.len], 0..) |pause_ns, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("{d}", .{pause_ns});
+    }
+    try writer.print("],\"full_overflow\":{d}}}}}\n", .{snapshot.runtime.full_pauses.overflow});
 }
 
 const gc_telemetry_header = "zig-js-gc\tworkload\tlanes\tjobs\tsample\telapsed_ns\tchecksum\tattempts\tcollections\ttimeouts\tpeer_parks\texit_cleanups\tpause_ns_total\tpause_ns_max\trendezvous_ns_total\trendezvous_ns_max\ttranche_bytes\tbytes_issued\tbytes_reset\tbytes_current\tminor_cycles\tminor_prepare_ns\tminor_trace_ns\tminor_sweep_ns\tminor_post_sweep_ns\tfull_cycles\tfull_prepare_ns\tfull_trace_ns\tfull_sweep_ns\tfull_post_sweep_ns\tobject_batch_calls\tobject_batch_cells\tobject_batch_ns_total\tobject_batch_ns_max\tworker_runs\tworker_run_ns\tworker_run_ns_max\tjoin_wait_ns\tjoin_parks\theap_collections\theap_minor_collections\theap_live_cells\theap_young_cells\theap_young_bytes\tlast_minor_young_bytes\tlast_minor_reclaimed_bytes\tlast_minor_survived_cells\tlast_minor_survived_bytes\tbacking_chunks\tbacking_capacity_slots\tbacking_live_slots\tbacking_free_slots\n";

@@ -1,4 +1,4 @@
-/** Measure the runtime cost of opt-in execution attribution against its disabled path. */
+/** Measure the runtime cost of the complete opt-in attribution sink against its disabled path. */
 import { ensurePublishable, metadata } from "./benchmark-comparison";
 import { DEFAULT_MANIFEST, loadManifest, validate as validateManifest } from "./representative-matrix";
 import { run, sha256File, writeText } from "./lib/home";

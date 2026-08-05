@@ -453,6 +453,270 @@ pub const BudgetAllocator = struct {
     }
 };
 
+/// Opt-in allocator and collection telemetry for causal attribution runs. The
+/// wrapper is installed only when `profile_execution_tiers` is requested, so
+/// ordinary contexts retain their existing allocator chain and allocate no
+/// profiling storage. Their cell and collection boundaries perform only the
+/// nullable-sink check measured by the instrumentation-overhead fixture.
+/// Backing operations describe calls at the Context allocator boundary;
+/// GC-cell operations separately describe logical cell storage issued by the
+/// reusable slab allocator, avoiding any false claim that slab growth and cell
+/// issuance are the same allocation site.
+pub const RuntimeAttributionProfiler = struct {
+    pub const max_gc_pause_samples = 4096;
+
+    pub const CellAllocationKind = enum {
+        fresh,
+        reused,
+        relocation,
+        delegated,
+    };
+
+    pub const AllocationSnapshot = struct {
+        backing_allocations: u64 = 0,
+        backing_allocation_bytes: u64 = 0,
+        backing_growths: u64 = 0,
+        backing_growth_bytes: u64 = 0,
+        backing_releases: u64 = 0,
+        backing_released_bytes: u64 = 0,
+        backing_current_bytes: u64 = 0,
+        backing_peak_bytes: u64 = 0,
+        gc_cell_allocations: u64 = 0,
+        gc_cell_bytes: u64 = 0,
+        gc_cell_fresh_allocations: u64 = 0,
+        gc_cell_reused_allocations: u64 = 0,
+        gc_cell_relocation_allocations: u64 = 0,
+        gc_cell_delegated_allocations: u64 = 0,
+        gc_cell_frees: u64 = 0,
+        gc_cell_freed_bytes: u64 = 0,
+    };
+
+    pub const PauseSamples = struct {
+        len: usize = 0,
+        overflow: u64 = 0,
+        values: [max_gc_pause_samples]u64 = @splat(0),
+    };
+
+    pub const Snapshot = struct {
+        allocation: AllocationSnapshot = .{},
+        minor_pauses: PauseSamples = .{},
+        full_pauses: PauseSamples = .{},
+    };
+
+    inner: std.mem.Allocator,
+    backing_allocations: std.atomic.Value(u64) = .init(0),
+    backing_allocation_bytes: std.atomic.Value(u64) = .init(0),
+    backing_growths: std.atomic.Value(u64) = .init(0),
+    backing_growth_bytes: std.atomic.Value(u64) = .init(0),
+    backing_releases: std.atomic.Value(u64) = .init(0),
+    backing_released_bytes: std.atomic.Value(u64) = .init(0),
+    backing_current_bytes: std.atomic.Value(u64) = .init(0),
+    backing_peak_bytes: std.atomic.Value(u64) = .init(0),
+    gc_cell_allocations: std.atomic.Value(u64) = .init(0),
+    gc_cell_bytes: std.atomic.Value(u64) = .init(0),
+    gc_cell_fresh_allocations: std.atomic.Value(u64) = .init(0),
+    gc_cell_reused_allocations: std.atomic.Value(u64) = .init(0),
+    gc_cell_relocation_allocations: std.atomic.Value(u64) = .init(0),
+    gc_cell_delegated_allocations: std.atomic.Value(u64) = .init(0),
+    gc_cell_frees: std.atomic.Value(u64) = .init(0),
+    gc_cell_freed_bytes: std.atomic.Value(u64) = .init(0),
+    gc_cycle_started_ns: std.atomic.Value(u64) = .init(0),
+    pause_lock: std.atomic.Mutex = .unlocked,
+    minor_pause_len: usize = 0,
+    minor_pause_overflow: u64 = 0,
+    minor_pause_ns: [max_gc_pause_samples]u64 = @splat(0),
+    full_pause_len: usize = 0,
+    full_pause_overflow: u64 = 0,
+    full_pause_ns: [max_gc_pause_samples]u64 = @splat(0),
+
+    fn recordPeak(self: *RuntimeAttributionProfiler, current: u64) void {
+        var peak = self.backing_peak_bytes.load(.monotonic);
+        while (current > peak) {
+            if (self.backing_peak_bytes.cmpxchgWeak(peak, current, .monotonic, .monotonic)) |observed| {
+                peak = observed;
+                continue;
+            }
+            return;
+        }
+    }
+
+    fn recordBackingAllocation(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        _ = self.backing_allocations.fetchAdd(1, .monotonic);
+        _ = self.backing_allocation_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        const previous = self.backing_current_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        self.recordPeak(previous +| @as(u64, @intCast(bytes)));
+    }
+
+    fn recordBackingGrowth(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        _ = self.backing_growths.fetchAdd(1, .monotonic);
+        _ = self.backing_growth_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        const previous = self.backing_current_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        self.recordPeak(previous +| @as(u64, @intCast(bytes)));
+    }
+
+    fn recordBackingRelease(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        _ = self.backing_releases.fetchAdd(1, .monotonic);
+        _ = self.backing_released_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        _ = self.backing_current_bytes.fetchSub(@intCast(bytes), .monotonic);
+    }
+
+    pub fn recordCellAllocation(self: *RuntimeAttributionProfiler, bytes: usize, kind: CellAllocationKind) void {
+        _ = self.gc_cell_allocations.fetchAdd(1, .monotonic);
+        _ = self.gc_cell_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        switch (kind) {
+            .fresh => _ = self.gc_cell_fresh_allocations.fetchAdd(1, .monotonic),
+            .reused => _ = self.gc_cell_reused_allocations.fetchAdd(1, .monotonic),
+            .relocation => _ = self.gc_cell_relocation_allocations.fetchAdd(1, .monotonic),
+            .delegated => _ = self.gc_cell_delegated_allocations.fetchAdd(1, .monotonic),
+        }
+    }
+
+    pub fn recordCellFree(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        _ = self.gc_cell_frees.fetchAdd(1, .monotonic);
+        _ = self.gc_cell_freed_bytes.fetchAdd(@intCast(bytes), .monotonic);
+    }
+
+    fn lockPauses(self: *RuntimeAttributionProfiler) void {
+        var spins: usize = 0;
+        while (!self.pause_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn beginGcCycle(self: *RuntimeAttributionProfiler, started_ns: u64) void {
+        self.gc_cycle_started_ns.store(started_ns, .release);
+    }
+
+    pub fn finishGcCycle(self: *RuntimeAttributionProfiler, full: bool, finished_ns: u64) void {
+        const started_ns = self.gc_cycle_started_ns.swap(0, .acq_rel);
+        if (started_ns == 0) return;
+        const elapsed = finished_ns -| started_ns;
+        self.lockPauses();
+        defer self.pause_lock.unlock();
+        if (full) {
+            if (self.full_pause_len == self.full_pause_ns.len) {
+                self.full_pause_overflow += 1;
+                return;
+            }
+            self.full_pause_ns[self.full_pause_len] = elapsed;
+            self.full_pause_len += 1;
+        } else {
+            if (self.minor_pause_len == self.minor_pause_ns.len) {
+                self.minor_pause_overflow += 1;
+                return;
+            }
+            self.minor_pause_ns[self.minor_pause_len] = elapsed;
+            self.minor_pause_len += 1;
+        }
+    }
+
+    pub fn snapshot(self: *RuntimeAttributionProfiler) Snapshot {
+        var out = Snapshot{ .allocation = .{
+            .backing_allocations = self.backing_allocations.load(.acquire),
+            .backing_allocation_bytes = self.backing_allocation_bytes.load(.acquire),
+            .backing_growths = self.backing_growths.load(.acquire),
+            .backing_growth_bytes = self.backing_growth_bytes.load(.acquire),
+            .backing_releases = self.backing_releases.load(.acquire),
+            .backing_released_bytes = self.backing_released_bytes.load(.acquire),
+            .backing_current_bytes = self.backing_current_bytes.load(.acquire),
+            .backing_peak_bytes = self.backing_peak_bytes.load(.acquire),
+            .gc_cell_allocations = self.gc_cell_allocations.load(.acquire),
+            .gc_cell_bytes = self.gc_cell_bytes.load(.acquire),
+            .gc_cell_fresh_allocations = self.gc_cell_fresh_allocations.load(.acquire),
+            .gc_cell_reused_allocations = self.gc_cell_reused_allocations.load(.acquire),
+            .gc_cell_relocation_allocations = self.gc_cell_relocation_allocations.load(.acquire),
+            .gc_cell_delegated_allocations = self.gc_cell_delegated_allocations.load(.acquire),
+            .gc_cell_frees = self.gc_cell_frees.load(.acquire),
+            .gc_cell_freed_bytes = self.gc_cell_freed_bytes.load(.acquire),
+        } };
+        self.lockPauses();
+        defer self.pause_lock.unlock();
+        out.minor_pauses.len = self.minor_pause_len;
+        out.minor_pauses.overflow = self.minor_pause_overflow;
+        @memcpy(out.minor_pauses.values[0..self.minor_pause_len], self.minor_pause_ns[0..self.minor_pause_len]);
+        out.full_pauses.len = self.full_pause_len;
+        out.full_pauses.overflow = self.full_pause_overflow;
+        @memcpy(out.full_pauses.values[0..self.full_pause_len], self.full_pause_ns[0..self.full_pause_len]);
+        return out;
+    }
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *RuntimeAttributionProfiler = @ptrCast(@alignCast(ctx));
+        const ptr = self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr) orelse return null;
+        self.recordBackingAllocation(len);
+        return ptr;
+    }
+
+    fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *RuntimeAttributionProfiler = @ptrCast(@alignCast(ctx));
+        if (!self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr)) return false;
+        if (new_len > mem.len)
+            self.recordBackingGrowth(new_len - mem.len)
+        else if (new_len < mem.len)
+            self.recordBackingRelease(mem.len - new_len);
+        return true;
+    }
+
+    fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *RuntimeAttributionProfiler = @ptrCast(@alignCast(ctx));
+        const ptr = self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr) orelse return null;
+        if (new_len > mem.len)
+            self.recordBackingGrowth(new_len - mem.len)
+        else if (new_len < mem.len)
+            self.recordBackingRelease(mem.len - new_len);
+        return ptr;
+    }
+
+    fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *RuntimeAttributionProfiler = @ptrCast(@alignCast(ctx));
+        self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
+        self.recordBackingRelease(mem.len);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+
+    pub fn allocator(self: *RuntimeAttributionProfiler) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+};
+
+test "RuntimeAttributionProfiler records exact backing, cell, and pause samples" {
+    var profile = RuntimeAttributionProfiler{ .inner = std.testing.allocator };
+    const allocator = profile.allocator();
+    const memory = try allocator.alloc(u8, 48);
+    profile.recordCellAllocation(96, .fresh);
+    profile.recordCellAllocation(112, .reused);
+    profile.recordCellAllocation(128, .relocation);
+    profile.recordCellAllocation(144, .delegated);
+    profile.recordCellFree(96);
+    profile.beginGcCycle(100);
+    profile.finishGcCycle(false, 175);
+    profile.beginGcCycle(200);
+    profile.finishGcCycle(true, 325);
+
+    const before_free = profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), before_free.allocation.backing_allocations);
+    try std.testing.expectEqual(@as(u64, 48), before_free.allocation.backing_allocation_bytes);
+    try std.testing.expectEqual(@as(u64, 48), before_free.allocation.backing_current_bytes);
+    try std.testing.expectEqual(@as(u64, 4), before_free.allocation.gc_cell_allocations);
+    try std.testing.expectEqual(@as(u64, 480), before_free.allocation.gc_cell_bytes);
+    try std.testing.expectEqual(@as(usize, 1), before_free.minor_pauses.len);
+    try std.testing.expectEqual(@as(u64, 75), before_free.minor_pauses.values[0]);
+    try std.testing.expectEqual(@as(usize, 1), before_free.full_pauses.len);
+    try std.testing.expectEqual(@as(u64, 125), before_free.full_pauses.values[0]);
+
+    allocator.free(memory);
+    const after_free = profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), after_free.allocation.backing_releases);
+    try std.testing.expectEqual(@as(u64, 48), after_free.allocation.backing_released_bytes);
+    try std.testing.expectEqual(@as(u64, 0), after_free.allocation.backing_current_bytes);
+}
+
 test "BudgetAllocator enforces outstanding byte limit" {
     var budget = BudgetAllocator{ .inner = std.testing.allocator, .limit = 64 };
     const a = budget.allocator();
@@ -723,6 +987,7 @@ pub const GcCellBacking = struct {
     };
 
     inner: std.mem.Allocator,
+    runtime_attribution_profiler: ?*RuntimeAttributionProfiler = null,
     parallel: bool = false,
     /// Allocation geometry is selected before private realm bootstrap, while
     /// `parallel` remains false so that bootstrap does not pay lock overhead.
@@ -1365,12 +1630,22 @@ pub const GcCellBacking = struct {
         if (self.relocation_planning) {
             const target = self.relocation_target_chunks[idx] orelse return null;
             for (0..target) |chunk_idx|
-                if (self.takeFreedSlotFromChunkLocked(idx, chunk_idx)) |ptr| return @ptrCast(ptr);
+                if (self.takeFreedSlotFromChunkLocked(idx, chunk_idx)) |ptr| {
+                    if (self.runtime_attribution_profiler) |profile|
+                        profile.recordCellAllocation(len, .relocation);
+                    return @ptrCast(ptr);
+                };
             for (0..target) |chunk_idx|
-                if (self.bumpFreshSlotInChunkLocked(idx, chunk_idx)) |ptr| return @ptrCast(ptr);
+                if (self.bumpFreshSlotInChunkLocked(idx, chunk_idx)) |ptr| {
+                    if (self.runtime_attribution_profiler) |profile|
+                        profile.recordCellAllocation(len, .relocation);
+                    return @ptrCast(ptr);
+                };
             return null;
         }
         const ptr = self.takeFreedSlotLocked(idx) orelse self.bumpFreshSlotLocked(idx) orelse return null;
+        if (self.runtime_attribution_profiler) |profile|
+            profile.recordCellAllocation(len, .relocation);
         return @ptrCast(ptr);
     }
 
@@ -1413,14 +1688,23 @@ pub const GcCellBacking = struct {
             self.acquireBucket(idx);
             defer self.unlockBucket(idx);
             if (self.bulk_teardown) return null;
-            const ptr = self.takeFreedSlotLocked(idx) orelse self.bumpFreshSlotLocked(idx);
+            var kind: RuntimeAttributionProfiler.CellAllocationKind = .reused;
+            const ptr = self.takeFreedSlotLocked(idx) orelse blk: {
+                kind = .fresh;
+                break :blk self.bumpFreshSlotLocked(idx);
+            };
             if (self.parallel and ptr != null and self.parallel_cell_tracking_enabled.load(.monotonic))
                 self.recordParallelCellAllocation(len);
+            if (ptr != null) if (self.runtime_attribution_profiler) |profile|
+                profile.recordCellAllocation(len, kind);
             return ptr;
         }
         self.acquireInner();
         defer self.unlockInner();
-        return self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
+        const ptr = self.inner.vtable.alloc(self.inner.ptr, len, alignment, ret_addr);
+        if (ptr != null) if (self.runtime_attribution_profiler) |profile|
+            profile.recordCellAllocation(len, .delegated);
+        return ptr;
     }
 
     fn parallelCellBytesSinceCollection(self: *GcCellBacking) usize {
@@ -1461,6 +1745,8 @@ pub const GcCellBacking = struct {
         std.debug.assert(inserted);
         self.bucket_free_counts[idx] += 1;
         self.bucket_free_hint[idx] = chunk_idx;
+        if (self.runtime_attribution_profiler) |profile|
+            profile.recordCellFree(bucket_sizes[idx]);
         return true;
     }
 
@@ -1520,6 +1806,8 @@ pub const GcCellBacking = struct {
         self.acquireInner();
         defer self.unlockInner();
         self.inner.vtable.free(self.inner.ptr, mem, alignment, ret_addr);
+        if (self.runtime_attribution_profiler) |profile|
+            profile.recordCellFree(mem.len);
     }
 
     const vtable: std.mem.Allocator.VTable = .{
@@ -2736,6 +3024,9 @@ pub const Context = struct {
     /// outlive the arena, GC backing, budget wrapper, JIT owner, and Context.
     host_allocator_lock: ?*SerializedAllocator = null,
     budget_allocator: ?*BudgetAllocator = null,
+    /// Owns the opt-in allocator counters and exact per-cycle GC pause samples.
+    /// Null preserves the production allocator chain and short-circuits sinks.
+    runtime_attribution_profiler: ?*RuntimeAttributionProfiler = null,
     /// Runaway-step ceiling handed to every interpreter this realm creates.
     /// See `TestingOptions.step_budget`.
     step_budget: u64 = interp.max_steps,
@@ -3307,9 +3598,10 @@ pub const Context = struct {
         /// Explicit post-MVP WebAssembly gates. All are disabled by default;
         /// enabling an unfinished feature produces an implementation diagnostic.
         wasm_features: wasm_types.Features = .{},
-        /// Collect exact tree-walker, VM, native-tier, deoptimization, and
-        /// environment-allocation counts. Use a separate attribution run rather
-        /// than enabling this on a performance-timing context.
+        /// Collect exact execution, Context-backing/GC-cell allocation, and
+        /// per-cycle GC-pause attribution. Use a separate attribution run rather
+        /// than enabling this on a performance-timing context; the disabled path
+        /// retains neither the allocator wrapper nor pause-sample storage.
         profile_execution_tiers: bool = false,
     };
 
@@ -3318,6 +3610,8 @@ pub const Context = struct {
     /// of the stable embedder options surface.
     pub const TestingOptions = struct {
         enable_jit: bool = true,
+        /// Same opt-in causal-attribution boundary as `Options`; tests use it to
+        /// exercise forced execution modes without changing production defaults.
         profile_execution_tiers: bool = false,
         /// Force plain synchronous execution through one tier for exact
         /// differentials. `required` throws instead of silently accepting a
@@ -4021,12 +4315,20 @@ pub const Context = struct {
 
         var budget_allocator: ?*BudgetAllocator = null;
         errdefer if (budget_allocator) |ba| gpa.destroy(ba);
-        const context_gpa = if (options.heap_limit_bytes) |limit| blk: {
+        const limited_gpa = if (options.heap_limit_bytes) |limit| blk: {
             const ba = try gpa.create(BudgetAllocator);
             ba.* = .{ .inner = serialized_gpa, .limit = limit };
             budget_allocator = ba;
             break :blk ba.allocator();
         } else serialized_gpa;
+        var runtime_attribution_profiler: ?*RuntimeAttributionProfiler = null;
+        errdefer if (runtime_attribution_profiler) |profile| gpa.destroy(profile);
+        const context_gpa = if (options.profile_execution_tiers) blk: {
+            const profile = try gpa.create(RuntimeAttributionProfiler);
+            profile.* = .{ .inner = limited_gpa };
+            runtime_attribution_profiler = profile;
+            break :blk profile.allocator();
+        } else limited_gpa;
         const arena_state = try context_gpa.create(std.heap.ArenaAllocator);
         arena_state.* = std.heap.ArenaAllocator.init(context_gpa);
         errdefer {
@@ -4061,6 +4363,7 @@ pub const Context = struct {
             .gpa = context_gpa,
             .host_allocator_lock = host_allocator_lock,
             .budget_allocator = budget_allocator,
+            .runtime_attribution_profiler = runtime_attribution_profiler,
             .step_budget = options.step_budget orelse interp.max_steps,
             .arena_state = arena_state,
             .locked_arena = locked_arena,
@@ -4126,6 +4429,7 @@ pub const Context = struct {
             // returning below.
             gc_state.backing = .{
                 .inner = context_gpa,
+                .runtime_attribution_profiler = runtime_attribution_profiler,
                 .parallel = false,
                 .expanded_chunks = true,
                 .moving_checkpoint_request = if (options.enable_jit and jit.supported)
@@ -4425,6 +4729,7 @@ pub const Context = struct {
         generated_code_bytes: usize,
         native_code: NativeCodeAttributionSnapshot,
         heap: RuntimeHeapAccounting,
+        runtime: RuntimeAttributionProfiler.Snapshot,
     };
 
     pub const NativeCodeAttributionSnapshot = struct {
@@ -4471,6 +4776,10 @@ pub const Context = struct {
                 .shape_fallback_events = code.shape_fallback_events,
             },
             .heap = self.runtimeHeapAccounting(),
+            .runtime = if (self.runtime_attribution_profiler) |profile|
+                profile.snapshot()
+            else
+                .{},
         };
     }
 
@@ -4634,6 +4943,7 @@ pub const Context = struct {
         const host_gpa = self.host_gpa;
         const context_gpa = self.gpa;
         const budget_allocator = self.budget_allocator;
+        const runtime_attribution_profiler = self.runtime_attribution_profiler;
         const host_allocator_lock = self.host_allocator_lock;
         if (self.gil) |g| {
             self.teardown_stop.store(true, .release);
@@ -4753,6 +5063,7 @@ pub const Context = struct {
         self.arena_state.deinit();
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
+        if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
         if (budget_allocator) |ba| host_gpa.destroy(ba);
         if (host_allocator_lock) |lock| host_gpa.destroy(lock);
     }
@@ -4869,6 +5180,7 @@ pub const Context = struct {
         const host_gpa = self.host_gpa;
         const context_gpa = self.gpa;
         const budget_allocator = self.budget_allocator;
+        const runtime_attribution_profiler = self.runtime_attribution_profiler;
         const host_allocator_lock = self.host_allocator_lock;
         self.deinitSharedRealmState();
         if (self.locked_arena) |la| {
@@ -4879,6 +5191,7 @@ pub const Context = struct {
         self.arena_state.deinit();
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
+        if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
         if (budget_allocator) |ba| host_gpa.destroy(ba);
         if (host_allocator_lock) |lock| host_gpa.destroy(lock);
     }
@@ -7246,8 +7559,17 @@ pub const Context = struct {
     }
 
     pub fn recordGcCollectionPhase(self: *Context, boundary: @import("gc").CollectionPhaseBoundary) void {
-        if (!self.gc_phase_profile_enabled.load(.acquire)) return;
+        const phase_profile_enabled = self.gc_phase_profile_enabled.load(.acquire);
+        const runtime_profile = self.runtime_attribution_profiler;
+        if (!phase_profile_enabled and runtime_profile == null) return;
         const now = parallelGcNowNs();
+        if (runtime_profile) |profile| switch (boundary) {
+            .minor_prepare_begin, .full_prepare_begin => profile.beginGcCycle(now),
+            .minor_post_sweep_end => profile.finishGcCycle(false, now),
+            .full_post_sweep_end => profile.finishGcCycle(true, now),
+            else => {},
+        };
+        if (!phase_profile_enabled) return;
         const started = self.gc_phase_started_ns.swap(now, .acq_rel);
         const elapsed = now -| started;
         switch (boundary) {
@@ -19943,6 +20265,9 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.host_callbacks));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.wasm_dispatches));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.environment_allocations));
+    try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.runtime.allocation.backing_allocations);
+    try std.testing.expectEqual(@as(usize, 0), ordinary_snapshot.runtime.minor_pauses.len);
+    try std.testing.expectEqual(@as(usize, 0), ordinary_snapshot.runtime.full_pauses.len);
 
     const profiled_tree = try Context.createWith(std.testing.allocator, .{
         .enable_gc = true,
@@ -19956,6 +20281,13 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     const tree_snapshot = profiled_tree.tierAttributionSnapshot();
     try std.testing.expect(tree_snapshot.execution.count(.tree_walker_entries) >= 2);
     try std.testing.expect(tree_snapshot.execution.count(.environment_allocations) > 0);
+    try std.testing.expect(tree_snapshot.runtime.allocation.backing_allocations > 0);
+    try std.testing.expect(tree_snapshot.runtime.allocation.backing_allocation_bytes > 0);
+    try std.testing.expect(tree_snapshot.runtime.allocation.gc_cell_allocations > 0);
+    try std.testing.expectEqual(
+        tree_snapshot.heap.collections,
+        tree_snapshot.runtime.minor_pauses.len + tree_snapshot.runtime.full_pauses.len,
+    );
 
     const profiled_vm = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = true,

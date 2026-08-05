@@ -1,0 +1,79 @@
+{
+  "schema_version": 11,
+  "matrix_id": "zig-js-representative-v11",
+  "status": "frozen",
+  "frozen_date": "2026-08-04",
+  "owner_issue": 461,
+  "history_policy": "This version hash-inherits every V10 workload, mode, jobs, checksum, timing boundary, engine-availability, acceptance, synchronization, and runtime-dispatch decision. It versions the opt-in allocation and exact per-cycle GC-pause inventory and removes only those implemented metrics from the pending inventory; any later workload, boundary, jobs, checksum, metric, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v10",
+    "path": "docs/.data/representative-benchmark-matrix-v10.json",
+    "sha256": "aa0b69ed9ae80373a07ba9c587c91491f645b83c0b2e89bd127e1f2d26cd7907",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels"
+    ]
+  },
+  "change": "Adds exact successful Context backing allocation/growth/release operations and bytes, logical GC-cell fresh/reused/relocation/delegated allocation and free counts/bytes, and the raw nanosecond duration of every completed minor/full collection. The two allocation domains remain separate, pause sample overflow rejects the artifact, and scored timing rows remain uninstrumented.",
+  "tier_attribution": {
+    "runner_mode": "attribution",
+    "scope": "one fresh zig-js process and context per workload and structural variant; Context backing attribution begins after the profiler storage itself is allocated and before arena/Context construction",
+    "phases": ["configuration", "warmup", "invocation"],
+    "warmup": "the inherited ten reduced-work calls",
+    "invocation": "one inherited full-work call with the frozen jobs and lane-zero input",
+    "metrics": [
+      "tree_walker_entries",
+      "vm_entries",
+      "vm_dispatches",
+      "vm_quick_kernel_hits",
+      "baseline_entries",
+      "optimizer_entries",
+      "optimizer_osr_entries",
+      "deoptimizations",
+      "runtime_operation_calls",
+      "host_callbacks",
+      "wasm_dispatches",
+      "environment_allocations",
+      "bytecode_admissions_by_reason",
+      "baseline_publications",
+      "optimizer_publications",
+      "generated_code_bytes",
+      "native_code_lifetime_by_state",
+      "heap_live_bytes",
+      "heap_collections",
+      "synchronization_by_path",
+      "worker_lifecycle",
+      "context_backing_allocations",
+      "gc_cell_allocations",
+      "gc_pause_samples"
+    ],
+    "equivalence": "For warmup and invocation independently, each base/variant pair must select the same non-empty set of tree-walker, VM, baseline, optimizer, optimizer-OSR, and deoptimization paths and allocate exactly the same number of environments. Exact tier, runtime, synchronization, allocation, GC-pause, and worker counters remain visible rather than normalized away; every Wasm workload must record an invocation-phase Wasm dispatch.",
+    "timing_isolation": "Attribution uses fresh opt-in processes and contexts outside every scored timing row; normal contexts retain the original allocator chain, disabled contention counters, null execution-attribution pointer, and no GC-pause sample storage.",
+    "recognizer_audit": {
+      "scope": ["src"],
+      "prohibited": "Every representative workload identifier is absent from engine source. Identifiers exist only in the owned workload, manifest, and benchmark tooling."
+    }
+  },
+  "pending_metric_panels": [
+    {
+      "metrics": ["cpu_time_ns", "peak_rss_bytes", "retained_rss_bytes", "tier_up_ns", "deoptimization_ns"],
+      "issue": 461
+    },
+    {
+      "metrics": ["cycles", "instructions", "cache_misses", "energy_joules", "thermal_state"],
+      "issue": 503
+    },
+    {
+      "metrics": ["independent_suite_results", "additional_engine_results"],
+      "issue": 504
+    }
+  ]
+}

@@ -23,6 +23,8 @@ export type TierSnapshot = {
   execution: CounterMap;
   admissions: CounterMap;
   synchronization: CounterMap;
+  allocation: CounterMap;
+  gc_pauses: GcPauseSamples;
   baseline_publications: number;
   optimizer_publications: number;
   generated_code_bytes: number;
@@ -37,11 +39,20 @@ export type TierDelta = {
   execution: CounterMap;
   admissions: CounterMap;
   synchronization: CounterMap;
+  allocation: CounterMap;
+  gc_pauses: GcPauseSamples;
   baseline_publications: number;
   optimizer_publications: number;
   generated_code_bytes: number;
   native_code: CounterMap;
   heap: CounterMap;
+};
+
+type GcPauseSamples = {
+  minor_ns: number[];
+  minor_overflow: number;
+  full_ns: number[];
+  full_overflow: number;
 };
 
 const phases: TierSnapshot["phase"][] = [
@@ -109,6 +120,24 @@ const synchronizationMetrics = [
   "lock_wait_ns",
   "condition_wait_ns",
   "property_wait_ns",
+];
+const allocationMetrics = [
+  "backing_allocations",
+  "backing_allocation_bytes",
+  "backing_growths",
+  "backing_growth_bytes",
+  "backing_releases",
+  "backing_released_bytes",
+  "backing_current_bytes",
+  "backing_peak_bytes",
+  "gc_cell_allocations",
+  "gc_cell_bytes",
+  "gc_cell_fresh_allocations",
+  "gc_cell_reused_allocations",
+  "gc_cell_relocation_allocations",
+  "gc_cell_delegated_allocations",
+  "gc_cell_frees",
+  "gc_cell_freed_bytes",
 ];
 const nativeCodeMetrics = [
   "live_artifacts",
@@ -216,6 +245,37 @@ function subtractSynchronization(after: CounterMap, before: CounterMap): Counter
   return result;
 }
 
+function subtractAllocation(after: CounterMap, before: CounterMap): CounterMap {
+  const result: CounterMap = {};
+  for (const name of allocationMetrics) {
+    const current = after[name] || 0,
+      previous = before[name] || 0;
+    if (name === "backing_current_bytes" || name === "backing_peak_bytes") {
+      result[name] = current;
+      continue;
+    }
+    requireValue(current >= previous, `${name} attribution counter regressed`);
+    result[name] = current - previous;
+  }
+  return result;
+}
+
+function subtractPauses(after: GcPauseSamples, before: GcPauseSamples): GcPauseSamples {
+  requireValue(
+    before.minor_ns.every((value, index) => after.minor_ns[index] === value) &&
+      before.full_ns.every((value, index) => after.full_ns[index] === value) &&
+      after.minor_overflow >= before.minor_overflow &&
+      after.full_overflow >= before.full_overflow,
+    "GC pause samples are not append-only",
+  );
+  return {
+    minor_ns: after.minor_ns.slice(before.minor_ns.length),
+    minor_overflow: after.minor_overflow - before.minor_overflow,
+    full_ns: after.full_ns.slice(before.full_ns.length),
+    full_overflow: after.full_overflow - before.full_overflow,
+  };
+}
+
 function emptySnapshot(row: TierSnapshot): TierSnapshot {
   return {
     ...row,
@@ -229,6 +289,8 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
     synchronization: Object.fromEntries(
       synchronizationMetrics.map((name) => [name, 0]),
     ),
+    allocation: Object.fromEntries(allocationMetrics.map((name) => [name, 0])),
+    gc_pauses: { minor_ns: [], minor_overflow: 0, full_ns: [], full_overflow: 0 },
     baseline_publications: 0,
     optimizer_publications: 0,
     generated_code_bytes: 0,
@@ -256,6 +318,8 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         execution: subtractMap(row.execution, before.execution),
         admissions: subtractMap(row.admissions, before.admissions),
         synchronization: subtractSynchronization(row.synchronization, before.synchronization),
+        allocation: subtractAllocation(row.allocation, before.allocation),
+        gc_pauses: subtractPauses(row.gc_pauses, before.gc_pauses),
         baseline_publications:
           row.baseline_publications - before.baseline_publications,
         optimizer_publications:
@@ -304,6 +368,11 @@ export function validate(
           Object.values(row.execution).every(Number.isInteger) &&
           Object.values(row.admissions).every(Number.isInteger) &&
           Object.values(row.synchronization).every(Number.isInteger) &&
+          Object.values(row.allocation).every(Number.isInteger) &&
+          row.gc_pauses.minor_ns.every(Number.isInteger) &&
+          row.gc_pauses.full_ns.every(Number.isInteger) &&
+          Number.isInteger(row.gc_pauses.minor_overflow) &&
+          Number.isInteger(row.gc_pauses.full_overflow) &&
           Object.values(row.native_code).every(Number.isInteger) &&
           Object.values(row.heap).every(Number.isInteger),
         `non-integral attribution for ${workload}`,
@@ -319,6 +388,37 @@ export function validate(
         `synchronization attribution inventory drift for ${workload}`,
       );
       requireValue(
+        JSON.stringify(Object.keys(row.allocation).sort()) ===
+          JSON.stringify([...allocationMetrics].sort()),
+        `allocation attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        JSON.stringify(Object.keys(row.heap).sort()) ===
+          JSON.stringify([...heapMetrics].sort()),
+        `heap attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        row.allocation.backing_allocation_bytes + row.allocation.backing_growth_bytes >=
+          row.allocation.backing_released_bytes &&
+          row.allocation.backing_current_bytes ===
+            row.allocation.backing_allocation_bytes + row.allocation.backing_growth_bytes -
+              row.allocation.backing_released_bytes &&
+          row.allocation.backing_peak_bytes >= row.allocation.backing_current_bytes &&
+          row.allocation.gc_cell_allocations ===
+            row.allocation.gc_cell_fresh_allocations + row.allocation.gc_cell_reused_allocations +
+              row.allocation.gc_cell_relocation_allocations + row.allocation.gc_cell_delegated_allocations &&
+          row.allocation.gc_cell_bytes >= row.allocation.gc_cell_freed_bytes,
+        `allocation attribution is incoherent for ${workload}`,
+      );
+      requireValue(
+        row.gc_pauses.minor_overflow === 0 && row.gc_pauses.full_overflow === 0 &&
+          row.gc_pauses.minor_ns.every((value) => value >= 0) &&
+          row.gc_pauses.full_ns.every((value) => value >= 0) &&
+          row.gc_pauses.full_ns.length === row.heap.full_collections &&
+          row.gc_pauses.minor_ns.length === row.heap.collections - row.heap.full_collections,
+        `GC pause attribution is incomplete for ${workload}`,
+      );
+      requireValue(
         row.synchronization.worker_run_ns >= row.synchronization.worker_run_ns_max &&
           row.synchronization.arena_lock_acquires >= row.synchronization.arena_lock_contentions &&
           row.synchronization.env_lock_acquires >= row.synchronization.env_lock_contentions &&
@@ -331,11 +431,6 @@ export function validate(
         JSON.stringify(Object.keys(row.native_code).sort()) ===
           JSON.stringify([...nativeCodeMetrics].sort()),
         `native-code attribution inventory drift for ${workload}`,
-      );
-      requireValue(
-        JSON.stringify(Object.keys(row.heap).sort()) ===
-          JSON.stringify([...heapMetrics].sort()),
-        `heap attribution inventory drift for ${workload}`,
       );
     });
     const lane = manifest.lanes.indexOf(1),
@@ -395,6 +490,53 @@ export function render(
         variant = byWorkload[family.variant].find((row) => row.phase === phase)!;
       rows.push(
         `| \`${family.family}\` | ${phase} | \`${signature(base)}\` | \`${signature(variant)}\` | ${base.execution.environment_allocations || 0} | ${variant.execution.environment_allocations || 0} |`,
+      );
+    }
+  }
+  rows.push(
+    "",
+    `${heading}${heading} Allocation throughput`,
+    "",
+    "Backing rows count successful Context allocator calls and growth bytes. GC-cell rows count logical slab/delegated cell issuance separately, so backing growth is never double-counted as a cell allocation.",
+    "",
+    "| family | phase | base backing ops | variant backing ops | base backing bytes | variant backing bytes | base GC cells | variant GC cells | base GC bytes | variant GC bytes |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const family of manifest.implemented_families) {
+    for (const phase of ["warmup", "invocation"] as const) {
+      const base = byWorkload[family.base].find((row) => row.phase === phase)!,
+        variant = byWorkload[family.variant].find((row) => row.phase === phase)!,
+        baseBackingOps = base.allocation.backing_allocations + base.allocation.backing_growths,
+        variantBackingOps = variant.allocation.backing_allocations + variant.allocation.backing_growths,
+        baseBackingBytes = base.allocation.backing_allocation_bytes + base.allocation.backing_growth_bytes,
+        variantBackingBytes = variant.allocation.backing_allocation_bytes + variant.allocation.backing_growth_bytes;
+      rows.push(
+        `| \`${family.family}\` | ${phase} | ${baseBackingOps} | ${variantBackingOps} | ${baseBackingBytes} | ${variantBackingBytes} | ${base.allocation.gc_cell_allocations} | ${variant.allocation.gc_cell_allocations} | ${base.allocation.gc_cell_bytes} | ${variant.allocation.gc_cell_bytes} |`,
+      );
+    }
+  }
+  const percentile = (samples: number[], quantile: number): string => {
+    if (samples.length === 0) return "none";
+    const ordered = [...samples].sort((a, b) => a - b);
+    return `${ordered[Math.ceil(ordered.length * quantile) - 1]} ns`;
+  };
+  rows.push(
+    "",
+    `${heading}${heading} GC pause distribution`,
+    "",
+    "Each phase contains the exact completed minor/full cycle samples appended during that interval. Percentiles use the nearest-rank method; `none` means the phase completed no collection, and any sample overflow rejects the artifact.",
+    "",
+    "| family | phase | base cycles | variant cycles | base p50 | variant p50 | base p95 | variant p95 | base max | variant max |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const family of manifest.implemented_families) {
+    for (const phase of ["warmup", "invocation"] as const) {
+      const base = byWorkload[family.base].find((row) => row.phase === phase)!,
+        variant = byWorkload[family.variant].find((row) => row.phase === phase)!,
+        basePauses = [...base.gc_pauses.minor_ns, ...base.gc_pauses.full_ns],
+        variantPauses = [...variant.gc_pauses.minor_ns, ...variant.gc_pauses.full_ns];
+      rows.push(
+        `| \`${family.family}\` | ${phase} | ${basePauses.length} | ${variantPauses.length} | ${percentile(basePauses, 0.5)} | ${percentile(variantPauses, 0.5)} | ${percentile(basePauses, 0.95)} | ${percentile(variantPauses, 0.95)} | ${percentile(basePauses, 1)} | ${percentile(variantPauses, 1)} |`,
       );
     }
   }
@@ -479,7 +621,7 @@ export function artifact(
   runner: string,
 ): any {
   return {
-    schema_version: 4,
+    schema_version: 5,
     matrix_id: manifest.matrix_id,
     quick,
     environment: info,
@@ -518,6 +660,19 @@ function syntheticRows(manifest: any): TierSnapshot[] {
         synchronization: Object.fromEntries(
           synchronizationMetrics.map((name) => [name, name === "worker_runs" ? index : 0]),
         ),
+        allocation: Object.fromEntries(allocationMetrics.map((name) => {
+          if (name === "backing_allocations" || name === "backing_allocation_bytes" ||
+              name === "backing_current_bytes" || name === "backing_peak_bytes" ||
+              name === "gc_cell_allocations" || name === "gc_cell_bytes" ||
+              name === "gc_cell_fresh_allocations") return [name, index];
+          return [name, 0];
+        })),
+        gc_pauses: {
+          minor_ns: Array.from({ length: index }, (_, sample) => sample + 1),
+          minor_overflow: 0,
+          full_ns: [],
+          full_overflow: 0,
+        },
         baseline_publications: 0,
         optimizer_publications: index > 0 ? 1 : 0,
         generated_code_bytes: index > 0 ? 4096 : 0,
@@ -525,7 +680,8 @@ function syntheticRows(manifest: any): TierSnapshot[] {
           nativeCodeMetrics.map((name) => [name, name === "live_bytes" && index > 0 ? 4096 : 0]),
         ),
         heap: Object.fromEntries(
-          heapMetrics.map((name) => [name, name === "live_bytes" ? 8192 + index : 0]),
+          heapMetrics.map((name) => [name,
+            name === "live_bytes" ? 8192 + index : name === "collections" ? index : 0]),
         ),
       }),
     );
@@ -581,12 +737,24 @@ export function selfTest(): void {
     () => validate(incoherentSynchronization, manifest, true),
     "synchronization attribution is incoherent",
   );
+  const allocation = JSON.parse(JSON.stringify(rows));
+  delete allocation[0].allocation.backing_allocations;
+  expectFailure(() => validate(allocation, manifest, true), "allocation attribution inventory drift");
+  const incoherentAllocation = JSON.parse(JSON.stringify(rows));
+  incoherentAllocation[1].allocation.backing_current_bytes += 1;
+  expectFailure(() => validate(incoherentAllocation, manifest, true), "allocation attribution is incoherent");
+  const incompleteGc = JSON.parse(JSON.stringify(rows));
+  incompleteGc[1].gc_pauses.minor_ns.pop();
+  expectFailure(() => validate(incompleteGc, manifest, true), "GC pause attribution is incomplete");
+  const overflowingGc = JSON.parse(JSON.stringify(rows));
+  overflowingGc[0].gc_pauses.minor_overflow = 1;
+  expectFailure(() => validate(overflowingGc, manifest, true), "GC pause attribution is incomplete");
   const wasm = JSON.parse(JSON.stringify(rows));
   const wasmIndex = workloadEntries(manifest).findIndex(([family]) => family.family.startsWith("wasm_"));
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/synchronization inventory, environment parity, native-code lifetime, and heap state verified");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/synchronization/allocation inventory, exact GC pauses, environment parity, native-code lifetime, and heap state verified");
 }
 
 function main(): void {
