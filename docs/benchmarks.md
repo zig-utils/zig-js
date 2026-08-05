@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v11.json`. V11 hash-inherits every V10 workload, mode, job count, checksum, timing boundary, engine-availability ruling, and acceptance decision while versioning exact allocation and per-cycle GC-pause attribution. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v12.json`. V12 hash-inherits every V11 workload, mode, job count, checksum, timing boundary, engine-availability ruling, and acceptance decision while versioning fresh-process CPU and resident-memory attribution. Accepted historical reports are not rewritten, capability boundaries remain explicit, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -153,6 +153,15 @@ sample overflow rejects the artifact. Reports derive p50/p95/max with the
 nearest-rank method and use `none`, not zero, when a phase completes no cycle.
 Ordinary contexts keep the original allocator chain and allocate no pause
 sample storage.
+
+Schema-version-6 sidecars use the V12 contract. Each fresh attribution process
+reads cumulative user/system CPU and peak RSS from `getrusage` and the live
+resident size from Mach `task_info` at every phase boundary. Reports subtract
+the CPU counters between boundaries while preserving peak and retained RSS as
+gauges. The invocation retained value is sampled after the workload host
+checkpoint and before Context destruction, so it is neither allocator-requested
+bytes nor the process-exit peak. These resource queries remain outside scored
+timing rows.
 
 The full-work schema-2 evidence is the
 [`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)

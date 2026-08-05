@@ -14,6 +14,12 @@ import { run, writeText } from "./lib/home";
 declare const __filename: string;
 
 export type CounterMap = Record<string, number>;
+export type ProcessResourceSnapshot = {
+  cpu_user_ns: number;
+  cpu_system_ns: number;
+  peak_rss_bytes: number;
+  retained_rss_bytes: number;
+};
 export type TierSnapshot = {
   kind: "zig-js-tier-attribution";
   workload: string;
@@ -30,6 +36,7 @@ export type TierSnapshot = {
   generated_code_bytes: number;
   native_code: CounterMap;
   heap: CounterMap;
+  process: ProcessResourceSnapshot;
 };
 export type TierDelta = {
   workload: string;
@@ -46,6 +53,7 @@ export type TierDelta = {
   generated_code_bytes: number;
   native_code: CounterMap;
   heap: CounterMap;
+  process: ProcessResourceSnapshot;
 };
 
 type GcPauseSamples = {
@@ -159,6 +167,12 @@ const heapMetrics = [
   "last_full_collection_bytes",
   "collections",
   "full_collections",
+];
+const processMetrics = [
+  "cpu_user_ns",
+  "cpu_system_ns",
+  "peak_rss_bytes",
+  "retained_rss_bytes",
 ];
 
 function requireValue(condition: boolean, message: string): void {
@@ -276,6 +290,24 @@ function subtractPauses(after: GcPauseSamples, before: GcPauseSamples): GcPauseS
   };
 }
 
+function subtractProcess(
+  after: ProcessResourceSnapshot,
+  before: ProcessResourceSnapshot,
+): ProcessResourceSnapshot {
+  requireValue(
+    after.cpu_user_ns >= before.cpu_user_ns &&
+      after.cpu_system_ns >= before.cpu_system_ns &&
+      after.peak_rss_bytes >= before.peak_rss_bytes,
+    "process resource counter regressed",
+  );
+  return {
+    cpu_user_ns: after.cpu_user_ns - before.cpu_user_ns,
+    cpu_system_ns: after.cpu_system_ns - before.cpu_system_ns,
+    peak_rss_bytes: after.peak_rss_bytes,
+    retained_rss_bytes: after.retained_rss_bytes,
+  };
+}
+
 function emptySnapshot(row: TierSnapshot): TierSnapshot {
   return {
     ...row,
@@ -296,6 +328,7 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
     generated_code_bytes: 0,
     native_code: Object.fromEntries(nativeCodeMetrics.map((name) => [name, 0])),
     heap: Object.fromEntries(heapMetrics.map((name) => [name, 0])),
+    process: Object.fromEntries(processMetrics.map((name) => [name, 0])) as ProcessResourceSnapshot,
   };
 }
 
@@ -327,6 +360,7 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         generated_code_bytes: row.generated_code_bytes,
         native_code: row.native_code,
         heap: row.heap,
+        process: subtractProcess(row.process, before.process),
       });
       requireValue(
         row.baseline_publications >= before.baseline_publications &&
@@ -374,7 +408,8 @@ export function validate(
           Number.isInteger(row.gc_pauses.minor_overflow) &&
           Number.isInteger(row.gc_pauses.full_overflow) &&
           Object.values(row.native_code).every(Number.isInteger) &&
-          Object.values(row.heap).every(Number.isInteger),
+          Object.values(row.heap).every(Number.isInteger) &&
+          Object.values(row.process).every(Number.isInteger),
         `non-integral attribution for ${workload}`,
       );
       requireValue(
@@ -396,6 +431,17 @@ export function validate(
         JSON.stringify(Object.keys(row.heap).sort()) ===
           JSON.stringify([...heapMetrics].sort()),
         `heap attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        JSON.stringify(Object.keys(row.process).sort()) ===
+          JSON.stringify([...processMetrics].sort()),
+        `process resource inventory drift for ${workload}`,
+      );
+      requireValue(
+        row.process.cpu_user_ns >= 0 && row.process.cpu_system_ns >= 0 &&
+          row.process.peak_rss_bytes > 0 && row.process.retained_rss_bytes > 0 &&
+          row.process.peak_rss_bytes >= row.process.retained_rss_bytes,
+        `process resource attribution is incoherent for ${workload}`,
       );
       requireValue(
         row.allocation.backing_allocation_bytes + row.allocation.backing_growth_bytes >=
@@ -590,6 +636,26 @@ export function render(
   }
   rows.push(
     "",
+    `${heading}${heading} Process CPU and resident memory`,
+    "",
+    "CPU values are exact getrusage deltas for the fresh runner process. Peak RSS is the cumulative Darwin ru_maxrss gauge; retained RSS is Mach resident_size sampled at the phase boundary. The invocation retained value is captured after the workload host checkpoint and before Context destruction.",
+    "",
+    "| family | phase | base CPU | variant CPU | base peak RSS | variant peak RSS | base retained RSS | variant retained RSS |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const family of manifest.implemented_families) {
+    for (const phase of ["warmup", "invocation"] as const) {
+      const base = byWorkload[family.base].find((row) => row.phase === phase)!,
+        variant = byWorkload[family.variant].find((row) => row.phase === phase)!,
+        baseCpu = base.process.cpu_user_ns + base.process.cpu_system_ns,
+        variantCpu = variant.process.cpu_user_ns + variant.process.cpu_system_ns;
+      rows.push(
+        `| \`${family.family}\` | ${phase} | ${baseCpu} ns | ${variantCpu} ns | ${base.process.peak_rss_bytes} bytes | ${variant.process.peak_rss_bytes} bytes | ${base.process.retained_rss_bytes} bytes | ${variant.process.retained_rss_bytes} bytes |`,
+      );
+    }
+  }
+  rows.push(
+    "",
     `${heading}${heading} Native-code and heap state`,
     "",
     "These values are phase-boundary gauges or cumulative counters, not timing-row measurements.",
@@ -621,7 +687,7 @@ export function artifact(
   runner: string,
 ): any {
   return {
-    schema_version: 5,
+    schema_version: 6,
     matrix_id: manifest.matrix_id,
     quick,
     environment: info,
@@ -683,6 +749,12 @@ function syntheticRows(manifest: any): TierSnapshot[] {
           heapMetrics.map((name) => [name,
             name === "live_bytes" ? 8192 + index : name === "collections" ? index : 0]),
         ),
+        process: {
+          cpu_user_ns: (index + 1) * 100,
+          cpu_system_ns: (index + 1) * 10,
+          peak_rss_bytes: 1_000_000 + index * 1_000,
+          retained_rss_bytes: 900_000 + index * 500,
+        },
       }),
     );
   }
@@ -722,6 +794,23 @@ export function selfTest(): void {
   const heap = JSON.parse(JSON.stringify(rows));
   delete heap[0].heap.collections;
   expectFailure(() => validate(heap, manifest, true), "heap attribution inventory drift");
+  const processResource = JSON.parse(JSON.stringify(rows));
+  delete processResource[0].process.retained_rss_bytes;
+  expectFailure(() => validate(processResource, manifest, true), "process resource inventory drift");
+  const incoherentProcessResource = JSON.parse(JSON.stringify(rows));
+  incoherentProcessResource[0].process.retained_rss_bytes =
+    incoherentProcessResource[0].process.peak_rss_bytes + 1;
+  expectFailure(
+    () => validate(incoherentProcessResource, manifest, true),
+    "process resource attribution is incoherent",
+  );
+  const regressedProcessResource = JSON.parse(JSON.stringify(rows));
+  regressedProcessResource[1].process.cpu_user_ns =
+    regressedProcessResource[0].process.cpu_user_ns - 1;
+  expectFailure(
+    () => validate(regressedProcessResource, manifest, true),
+    "process resource counter regressed",
+  );
   const execution = JSON.parse(JSON.stringify(rows));
   delete execution[0].execution.vm_dispatches;
   expectFailure(() => validate(execution, manifest, true), "execution attribution inventory drift");
@@ -754,7 +843,7 @@ export function selfTest(): void {
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/synchronization/allocation inventory, exact GC pauses, environment parity, native-code lifetime, and heap state verified");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/synchronization/allocation/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, and RSS verified");
 }
 
 function main(): void {

@@ -81,6 +81,49 @@ const ModuleLane = struct {
     checksum: f64 = 0,
 };
 
+const ProcessResourceSnapshot = struct {
+    cpu_user_ns: u64,
+    cpu_system_ns: u64,
+    peak_rss_bytes: u64,
+    retained_rss_bytes: u64,
+};
+
+fn timevalNs(value: std.c.timeval) u64 {
+    return @as(u64, @intCast(value.sec)) * std.time.ns_per_s +
+        @as(u64, @intCast(value.usec)) * std.time.ns_per_us;
+}
+
+fn processResourceSnapshot() !ProcessResourceSnapshot {
+    const usage = std.posix.getrusage(std.c.rusage.SELF);
+    const task = std.c.mach_task_self();
+    if (task == std.c.TASK.NULL) return error.ProcessResourceUnavailable;
+    var vm_info: std.c.task_vm_info_data_t = std.mem.zeroes(std.c.task_vm_info_data_t);
+    var info_count = std.c.TASK.VM.INFO_COUNT;
+    const task_result = std.c.task_info(
+        task,
+        std.c.TASK.VM.INFO,
+        @as(std.c.task_info_t, @ptrCast(&vm_info)),
+        &info_count,
+    );
+    const resident_info_count = std.math.divCeil(
+        usize,
+        @offsetOf(std.c.task_vm_info_data_t, "resident_size") + @sizeOf(std.c.mach_vm_size_t),
+        @sizeOf(std.c.natural_t),
+    ) catch unreachable;
+    // Older Darwin kernels may return fewer trailing task_vm_info fields than
+    // the build SDK declares. resident_size is an early, stable field; require
+    // that exact prefix instead of fields this measurement never reads.
+    if (task_result != 0 or info_count < resident_info_count) return error.ProcessResourceUnavailable;
+    return .{
+        .cpu_user_ns = timevalNs(usage.utime),
+        .cpu_system_ns = timevalNs(usage.stime),
+        // Darwin reports ru_maxrss in bytes. Keep the same kernel field used by
+        // /usr/bin/time -l, while retained RSS is the live Mach task gauge.
+        .peak_rss_bytes = @intCast(usage.maxrss),
+        .retained_rss_bytes = @intCast(vm_info.resident_size),
+    };
+}
+
 fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 }
@@ -137,6 +180,7 @@ fn printTierAttributionRow(
     phase: []const u8,
     checksum: f64,
     snapshot: js.Context.TierAttributionSnapshot,
+    process: ProcessResourceSnapshot,
 ) !void {
     try writer.print("{{\"kind\":\"zig-js-tier-attribution\",\"workload\":\"{s}\",\"jobs\":{d},\"phase\":\"{s}\",\"checksum\":{d:.0},\"execution\":{{", .{
         workload, jobs, phase, checksum,
@@ -197,7 +241,13 @@ fn printTierAttributionRow(
         if (index != 0) try writer.writeByte(',');
         try writer.print("{d}", .{pause_ns});
     }
-    try writer.print("],\"full_overflow\":{d}}}}}\n", .{snapshot.runtime.full_pauses.overflow});
+    try writer.print("],\"full_overflow\":{d}}},\"process\":{{\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"peak_rss_bytes\":{d},\"retained_rss_bytes\":{d}}}}}\n", .{
+        snapshot.runtime.full_pauses.overflow,
+        process.cpu_user_ns,
+        process.cpu_system_ns,
+        process.peak_rss_bytes,
+        process.retained_rss_bytes,
+    });
 }
 
 const gc_telemetry_header = "zig-js-gc\tworkload\tlanes\tjobs\tsample\telapsed_ns\tchecksum\tattempts\tcollections\ttimeouts\tpeer_parks\texit_cleanups\tpause_ns_total\tpause_ns_max\trendezvous_ns_total\trendezvous_ns_max\ttranche_bytes\tbytes_issued\tbytes_reset\tbytes_current\tminor_cycles\tminor_prepare_ns\tminor_trace_ns\tminor_sweep_ns\tminor_post_sweep_ns\tfull_cycles\tfull_prepare_ns\tfull_trace_ns\tfull_sweep_ns\tfull_post_sweep_ns\tobject_batch_calls\tobject_batch_cells\tobject_batch_ns_total\tobject_batch_ns_max\tworker_runs\tworker_run_ns\tworker_run_ns_max\tjoin_wait_ns\tjoin_parks\theap_collections\theap_minor_collections\theap_live_cells\theap_young_cells\theap_young_bytes\tlast_minor_young_bytes\tlast_minor_reclaimed_bytes\tlast_minor_survived_cells\tlast_minor_survived_bytes\tbacking_chunks\tbacking_capacity_slots\tbacking_live_slots\tbacking_free_slots\n";
@@ -353,11 +403,17 @@ fn runAttribution(
     });
     defer ctx.destroy();
     const checkpoint = try configure(ctx, workload, jobs, 0);
-    try printTierAttributionRow(writer, workload, jobs, "configuration", 0, ctx.tierAttributionSnapshot());
+    const configuration = ctx.tierAttributionSnapshot();
+    const configuration_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, workload, jobs, "configuration", 0, configuration, configuration_process);
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
-    try printTierAttributionRow(writer, workload, jobs, "warmup", 0, ctx.tierAttributionSnapshot());
+    const warmed = ctx.tierAttributionSnapshot();
+    const warmed_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, workload, jobs, "warmup", 0, warmed, warmed_process);
     const result = try invoke(ctx, checkpoint);
-    try printTierAttributionRow(writer, workload, jobs, "invocation", result.toNumber(), ctx.tierAttributionSnapshot());
+    const invoked = ctx.tierAttributionSnapshot();
+    const invoked_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, workload, jobs, "invocation", result.toNumber(), invoked, invoked_process);
     _ = io;
 }
 
@@ -603,12 +659,18 @@ fn runModuleAttribution(
         .profile_execution_tiers = true,
     });
     defer ctx.destroy();
-    try printTierAttributionRow(writer, workload, jobs, "configuration", 0, ctx.tierAttributionSnapshot());
+    const configuration = ctx.tierAttributionSnapshot();
+    const configuration_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, workload, jobs, "configuration", 0, configuration, configuration_process);
     try configureModuleGlobals(ctx, jobs, 0);
-    try printTierAttributionRow(writer, workload, jobs, "warmup", 0, ctx.tierAttributionSnapshot());
+    const warmed = ctx.tierAttributionSnapshot();
+    const warmed_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, workload, jobs, "warmup", 0, warmed, warmed_process);
     _ = try ctx.evaluateModule(profile.entry_path, profile.entry_source, profile.host());
     const checksum = (try ctx.evaluate("globalThis.__representativeModuleChecksum")).toNumber();
-    try printTierAttributionRow(writer, workload, jobs, "invocation", checksum, ctx.tierAttributionSnapshot());
+    const invoked = ctx.tierAttributionSnapshot();
+    const invoked_process = try processResourceSnapshot();
+    try printTierAttributionRow(writer, workload, jobs, "invocation", checksum, invoked, invoked_process);
     _ = io;
 }
 
