@@ -13,6 +13,8 @@ const native_observability = @import("jit/native_observability.zig");
 
 pub const NativeCodePublisher = native_observability.Publisher;
 pub const NativeCodeArtifact = native_observability.Artifact;
+pub const NativePcLocation = native_observability.PcLocation;
+pub const NativeSourcePosition = native_observability.SourcePosition;
 pub const NativeUnwindPlan = native_observability.UnwindPlan;
 pub const NativeCodePublicationError = native_observability.PublishError;
 
@@ -630,6 +632,21 @@ pub const NativeCodeOrigin = struct {
     source_byte_offset: usize = 0,
     source_line: usize = 0,
     source_column: usize = 0,
+    /// Optional ephemeral resolver used while an observed artifact is adopted.
+    /// It exposes only explicit bytecode statement sites and is never retained.
+    source_resolver_context: ?*anyopaque = null,
+    bytecode_context: ?*const anyopaque = null,
+    resolve_source: ?*const fn (
+        context: ?*anyopaque,
+        bytecode_context: ?*const anyopaque,
+        bytecode_offset: u32,
+    ) ?NativeSourceResolution = null,
+};
+
+pub const NativeSourceResolution = struct {
+    script_id: u64,
+    source_url: []const u8,
+    position: native_observability.SourcePosition,
 };
 
 /// Caller-owned copy of a native-PC registry row. Returning owned strings is
@@ -651,6 +668,8 @@ pub const NativeCodeSnapshot = struct {
     source_byte_offset: usize,
     source_line: usize,
     source_column: usize,
+    bytecode_offset: ?u32,
+    source_is_exact: bool,
 
     pub fn deinit(self: *NativeCodeSnapshot) void {
         self.allocator.free(self.symbol_name);
@@ -673,6 +692,7 @@ const NativeCodeMetadata = struct {
     source_byte_offset: usize,
     source_line: usize,
     source_column: usize,
+    pc_locations: []native_observability.PcLocation,
     publication: ?native_observability.Publication = null,
 
     fn create(
@@ -682,6 +702,7 @@ const NativeCodeMetadata = struct {
         memory: *const CodeMemory,
         unwind: native_observability.UnwindPlan,
         origin: NativeCodeOrigin,
+        pc_locations: []const native_observability.PcLocation,
         publisher: ?NativeCodePublisher,
     ) NativeCodePublicationError!*NativeCodeMetadata {
         const metadata = try allocator.create(NativeCodeMetadata);
@@ -697,6 +718,8 @@ const NativeCodeMetadata = struct {
             .{ @tagName(kind), artifact_id, display_name },
         );
         errdefer allocator.free(symbol_name);
+        const owned_pc_locations = try allocator.dupe(native_observability.PcLocation, pc_locations);
+        errdefer allocator.free(owned_pc_locations);
         for (symbol_name) |*byte| {
             if (!std.ascii.isAlphanumeric(byte.*) and byte.* != '_' and byte.* != '$') byte.* = '_';
         }
@@ -715,6 +738,7 @@ const NativeCodeMetadata = struct {
             .source_byte_offset = origin.source_byte_offset,
             .source_line = origin.source_line,
             .source_column = origin.source_column,
+            .pc_locations = owned_pc_locations,
         };
         if (publisher) |external| {
             metadata.publication = try external.publish(allocator, .{
@@ -729,6 +753,7 @@ const NativeCodeMetadata = struct {
                 .source_byte_offset = origin.source_byte_offset,
                 .source_line = origin.source_line,
                 .source_column = origin.source_column,
+                .pc_locations = owned_pc_locations,
                 .unwind = unwind,
             });
         }
@@ -741,6 +766,7 @@ const NativeCodeMetadata = struct {
         allocator.free(self.symbol_name);
         allocator.free(self.function_name);
         allocator.free(self.source_url);
+        allocator.free(self.pc_locations);
         allocator.destroy(self);
     }
 
@@ -749,12 +775,33 @@ const NativeCodeMetadata = struct {
         allocator: std.mem.Allocator,
         kind: CodeKind,
         retired: bool,
+        pc: usize,
     ) std.mem.Allocator.Error!NativeCodeSnapshot {
         const symbol_name = try allocator.dupe(u8, self.symbol_name);
         errdefer allocator.free(symbol_name);
         const function_name = try allocator.dupe(u8, self.function_name);
         errdefer allocator.free(function_name);
         const source_url = try allocator.dupe(u8, self.source_url);
+        var bytecode_offset: ?u32 = null;
+        var source_is_exact = false;
+        var source_byte_offset = self.source_byte_offset;
+        var source_line = self.source_line;
+        var source_column = self.source_column;
+        const native_offset = pc - self.pc_start;
+        for (self.pc_locations) |location| {
+            if (location.native_offset > native_offset) break;
+            bytecode_offset = location.bytecode_offset;
+            source_is_exact = location.source != null;
+            if (location.source) |source| {
+                source_byte_offset = source.byte_offset;
+                source_line = source.line;
+                source_column = source.column;
+            } else {
+                source_byte_offset = self.source_byte_offset;
+                source_line = self.source_line;
+                source_column = self.source_column;
+            }
+        }
         return .{
             .allocator = allocator,
             .artifact_id = self.artifact_id,
@@ -767,10 +814,105 @@ const NativeCodeMetadata = struct {
             .function_identity = self.function_identity,
             .script_id = self.script_id,
             .source_url = source_url,
-            .source_byte_offset = self.source_byte_offset,
-            .source_line = self.source_line,
-            .source_column = self.source_column,
+            .source_byte_offset = source_byte_offset,
+            .source_line = source_line,
+            .source_column = source_column,
+            .bytecode_offset = bytecode_offset,
+            .source_is_exact = source_is_exact,
         };
+    }
+};
+
+pub const NativePcMapMetadata = struct {
+    allocator: std.mem.Allocator,
+    entries: []native_observability.PcLocation,
+
+    pub fn destroy(self: *NativePcMapMetadata) void {
+        const allocator = self.allocator;
+        allocator.free(self.entries);
+        allocator.destroy(self);
+    }
+};
+
+/// Compilation-local builder for sorted PC-change rows. Callers leave it
+/// disabled unless the owning Context opted into native observability.
+pub const NativePcMapBuilder = struct {
+    allocator: std.mem.Allocator,
+    enabled: bool,
+    entries: std.ArrayListUnmanaged(native_observability.PcLocation) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator, enabled: bool) NativePcMapBuilder {
+        return .{ .allocator = allocator, .enabled = enabled };
+    }
+
+    pub fn deinit(self: *NativePcMapBuilder) void {
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn mark(self: *NativePcMapBuilder, native_offset: usize, bytecode_offset: ?usize) !void {
+        if (!self.enabled) return;
+        const native = std.math.cast(u32, native_offset) orelse return error.UnsupportedChunk;
+        const bytecode = if (bytecode_offset) |offset|
+            std.math.cast(u32, offset) orelse return error.UnsupportedChunk
+        else
+            null;
+        if (self.entries.items.len != 0) {
+            const last = &self.entries.items[self.entries.items.len - 1];
+            std.debug.assert(native >= last.native_offset);
+            if (native == last.native_offset) {
+                last.* = .{ .native_offset = native, .bytecode_offset = bytecode };
+                return;
+            }
+            if (last.bytecode_offset == bytecode) return;
+        }
+        try self.entries.append(self.allocator, .{
+            .native_offset = native,
+            .bytecode_offset = bytecode,
+        });
+    }
+
+    pub fn finish(self: *NativePcMapBuilder) !?*NativePcMapMetadata {
+        if (!self.enabled or self.entries.items.len == 0) return null;
+        const metadata = try self.allocator.create(NativePcMapMetadata);
+        errdefer self.allocator.destroy(metadata);
+        metadata.* = .{
+            .allocator = self.allocator,
+            .entries = try self.entries.toOwnedSlice(self.allocator),
+        };
+        return metadata;
+    }
+};
+
+const PreparedNativePcLocations = struct {
+    allocator: ?std.mem.Allocator = null,
+    entries: []native_observability.PcLocation = &.{},
+
+    fn create(
+        allocator: std.mem.Allocator,
+        enabled: bool,
+        map: ?*const NativePcMapMetadata,
+        origin: NativeCodeOrigin,
+    ) std.mem.Allocator.Error!PreparedNativePcLocations {
+        if (!enabled) return .{};
+        const raw = map orelse return .{};
+        const entries = try allocator.dupe(native_observability.PcLocation, raw.entries);
+        errdefer allocator.free(entries);
+        if (origin.resolve_source) |resolve| for (entries) |*entry| {
+            const bytecode = entry.bytecode_offset orelse continue;
+            const source = resolve(origin.source_resolver_context, origin.bytecode_context, bytecode) orelse continue;
+            // One bytecode chunk has one script identity. Refuse cross-script
+            // attribution instead of silently borrowing a URL from either side.
+            if (source.script_id != origin.script_id or
+                !std.mem.eql(u8, source.source_url, origin.source_url)) continue;
+            entry.source = source.position;
+        };
+        return .{ .allocator = allocator, .entries = entries };
+    }
+
+    fn deinit(self: *PreparedNativePcLocations) void {
+        if (self.allocator) |allocator| allocator.free(self.entries);
+        self.* = .{};
     }
 };
 
@@ -1041,6 +1183,9 @@ pub const CompiledCode = struct {
     /// Machine-frame facts emitted by codegen and consumed only by an opt-in
     /// external publisher. `.none` adds no publication work on the default path.
     unwind: native_observability.UnwindPlan = .none,
+    /// Present only when compilation was requested by an observability-enabled
+    /// owner. Entries contain exact codegen offsets but no borrowed VM state.
+    native_pc_map: ?*NativePcMapMetadata = null,
     /// False for an artifact that may only be entered through an exact OSR row.
     entry_enabled: bool = true,
     invalidation_generation: ?*const std.atomic.Value(u64) = null,
@@ -1063,6 +1208,7 @@ pub const CompiledCode = struct {
         if (self.stack_maps) |metadata| metadata.destroy();
         if (self.osr) |metadata| metadata.destroy();
         if (self.native_operations) |metadata| metadata.destroy();
+        if (self.native_pc_map) |metadata| metadata.destroy();
         self.* = undefined;
     }
 
@@ -1283,6 +1429,13 @@ pub const Owner = struct {
         const allocator = self.allocator orelse return error.OutOfMemory;
         const owned = try allocator.create(CompiledCode);
         errdefer allocator.destroy(owned);
+        var pc_locations = try PreparedNativePcLocations.create(
+            allocator,
+            self.native_observability,
+            compiled.native_pc_map,
+            origin,
+        );
+        defer pc_locations.deinit();
 
         self.acquireLock();
         defer self.lock.unlock();
@@ -1292,7 +1445,7 @@ pub const Owner = struct {
         }
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.tiers.ensureUnusedCapacity(allocator, 1);
-        const metadata = try self.createNativeCodeMetadataLocked(allocator, &compiled, origin);
+        const metadata = try self.createNativeCodeMetadataLocked(allocator, &compiled, origin, pc_locations.entries);
         errdefer if (metadata) |value| value.destroy();
         owned.* = compiled;
         owned.native_code_metadata = metadata;
@@ -1330,6 +1483,13 @@ pub const Owner = struct {
         const allocator = self.allocator orelse return error.OutOfMemory;
         const owned = try allocator.create(CompiledCode);
         errdefer allocator.destroy(owned);
+        var pc_locations = try PreparedNativePcLocations.create(
+            allocator,
+            self.native_observability,
+            compiled.native_pc_map,
+            origin,
+        );
+        defer pc_locations.deinit();
 
         self.acquireLock();
         defer self.lock.unlock();
@@ -1339,7 +1499,7 @@ pub const Owner = struct {
         }
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.optimizer_tiers.ensureUnusedCapacity(allocator, 1);
-        const metadata = try self.createNativeCodeMetadataLocked(allocator, &compiled, origin);
+        const metadata = try self.createNativeCodeMetadataLocked(allocator, &compiled, origin, pc_locations.entries);
         errdefer if (metadata) |value| value.destroy();
         owned.* = compiled;
         owned.native_code_metadata = metadata;
@@ -1597,6 +1757,7 @@ pub const Owner = struct {
         allocator: std.mem.Allocator,
         compiled: *const CompiledCode,
         origin: NativeCodeOrigin,
+        pc_locations: []const native_observability.PcLocation,
     ) AdoptError!?*NativeCodeMetadata {
         if (!self.native_observability) return null;
         const artifact_id = self.next_native_artifact_id;
@@ -1608,6 +1769,7 @@ pub const Owner = struct {
             &compiled.memory,
             compiled.unwind,
             origin,
+            pc_locations,
             self.native_code_publisher,
         );
         self.next_native_artifact_id = artifact_id + 1;
@@ -1819,7 +1981,7 @@ fn lookupNativeCodeList(
     for (codes) |code| {
         const metadata = code.native_code_metadata orelse continue;
         if (pc >= metadata.pc_start and pc < metadata.pc_end)
-            return try metadata.snapshot(allocator, code.kind, retired);
+            return try metadata.snapshot(allocator, code.kind, retired, pc);
     }
     return null;
 }
@@ -1921,19 +2083,41 @@ pub const CodeMemory = struct {
 /// a completed result. This is the backend/ABI bring-up primitive used before
 /// bytecode lowering; it deliberately knows nothing about source text.
 pub fn compileConstantEntry(result_bits: u64) !CompiledCode {
+    return compileConstantEntryWithPcMap(result_bits, null);
+}
+
+/// Observed variant of the leaf bring-up primitive. The store completes the
+/// folded constant load; status publication and return belong to the exact
+/// bytecode exit selected by the architecture-neutral compiler.
+pub fn compileConstantEntryObserved(result_bits: u64, exit_bytecode_offset: usize) !CompiledCode {
+    return compileConstantEntryWithPcMap(result_bits, exit_bytecode_offset);
+}
+
+fn compileConstantEntryWithPcMap(result_bits: u64, exit_bytecode_offset: ?usize) !CompiledCode {
     if (!supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
 
     var memory = try CodeMemory.init(32);
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
+    var pc_map = NativePcMapBuilder.init(std.heap.page_allocator, exit_bytecode_offset != null);
+    defer pc_map.deinit();
+    try pc_map.mark(0, 0);
     try assembler.movImmediate64(1, result_bits);
     try assembler.store64(1, 0, @offsetOf(NativeFrame, "result_bits"));
+    if (exit_bytecode_offset) |bytecode| try pc_map.mark(assembler.position(), bytecode);
     try assembler.movImmediate32(0, @backingInt(ExitStatus.complete));
     try assembler.ret();
     try memory.publish(assembler.bytes().len);
+    const native_pc_map = try pc_map.finish();
+    errdefer if (native_pc_map) |metadata| metadata.destroy();
 
     const entry: NativeEntry = @ptrCast(@alignCast(memory.executableBytes().ptr));
-    return .{ .memory = memory, .entry = entry, .unwind = .aarch64_leaf };
+    return .{
+        .memory = memory,
+        .entry = entry,
+        .unwind = .aarch64_leaf,
+        .native_pc_map = native_pc_map,
+    };
 }
 
 extern "c" fn pthread_jit_write_protect_np(enabled: c_int) void;
@@ -2372,6 +2556,113 @@ test "disabled native observability retains no artifact metadata" {
     try std.testing.expect(code.native_code_metadata == null);
     const pc = @intFromPtr(code.memory.executableBytes().ptr);
     try std.testing.expect((try owner.lookupNativeCode(std.testing.allocator, pc)) == null);
+}
+
+test "native publisher and lookup receive exact PC source rows" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const Capture = struct {
+        published: bool = false,
+        unpublished: bool = false,
+        failed: bool = false,
+
+        const Self = @This();
+
+        const Token = struct {
+            allocator: std.mem.Allocator,
+            capture: *Self,
+        };
+
+        fn publish(
+            context: ?*anyopaque,
+            allocator: std.mem.Allocator,
+            artifact: NativeCodeArtifact,
+        ) NativeCodePublicationError!?*anyopaque {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.published = true;
+            if (artifact.pc_locations.len != 3 or
+                artifact.pc_locations[0].native_offset != 0 or
+                artifact.pc_locations[0].bytecode_offset != null or
+                artifact.pc_locations[1].native_offset != 4 or
+                artifact.pc_locations[1].bytecode_offset != 7 or
+                artifact.pc_locations[1].source == null or
+                artifact.pc_locations[1].source.?.line != 9 or
+                artifact.pc_locations[2].native_offset != 8 or
+                artifact.pc_locations[2].bytecode_offset != null)
+                self.failed = true;
+            const token = try allocator.create(Token);
+            token.* = .{ .allocator = allocator, .capture = self };
+            return token;
+        }
+
+        fn unpublish(_: ?*anyopaque, token_ptr: *anyopaque) void {
+            const token: *Token = @ptrCast(@alignCast(token_ptr));
+            token.capture.unpublished = true;
+            token.allocator.destroy(token);
+        }
+
+        fn resolve(_: ?*anyopaque, _: ?*const anyopaque, bytecode_offset: u32) ?NativeSourceResolution {
+            if (bytecode_offset != 7) return null;
+            return .{
+                .script_id = 51,
+                .source_url = "publisher.js",
+                .position = .{ .byte_offset = 81, .line = 9, .column = 5 },
+            };
+        }
+    };
+
+    var capture = Capture{};
+    var owner = Owner.initWithOptions(std.testing.allocator, .{
+        .native_code_publisher = .{
+            .context = &capture,
+            .publish_fn = Capture.publish,
+            .unpublish_fn = Capture.unpublish,
+        },
+    });
+    defer if (owner.allocator != null) owner.deinit();
+    var tier = Tier{};
+    var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    var compiled = try compileConstantEntry(0x505);
+    errdefer compiled.deinit();
+    var map = NativePcMapBuilder.init(std.testing.allocator, true);
+    defer map.deinit();
+    try map.mark(0, null);
+    try map.mark(4, 7);
+    try map.mark(8, null);
+    compiled.native_pc_map = try map.finish();
+    const code = try owner.adoptAndPublishObserved(&tier, compiled, .{
+        .function_name = "publisherFixture",
+        .script_id = 51,
+        .source_url = "publisher.js",
+        .source_byte_offset = 3,
+        .source_line = 2,
+        .source_column = 1,
+        .resolve_source = Capture.resolve,
+    });
+    compilation.release();
+    try std.testing.expect(capture.published);
+    try std.testing.expect(!capture.failed);
+
+    const pc_start = @intFromPtr(code.memory.executableBytes().ptr);
+    var exact = (try owner.lookupNativeCode(std.testing.allocator, pc_start + 4)) orelse
+        return error.TestUnexpectedResult;
+    defer exact.deinit();
+    try std.testing.expectEqual(@as(?u32, 7), exact.bytecode_offset);
+    try std.testing.expect(exact.source_is_exact);
+    try std.testing.expectEqual(@as(usize, 81), exact.source_byte_offset);
+    try std.testing.expectEqual(@as(usize, 9), exact.source_line);
+    try std.testing.expectEqual(@as(usize, 5), exact.source_column);
+
+    var plumbing = (try owner.lookupNativeCode(std.testing.allocator, pc_start + 8)) orelse
+        return error.TestUnexpectedResult;
+    defer plumbing.deinit();
+    try std.testing.expect(plumbing.bytecode_offset == null);
+    try std.testing.expect(!plumbing.source_is_exact);
+    try std.testing.expectEqual(@as(usize, 3), plumbing.source_byte_offset);
+    try std.testing.expectEqual(@as(usize, 2), plumbing.source_line);
+
+    owner.deinit();
+    try std.testing.expect(capture.unpublished);
 }
 
 test "native PC lookup serializes with epoch reclamation" {

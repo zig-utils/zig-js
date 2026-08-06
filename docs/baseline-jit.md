@@ -188,6 +188,15 @@ registry covers live artifacts and mappings retained by an older execution
 epoch. Lookup returns an owned copy, so releasing the owner lock cannot leave a
 profiler holding slices into reclaimed metadata.
 
+Observed baseline compilation also emits sorted, artifact-relative PC change
+rows. Each executable range names its exact bytecode offset; prologue,
+epilogue, and other artifact plumbing are explicitly unmapped. When that
+bytecode is an inspector statement boundary, adoption copies the same script
+identity and one-based source position used by the inspector. Bytecodes without
+an explicit statement node remain source-unmapped instead of inheriting a
+guessed nearest line. The rows are passed to external publishers and returned
+by owned PC lookups. Disabled compilation does not allocate or retain a map.
+
 Retirement removes the registry row before unmapping executable memory. Once the
 last execution lease releases and reclamation completes, the old PC no longer
 resolves; address reuse therefore cannot inherit a stale function identity.
@@ -215,10 +224,11 @@ section. After the canonical frame prologue, LLDB must walk from the generated
 frame to the host binary. The production fixture also requires
 `_Unwind_Find_FDE` to resolve the exact live generated range and to stop
 resolving it after Context teardown; the debugger symbol must disappear at the
-same boundary. System-profiler image publication, source/inline maps in the
-external object, logical async/deopt/Wasm stack reconstruction, and crash-path
-integration remain separate work; the process-local registry alone still does
-not make anonymous `MAP_JIT` leaves visible to an external profiler.
+same boundary. System-profiler image publication, optimizer/inline maps and
+source rows in the external object, logical async/deopt/Wasm stack
+reconstruction, and crash-path integration remain separate work; the
+process-local registry alone still does not make anonymous `MAP_JIT` leaves
+visible to an external profiler.
 
 ## Correctness and performance gates
 

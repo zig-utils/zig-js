@@ -16,12 +16,25 @@ const Chunk = bc.Chunk;
 const Value = value.Value;
 
 pub fn compile(chunk: *const Chunk) !jit.CompiledCode {
+    return compileWithObservability(chunk, false);
+}
+
+pub fn compileObserved(chunk: *const Chunk) !jit.CompiledCode {
+    return compileWithObservability(chunk, true);
+}
+
+fn compileWithObservability(chunk: *const Chunk, native_observability: bool) !jit.CompiledCode {
     if (constantResult(chunk)) |selection| {
-        var compiled = try jit.compileConstantEntry(selection.bits);
+        const exit_bytecode_offset: usize = if (chunk.code.items.len == 3 and chunk.code.items[1].op == .set_acc) 2 else 1;
+        var compiled = if (native_observability)
+            try jit.compileConstantEntryObserved(selection.bits, exit_bytecode_offset)
+        else
+            try jit.compileConstantEntry(selection.bits);
+        errdefer compiled.deinit();
         compiled.bytecode_steps = selection.steps;
         return compiled;
     }
-    return compileNumeric(chunk);
+    return compileNumeric(chunk, native_observability);
 }
 
 /// Allocation-free entry filter for eager tiering. A false result guarantees
@@ -1078,13 +1091,18 @@ fn integerComparisonFalseCondition(op: bc.Op) aarch64.Condition {
     };
 }
 
+const FusedComparisonBranch = struct {
+    fixup: ControlFixup,
+    branch_offset: usize,
+};
+
 fn emitFusedComparisonBranch(
     assembler: *aarch64.Assembler,
     state: State,
     representation: RepresentationState,
     comparison: bc.Op,
     target: u32,
-) !ControlFixup {
+) !FusedComparisonBranch {
     const lhs_slot = state.depth - 2;
     const both_integer = stackIsInteger(representation, lhs_slot) and stackIsInteger(representation, lhs_slot + 1);
     if (both_integer) {
@@ -1094,13 +1112,17 @@ fn emitFusedComparisonBranch(
         try ensureFloatStackValue(assembler, representation, lhs_slot + 1);
         try assembler.compareFloat64(try numericRegister(lhs_slot), try numericRegister(lhs_slot + 1));
     }
-    return .{ .condition = .{
-        .at = try assembler.branchConditionPlaceholder(if (both_integer)
-            integerComparisonFalseCondition(comparison)
-        else
-            comparisonFalseCondition(comparison)),
-        .target = target,
-    } };
+    const branch_offset = assembler.position();
+    return .{
+        .fixup = .{ .condition = .{
+            .at = try assembler.branchConditionPlaceholder(if (both_integer)
+                integerComparisonFalseCondition(comparison)
+            else
+                comparisonFalseCondition(comparison)),
+            .target = target,
+        } },
+        .branch_offset = branch_offset,
+    };
 }
 
 fn integerArithmeticResult(state: State, representation: RepresentationState, op: bc.Op) bool {
@@ -1332,7 +1354,7 @@ fn patchControlToOffset(assembler: *aarch64.Assembler, fixup: ControlFixup, targ
     }
 }
 
-fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
+fn compileNumeric(chunk: *const Chunk, native_observability: bool) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
 
     var analysis = try analyzeNumeric(chunk, true);
@@ -1364,6 +1386,9 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     var assembler = aarch64.Assembler.init(memory.writableBytes());
     var returns = aarch64.ReturnBranches.init(allocator);
     defer returns.deinit();
+    var pc_map = jit.NativePcMapBuilder.init(allocator, native_observability);
+    defer pc_map.deinit();
+    try pc_map.mark(0, null);
 
     const fast_offsets = try allocator.alloc(usize, code_len);
     defer allocator.free(fast_offsets);
@@ -1440,6 +1465,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     // the interpreter's instruction-level semantics.
     for (blocks, 0..) |block, block_index| {
         if (!covered_successors[block_index]) {
+            try pc_map.mark(assembler.position(), block.start);
             fast_offsets[block.start] = assembler.position();
             const instruction_count: u12 = if (block_index + 1 < blocks.len and covered_successors[block_index + 1])
                 @intCast(@as(u32, block.instructionCount()) + blocks[block_index + 1].instructionCount())
@@ -1460,14 +1486,17 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
             const state = analysis.states[ip].?;
             const representation = selection.states[ip].?;
             const inst = chunk.code.items[ip];
+            try pc_map.mark(assembler.position(), ip);
             if (isNumericComparison(inst.op) and ip + 1 < block.end and chunk.code.items[ip + 1].op == .jump_if_false) {
-                fast_control_fixups[ip + 1] = try emitFusedComparisonBranch(
+                const fused = try emitFusedComparisonBranch(
                     &assembler,
                     state,
                     representation,
                     inst.op,
                     chunk.code.items[ip + 1].a,
                 );
+                fast_control_fixups[ip + 1] = fused.fixup;
+                try pc_map.mark(fused.branch_offset, ip + 1);
                 ip += 2;
                 continue;
             }
@@ -1485,6 +1514,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     // prefix only from its pre-accounting predecessor. Slow replay and explicit
     // transfers use this guarded entry, which then jumps back to the same body.
     for (blocks, 0..) |block, block_index| if (covered_successors[block_index]) {
+        try pc_map.mark(assembler.position(), block.start);
         fast_offsets[block.start] = assembler.position();
         const instruction_count = block.instructionCount();
         try assembler.compareImmediate64(25, instruction_count);
@@ -1502,6 +1532,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     // covered successor that was conservatively pre-accounted, then enter the
     // false target through its ordinary guarded offset.
     for (blocks, 0..) |block, block_index| if (refund_fixups[block_index]) |fixup| {
+        try pc_map.mark(assembler.position(), block.end - 1);
         const stub = assembler.position();
         try patchControlToOffset(&assembler, fixup, stub);
         const successor_count = blocks[block_index + 1].instructionCount();
@@ -1519,6 +1550,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     // end, then rejoin a fast block. Checkpoint islands resume immediately at
     // the operation whose accounting triggered the callback.
     for (blocks, 0..) |block, block_index| {
+        try pc_map.mark(assembler.position(), block.start);
         slow_offsets[block_index] = assembler.position();
         try assembler.patchConditionBranch(fast_budget_fixups[block_index], slow_offsets[block_index]);
         try assembler.patchConditionBranch(fast_checkpoint_fixups[block_index], slow_offsets[block_index]);
@@ -1526,6 +1558,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         for (block.start..block.end) |ip| {
             const state = analysis.states[ip].?;
             const representation = selection.states[ip].?;
+            try pc_map.mark(assembler.position(), ip);
             try assembler.addImmediate64(19, 19, 1);
             try assembler.subtractImmediateSetFlags64(25, 25, 1);
             budget_fixups[ip] = try assembler.branchConditionPlaceholder(.lo);
@@ -1561,6 +1594,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         const state = analysis.states[ip] orelse continue;
         const representation = selection.states[ip].?;
         const stub = assembler.position();
+        try pc_map.mark(stub, ip);
         try assembler.patchConditionBranch(budget_fixups[ip], stub);
         try assembler.patchConditionBranch(checkpoint_fixups[ip], stub);
         // Numeric locals live in callee-saved d8-d15 or, for selected safe
@@ -1607,6 +1641,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     }
 
     const status_exit = assembler.position();
+    try pc_map.mark(status_exit, null);
     try returns.emit(&assembler);
     for (status_fixups) |at| if (at != unreachable_offset) try assembler.patchCompareBranch(at, status_exit);
 
@@ -1615,6 +1650,8 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     const frame_epilogue_offset = try emitRestoreAndReturn(&assembler, selection.locals);
 
     try memory.publish(assembler.bytes().len);
+    const native_pc_map = try pc_map.finish();
+    errdefer if (native_pc_map) |metadata| metadata.destroy();
     const entry: jit.NativeEntry = @ptrCast(@alignCast(memory.executableBytes().ptr));
     const required_numeric_slots: u64 = if (chunk.param_count == 64)
         std.math.maxInt(u64)
@@ -1630,6 +1667,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         .required_numeric_slots = required_numeric_slots,
         .required_u32_slots = if (selection.locals != 0) lowBits(chunk.param_count) else 0,
         .max_stack_depth = analysis.max_stack_depth,
+        .native_pc_map = native_pc_map,
         .unwind = .{ .aarch64_frame_pointer = .{
             .epilogue_offset = std.math.cast(u32, frame_epilogue_offset) orelse return error.UnsupportedChunk,
             .saved_gpr_count = if (@popCount(selection.locals) > 2) 10 else 8,
@@ -1655,9 +1693,61 @@ test "compiler lowers a constant-return bytecode function" {
 
     var compiled = try compile(function_chunk);
     defer compiled.deinit();
+    try std.testing.expect(compiled.native_pc_map == null);
     var frame = jit.NativeFrame{};
     try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
     try std.testing.expectEqual(@as(f64, 42), @import("../value.zig").Value.fromRawBits(frame.result_bits).asNum());
+
+    var observed = try compileObserved(function_chunk);
+    defer observed.deinit();
+    const locations = observed.native_pc_map.?.entries;
+    try std.testing.expectEqual(@as(usize, 2), locations.len);
+    try std.testing.expectEqual(@as(?u32, 0), locations[0].bytecode_offset);
+    try std.testing.expectEqual(@as(?u32, 1), locations[1].bytecode_offset);
+}
+
+test "observed baseline code records exact bytecode PC changes" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const Parser = @import("../parser.zig").Parser;
+    const Compiler = @import("../compiler.zig").Compiler;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function choose(a, b) {
+        \\  if (a < b) return a + 1;
+        \\  return b + 2;
+        \\}
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    const chunk = root.fns.items[0].chunk.?;
+    var compiled = try compileObserved(chunk);
+    defer compiled.deinit();
+
+    const entries = compiled.native_pc_map.?.entries;
+    try std.testing.expect(entries.len > chunk.code.items.len);
+    try std.testing.expectEqual(@as(u32, 0), entries[0].native_offset);
+    try std.testing.expect(entries[0].bytecode_offset == null);
+    var saw_comparison = false;
+    var saw_branch = false;
+    var saw_unmapped_epilogue = false;
+    for (entries, 0..) |entry, index| {
+        try std.testing.expect(entry.native_offset < compiled.memory.executableBytes().len);
+        try std.testing.expect(entry.source == null);
+        if (index != 0) try std.testing.expect(entries[index - 1].native_offset < entry.native_offset);
+        if (entry.bytecode_offset) |bytecode_offset| {
+            const instruction: usize = bytecode_offset;
+            if (chunk.code.items[instruction].op == .lt) saw_comparison = true;
+            if (chunk.code.items[instruction].op == .jump_if_false) saw_branch = true;
+        } else if (index != 0) {
+            saw_unmapped_epilogue = true;
+        }
+    }
+    try std.testing.expect(saw_comparison);
+    try std.testing.expect(saw_branch);
+    try std.testing.expect(saw_unmapped_epilogue);
 }
 
 test "plain function chunks record native frame arity" {

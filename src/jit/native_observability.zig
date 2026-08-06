@@ -20,6 +20,23 @@ pub const UnwindPlan = union(enum(u8)) {
     },
 };
 
+/// Exact source position attached to one native-PC change row. Lines and
+/// columns use the engine's one-based inspector convention.
+pub const SourcePosition = struct {
+    byte_offset: usize,
+    line: usize,
+    column: usize,
+};
+
+/// One sorted native-PC change row. A null bytecode offset deliberately means
+/// that the machine range is artifact plumbing (for example a prologue or
+/// epilogue), not that a publisher should infer the nearest JavaScript site.
+pub const PcLocation = struct {
+    native_offset: u32,
+    bytecode_offset: ?u32 = null,
+    source: ?SourcePosition = null,
+};
+
 /// Immutable description of one generated artifact at the instant its native
 /// mapping becomes reachable. Publishers must copy every slice they retain.
 pub const Artifact = struct {
@@ -34,6 +51,9 @@ pub const Artifact = struct {
     source_byte_offset: usize,
     source_line: usize,
     source_column: usize,
+    /// Sorted, artifact-relative PC rows. Publishers must copy this slice if
+    /// they retain it after `publish_fn` returns.
+    pc_locations: []const PcLocation = &.{},
     unwind: UnwindPlan = .none,
 };
 

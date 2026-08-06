@@ -5615,7 +5615,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         owner,
         chunk,
         vm.prefer_managed_baseline,
-        nativeCodeOrigin(vm, owner),
+        nativeCodeOrigin(vm, owner, chunk),
     )) |artifact| {
         if (!nativeExecutionPermitted(vm, owner)) return null;
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
@@ -5642,13 +5642,16 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     if (code == null) if (owner.claimCompilation(&chunk.tier, tier_threshold)) |claim_value| {
         var claim = claim_value;
         const tier_up_started_ns = tierTimingStarted(vm);
-        var compiled = jit_compiler.compile(chunk) catch {
+        var compiled = (if (owner.nativeObservabilityEnabled())
+            jit_compiler.compileObserved(chunk)
+        else
+            jit_compiler.compile(chunk)) catch {
             recordBaselineTierUp(vm, tier_up_started_ns, false);
             chunk.tier.publishRejected();
             claim.release();
             return null;
         };
-        _ = owner.adoptAndPublishObserved(&chunk.tier, compiled, nativeCodeOrigin(vm, owner)) catch |err| {
+        _ = owner.adoptAndPublishObserved(&chunk.tier, compiled, nativeCodeOrigin(vm, owner, chunk)) catch |err| {
             recordBaselineTierUp(vm, tier_up_started_ns, false);
             compiled.deinit();
             if (err == error.Invalidated) chunk.tier.invalidate() else chunk.tier.publishRejected();
@@ -5667,7 +5670,29 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     };
 }
 
-fn nativeCodeOrigin(vm: *const Interpreter, owner: *const jit.Owner) jit.NativeCodeOrigin {
+fn resolveNativeBytecodeSource(
+    context: ?*anyopaque,
+    bytecode_context: ?*const anyopaque,
+    bytecode_offset: u32,
+) ?jit.NativeSourceResolution {
+    const vm: *Interpreter = @ptrCast(@alignCast(context orelse return null));
+    const chunk: *const Chunk = @ptrCast(@alignCast(bytecode_context orelse return null));
+    const instruction: usize = bytecode_offset;
+    if (instruction >= chunk.debug_nodes.len) return null;
+    const node = chunk.debug_nodes[instruction] orelse return null;
+    const source = vm.debugStatementLocation(node) orelse return null;
+    return .{
+        .script_id = source.script_id,
+        .source_url = source.source_url,
+        .position = .{
+            .byte_offset = source.location.byte_offset,
+            .line = source.location.line,
+            .column = source.location.column,
+        },
+    };
+}
+
+fn nativeCodeOrigin(vm: *Interpreter, owner: *const jit.Owner, chunk: ?*const Chunk) jit.NativeCodeOrigin {
     if (!owner.nativeObservabilityEnabled()) return .{};
     const frame = vm.stack_trace_call_frame orelse return .{};
     const location = frame.definition_location orelse frame.location;
@@ -5679,6 +5704,9 @@ fn nativeCodeOrigin(vm: *const Interpreter, owner: *const jit.Owner) jit.NativeC
         .source_byte_offset = source.location.byte_offset,
         .source_line = source.location.line,
         .source_column = source.location.column,
+        .source_resolver_context = vm,
+        .bytecode_context = chunk,
+        .resolve_source = if (chunk != null) resolveNativeBytecodeSource else null,
     };
     return .{
         .function_name = frame.function_name,
@@ -5686,7 +5714,7 @@ fn nativeCodeOrigin(vm: *const Interpreter, owner: *const jit.Owner) jit.NativeC
     };
 }
 
-fn nativeCodeOriginForFunction(func: *const Function, owner: *const jit.Owner) jit.NativeCodeOrigin {
+fn nativeCodeOriginForFunction(vm: *Interpreter, func: *const Function, owner: *const jit.Owner) jit.NativeCodeOrigin {
     if (!owner.nativeObservabilityEnabled()) return .{};
     if (func.definition_location) |source| return .{
         .function_name = func.name,
@@ -5696,6 +5724,9 @@ fn nativeCodeOriginForFunction(func: *const Function, owner: *const jit.Owner) j
         .source_byte_offset = source.location.byte_offset,
         .source_line = source.location.line,
         .source_column = source.location.column,
+        .source_resolver_context = vm,
+        .bytecode_context = func.chunk,
+        .resolve_source = if (func.chunk != null) resolveNativeBytecodeSource else null,
     };
     return .{
         .function_name = func.name,
@@ -5717,7 +5748,7 @@ test "vm: native code origin uses the inspector stack identity" {
     };
     var machine: Interpreter = undefined;
     machine.stack_trace_call_frame = &frame;
-    const origin = nativeCodeOrigin(&machine, &owner);
+    const origin = nativeCodeOrigin(&machine, &owner, null);
     try std.testing.expectEqualStrings("observedFunction", origin.function_name);
     try std.testing.expectEqual(@as(usize, 0x501), origin.function_identity);
     try std.testing.expectEqual(@as(u64, 23), origin.script_id);
@@ -5733,7 +5764,7 @@ test "vm: native code origin uses the inspector stack identity" {
         .location = .{ .byte_offset = 91, .line = 11, .column = 3 },
         .source_url = "direct.js",
     };
-    const direct = nativeCodeOriginForFunction(&function, &owner);
+    const direct = nativeCodeOriginForFunction(&machine, &function, &owner);
     try std.testing.expectEqualStrings("directCallee", direct.function_name);
     try std.testing.expectEqual(@intFromPtr(&function), direct.function_identity);
     try std.testing.expectEqual(@as(u64, 29), direct.script_id);
@@ -5742,7 +5773,7 @@ test "vm: native code origin uses the inspector stack identity" {
 
     var disabled = jit.Owner.init(std.testing.allocator);
     defer disabled.deinit();
-    const empty = nativeCodeOrigin(&machine, &disabled);
+    const empty = nativeCodeOrigin(&machine, &disabled, null);
     try std.testing.expectEqual(@as(usize, 0), empty.function_name.len);
     try std.testing.expectEqual(@as(usize, 0), empty.source_url.len);
 }
@@ -5774,7 +5805,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
         owner,
         chunk,
         vm.prefer_managed_baseline,
-        nativeCodeOriginForFunction(func, owner),
+        nativeCodeOriginForFunction(vm, func, owner),
     );
     const baseline_artifact = chunk.tier.loadCode();
     if (!nativeExecutionPermitted(vm, owner)) return null;
