@@ -43,6 +43,8 @@ pub const Operation = struct {
     lhs: u8 = 0,
     rhs: u8 = 0,
     immediate: u64 = 0,
+    /// Exact originating bytecode, or null for synthetic edge/register moves.
+    origin: ?u32 = null,
 };
 
 const CopyPair = struct {
@@ -56,6 +58,9 @@ pub const BranchSelection = struct {
     true_result: u8,
     false_block: u32,
     true_block: u32,
+    origin: u32,
+    false_return_origin: u32,
+    true_return_origin: u32,
 };
 
 pub const SideExitBranch = struct {
@@ -68,6 +73,7 @@ pub const SideExitBranch = struct {
     backedge_steps: u12 = 0,
     loop_prefix_steps: u12 = 0,
     true_block: ?u32 = null,
+    origin: u32,
 };
 
 pub const SideExit = struct {
@@ -88,6 +94,7 @@ pub const LoopBranch = struct {
     terminal: bool,
     false_steps: u12,
     true_steps: u12,
+    origin: u32,
 };
 
 pub const LoopExitGuard = struct {
@@ -98,6 +105,7 @@ pub const LoopExitGuard = struct {
     exit_on_true: bool,
     exit_deopt_index: u16 = 0,
     exit_steps: u12,
+    origin: u32,
 };
 
 pub const LoopLatchGuard = struct {
@@ -108,6 +116,7 @@ pub const LoopLatchGuard = struct {
     operations_block: u32,
     backedge_on_true: bool,
     backedge_steps: u12,
+    origin: u32,
 };
 
 pub const LoopRegionTargetKind = enum(u8) { block, header, exit };
@@ -128,6 +137,7 @@ pub const LoopRegionBlock = struct {
     steps: u12,
     runtime_steps: u12 = 0,
     entry_deopt_index: u16 = 0,
+    condition_origin: ?u32 = null,
     successors: [2]LoopRegionTarget = @splat(.{ .kind = .block, .block = optimizer.Block.none }),
 };
 
@@ -142,6 +152,7 @@ pub const Program = struct {
     allocator: std.mem.Allocator,
     operations: []Operation,
     result: u8,
+    completion_origin: ?u32 = null,
     branch: ?BranchSelection,
     side_exit: ?SideExit,
     side_exit_branch: ?SideExitBranch,
@@ -365,6 +376,7 @@ fn stageNativeOperationDescriptors(
                     .destination = @intCast(scratch_slots.*),
                     .block = state.block,
                     .lhs = @intCast(source),
+                    .origin = state.origin,
                 });
                 scratch_slots.* += 1;
             }
@@ -588,6 +600,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .destination = @intCast(node.id),
                 .block = node.block,
                 .immediate = node.immediate,
+                .origin = node.origin,
             });
         },
         .constant => {
@@ -598,6 +611,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .destination = @intCast(node.id),
                 .block = node.block,
                 .immediate = node.immediate,
+                .origin = node.origin,
             });
         },
         .undefined => {
@@ -607,6 +621,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .destination = @intCast(node.id),
                 .block = node.block,
                 .immediate = Value.undef().rawBits(),
+                .origin = node.origin,
             });
         },
         .null => {
@@ -616,6 +631,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .destination = @intCast(node.id),
                 .block = node.block,
                 .immediate = Value.nul().rawBits(),
+                .origin = node.origin,
             });
         },
         .true, .false => {
@@ -625,6 +641,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .destination = @intCast(node.id),
                 .block = node.block,
                 .immediate = Value.boolVal(node.kind == .true).rawBits(),
+                .origin = node.origin,
             });
         },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
@@ -644,6 +661,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                         .destination = @intCast(scratch_slots),
                         .block = node.block,
                         .lhs = @intCast(source),
+                        .origin = node.origin,
                     });
                     scratch_slots += 1;
                 }
@@ -657,6 +675,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                     .block = node.block,
                     .lhs = @intCast(first_input),
                     .immediate = node.origin,
+                    .origin = node.origin,
                 });
                 continue;
             }
@@ -689,6 +708,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .block = node.block,
                 .lhs = @intCast(lhs),
                 .rhs = @intCast(rhs),
+                .origin = node.origin,
             });
         },
         .to_numeric, .neg, .pos, .not, .typeof_op, .inc, .dec, .bit_not, .to_string, .to_property_key, .get_prop, .private_in => {
@@ -705,6 +725,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .block = node.block,
                 .lhs = @intCast(input),
                 .immediate = node.origin,
+                .origin = node.origin,
             });
         },
         .get_index, .set_prop, .set_index, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr, .in_op, .instance_of => {
@@ -719,6 +740,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                     .destination = @intCast(scratch_slots),
                     .block = node.block,
                     .lhs = @intCast(source),
+                    .origin = node.origin,
                 });
                 scratch_slots += 1;
             }
@@ -729,6 +751,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .block = node.block,
                 .lhs = @intCast(first_input),
                 .immediate = node.origin,
+                .origin = node.origin,
             });
         },
         .load_var, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
@@ -756,6 +779,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                     .destination = @intCast(scratch_slots),
                     .block = node.block,
                     .lhs = @intCast(source),
+                    .origin = node.origin,
                 });
                 scratch_slots += 1;
             }
@@ -766,6 +790,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .block = node.block,
                 .lhs = @intCast(first_input),
                 .immediate = node.origin,
+                .origin = node.origin,
             });
         },
         .call, .call_eval, .call_method, .call_spread, .call_eval_spread, .call_with_this_spread, .call_with_this, .construct, .construct_spread => {
@@ -793,6 +818,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                     .destination = @intCast(scratch_slots),
                     .block = node.block,
                     .lhs = @intCast(source),
+                    .origin = node.origin,
                 });
                 scratch_slots += 1;
             }
@@ -803,6 +829,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .block = node.block,
                 .lhs = @intCast(first_input),
                 .immediate = node.origin,
+                .origin = node.origin,
             });
         },
     };
@@ -812,11 +839,13 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     var side_exit: ?SideExit = null;
     var side_exit_branch: ?SideExitBranch = null;
     var finally_dispatch: ?FinallyDispatch = null;
+    var completion_origin: ?u32 = null;
     var bytecode_steps: u32 = 0;
     var deterministic_path = false;
     if (graph.branches.len == 0) {
         if (graph.returns.len == 1) {
             result = try resolveAlias(graph.returns[0].value, aliases);
+            completion_origin = graph.returns[0].origin;
             const return_block = plan.blocks[graph.returns[0].block];
             bytecode_steps = try deterministicPathSteps(
                 plan,
@@ -890,6 +919,9 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .true_result = @intCast(true_result),
                 .false_block = branch.false_block,
                 .true_block = branch.true_block,
+                .origin = branch.origin,
+                .false_return_origin = false_return.origin,
+                .true_return_origin = true_return.origin,
             };
         } else {
             bytecode_steps = plan.blocks[0].instruction_count;
@@ -899,6 +931,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .true_deopt_index = try blockEntryStateIndex(graph.frame_states, branch.true_block),
                 .false_steps = @intCast(plan.blocks[0].instruction_count),
                 .true_steps = @intCast(plan.blocks[0].instruction_count),
+                .origin = branch.origin,
             };
         }
     }
@@ -1037,6 +1070,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .allocator = allocator,
         .operations = owned_operations,
         .result = @intCast(result),
+        .completion_origin = completion_origin,
         .branch = branch_selection,
         .side_exit = side_exit,
         .side_exit_branch = side_exit_branch,
@@ -1166,6 +1200,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
                 .exit_from = if (exit.direct) tail_block else exit.block,
                 .exit_on_true = exit_on_true,
                 .exit_steps = std.math.cast(u12, exit_steps) orelse break,
+                .origin = guard_branch.origin,
             }) catch return error.OutOfMemory;
             tail_block = continue_block;
         }
@@ -1223,6 +1258,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
                 .operations_block = if (backedge.direct) synthetic_block else backedge.block,
                 .backedge_on_true = backedge_on_true,
                 .backedge_steps = std.math.cast(u12, latch_steps) orelse return error.UnsupportedChunk,
+                .origin = guard_branch.origin,
             });
             guarded_backedge_steps = @max(guarded_backedge_steps, latch_steps);
             tail_block = continue_block;
@@ -1299,6 +1335,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
                 .terminal = terminal,
                 .false_steps = std.math.cast(u12, false_steps) orelse return error.UnsupportedChunk,
                 .true_steps = std.math.cast(u12, nested_true_steps) orelse return error.UnsupportedChunk,
+                .origin = nested.origin,
             });
             total_steps = std.math.add(u32, total_steps, @max(false_steps, nested_true_steps)) catch
                 return error.UnsupportedChunk;
@@ -1451,6 +1488,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             .backedge_steps = std.math.cast(u12, backedge_steps) orelse return error.UnsupportedChunk,
             .loop_prefix_steps = std.math.cast(u12, tail_prefix_steps) orelse return error.UnsupportedChunk,
             .true_block = body,
+            .origin = branch.origin,
         },
         .loop_exit_guards = owned_exit_guards,
         .loop_latch_guards = owned_latch_guards,
@@ -1899,6 +1937,7 @@ fn lowerRegionOsr(
         if (block.successor_count == 2) {
             const conditional = branchForBlock(graph.branches, block_id) orelse return error.UnsupportedChunk;
             lowered.condition = std.math.cast(u8, conditional.condition) orelse return error.UnsupportedChunk;
+            lowered.condition_origin = conditional.origin;
             targets[0] = conditional.false_block;
             targets[1] = conditional.true_block;
         } else {
@@ -1980,6 +2019,7 @@ fn lowerRegionOsr(
             .false_steps = header_steps,
             .true_steps = iteration_steps,
             .backedge_steps = iteration_steps,
+            .origin = outer.origin,
         },
         .loop_region_blocks = owned_region_blocks,
         .loop_region_entry_operations_block = entry_operations_block,
@@ -2117,6 +2157,7 @@ fn appendPrimitiveLeaves(
                 .destination = @intCast(node.id),
                 .block = optimizer.Block.none,
                 .immediate = node.immediate,
+                .origin = node.origin,
             });
             initialized[node.id] = true;
         },
@@ -2127,6 +2168,7 @@ fn appendPrimitiveLeaves(
                 .destination = @intCast(node.id),
                 .block = optimizer.Block.none,
                 .immediate = Value.boolVal(node.kind == .true).rawBits(),
+                .origin = node.origin,
             });
             initialized[node.id] = true;
         },
@@ -2332,6 +2374,7 @@ const RegionRuntimeLowering = struct {
                 .destination = @intCast(self.scratch_slots.*),
                 .block = node.block,
                 .lhs = @intCast(source),
+                .origin = node.origin,
             });
             self.scratch_slots.* += 1;
         }
@@ -2343,6 +2386,7 @@ const RegionRuntimeLowering = struct {
         allocator: std.mem.Allocator,
         operations: *std.ArrayListUnmanaged(Operation),
         block: u32,
+        origin: u32,
         lhs: u8,
         rhs: u8,
     ) !u8 {
@@ -2353,8 +2397,8 @@ const RegionRuntimeLowering = struct {
             self.binary_inputs = slot;
             break :first slot;
         };
-        try operations.append(allocator, .{ .kind = .copy, .destination = first, .block = block, .lhs = lhs });
-        try operations.append(allocator, .{ .kind = .copy, .destination = first + 1, .block = block, .lhs = rhs });
+        try operations.append(allocator, .{ .kind = .copy, .destination = first, .block = block, .lhs = lhs, .origin = origin });
+        try operations.append(allocator, .{ .kind = .copy, .destination = first + 1, .block = block, .lhs = rhs, .origin = origin });
         return first;
     }
 
@@ -2363,6 +2407,7 @@ const RegionRuntimeLowering = struct {
         allocator: std.mem.Allocator,
         operations: *std.ArrayListUnmanaged(Operation),
         block: u32,
+        origin: u32,
         first_source: u8,
         second_source: u8,
         third_source: u8,
@@ -2374,9 +2419,9 @@ const RegionRuntimeLowering = struct {
             self.ternary_inputs = slot;
             break :first slot;
         };
-        try operations.append(allocator, .{ .kind = .copy, .destination = first, .block = block, .lhs = first_source });
-        try operations.append(allocator, .{ .kind = .copy, .destination = first + 1, .block = block, .lhs = second_source });
-        try operations.append(allocator, .{ .kind = .copy, .destination = first + 2, .block = block, .lhs = third_source });
+        try operations.append(allocator, .{ .kind = .copy, .destination = first, .block = block, .lhs = first_source, .origin = origin });
+        try operations.append(allocator, .{ .kind = .copy, .destination = first + 1, .block = block, .lhs = second_source, .origin = origin });
+        try operations.append(allocator, .{ .kind = .copy, .destination = first + 2, .block = block, .lhs = third_source, .origin = origin });
         return first;
     }
 };
@@ -2432,6 +2477,7 @@ fn appendBlockOperations(
                     .block = block,
                     .lhs = @intCast(node.lhs),
                     .rhs = @intCast(node.rhs),
+                    .origin = node.origin,
                 });
                 initialized[node.id] = true;
             },
@@ -2445,6 +2491,7 @@ fn appendBlockOperations(
                     .block = block,
                     .lhs = @intCast(node.lhs),
                     .immediate = node.origin,
+                    .origin = node.origin,
                 });
                 initialized[node.id] = true;
             },
@@ -2457,6 +2504,7 @@ fn appendBlockOperations(
                     allocator,
                     operations,
                     block,
+                    node.origin,
                     @intCast(node.lhs),
                     @intCast(node.rhs),
                 );
@@ -2467,6 +2515,7 @@ fn appendBlockOperations(
                     .block = block,
                     .lhs = first_input,
                     .immediate = node.origin,
+                    .origin = node.origin,
                 });
                 initialized[node.id] = true;
             },
@@ -2479,6 +2528,7 @@ fn appendBlockOperations(
                     allocator,
                     operations,
                     block,
+                    node.origin,
                     @intCast(node.lhs),
                     @intCast(node.rhs),
                 );
@@ -2489,6 +2539,7 @@ fn appendBlockOperations(
                     .block = block,
                     .lhs = first_input,
                     .immediate = node.origin,
+                    .origin = node.origin,
                 });
                 initialized[node.id] = true;
             },
@@ -2501,6 +2552,7 @@ fn appendBlockOperations(
                     allocator,
                     operations,
                     block,
+                    node.origin,
                     @intCast(node.lhs),
                     @intCast(node.rhs),
                     @intCast(node.third),
@@ -2512,6 +2564,7 @@ fn appendBlockOperations(
                     .block = block,
                     .lhs = first_input,
                     .immediate = node.origin,
+                    .origin = node.origin,
                 });
                 initialized[node.id] = true;
             },
@@ -2541,6 +2594,7 @@ fn appendBlockOperations(
                     .block = block,
                     .lhs = first_input,
                     .immediate = node.origin,
+                    .origin = node.origin,
                 });
                 initialized[node.id] = true;
             },
@@ -2572,6 +2626,7 @@ fn appendBlockOperations(
                     .block = block,
                     .lhs = first_input,
                     .immediate = node.origin,
+                    .origin = node.origin,
                 });
                 initialized[node.id] = true;
             },
@@ -2733,6 +2788,14 @@ fn resolveAlias(initial: optimizer.ValueId, aliases: [jit.numeric_scratch_capaci
 }
 
 pub fn compile(chunk: *const bc.Chunk) !jit.CompiledCode {
+    return compileWithObservability(chunk, false);
+}
+
+pub fn compileObserved(chunk: *const bc.Chunk) !jit.CompiledCode {
+    return compileWithObservability(chunk, true);
+}
+
+fn compileWithObservability(chunk: *const bc.Chunk, native_observability: bool) !jit.CompiledCode {
     var plan = try optimizer.build(chunk, std.heap.page_allocator);
     defer plan.deinit();
     var program = lower(chunk, &plan, std.heap.page_allocator) catch |err| switch (err) {
@@ -2746,7 +2809,7 @@ pub fn compile(chunk: *const bc.Chunk) !jit.CompiledCode {
         else => return err,
     };
     defer program.deinit();
-    return compileAarch64(&program);
+    return compileAarch64(&program, native_observability);
 }
 
 const LoopRegionPatch = struct {
@@ -2762,11 +2825,13 @@ fn emitLoopRegionTarget(
     loop_top: usize,
     entry_deopt_index: u16,
     patches: *std.ArrayListUnmanaged(LoopRegionPatch),
+    pc_map: *jit.NativePcMapBuilder,
 ) !void {
     switch (target.kind) {
         .block => {
-            try emitBlockOperations(assembler, returns, program, target.operations_block);
+            try emitBlockOperations(assembler, returns, program, target.operations_block, pc_map);
             if (target.moving_safepoint) {
+                try pc_map.mark(assembler.position(), program.deopt_points[target.safepoint_deopt_index].exit_ip);
                 try emitMovingSafepointPoll(
                     assembler,
                     target.safepoint_deopt_index,
@@ -2780,7 +2845,8 @@ fn emitLoopRegionTarget(
             });
         },
         .header => {
-            try emitBlockOperations(assembler, returns, program, target.operations_block);
+            try emitBlockOperations(assembler, returns, program, target.operations_block, pc_map);
+            try pc_map.mark(assembler.position(), program.deopt_points[entry_deopt_index].exit_ip);
             try emitMovingSafepointPoll(
                 assembler,
                 entry_deopt_index,
@@ -2790,16 +2856,19 @@ fn emitLoopRegionTarget(
             const backedge = try assembler.branchPlaceholder();
             try assembler.patchBranch(backedge, loop_top);
         },
-        .exit => try emitSideExit(
-            assembler,
-            returns,
-            target.deopt_index,
-            program.deopt_points[target.deopt_index].exit_ip,
-        ),
+        .exit => {
+            try pc_map.mark(assembler.position(), program.deopt_points[target.deopt_index].exit_ip);
+            try emitSideExit(
+                assembler,
+                returns,
+                target.deopt_index,
+                program.deopt_points[target.deopt_index].exit_ip,
+            );
+        },
     }
 }
 
-fn compileAarch64(program: *const Program) !jit.CompiledCode {
+fn compileAarch64(program: *const Program, native_observability: bool) !jit.CompiledCode {
     if (!jit.optimizer_supported) return error.UnsupportedTarget;
     var memory = try jit.CodeMemory.init(
         @as(usize, program.operations.len) * 192 + @as(usize, program.loop_region_blocks.len) * 256 + 2048,
@@ -2808,6 +2877,9 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     var assembler = aarch64.Assembler.init(memory.writableBytes());
     var returns = aarch64.ReturnBranches.init(std.heap.page_allocator);
     defer returns.deinit();
+    var pc_map = jit.NativePcMapBuilder.init(std.heap.page_allocator, native_observability);
+    defer pc_map.deinit();
+    try pc_map.mark(0, null);
     try assembler.pushPair(29, 30);
     try assembler.establishFramePointer();
     try assembler.moveRegister64(12, 0); // stable NativeFrame
@@ -2816,42 +2888,46 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try emitInvalidationPoll(&assembler, &returns);
 
     for (program.operations) |operation| if (operation.block == optimizer.Block.none)
-        try emitOperation(&assembler, &returns, program, operation);
+        try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
     if (program.side_exit) |side_exit| {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
-            try emitOperation(&assembler, &returns, program, operation);
+            try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
         const runtime_steps = try runtimeOperationSteps(program);
         if (runtime_steps > side_exit.steps) return error.UnsupportedChunk;
         const remaining_steps: u12 = @intCast(side_exit.steps - runtime_steps);
         if (remaining_steps != 0) try emitStepIncrement(&assembler, remaining_steps);
+        try pc_map.mark(assembler.position(), program.deopt_points[side_exit.deopt_index].exit_ip);
         try emitSideExit(&assembler, &returns, side_exit.deopt_index, program.deopt_points[side_exit.deopt_index].exit_ip);
     } else if (program.finally_dispatch) |dispatch| {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
-            try emitOperation(&assembler, &returns, program, operation);
+            try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
         const runtime_steps = try runtimeOperationSteps(program);
         if (runtime_steps > dispatch.steps) return error.UnsupportedChunk;
         const remaining_steps: u12 = @intCast(dispatch.steps - runtime_steps);
         if (remaining_steps != 0) try emitStepIncrement(&assembler, remaining_steps);
+        try pc_map.mark(assembler.position(), program.deopt_points[dispatch.deopt_index].exit_ip);
         try emitFinallyDispatch(&assembler, &returns, program, dispatch);
     } else if (program.side_exit_branch) |branch| if (branch.entry_deopt_index) |entry_deopt_index| {
         try assembler.load64(15, 12, frameOffset("steps_until_checkpoint"));
         try assembler.load64(16, 12, frameOffset("steps_until_budget"));
         try assembler.movImmediate32(8, moving_safepoint_backedge_interval);
         const loop_top = assembler.position();
+        try pc_map.mark(loop_top, program.deopt_points[entry_deopt_index].exit_ip);
         const invalidated = try emitInvalidationSideExitPoll(&assembler);
         try assembler.compareImmediate64(15, branch.true_steps);
         const checkpoint_exit = try assembler.branchConditionPlaceholder(.ls);
         try assembler.compareImmediate64(16, branch.true_steps);
         const budget_exit = try assembler.branchConditionPlaceholder(.lo);
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, &returns, program, operation);
+            try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
         if (program.loop_region_blocks.len != 0) {
             try emitStepIncrement(&assembler, program.loop_region_header_steps);
             try assembler.subtractImmediate64(15, 15, program.loop_region_header_steps);
             try assembler.subtractImmediate64(16, 16, program.loop_region_header_steps);
         }
+        try pc_map.mark(assembler.position(), branch.origin);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
@@ -2862,9 +2938,10 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             const block_positions = try std.heap.page_allocator.alloc(usize, program.loop_region_blocks.len);
             defer std.heap.page_allocator.free(block_positions);
 
-            try emitBlockOperations(&assembler, &returns, program, program.loop_region_entry_operations_block);
+            try emitBlockOperations(&assembler, &returns, program, program.loop_region_entry_operations_block, &pc_map);
             for (program.loop_region_blocks, 0..) |region, region_index| {
                 block_positions[region_index] = assembler.position();
+                try pc_map.mark(block_positions[region_index], program.deopt_points[region.entry_deopt_index].exit_ip);
                 var region_invalidated: ?usize = null;
                 var region_checkpoint: ?usize = null;
                 var region_budget: ?usize = null;
@@ -2875,7 +2952,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     try assembler.compareImmediate64(16, region.steps);
                     region_budget = try assembler.branchConditionPlaceholder(.lo);
                 }
-                try emitBlockOperations(&assembler, &returns, program, region.block);
+                try emitBlockOperations(&assembler, &returns, program, region.block, &pc_map);
                 if (region.runtime_steps > region.steps) return error.UnsupportedChunk;
                 const remaining_steps = region.steps - region.runtime_steps;
                 if (remaining_steps != 0) {
@@ -2894,8 +2971,13 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                         loop_top,
                         entry_deopt_index,
                         &patches,
+                        &pc_map,
                     );
                 } else {
+                    try pc_map.mark(
+                        assembler.position(),
+                        if (region.condition_origin) |origin| @as(usize, origin) else null,
+                    );
                     try assembler.load64(9, 14, try slotOffset(region.condition));
                     try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
                     try assembler.compareRegister64(9, 10);
@@ -2908,6 +2990,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                         loop_top,
                         entry_deopt_index,
                         &patches,
+                        &pc_map,
                     );
                     try assembler.patchConditionBranch(false_edge, assembler.position());
                     try emitLoopRegionTarget(
@@ -2918,6 +3001,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                         loop_top,
                         entry_deopt_index,
                         &patches,
+                        &pc_map,
                     );
                 }
                 if (program.loop_region_dynamic_checks) {
@@ -2925,6 +3009,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     try assembler.patchConditionBranch(region_invalidated.?, region_poll_exit);
                     try assembler.patchConditionBranch(region_checkpoint.?, region_poll_exit);
                     try assembler.patchConditionBranch(region_budget.?, region_poll_exit);
+                    try pc_map.mark(region_poll_exit, program.deopt_points[region.entry_deopt_index].exit_ip);
                     try emitSideExit(
                         &assembler,
                         &returns,
@@ -2944,7 +3029,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             }
         } else {
             for (program.loop_exit_guards) |guard| {
-                try emitBlockOperations(&assembler, &returns, program, guard.entry_block);
+                try emitBlockOperations(&assembler, &returns, program, guard.entry_block, &pc_map);
+                try pc_map.mark(assembler.position(), guard.origin);
                 try assembler.load64(9, 14, try slotOffset(guard.condition));
                 try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
                 try assembler.compareRegister64(9, 10);
@@ -2952,71 +3038,85 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     if (guard.exit_on_true) .eq else .ne,
                 );
                 if (guard.exit_from != guard.entry_block)
-                    try emitBlockOperations(&assembler, &returns, program, guard.exit_block);
+                    try emitBlockOperations(&assembler, &returns, program, guard.exit_block, &pc_map);
                 try emitStepIncrement(&assembler, guard.exit_steps);
+                try pc_map.mark(assembler.position(), program.deopt_points[guard.exit_deopt_index].exit_ip);
                 try emitSideExit(
                     &assembler,
                     &returns,
                     guard.exit_deopt_index,
                     program.deopt_points[guard.exit_deopt_index].exit_ip,
                 );
-                try assembler.patchConditionBranch(continue_jump, assembler.position());
+                const continue_target = assembler.position();
+                try assembler.patchConditionBranch(continue_jump, continue_target);
+                try pc_map.mark(continue_target, null);
             }
             for (program.loop_latch_guards) |guard| {
-                try emitBlockOperations(&assembler, &returns, program, guard.entry_block);
+                try emitBlockOperations(&assembler, &returns, program, guard.entry_block, &pc_map);
+                try pc_map.mark(assembler.position(), guard.origin);
                 try assembler.load64(9, 14, try slotOffset(guard.condition));
                 try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
                 try assembler.compareRegister64(9, 10);
                 const continue_jump = try assembler.branchConditionPlaceholder(
                     if (guard.backedge_on_true) .eq else .ne,
                 );
-                try emitBlockOperations(&assembler, &returns, program, guard.operations_block);
+                try emitBlockOperations(&assembler, &returns, program, guard.operations_block, &pc_map);
                 try emitStepIncrement(&assembler, guard.backedge_steps);
                 try assembler.subtractImmediate64(15, 15, guard.backedge_steps);
                 try assembler.subtractImmediate64(16, 16, guard.backedge_steps);
+                try pc_map.mark(assembler.position(), program.deopt_points[entry_deopt_index].exit_ip);
                 try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
                 if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
                 const guarded_backedge = try assembler.branchPlaceholder();
                 try assembler.patchBranch(guarded_backedge, loop_top);
-                try assembler.patchConditionBranch(continue_jump, assembler.position());
+                const continue_target = assembler.position();
+                try assembler.patchConditionBranch(continue_jump, continue_target);
+                try pc_map.mark(continue_target, null);
             }
             if (program.loop_branches.len != 0) {
                 try emitStepIncrement(&assembler, branch.loop_prefix_steps);
                 try assembler.subtractImmediate64(15, 15, branch.loop_prefix_steps);
                 try assembler.subtractImmediate64(16, 16, branch.loop_prefix_steps);
                 for (program.loop_branches) |segment| {
-                    try emitBlockOperations(&assembler, &returns, program, segment.entry_block);
+                    try emitBlockOperations(&assembler, &returns, program, segment.entry_block, &pc_map);
+                    try pc_map.mark(assembler.position(), segment.origin);
                     try assembler.load64(9, 14, try slotOffset(segment.condition));
                     try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
                     try assembler.compareRegister64(9, 10);
                     const segment_false_jump = try assembler.branchConditionPlaceholder(.eq);
 
-                    try emitBlockOperations(&assembler, &returns, program, segment.true_block);
+                    try emitBlockOperations(&assembler, &returns, program, segment.true_block, &pc_map);
                     if (segment.emit_merge) if (segment.merge_block) |merge_block|
-                        try emitBlockOperations(&assembler, &returns, program, merge_block);
+                        try emitBlockOperations(&assembler, &returns, program, merge_block, &pc_map);
                     try emitStepIncrement(&assembler, segment.true_steps);
                     try assembler.subtractImmediate64(15, 15, segment.true_steps);
                     try assembler.subtractImmediate64(16, 16, segment.true_steps);
                     const true_join = try assembler.branchPlaceholder();
 
-                    try assembler.patchConditionBranch(segment_false_jump, assembler.position());
-                    try emitBlockOperations(&assembler, &returns, program, segment.false_block);
+                    const false_target = assembler.position();
+                    try assembler.patchConditionBranch(segment_false_jump, false_target);
+                    try pc_map.mark(false_target, null);
+                    try emitBlockOperations(&assembler, &returns, program, segment.false_block, &pc_map);
                     if (segment.emit_merge) if (segment.merge_block) |merge_block|
-                        try emitBlockOperations(&assembler, &returns, program, merge_block);
+                        try emitBlockOperations(&assembler, &returns, program, merge_block, &pc_map);
                     try emitStepIncrement(&assembler, segment.false_steps);
                     try assembler.subtractImmediate64(15, 15, segment.false_steps);
                     try assembler.subtractImmediate64(16, 16, segment.false_steps);
-                    try assembler.patchBranch(true_join, assembler.position());
+                    const join = assembler.position();
+                    try assembler.patchBranch(true_join, join);
+                    try pc_map.mark(join, null);
                 }
+                try pc_map.mark(assembler.position(), program.deopt_points[entry_deopt_index].exit_ip);
                 try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
                 if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
                 const backedge = try assembler.branchPlaceholder();
                 try assembler.patchBranch(backedge, loop_top);
             } else {
-                try emitBlockOperations(&assembler, &returns, program, branch.true_block.?);
+                try emitBlockOperations(&assembler, &returns, program, branch.true_block.?, &pc_map);
                 try emitStepIncrement(&assembler, branch.backedge_steps);
                 try assembler.subtractImmediate64(15, 15, branch.backedge_steps);
                 try assembler.subtractImmediate64(16, 16, branch.backedge_steps);
+                try pc_map.mark(assembler.position(), program.deopt_points[entry_deopt_index].exit_ip);
                 try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
                 if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
                 const backedge = try assembler.branchPlaceholder();
@@ -3024,7 +3124,9 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             }
         }
 
-        try assembler.patchConditionBranch(false_jump, assembler.position());
+        const false_target = assembler.position();
+        try assembler.patchConditionBranch(false_jump, false_target);
+        try pc_map.mark(false_target, program.deopt_points[branch.false_deopt_index].exit_ip);
         if (program.loop_region_blocks.len == 0) try emitStepIncrement(&assembler, branch.false_steps);
         try emitSideExit(&assembler, &returns, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
 
@@ -3032,39 +3134,50 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.patchConditionBranch(invalidated, poll_exit);
         try assembler.patchConditionBranch(checkpoint_exit, poll_exit);
         try assembler.patchConditionBranch(budget_exit, poll_exit);
+        try pc_map.mark(poll_exit, program.deopt_points[entry_deopt_index].exit_ip);
         try emitSideExit(&assembler, &returns, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
     } else {
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, &returns, program, operation);
+            try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
+        try pc_map.mark(assembler.position(), branch.origin);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
         if (branch.true_block) |block| for (program.operations) |operation|
-            if (operation.block == block) try emitOperation(&assembler, &returns, program, operation);
+            if (operation.block == block) try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
+        try pc_map.mark(assembler.position(), program.deopt_points[branch.true_deopt_index].exit_ip);
         try emitStepIncrement(&assembler, branch.true_steps);
         try emitSideExit(&assembler, &returns, branch.true_deopt_index, program.deopt_points[branch.true_deopt_index].exit_ip);
-        try assembler.patchConditionBranch(false_jump, assembler.position());
+        const false_target = assembler.position();
+        try assembler.patchConditionBranch(false_jump, false_target);
+        try pc_map.mark(false_target, program.deopt_points[branch.false_deopt_index].exit_ip);
         try emitStepIncrement(&assembler, branch.false_steps);
         try emitSideExit(&assembler, &returns, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
     } else if (program.branch) |branch| {
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, &returns, program, operation);
+            try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
+        try pc_map.mark(assembler.position(), branch.origin);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
-        try emitBlockOperations(&assembler, &returns, program, branch.true_block);
+        try emitBlockOperations(&assembler, &returns, program, branch.true_block, &pc_map);
+        try pc_map.mark(assembler.position(), branch.true_return_origin);
         try assembler.load64(9, 14, try slotOffset(branch.true_result));
         const done = try assembler.branchPlaceholder();
         try assembler.patchConditionBranch(false_jump, assembler.position());
-        try emitBlockOperations(&assembler, &returns, program, branch.false_block);
+        try emitBlockOperations(&assembler, &returns, program, branch.false_block, &pc_map);
+        try pc_map.mark(assembler.position(), branch.false_return_origin);
         try assembler.load64(9, 14, try slotOffset(branch.false_result));
         try assembler.patchBranch(done, assembler.position());
+        // The machine join is reached from two distinct return bytecodes.
+        try pc_map.mark(assembler.position(), null);
     } else {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
-            try emitOperation(&assembler, &returns, program, operation);
+            try emitMappedOperation(&assembler, &returns, program, operation, &pc_map);
+        try pc_map.mark(assembler.position(), if (program.completion_origin) |origin| @as(usize, origin) else null);
         try assembler.load64(9, 14, try slotOffset(program.result));
     }
     if (program.side_exit == null and program.side_exit_branch == null and program.finally_dispatch == null) {
@@ -3079,10 +3192,13 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try emitReturn(&assembler, &returns);
     }
     const epilogue_offset = assembler.position();
+    try pc_map.mark(epilogue_offset, null);
     try returns.patchAll(&assembler, epilogue_offset);
     try assembler.popPair(29, 30);
     try assembler.ret();
     try memory.publish(assembler.bytes().len);
+    const native_pc_map = try pc_map.finish();
+    errdefer if (native_pc_map) |metadata| metadata.destroy();
     const deopt = try jit.DeoptMetadata.create(
         std.heap.page_allocator,
         program.deopt_points,
@@ -3117,6 +3233,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .frame_slots = program.frame_slots,
         .required_numeric_slots = program.required_numeric_slots,
         .max_stack_depth = program.scratch_slots,
+        .native_pc_map = native_pc_map,
         .deopt = deopt,
         .stack_maps = stack_maps,
         .native_operations = native_operations,
@@ -3160,9 +3277,21 @@ fn emitBlockOperations(
     returns: *aarch64.ReturnBranches,
     program: *const Program,
     block: u32,
+    pc_map: *jit.NativePcMapBuilder,
 ) !void {
     for (program.operations) |operation| if (operation.block == block)
-        try emitOperation(assembler, returns, program, operation);
+        try emitMappedOperation(assembler, returns, program, operation, pc_map);
+}
+
+fn emitMappedOperation(
+    assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
+    program: *const Program,
+    operation: Operation,
+    pc_map: *jit.NativePcMapBuilder,
+) !void {
+    try pc_map.mark(assembler.position(), if (operation.origin) |origin| @as(usize, origin) else null);
+    try emitOperation(assembler, returns, program, operation);
 }
 
 fn emitOperation(
@@ -4146,9 +4275,53 @@ test "optimizer schedules edge assignments as parallel copies" {
     for (operations.items) |operation| {
         try std.testing.expectEqual(OperationKind.copy, operation.kind);
         try std.testing.expectEqual(@as(u32, 7), operation.block);
+        try std.testing.expect(operation.origin == null);
         values[operation.destination] = values[operation.lhs];
     }
     try std.testing.expectEqualSlices(u64, &.{ 20, 10, 20 }, values[0..3]);
+}
+
+test "observed optimizer code records exact operation branch and return PCs" {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = try makeExactBranchChunk(arena.allocator());
+
+    var ordinary = try compile(&chunk);
+    defer ordinary.deinit();
+    try std.testing.expect(ordinary.native_pc_map == null);
+
+    var observed = try compileObserved(&chunk);
+    defer observed.deinit();
+    const entries = observed.native_pc_map.?.entries;
+    try std.testing.expect(entries.len >= 6);
+    try std.testing.expectEqual(@as(u32, 0), entries[0].native_offset);
+    try std.testing.expect(entries[0].bytecode_offset == null);
+    var saw_comparison = false;
+    var saw_branch = false;
+    var saw_true_return = false;
+    var saw_false_return = false;
+    var saw_shared_plumbing = false;
+    for (entries, 0..) |entry, index| {
+        try std.testing.expect(entry.native_offset < observed.memory.executableBytes().len);
+        try std.testing.expect(entry.source == null);
+        if (index != 0) try std.testing.expect(entries[index - 1].native_offset < entry.native_offset);
+        if (entry.bytecode_offset) |bytecode_offset| switch (bytecode_offset) {
+            2 => saw_comparison = true,
+            3 => saw_branch = true,
+            7 => saw_true_return = true,
+            11 => saw_false_return = true,
+            else => {},
+        } else if (index != 0) {
+            saw_shared_plumbing = true;
+        }
+    }
+    try std.testing.expect(saw_comparison);
+    try std.testing.expect(saw_branch);
+    try std.testing.expect(saw_true_return);
+    try std.testing.expect(saw_false_return);
+    try std.testing.expect(saw_shared_plumbing);
 }
 
 test "optimizer lowerer produces portable guarded numeric operations" {
@@ -4603,7 +4776,7 @@ test "optimizer executes to_numeric through the native operation ABI" {
     try std.testing.expectEqual(descriptor.first_input, operation.lhs);
 
     if (jit.supported and builtin.cpu.arch == .aarch64) {
-        var compiled = try compileAarch64(&program);
+        var compiled = try compileAarch64(&program, false);
         defer compiled.deinit();
         const native_bytes = compiled.memory.executableBytes();
         try std.testing.expectEqual(@as(u32, 0xa9bf_7bfd), std.mem.readInt(u32, native_bytes[0..4], .little));
@@ -4757,7 +4930,7 @@ test "optimizer routes native to_numeric exceptions to an owned catch target" {
     try std.testing.expectEqual(@as(u16, 1), target.target_stack_depth);
 
     if (jit.supported and builtin.cpu.arch == .aarch64) {
-        var compiled = try compileAarch64(&program);
+        var compiled = try compileAarch64(&program, false);
         defer compiled.deinit();
         try std.testing.expect(compiled.has_side_exits);
         var slots = [_]u64{Value.num(7).rawBits()};
@@ -5509,11 +5682,12 @@ test "optimizer compiler side exits asymmetric control exactly" {
     _ = try asymmetric.emit(.load_const, two_value);
     _ = try asymmetric.emit(.ret, 0);
 
-    var compiled = try compile(&asymmetric);
+    var compiled = try compileObserved(&asymmetric);
     defer compiled.deinit();
     try std.testing.expect(compiled.manages_steps);
     try std.testing.expect(compiled.has_side_exits);
     try std.testing.expectEqual(@as(u32, 4), compiled.bytecode_steps);
+    const pc_map = compiled.native_pc_map orelse return error.TestUnexpectedResult;
     var slots = [_]Value{Value.num(-1)};
     var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
     var steps: u64 = 0;
@@ -5526,12 +5700,18 @@ test "optimizer compiler side exits asymmetric control exactly" {
     try std.testing.expectEqual(@as(usize, 4), frame.exit_ip);
     try std.testing.expectEqual(@as(u64, 4), steps);
     try std.testing.expectEqual(jit.DeoptPointKind.block_entry, compiled.deopt.?.points[frame.deopt_index].kind);
+    for (pc_map.entries) |entry| {
+        if (entry.bytecode_offset == @as(u32, @intCast(frame.exit_ip))) break;
+    } else return error.TestUnexpectedResult;
 
     slots[0] = Value.num(1);
     steps = 0;
     try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
     try std.testing.expectEqual(@as(usize, 8), frame.exit_ip);
     try std.testing.expectEqual(@as(u64, 4), steps);
+    for (pc_map.entries) |entry| {
+        if (entry.bytecode_offset == @as(u32, @intCast(frame.exit_ip))) break;
+    } else return error.TestUnexpectedResult;
 }
 
 test "optimizer compiler side exits with an active catch handler" {
@@ -5746,7 +5926,7 @@ test "optimizer compiler executes multiple loop iterations through OSR" {
         var race_program = try lowerLoopOsr(&chunk, &race_plan, std.testing.allocator);
         defer race_program.deinit();
         race_program.observe_loop_backedges = true;
-        var race_compiled = try compileAarch64(&race_program);
+        var race_compiled = try compileAarch64(&race_program, false);
         defer race_compiled.deinit();
         const race_osr = race_compiled.osr orelse return error.TestUnexpectedResult;
         const race_entry = race_osr.findEntry(4, 2, 0, 0, Value.undef().rawBits()) orelse
@@ -6267,7 +6447,7 @@ test "optimizer loop OSR executes independent branch latches" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = try makeTwoLatchLoopChunk(arena.allocator());
-    var compiled = try compile(&chunk);
+    var compiled = try compileObserved(&chunk);
     defer compiled.deinit();
     try std.testing.expectEqual(@as(u32, 19), compiled.bytecode_steps);
     const osr = compiled.osr orelse return error.TestUnexpectedResult;
@@ -6287,6 +6467,10 @@ test "optimizer loop OSR executes independent branch latches" {
     try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
     try std.testing.expectEqual(@as(usize, 37), frame.exit_ip);
     try std.testing.expectEqual(@as(u64, 80), steps);
+    const pc_map = compiled.native_pc_map orelse return error.TestUnexpectedResult;
+    for (pc_map.entries) |entry| {
+        if (entry.bytecode_offset == @as(u32, @intCast(frame.exit_ip))) break;
+    } else return error.TestUnexpectedResult;
     const exit = compiled.deopt.?.points[frame.deopt_index];
     try std.testing.expectEqual(@as(f64, 4), Value.fromRawBits(
         compiled.deopt.?.values[exit.first_value + 1].materialize(&slots, &scratch) orelse

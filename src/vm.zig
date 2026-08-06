@@ -5522,7 +5522,10 @@ fn loadOrCompileOptimizer(
     )) |claim_value| {
         var claim = claim_value;
         const tier_up_started_ns = tierTimingStarted(vm);
-        var compiled = optimizer_compiler.compile(chunk) catch |err| {
+        var compiled = (if (owner.nativeObservabilityEnabled())
+            optimizer_compiler.compileObserved(chunk)
+        else
+            optimizer_compiler.compile(chunk)) catch |err| {
             recordOptimizerTierUp(vm, tier_up_started_ns, false);
             if (err == error.OutOfMemory) {
                 chunk.optimizer_tier.invalidate();

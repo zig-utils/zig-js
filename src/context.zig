@@ -16416,6 +16416,9 @@ test "Context native observability captures published function identity" {
         \\  while (i < n) { total = total + i; i = i + 1; }
         \\  return total;
         \\}
+        \\observedNative(100); observedNative(100); observedNative(100);
+        \\observedNative(100); observedNative(100); observedNative(100);
+        \\observedNative(100); observedNative(100); observedNative(100);
         \\observedNative(100)
     );
     try std.testing.expectEqual(@as(f64, 4950), result.asNum());
@@ -16452,6 +16455,32 @@ test "Context native observability captures published function identity" {
             @intFromPtr(code.memory.executableBytes().ptr) + entry.native_offset,
         )) orelse return error.TestUnexpectedResult;
         defer exact.deinit();
+        try std.testing.expectEqual(bytecode_offset, exact.bytecode_offset.?);
+        try std.testing.expect(exact.source_is_exact);
+        try std.testing.expectEqual(inspector_location.script_id, exact.script_id);
+        try std.testing.expectEqualStrings(inspector_location.source_url, exact.source_url);
+        try std.testing.expectEqual(inspector_location.location.byte_offset, exact.source_byte_offset);
+        try std.testing.expectEqual(inspector_location.location.line, exact.source_line);
+        try std.testing.expectEqual(inspector_location.location.column, exact.source_column);
+        break;
+    } else return error.TestUnexpectedResult;
+
+    const optimized = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(jit.CodeKind.optimizer, optimized.kind);
+    const optimizer_map = optimized.native_pc_map orelse return error.TestUnexpectedResult;
+    for (optimizer_map.entries) |entry| {
+        const bytecode_offset = entry.bytecode_offset orelse continue;
+        const instruction: usize = bytecode_offset;
+        if (instruction >= chunk.debug_nodes.len) continue;
+        const node = chunk.debug_nodes[instruction] orelse continue;
+        const inspector_location = ctx.debug_statement_locations.get(node) orelse continue;
+        var exact = (try ctx.jit_owner.lookupNativeCode(
+            std.testing.allocator,
+            @intFromPtr(optimized.memory.executableBytes().ptr) + entry.native_offset,
+        )) orelse return error.TestUnexpectedResult;
+        defer exact.deinit();
+        try std.testing.expectEqual(jit.CodeKind.optimizer, exact.kind);
         try std.testing.expectEqual(bytecode_offset, exact.bytecode_offset.?);
         try std.testing.expect(exact.source_is_exact);
         try std.testing.expectEqual(inspector_location.script_id, exact.script_id);

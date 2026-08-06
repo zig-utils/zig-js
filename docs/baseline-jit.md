@@ -197,6 +197,14 @@ an explicit statement node remain source-unmapped instead of inheriting a
 guessed nearest line. The rows are passed to external publishers and returned
 by owned PC lookups. Disabled compilation does not allocate or retain a map.
 
+Observed optimizer compilation uses the same row format. Real SSA operations
+carry their graph's bytecode origin; branch tests, return arms, side exits,
+deopt polls, and loop controls use their explicit branch or recovery record.
+Hoisted operations retain their real origin, while synthetic edge-copy
+shuffles, path-dependent joins, and the shared epilogue reset attribution to
+unmapped. The VM resolves exact inspector statement sites for optimizer rows at
+the same pre-publication boundary used by baseline code.
+
 Retirement removes the registry row before unmapping executable memory. Once the
 last execution lease releases and reclamation completes, the old PC no longer
 resolves; address reuse therefore cannot inherit a stale function identity.
@@ -224,8 +232,8 @@ section. After the canonical frame prologue, LLDB must walk from the generated
 frame to the host binary. The production fixture also requires
 `_Unwind_Find_FDE` to resolve the exact live generated range and to stop
 resolving it after Context teardown; the debugger symbol must disappear at the
-same boundary. System-profiler image publication, optimizer/inline maps and
-source rows in the external object, logical async/deopt/Wasm stack
+same boundary. System-profiler image publication, inline-frame maps and source
+rows in the external object, logical async/deopt/Wasm stack
 reconstruction, and crash-path integration remain separate work; the
 process-local registry alone still does not make anonymous `MAP_JIT` leaves
 visible to an external profiler.
