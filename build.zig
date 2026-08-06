@@ -1930,6 +1930,34 @@ pub fn build(b: *std.Build) void {
         independent_suite_collect_step.dependOn(&missing_checkout.step);
     }
 
+    const independent_suite_recognizer_self_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-suite-recognizer.ts", "--self-test" });
+    const independent_suite_recognizer_step = b.step("independent-suite-recognizer", "Pair exact and source-hash-mutated Octane attribution diagnostics");
+    if (independent_suite_checkout) |checkout| {
+        if (independent_suite_zig_js_revision) |revision| {
+            if (b.option([]const u8, "independent-suite-recognizer-out", "Absolute recognizer artifact path outside the zig-js worktree")) |output| {
+                const recognizer = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-suite-recognizer.ts" });
+                recognizer.addArtifactArg(independent_suite_zig_js);
+                recognizer.addArgs(&.{
+                    checkout,
+                    revision,
+                    output,
+                    b.fmt("{d}", .{b.option(u32, "independent-suite-timeout-ms", "Timeout for each isolated child process") orelse 900_000}),
+                });
+                recognizer.step.dependOn(&run_independent_suite_audit.step);
+                independent_suite_recognizer_step.dependOn(&recognizer.step);
+            } else {
+                const missing_output = b.addFail("independent-suite-recognizer requires -Dindependent-suite-recognizer-out=<absolute-path-outside-zig-js>");
+                independent_suite_recognizer_step.dependOn(&missing_output.step);
+            }
+        } else {
+            const missing_revision = b.addFail("independent-suite-recognizer requires -Dindependent-suite-zig-js-revision=<40-hex-commit>");
+            independent_suite_recognizer_step.dependOn(&missing_revision.step);
+        }
+    } else {
+        const missing_checkout = b.addFail("independent-suite-recognizer requires -Dindependent-suite-checkout=<verified-out-of-tree-path>");
+        independent_suite_recognizer_step.dependOn(&missing_checkout.step);
+    }
+
     // Reproducible engine comparison against the system JavaScriptCore. The
     // runners are deliberately separate executables so zig-js's JSC-shaped C
     // exports cannot interpose on the real framework symbols. Home TypeScript
@@ -1968,6 +1996,7 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&run_independent_suite_audit_tests.step);
     comparison_harness_test_step.dependOn(&independent_suite_zig_js_self_test.step);
     comparison_harness_test_step.dependOn(&independent_suite_collector_self_test.step);
+    comparison_harness_test_step.dependOn(&independent_suite_recognizer_self_test.step);
     comparison_harness_test_step.dependOn(independent_suite_jsc_self_test_step);
     const optimizer_release_inventory_step = b.step("optimizer-release-inventory-check", "Validate the optimizer backend, correctness, sanitizer, and performance evidence");
     optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);

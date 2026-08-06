@@ -4,7 +4,7 @@ import { checked, readText, removeTemporaryDirectory, run, temporaryDirectory, w
 
 declare const __filename: string;
 
-const ROWS = ["richards", "regexp", "splay", "navier_stokes", "box2d"] as const;
+export const ROWS = ["richards", "regexp", "splay", "navier_stokes", "box2d"] as const;
 const ROW_LICENSES: Record<string, string[]> = {
   richards: ["BSD-3-Clause"],
   regexp: ["BSD-3-Clause"],
@@ -35,6 +35,7 @@ const TERMINATION_BOUNDARY = "external_process_timeout";
 const SUITE_REVISION = "570ad1ccfe86e3eecba0636c8f932ac08edec517";
 const SUITE_TREE = "e40d5c8489d05e384f32ed064d1f5286e9c236f3";
 type Mode = "score" | "attribution";
+export type SourceVariant = "exact" | "anti_specialization";
 type Completed = ReturnType<typeof run>;
 
 function requireValue(condition: boolean, message: string): void {
@@ -78,14 +79,17 @@ function parsePositive(value: unknown, label: string): number {
   return parsed;
 }
 
-function expectedArgv(runner: string, checkout: string, row: string, mode: Mode, revision: string): string[] {
-  return [runner, checkout, row, mode, revision];
+export function expectedArgv(runner: string, checkout: string, row: string, mode: Mode, revision: string, variant: SourceVariant = "exact"): string[] {
+  const argv = [runner, checkout, row, mode, revision];
+  if (variant === "anti_specialization") argv.push(variant);
+  return argv;
 }
 
-export function validateChild(child: any, expected: { runner: string; checkout: string; row: string; mode: Mode; revision: string }): void {
+export function validateChild(child: any, expected: { runner: string; checkout: string; row: string; mode: Mode; revision: string; variant?: SourceVariant }): void {
+  const variant = expected.variant || "exact";
   requireValue(child && child.schema_version === 1 && child.kind === "zig-js-independent-suite-sample", "child schema identity drift");
   requireValue(child.suite === "octane-2-retired" && child.suite_revision === SUITE_REVISION && child.suite_tree === SUITE_TREE, "child suite identity drift");
-  requireValue(child.row === expected.row && child.mode === expected.mode, "child row/mode identity drift");
+  requireValue(child.row === expected.row && child.mode === expected.mode && child.source_variant === variant, "child row/mode/source-variant identity drift");
   requireValue(JSON.stringify(child.licenses) === JSON.stringify(ROW_LICENSES[expected.row]), "child license identity drift");
   requireValue(["passed", "failed"].includes(child.status), "child status is invalid");
   requireValue(child.engine?.id === "zig-js" && child.engine.separate_process === true, "child engine isolation drift");
@@ -100,13 +104,21 @@ export function validateChild(child: any, expected: { runner: string; checkout: 
     requireValue(dependency.clean === true, `child ${dependency.id} worktree is not clean`);
   });
   requireValue(/^[0-9a-f]{64}$/.test(child.engine.executable_sha256 || ""), "child executable SHA-256 is invalid");
-  requireValue(JSON.stringify(child.engine.argv) === JSON.stringify(expectedArgv(expected.runner, expected.checkout, expected.row, expected.mode, expected.revision)), "child argv drift");
+  requireValue(JSON.stringify(child.engine.argv) === JSON.stringify(expectedArgv(expected.runner, expected.checkout, expected.row, expected.mode, expected.revision, variant)), "child argv drift");
   requireValue(JSON.stringify(child.engine.environment) === JSON.stringify(REQUIRED_ENVIRONMENT), "child environment drift");
-  requireValue(child.adapter?.id === "zig-js-octane-minimal-shell-v1" && child.adapter.source_transform === false, "child adapter boundary drift");
+  requireValue(child.adapter?.id === "zig-js-octane-minimal-shell-v1" && child.adapter.source_variant === variant, "child adapter boundary drift");
+  requireValue(child.adapter.source_transform === (variant === "anti_specialization"), "child source-transform boundary drift");
+  requireValue(child.adapter.transformation === (variant === "anti_specialization" ? "deterministic leading block comment after exact SHA-256 validation" : null), "child transformation identity drift");
   requireValue(JSON.stringify(child.adapter.host_globals) === JSON.stringify(["load", "print"]), "child host-global boundary drift");
   requireValue(child.adapter.evaluation_step_budget === EVALUATION_STEP_BUDGET, "child evaluation-step budget drift");
   requireValue(child.adapter.termination_boundary === TERMINATION_BOUNDARY, "child termination boundary drift");
-  requireValue(JSON.stringify(child.adapter.loaded_sources) === JSON.stringify([BASE_SOURCE, ROW_SOURCES[expected.row]]), "child source identity drift");
+  const expectedSources = [BASE_SOURCE, ROW_SOURCES[expected.row]];
+  requireValue(Array.isArray(child.adapter.loaded_sources) && child.adapter.loaded_sources.length === expectedSources.length, "child source inventory drift");
+  child.adapter.loaded_sources.forEach((source: any, index: number) => {
+    requireValue(source.path === expectedSources[index].path && source.sha256 === expectedSources[index].sha256, "child pinned source identity drift");
+    requireValue(/^[0-9a-f]{64}$/.test(source.evaluated_sha256 || ""), "child evaluated source SHA-256 is invalid");
+    requireValue((source.evaluated_sha256 === source.sha256) === (variant === "exact"), "child evaluated source variant drift");
+  });
   requireValue(Array.isArray(child.raw_samples) && child.raw_samples.length === 1, "child raw-sample cardinality drift");
   const raw = child.raw_samples[0];
   requireValue(raw.index === 0 && raw.mode === expected.mode && raw.instrumentation_enabled === (expected.mode === "attribution"), "child raw-sample identity drift");
@@ -395,9 +407,9 @@ function syntheticChild(row: string, mode: Mode, status: "passed" | "failed", ru
   ];
   return {
     schema_version: 1, kind: "zig-js-independent-suite-sample", suite: "octane-2-retired", suite_revision: SUITE_REVISION, suite_tree: SUITE_TREE,
-    row, licenses: ROW_LICENSES[row], mode, publication_status: "diagnostic_single_sample",
+    row, licenses: ROW_LICENSES[row], mode, source_variant: "exact", publication_status: "diagnostic_single_sample",
     engine: { id: "zig-js", executable_path: runner, executable_sha256: "b".repeat(64), source_revision: revision, source_dependencies: sourceDependencies, version_output: "fixture", argv: expectedArgv(runner, checkout, row, mode, revision), environment: REQUIRED_ENVIRONMENT, separate_process: true },
-    adapter: { id: "zig-js-octane-minimal-shell-v1", host_globals: ["load", "print"], source_transform: false, evaluation_step_budget: EVALUATION_STEP_BUDGET, termination_boundary: TERMINATION_BOUNDARY, loaded_sources: [BASE_SOURCE, ROW_SOURCES[row]] },
+    adapter: { id: "zig-js-octane-minimal-shell-v1", host_globals: ["load", "print"], source_transform: false, source_variant: "exact", transformation: null, evaluation_step_budget: EVALUATION_STEP_BUDGET, termination_boundary: TERMINATION_BOUNDARY, loaded_sources: [BASE_SOURCE, ROW_SOURCES[row]].map((source) => ({ ...source, evaluated_sha256: source.sha256 })) },
     status, failure: passed ? null : "fixture failure", skip_reason: null,
     upstream_outputs: passed ? [...ROW_RESULTS[row].map((name) => ({ kind: "result", name, value: "100" })), { kind: "score", name: "selected-geometric-aggregate", value: "200" }] : [{ kind: "error", name: ROW_RESULTS[row][0], value: "fixture failure" }],
     auxiliary_outputs: [], raw_samples: [{ index: 0, mode, instrumentation_enabled: mode === "attribution", outer_wall_ns: 100, cpu_user_ns: 80, cpu_system_ns: 20, peak_rss_bytes_before: 10, peak_rss_bytes_after: 20 }],

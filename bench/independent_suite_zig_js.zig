@@ -21,12 +21,14 @@ const RowSpec = octane.RowSpec;
 const LoadedSource = struct {
     path: []const u8,
     sha256: []const u8,
+    evaluated_sha256: [64]u8,
     bytes: []const u8,
 };
 
 const SourceIdentity = struct {
     path: []const u8,
     sha256: []const u8,
+    evaluated_sha256: []const u8,
 };
 
 const SourceDependencyIdentity = struct {
@@ -50,6 +52,7 @@ const VerifiedSourceIdentity = struct {
 
 const EventKind = enum { result, @"error", score };
 const RunMode = enum { score, attribution };
+const SourceVariant = enum { exact, anti_specialization };
 
 const ProtocolEvent = struct {
     kind: EventKind,
@@ -183,12 +186,15 @@ const Report = struct {
     row: []const u8,
     licenses: []const []const u8,
     mode: RunMode,
+    source_variant: SourceVariant,
     publication_status: []const u8 = "diagnostic_single_sample",
     engine: EngineIdentity,
     adapter: struct {
         id: []const u8 = "zig-js-octane-minimal-shell-v1",
         host_globals: []const []const u8 = &.{ "load", "print" },
-        source_transform: bool = false,
+        source_transform: bool,
+        source_variant: SourceVariant,
+        transformation: ?[]const u8,
         evaluation_step_budget: []const u8 = "18446744073709551615",
         termination_boundary: []const u8 = "external_process_timeout",
         loaded_sources: []const SourceIdentity,
@@ -226,7 +232,23 @@ fn readPinnedSource(gpa: std.mem.Allocator, io: std.Io, checkout: []const u8, pa
         std.debug.print("independent-suite runner: {s} SHA-256 drift: expected {s}, got {s}\n", .{ path, expected_sha256, actual });
         return error.SourceChecksumMismatch;
     }
-    return .{ .path = path, .sha256 = expected_sha256, .bytes = bytes };
+    return .{ .path = path, .sha256 = expected_sha256, .evaluated_sha256 = actual, .bytes = bytes };
+}
+
+fn applySourceVariant(gpa: std.mem.Allocator, source: LoadedSource, variant: SourceVariant) !LoadedSource {
+    if (variant == .exact) return source;
+    const prefix = try std.fmt.allocPrint(gpa, "/* zig-js independent-suite anti-specialization source-hash variant: {s} */\n", .{source.path});
+    defer gpa.free(prefix);
+    const bytes = try gpa.alloc(u8, prefix.len + source.bytes.len);
+    @memcpy(bytes[0..prefix.len], prefix);
+    @memcpy(bytes[prefix.len..], source.bytes);
+    gpa.free(source.bytes);
+    return .{
+        .path = source.path,
+        .sha256 = source.sha256,
+        .evaluated_sha256 = digestHex(bytes),
+        .bytes = bytes,
+    };
 }
 
 fn nativeState(self: *js.Interpreter) ?*AdapterState {
@@ -564,6 +586,7 @@ fn runSample(
     sources: [2]LoadedSource,
     own_sources: bool,
     mode: RunMode,
+    source_variant: SourceVariant,
     revision: []const u8,
     source_dependencies: []const SourceDependencyIdentity,
     argv: []const []const u8,
@@ -621,8 +644,8 @@ fn runSample(
         admissions[index] = .{ .name = name, .value = snapshot.admissions.count(reason) };
 
     const loaded_sources = [_]SourceIdentity{
-        .{ .path = sources[0].path, .sha256 = sources[0].sha256 },
-        .{ .path = sources[1].path, .sha256 = sources[1].sha256 },
+        .{ .path = sources[0].path, .sha256 = sources[0].sha256, .evaluated_sha256 = &sources[0].evaluated_sha256 },
+        .{ .path = sources[1].path, .sha256 = sources[1].sha256, .evaluated_sha256 = &sources[1].evaluated_sha256 },
     };
     const raw_samples = [_]RawSample{.{
         .index = 0,
@@ -645,6 +668,7 @@ fn runSample(
         .row = row.id,
         .licenses = row.licenses,
         .mode = mode,
+        .source_variant = source_variant,
         .engine = .{
             .executable_path = identity.path,
             .executable_sha256 = identity.sha256,
@@ -653,7 +677,12 @@ fn runSample(
             .argv = argv,
             .environment = &environment,
         },
-        .adapter = .{ .loaded_sources = &loaded_sources },
+        .adapter = .{
+            .source_transform = source_variant == .anti_specialization,
+            .source_variant = source_variant,
+            .transformation = if (source_variant == .anti_specialization) "deterministic leading block comment after exact SHA-256 validation" else null,
+            .loaded_sources = &loaded_sources,
+        },
         .status = if (validation.valid) "passed" else "failed",
         .failure = state.failure,
         .upstream_outputs = state.events.items,
@@ -720,17 +749,30 @@ fn selfTest(gpa: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, argv: []
         \\};
     ;
     const fixture_workload = "var fixtureWorkloadBytesAreUnchanged = 1;";
+    const probe_bytes = try gpa.dupe(u8, fixture_workload);
+    const exact_probe_sha256 = digestHex(probe_bytes);
+    const mutated_probe = try applySourceVariant(gpa, .{
+        .path = fixture_row.path,
+        .sha256 = "self-test",
+        .evaluated_sha256 = exact_probe_sha256,
+        .bytes = probe_bytes,
+    }, .anti_specialization);
+    defer gpa.free(mutated_probe.bytes);
+    if (std.mem.eql(u8, &mutated_probe.evaluated_sha256, &exact_probe_sha256) or
+        !std.mem.endsWith(u8, mutated_probe.bytes, fixture_workload))
+        return error.SourceVariantSelfTestFailed;
     const sources = [2]LoadedSource{
-        .{ .path = base_path, .sha256 = "self-test", .bytes = fixture_base },
-        .{ .path = fixture_row.path, .sha256 = "self-test", .bytes = fixture_workload },
+        .{ .path = base_path, .sha256 = "self-test", .evaluated_sha256 = "0000000000000000000000000000000000000000000000000000000000000000".*, .bytes = fixture_base },
+        .{ .path = fixture_row.path, .sha256 = "self-test", .evaluated_sha256 = "1111111111111111111111111111111111111111111111111111111111111111".*, .bytes = fixture_workload },
     };
     const fixture_dependencies = [_]SourceDependencyIdentity{
         .{ .id = "zig-regex", .path = "/self-test/zig-regex", .revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .repository = "https://github.com/zig-utils/zig-regex.git", .clean = true },
         .{ .id = "zig-gc", .path = "/self-test/zig-gc", .revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .repository = "https://github.com/zig-utils/zig-gc.git", .clean = true },
     };
-    const scored = try runSample(gpa, io, writer, fixture_row, sources, false, .score, "self-test", &fixture_dependencies, argv);
-    const attributed = try runSample(gpa, io, writer, fixture_row, sources, false, .attribution, "self-test", &fixture_dependencies, argv);
-    return scored and attributed;
+    const scored = try runSample(gpa, io, writer, fixture_row, sources, false, .score, .exact, "self-test", &fixture_dependencies, argv);
+    const attributed = try runSample(gpa, io, writer, fixture_row, sources, false, .attribution, .exact, "self-test", &fixture_dependencies, argv);
+    const mutated = try runSample(gpa, io, writer, fixture_row, sources, false, .attribution, .anti_specialization, "self-test", &fixture_dependencies, argv);
+    return scored and attributed and mutated;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -743,13 +785,13 @@ pub fn main(init: std.process.Init) !void {
         var discard_buffer: [4096]u8 = undefined;
         var discarding = std.Io.Writer.Discarding.init(&discard_buffer);
         const valid = try selfTest(init.gpa, init.io, &discarding.writer, argv);
-        try stdout.writeAll("independent-suite zig-js adapter self-test: score and attribution modes passed\n");
+        try stdout.writeAll("independent-suite zig-js adapter self-test: score, attribution, and anti-specialization modes passed\n");
         try stdout.flush();
         if (!valid) std.process.exit(1);
         return;
     }
-    if (argv.len != 5) {
-        std.debug.print("usage: independent-suite-zig-js <verified-octane-checkout> <row> <score|attribution> <zig-js-revision>\nrows: richards, regexp, splay, navier_stokes, box2d\n", .{});
+    if (argv.len != 5 and argv.len != 6) {
+        std.debug.print("usage: independent-suite-zig-js <verified-octane-checkout> <row> <score|attribution> <zig-js-revision> [exact|anti_specialization]\nrows: richards, regexp, splay, navier_stokes, box2d\n", .{});
         std.process.exit(2);
     }
     const row = rowById(argv[2]) orelse {
@@ -760,20 +802,30 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("independent-suite runner: unknown mode '{s}'\n", .{argv[3]});
         std.process.exit(2);
     };
+    const source_variant = if (argv.len == 6) std.meta.stringToEnum(SourceVariant, argv[5]) orelse {
+        std.debug.print("independent-suite runner: unknown source variant '{s}'\n", .{argv[5]});
+        std.process.exit(2);
+    } else SourceVariant.exact;
+    if (source_variant == .anti_specialization and mode != .attribution) {
+        std.debug.print("independent-suite runner: anti-specialization variants are attribution-only diagnostics\n", .{});
+        std.process.exit(2);
+    }
     try verifyEnvironment(init.environ_map);
     var source_identity = try verifySourceIdentity(init.gpa, init.io, argv[4]);
     defer source_identity.deinit(init.gpa);
     const checkout = try std.Io.Dir.cwd().realPathFileAlloc(init.io, argv[1], init.gpa);
     defer init.gpa.free(checkout);
     var sources_handed_off = false;
-    const base = try readPinnedSource(init.gpa, init.io, checkout, base_path, base_sha256);
+    var base = try readPinnedSource(init.gpa, init.io, checkout, base_path, base_sha256);
     errdefer if (!sources_handed_off) init.gpa.free(base.bytes);
-    const workload = try readPinnedSource(init.gpa, init.io, checkout, row.path, row.sha256);
+    base = try applySourceVariant(init.gpa, base, source_variant);
+    var workload = try readPinnedSource(init.gpa, init.io, checkout, row.path, row.sha256);
     errdefer if (!sources_handed_off) init.gpa.free(workload.bytes);
+    workload = try applySourceVariant(init.gpa, workload, source_variant);
     const sources = [2]LoadedSource{ base, workload };
     // `runSample` owns both buffers from this point, including on error.
     sources_handed_off = true;
-    const valid = try runSample(init.gpa, init.io, stdout, row.*, sources, true, mode, argv[4], &source_identity.dependencies, argv);
+    const valid = try runSample(init.gpa, init.io, stdout, row.*, sources, true, mode, source_variant, argv[4], &source_identity.dependencies, argv);
     try stdout.flush();
     if (!valid) std.process.exit(1);
 }

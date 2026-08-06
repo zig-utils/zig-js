@@ -444,6 +444,25 @@ the five applicable rows by sample index, and every score and attribution
 sample is a fresh adapter process. Attribution samples remain separate from the
 uninstrumented score samples.
 
+Anti-specialization evidence is a distinct attribution-only diagnostic. The
+runner first verifies the exact pinned upstream bytes, then prepends a
+deterministic block comment to each evaluated source so its SHA-256 and source
+offsets differ without changing its AST or workload. Scored sources are never
+transformed. The recognizer audit rejects Octane revisions, hashes, and
+distinctive identifiers anywhere under `src/`, then requires every exact and
+mutated pair to pass the same output contract and select identical nonzero
+execution-tier and bytecode-admission sets:
+
+```sh
+zig build independent-suite-recognizer \
+  -Dindependent-suite-checkout=/absolute/outside/zig-js/octane \
+  -Dindependent-suite-zig-js-revision=$(git rev-parse HEAD) \
+  -Dindependent-suite-recognizer-out=/tmp/zig-js-octane-recognizer.json
+```
+
+The artifact retains both complete child reports and raw transports. It is
+diagnostic recognizer evidence, never a performance result.
+
 The schema-1 collection retains each child's raw stdout, parsed JSON when
 available, stderr, exit status, timeout state, and contract-validation result.
 Failed and malformed children are never discarded. Dispersion is the median,
