@@ -17,6 +17,9 @@ pub const NativePcLocation = native_observability.PcLocation;
 pub const NativeSourcePosition = native_observability.SourcePosition;
 pub const NativeUnwindPlan = native_observability.UnwindPlan;
 pub const NativeCodePublicationError = native_observability.PublishError;
+pub const NativeSignalSafeBuffers = native_observability.SignalSafeBuffers;
+pub const NativeSignalSafeSnapshot = native_observability.SignalSafeSnapshot;
+pub const NativeSignalSafeLookupError = native_observability.SignalSafeLookupError;
 
 /// Opt into the process-global GDB/LLDB JIT descriptor adapter. Keeping the
 /// import behind a lazily analyzed function prevents the embeddable library
@@ -701,6 +704,8 @@ const NativeCodeMetadata = struct {
     source_line: usize,
     source_column: usize,
     pc_locations: []native_observability.PcLocation,
+    signal_safe_registry: *native_observability.SignalSafeRegistry,
+    signal_safe_registry_node: native_observability.SignalSafeRegistryNode,
     publication: ?native_observability.Publication = null,
 
     fn create(
@@ -711,6 +716,7 @@ const NativeCodeMetadata = struct {
         unwind: native_observability.UnwindPlan,
         origin: NativeCodeOrigin,
         pc_locations: []const native_observability.PcLocation,
+        signal_safe_registry: *native_observability.SignalSafeRegistry,
         publisher: ?NativeCodePublisher,
     ) NativeCodePublicationError!*NativeCodeMetadata {
         const metadata = try allocator.create(NativeCodeMetadata);
@@ -747,35 +753,46 @@ const NativeCodeMetadata = struct {
             .source_line = origin.source_line,
             .source_column = origin.source_column,
             .pc_locations = owned_pc_locations,
+            .signal_safe_registry = signal_safe_registry,
+            .signal_safe_registry_node = undefined,
         };
+        const artifact: native_observability.Artifact = .{
+            .kind = kind,
+            .pc_start = pc_start,
+            .code = bytes,
+            .symbol_name = symbol_name,
+            .function_name = function_name,
+            .function_identity = origin.function_identity,
+            .script_id = origin.script_id,
+            .source_url = source_url,
+            .source_byte_offset = origin.source_byte_offset,
+            .source_line = origin.source_line,
+            .source_column = origin.source_column,
+            .pc_locations = owned_pc_locations,
+            .unwind = unwind,
+        };
+        metadata.signal_safe_registry_node = .{ .artifact_id = artifact_id, .artifact = artifact };
+        signal_safe_registry.register(&metadata.signal_safe_registry_node);
+        errdefer signal_safe_registry.unregister(&metadata.signal_safe_registry_node);
         if (publisher) |external| {
-            metadata.publication = try external.publish(allocator, .{
-                .kind = kind,
-                .pc_start = pc_start,
-                .code = bytes,
-                .symbol_name = symbol_name,
-                .function_name = function_name,
-                .function_identity = origin.function_identity,
-                .script_id = origin.script_id,
-                .source_url = source_url,
-                .source_byte_offset = origin.source_byte_offset,
-                .source_line = origin.source_line,
-                .source_column = origin.source_column,
-                .pc_locations = owned_pc_locations,
-                .unwind = unwind,
-            });
+            metadata.publication = try external.publish(allocator, artifact);
         }
         return metadata;
     }
 
     fn destroy(self: *NativeCodeMetadata) void {
         const allocator = self.allocator;
+        self.signal_safe_registry.unregister(&self.signal_safe_registry_node);
         if (self.publication) |*publication| publication.deinit();
         allocator.free(self.symbol_name);
         allocator.free(self.function_name);
         allocator.free(self.source_url);
         allocator.free(self.pc_locations);
         allocator.destroy(self);
+    }
+
+    fn markRetired(self: *NativeCodeMetadata) void {
+        self.signal_safe_registry_node.retired.store(true, .release);
     }
 
     fn snapshot(
@@ -1209,7 +1226,7 @@ pub const CompiledCode = struct {
     pub fn deinit(self: *CompiledCode) void {
         // Publication backends must unregister before the executable address can
         // be reused. The owned metadata boundary preserves that ordering even
-        // though the current registry is process-local.
+        // though the crash-path registry is scoped to this Owner.
         if (self.native_code_metadata) |metadata| metadata.destroy();
         self.memory.deinit();
         if (self.deopt) |metadata| metadata.destroy();
@@ -1261,6 +1278,7 @@ pub const Owner = struct {
     allocator: ?std.mem.Allocator = null,
     native_observability: bool = false,
     native_code_publisher: ?NativeCodePublisher = null,
+    signal_safe_registry: std.atomic.Value(usize) = .init(0),
     /// Protected by `lock`; zero is reserved for artifacts without metadata.
     next_native_artifact_id: u64 = 1,
     lock: std.atomic.Mutex = .unlocked,
@@ -1419,6 +1437,19 @@ pub const Owner = struct {
 
     pub fn nativeCodePublisher(self: *const Owner) ?NativeCodePublisher {
         return self.native_code_publisher;
+    }
+
+    /// Resolve an observed generated PC without locks, allocation, or borrowed
+    /// result storage. The caller owns every returned string buffer.
+    pub fn lookupNativeCodeSignalSafe(
+        self: *Owner,
+        pc: usize,
+        buffers: NativeSignalSafeBuffers,
+    ) NativeSignalSafeLookupError!?NativeSignalSafeSnapshot {
+        const registry_address = self.signal_safe_registry.load(.acquire);
+        if (registry_address == 0) return null;
+        const registry: *native_observability.SignalSafeRegistry = @ptrFromInt(registry_address);
+        return registry.lookup(pc, buffers);
     }
 
     /// Atomically adopt a mapping, register its tier for later invalidation,
@@ -1677,6 +1708,7 @@ pub const Owner = struct {
         for (self.codes.items) |code| {
             if (codeWatchesShape(code, shape_token)) {
                 _ = code.artifact_generation.fetchAdd(1, .acq_rel);
+                if (code.native_code_metadata) |metadata| metadata.markRetired();
                 if (code.baseline_tier) |tier| tier.invalidate();
                 if (code.optimizer_tier) |tier| tier.invalidate();
                 retired_codes.appendAssumeCapacity(code);
@@ -1730,6 +1762,11 @@ pub const Owner = struct {
         self.tiers.deinit(allocator);
         self.optimizer_tiers.deinit(allocator);
         self.execution_epochs.deinit(allocator);
+        const signal_safe_registry = self.signal_safe_registry.load(.monotonic);
+        if (signal_safe_registry != 0) {
+            const registry: *native_observability.SignalSafeRegistry = @ptrFromInt(signal_safe_registry);
+            allocator.destroy(registry);
+        }
         self.lock.unlock();
         self.* = .{};
     }
@@ -1770,6 +1807,15 @@ pub const Owner = struct {
         if (!self.native_observability) return null;
         const artifact_id = self.next_native_artifact_id;
         if (artifact_id == std.math.maxInt(u64)) return error.NativeArtifactIdExhausted;
+        const signal_safe_registry_address = self.signal_safe_registry.load(.monotonic);
+        const signal_safe_registry = if (signal_safe_registry_address != 0)
+            @as(*native_observability.SignalSafeRegistry, @ptrFromInt(signal_safe_registry_address))
+        else registry: {
+            const value = try allocator.create(native_observability.SignalSafeRegistry);
+            value.* = .{};
+            self.signal_safe_registry.store(@intFromPtr(value), .release);
+            break :registry value;
+        };
         const metadata = try NativeCodeMetadata.create(
             allocator,
             artifact_id,
@@ -1778,6 +1824,7 @@ pub const Owner = struct {
             compiled.unwind,
             origin,
             pc_locations,
+            signal_safe_registry,
             self.native_code_publisher,
         );
         self.next_native_artifact_id = artifact_id + 1;
@@ -1822,7 +1869,10 @@ pub const Owner = struct {
         std.debug.assert(!old_epoch.retired and old_epoch.codes.items.len == 0);
         self.recordInvalidation();
         _ = self.full_invalidation_events.fetchAdd(1, .monotonic);
-        for (self.codes.items) |code| _ = code.artifact_generation.fetchAdd(1, .acq_rel);
+        for (self.codes.items) |code| {
+            _ = code.artifact_generation.fetchAdd(1, .acq_rel);
+            if (code.native_code_metadata) |metadata| metadata.markRetired();
+        }
         for (self.tiers.items) |tier| tier.invalidate();
         self.tiers.clearRetainingCapacity();
         for (self.optimizer_tiers.items) |tier| tier.invalidate();
@@ -1846,7 +1896,10 @@ pub const Owner = struct {
         self.acquireLock();
         self.recordInvalidation();
         _ = self.full_invalidation_events.fetchAdd(1, .monotonic);
-        for (self.codes.items) |code| _ = code.artifact_generation.fetchAdd(1, .acq_rel);
+        for (self.codes.items) |code| {
+            _ = code.artifact_generation.fetchAdd(1, .acq_rel);
+            if (code.native_code_metadata) |metadata| metadata.markRetired();
+        }
         self.lock.unlock();
         while (!self.allExecutionEpochsIdle()) std.Thread.yield() catch {};
         self.acquireLock();
@@ -2510,6 +2563,15 @@ test "native PC registry follows live and retired executable lifetime" {
     try std.testing.expectEqual(@as(usize, 4), live.source_line);
     try std.testing.expectEqual(@as(usize, 9), live.source_column);
     try std.testing.expect((try owner.lookupNativeCode(std.testing.allocator, pc_end)) == null);
+    var signal_symbol: [64]u8 = undefined;
+    var signal_function: [64]u8 = undefined;
+    var signal_source: [64]u8 = undefined;
+    const signal_live = (try owner.lookupNativeCodeSignalSafe(pc_start, .{
+        .symbol_name = &signal_symbol,
+        .function_name = &signal_function,
+        .source_url = &signal_source,
+    })) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!signal_live.retired);
 
     var execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
     owner.clear();
@@ -2518,8 +2580,19 @@ test "native PC registry follows live and retired executable lifetime" {
     defer retired.deinit();
     try std.testing.expect(retired.retired);
     try std.testing.expectEqual(live.artifact_id, retired.artifact_id);
+    const signal_retired = (try owner.lookupNativeCodeSignalSafe(pc_start, .{
+        .symbol_name = &signal_symbol,
+        .function_name = &signal_function,
+        .source_url = &signal_source,
+    })) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(signal_retired.retired);
     execution.release();
     try std.testing.expect((try owner.lookupNativeCode(std.testing.allocator, pc_start)) == null);
+    try std.testing.expect((try owner.lookupNativeCodeSignalSafe(pc_start, .{
+        .symbol_name = &signal_symbol,
+        .function_name = &signal_function,
+        .source_url = &signal_source,
+    })) == null);
     // Both snapshots are owned copies and remain valid after mapping reclamation.
     try std.testing.expectEqualStrings("hot loop", live.function_name);
     try std.testing.expectEqualStrings(live.symbol_name, retired.symbol_name);
@@ -2562,8 +2635,17 @@ test "disabled native observability retains no artifact metadata" {
     );
     compilation.release();
     try std.testing.expect(code.native_code_metadata == null);
+    try std.testing.expectEqual(@as(usize, 0), owner.signal_safe_registry.load(.acquire));
     const pc = @intFromPtr(code.memory.executableBytes().ptr);
     try std.testing.expect((try owner.lookupNativeCode(std.testing.allocator, pc)) == null);
+    var symbol_buffer: [64]u8 = undefined;
+    var function_buffer: [64]u8 = undefined;
+    var source_buffer: [64]u8 = undefined;
+    try std.testing.expect((try owner.lookupNativeCodeSignalSafe(pc, .{
+        .symbol_name = &symbol_buffer,
+        .function_name = &function_buffer,
+        .source_url = &source_buffer,
+    })) == null);
 }
 
 test "native publisher and lookup receive exact PC source rows" {
@@ -2661,6 +2743,32 @@ test "native publisher and lookup receive exact PC source rows" {
     try std.testing.expectEqual(@as(usize, 9), exact.source_line);
     try std.testing.expectEqual(@as(usize, 5), exact.source_column);
 
+    var signal_symbol: [64]u8 = undefined;
+    var signal_function: [64]u8 = undefined;
+    var signal_source: [64]u8 = undefined;
+    const signal_exact = (try owner.lookupNativeCodeSignalSafe(pc_start + 4, .{
+        .symbol_name = &signal_symbol,
+        .function_name = &signal_function,
+        .source_url = &signal_source,
+    })) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 1), signal_exact.artifact_id);
+    try std.testing.expectEqual(CodeKind.baseline, signal_exact.kind);
+    try std.testing.expectEqual(@as(usize, 4), signal_exact.native_offset);
+    try std.testing.expectEqualStrings("zig_js_baseline_1_publisherFixture", signal_exact.symbol_name);
+    try std.testing.expectEqualStrings("publisherFixture", signal_exact.function_name);
+    try std.testing.expectEqualStrings("publisher.js", signal_exact.source_url);
+    try std.testing.expectEqual(@as(?u32, 7), signal_exact.bytecode_offset);
+    try std.testing.expect(signal_exact.source_is_exact);
+    try std.testing.expectEqual(@as(usize, 81), signal_exact.source_byte_offset);
+    try std.testing.expectEqual(@as(usize, 9), signal_exact.source_line);
+    try std.testing.expectEqual(@as(usize, 5), signal_exact.source_column);
+    var short_symbol: [1]u8 = undefined;
+    try std.testing.expectError(error.NativeIdentityBufferTooSmall, owner.lookupNativeCodeSignalSafe(pc_start + 4, .{
+        .symbol_name = &short_symbol,
+        .function_name = &signal_function,
+        .source_url = &signal_source,
+    }));
+
     var plumbing = (try owner.lookupNativeCode(std.testing.allocator, pc_start + 8)) orelse
         return error.TestUnexpectedResult;
     defer plumbing.deinit();
@@ -2671,6 +2779,79 @@ test "native publisher and lookup receive exact PC source rows" {
 
     owner.deinit();
     try std.testing.expect(capture.unpublished);
+    try std.testing.expect((try owner.lookupNativeCodeSignalSafe(pc_start + 4, .{
+        .symbol_name = &signal_symbol,
+        .function_name = &signal_function,
+        .source_url = &signal_source,
+    })) == null);
+}
+
+test "signal-safe registry publishes its first artifact atomically" {
+    if (!supported or builtin.cpu.arch != .aarch64 or builtin.single_threaded) return error.SkipZigTest;
+
+    var owner = Owner.initWithOptions(std.testing.allocator, .{ .native_observability = true });
+    defer owner.deinit();
+    var compiled = try compileConstantEntry(0x503);
+    var compiled_owned = true;
+    errdefer if (compiled_owned) compiled.deinit();
+    const pc = @intFromPtr(compiled.memory.executableBytes().ptr);
+
+    const Shared = struct {
+        owner: *Owner,
+        pc: usize,
+        stop: std.atomic.Value(bool) = .init(false),
+        failed: std.atomic.Value(bool) = .init(false),
+        missing_seen: std.atomic.Value(usize) = .init(0),
+        artifact_seen: std.atomic.Value(usize) = .init(0),
+
+        fn lookup(shared: *@This()) void {
+            var symbol_buffer: [64]u8 = undefined;
+            var function_buffer: [64]u8 = undefined;
+            var source_buffer: [1]u8 = undefined;
+            while (!shared.stop.load(.acquire)) {
+                const snapshot = shared.owner.lookupNativeCodeSignalSafe(shared.pc, .{
+                    .symbol_name = &symbol_buffer,
+                    .function_name = &function_buffer,
+                    .source_url = &source_buffer,
+                }) catch {
+                    shared.failed.store(true, .release);
+                    return;
+                };
+                if (snapshot) |value| {
+                    if (value.artifact_id != 1 or
+                        !std.mem.eql(u8, value.function_name, "firstPublication"))
+                        shared.failed.store(true, .release);
+                    _ = shared.artifact_seen.fetchAdd(1, .monotonic);
+                } else {
+                    _ = shared.missing_seen.fetchAdd(1, .monotonic);
+                }
+            }
+        }
+    };
+    var shared = Shared{ .owner = &owner, .pc = pc };
+    var thread = try std.Thread.spawn(.{}, Shared.lookup, .{&shared});
+    var thread_joined = false;
+    defer if (!thread_joined) {
+        shared.stop.store(true, .release);
+        thread.join();
+    };
+    while (shared.missing_seen.load(.acquire) == 0 and !shared.failed.load(.acquire))
+        std.atomic.spinLoopHint();
+
+    var tier = Tier{};
+    var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    defer compilation.release();
+    _ = try owner.adoptAndPublishObserved(&tier, compiled, .{ .function_name = "firstPublication" });
+    compiled_owned = false;
+    while (shared.artifact_seen.load(.acquire) == 0 and !shared.failed.load(.acquire))
+        std.atomic.spinLoopHint();
+    shared.stop.store(true, .release);
+    thread.join();
+    thread_joined = true;
+
+    try std.testing.expect(!shared.failed.load(.acquire));
+    try std.testing.expect(shared.missing_seen.load(.acquire) != 0);
+    try std.testing.expect(shared.artifact_seen.load(.acquire) != 0);
 }
 
 test "native PC lookup serializes with epoch reclamation" {
@@ -2697,9 +2878,30 @@ test "native PC lookup serializes with epoch reclamation" {
         live_seen: std.atomic.Value(usize) = .init(0),
         retired_seen: std.atomic.Value(usize) = .init(0),
         missing_seen: std.atomic.Value(usize) = .init(0),
+        signal_seen: std.atomic.Value(usize) = .init(0),
+        signal_missing_seen: std.atomic.Value(usize) = .init(0),
 
         fn lookup(shared: *@This()) void {
+            var symbol_buffer: [64]u8 = undefined;
+            var function_buffer: [64]u8 = undefined;
+            var source_buffer: [1]u8 = undefined;
             while (!shared.stop.load(.acquire)) {
+                const signal_snapshot = shared.owner.lookupNativeCodeSignalSafe(shared.pc, .{
+                    .symbol_name = &symbol_buffer,
+                    .function_name = &function_buffer,
+                    .source_url = &source_buffer,
+                }) catch {
+                    shared.failed.store(true, .release);
+                    return;
+                };
+                if (signal_snapshot) |snapshot| {
+                    if (snapshot.artifact_id != 1 or
+                        !std.mem.eql(u8, snapshot.function_name, "retirementRace"))
+                        shared.failed.store(true, .release);
+                    _ = shared.signal_seen.fetchAdd(1, .monotonic);
+                } else {
+                    _ = shared.signal_missing_seen.fetchAdd(1, .monotonic);
+                }
                 var snapshot = shared.owner.lookupNativeCode(std.heap.page_allocator, shared.pc) catch {
                     shared.failed.store(true, .release);
                     return;
@@ -2726,7 +2928,8 @@ test "native PC lookup serializes with epoch reclamation" {
     owner.clear();
     while (shared.retired_seen.load(.acquire) == 0 and !shared.failed.load(.acquire)) std.atomic.spinLoopHint();
     execution.release();
-    while (shared.missing_seen.load(.acquire) == 0 and !shared.failed.load(.acquire)) std.atomic.spinLoopHint();
+    while ((shared.missing_seen.load(.acquire) == 0 or shared.signal_missing_seen.load(.acquire) == 0) and
+        !shared.failed.load(.acquire)) std.atomic.spinLoopHint();
     shared.stop.store(true, .release);
     thread.join();
 
@@ -2734,6 +2937,8 @@ test "native PC lookup serializes with epoch reclamation" {
     try std.testing.expect(shared.live_seen.load(.acquire) != 0);
     try std.testing.expect(shared.retired_seen.load(.acquire) != 0);
     try std.testing.expect(shared.missing_seen.load(.acquire) != 0);
+    try std.testing.expect(shared.signal_seen.load(.acquire) != 0);
+    try std.testing.expect(shared.signal_missing_seen.load(.acquire) != 0);
 }
 
 test "Owner adopts and invalidates optimizer artifacts under one lease" {

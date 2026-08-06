@@ -209,6 +209,13 @@ Retirement removes the registry row before unmapping executable memory. Once the
 last execution lease releases and reclamation completes, the old PC no longer
 resolves; address reuse therefore cannot inherit a stale function identity.
 With the option disabled, publication allocates and retains no native metadata.
+`Context.lookupNativeCodeSignalSafe` exposes the same exact artifact, tier,
+live/retired state, native offset, bytecode offset, and source identity to an
+embedder crash/signal path without allocation, locks, I/O, or borrowed storage.
+It copies into caller-owned buffers and fails rather than truncating an
+identity. The Owner-local registry unlinks a retiring artifact, waits for
+pre-existing lock-free readers, and only then permits metadata destruction and
+executable address reuse.
 
 `Context.Options.native_code_publisher` installs an embedder-owned external
 publisher and implies `native_observability`. Publication returns an opaque

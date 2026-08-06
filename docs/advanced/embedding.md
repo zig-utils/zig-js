@@ -77,8 +77,13 @@ Notes that matter in practice:
   GC-backed caps can collect and retry at safe allocation-recovery points.
 - **`native_observability` is opt-in and fixed for the context lifetime.** It
   retains stable generated-code names, PC ranges, and source identity through
-  execution-epoch retirement for profiler/debugger adapters. It does not by
-  itself publish an image to the system profiler.
+  execution-epoch retirement for profiler/debugger adapters.
+  `Context.lookupNativeCodeSignalSafe` resolves an exact PC from the owning
+  Context using only lock-free atomics and caller-provided buffers; it performs
+  no allocation, locking, I/O, or borrowed return. An undersized identity buffer
+  fails with `error.NativeIdentityBufferTooSmall` instead of truncating crash
+  evidence. The Context must outlive the callback. Native observability does not
+  by itself publish an image to the system profiler.
 - **External publication is embedder-owned.** On macOS, passing
   `.native_code_publisher = js.jit.gdbJitPublisher()` selects the standard GDB
   JIT protocol used by LLDB and implies native observability. The publisher is

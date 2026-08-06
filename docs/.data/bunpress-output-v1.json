@@ -20,8 +20,8 @@
     },
     {
       "path": "advanced/embedding/index.html",
-      "bytes": 163161,
-      "sha256": "92715521bef188becb25f667d6d19e2ab3f1c565c64f8a23a013d34534ee0569"
+      "bytes": 163557,
+      "sha256": "51b6c46b65ff181ef183879b684fd84c5bd38bc9fa335341d6cffbaaa2a5fd60"
     },
     {
       "path": "advanced/execution-tiers/index.html",
@@ -55,8 +55,8 @@
     },
     {
       "path": "baseline-jit/index.html",
-      "bytes": 169870,
-      "sha256": "74e05e7dafe2ee90d5dfe78495ebe27fd53cfae6cf7fbab1432aa98907ff2368"
+      "bytes": 170366,
+      "sha256": "3af1e995b641356fa4352ac96702507ef90a6bf54362fba64ac92d19222ce845"
     },
     {
       "path": "benchmarks/index.html",
@@ -264,5 +264,5 @@
       "sha256": "796181527b872553988eb930dd4a79104fbc1c5edc916b370e71d552106bb2a1"
     }
   ],
-  "tree_sha256": "6630003c1ff9e689af40ae38a1da355cfa01bef4c7e15d3b35fe6f8a2b1ae5b8"
+  "tree_sha256": "52caa9a16cafb792ea165a668c76c665869da527885f86755833cfb4338e86cd"
 }

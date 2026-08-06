@@ -4786,6 +4786,17 @@ pub const Context = struct {
         shape_fallback_events: u64,
     };
 
+    /// Allocation-free exact generated-PC lookup for host crash/signal paths.
+    /// The Context and caller-owned buffers must outlive the call.
+    pub fn lookupNativeCodeSignalSafe(
+        self: *Context,
+        pc: usize,
+        buffers: jit.NativeSignalSafeBuffers,
+    ) jit.NativeSignalSafeLookupError!?jit.NativeSignalSafeSnapshot {
+        const owner = self.shared_jit_owner orelse &self.jit_owner;
+        return owner.lookupNativeCodeSignalSafe(pc, buffers);
+    }
+
     /// Phase-boundary attribution snapshot. Counters are monotonic while live
     /// byte/artifact fields are gauges; every shared component is read through
     /// its atomic/accounting snapshot after benchmark workers have joined.
@@ -16462,6 +16473,25 @@ test "Context native observability captures published function identity" {
         try std.testing.expectEqual(inspector_location.location.byte_offset, exact.source_byte_offset);
         try std.testing.expectEqual(inspector_location.location.line, exact.source_line);
         try std.testing.expectEqual(inspector_location.location.column, exact.source_column);
+        var signal_symbol: [256]u8 = undefined;
+        var signal_function: [256]u8 = undefined;
+        var signal_source: [256]u8 = undefined;
+        const signal_exact = (try ctx.lookupNativeCodeSignalSafe(
+            @intFromPtr(code.memory.executableBytes().ptr) + entry.native_offset,
+            .{
+                .symbol_name = &signal_symbol,
+                .function_name = &signal_function,
+                .source_url = &signal_source,
+            },
+        )) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(exact.artifact_id, signal_exact.artifact_id);
+        try std.testing.expectEqualStrings(exact.symbol_name, signal_exact.symbol_name);
+        try std.testing.expectEqualStrings(exact.function_name, signal_exact.function_name);
+        try std.testing.expectEqualStrings(exact.source_url, signal_exact.source_url);
+        try std.testing.expectEqual(exact.bytecode_offset, signal_exact.bytecode_offset);
+        try std.testing.expect(signal_exact.source_is_exact);
+        try std.testing.expectEqual(exact.source_line, signal_exact.source_line);
+        try std.testing.expectEqual(exact.source_column, signal_exact.source_column);
         break;
     } else return error.TestUnexpectedResult;
 
@@ -16493,6 +16523,7 @@ test "Context native observability captures published function identity" {
 }
 
 test "Context public Options expose only stable thread controls" {
+    try std.testing.expect(@hasDecl(Context, "lookupNativeCodeSignalSafe"));
     try std.testing.expect(@hasField(Context.Options, "enable_jit"));
     try std.testing.expect(@hasField(Context.Options, "native_observability"));
     try std.testing.expect(@hasField(Context.Options, "native_code_publisher"));
