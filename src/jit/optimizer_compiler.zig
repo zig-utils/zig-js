@@ -2756,6 +2756,7 @@ const LoopRegionPatch = struct {
 
 fn emitLoopRegionTarget(
     assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
     program: *const Program,
     target: LoopRegionTarget,
     loop_top: usize,
@@ -2764,7 +2765,7 @@ fn emitLoopRegionTarget(
 ) !void {
     switch (target.kind) {
         .block => {
-            try emitBlockOperations(assembler, program, target.operations_block);
+            try emitBlockOperations(assembler, returns, program, target.operations_block);
             if (target.moving_safepoint) {
                 try emitMovingSafepointPoll(
                     assembler,
@@ -2779,7 +2780,7 @@ fn emitLoopRegionTarget(
             });
         },
         .header => {
-            try emitBlockOperations(assembler, program, target.operations_block);
+            try emitBlockOperations(assembler, returns, program, target.operations_block);
             try emitMovingSafepointPoll(
                 assembler,
                 entry_deopt_index,
@@ -2791,6 +2792,7 @@ fn emitLoopRegionTarget(
         },
         .exit => try emitSideExit(
             assembler,
+            returns,
             target.deopt_index,
             program.deopt_points[target.deopt_index].exit_ip,
         ),
@@ -2804,33 +2806,35 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     );
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
+    var returns = aarch64.ReturnBranches.init(std.heap.page_allocator);
+    defer returns.deinit();
     try assembler.pushPair(29, 30);
     try assembler.establishFramePointer();
     try assembler.moveRegister64(12, 0); // stable NativeFrame
     try assembler.load64(13, 12, frameOffset("slots"));
     try assembler.load64(14, 12, frameOffset("scratch"));
-    try emitInvalidationPoll(&assembler);
+    try emitInvalidationPoll(&assembler, &returns);
 
     for (program.operations) |operation| if (operation.block == optimizer.Block.none)
-        try emitOperation(&assembler, program, operation);
+        try emitOperation(&assembler, &returns, program, operation);
     if (program.side_exit) |side_exit| {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
-            try emitOperation(&assembler, program, operation);
+            try emitOperation(&assembler, &returns, program, operation);
         const runtime_steps = try runtimeOperationSteps(program);
         if (runtime_steps > side_exit.steps) return error.UnsupportedChunk;
         const remaining_steps: u12 = @intCast(side_exit.steps - runtime_steps);
         if (remaining_steps != 0) try emitStepIncrement(&assembler, remaining_steps);
-        try emitSideExit(&assembler, side_exit.deopt_index, program.deopt_points[side_exit.deopt_index].exit_ip);
+        try emitSideExit(&assembler, &returns, side_exit.deopt_index, program.deopt_points[side_exit.deopt_index].exit_ip);
     } else if (program.finally_dispatch) |dispatch| {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
-            try emitOperation(&assembler, program, operation);
+            try emitOperation(&assembler, &returns, program, operation);
         const runtime_steps = try runtimeOperationSteps(program);
         if (runtime_steps > dispatch.steps) return error.UnsupportedChunk;
         const remaining_steps: u12 = @intCast(dispatch.steps - runtime_steps);
         if (remaining_steps != 0) try emitStepIncrement(&assembler, remaining_steps);
-        try emitFinallyDispatch(&assembler, program, dispatch);
+        try emitFinallyDispatch(&assembler, &returns, program, dispatch);
     } else if (program.side_exit_branch) |branch| if (branch.entry_deopt_index) |entry_deopt_index| {
         try assembler.load64(15, 12, frameOffset("steps_until_checkpoint"));
         try assembler.load64(16, 12, frameOffset("steps_until_budget"));
@@ -2842,7 +2846,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.compareImmediate64(16, branch.true_steps);
         const budget_exit = try assembler.branchConditionPlaceholder(.lo);
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, program, operation);
+            try emitOperation(&assembler, &returns, program, operation);
         if (program.loop_region_blocks.len != 0) {
             try emitStepIncrement(&assembler, program.loop_region_header_steps);
             try assembler.subtractImmediate64(15, 15, program.loop_region_header_steps);
@@ -2858,7 +2862,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             const block_positions = try std.heap.page_allocator.alloc(usize, program.loop_region_blocks.len);
             defer std.heap.page_allocator.free(block_positions);
 
-            try emitBlockOperations(&assembler, program, program.loop_region_entry_operations_block);
+            try emitBlockOperations(&assembler, &returns, program, program.loop_region_entry_operations_block);
             for (program.loop_region_blocks, 0..) |region, region_index| {
                 block_positions[region_index] = assembler.position();
                 var region_invalidated: ?usize = null;
@@ -2871,7 +2875,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     try assembler.compareImmediate64(16, region.steps);
                     region_budget = try assembler.branchConditionPlaceholder(.lo);
                 }
-                try emitBlockOperations(&assembler, program, region.block);
+                try emitBlockOperations(&assembler, &returns, program, region.block);
                 if (region.runtime_steps > region.steps) return error.UnsupportedChunk;
                 const remaining_steps = region.steps - region.runtime_steps;
                 if (remaining_steps != 0) {
@@ -2884,6 +2888,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                 if (region.successor_count == 1) {
                     try emitLoopRegionTarget(
                         &assembler,
+                        &returns,
                         program,
                         region.successors[0],
                         loop_top,
@@ -2897,6 +2902,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     const false_edge = try assembler.branchConditionPlaceholder(.eq);
                     try emitLoopRegionTarget(
                         &assembler,
+                        &returns,
                         program,
                         region.successors[1],
                         loop_top,
@@ -2906,6 +2912,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     try assembler.patchConditionBranch(false_edge, assembler.position());
                     try emitLoopRegionTarget(
                         &assembler,
+                        &returns,
                         program,
                         region.successors[0],
                         loop_top,
@@ -2920,6 +2927,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     try assembler.patchConditionBranch(region_budget.?, region_poll_exit);
                     try emitSideExit(
                         &assembler,
+                        &returns,
                         region.entry_deopt_index,
                         program.deopt_points[region.entry_deopt_index].exit_ip,
                     );
@@ -2936,7 +2944,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             }
         } else {
             for (program.loop_exit_guards) |guard| {
-                try emitBlockOperations(&assembler, program, guard.entry_block);
+                try emitBlockOperations(&assembler, &returns, program, guard.entry_block);
                 try assembler.load64(9, 14, try slotOffset(guard.condition));
                 try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
                 try assembler.compareRegister64(9, 10);
@@ -2944,24 +2952,25 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     if (guard.exit_on_true) .eq else .ne,
                 );
                 if (guard.exit_from != guard.entry_block)
-                    try emitBlockOperations(&assembler, program, guard.exit_block);
+                    try emitBlockOperations(&assembler, &returns, program, guard.exit_block);
                 try emitStepIncrement(&assembler, guard.exit_steps);
                 try emitSideExit(
                     &assembler,
+                    &returns,
                     guard.exit_deopt_index,
                     program.deopt_points[guard.exit_deopt_index].exit_ip,
                 );
                 try assembler.patchConditionBranch(continue_jump, assembler.position());
             }
             for (program.loop_latch_guards) |guard| {
-                try emitBlockOperations(&assembler, program, guard.entry_block);
+                try emitBlockOperations(&assembler, &returns, program, guard.entry_block);
                 try assembler.load64(9, 14, try slotOffset(guard.condition));
                 try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
                 try assembler.compareRegister64(9, 10);
                 const continue_jump = try assembler.branchConditionPlaceholder(
                     if (guard.backedge_on_true) .eq else .ne,
                 );
-                try emitBlockOperations(&assembler, program, guard.operations_block);
+                try emitBlockOperations(&assembler, &returns, program, guard.operations_block);
                 try emitStepIncrement(&assembler, guard.backedge_steps);
                 try assembler.subtractImmediate64(15, 15, guard.backedge_steps);
                 try assembler.subtractImmediate64(16, 16, guard.backedge_steps);
@@ -2976,24 +2985,24 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                 try assembler.subtractImmediate64(15, 15, branch.loop_prefix_steps);
                 try assembler.subtractImmediate64(16, 16, branch.loop_prefix_steps);
                 for (program.loop_branches) |segment| {
-                    try emitBlockOperations(&assembler, program, segment.entry_block);
+                    try emitBlockOperations(&assembler, &returns, program, segment.entry_block);
                     try assembler.load64(9, 14, try slotOffset(segment.condition));
                     try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
                     try assembler.compareRegister64(9, 10);
                     const segment_false_jump = try assembler.branchConditionPlaceholder(.eq);
 
-                    try emitBlockOperations(&assembler, program, segment.true_block);
+                    try emitBlockOperations(&assembler, &returns, program, segment.true_block);
                     if (segment.emit_merge) if (segment.merge_block) |merge_block|
-                        try emitBlockOperations(&assembler, program, merge_block);
+                        try emitBlockOperations(&assembler, &returns, program, merge_block);
                     try emitStepIncrement(&assembler, segment.true_steps);
                     try assembler.subtractImmediate64(15, 15, segment.true_steps);
                     try assembler.subtractImmediate64(16, 16, segment.true_steps);
                     const true_join = try assembler.branchPlaceholder();
 
                     try assembler.patchConditionBranch(segment_false_jump, assembler.position());
-                    try emitBlockOperations(&assembler, program, segment.false_block);
+                    try emitBlockOperations(&assembler, &returns, program, segment.false_block);
                     if (segment.emit_merge) if (segment.merge_block) |merge_block|
-                        try emitBlockOperations(&assembler, program, merge_block);
+                        try emitBlockOperations(&assembler, &returns, program, merge_block);
                     try emitStepIncrement(&assembler, segment.false_steps);
                     try assembler.subtractImmediate64(15, 15, segment.false_steps);
                     try assembler.subtractImmediate64(16, 16, segment.false_steps);
@@ -3004,7 +3013,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                 const backedge = try assembler.branchPlaceholder();
                 try assembler.patchBranch(backedge, loop_top);
             } else {
-                try emitBlockOperations(&assembler, program, branch.true_block.?);
+                try emitBlockOperations(&assembler, &returns, program, branch.true_block.?);
                 try emitStepIncrement(&assembler, branch.backedge_steps);
                 try assembler.subtractImmediate64(15, 15, branch.backedge_steps);
                 try assembler.subtractImmediate64(16, 16, branch.backedge_steps);
@@ -3017,45 +3026,45 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
 
         try assembler.patchConditionBranch(false_jump, assembler.position());
         if (program.loop_region_blocks.len == 0) try emitStepIncrement(&assembler, branch.false_steps);
-        try emitSideExit(&assembler, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
+        try emitSideExit(&assembler, &returns, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
 
         const poll_exit = assembler.position();
         try assembler.patchConditionBranch(invalidated, poll_exit);
         try assembler.patchConditionBranch(checkpoint_exit, poll_exit);
         try assembler.patchConditionBranch(budget_exit, poll_exit);
-        try emitSideExit(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+        try emitSideExit(&assembler, &returns, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
     } else {
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, program, operation);
+            try emitOperation(&assembler, &returns, program, operation);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
         if (branch.true_block) |block| for (program.operations) |operation|
-            if (operation.block == block) try emitOperation(&assembler, program, operation);
+            if (operation.block == block) try emitOperation(&assembler, &returns, program, operation);
         try emitStepIncrement(&assembler, branch.true_steps);
-        try emitSideExit(&assembler, branch.true_deopt_index, program.deopt_points[branch.true_deopt_index].exit_ip);
+        try emitSideExit(&assembler, &returns, branch.true_deopt_index, program.deopt_points[branch.true_deopt_index].exit_ip);
         try assembler.patchConditionBranch(false_jump, assembler.position());
         try emitStepIncrement(&assembler, branch.false_steps);
-        try emitSideExit(&assembler, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
+        try emitSideExit(&assembler, &returns, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
     } else if (program.branch) |branch| {
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, program, operation);
+            try emitOperation(&assembler, &returns, program, operation);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
-        try emitBlockOperations(&assembler, program, branch.true_block);
+        try emitBlockOperations(&assembler, &returns, program, branch.true_block);
         try assembler.load64(9, 14, try slotOffset(branch.true_result));
         const done = try assembler.branchPlaceholder();
         try assembler.patchConditionBranch(false_jump, assembler.position());
-        try emitBlockOperations(&assembler, program, branch.false_block);
+        try emitBlockOperations(&assembler, &returns, program, branch.false_block);
         try assembler.load64(9, 14, try slotOffset(branch.false_result));
         try assembler.patchBranch(done, assembler.position());
     } else {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
-            try emitOperation(&assembler, program, operation);
+            try emitOperation(&assembler, &returns, program, operation);
         try assembler.load64(9, 14, try slotOffset(program.result));
     }
     if (program.side_exit == null and program.side_exit_branch == null and program.finally_dispatch == null) {
@@ -3067,8 +3076,12 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         if (program.native_operations.len != 0 and suffix_steps != 0)
             try emitStepIncrement(&assembler, suffix_steps);
         try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
-        try emitReturn(&assembler);
+        try emitReturn(&assembler, &returns);
     }
+    const epilogue_offset = assembler.position();
+    try returns.patchAll(&assembler, epilogue_offset);
+    try assembler.popPair(29, 30);
+    try assembler.ret();
     try memory.publish(assembler.bytes().len);
     const deopt = try jit.DeoptMetadata.create(
         std.heap.page_allocator,
@@ -3113,12 +3126,14 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             program.finally_dispatch != null or program.native_operations.len != 0,
         .has_side_exits = program.side_exit != null or program.side_exit_branch != null or
             program.finally_dispatch != null or programHasExceptionalOperations(program),
+        .unwind = .{ .aarch64_frame_pointer = .{
+            .epilogue_offset = std.math.cast(u32, epilogue_offset) orelse return error.UnsupportedChunk,
+        } },
     };
 }
 
-fn emitReturn(assembler: *aarch64.Assembler) !void {
-    try assembler.popPair(29, 30);
-    try assembler.ret();
+fn emitReturn(assembler: *aarch64.Assembler, returns: *aarch64.ReturnBranches) !void {
+    try returns.emit(assembler);
 }
 
 fn programHasExceptionalOperations(program: *const Program) bool {
@@ -3140,12 +3155,22 @@ fn runtimeOperationSteps(program: *const Program) !u32 {
     return steps;
 }
 
-fn emitBlockOperations(assembler: *aarch64.Assembler, program: *const Program, block: u32) !void {
+fn emitBlockOperations(
+    assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
+    program: *const Program,
+    block: u32,
+) !void {
     for (program.operations) |operation| if (operation.block == block)
-        try emitOperation(assembler, program, operation);
+        try emitOperation(assembler, returns, program, operation);
 }
 
-fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operation: Operation) !void {
+fn emitOperation(
+    assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
+    program: *const Program,
+    operation: Operation,
+) !void {
     switch (operation.kind) {
         .copy => {
             try assembler.load64(9, 14, try slotOffset(operation.lhs));
@@ -3190,7 +3215,7 @@ fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operati
             const done = try assembler.branchPlaceholder();
             try assembler.patchConditionBranch(absent, assembler.position());
             try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
-            try emitReturn(assembler);
+            try emitReturn(assembler, returns);
             try assembler.patchBranch(done, assembler.position());
         },
         .lt, .le, .gt, .ge, .eq, .neq => {
@@ -3201,7 +3226,7 @@ fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operati
             try assembler.addRegister64(9, 10, 9);
             try assembler.store64(9, 14, try slotOffset(operation.destination));
         },
-        .runtime_operation => try emitRuntimeOperation(assembler, program, operation),
+        .runtime_operation => try emitRuntimeOperation(assembler, returns, program, operation),
     }
 }
 
@@ -3734,6 +3759,7 @@ fn emitDirectDenseArrayAppend(
 
 fn emitDirectDenseArrayPush(
     assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
     operation: Operation,
     descriptor: jit.NativeOperationDescriptor,
 ) !?DirectRuntimeAccess {
@@ -3798,15 +3824,16 @@ fn emitDirectDenseArrayPush(
     try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.out_of_memory));
     const trap = try assembler.branchConditionPlaceholder(.ne);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.stop));
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
     try assembler.patchConditionBranch(trap, assembler.position());
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
     return direct;
 }
 
 fn emitRuntimeOperation(
     assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
     program: *const Program,
     operation: Operation,
 ) !void {
@@ -3843,7 +3870,7 @@ fn emitRuntimeOperation(
         const fallback = assembler.position();
         try direct.patchFallbacks(assembler, fallback);
         try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.side_exit));
-        try emitReturn(assembler);
+        try emitReturn(assembler, returns);
         try assembler.patchBranch(completed, assembler.position());
         return;
     }
@@ -3858,7 +3885,7 @@ fn emitRuntimeOperation(
         (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayWrite(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayAppend(assembler, operation, descriptor)) orelse
-        try emitDirectDenseArrayPush(assembler, operation, descriptor);
+        try emitDirectDenseArrayPush(assembler, returns, operation, descriptor);
     const callback_position = assembler.position();
     if (direct_runtime_access) |direct| try direct.patchFallbacks(assembler, callback_position);
 
@@ -3893,24 +3920,24 @@ fn emitRuntimeOperation(
         else
             jit.ExitStatus.operation_exception)),
     );
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
 
     try assembler.patchConditionBranch(not_throw, assembler.position());
     try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.invalidated));
     const trap = try assembler.branchConditionPlaceholder(.ne);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.invalidated));
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
 
     try assembler.patchConditionBranch(trap, assembler.position());
     try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.out_of_memory));
     const operation_trap = try assembler.branchConditionPlaceholder(.ne);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.stop));
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
     const trap_position = assembler.position();
     try assembler.patchConditionBranch(absent, trap_position);
     try assembler.patchConditionBranch(operation_trap, trap_position);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
     const completion_position = assembler.position();
     try assembler.patchBranch(done, completion_position);
     if (direct_runtime_access) |direct| try direct.patchCompletions(assembler, completion_position);
@@ -3923,7 +3950,7 @@ fn emitStepIncrement(assembler: *aarch64.Assembler, steps: u12) !void {
     try assembler.store64(10, 9, 0);
 }
 
-fn emitInvalidationPoll(assembler: *aarch64.Assembler) !void {
+fn emitInvalidationPoll(assembler: *aarch64.Assembler, returns: *aarch64.ReturnBranches) !void {
     try assembler.load64(9, 12, frameOffset("invalidation_generation"));
     try assembler.compareImmediate64(9, 0);
     const no_owner = try assembler.branchConditionPlaceholder(.eq);
@@ -3932,7 +3959,7 @@ fn emitInvalidationPoll(assembler: *aarch64.Assembler) !void {
     try assembler.compareRegister64(10, 11);
     const current = try assembler.branchConditionPlaceholder(.eq);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.invalidated));
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
     try assembler.patchConditionBranch(no_owner, assembler.position());
     try assembler.patchConditionBranch(current, assembler.position());
 }
@@ -3989,16 +4016,26 @@ fn emitBackedgeObserver(assembler: *aarch64.Assembler) !void {
     try assembler.patchConditionBranch(absent, assembler.position());
 }
 
-fn emitSideExit(assembler: *aarch64.Assembler, deopt_index: u16, exit_ip: u32) !void {
+fn emitSideExit(
+    assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
+    deopt_index: u16,
+    exit_ip: u32,
+) !void {
     try assembler.movImmediate64(9, exit_ip);
     try assembler.store64(9, 12, frameOffset("exit_ip"));
     try assembler.movImmediate64(9, deopt_index);
     try assembler.store64(9, 12, frameOffset("deopt_index"));
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.side_exit));
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
 }
 
-fn emitFinallyDispatch(assembler: *aarch64.Assembler, program: *const Program, dispatch: FinallyDispatch) !void {
+fn emitFinallyDispatch(
+    assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
+    program: *const Program,
+    dispatch: FinallyDispatch,
+) !void {
     if (dispatch.deopt_index >= program.deopt_points.len or
         program.deopt_points[dispatch.deopt_index].kind != .finally_dispatch)
         return error.UnsupportedChunk;
@@ -4023,11 +4060,11 @@ fn emitFinallyDispatch(assembler: *aarch64.Assembler, program: *const Program, d
         try assembler.compareRegister64(9, 10);
         const next = try assembler.branchConditionPlaceholder(.ne);
         try assembler.movImmediate32(0, @intCast(@backingInt(case.status)));
-        try emitReturn(assembler);
+        try emitReturn(assembler, returns);
         try assembler.patchConditionBranch(next, assembler.position());
     }
     try assembler.movImmediate32(0, @intCast(@backingInt(jit.ExitStatus.operation_trap)));
-    try emitReturn(assembler);
+    try emitReturn(assembler, returns);
 }
 
 fn loadNumericOperands(assembler: *aarch64.Assembler, operation: Operation) !void {
@@ -4573,6 +4610,10 @@ test "optimizer executes to_numeric through the native operation ABI" {
         try std.testing.expectEqual(@as(u32, 0x9100_03fd), std.mem.readInt(u32, native_bytes[4..8], .little));
         try std.testing.expectEqual(@as(u32, 0xa8c1_7bfd), std.mem.readInt(u32, native_bytes[native_bytes.len - 8 ..][0..4], .little));
         try std.testing.expectEqual(@as(u32, 0xd65f_03c0), std.mem.readInt(u32, native_bytes[native_bytes.len - 4 ..][0..4], .little));
+        const unwind = compiled.unwind.aarch64_frame_pointer;
+        try std.testing.expectEqual(@as(u8, 0), unwind.saved_gpr_count);
+        try std.testing.expectEqual(@as(u8, 0), unwind.saved_float_count);
+        try std.testing.expectEqual(native_bytes.len - 8, unwind.epilogue_offset);
         try std.testing.expect(compiled.manages_steps);
         var slots = [_]u64{Value.num(7).rawBits()};
         var scratch: [jit.numeric_scratch_capacity]u64 = undefined;

@@ -2,6 +2,24 @@ const std = @import("std");
 
 pub const CodeKind = enum(u8) { baseline, optimizer };
 
+/// Exact machine-frame contract emitted with an artifact. The plan describes
+/// codegen facts rather than asking a publication backend to recognize opcodes.
+pub const UnwindPlan = union(enum(u8)) {
+    none,
+    aarch64_leaf,
+    aarch64_frame_pointer: struct {
+        /// Offset of the final `ldp x29, x30, [sp], #16`; the following
+        /// instruction is the artifact's sole `ret`.
+        epilogue_offset: u32,
+        /// Consecutive callee-saved registers starting at x19, pushed in pairs
+        /// immediately after the frame record.
+        saved_gpr_count: u8 = 0,
+        /// Consecutive callee-saved registers starting at d8, pushed in pairs
+        /// after the integer pairs.
+        saved_float_count: u8 = 0,
+    },
+};
+
 /// Immutable description of one generated artifact at the instant its native
 /// mapping becomes reachable. Publishers must copy every slice they retain.
 pub const Artifact = struct {
@@ -16,10 +34,12 @@ pub const Artifact = struct {
     source_byte_offset: usize,
     source_line: usize,
     source_column: usize,
+    unwind: UnwindPlan = .none,
 };
 
 pub const PublishError = std.mem.Allocator.Error || error{
     NativeSymbolObjectTooLarge,
+    NativeUnwindInfoTooLarge,
     NativeCodePublicationFailed,
 };
 

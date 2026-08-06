@@ -2,6 +2,32 @@
 
 const std = @import("std");
 
+/// Collect forward exits so a generated artifact owns one final ABI epilogue.
+/// Besides reducing duplicated restore code, this gives unwind publication one
+/// exact terminal row instead of inferred per-return opcode locations.
+pub const ReturnBranches = struct {
+    allocator: std.mem.Allocator,
+    branches: std.ArrayListUnmanaged(usize) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) ReturnBranches {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *ReturnBranches) void {
+        self.branches.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn emit(self: *ReturnBranches, assembler: *Assembler) !void {
+        try self.branches.ensureUnusedCapacity(self.allocator, 1);
+        self.branches.appendAssumeCapacity(try assembler.branchPlaceholder());
+    }
+
+    pub fn patchAll(self: *const ReturnBranches, assembler: *Assembler, epilogue_offset: usize) !void {
+        for (self.branches.items) |branch| try assembler.patchBranch(branch, epilogue_offset);
+    }
+};
+
 pub const Condition = enum(u4) {
     eq = 0,
     ne = 1,

@@ -12,6 +12,8 @@ const aarch64 = @import("jit/aarch64.zig");
 const native_observability = @import("jit/native_observability.zig");
 
 pub const NativeCodePublisher = native_observability.Publisher;
+pub const NativeCodeArtifact = native_observability.Artifact;
+pub const NativeUnwindPlan = native_observability.UnwindPlan;
 pub const NativeCodePublicationError = native_observability.PublishError;
 
 /// Opt into the process-global GDB/LLDB JIT descriptor adapter. Keeping the
@@ -678,6 +680,7 @@ const NativeCodeMetadata = struct {
         artifact_id: u64,
         kind: CodeKind,
         memory: *const CodeMemory,
+        unwind: native_observability.UnwindPlan,
         origin: NativeCodeOrigin,
         publisher: ?NativeCodePublisher,
     ) NativeCodePublicationError!*NativeCodeMetadata {
@@ -726,6 +729,7 @@ const NativeCodeMetadata = struct {
                 .source_byte_offset = origin.source_byte_offset,
                 .source_line = origin.source_line,
                 .source_column = origin.source_column,
+                .unwind = unwind,
             });
         }
         return metadata;
@@ -1034,6 +1038,9 @@ pub const CompiledCode = struct {
     stack_maps: ?*StackMapMetadata = null,
     osr: ?*OsrMetadata = null,
     native_operations: ?*NativeOperationMetadata = null,
+    /// Machine-frame facts emitted by codegen and consumed only by an opt-in
+    /// external publisher. `.none` adds no publication work on the default path.
+    unwind: native_observability.UnwindPlan = .none,
     /// False for an artifact that may only be entered through an exact OSR row.
     entry_enabled: bool = true,
     invalidation_generation: ?*const std.atomic.Value(u64) = null,
@@ -1599,6 +1606,7 @@ pub const Owner = struct {
             artifact_id,
             compiled.kind,
             &compiled.memory,
+            compiled.unwind,
             origin,
             self.native_code_publisher,
         );
@@ -1925,7 +1933,7 @@ pub fn compileConstantEntry(result_bits: u64) !CompiledCode {
     try memory.publish(assembler.bytes().len);
 
     const entry: NativeEntry = @ptrCast(@alignCast(memory.executableBytes().ptr));
-    return .{ .memory = memory, .entry = entry };
+    return .{ .memory = memory, .entry = entry, .unwind = .aarch64_leaf };
 }
 
 extern "c" fn pthread_jit_write_protect_np(enabled: c_int) void;

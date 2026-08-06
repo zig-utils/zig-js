@@ -987,7 +987,7 @@ fn ensureFloatStackValue(assembler: *aarch64.Assembler, representation: Represen
         try assembler.convertUnsigned64ToFloat64(try numericRegister(stack_slot), try integerStackRegister(stack_slot));
 }
 
-fn emitRestoreAndReturn(assembler: *aarch64.Assembler, selected_integers: u64) !void {
+fn emitRestoreAndReturn(assembler: *aarch64.Assembler, selected_integers: u64) !usize {
     try assembler.popFloatPair64(14, 15);
     try assembler.popFloatPair64(12, 13);
     try assembler.popFloatPair64(10, 11);
@@ -997,16 +997,22 @@ fn emitRestoreAndReturn(assembler: *aarch64.Assembler, selected_integers: u64) !
     try assembler.popPair(23, 24);
     try assembler.popPair(21, 22);
     try assembler.popPair(19, 20);
+    const frame_epilogue_offset = assembler.position();
     try assembler.popPair(29, 30);
     try assembler.ret();
+    return frame_epilogue_offset;
 }
 
-fn emitCompletedExit(assembler: *aarch64.Assembler, result_register: u5, selected_integers: u64) !void {
+fn emitCompletedExit(
+    assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
+    result_register: u5,
+) !void {
     try assembler.load64(10, 21, frameOffset("steps"));
     try assembler.store64(19, 10, 0);
     try assembler.store64(result_register, 21, frameOffset("result_bits"));
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
-    try emitRestoreAndReturn(assembler, selected_integers);
+    try returns.emit(assembler);
 }
 
 fn emitCanonicalNumber(assembler: *aarch64.Assembler, register: u5, float_register: u5) !void {
@@ -1118,6 +1124,7 @@ fn integerArithmeticResult(state: State, representation: RepresentationState, op
 
 fn emitOperation(
     assembler: *aarch64.Assembler,
+    returns: *aarch64.ReturnBranches,
     chunk: *const Chunk,
     state: State,
     representation: RepresentationState,
@@ -1282,11 +1289,11 @@ fn emitOperation(
                 try emitCanonicalNumber(assembler, 9, try numericRegister(result_slot))
             else
                 try assembler.load64(9, 20, try slotOffset(result_slot));
-            try emitCompletedExit(assembler, 9, selected_integers);
+            try emitCompletedExit(assembler, returns, 9);
         },
         .ret_undef => {
             try assembler.movImmediate64(9, Value.undef().rawBits());
-            try emitCompletedExit(assembler, 9, selected_integers);
+            try emitCompletedExit(assembler, returns, 9);
         },
         else => unreachable,
     }
@@ -1355,6 +1362,8 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     var memory = try jit.CodeMemory.init(estimated + 4096);
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
+    var returns = aarch64.ReturnBranches.init(allocator);
+    defer returns.deinit();
 
     const fast_offsets = try allocator.alloc(usize, code_len);
     defer allocator.free(fast_offsets);
@@ -1462,7 +1471,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
                 ip += 2;
                 continue;
             }
-            fast_control_fixups[ip] = try emitOperation(&assembler, chunk, state, representation, selection.locals, inst);
+            fast_control_fixups[ip] = try emitOperation(&assembler, &returns, chunk, state, representation, selection.locals, inst);
             ip += 1;
         }
         if (block_index + 1 < blocks.len and covered_successors[block_index + 1]) {
@@ -1525,6 +1534,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
             operation_offsets[ip] = assembler.position();
             slow_control_fixups[ip] = try emitOperation(
                 &assembler,
+                &returns,
                 chunk,
                 state,
                 representation,
@@ -1597,8 +1607,12 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     }
 
     const status_exit = assembler.position();
-    try emitRestoreAndReturn(&assembler, selection.locals);
+    try returns.emit(&assembler);
     for (status_fixups) |at| if (at != unreachable_offset) try assembler.patchCompareBranch(at, status_exit);
+
+    const epilogue_offset = assembler.position();
+    try returns.patchAll(&assembler, epilogue_offset);
+    const frame_epilogue_offset = try emitRestoreAndReturn(&assembler, selection.locals);
 
     try memory.publish(assembler.bytes().len);
     const entry: jit.NativeEntry = @ptrCast(@alignCast(memory.executableBytes().ptr));
@@ -1616,6 +1630,11 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
         .required_numeric_slots = required_numeric_slots,
         .required_u32_slots = if (selection.locals != 0) lowBits(chunk.param_count) else 0,
         .max_stack_depth = analysis.max_stack_depth,
+        .unwind = .{ .aarch64_frame_pointer = .{
+            .epilogue_offset = std.math.cast(u32, frame_epilogue_offset) orelse return error.UnsupportedChunk,
+            .saved_gpr_count = if (@popCount(selection.locals) > 2) 10 else 8,
+            .saved_float_count = 8,
+        } },
     };
 }
 
@@ -1886,6 +1905,10 @@ test "compiler executes a numeric local loop across a checkpoint" {
     try std.testing.expectEqual(@as(u32, 0x9100_03fd), std.mem.readInt(u32, native_bytes[4..8], .little));
     try std.testing.expectEqual(@as(u32, 0xa8c1_7bfd), std.mem.readInt(u32, native_bytes[native_bytes.len - 8 ..][0..4], .little));
     try std.testing.expectEqual(@as(u32, 0xd65f_03c0), std.mem.readInt(u32, native_bytes[native_bytes.len - 4 ..][0..4], .little));
+    const unwind = compiled.unwind.aarch64_frame_pointer;
+    try std.testing.expectEqual(@as(u8, 8), unwind.saved_gpr_count);
+    try std.testing.expectEqual(@as(u8, 8), unwind.saved_float_count);
+    try std.testing.expectEqual(native_bytes.len - 8, unwind.epilogue_offset);
 
     var slots: [3]u64 = undefined;
     var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
