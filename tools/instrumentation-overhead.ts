@@ -6,11 +6,11 @@ import { run, sha256File, writeText } from "./lib/home";
 declare const __filename: string;
 
 type State = "disabled" | "enabled";
-const COUNTER_NAMES = ["instructions", "cycles", "voluntary_context_switches", "involuntary_context_switches"] as const;
+const OWNED_COUNTER_NAMES = ["instructions", "cycles", "process_energy_nj", "package_idle_wakeups", "interrupt_wakeups", "pageins", "page_cache_hits"] as const;
+const TIME_COUNTER_NAMES = ["voluntary_context_switches", "involuntary_context_switches"] as const;
+const COUNTER_NAMES = [...OWNED_COUNTER_NAMES, ...TIME_COUNTER_NAMES] as const;
 type CounterName = typeof COUNTER_NAMES[number];
-const COUNTER_LABELS: Record<CounterName, string> = {
-  instructions: "instructions retired",
-  cycles: "cycles elapsed",
+const COUNTER_LABELS: Record<typeof TIME_COUNTER_NAMES[number], string> = {
   voluntary_context_switches: "voluntary context switches",
   involuntary_context_switches: "involuntary context switches",
 };
@@ -55,10 +55,20 @@ function counterObservation(stderr: string, label: string): CounterObservation {
   return { status: "unavailable", reason: `${label} was not reported by /usr/bin/time -l` };
 }
 
-function parseCounters(stderr: string): CounterMeasurements {
+export function parseDarwinCounters(stdout: string, mode: string, workload: string, jobs: number): Pick<CounterMeasurements, typeof OWNED_COUNTER_NAMES[number]> {
+  const rows = stdout.split("\n").filter((line) => line.startsWith("zig-js-darwin-rusage\t"));
+  requireValue(rows.length === 1, `expected one Darwin rusage row, got ${rows.length}`);
+  const fields = rows[0].split("\t");
+  requireValue(fields.length === 13 && fields[1] === mode && fields[2] === workload && Number(fields[3]) === jobs && Number(fields[4]) === 0, "Darwin rusage identity drift");
+  requireValue(fields[5] === "measured", `Darwin rusage status is ${fields[5]}`);
+  const observations = fields.slice(6).map((field) => ({ status: "measured" as const, value: Number(field) }));
+  observations.forEach((observation) => requireValue(Number.isFinite(observation.value) && observation.value >= 0, "Darwin rusage counter is invalid"));
+  return Object.fromEntries(OWNED_COUNTER_NAMES.map((name, index) => [name, observations[index]])) as Pick<CounterMeasurements, typeof OWNED_COUNTER_NAMES[number]>;
+}
+
+function parseCounters(stdout: string, stderr: string, mode: string, workload: string, jobs: number): CounterMeasurements {
   return {
-    instructions: counterObservation(stderr, COUNTER_LABELS.instructions),
-    cycles: counterObservation(stderr, COUNTER_LABELS.cycles),
+    ...parseDarwinCounters(stdout, mode, workload, jobs),
     voluntary_context_switches: counterObservation(stderr, COUNTER_LABELS.voluntary_context_switches),
     involuntary_context_switches: counterObservation(stderr, COUNTER_LABELS.involuntary_context_switches),
   };
@@ -92,12 +102,12 @@ function runOne(
   jobs: number,
 ): { mode: "single" | "single_profiled"; measurement: Measurement; checksum: number } {
   const mode = state === "disabled" ? "single" : "single_profiled";
-  const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", runner, mode, workload, String(jobs), "1"];
+  const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", runner, mode, workload, String(jobs), "1", "--darwin-rusage"];
   console.error(`+ ${command.join(" ")}`);
   const completed = run(command);
   requireValue(completed.exitCode === 0, completed.stderr || `benchmark exited ${completed.exitCode}`);
   const row = parseRow(completed.stdout, mode, workload, jobs);
-  const counters = parseCounters(completed.stderr);
+  const counters = parseCounters(completed.stdout, completed.stderr, mode, workload, jobs);
   return {
     mode,
     checksum: row.checksum,
@@ -113,14 +123,14 @@ function runOne(
 
 type NoOpSample = { sample: number; counters: CounterMeasurements };
 
-function collectNoOp(repetitions: number): NoOpSample[] {
+function collectNoOp(runner: string, repetitions: number): NoOpSample[] {
   const samples: NoOpSample[] = [];
   for (let sample = 0; sample < repetitions; sample += 1) {
-    const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", "/usr/bin/true"];
+    const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", runner, "--darwin-rusage-noop"];
     console.error(`+ ${command.join(" ")}`);
     const completed = run(command);
     requireValue(completed.exitCode === 0, completed.stderr || `no-op calibration exited ${completed.exitCode}`);
-    samples.push({ sample, counters: parseCounters(completed.stderr) });
+    samples.push({ sample, counters: parseCounters(completed.stdout, completed.stderr, "single", "counter_noop", 1) });
   }
   return samples;
 }
@@ -194,21 +204,37 @@ export function summarize(samples: Sample[]): any {
     const disabled = median(measuredValues(disabledObservations)), enabled = median(measuredValues(enabledObservations)), jobs = samples[0].identity.jobs;
     result[metric] = { status, disabled_median: disabled, enabled_median: enabled, enabled_over_disabled: disabled === 0 ? null : enabled / disabled, disabled_per_job: disabled / jobs, enabled_per_job: enabled / jobs };
   }
+  const energy = result.process_energy_nj, jobs = samples[0].identity.jobs;
+  result.logical_work_per_joule = energy.status === "measured" && energy.disabled_median > 0 && energy.enabled_median > 0
+    ? { status: "measured", disabled: jobs * 1e9 / energy.disabled_median, enabled: jobs * 1e9 / energy.enabled_median }
+    : { status: energy.status || "unavailable", disabled: null, enabled: null };
+  const cycles = result.cycles, instructions = result.instructions;
+  result.cycles_per_logical_job = cycles.status === "measured"
+    ? { status: "measured", disabled: cycles.disabled_median / jobs, enabled: cycles.enabled_median / jobs }
+    : { status: cycles.status, disabled: null, enabled: null };
+  result.instructions_per_logical_job = instructions.status === "measured"
+    ? { status: "measured", disabled: instructions.disabled_median / jobs, enabled: instructions.enabled_median / jobs }
+    : { status: instructions.status, disabled: null, enabled: null };
+  result.process_energy_per_logical_job_nj = energy.status === "measured"
+    ? { status: "measured", disabled: energy.disabled_median / jobs, enabled: energy.enabled_median / jobs }
+    : { status: energy.status, disabled: null, enabled: null };
+  result.instructions_per_cycle = cycles.status === "measured" && instructions.status === "measured" && cycles.disabled_median > 0 && cycles.enabled_median > 0
+    ? { status: "measured", disabled: instructions.disabled_median / cycles.disabled_median, enabled: instructions.enabled_median / cycles.enabled_median }
+    : { status: cycles.status !== "measured" ? cycles.status : instructions.status, disabled: null, enabled: null };
   return result;
 }
 
 const UNAVAILABLE_CAPABILITIES: Record<string, { unit: string; reason: string }> = {
-  branches: { unit: "count", reason: "the unprivileged macOS /usr/bin/time -l interface does not expose branch counts" },
-  branch_misses: { unit: "count", reason: "the unprivileged macOS /usr/bin/time -l interface does not expose branch misses" },
-  cache_misses: { unit: "count", reason: "the unprivileged macOS /usr/bin/time -l interface does not expose cache misses" },
-  tlb_misses: { unit: "count", reason: "the unprivileged macOS /usr/bin/time -l interface does not expose TLB misses" },
-  migrations: { unit: "count", reason: "the unprivileged macOS /usr/bin/time -l interface does not expose CPU migrations" },
-  scheduler_wait_ns: { unit: "ns", reason: "the unprivileged macOS /usr/bin/time -l interface does not expose scheduler wait time" },
-  frequency_hz: { unit: "Hz", reason: "the unprivileged macOS /usr/bin/time -l interface does not expose effective frequency" },
+  branches: { unit: "count", reason: "the unprivileged macOS process-boundary interfaces do not expose branch counts" },
+  branch_misses: { unit: "count", reason: "the unprivileged macOS process-boundary interfaces do not expose branch misses" },
+  cache_misses: { unit: "count", reason: "the unprivileged macOS process-boundary interfaces do not expose CPU cache misses; VM page-cache hits are retained separately" },
+  tlb_misses: { unit: "count", reason: "the unprivileged macOS process-boundary interfaces do not expose TLB misses" },
+  migrations: { unit: "count", reason: "the unprivileged macOS process-boundary interfaces do not expose CPU migrations" },
+  scheduler_wait_ns: { unit: "ns", reason: "the unprivileged macOS process-boundary interfaces do not expose scheduler wait time" },
+  frequency_hz: { unit: "Hz", reason: "the unprivileged macOS process-boundary interfaces do not expose effective frequency" },
   thermal_state: { unit: "state", reason: "the benchmark interface records power source but has no trustworthy process-scoped thermal sample" },
-  package_energy_joules: { unit: "J", reason: "macOS exposes no unprivileged process-boundary package-energy counter through /usr/bin/time -l" },
-  process_energy_joules: { unit: "J", reason: "macOS exposes no unprivileged process-energy counter through /usr/bin/time -l" },
-  peak_power_watts: { unit: "W", reason: "macOS exposes no unprivileged process-boundary peak-power counter through /usr/bin/time -l" },
+  package_energy_joules: { unit: "J", reason: "the unprivileged macOS process-boundary interfaces expose process energy but not package energy" },
+  peak_power_watts: { unit: "W", reason: "the unprivileged macOS process-boundary interfaces expose cumulative process energy but not peak power" },
 };
 
 function capabilityInventory(noOpSamples: NoOpSample[], samples: Sample[]): Record<string, any> {
@@ -220,11 +246,15 @@ function capabilityInventory(noOpSamples: NoOpSample[], samples: Sample[]): Reco
     const observed = [...noOp, ...allWork];
     const status = observationStatus(observed);
     const firstMissing = observed.find((value) => value.status !== "measured") as Exclude<CounterObservation, { status: "measured" }> | undefined;
+    const owned = (OWNED_COUNTER_NAMES as readonly string[]).includes(counter);
+    const multiplexed = counter === "instructions" || counter === "cycles";
     inventory[counter] = {
-      unit: "count",
-      source: `/usr/bin/time -l: ${COUNTER_LABELS[counter]}`,
+      unit: counter === "process_energy_nj" ? "nJ" : "count",
+      source: owned ? "proc_pid_rusage(RUSAGE_INFO_V6) self-process delta" : `/usr/bin/time -l: ${COUNTER_LABELS[counter as typeof TIME_COUNTER_NAMES[number]]}`,
       availability: status === "measured" ? { status } : { status, reason: firstMissing!.reason },
-      multiplexing: { status: "unavailable", reason: "/usr/bin/time -l exposes no multiplexing or scaling metadata" },
+      multiplexing: multiplexed
+        ? { status: "unavailable", reason: "proc_pid_rusage exposes no multiplexing or scaling metadata" }
+        : { status: "not_applicable", reason: "this counter is not a multiplexed hardware event" },
       calibration: {
         no_op: dispersion(measuredValues(noOp)),
         known_work: dispersion(measuredValues(knownWork)),
@@ -243,11 +273,14 @@ function capabilityInventory(noOpSamples: NoOpSample[], samples: Sample[]): Reco
 }
 
 export function validateArtifact(artifact: any): void {
-  requireValue(artifact.schema_version === 2 && artifact.profile_id === "zig-js-instrumentation-overhead-v2", "overhead schema identity drift");
+  requireValue(artifact.schema_version === 3 && artifact.profile_id === "zig-js-instrumentation-overhead-v3", "overhead schema identity drift");
   requireValue(artifact.metadata && artifact.metadata.pairs >= 2, "overhead metadata is incomplete");
   requireValue(["diagnostic", "quiet_reference"].includes(artifact.metadata.host_class), "overhead host class is invalid");
-  if (artifact.metadata.host_class === "quiet_reference")
+  if (artifact.metadata.host_class === "quiet_reference") {
     requireValue(artifact.metadata.environment.Power.includes("AC Power"), "quiet-reference overhead evidence requires AC power");
+    for (const counter of ["instructions", "cycles", "process_energy_nj"])
+      requireValue(artifact.counter_capabilities[counter].availability.status === "measured" && artifact.counter_capabilities[counter].calibration.known_work.status === "stable", `quiet-reference efficiency evidence requires stable known-work ${counter}`);
+  }
   requireValue(/^[0-9a-f]{64}$/.test(artifact.metadata.runner_sha256), "runner hash is invalid");
   requireValue(Number.isInteger(artifact.metadata.runner_size_bytes) && artifact.metadata.runner_size_bytes > 0, "runner size is invalid");
   const samples: Sample[] = artifact.samples;
@@ -270,7 +303,7 @@ export function validateArtifact(artifact: any): void {
       }
     }
   }
-  requireValue(artifact.calibration?.no_op?.command?.join(" ") === "env LC_ALL=C /usr/bin/time -l /usr/bin/true", "no-op calibration command drift");
+  requireValue(artifact.calibration?.no_op?.command?.join(" ") === `env LC_ALL=C /usr/bin/time -l ${artifact.metadata.runner_path} --darwin-rusage-noop`, "no-op calibration command drift");
   requireValue(artifact.calibration.no_op.samples.length === artifact.metadata.pairs, "no-op calibration repetition drift");
   artifact.calibration.no_op.samples.forEach((sample: NoOpSample, index: number) => {
     requireValue(sample.sample === index, `no-op calibration sample ${index} identity drift`);
@@ -306,6 +339,12 @@ export function validateArtifact(artifact: any): void {
   requireValue(artifact.boundaries.retained_rss.status === "unavailable", "retained RSS must remain explicit");
   requireValue(artifact.boundaries.contention.status === "not_applicable", "single-thread contention boundary drift");
   requireValue(artifact.boundaries.code_size.status === "same_binary", "runtime toggle must identify the same binary");
+  if (artifact.counter_capabilities.process_energy_nj.availability.status === "measured")
+    requireValue(artifact.summary.logical_work_per_joule.status === "measured" && artifact.summary.logical_work_per_joule.disabled > 0 && artifact.summary.logical_work_per_joule.enabled > 0 && artifact.summary.process_energy_per_logical_job_nj.status === "measured", "energy normalization is invalid");
+  if (artifact.counter_capabilities.cycles.availability.status === "measured")
+    requireValue(artifact.summary.cycles_per_logical_job.status === "measured" && artifact.summary.cycles_per_logical_job.disabled >= 0 && artifact.summary.cycles_per_logical_job.enabled >= 0, "cycle normalization is invalid");
+  if (artifact.counter_capabilities.instructions.availability.status === "measured")
+    requireValue(artifact.summary.instructions_per_logical_job.status === "measured" && artifact.summary.instructions_per_logical_job.disabled >= 0 && artifact.summary.instructions_per_logical_job.enabled >= 0, "instruction normalization is invalid");
 }
 
 export function render(artifact: any, rawPath = ""): string {
@@ -331,17 +370,31 @@ export function render(artifact: any, rawPath = ""): string {
     "| metric | disabled median | enabled median | enabled / disabled |",
     "| --- | ---: | ---: | ---: |",
   ];
-  for (const [name, unit] of [["wall_time_ns", "ns"], ["process_cpu_user_ns", "ns"], ["process_cpu_system_ns", "ns"], ["peak_rss_bytes", "bytes"], ["instructions", "count"], ["cycles", "count"], ["voluntary_context_switches", "count"], ["involuntary_context_switches", "count"]]) {
+  const metricRows: [string, string][] = [
+    ["wall_time_ns", "ns"], ["process_cpu_user_ns", "ns"], ["process_cpu_system_ns", "ns"], ["peak_rss_bytes", "bytes"],
+    ...COUNTER_NAMES.map((name) => [name, name === "process_energy_nj" ? "nJ" : "count"] as [string, string]),
+  ];
+  for (const [name, unit] of metricRows) {
     const metric = summary[name];
     rows.push(metric.status && metric.status !== "measured"
       ? `| \`${name}\` | ${metric.status} | ${metric.status} | N/A |`
       : `| \`${name}\` | ${metric.disabled_median} ${unit} | ${metric.enabled_median} ${unit} | ${metric.enabled_over_disabled === null ? "N/A" : metric.enabled_over_disabled.toFixed(4) + "x"} |`);
   }
+  const efficiency = summary.logical_work_per_joule;
+  rows.push(efficiency.status === "measured"
+    ? `| \`logical_work_per_joule\` | ${efficiency.disabled.toFixed(3)} jobs/J | ${efficiency.enabled.toFixed(3)} jobs/J | ${(efficiency.enabled / efficiency.disabled).toFixed(4)}x |`
+    : `| \`logical_work_per_joule\` | ${efficiency.status} | ${efficiency.status} | N/A |`);
+  for (const [name, unit] of [["cycles_per_logical_job", "cycles/job"], ["instructions_per_logical_job", "instructions/job"], ["process_energy_per_logical_job_nj", "nJ/job"], ["instructions_per_cycle", "instructions/cycle"]]) {
+    const metric = summary[name];
+    rows.push(metric.status === "measured"
+      ? `| \`${name}\` | ${metric.disabled.toFixed(3)} ${unit} | ${metric.enabled.toFixed(3)} ${unit} | ${(metric.enabled / metric.disabled).toFixed(4)}x |`
+      : `| \`${name}\` | ${metric.status} | ${metric.status} | N/A |`);
+  }
   rows.push(
     "",
     "## Counter capability and calibration",
     "",
-    "Counter availability is separate from sample quality. `noisy` retains every raw value but forbids a stable efficiency claim; unavailable multiplexing metadata is never treated as non-multiplexed.",
+    "Counter availability is separate from sample quality. `noisy` retains every raw value but forbids a stable efficiency claim; unavailable multiplexing metadata is never treated as non-multiplexed. Instructions, cycles, process energy, wakeups, page-ins, and VM page-cache hits come from owned self-process `proc_pid_rusage(RUSAGE_INFO_V6)` deltas.",
     "",
     "| counter | availability | multiplexing | no-op quality | known-work quality |",
     "| --- | --- | --- | --- | --- |",
@@ -376,6 +429,11 @@ function syntheticSamples(): Sample[] {
         peak_rss_bytes: 10_000_000,
         instructions: { status: "measured", value: 1000 + pair },
         cycles: { status: "measured", value: 500 + pair },
+        process_energy_nj: { status: "measured", value: 200 + pair },
+        package_idle_wakeups: { status: "measured", value: 1 },
+        interrupt_wakeups: { status: "measured", value: 2 },
+        pageins: { status: "measured", value: 0 },
+        page_cache_hits: { status: "measured", value: 3 },
         voluntary_context_switches: { status: "measured", value: 1 },
         involuntary_context_switches: { status: "measured", value: 2 },
       },
@@ -390,6 +448,11 @@ function syntheticNoOpSamples(): NoOpSample[] {
     counters: {
       instructions: { status: "measured", value: 100 + sample },
       cycles: { status: "measured", value: 50 + sample },
+      process_energy_nj: { status: "measured", value: 20 + sample },
+      package_idle_wakeups: { status: "measured", value: 0 },
+      interrupt_wakeups: { status: "measured", value: 1 },
+      pageins: { status: "measured", value: 0 },
+      page_cache_hits: { status: "measured", value: 2 },
       voluntary_context_switches: { status: "measured", value: 0 },
       involuntary_context_switches: { status: "measured", value: 1 },
     },
@@ -410,14 +473,16 @@ export function selfTest(): void {
   requireValue(counterObservation(timing, "instructions retired").status === "measured", "measured counter classification drift");
   requireValue(counterObservation("operation not permitted", "cycles elapsed").status === "permission_denied", "permission counter classification drift");
   requireValue(counterObservation("", "cycles elapsed").status === "unavailable", "unavailable counter classification drift");
+  const owned = parseDarwinCounters("zig-js-darwin-rusage\tsingle\trepresentative_json\t110\t0\tmeasured\t1000\t500\t200\t1\t2\t0\t3\n", "single", "representative_json", 110);
+  requireValue(owned.instructions.status === "measured" && owned.process_energy_nj.value === 200 && owned.page_cache_hits.value === 3, "owned Darwin counter parse drift");
   const samples = syntheticSamples(), noOpSamples = syntheticNoOpSamples(), artifact = {
-    schema_version: 2,
-    profile_id: "zig-js-instrumentation-overhead-v2",
-    metadata: { pairs: 2, host_class: "diagnostic", runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", workload_source: "bench/representative_comparison.js", workload_source_sha256: "b".repeat(64), jobs: 110, expected_checksum: 5864992, revision: "c".repeat(40), environment: { Date: "2026-08-04", Host: "fixture", OS: "fixture", Zig: "fixture", "zig-gc": "d".repeat(40), "zig-regex": "e".repeat(40), Power: "Battery Power" } },
+    schema_version: 3,
+    profile_id: "zig-js-instrumentation-overhead-v3",
+    metadata: { pairs: 2, host_class: "diagnostic", runner_path: "/tmp/runner", runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", workload_source: "bench/representative_comparison.js", workload_source_sha256: "b".repeat(64), jobs: 110, expected_checksum: 5864992, revision: "c".repeat(40), environment: { Date: "2026-08-04", Host: "fixture", OS: "fixture", Zig: "fixture", "zig-gc": "d".repeat(40), "zig-regex": "e".repeat(40), Power: "Battery Power" } },
     samples,
     summary: summarize(samples),
     calibration: {
-      no_op: { command: ["env", "LC_ALL=C", "/usr/bin/time", "-l", "/usr/bin/true"], samples: noOpSamples },
+      no_op: { command: ["env", "LC_ALL=C", "/usr/bin/time", "-l", "/tmp/runner", "--darwin-rusage-noop"], samples: noOpSamples },
       known_work: { sample_state: "disabled", sample_pairs: [0, 1] },
     },
     counter_capabilities: capabilityInventory(noOpSamples, samples),
@@ -439,6 +504,11 @@ export function selfTest(): void {
   expectFailure(() => validateArtifact(order), "order drift");
   const reference = JSON.parse(JSON.stringify(artifact)); reference.metadata.host_class = "quiet_reference";
   expectFailure(() => validateArtifact(reference), "requires AC power");
+  reference.metadata.environment.Power = "AC Power";
+  (reference.samples.filter((sample: Sample) => sample.identity.state === "disabled")[1].metrics.process_energy_nj as any).value = 1000;
+  reference.summary = summarize(reference.samples);
+  reference.counter_capabilities = capabilityInventory(reference.calibration.no_op.samples, reference.samples);
+  expectFailure(() => validateArtifact(reference), "requires stable known-work process_energy_nj");
   console.log("OK instrumentation overhead self-test: parsing, alternation, checksums, capability states, calibration quality, and explicit boundaries verified");
 }
 
@@ -479,15 +549,16 @@ function main(): void {
   const manifest = loadManifest(manifestPath); validateManifest(manifest);
   const resolved = resolveWorkload(manifest, workload, quick), info = metadata();
   ensurePublishable(info, Boolean(rawOut));
-  const noOpSamples = collectNoOp(pairs);
+  const noOpSamples = collectNoOp(runner, pairs);
   const samples = collect(runner, workload, resolved.jobs, resolved.checksum, pairs), size = Number(run(["/usr/bin/stat", "-f", "%z", runner]).stdout.trim());
   const artifact = {
-    schema_version: 2,
-    profile_id: "zig-js-instrumentation-overhead-v2",
+    schema_version: 3,
+    profile_id: "zig-js-instrumentation-overhead-v3",
     metadata: {
       environment: info,
       host_class: hostClass,
       revision: info["zig-js"],
+      runner_path: runner,
       runner_sha256: sha256File(runner),
       runner_size_bytes: size,
       workload,
@@ -501,7 +572,7 @@ function main(): void {
     samples,
     summary: summarize(samples),
     calibration: {
-      no_op: { command: ["env", "LC_ALL=C", "/usr/bin/time", "-l", "/usr/bin/true"], samples: noOpSamples },
+      no_op: { command: ["env", "LC_ALL=C", "/usr/bin/time", "-l", runner, "--darwin-rusage-noop"], samples: noOpSamples },
       known_work: { sample_state: "disabled", sample_pairs: samples.filter((sample) => sample.identity.state === "disabled").map((sample) => sample.identity.pair_sample) },
     },
     counter_capabilities: capabilityInventory(noOpSamples, samples),

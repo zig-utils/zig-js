@@ -288,20 +288,31 @@ exposed as `zig build instrumentation-overhead`, alternates fresh-process
 `single`/`single_profiled` pairs from one ReleaseFast runner and rejects any
 workload, job-count, sample-index, or frozen-checksum mismatch. The raw artifact
 retains wall time, process user/system CPU, peak RSS, retired instructions,
-cycles, and voluntary/involuntary context switches for every sample, including
-logical-work normalization. No sample is discarded or reordered.
+cycles, cumulative process energy, package/interrupt wakeups, page-ins, VM
+page-cache hits, and voluntary/involuntary context switches for every sample.
+It derives cycles, instructions, and process-energy per frozen logical job,
+instructions per cycle, and jobs per joule without replacing the raw values.
+No sample is discarded or reordered.
 
-Schema v2 (with historical schema-v1 artifacts left unchanged) keeps each OS
+Schema v3 (with historical schema-v1/v2 artifacts left unchanged) keeps each OS
 counter as a status-bearing observation: `measured`,
 `unavailable`, or `permission_denied`. Before the alternating workload pairs it
-runs the same number of `/usr/bin/time -l /usr/bin/true` no-op probes, then
-compares their raw counter dispersion with the disabled known-work samples.
-Five-percent relative standard deviation separates `stable` from `noisy`;
-zero-mean or insufficient observations are `indeterminate`, never silently
-stable. The artifact also records that macOS `time -l` exposes no multiplexing
-metadata and inventories branches/misses, cache/TLB misses, migrations,
-scheduler wait, frequency, thermal state, energy, and peak power as explicit
-unavailable capabilities rather than zero-valued measurements.
+runs the same number of runner-owned no-op boundary probes, then compares their
+raw counter dispersion with the disabled known-work samples. Five-percent
+relative standard deviation separates `stable` from `noisy`; zero-mean or
+insufficient observations are `indeterminate`, never silently stable.
+
+On macOS, the runner snapshots its own public
+`proc_pid_rusage(RUSAGE_INFO_V6)` record immediately before and after the timed
+JavaScript invocation. That owned boundary supplies instructions, cycles,
+process energy in nanojoules, wakeups, page-ins, and VM page-cache hits;
+`/usr/bin/time -l` independently supplies fresh-process CPU, peak RSS, and
+context switches. The artifact records that the instruction/cycle interface
+exposes no multiplexing or scaling metadata. CPU cache/TLB misses, branches,
+migrations, scheduler wait, frequency, trustworthy thermal state, package
+energy, and peak power remain explicit unavailable capabilities rather than
+zero-valued measurements. VM page-cache hits are never mislabeled as CPU cache
+behavior.
 
 ```sh
 zig build instrumentation-overhead \
@@ -316,9 +327,17 @@ exits, and single-thread lock contention is not applicable; both boundaries are
 encoded explicitly rather than as zero. Quick mode uses two reduced-work pairs
 to validate the harness and is never publication evidence.
 
+Counter collection is a separate `--darwin-rusage` runner mode. Ordinary
+benchmark and production execution does not call `proc_pid_rusage`; the opt-in
+snapshots and counter row are absent from that path. The existing
+`single`/`single_profiled` exact-binary A/B continues to quantify the runtime
+attribution sink independently of this collector.
+
 Runs default to `diagnostic`. A negligible-overhead publication claim requires
 `-Dinstrumentation-overhead-host-class=quiet_reference`; that classification
-fails closed unless the captured power state is AC. Battery/hosted results stay
+fails closed unless the captured power state is AC and known-work instructions,
+cycles, and process energy are all measured and stable at the declared 5% RSD
+threshold. Battery, hosted, unavailable-counter, or noisy-counter results stay
 visible as diagnostic artifacts and cannot satisfy the reference-host gate.
 
 The first full-work diagnostic is the seven-pair

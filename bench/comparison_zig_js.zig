@@ -15,6 +15,7 @@
 //! mode measures zig-js's distinct shared-realm JavaScript Thread model.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const js = @import("js");
 const representative_modules = @import("representative_modules.zig");
 
@@ -88,6 +89,123 @@ const ProcessResourceSnapshot = struct {
     peak_rss_bytes: u64,
     retained_rss_bytes: u64,
 };
+
+// Darwin's public proc_pid_rusage RUSAGE_INFO_V6 layout. Keep the public field
+// names and complete trailing storage: libproc writes the entire flavor, and a
+// named layout prevents a new SDK field from silently shifting an array index.
+const DarwinRusageInfoV6 = extern struct {
+    ri_uuid: [16]u8,
+    ri_user_time: u64,
+    ri_system_time: u64,
+    ri_pkg_idle_wkups: u64,
+    ri_interrupt_wkups: u64,
+    ri_pageins: u64,
+    ri_wired_size: u64,
+    ri_resident_size: u64,
+    ri_phys_footprint: u64,
+    ri_proc_start_abstime: u64,
+    ri_proc_exit_abstime: u64,
+    ri_child_user_time: u64,
+    ri_child_system_time: u64,
+    ri_child_pkg_idle_wkups: u64,
+    ri_child_interrupt_wkups: u64,
+    ri_child_pageins: u64,
+    ri_child_elapsed_abstime: u64,
+    ri_diskio_bytesread: u64,
+    ri_diskio_byteswritten: u64,
+    ri_cpu_time_qos_default: u64,
+    ri_cpu_time_qos_maintenance: u64,
+    ri_cpu_time_qos_background: u64,
+    ri_cpu_time_qos_utility: u64,
+    ri_cpu_time_qos_legacy: u64,
+    ri_cpu_time_qos_user_initiated: u64,
+    ri_cpu_time_qos_user_interactive: u64,
+    ri_billed_system_time: u64,
+    ri_serviced_system_time: u64,
+    ri_logical_writes: u64,
+    ri_lifetime_max_phys_footprint: u64,
+    ri_instructions: u64,
+    ri_cycles: u64,
+    ri_billed_energy: u64,
+    ri_serviced_energy: u64,
+    ri_interval_max_phys_footprint: u64,
+    ri_runnable_time: u64,
+    ri_flags: u64,
+    ri_user_ptime: u64,
+    ri_system_ptime: u64,
+    ri_pinstructions: u64,
+    ri_pcycles: u64,
+    ri_energy_nj: u64,
+    ri_penergy_nj: u64,
+    ri_secure_time_in_system: u64,
+    ri_secure_ptime_in_system: u64,
+    ri_neural_footprint: u64,
+    ri_lifetime_max_neural_footprint: u64,
+    ri_interval_max_neural_footprint: u64,
+    ri_conclave_footprint: u64,
+    ri_page_wait_time_mach: u64,
+    ri_page_cache_hits: u64,
+    ri_reserved: [6]u64,
+};
+comptime {
+    std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_user_time") == 16);
+    std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_instructions") == 248);
+    std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_energy_nj") == 336);
+    std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_page_cache_hits") == 408);
+    std.debug.assert(@sizeOf(DarwinRusageInfoV6) == 464);
+}
+
+const DarwinCounterSnapshot = struct {
+    instructions: u64,
+    cycles: u64,
+    energy_nj: u64,
+    package_idle_wakeups: u64,
+    interrupt_wakeups: u64,
+    pageins: u64,
+    page_cache_hits: u64,
+};
+
+const rusage_info_v6 = 6;
+extern "c" fn proc_pid_rusage(pid: std.c.pid_t, flavor: c_int, buffer: *anyopaque) c_int;
+
+fn darwinCounterSnapshot() !DarwinCounterSnapshot {
+    if (builtin.os.tag != .macos) return error.DarwinRusageUnavailable;
+    var info = std.mem.zeroes(DarwinRusageInfoV6);
+    if (proc_pid_rusage(std.c.getpid(), rusage_info_v6, &info) != 0) return error.DarwinRusageUnavailable;
+    return .{
+        .package_idle_wakeups = info.ri_pkg_idle_wkups,
+        .interrupt_wakeups = info.ri_interrupt_wkups,
+        .pageins = info.ri_pageins,
+        .instructions = info.ri_instructions,
+        .cycles = info.ri_cycles,
+        .energy_nj = info.ri_energy_nj,
+        .page_cache_hits = info.ri_page_cache_hits,
+    };
+}
+
+fn printDarwinCounterRow(
+    writer: *std.Io.Writer,
+    mode: Mode,
+    workload: []const u8,
+    jobs: usize,
+    sample: usize,
+    before: DarwinCounterSnapshot,
+    after: DarwinCounterSnapshot,
+) !void {
+    try writer.print("zig-js-darwin-rusage\t{s}\t{s}\t{d}\t{d}\tmeasured\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+        @tagName(mode),
+        workload,
+        jobs,
+        sample,
+        after.instructions -| before.instructions,
+        after.cycles -| before.cycles,
+        after.energy_nj -| before.energy_nj,
+        after.package_idle_wakeups -| before.package_idle_wakeups,
+        after.interrupt_wakeups -| before.interrupt_wakeups,
+        after.pageins -| before.pageins,
+        after.page_cache_hits -| before.page_cache_hits,
+    });
+}
 
 fn timevalNs(value: std.c.timeval) u64 {
     return @as(u64, @intCast(value.sec)) * std.time.ns_per_s +
@@ -371,6 +489,7 @@ fn runSingle(
     workload: []const u8,
     jobs: usize,
     samples: usize,
+    darwin_rusage: bool,
 ) !void {
     const ctx = try js.Context.createWith(allocator, .{
         .enable_gc = true,
@@ -386,11 +505,20 @@ fn runSingle(
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
 
     for (0..samples) |sample| {
+        const counters_before = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
         const started = nowNs(io);
         const result = try invoke(ctx, checkpoint);
         const elapsed: u64 = @intCast(nowNs(io) - started);
+        const counters_after = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
         try printRow(writer, mode, workload, 1, jobs, sample, elapsed, result.toNumber());
+        if (darwin_rusage) try printDarwinCounterRow(writer, mode, workload, jobs, sample, counters_before, counters_after);
     }
+}
+
+fn runDarwinRusageNoOp(writer: *std.Io.Writer) !void {
+    const before = try darwinCounterSnapshot();
+    const after = try darwinCounterSnapshot();
+    try printDarwinCounterRow(writer, .single, "counter_noop", 1, 0, before, after);
 }
 
 fn runAttribution(
@@ -783,12 +911,20 @@ fn runShared(
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--darwin-rusage-noop")) {
+        var noop_buffer: [1024]u8 = undefined;
+        var noop_writer = std.Io.File.stdout().writer(init.io, &noop_buffer);
+        try runDarwinRusageNoOp(&noop_writer.interface);
+        try noop_writer.interface.flush();
+        return;
+    }
     if (args.len < 5 or args.len > 7) return error.InvalidArguments;
 
     const mode = try parseMode(args[1]);
     const workload = args[2];
     const jobs = try std.fmt.parseUnsigned(usize, args[3], 10);
     const samples = try std.fmt.parseUnsigned(usize, args[4], 10);
+    const darwin_rusage = args.len == 6 and std.mem.eql(u8, args[5], "--darwin-rusage");
     const lanes = if (mode == .single or mode == .single_profiled or mode == .attribution or mode == .module_attribution)
         1
     else if (args.len >= 6)
@@ -796,6 +932,8 @@ pub fn main(init: std.process.Init) !void {
     else
         return error.InvalidArguments;
     const gc_telemetry = args.len == 7 and std.mem.eql(u8, args[6], "--gc-telemetry");
+    if (args.len == 6 and !darwin_rusage and (mode == .single or mode == .single_profiled)) return error.InvalidArguments;
+    if (darwin_rusage and mode != .single and mode != .single_profiled) return error.InvalidArguments;
     if (args.len == 7 and !gc_telemetry) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
     if ((mode == .attribution or mode == .shared_attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
@@ -807,7 +945,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     switch (mode) {
-        .single, .single_profiled => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples),
+        .single, .single_profiled => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples, darwin_rusage),
         .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry),
