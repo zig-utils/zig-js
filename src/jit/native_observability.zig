@@ -2,6 +2,17 @@ const std = @import("std");
 
 pub const CodeKind = enum(u8) { baseline, optimizer };
 
+/// Process-wide storage and lifecycle accounting for the opt-in GDB JIT
+/// adapter. Lifetime counters are monotonic; live fields return to their prior
+/// values after every registered artifact is retired.
+pub const GdbJitStats = struct {
+    live_registrations: usize,
+    live_symfile_bytes: usize,
+    live_unwind_bytes: usize,
+    registrations: u64,
+    unregistrations: u64,
+};
+
 /// Exact machine-frame contract emitted with an artifact. The plan describes
 /// codegen facts rather than asking a publication backend to recognize opcodes.
 pub const UnwindPlan = union(enum(u8)) {

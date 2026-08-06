@@ -25,6 +25,14 @@ pub fn gdbJitPublisher() NativeCodePublisher {
     return @import("jit/gdb_jit.zig").publisher();
 }
 
+pub const GdbJitStats = native_observability.GdbJitStats;
+
+/// Exact process-wide storage and lifecycle accounting for the opt-in adapter.
+/// The snapshot is serialized with registration-list mutation.
+pub fn gdbJitStats() GdbJitStats {
+    return @import("jit/gdb_jit.zig").stats();
+}
+
 test {
     _ = @import("jit/gdb_jit.zig");
 }

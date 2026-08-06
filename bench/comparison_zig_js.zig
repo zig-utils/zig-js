@@ -2,6 +2,7 @@
 //!
 //! Usage:
 //!   bench-comparison-zig-js single <workload> <jobs> <samples>
+//!   bench-comparison-zig-js single_observed <workload> <jobs> <samples>
 //!   bench-comparison-zig-js independent_steady <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js independent_cold <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes>
@@ -52,7 +53,7 @@ const shared_harness =
     \\};
 ;
 
-const Mode = enum { single, single_profiled, independent_steady, independent_cold, shared, attribution, shared_attribution, module_cold, module_attribution };
+const Mode = enum { single, single_profiled, single_observed, independent_steady, independent_cold, shared, attribution, shared_attribution, module_cold, module_attribution };
 
 const SteadyLane = struct {
     io: std.Io,
@@ -306,6 +307,58 @@ fn printRow(
     });
 }
 
+fn printNativeObservabilityRow(
+    writer: *std.Io.Writer,
+    mode: Mode,
+    workload: []const u8,
+    jobs: usize,
+    sample: usize,
+    ctx: *js.Context,
+) !void {
+    const code = ctx.jit_owner.stats();
+    const publisher = js.jit.gdbJitStats();
+    const process = try processResourceSnapshot();
+    try writer.print("zig-js-native-observability\t{s}\t{s}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+        @tagName(mode),
+        workload,
+        jobs,
+        sample,
+        code.live_artifacts,
+        code.live_bytes,
+        ctx.jit_owner.baselinePublications(),
+        ctx.jit_owner.optimizerPublications(),
+        publisher.live_registrations,
+        publisher.live_symfile_bytes,
+        publisher.live_unwind_bytes,
+        publisher.registrations,
+        publisher.unregistrations,
+        process.peak_rss_bytes,
+        process.retained_rss_bytes,
+    });
+}
+
+fn printNativeObservabilityRetiredRow(
+    writer: *std.Io.Writer,
+    mode: Mode,
+    workload: []const u8,
+    jobs: usize,
+) !void {
+    const publisher = js.jit.gdbJitStats();
+    const process = try processResourceSnapshot();
+    try writer.print("zig-js-native-observability-retired\t{s}\t{s}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+        @tagName(mode),
+        workload,
+        jobs,
+        publisher.live_registrations,
+        publisher.live_symfile_bytes,
+        publisher.live_unwind_bytes,
+        publisher.registrations,
+        publisher.unregistrations,
+        process.peak_rss_bytes,
+        process.retained_rss_bytes,
+    });
+}
+
 fn printTierAttributionRow(
     writer: *std.Io.Writer,
     mode: []const u8,
@@ -463,7 +516,20 @@ fn printGcTelemetryRow(
     });
 }
 
-fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !bool {
+fn evaluateRegistered(ctx: *js.Context, source: []const u8, source_url: []const u8) !js.Value {
+    const script = try ctx.registerDebugScript(source, source_url, 1);
+    const saved_script_id = ctx.debug_script_id;
+    const saved_start_line = ctx.debug_script_start_line;
+    defer {
+        ctx.debug_script_id = saved_script_id;
+        ctx.debug_script_start_line = saved_start_line;
+    }
+    ctx.debug_script_id = script.id;
+    ctx.debug_script_start_line = script.start_line;
+    return ctx.evaluate(source);
+}
+
+fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize, observed: bool) !bool {
     const source_bytes = if (std.mem.startsWith(u8, workload, "wasm_threads_"))
         wasm_threads_workload_source
     else if (std.mem.startsWith(u8, workload, "wasm_"))
@@ -472,11 +538,26 @@ fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !
         representative_workload_source
     else
         workload_source;
-    _ = try ctx.evaluate(source_bytes);
+    if (observed) {
+        const source_url = if (std.mem.startsWith(u8, workload, "wasm_threads_"))
+            "bench/wasm_threads_comparison.js"
+        else if (std.mem.startsWith(u8, workload, "wasm_"))
+            "bench/wasm_simd_comparison.js"
+        else if (std.mem.startsWith(u8, workload, "representative_"))
+            "bench/representative_comparison.js"
+        else
+            "bench/comparison.js";
+        _ = try evaluateRegistered(ctx, source_bytes, source_url);
+    } else {
+        _ = try ctx.evaluate(source_bytes);
+    }
     const source = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkPrepare = undefined; globalThis.__benchmarkFinish = undefined; globalThis.__benchmarkReadChecksum = undefined; globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkInvoke = function(jobs, lane) {{ if (globalThis.__benchmarkPrepare) globalThis.__benchmarkPrepare(jobs, 1, lane, false); var result = globalThis.__benchmarkSelected(jobs, lane); return globalThis.__benchmarkFinish ? globalThis.__benchmarkFinish(jobs, 1, lane, false) : result; }}; globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
         workload, jobs, lane,
     });
-    _ = try ctx.evaluate(source);
+    if (observed)
+        _ = try evaluateRegistered(ctx, source, "bench/comparison-runner.js")
+    else
+        _ = try ctx.evaluate(source);
     return (try ctx.evaluate("typeof globalThis.__benchmarkReadChecksum === 'function' ? 1 : 0")).toNumber() == 1;
 }
 
@@ -502,18 +583,22 @@ fn runSingle(
     jobs: usize,
     samples: usize,
     darwin_rusage: bool,
+    native_observability_telemetry: bool,
 ) !void {
+    const observed = mode == .single_observed;
     const ctx = try js.Context.createWith(allocator, .{
         .enable_gc = true,
         .profile_execution_tiers = mode == .single_profiled,
+        .native_code_publisher = if (observed) js.jit.gdbJitPublisher() else null,
         .wasm_features = .{
             .nontrapping_float_to_int = true,
             .fixed_width_simd = true,
             .threads = true,
         },
     });
-    defer ctx.destroy();
-    const checkpoint = try configure(ctx, workload, jobs, 0);
+    var context_live = true;
+    errdefer if (context_live) ctx.destroy();
+    const checkpoint = try configure(ctx, workload, jobs, 0, observed);
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
 
     for (0..samples) |sample| {
@@ -526,7 +611,13 @@ fn runSingle(
         const thermal_after = if (darwin_rusage) try darwinThermalState() else undefined;
         try printRow(writer, mode, workload, 1, jobs, sample, elapsed, result.toNumber());
         if (darwin_rusage) try printDarwinCounterRow(writer, mode, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
+        if (native_observability_telemetry)
+            try printNativeObservabilityRow(writer, mode, workload, jobs, sample, ctx);
     }
+    ctx.destroy();
+    context_live = false;
+    if (native_observability_telemetry)
+        try printNativeObservabilityRetiredRow(writer, mode, workload, jobs);
 }
 
 fn runDarwinRusageNoOp(writer: *std.Io.Writer) !void {
@@ -556,7 +647,7 @@ fn runAttribution(
         },
     });
     defer ctx.destroy();
-    const checkpoint = try configure(ctx, workload, jobs, 0);
+    const checkpoint = try configure(ctx, workload, jobs, 0, false);
     const configuration = ctx.tierAttributionSnapshot();
     const configuration_process = try processResourceSnapshot();
     try printTierAttributionRow(writer, "single", workload, 1, jobs, "configuration", 0, configuration, configuration_process);
@@ -585,7 +676,7 @@ fn steadyLaneMain(lane: *SteadyLane) void {
         return;
     };
     defer ctx.destroy();
-    const checkpoint = configure(ctx, lane.workload, lane.jobs, lane.lane) catch {
+    const checkpoint = configure(ctx, lane.workload, lane.jobs, lane.lane, false) catch {
         lane.failed.store(true, .release);
         lane.ready.post(lane.io);
         return;
@@ -683,7 +774,7 @@ fn coldLaneMain(lane: *ColdLane) void {
         return;
     };
     defer ctx.destroy();
-    const checkpoint = configure(ctx, lane.workload, lane.jobs, lane.lane) catch {
+    const checkpoint = configure(ctx, lane.workload, lane.jobs, lane.lane, false) catch {
         lane.failed.store(true, .release);
         return;
     };
@@ -866,7 +957,7 @@ fn runSharedAttribution(
         },
     });
     defer ctx.destroy();
-    const checkpoint = try configure(ctx, workload, jobs, 0);
+    const checkpoint = try configure(ctx, workload, jobs, 0, false);
     _ = try ctx.evaluate(shared_harness);
     const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
         jobs, lanes,
@@ -912,7 +1003,7 @@ fn runShared(
         },
     });
     defer ctx.destroy();
-    const checkpoint = try configure(ctx, workload, jobs, 0);
+    const checkpoint = try configure(ctx, workload, jobs, 0, false);
     _ = try ctx.evaluate(shared_harness);
     const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
         jobs, lanes,
@@ -969,10 +1060,12 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != base_len and args.len != base_len + 1) return error.InvalidArguments;
     const lanes = if (has_lanes) try std.fmt.parseUnsigned(usize, args[5], 10) else 1;
     const option = if (args.len == base_len + 1) args[base_len] else "";
-    const darwin_rusage = std.mem.eql(u8, option, "--darwin-rusage");
+    const native_observability_telemetry = std.mem.eql(u8, option, "--native-observability-telemetry");
+    const darwin_rusage = std.mem.eql(u8, option, "--darwin-rusage") or native_observability_telemetry;
     const gc_telemetry = std.mem.eql(u8, option, "--gc-telemetry");
     if (option.len != 0 and !darwin_rusage and !gc_telemetry) return error.InvalidArguments;
     if (darwin_rusage and (mode == .attribution or mode == .shared_attribution or mode == .module_attribution)) return error.InvalidArguments;
+    if (native_observability_telemetry and mode != .single and mode != .single_observed) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
     if ((mode == .attribution or mode == .shared_attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
@@ -983,7 +1076,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     switch (mode) {
-        .single, .single_profiled => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples, darwin_rusage),
+        .single, .single_profiled, .single_observed => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples, darwin_rusage, native_observability_telemetry),
         .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
         .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry, darwin_rusage),

@@ -48,6 +48,30 @@ pub export fn __jit_debug_register_code() callconv(.c) void {
 
 var protocol_lock: std.atomic.Mutex = .unlocked;
 
+pub const Stats = observability.GdbJitStats;
+
+const Accounting = struct {
+    live_registrations: std.atomic.Value(usize) = .init(0),
+    live_symfile_bytes: std.atomic.Value(usize) = .init(0),
+    live_unwind_bytes: std.atomic.Value(usize) = .init(0),
+    registrations: std.atomic.Value(u64) = .init(0),
+    unregistrations: std.atomic.Value(u64) = .init(0),
+};
+
+var accounting = Accounting{};
+
+pub fn stats() Stats {
+    lockProtocol();
+    defer protocol_lock.unlock();
+    return .{
+        .live_registrations = accounting.live_registrations.load(.acquire),
+        .live_symfile_bytes = accounting.live_symfile_bytes.load(.acquire),
+        .live_unwind_bytes = accounting.live_unwind_bytes.load(.acquire),
+        .registrations = accounting.registrations.load(.acquire),
+        .unregistrations = accounting.unregistrations.load(.acquire),
+    };
+}
+
 fn lockProtocol() void {
     while (!protocol_lock.tryLock()) std.atomic.spinLoopHint();
 }
@@ -129,6 +153,10 @@ fn publish(
     __jit_debug_descriptor.first_entry = entry;
     __jit_debug_descriptor.relevant_entry = entry;
     __jit_debug_descriptor.action_flag = .register;
+    _ = accounting.live_registrations.fetchAdd(1, .release);
+    _ = accounting.live_symfile_bytes.fetchAdd(symfile.len, .release);
+    if (unwind) |info| _ = accounting.live_unwind_bytes.fetchAdd(info.bytes.len, .release);
+    _ = accounting.registrations.fetchAdd(1, .release);
     @call(.never_inline, __jit_debug_register_code, .{});
     __jit_debug_descriptor.action_flag = .no_action;
     __jit_debug_descriptor.relevant_entry = null;
@@ -151,6 +179,10 @@ fn unpublish(_: ?*anyopaque, opaque_registration: *anyopaque) void {
     @call(.never_inline, __jit_debug_register_code, .{});
     __jit_debug_descriptor.action_flag = .no_action;
     __jit_debug_descriptor.relevant_entry = null;
+    _ = accounting.live_registrations.fetchSub(1, .release);
+    _ = accounting.live_symfile_bytes.fetchSub(registration.symfile.len, .release);
+    if (registration.unwind) |unwind| _ = accounting.live_unwind_bytes.fetchSub(unwind.bytes.len, .release);
+    _ = accounting.unregistrations.fetchAdd(1, .release);
     protocol_lock.unlock();
 
     const allocator = registration.allocator;
@@ -1006,6 +1038,7 @@ test "Mach-O publication unlink removes the debugger entry before storage releas
     if (!supportsMachOObject()) return error.SkipZigTest;
     const code = [_]u8{ 0xc0, 0x03, 0x5f, 0xd6 };
     const interface = publisher();
+    const before = stats();
     var publication = (try interface.publish(std.testing.allocator, .{
         .kind = .optimizer,
         .pc_start = @intFromPtr(&code),
@@ -1019,8 +1052,24 @@ test "Mach-O publication unlink removes the debugger entry before storage releas
         .source_line = 1,
         .source_column = 1,
     })) orelse return error.TestUnexpectedResult;
+    var publication_live = true;
+    defer if (publication_live) publication.deinit();
+    const registration: *Registration = @ptrCast(@alignCast(publication.token));
+    const published = stats();
+    try std.testing.expectEqual(before.live_registrations + 1, published.live_registrations);
+    try std.testing.expectEqual(before.live_symfile_bytes + registration.symfile.len, published.live_symfile_bytes);
+    try std.testing.expectEqual(before.live_unwind_bytes, published.live_unwind_bytes);
+    try std.testing.expectEqual(before.registrations + 1, published.registrations);
+    try std.testing.expectEqual(before.unregistrations, published.unregistrations);
     try std.testing.expect(__jit_debug_descriptor.first_entry != null);
     publication.deinit();
+    publication_live = false;
+    const retired = stats();
+    try std.testing.expectEqual(before.live_registrations, retired.live_registrations);
+    try std.testing.expectEqual(before.live_symfile_bytes, retired.live_symfile_bytes);
+    try std.testing.expectEqual(before.live_unwind_bytes, retired.live_unwind_bytes);
+    try std.testing.expectEqual(before.registrations + 1, retired.registrations);
+    try std.testing.expectEqual(before.unregistrations + 1, retired.unregistrations);
     try std.testing.expect(__jit_debug_descriptor.first_entry == null);
     try std.testing.expectEqual(Action.no_action, __jit_debug_descriptor.action_flag);
 }
@@ -1052,9 +1101,16 @@ fn churnPublications() void {
 
 test "Mach-O publication list serializes concurrent register and unregister" {
     if (!supportsMachOObject() or builtin.single_threaded) return error.SkipZigTest;
+    const before = stats();
     var threads: [4]std.Thread = undefined;
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, churnPublications, .{});
     for (&threads) |*thread| thread.join();
+    const after = stats();
+    try std.testing.expectEqual(before.live_registrations, after.live_registrations);
+    try std.testing.expectEqual(before.live_symfile_bytes, after.live_symfile_bytes);
+    try std.testing.expectEqual(before.live_unwind_bytes, after.live_unwind_bytes);
+    try std.testing.expectEqual(before.registrations + 256, after.registrations);
+    try std.testing.expectEqual(before.unregistrations + 256, after.unregistrations);
     try std.testing.expect(__jit_debug_descriptor.first_entry == null);
     try std.testing.expectEqual(Action.no_action, __jit_debug_descriptor.action_flag);
 }

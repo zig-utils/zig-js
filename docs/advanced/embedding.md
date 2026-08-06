@@ -79,6 +79,11 @@ Notes that matter in practice:
   retains stable generated-code names, PC ranges, and source identity through
   execution-epoch retirement for profiler/debugger adapters. It does not by
   itself publish an image to the system profiler.
+- **External publication is embedder-owned.** On macOS, passing
+  `.native_code_publisher = js.jit.gdbJitPublisher()` selects the standard GDB
+  JIT protocol used by LLDB and implies native observability. The publisher is
+  process-global; `js.jit.gdbJitStats()` reports its exact live symbol-object
+  and unwind storage plus register/unregister totals.
 - **Wasm features are off by default** and dependency-checked; enabling an
   unfinished one produces an implementation diagnostic rather than degrading
   silently.

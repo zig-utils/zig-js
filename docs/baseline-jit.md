@@ -231,6 +231,16 @@ this adapter, so the default static library does not collide with a host that
 already owns the protocol. LLDB disables this loader by default on macOS; use
 `settings set plugin.jit-loader.gdb.enable on`.
 
+`jit.gdbJitStats()` returns one lock-coherent process-wide snapshot of the
+adapter's live registration count, owned symbol-object bytes, owned unwind
+bytes, and monotonic register/unregister totals. Live storage is incremented
+before the debugger registration callback and decremented only after its
+unregister callback returns, so the counters describe the same lifetime in
+which a debugger may read the object. The comparison runner's
+`single_observed` mode registers benchmark sources before evaluation and emits
+these exact fields plus generated-code and resident-memory gauges before and
+after Context teardown. Both benchmark states use that same binary.
+
 `zig build native-observability-lldb-test` drives the real LLDB loader. Pending
 baseline and optimizer symbol breakpoints must resolve at offset zero of their
 exact JIT sections. Both objects must expose one compilation unit, leave their
