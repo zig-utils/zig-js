@@ -218,25 +218,32 @@ context must outlive the Context and its shared realms.
 
 `jit.gdbJitPublisher()` is the opt-in macOS adapter for the standard GDB JIT
 protocol, which LLDB also implements. It builds an in-memory Mach-O object whose
-single `__text` section has the exact existing executable address and byte size,
-then registers and unregisters that object with the artifact. It does not copy,
-link, or remap executable code. The process-global `__jit_debug_descriptor` and
+`__text` section has the exact existing executable address and byte size. When
+an artifact has exact source rows, the object also owns minimal DWARF v4
+`__debug_abbrev`, `__debug_info`, and `__debug_line` sections. Each mapped PC
+sets its exact one-based line and column. An explicitly unmapped PC closes the
+current line sequence, so a debugger cannot inherit a nearby JavaScript line
+across prologue, join, move, or epilogue plumbing. The adapter registers and
+unregisters the object with the artifact; it does not copy, link, or remap
+executable code. The process-global `__jit_debug_descriptor` and
 `__jit_debug_register_code` symbols are emitted only when an embedder selects
 this adapter, so the default static library does not collide with a host that
 already owns the protocol. LLDB disables this loader by default on macOS; use
 `settings set plugin.jit-loader.gdb.enable on`.
 
-`zig build native-observability-lldb-test` drives the real LLDB loader. Its
-pending generated-symbol breakpoint must resolve at offset zero of the exact JIT
-section. After the canonical frame prologue, LLDB must walk from the generated
-frame to the host binary. The production fixture also requires
+`zig build native-observability-lldb-test` drives the real LLDB loader. Pending
+baseline and optimizer symbol breakpoints must resolve at offset zero of their
+exact JIT sections. Both objects must expose one compilation unit, leave their
+entry prologues unmapped, and resolve source breakpoints to the exact fixture
+file, line, and nonzero column. After the baseline canonical frame prologue,
+LLDB must also walk from the generated frame to the host binary. The production
+fixture requires
 `_Unwind_Find_FDE` to resolve the exact live generated range and to stop
-resolving it after Context teardown; the debugger symbol must disappear at the
-same boundary. System-profiler image publication, inline-frame maps and source
-rows in the external object, logical async/deopt/Wasm stack
-reconstruction, and crash-path integration remain separate work; the
-process-local registry alone still does not make anonymous `MAP_JIT` leaves
-visible to an external profiler.
+resolving it after Context teardown; both debugger symbols must disappear at
+the same boundary. System-profiler image publication, inline-frame maps,
+logical async/deopt/Wasm stack reconstruction, and crash-path integration
+remain separate work; the process-local registry alone still does not make
+anonymous `MAP_JIT` leaves visible to an external profiler.
 
 ## Correctness and performance gates
 

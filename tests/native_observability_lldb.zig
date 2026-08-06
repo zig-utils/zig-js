@@ -11,9 +11,12 @@ extern "c" fn _Unwind_Find_FDE(pc: *const anyopaque, bases: *DwarfEhBases) ?*con
 
 const TrackingPublisher = struct {
     inner: js.jit.NativeCodePublisher,
-    last_pc: std.atomic.Value(usize) = .init(0),
-    registered: std.atomic.Value(bool) = .init(false),
-    unregistered: std.atomic.Value(bool) = .init(false),
+    baseline_pc: std.atomic.Value(usize) = .init(0),
+    optimizer_pc: std.atomic.Value(usize) = .init(0),
+    baseline_source_rows: std.atomic.Value(usize) = .init(0),
+    optimizer_source_rows: std.atomic.Value(usize) = .init(0),
+    publication_count: std.atomic.Value(usize) = .init(0),
+    unpublication_count: std.atomic.Value(usize) = .init(0),
 
     fn interface(self: *TrackingPublisher) js.jit.NativeCodePublisher {
         return .{
@@ -29,6 +32,26 @@ const TrackingPublisher = struct {
         artifact: js.jit.NativeCodeArtifact,
     ) js.jit.NativeCodePublicationError!?*anyopaque {
         const self: *TrackingPublisher = @ptrCast(@alignCast(context.?));
+        const expected_kind: ?js.jit.CodeKind = if (std.mem.eql(u8, artifact.function_name, "observedBaseline"))
+            .baseline
+        else if (std.mem.eql(u8, artifact.function_name, "observedOptimizer"))
+            .optimizer
+        else
+            null;
+        if (expected_kind) |kind| {
+            if (artifact.kind != kind) return error.NativeCodePublicationFailed;
+            if (!std.mem.eql(u8, artifact.source_url, "native-observability-fixture.js"))
+                return error.NativeCodePublicationFailed;
+            var source_rows: usize = 0;
+            for (artifact.pc_locations) |entry| if (entry.source != null) {
+                source_rows += 1;
+            };
+            if (source_rows == 0) return error.NativeCodePublicationFailed;
+            switch (artifact.kind) {
+                .baseline => self.baseline_source_rows.store(source_rows, .release),
+                .optimizer => self.optimizer_source_rows.store(source_rows, .release),
+            }
+        }
         const token = try self.inner.publish_fn(self.inner.context, allocator, artifact) orelse return null;
         var bases: DwarfEhBases = .{ .tbase = 0, .dbase = 0, .func = 0 };
         const pc: *const anyopaque = @ptrFromInt(artifact.pc_start);
@@ -37,18 +60,18 @@ const TrackingPublisher = struct {
             self.inner.unpublish_fn(self.inner.context, token);
             return error.NativeCodePublicationFailed;
         }
-        self.last_pc.store(artifact.pc_start, .release);
-        self.registered.store(true, .release);
+        if (expected_kind) |kind| switch (kind) {
+            .baseline => self.baseline_pc.store(artifact.pc_start, .release),
+            .optimizer => self.optimizer_pc.store(artifact.pc_start, .release),
+        };
+        _ = self.publication_count.fetchAdd(1, .release);
         return token;
     }
 
     fn unpublish(context: ?*anyopaque, token: *anyopaque) void {
         const self: *TrackingPublisher = @ptrCast(@alignCast(context.?));
-        const pc = self.last_pc.load(.acquire);
         self.inner.unpublish_fn(self.inner.context, token);
-        if (pc == 0) return;
-        var bases: DwarfEhBases = undefined;
-        self.unregistered.store(_Unwind_Find_FDE(@ptrFromInt(pc), &bases) == null, .release);
+        _ = self.unpublication_count.fetchAdd(1, .release);
     }
 };
 
@@ -64,23 +87,55 @@ pub fn main() !void {
         .native_code_publisher = tracking.interface(),
     });
     errdefer context.destroy();
-    const result = try context.evaluate(
-        \\function observedNative(n) {
-        \\  var total = 0;
-        \\  var i = 0;
-        \\  while (i < n) { total = total + i; i = i + 1; }
-        \\  return total;
+    const source =
+        \\function observedBaseline(n) {
+        \\  var doubled = n + n;
+        \\  var shifted = doubled - 3;
+        \\  return shifted * 2;
         \\}
-        \\observedNative(100)
-    );
-    if (result.asNum() != 4950) return error.TestUnexpectedResult;
-    const warmed = try context.evaluate("observedNative(101)");
-    if (warmed.asNum() != 5050) return error.TestUnexpectedWarmResult;
+        \\observedBaseline(100); observedBaseline(100);
+        \\function observedOptimizer(box, n) {
+        \\  return box.value + n;
+        \\}
+        \\var observedBox = { value: 40 };
+        \\observedOptimizer(observedBox, 1); observedOptimizer(observedBox, 1);
+        \\observedOptimizer(observedBox, 1); observedOptimizer(observedBox, 1);
+        \\observedOptimizer(observedBox, 1); observedOptimizer(observedBox, 1);
+        \\observedOptimizer(observedBox, 1); observedOptimizer(observedBox, 1);
+        \\observedOptimizer(observedBox, 1); observedOptimizer(observedBox, 2)
+    ;
+    const result = evaluate: {
+        const script = try context.registerDebugScript(
+            source,
+            "native-observability-fixture.js",
+            20,
+        );
+        const saved_script_id = context.debug_script_id;
+        const saved_start_line = context.debug_script_start_line;
+        defer {
+            context.debug_script_id = saved_script_id;
+            context.debug_script_start_line = saved_start_line;
+        }
+        context.debug_script_id = script.id;
+        context.debug_script_start_line = script.start_line;
+        break :evaluate try context.evaluate(source);
+    };
+    if (result.asNum() != 42) return error.TestUnexpectedResult;
+    const warmed = try context.evaluate("observedBaseline(101)");
+    if (warmed.asNum() != 398) return error.TestUnexpectedWarmResult;
     if (context.jit_owner.stats().live_artifacts == 0) return error.TestMissingNativeArtifact;
-    if (!tracking.registered.load(.acquire)) return error.TestMissingUnwindRegistration;
-    const native = try context.evaluate("observedNative(102)");
-    if (native.asNum() != 5151) return error.TestUnexpectedNativeResult;
+    if (tracking.publication_count.load(.acquire) < 2) return error.TestMissingUnwindRegistration;
+    if (tracking.baseline_source_rows.load(.acquire) == 0) return error.TestMissingBaselineSourceRows;
+    if (tracking.optimizer_source_rows.load(.acquire) == 0) return error.TestMissingOptimizerSourceRows;
+    const native = try context.evaluate("observedOptimizer(observedBox, 3)");
+    if (native.asNum() != 43) return error.TestUnexpectedNativeResult;
     context.destroy();
-    if (!tracking.unregistered.load(.acquire)) return error.TestUnexpectedResult;
+    if (tracking.unpublication_count.load(.acquire) != tracking.publication_count.load(.acquire))
+        return error.TestUnexpectedResult;
+    var bases: DwarfEhBases = undefined;
+    if (_Unwind_Find_FDE(@ptrFromInt(tracking.baseline_pc.load(.acquire)), &bases) != null)
+        return error.TestUnexpectedBaselineUnwindRegistration;
+    if (_Unwind_Find_FDE(@ptrFromInt(tracking.optimizer_pc.load(.acquire)), &bases) != null)
+        return error.TestUnexpectedOptimizerUnwindRegistration;
     @call(.never_inline, native_observability_after_unregister, .{});
 }
