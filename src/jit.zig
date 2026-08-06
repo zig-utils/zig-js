@@ -602,6 +602,141 @@ pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
 
 pub const CodeKind = enum(u8) { baseline, optimizer };
 
+/// Source identity captured when one native artifact is published. The owner
+/// duplicates the strings only when native observability is enabled, so the
+/// ordinary JIT path neither allocates nor retains profiler metadata.
+pub const NativeCodeOrigin = struct {
+    function_name: []const u8 = "",
+    function_identity: usize = 0,
+    script_id: u64 = 0,
+    source_url: []const u8 = "",
+    source_byte_offset: usize = 0,
+    source_line: usize = 0,
+    source_column: usize = 0,
+};
+
+/// Caller-owned copy of a native-PC registry row. Returning owned strings is
+/// deliberate: the executable artifact may be reclaimed as soon as the owner
+/// lock is released, and exposing slices into that artifact would create the
+/// stale-symbol race this registry exists to prevent.
+pub const NativeCodeSnapshot = struct {
+    allocator: std.mem.Allocator,
+    artifact_id: u64,
+    kind: CodeKind,
+    pc_start: usize,
+    pc_end: usize,
+    retired: bool,
+    symbol_name: []u8,
+    function_name: []u8,
+    function_identity: usize,
+    script_id: u64,
+    source_url: []u8,
+    source_byte_offset: usize,
+    source_line: usize,
+    source_column: usize,
+
+    pub fn deinit(self: *NativeCodeSnapshot) void {
+        self.allocator.free(self.symbol_name);
+        self.allocator.free(self.function_name);
+        self.allocator.free(self.source_url);
+        self.* = undefined;
+    }
+};
+
+const NativeCodeMetadata = struct {
+    allocator: std.mem.Allocator,
+    artifact_id: u64,
+    pc_start: usize,
+    pc_end: usize,
+    symbol_name: []u8,
+    function_name: []u8,
+    function_identity: usize,
+    script_id: u64,
+    source_url: []u8,
+    source_byte_offset: usize,
+    source_line: usize,
+    source_column: usize,
+
+    fn create(
+        allocator: std.mem.Allocator,
+        artifact_id: u64,
+        kind: CodeKind,
+        memory: *const CodeMemory,
+        origin: NativeCodeOrigin,
+    ) std.mem.Allocator.Error!*NativeCodeMetadata {
+        const metadata = try allocator.create(NativeCodeMetadata);
+        errdefer allocator.destroy(metadata);
+        const function_name = try allocator.dupe(u8, origin.function_name);
+        errdefer allocator.free(function_name);
+        const source_url = try allocator.dupe(u8, origin.source_url);
+        errdefer allocator.free(source_url);
+        const display_name = if (origin.function_name.len == 0) "anonymous" else origin.function_name;
+        const symbol_name = try std.fmt.allocPrint(
+            allocator,
+            "zig_js_{s}_{d}_{s}",
+            .{ @tagName(kind), artifact_id, display_name },
+        );
+        errdefer allocator.free(symbol_name);
+        for (symbol_name) |*byte| {
+            if (!std.ascii.isAlphanumeric(byte.*) and byte.* != '_' and byte.* != '$') byte.* = '_';
+        }
+        const bytes = memory.executableBytes();
+        const pc_start = @intFromPtr(bytes.ptr);
+        metadata.* = .{
+            .allocator = allocator,
+            .artifact_id = artifact_id,
+            .pc_start = pc_start,
+            .pc_end = pc_start + bytes.len,
+            .symbol_name = symbol_name,
+            .function_name = function_name,
+            .function_identity = origin.function_identity,
+            .script_id = origin.script_id,
+            .source_url = source_url,
+            .source_byte_offset = origin.source_byte_offset,
+            .source_line = origin.source_line,
+            .source_column = origin.source_column,
+        };
+        return metadata;
+    }
+
+    fn destroy(self: *NativeCodeMetadata) void {
+        const allocator = self.allocator;
+        allocator.free(self.symbol_name);
+        allocator.free(self.function_name);
+        allocator.free(self.source_url);
+        allocator.destroy(self);
+    }
+
+    fn snapshot(
+        self: *const NativeCodeMetadata,
+        allocator: std.mem.Allocator,
+        kind: CodeKind,
+        retired: bool,
+    ) std.mem.Allocator.Error!NativeCodeSnapshot {
+        const symbol_name = try allocator.dupe(u8, self.symbol_name);
+        errdefer allocator.free(symbol_name);
+        const function_name = try allocator.dupe(u8, self.function_name);
+        errdefer allocator.free(function_name);
+        const source_url = try allocator.dupe(u8, self.source_url);
+        return .{
+            .allocator = allocator,
+            .artifact_id = self.artifact_id,
+            .kind = kind,
+            .pc_start = self.pc_start,
+            .pc_end = self.pc_end,
+            .retired = retired,
+            .symbol_name = symbol_name,
+            .function_name = function_name,
+            .function_identity = self.function_identity,
+            .script_id = self.script_id,
+            .source_url = source_url,
+            .source_byte_offset = self.source_byte_offset,
+            .source_line = self.source_line,
+            .source_column = self.source_column,
+        };
+    }
+};
+
 pub const RecoverySource = enum(u8) { frame_slot, scratch_slot, constant };
 
 pub const RecoveryValue = struct {
@@ -873,8 +1008,16 @@ pub const CompiledCode = struct {
     /// A side exit may have executed observable bytecode and must resume from
     /// `deopt`; direct/restart-only entry paths reject such artifacts.
     has_side_exits: bool = false,
+    /// Present only for owners created with native observability enabled. Its
+    /// lifetime is exactly the executable mapping's lifetime, including epochs
+    /// retained by in-flight native readers.
+    native_code_metadata: ?*NativeCodeMetadata = null,
 
     pub fn deinit(self: *CompiledCode) void {
+        // Publication backends must unregister before the executable address can
+        // be reused. The owned metadata boundary preserves that ordering even
+        // though the current registry is process-local.
+        if (self.native_code_metadata) |metadata| metadata.destroy();
         self.memory.deinit();
         if (self.deopt) |metadata| metadata.destroy();
         if (self.stack_maps) |metadata| metadata.destroy();
@@ -916,7 +1059,14 @@ pub const OwnerStats = struct {
 /// exact retirement preserves unrelated artifacts across rotations, so retired
 /// mappings wait for the older-reader frontier whenever survivors crossed it.
 pub const Owner = struct {
+    pub const Options = struct {
+        native_observability: bool = false,
+    };
+
     allocator: ?std.mem.Allocator = null,
+    native_observability: bool = false,
+    /// Protected by `lock`; zero is reserved for artifacts without metadata.
+    next_native_artifact_id: u64 = 1,
     lock: std.atomic.Mutex = .unlocked,
     codes: std.ArrayListUnmanaged(*CompiledCode) = .empty,
     tiers: std.ArrayListUnmanaged(*Tier) = .empty,
@@ -1014,7 +1164,7 @@ pub const Owner = struct {
         for (&self.watched_shape_filter) |*word| word.store(0, .release);
     }
 
-    pub const AdoptError = std.mem.Allocator.Error || error{Invalidated};
+    pub const AdoptError = std.mem.Allocator.Error || error{ Invalidated, NativeArtifactIdExhausted };
 
     pub const Compilation = struct {
         owner: *Owner,
@@ -1059,10 +1209,30 @@ pub const Owner = struct {
         return .{ .allocator = allocator };
     }
 
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) Owner {
+        return .{
+            .allocator = allocator,
+            .native_observability = options.native_observability,
+        };
+    }
+
+    pub fn nativeObservabilityEnabled(self: *const Owner) bool {
+        return self.native_observability;
+    }
+
     /// Atomically adopt a mapping, register its tier for later invalidation,
     /// and publish the ready entry. Publication under the owner lock closes the
     /// race where code deletion could otherwise miss a just-compiled tier.
     pub fn adoptAndPublish(self: *Owner, tier: *Tier, compiled: CompiledCode) AdoptError!*CompiledCode {
+        return self.adoptAndPublishObserved(tier, compiled, .{});
+    }
+
+    pub fn adoptAndPublishObserved(
+        self: *Owner,
+        tier: *Tier,
+        compiled: CompiledCode,
+        origin: NativeCodeOrigin,
+    ) AdoptError!*CompiledCode {
         const allocator = self.allocator orelse return error.OutOfMemory;
         const owned = try allocator.create(CompiledCode);
         errdefer allocator.destroy(owned);
@@ -1075,7 +1245,10 @@ pub const Owner = struct {
         }
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.tiers.ensureUnusedCapacity(allocator, 1);
+        const metadata = try self.createNativeCodeMetadataLocked(allocator, &compiled, origin);
+        errdefer if (metadata) |value| value.destroy();
         owned.* = compiled;
+        owned.native_code_metadata = metadata;
         owned.artifact_generation.store(0, .monotonic);
         owned.baseline_tier = tier;
         owned.optimizer_tier = null;
@@ -1097,6 +1270,16 @@ pub const Owner = struct {
         claim: OptimizerTier.CompilationClaim,
         compiled: CompiledCode,
     ) AdoptError!*CompiledCode {
+        return self.adoptOptimizerAndPublishObserved(tier, claim, compiled, .{});
+    }
+
+    pub fn adoptOptimizerAndPublishObserved(
+        self: *Owner,
+        tier: *OptimizerTier,
+        claim: OptimizerTier.CompilationClaim,
+        compiled: CompiledCode,
+        origin: NativeCodeOrigin,
+    ) AdoptError!*CompiledCode {
         const allocator = self.allocator orelse return error.OutOfMemory;
         const owned = try allocator.create(CompiledCode);
         errdefer allocator.destroy(owned);
@@ -1109,7 +1292,10 @@ pub const Owner = struct {
         }
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.optimizer_tiers.ensureUnusedCapacity(allocator, 1);
+        const metadata = try self.createNativeCodeMetadataLocked(allocator, &compiled, origin);
+        errdefer if (metadata) |value| value.destroy();
         owned.* = compiled;
+        owned.native_code_metadata = metadata;
         owned.artifact_generation.store(0, .monotonic);
         owned.baseline_tier = null;
         owned.optimizer_tier = tier;
@@ -1120,6 +1306,25 @@ pub const Owner = struct {
         self.optimizer_tiers.appendAssumeCapacity(tier);
         self.accountPublished(owned);
         return owned;
+    }
+
+    /// Resolve one generated PC against both live and lease-retained artifacts.
+    /// The half-open range rejects a return address exactly at the next mapping,
+    /// and the owned result remains valid after concurrent epoch reclamation.
+    pub fn lookupNativeCode(
+        self: *Owner,
+        allocator: std.mem.Allocator,
+        pc: usize,
+    ) std.mem.Allocator.Error!?NativeCodeSnapshot {
+        if (!self.native_observability or self.allocator == null) return null;
+        self.acquireLock();
+        defer self.lock.unlock();
+        if (try lookupNativeCodeList(self.codes.items, allocator, pc, false)) |snapshot| return snapshot;
+        if (try lookupNativeCodeList(self.initial_execution_epoch.codes.items, allocator, pc, true)) |snapshot| return snapshot;
+        for (self.execution_epochs.items) |epoch| {
+            if (try lookupNativeCodeList(epoch.codes.items, allocator, pc, true)) |snapshot| return snapshot;
+        }
+        return null;
     }
 
     /// Protect one outer VM execution, amortizing invalidation synchronization
@@ -1340,6 +1545,20 @@ pub const Owner = struct {
         while (!self.lock.tryLock()) std.atomic.spinLoopHint();
     }
 
+    fn createNativeCodeMetadataLocked(
+        self: *Owner,
+        allocator: std.mem.Allocator,
+        compiled: *const CompiledCode,
+        origin: NativeCodeOrigin,
+    ) AdoptError!?*NativeCodeMetadata {
+        if (!self.native_observability) return null;
+        const artifact_id = self.next_native_artifact_id;
+        if (artifact_id == std.math.maxInt(u64)) return error.NativeArtifactIdExhausted;
+        const metadata = try NativeCodeMetadata.create(allocator, artifact_id, compiled.kind, &compiled.memory, origin);
+        self.next_native_artifact_id = artifact_id + 1;
+        return metadata;
+    }
+
     fn currentExecutionEpoch(self: *Owner) *ExecutionEpoch {
         const address = self.current_execution_epoch.load(.acquire);
         if (address != 0) return @ptrFromInt(address);
@@ -1535,6 +1754,20 @@ pub const Owner = struct {
         _ = self.invalidation_generation.fetchAdd(1, .acq_rel);
     }
 };
+
+fn lookupNativeCodeList(
+    codes: []const *CompiledCode,
+    allocator: std.mem.Allocator,
+    pc: usize,
+    retired: bool,
+) std.mem.Allocator.Error!?NativeCodeSnapshot {
+    for (codes) |code| {
+        const metadata = code.native_code_metadata orelse continue;
+        if (pc >= metadata.pc_start and pc < metadata.pc_end)
+            return try metadata.snapshot(allocator, code.kind, retired);
+    }
+    return null;
+}
 
 fn codeWatchesShape(code: *const CompiledCode, shape_token: usize) bool {
     const operations = code.native_operations orelse return false;
@@ -1986,6 +2219,167 @@ test "Owner releases adopted executable mappings" {
     var frame = NativeFrame{};
     try std.testing.expectEqual(ExitStatus.complete, code.run(&frame));
     try std.testing.expectEqual(@as(u64, 0x1234), frame.result_bits);
+}
+
+test "native PC registry follows live and retired executable lifetime" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var owner = Owner.initWithOptions(std.testing.allocator, .{ .native_observability = true });
+    defer owner.deinit();
+    var tier = Tier{};
+    var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    const code = try owner.adoptAndPublishObserved(
+        &tier,
+        try compileConstantEntry(0x501),
+        .{
+            .function_name = "hot loop",
+            .function_identity = 0x1234,
+            .script_id = 17,
+            .source_url = "fixture.js",
+            .source_byte_offset = 41,
+            .source_line = 4,
+            .source_column = 9,
+        },
+    );
+    compilation.release();
+    const bytes = code.memory.executableBytes();
+    const pc_start = @intFromPtr(bytes.ptr);
+    const pc_end = pc_start + bytes.len;
+
+    var live = (try owner.lookupNativeCode(std.testing.allocator, pc_start)) orelse
+        return error.TestUnexpectedResult;
+    defer live.deinit();
+    try std.testing.expectEqual(@as(u64, 1), live.artifact_id);
+    try std.testing.expectEqual(CodeKind.baseline, live.kind);
+    try std.testing.expectEqual(pc_start, live.pc_start);
+    try std.testing.expectEqual(pc_end, live.pc_end);
+    try std.testing.expect(!live.retired);
+    try std.testing.expectEqualStrings("zig_js_baseline_1_hot_loop", live.symbol_name);
+    try std.testing.expectEqualStrings("hot loop", live.function_name);
+    try std.testing.expectEqual(@as(usize, 0x1234), live.function_identity);
+    try std.testing.expectEqual(@as(u64, 17), live.script_id);
+    try std.testing.expectEqualStrings("fixture.js", live.source_url);
+    try std.testing.expectEqual(@as(usize, 41), live.source_byte_offset);
+    try std.testing.expectEqual(@as(usize, 4), live.source_line);
+    try std.testing.expectEqual(@as(usize, 9), live.source_column);
+    try std.testing.expect((try owner.lookupNativeCode(std.testing.allocator, pc_end)) == null);
+
+    var execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+    owner.clear();
+    var retired = (try owner.lookupNativeCode(std.testing.allocator, pc_start)) orelse
+        return error.TestUnexpectedResult;
+    defer retired.deinit();
+    try std.testing.expect(retired.retired);
+    try std.testing.expectEqual(live.artifact_id, retired.artifact_id);
+    execution.release();
+    try std.testing.expect((try owner.lookupNativeCode(std.testing.allocator, pc_start)) == null);
+    // Both snapshots are owned copies and remain valid after mapping reclamation.
+    try std.testing.expectEqualStrings("hot loop", live.function_name);
+    try std.testing.expectEqualStrings(live.symbol_name, retired.symbol_name);
+
+    var profile = OptimizerProfile{};
+    profile.observeEntry();
+    var optimizer_tier = OptimizerTier{};
+    var optimizer_compilation = owner.claimOptimizerCompilation(&optimizer_tier, &profile, 1) orelse
+        return error.TestUnexpectedResult;
+    var optimizer_compiled = try compileConstantEntry(0x503);
+    optimizer_compiled.kind = .optimizer;
+    const optimizer_code = try owner.adoptOptimizerAndPublishObserved(
+        &optimizer_tier,
+        optimizer_compilation.claim,
+        optimizer_compiled,
+        .{ .function_name = "optimized" },
+    );
+    optimizer_compilation.release();
+    var optimized = (try owner.lookupNativeCode(
+        std.testing.allocator,
+        @intFromPtr(optimizer_code.memory.executableBytes().ptr),
+    )) orelse return error.TestUnexpectedResult;
+    defer optimized.deinit();
+    try std.testing.expectEqual(@as(u64, 2), optimized.artifact_id);
+    try std.testing.expectEqual(CodeKind.optimizer, optimized.kind);
+    try std.testing.expectEqualStrings("zig_js_optimizer_2_optimized", optimized.symbol_name);
+}
+
+test "disabled native observability retains no artifact metadata" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var owner = Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var tier = Tier{};
+    var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    const code = try owner.adoptAndPublishObserved(
+        &tier,
+        try compileConstantEntry(0x502),
+        .{ .function_name = "must not be retained", .source_url = "disabled.js" },
+    );
+    compilation.release();
+    try std.testing.expect(code.native_code_metadata == null);
+    const pc = @intFromPtr(code.memory.executableBytes().ptr);
+    try std.testing.expect((try owner.lookupNativeCode(std.testing.allocator, pc)) == null);
+}
+
+test "native PC lookup serializes with epoch reclamation" {
+    if (!supported or builtin.cpu.arch != .aarch64 or builtin.single_threaded) return error.SkipZigTest;
+
+    var owner = Owner.initWithOptions(std.testing.allocator, .{ .native_observability = true });
+    defer owner.deinit();
+    var tier = Tier{};
+    var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    const code = try owner.adoptAndPublishObserved(
+        &tier,
+        try compileConstantEntry(0x504),
+        .{ .function_name = "retirementRace" },
+    );
+    compilation.release();
+    const pc = @intFromPtr(code.memory.executableBytes().ptr);
+    var execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+
+    const Shared = struct {
+        owner: *Owner,
+        pc: usize,
+        stop: std.atomic.Value(bool) = .init(false),
+        failed: std.atomic.Value(bool) = .init(false),
+        live_seen: std.atomic.Value(usize) = .init(0),
+        retired_seen: std.atomic.Value(usize) = .init(0),
+        missing_seen: std.atomic.Value(usize) = .init(0),
+
+        fn lookup(shared: *@This()) void {
+            while (!shared.stop.load(.acquire)) {
+                var snapshot = shared.owner.lookupNativeCode(std.heap.page_allocator, shared.pc) catch {
+                    shared.failed.store(true, .release);
+                    return;
+                } orelse {
+                    _ = shared.missing_seen.fetchAdd(1, .monotonic);
+                    continue;
+                };
+                if (snapshot.artifact_id != 1 or
+                    !std.mem.eql(u8, snapshot.function_name, "retirementRace"))
+                {
+                    shared.failed.store(true, .release);
+                }
+                if (snapshot.retired)
+                    _ = shared.retired_seen.fetchAdd(1, .monotonic)
+                else
+                    _ = shared.live_seen.fetchAdd(1, .monotonic);
+                snapshot.deinit();
+            }
+        }
+    };
+    var shared = Shared{ .owner = &owner, .pc = pc };
+    var thread = try std.Thread.spawn(.{}, Shared.lookup, .{&shared});
+    while (shared.live_seen.load(.acquire) == 0 and !shared.failed.load(.acquire)) std.atomic.spinLoopHint();
+    owner.clear();
+    while (shared.retired_seen.load(.acquire) == 0 and !shared.failed.load(.acquire)) std.atomic.spinLoopHint();
+    execution.release();
+    while (shared.missing_seen.load(.acquire) == 0 and !shared.failed.load(.acquire)) std.atomic.spinLoopHint();
+    shared.stop.store(true, .release);
+    thread.join();
+
+    try std.testing.expect(!shared.failed.load(.acquire));
+    try std.testing.expect(shared.live_seen.load(.acquire) != 0);
+    try std.testing.expect(shared.retired_seen.load(.acquire) != 0);
+    try std.testing.expect(shared.missing_seen.load(.acquire) != 0);
 }
 
 test "Owner adopts and invalidates optimizer artifacts under one lease" {

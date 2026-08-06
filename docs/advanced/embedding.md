@@ -58,6 +58,7 @@ const ctx = try js.Context.createWith(allocator, .{
     .enable_gc = false,          // precise tracing GC instead of the arena
     .concurrent_gc = false,      // mark concurrently with a single mutator
     .heap_limit_bytes = null,    // fail-closed cap on outstanding Context bytes
+    .native_observability = false, // retain owned native-PC identity metadata
     .wasm_features = .{},        // post-MVP WebAssembly gates, all off by default
 });
 ```
@@ -74,6 +75,10 @@ Notes that matter in practice:
 - **`heap_limit_bytes` covers Context-owned allocations** — arena chunks, GC cell
   slabs and side storage, thread records. Arena-backed caps fail closed;
   GC-backed caps can collect and retry at safe allocation-recovery points.
+- **`native_observability` is opt-in and fixed for the context lifetime.** It
+  retains stable generated-code names, PC ranges, and source identity through
+  execution-epoch retirement for profiler/debugger adapters. It does not by
+  itself publish an image to the system profiler.
 - **Wasm features are off by default** and dependency-checked; enabling an
   unfinished one produces an implementation diagnostic rather than degrading
   silently.

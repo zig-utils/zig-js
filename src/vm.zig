@@ -5499,7 +5499,13 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     return execLoop(vm, &exec, chunk, frame, null);
 }
 
-fn loadOrCompileOptimizer(vm: *Interpreter, owner: *jit.Owner, chunk: *Chunk, prefer_managed_baseline: bool) ?*const jit.CompiledCode {
+fn loadOrCompileOptimizer(
+    vm: *Interpreter,
+    owner: *jit.Owner,
+    chunk: *Chunk,
+    prefer_managed_baseline: bool,
+    origin: jit.NativeCodeOrigin,
+) ?*const jit.CompiledCode {
     // A managed baseline artifact already owns the whole loop, including exact
     // checkpoint accounting. The generic optimizer region currently expands
     // the same loop into finer-grained guarded operations and can be much
@@ -5526,7 +5532,12 @@ fn loadOrCompileOptimizer(vm: *Interpreter, owner: *jit.Owner, chunk: *Chunk, pr
             claim.release();
             return null;
         };
-        _ = owner.adoptOptimizerAndPublish(&chunk.optimizer_tier, claim.claim, compiled) catch {
+        _ = owner.adoptOptimizerAndPublishObserved(
+            &chunk.optimizer_tier,
+            claim.claim,
+            compiled,
+            origin,
+        ) catch {
             recordOptimizerTierUp(vm, tier_up_started_ns, false);
             compiled.deinit();
             chunk.optimizer_tier.invalidate();
@@ -5599,7 +5610,13 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     const owner = vm.jit_owner orelse return null;
 
     if (!nativeExecutionPermitted(vm, owner)) return null;
-    if (loadOrCompileOptimizer(vm, owner, chunk, vm.prefer_managed_baseline)) |artifact| {
+    if (loadOrCompileOptimizer(
+        vm,
+        owner,
+        chunk,
+        vm.prefer_managed_baseline,
+        nativeCodeOrigin(vm, owner),
+    )) |artifact| {
         if (!nativeExecutionPermitted(vm, owner)) return null;
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
         switch (try tryExecuteNative(vm, artifact, frame, exec)) {
@@ -5631,7 +5648,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
             claim.release();
             return null;
         };
-        _ = owner.adoptAndPublish(&chunk.tier, compiled) catch |err| {
+        _ = owner.adoptAndPublishObserved(&chunk.tier, compiled, nativeCodeOrigin(vm, owner)) catch |err| {
             recordBaselineTierUp(vm, tier_up_started_ns, false);
             compiled.deinit();
             if (err == error.Invalidated) chunk.tier.invalidate() else chunk.tier.publishRejected();
@@ -5648,6 +5665,86 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         .complete => |result| result,
         .miss, .deoptimized => null,
     };
+}
+
+fn nativeCodeOrigin(vm: *const Interpreter, owner: *const jit.Owner) jit.NativeCodeOrigin {
+    if (!owner.nativeObservabilityEnabled()) return .{};
+    const frame = vm.stack_trace_call_frame orelse return .{};
+    const location = frame.definition_location orelse frame.location;
+    if (location) |source| return .{
+        .function_name = frame.function_name,
+        .function_identity = frame.function_identity,
+        .script_id = source.script_id,
+        .source_url = source.source_url,
+        .source_byte_offset = source.location.byte_offset,
+        .source_line = source.location.line,
+        .source_column = source.location.column,
+    };
+    return .{
+        .function_name = frame.function_name,
+        .function_identity = frame.function_identity,
+    };
+}
+
+fn nativeCodeOriginForFunction(func: *const Function, owner: *const jit.Owner) jit.NativeCodeOrigin {
+    if (!owner.nativeObservabilityEnabled()) return .{};
+    if (func.definition_location) |source| return .{
+        .function_name = func.name,
+        .function_identity = @intFromPtr(func),
+        .script_id = source.script_id,
+        .source_url = source.source_url,
+        .source_byte_offset = source.location.byte_offset,
+        .source_line = source.location.line,
+        .source_column = source.location.column,
+    };
+    return .{
+        .function_name = func.name,
+        .function_identity = @intFromPtr(func),
+    };
+}
+
+test "vm: native code origin uses the inspector stack identity" {
+    var owner = jit.Owner.initWithOptions(std.testing.allocator, .{ .native_observability = true });
+    defer owner.deinit();
+    var frame = interp.StackTraceCallFrame{
+        .function_name = "observedFunction",
+        .function_identity = 0x501,
+        .definition_location = .{
+            .script_id = 23,
+            .location = .{ .byte_offset = 71, .line = 8, .column = 6 },
+            .source_url = "observed.js",
+        },
+    };
+    var machine: Interpreter = undefined;
+    machine.stack_trace_call_frame = &frame;
+    const origin = nativeCodeOrigin(&machine, &owner);
+    try std.testing.expectEqualStrings("observedFunction", origin.function_name);
+    try std.testing.expectEqual(@as(usize, 0x501), origin.function_identity);
+    try std.testing.expectEqual(@as(u64, 23), origin.script_id);
+    try std.testing.expectEqualStrings("observed.js", origin.source_url);
+    try std.testing.expectEqual(@as(usize, 71), origin.source_byte_offset);
+    try std.testing.expectEqual(@as(usize, 8), origin.source_line);
+    try std.testing.expectEqual(@as(usize, 6), origin.source_column);
+
+    var function: Function = undefined;
+    function.name = "directCallee";
+    function.definition_location = .{
+        .script_id = 29,
+        .location = .{ .byte_offset = 91, .line = 11, .column = 3 },
+        .source_url = "direct.js",
+    };
+    const direct = nativeCodeOriginForFunction(&function, &owner);
+    try std.testing.expectEqualStrings("directCallee", direct.function_name);
+    try std.testing.expectEqual(@intFromPtr(&function), direct.function_identity);
+    try std.testing.expectEqual(@as(u64, 29), direct.script_id);
+    try std.testing.expectEqualStrings("direct.js", direct.source_url);
+    try std.testing.expectEqual(@as(usize, 91), direct.source_byte_offset);
+
+    var disabled = jit.Owner.init(std.testing.allocator);
+    defer disabled.deinit();
+    const empty = nativeCodeOrigin(&machine, &disabled);
+    try std.testing.expectEqual(@as(usize, 0), empty.function_name.len);
+    try std.testing.expectEqual(@as(usize, 0), empty.source_url.len);
 }
 
 /// A ready numeric leaf has no object/upvalue/`this`/eval opcode and its native
@@ -5672,7 +5769,13 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     const copy_count = @min(args.len, parameter_count);
     @memcpy(slots[0..copy_count], args[0..copy_count]);
 
-    const optimizer_artifact = loadOrCompileOptimizer(vm, owner, chunk, vm.prefer_managed_baseline);
+    const optimizer_artifact = loadOrCompileOptimizer(
+        vm,
+        owner,
+        chunk,
+        vm.prefer_managed_baseline,
+        nativeCodeOriginForFunction(func, owner),
+    );
     const baseline_artifact = chunk.tier.loadCode();
     if (!nativeExecutionPermitted(vm, owner)) return null;
     if (optimizer_artifact == null and baseline_artifact == null) return null;
@@ -8328,6 +8431,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .closure = closure_env,
         .realm_global = interp.functionRealmGlobal(closure_env, vm.global_object),
         .name = tmpl.name,
+        .definition_location = vm.debugStatementLocation(tmpl.definition_node) orelse vm.debug_current_location,
         .source = tmpl.source,
         .bytecode_admission_reason = admission_reason,
         .bytecode_execution_mode = vm.bytecode_execution_mode,

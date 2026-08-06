@@ -566,6 +566,10 @@ pub const FnTemplateAdmission = enum {
 
 pub const FnTemplate = struct {
     name: []const u8,
+    /// Function declaration/expression node used to recover its exact registered
+    /// source coordinates even when declaration instantiation is hoisted ahead
+    /// of the first statement checkpoint.
+    definition_node: *const ast.Node,
     /// A *named function expression's* own name, which binds as an immutable
     /// binding in a fresh scope enclosing the body (so the body can recurse via
     /// its own name and can't rebind it). Empty for declarations and anonymous

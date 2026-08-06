@@ -3620,6 +3620,10 @@ pub const Context = struct {
         /// than enabling this on a performance-timing context; the disabled path
         /// retains neither the allocator wrapper nor pause-sample storage.
         profile_execution_tiers: bool = false,
+        /// Retain owned native-PC names and source identity for profiler,
+        /// debugger, and crash-report adapters. Disabled contexts perform no
+        /// metadata allocation or publication work.
+        native_observability: bool = false,
     };
 
     /// Test/conformance-only creation knobs. These model harness flags such as
@@ -3630,6 +3634,7 @@ pub const Context = struct {
         /// Same opt-in causal-attribution boundary as `Options`; tests use it to
         /// exercise forced execution modes without changing production defaults.
         profile_execution_tiers: bool = false,
+        native_observability: bool = false,
         /// Force plain synchronous execution through one tier for exact
         /// differentials. `required` throws instead of silently accepting a
         /// compiler or template fallback as VM coverage.
@@ -4188,6 +4193,7 @@ pub const Context = struct {
             .heap_limit_bytes = options.heap_limit_bytes,
             .wasm_features = options.wasm_features,
             .profile_execution_tiers = options.profile_execution_tiers,
+            .native_observability = options.native_observability,
         });
     }
 
@@ -4208,7 +4214,9 @@ pub const Context = struct {
             .host_gpa = primary.host_gpa,
             .gpa = allocator,
             .arena_state = primary.arena_state,
-            .jit_owner = jit.Owner.init(allocator),
+            .jit_owner = jit.Owner.initWithOptions(allocator, .{
+                .native_observability = primary.jit_owner.nativeObservabilityEnabled(),
+            }),
             .shared_jit_owner = primary.shared_jit_owner orelse &primary.jit_owner,
             .enable_jit = primary.enable_jit,
             .bytecode_execution_mode = primary.bytecode_execution_mode,
@@ -4303,6 +4311,7 @@ pub const Context = struct {
             .enable_jit = primary.enable_jit,
             .bytecode_execution_mode = primary.bytecode_execution_mode,
             .profile_execution_tiers = primary.profile_execution_tiers,
+            .native_observability = primary.jit_owner.nativeObservabilityEnabled(),
             .enable_gc = true,
             .wasm_features = primary.wasm_features,
         }, primary);
@@ -4384,7 +4393,9 @@ pub const Context = struct {
             .step_budget = options.step_budget orelse interp.max_steps,
             .arena_state = arena_state,
             .locked_arena = locked_arena,
-            .jit_owner = jit.Owner.init(context_gpa),
+            .jit_owner = jit.Owner.initWithOptions(context_gpa, .{
+                .native_observability = options.native_observability,
+            }),
             .shared_jit_owner = if (shared_owner) |owner| owner.shared_jit_owner orelse &owner.jit_owner else null,
             .enable_jit = options.enable_jit,
             .bytecode_execution_mode = options.bytecode_execution_mode,
@@ -16367,8 +16378,54 @@ test "Context enable_jit false keeps the bytecode VM deterministic" {
     try std.testing.expectEqual(@as(f64, 5), result.asNum());
 }
 
+test "Context native observability is opt in" {
+    const ordinary = try Context.create(std.testing.allocator);
+    defer ordinary.destroy();
+    try std.testing.expect(!ordinary.jit_owner.nativeObservabilityEnabled());
+
+    const observable = try Context.createWith(std.testing.allocator, .{ .native_observability = true });
+    defer observable.destroy();
+    try std.testing.expect(observable.jit_owner.nativeObservabilityEnabled());
+}
+
+test "Context native observability captures published function identity" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{ .native_observability = true });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function observedNative(n) {
+        \\  var total = 0;
+        \\  var i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\observedNative(100)
+    );
+    try std.testing.expectEqual(@as(f64, 4950), result.asNum());
+    const function_value = ctx.global_object.getOwn("observedNative") orelse return error.TestUnexpectedResult;
+    const raw_function = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const function: *interp.Function = @ptrCast(@alignCast(raw_function));
+    const chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const code = chunk.tier.loadCode() orelse
+        chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var snapshot = (try ctx.jit_owner.lookupNativeCode(
+        std.testing.allocator,
+        @intFromPtr(code.memory.executableBytes().ptr),
+    )) orelse return error.TestUnexpectedResult;
+    defer snapshot.deinit();
+    try std.testing.expectEqualStrings("observedNative", snapshot.function_name);
+    try std.testing.expectEqual(@intFromPtr(function), snapshot.function_identity);
+    try std.testing.expect(snapshot.script_id != 0);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.source_byte_offset);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.source_line);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.source_column);
+}
+
 test "Context public Options expose only stable thread controls" {
     try std.testing.expect(@hasField(Context.Options, "enable_jit"));
+    try std.testing.expect(@hasField(Context.Options, "native_observability"));
     try std.testing.expect(@hasField(Context.Options, "enable_threads"));
     try std.testing.expect(@hasField(Context.Options, "gil"));
     try std.testing.expect(@hasField(Context.Options, "heap_limit_bytes"));

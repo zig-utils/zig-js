@@ -1731,7 +1731,7 @@ pub const Compiler = struct {
     fn compileStmtList(self: *Compiler, stmts: []*Node) CompileError!void {
         for (stmts) |s| switch (s.*) {
             .func_decl => |fnode| {
-                const fi = try self.compileFunction(fnode, false);
+                const fi = try self.compileFunction(s, fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
                 try self.emitDefineForce(fnode.name);
             },
@@ -1801,7 +1801,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emitAB(.bind_pattern, pi, mode);
             },
             .func_decl => |fnode| {
-                const fi = try self.compileFunction(fnode, false);
+                const fi = try self.compileFunction(node, fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
                 try self.emitDefineForce(fnode.name);
             },
@@ -3128,7 +3128,7 @@ pub const Compiler = struct {
                 self.chunk.patchToHere(to_end);
             },
             .function => |fnode| {
-                const fi = try self.compileFunction(fnode, true);
+                const fi = try self.compileFunction(node, fnode, true);
                 _ = try self.chunk.emit(.make_closure, fi);
             },
             .class_expr => |c| {
@@ -3271,7 +3271,7 @@ pub const Compiler = struct {
                             const ci = try self.chunk.addConst(try Value.strAlloc(self.arena, p.key));
                             _ = try self.chunk.emit(.load_const, ci);
                         }
-                        const gi = try self.compileFunction(p.value.function, false);
+                        const gi = try self.compileFunction(p.value, p.value.function, false);
                         _ = try self.chunk.emit(.make_closure, gi);
                         _ = try self.chunk.emit(if (p.accessor == .get) .init_getter else .init_setter, 0);
                         continue;
@@ -3616,7 +3616,12 @@ pub const Compiler = struct {
         }
     }
 
-    fn compileFunction(self: *Compiler, fnode: *const ast.FunctionNode, named_expr: bool) CompileError!u32 {
+    fn compileFunction(
+        self: *Compiler,
+        definition_node: *const Node,
+        fnode: *const ast.FunctionNode,
+        named_expr: bool,
+    ) CompileError!u32 {
         // Suspendable functions run env-mode and capture the enclosing scope BY
         // NAME (load_var). If the enclosing function is frame-mode (tiered), its
         // locals live in frame slots the suspendable function's Environment chain
@@ -3707,6 +3712,7 @@ pub const Compiler = struct {
         const tmpl = try self.arena.create(bc.FnTemplate);
         tmpl.* = .{
             .name = fnode.name,
+            .definition_node = definition_node,
             // A *named function expression* (not a declaration, not an inferred
             // name, not a method, not an arrow) self-binds its own name in an
             // enclosing immutable scope — recorded here so `make_closure` wraps

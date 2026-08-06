@@ -161,6 +161,27 @@ but bytecode analysis remains separate from the AArch64 assembler. Other POSIX
 memory transitions and an x86-64 emitter remain future backend work; tests that
 execute generated entries skip when that backend is unavailable.
 
+### Native PC ownership
+
+`Context.Options.native_observability` opts a context into an owned native-PC
+registry. At publication, each baseline or optimizer artifact receives a stable
+artifact id and sanitized symbol name plus its exact half-open executable range,
+function identity, script id, source URL, and definition coordinates. The
+registry covers live artifacts and mappings retained by an older execution
+epoch. Lookup returns an owned copy, so releasing the owner lock cannot leave a
+profiler holding slices into reclaimed metadata.
+
+Retirement removes the registry row before unmapping executable memory. Once the
+last execution lease releases and reclamation completes, the old PC no longer
+resolves; address reuse therefore cannot inherit a stale function identity.
+With the option disabled, publication allocates and retains no native metadata.
+
+This is the lifetime and identity boundary for profiler, crash-report, debugger,
+and inspector adapters. System-profiler image publication, unwind records, and
+exact native-PC-to-bytecode/inline maps remain separate work; enabling the
+registry alone does not make anonymous `MAP_JIT` leaves visible to an external
+profiler.
+
 ## Correctness and performance gates
 
 Each compiler feature lands with differential tests that execute the same
