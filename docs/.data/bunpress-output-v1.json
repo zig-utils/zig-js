@@ -55,8 +55,8 @@
     },
     {
       "path": "baseline-jit/index.html",
-      "bytes": 170366,
-      "sha256": "3af1e995b641356fa4352ac96702507ef90a6bf54362fba64ac92d19222ce845"
+      "bytes": 170959,
+      "sha256": "bdfda65fdb3a0239ef40131fcc29b5bcfd7263831b85b26f087464bb3ba0d36a"
     },
     {
       "path": "benchmarks/index.html",
@@ -264,5 +264,5 @@
       "sha256": "796181527b872553988eb930dd4a79104fbc1c5edc916b370e71d552106bb2a1"
     }
   ],
-  "tree_sha256": "52caa9a16cafb792ea165a668c76c665869da527885f86755833cfb4338e86cd"
+  "tree_sha256": "68741243e54096f662ee9d5baa66db5a623ccaa4088a8d1a4aa52680c4d737d3"
 }

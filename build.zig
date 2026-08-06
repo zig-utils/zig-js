@@ -210,6 +210,25 @@ pub fn build(b: *std.Build) void {
             "Validate exact generated-code registration with the real LLDB JIT loader",
         );
         lldb_jit_registration_test_step.dependOn(&run_lldb_jit_registration_test.step);
+
+        const native_observability_signal_fixture = b.addExecutable(.{
+            .name = "native-observability-signal",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/native_observability_signal.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "js", .module = mod }},
+            }),
+        });
+        const run_native_observability_signal_fixture = b.addRunArtifact(native_observability_signal_fixture);
+        run_native_observability_signal_fixture.has_side_effects = true;
+        const native_observability_signal_test_step = b.step(
+            "native-observability-signal-test",
+            "Sample and resolve a production-generated JavaScript PC from a POSIX signal handler",
+        );
+        native_observability_signal_test_step.dependOn(&run_native_observability_signal_fixture.step);
     }
 
     const private_abi_consumer = b.option(

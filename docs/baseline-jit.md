@@ -263,10 +263,19 @@ LLDB must also walk from the generated frame to the host binary. The production
 fixture requires
 `_Unwind_Find_FDE` to resolve the exact live generated range and to stop
 resolving it after Context teardown; both debugger symbols must disappear at
-the same boundary. System-profiler image publication, inline-frame maps,
-logical async/deopt/Wasm stack reconstruction, and crash-path integration
-remain separate work; the process-local registry alone still does not make
-anonymous `MAP_JIT` leaves visible to an external profiler.
+the same boundary.
+
+`zig build native-observability-signal-test` installs a real `SA_SIGINFO`
+handler, targets the JavaScript execution thread with `SIGUSR1`, extracts the
+interrupted PC from the host `ucontext`, and resolves an exact production JIT
+source row through `Context.lookupNativeCodeSignalSafe`. The handler performs
+no allocation, locking, or I/O; all identity verification and teardown happen
+after the sender proves the last targeted signal was handled. The same fixture
+accepts `-Dtsan=true` to cover its atomic handoff. Fatal crash-report transport,
+system-profiler image publication, inline-frame maps, and logical
+async/deopt/Wasm stack reconstruction remain separate work; the Owner-local
+registry alone still does not make anonymous `MAP_JIT` leaves visible to an
+external profiler.
 
 ## Correctness and performance gates
 
