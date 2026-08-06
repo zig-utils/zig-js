@@ -241,7 +241,7 @@ fn validateInventory(inventory: Inventory) !void {
     if (applicable_results == 0 or excluded_results == 0)
         return fail("inventory must distinguish applicable and excluded results", .{});
 
-    const expected_engines = [_][]const u8{ "zig-js", "system-jsc", "v8", "spidermonkey", "quickjs" };
+    const expected_engines = [_][]const u8{ "zig-js", "system-jsc", "node-v8", "v8", "spidermonkey", "quickjs" };
     if (inventory.engines.len != expected_engines.len) return fail("engine inventory size drift", .{});
     for (expected_engines) |id| {
         var found = false;
@@ -256,6 +256,8 @@ fn validateInventory(inventory: Inventory) !void {
                 return fail("zig-js independent-suite dependency pin contract is incomplete", .{});
             if (std.mem.eql(u8, id, "system-jsc") and !std.mem.eql(u8, engine.adapter_status, "minimal_shell_v1_implemented_macos"))
                 return fail("system-JSC independent-suite adapter status drift", .{});
+            if (std.mem.eql(u8, id, "node-v8") and !std.mem.eql(u8, engine.adapter_status, "node_vm_minimal_shell_v1_implemented"))
+                return fail("Node/V8 independent-suite adapter status drift", .{});
             if (!contains(engine.required_run_metadata, "executable_path") or
                 !contains(engine.required_run_metadata, "executable_sha256") or
                 !contains(engine.required_run_metadata, "version_output") or
@@ -420,7 +422,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("independent-suite checkout ok: {s} at exact revision/tree with {d} pinned files\n", .{ suite_id, files });
         return;
     }
-    std.debug.print("independent-suite audit ok: frozen candidate suites, 17 Octane results, and 5 engine pin contracts classified\n", .{});
+    std.debug.print("independent-suite audit ok: frozen candidate suites, 17 Octane results, and 6 engine pin contracts classified\n", .{});
 }
 
 test "checked independent-suite inventory validates" {

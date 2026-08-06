@@ -1865,6 +1865,41 @@ pub fn build(b: *std.Build) void {
         independent_suite_jsc_step.dependOn(&unsupported_run.step);
     }
 
+    // Optional independently installed Node/V8 control. The engine is named
+    // Node/V8 explicitly: it is neither a standalone d8 shell nor a browser.
+    const independent_suite_node_v8_self_test = b.addSystemCommand(&.{ "/usr/bin/env", "node" });
+    independent_suite_node_v8_self_test.addFileArg(b.path("bench/independent_suite_node_v8.js"));
+    independent_suite_node_v8_self_test.addArg("--self-test");
+    independent_suite_node_v8_self_test.setEnvironmentVariable("TZ", "UTC");
+    independent_suite_node_v8_self_test.setEnvironmentVariable("LC_ALL", "C");
+    independent_suite_node_v8_self_test.setEnvironmentVariable("LANG", "C");
+    const independent_suite_node_v8_self_test_step = b.step("independent-suite-node-v8-self-test", "Test the optional independently installed Node/V8 adapter");
+    independent_suite_node_v8_self_test_step.dependOn(&independent_suite_node_v8_self_test.step);
+    const independent_suite_node_v8_step = b.step("independent-suite-node-v8", "Run one pinned Octane row through an independently installed Node/V8 runtime");
+    if (independent_suite_checkout) |checkout| {
+        if (b.option([]const u8, "independent-suite-node-v8-adapter-revision", "Exact zig-js source revision represented by the Node/V8 adapter")) |revision| {
+            const run_node_v8 = b.addSystemCommand(&.{ "/usr/bin/env", "node" });
+            run_node_v8.addFileArg(b.path("bench/independent_suite_node_v8.js"));
+            run_node_v8.addArgs(&.{
+                checkout,
+                b.option([]const u8, "independent-suite-row", "Applicable independent-suite row id") orelse "richards",
+                revision,
+                "score",
+            });
+            run_node_v8.setEnvironmentVariable("TZ", "UTC");
+            run_node_v8.setEnvironmentVariable("LC_ALL", "C");
+            run_node_v8.setEnvironmentVariable("LANG", "C");
+            run_node_v8.step.dependOn(&run_independent_suite_audit.step);
+            independent_suite_node_v8_step.dependOn(&run_node_v8.step);
+        } else {
+            const missing_revision = b.addFail("independent-suite-node-v8 requires -Dindependent-suite-node-v8-adapter-revision=<40-hex-commit>");
+            independent_suite_node_v8_step.dependOn(&missing_revision.step);
+        }
+    } else {
+        const missing_checkout = b.addFail("independent-suite-node-v8 requires -Dindependent-suite-checkout=<verified-out-of-tree-path>");
+        independent_suite_node_v8_step.dependOn(&missing_checkout.step);
+    }
+
     const independent_suite_zig_js_revision = b.option([]const u8, "independent-suite-zig-js-revision", "Exact zig-js source revision represented by the runner");
     const independent_suite_zig_js_step = b.step("independent-suite-zig-js", "Run one pinned Octane row through the isolated zig-js adapter");
     if (independent_suite_checkout) |checkout| {

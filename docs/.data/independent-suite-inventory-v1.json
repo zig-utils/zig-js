@@ -264,6 +264,13 @@
       "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "framework_version", "argv", "environment"]
     },
     {
+      "id": "node-v8",
+      "kind": "independently_installed_runtime",
+      "disposition": "optional_when_available",
+      "adapter_status": "node_vm_minimal_shell_v1_implemented",
+      "required_run_metadata": ["executable_path", "executable_sha256", "version_output", "node_version", "v8_version", "adapter_path", "adapter_sha256", "adapter_source_revision", "argv", "environment"]
+    },
+    {
       "id": "v8",
       "kind": "independently_installed",
       "disposition": "optional",

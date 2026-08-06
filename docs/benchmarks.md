@@ -425,6 +425,28 @@ exact per-context tier/compilation/deoptimization or GC/allocation/pause
 counters; those fields are `unavailable_public_api`, never zero. Framework
 samples are score-only and remain separate from zig-js attribution samples.
 
+An optional independently installed Node/V8 control is also explicit about its
+programming model: it is a fresh `node:vm` context inside a Node process, not a
+standalone `d8` shell and not a browser. The adapter verifies the same pinned
+sources without transformation and records the Node executable path/hash, Node
+and V8 versions, adapter path/hash/revision, argv/environment, raw process
+sample, outputs, validation, and timing boundaries. Node exposes no exact
+per-context V8 tier or GC counters through `node:vm`, so those fields are
+`unavailable_public_api`.
+
+```sh
+zig build independent-suite-node-v8-self-test
+zig build independent-suite-node-v8 \
+  -Dindependent-suite-checkout=/absolute/outside/zig-js/octane \
+  -Dindependent-suite-row=richards \
+  -Dindependent-suite-node-v8-adapter-revision=$(git rev-parse HEAD)
+```
+
+The step is optional and resolves `node` only when invoked; Node/V8 never
+becomes an ordinary build or runtime dependency. Standalone V8, SpiderMonkey,
+and QuickJS remain separate planned adapters rather than being conflated with
+this Node-hosted control.
+
 A single adapter invocation is a compatibility diagnostic, not publishable
 performance evidence. The
 [`independent-suite-collector.ts`](../tools/independent-suite-collector.ts)
