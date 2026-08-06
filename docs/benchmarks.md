@@ -292,9 +292,11 @@ cycles, cumulative process energy, package/interrupt wakeups, page-ins, VM
 page-cache hits, and voluntary/involuntary context switches for every sample.
 It derives cycles, instructions, and process-energy per frozen logical job,
 instructions per cycle, and jobs per joule without replacing the raw values.
-No sample is discarded or reordered.
+Public `NSProcessInfo.thermalState` snapshots before and after each boundary
+retain nominal/fair/serious/critical state and detect within- or across-sample
+drift. No sample is discarded or reordered.
 
-Schema v3 (with historical schema-v1/v2 artifacts left unchanged) keeps each OS
+Schema v4 (with historical schema-v1/v2/v3 artifacts left unchanged) keeps each OS
 counter as a status-bearing observation: `measured`,
 `unavailable`, or `permission_denied`. Before the alternating workload pairs it
 runs the same number of runner-owned no-op boundary probes, then compares their
@@ -307,12 +309,13 @@ On macOS, the runner snapshots its own public
 JavaScript invocation. That owned boundary supplies instructions, cycles,
 process energy in nanojoules, wakeups, page-ins, and VM page-cache hits;
 `/usr/bin/time -l` independently supplies fresh-process CPU, peak RSS, and
-context switches. The artifact records that the instruction/cycle interface
-exposes no multiplexing or scaling metadata. CPU cache/TLB misses, branches,
-migrations, scheduler wait, frequency, trustworthy thermal state, package
-energy, and peak power remain explicit unavailable capabilities rather than
-zero-valued measurements. VM page-cache hits are never mislabeled as CPU cache
-behavior.
+context switches. System thermal snapshots occur immediately outside both the
+wall-time and process-counter boundaries, so querying Foundation is not charged
+to the JavaScript work. The artifact records that the instruction/cycle
+interface exposes no multiplexing or scaling metadata. CPU cache/TLB misses,
+branches, migrations, scheduler wait, frequency, package energy, and peak power
+remain explicit unavailable capabilities rather than zero-valued measurements.
+VM page-cache hits are never mislabeled as CPU cache behavior.
 
 ```sh
 zig build instrumentation-overhead \
@@ -337,8 +340,11 @@ Runs default to `diagnostic`. A negligible-overhead publication claim requires
 `-Dinstrumentation-overhead-host-class=quiet_reference`; that classification
 fails closed unless the captured power state is AC and known-work instructions,
 cycles, and process energy are all measured and stable at the declared 5% RSD
-threshold. Battery, hosted, unavailable-counter, or noisy-counter results stay
-visible as diagnostic artifacts and cannot satisfy the reference-host gate.
+threshold. Known-work thermal state must also remain nominal before and after
+every sample with no across-sample state change. Battery, hosted,
+unavailable-counter, noisy-counter, non-nominal, or thermally drifting results
+stay visible as diagnostic artifacts and cannot satisfy the reference-host
+gate.
 
 The first full-work diagnostic is the seven-pair
 [`instrumentation-overhead-diagnostic-2026-08-04.md`](.data/instrumentation-overhead-diagnostic-2026-08-04.md)

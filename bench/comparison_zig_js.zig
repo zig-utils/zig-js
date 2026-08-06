@@ -167,6 +167,7 @@ const DarwinCounterSnapshot = struct {
 
 const rusage_info_v6 = 6;
 extern "c" fn proc_pid_rusage(pid: std.c.pid_t, flavor: c_int, buffer: *anyopaque) c_int;
+extern "c" fn zig_js_benchmark_thermal_state() i32;
 
 fn darwinCounterSnapshot() !DarwinCounterSnapshot {
     if (builtin.os.tag != .macos) return error.DarwinRusageUnavailable;
@@ -183,6 +184,13 @@ fn darwinCounterSnapshot() !DarwinCounterSnapshot {
     };
 }
 
+fn darwinThermalState() !i32 {
+    if (builtin.os.tag != .macos) return error.DarwinThermalStateUnavailable;
+    const state = zig_js_benchmark_thermal_state();
+    if (state < 0 or state > 3) return error.DarwinThermalStateUnavailable;
+    return state;
+}
+
 fn printDarwinCounterRow(
     writer: *std.Io.Writer,
     mode: Mode,
@@ -191,8 +199,10 @@ fn printDarwinCounterRow(
     sample: usize,
     before: DarwinCounterSnapshot,
     after: DarwinCounterSnapshot,
+    thermal_before: i32,
+    thermal_after: i32,
 ) !void {
-    try writer.print("zig-js-darwin-rusage\t{s}\t{s}\t{d}\t{d}\tmeasured\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+    try writer.print("zig-js-darwin-rusage\t{s}\t{s}\t{d}\t{d}\tmeasured\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
         @tagName(mode),
         workload,
         jobs,
@@ -204,6 +214,8 @@ fn printDarwinCounterRow(
         after.interrupt_wakeups -| before.interrupt_wakeups,
         after.pageins -| before.pageins,
         after.page_cache_hits -| before.page_cache_hits,
+        thermal_before,
+        thermal_after,
     });
 }
 
@@ -505,20 +517,24 @@ fn runSingle(
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
 
     for (0..samples) |sample| {
+        const thermal_before = if (darwin_rusage) try darwinThermalState() else undefined;
         const counters_before = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
         const started = nowNs(io);
         const result = try invoke(ctx, checkpoint);
         const elapsed: u64 = @intCast(nowNs(io) - started);
         const counters_after = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
+        const thermal_after = if (darwin_rusage) try darwinThermalState() else undefined;
         try printRow(writer, mode, workload, 1, jobs, sample, elapsed, result.toNumber());
-        if (darwin_rusage) try printDarwinCounterRow(writer, mode, workload, jobs, sample, counters_before, counters_after);
+        if (darwin_rusage) try printDarwinCounterRow(writer, mode, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
     }
 }
 
 fn runDarwinRusageNoOp(writer: *std.Io.Writer) !void {
+    const thermal_before = try darwinThermalState();
     const before = try darwinCounterSnapshot();
     const after = try darwinCounterSnapshot();
-    try printDarwinCounterRow(writer, .single, "counter_noop", 1, 0, before, after);
+    const thermal_after = try darwinThermalState();
+    try printDarwinCounterRow(writer, .single, "counter_noop", 1, 0, before, after, thermal_before, thermal_after);
 }
 
 fn runAttribution(

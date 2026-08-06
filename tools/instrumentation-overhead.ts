@@ -18,11 +18,16 @@ type CounterObservation =
   | { status: "measured"; value: number }
   | { status: "unavailable" | "permission_denied"; reason: string };
 type CounterMeasurements = Record<CounterName, CounterObservation>;
+type ThermalState = "nominal" | "fair" | "serious" | "critical";
+type ThermalObservation =
+  | { status: "measured"; before: ThermalState; after: ThermalState }
+  | { status: "unavailable" | "permission_denied"; reason: string };
 type Measurement = {
   wall_time_ns: number;
   process_cpu_user_ns: number;
   process_cpu_system_ns: number;
   peak_rss_bytes: number;
+  thermal_state: ThermalObservation;
 } & CounterMeasurements;
 type Sample = {
   identity: {
@@ -55,15 +60,27 @@ function counterObservation(stderr: string, label: string): CounterObservation {
   return { status: "unavailable", reason: `${label} was not reported by /usr/bin/time -l` };
 }
 
-export function parseDarwinCounters(stdout: string, mode: string, workload: string, jobs: number): Pick<CounterMeasurements, typeof OWNED_COUNTER_NAMES[number]> {
+function darwinFields(stdout: string, mode: string, workload: string, jobs: number): string[] {
   const rows = stdout.split("\n").filter((line) => line.startsWith("zig-js-darwin-rusage\t"));
   requireValue(rows.length === 1, `expected one Darwin rusage row, got ${rows.length}`);
   const fields = rows[0].split("\t");
-  requireValue(fields.length === 13 && fields[1] === mode && fields[2] === workload && Number(fields[3]) === jobs && Number(fields[4]) === 0, "Darwin rusage identity drift");
+  requireValue(fields.length === 15 && fields[1] === mode && fields[2] === workload && Number(fields[3]) === jobs && Number(fields[4]) === 0, "Darwin rusage identity drift");
   requireValue(fields[5] === "measured", `Darwin rusage status is ${fields[5]}`);
-  const observations = fields.slice(6).map((field) => ({ status: "measured" as const, value: Number(field) }));
+  return fields;
+}
+
+export function parseDarwinCounters(stdout: string, mode: string, workload: string, jobs: number): Pick<CounterMeasurements, typeof OWNED_COUNTER_NAMES[number]> {
+  const observations = darwinFields(stdout, mode, workload, jobs).slice(6, 13).map((field) => ({ status: "measured" as const, value: Number(field) }));
   observations.forEach((observation) => requireValue(Number.isFinite(observation.value) && observation.value >= 0, "Darwin rusage counter is invalid"));
   return Object.fromEntries(OWNED_COUNTER_NAMES.map((name, index) => [name, observations[index]])) as Pick<CounterMeasurements, typeof OWNED_COUNTER_NAMES[number]>;
+}
+
+const THERMAL_STATES: ThermalState[] = ["nominal", "fair", "serious", "critical"];
+export function parseDarwinThermalState(stdout: string, mode: string, workload: string, jobs: number): ThermalObservation {
+  const fields = darwinFields(stdout, mode, workload, jobs), before = Number(fields[13]), after = Number(fields[14]);
+  if (!Number.isInteger(before) || !Number.isInteger(after) || before < 0 || before >= THERMAL_STATES.length || after < 0 || after >= THERMAL_STATES.length)
+    return { status: "unavailable", reason: "NSProcessInfo thermalState returned an unsupported value" };
+  return { status: "measured", before: THERMAL_STATES[before], after: THERMAL_STATES[after] };
 }
 
 function parseCounters(stdout: string, stderr: string, mode: string, workload: string, jobs: number): CounterMeasurements {
@@ -116,12 +133,13 @@ function runOne(
       process_cpu_user_ns: Math.round(timeMetric(completed.stderr, "user") * 1e9),
       process_cpu_system_ns: Math.round(timeMetric(completed.stderr, "sys") * 1e9),
       peak_rss_bytes: Math.round(timeMetric(completed.stderr, "maximum resident set size")),
+      thermal_state: parseDarwinThermalState(completed.stdout, mode, workload, jobs),
       ...counters,
     },
   };
 }
 
-type NoOpSample = { sample: number; counters: CounterMeasurements };
+type NoOpSample = { sample: number; counters: CounterMeasurements; thermal_state: ThermalObservation };
 
 function collectNoOp(runner: string, repetitions: number): NoOpSample[] {
   const samples: NoOpSample[] = [];
@@ -130,7 +148,7 @@ function collectNoOp(runner: string, repetitions: number): NoOpSample[] {
     console.error(`+ ${command.join(" ")}`);
     const completed = run(command);
     requireValue(completed.exitCode === 0, completed.stderr || `no-op calibration exited ${completed.exitCode}`);
-    samples.push({ sample, counters: parseCounters(completed.stdout, completed.stderr, "single", "counter_noop", 1) });
+    samples.push({ sample, counters: parseCounters(completed.stdout, completed.stderr, "single", "counter_noop", 1), thermal_state: parseDarwinThermalState(completed.stdout, "single", "counter_noop", 1) });
   }
   return samples;
 }
@@ -174,6 +192,25 @@ function observationStatus(observations: CounterObservation[]): "measured" | "un
   if (observations.some((value) => value.status === "permission_denied")) return "permission_denied";
   if (observations.some((value) => value.status === "unavailable")) return "unavailable";
   return "measured";
+}
+
+function thermalObservationStatus(observations: ThermalObservation[]): "measured" | "unavailable" | "permission_denied" {
+  if (observations.some((value) => value.status === "permission_denied")) return "permission_denied";
+  if (observations.some((value) => value.status === "unavailable")) return "unavailable";
+  return "measured";
+}
+
+function thermalQuality(observations: ThermalObservation[]): { samples: number; states: ThermalState[]; boundaries_stable: boolean; relative_standard_deviation: null; status: "stable" | "noisy" | "indeterminate" } {
+  const measured = observations.filter((value): value is Extract<ThermalObservation, { status: "measured" }> => value.status === "measured"),
+    states = [...new Set(measured.flatMap((value) => [value.before, value.after]))].sort() as ThermalState[],
+    boundariesStable = measured.every((value) => value.before === value.after);
+  return {
+    samples: measured.length,
+    states,
+    boundaries_stable: boundariesStable,
+    relative_standard_deviation: null,
+    status: measured.length === 0 ? "indeterminate" : boundariesStable && states.length === 1 ? "stable" : "noisy",
+  };
 }
 
 function dispersion(values: number[]): { samples: number; median: number | null; relative_standard_deviation: number | null; status: "stable" | "noisy" | "indeterminate" } {
@@ -221,6 +258,10 @@ export function summarize(samples: Sample[]): any {
   result.instructions_per_cycle = cycles.status === "measured" && instructions.status === "measured" && cycles.disabled_median > 0 && cycles.enabled_median > 0
     ? { status: "measured", disabled: instructions.disabled_median / cycles.disabled_median, enabled: instructions.enabled_median / cycles.enabled_median }
     : { status: cycles.status !== "measured" ? cycles.status : instructions.status, disabled: null, enabled: null };
+  const thermal = samples.map((sample) => sample.metrics.thermal_state), thermalStatus = thermalObservationStatus(thermal), quality = thermalQuality(thermal);
+  result.thermal_state = thermalStatus === "measured"
+    ? { status: "measured", states: quality.states, boundaries_stable: quality.boundaries_stable, quality: quality.status }
+    : { status: thermalStatus, states: [], boundaries_stable: false, quality: "indeterminate" };
   return result;
 }
 
@@ -232,7 +273,6 @@ const UNAVAILABLE_CAPABILITIES: Record<string, { unit: string; reason: string }>
   migrations: { unit: "count", reason: "the unprivileged macOS process-boundary interfaces do not expose CPU migrations" },
   scheduler_wait_ns: { unit: "ns", reason: "the unprivileged macOS process-boundary interfaces do not expose scheduler wait time" },
   frequency_hz: { unit: "Hz", reason: "the unprivileged macOS process-boundary interfaces do not expose effective frequency" },
-  thermal_state: { unit: "state", reason: "the benchmark interface records power source but has no trustworthy process-scoped thermal sample" },
   package_energy_joules: { unit: "J", reason: "the unprivileged macOS process-boundary interfaces expose process energy but not package energy" },
   peak_power_watts: { unit: "W", reason: "the unprivileged macOS process-boundary interfaces expose cumulative process energy but not peak power" },
 };
@@ -262,6 +302,19 @@ function capabilityInventory(noOpSamples: NoOpSample[], samples: Sample[]): Reco
       },
     };
   }
+  const noOpThermal = noOpSamples.map((sample) => sample.thermal_state), knownWorkThermal = samples.filter((sample) => sample.identity.state === "disabled").map((sample) => sample.metrics.thermal_state), allThermal = samples.map((sample) => sample.metrics.thermal_state), thermalStatus = thermalObservationStatus([...noOpThermal, ...allThermal]);
+  const firstMissingThermal = [...noOpThermal, ...allThermal].find((value) => value.status !== "measured") as Exclude<ThermalObservation, { status: "measured" }> | undefined;
+  inventory.thermal_state = {
+    unit: "categorical",
+    source: "NSProcessInfo.thermalState immediately outside the timed/process-counter boundary",
+    availability: thermalStatus === "measured" ? { status: "measured" } : { status: thermalStatus, reason: firstMissingThermal!.reason },
+    multiplexing: { status: "not_applicable", reason: "thermal state is a system condition, not a multiplexed hardware event" },
+    calibration: {
+      no_op: thermalQuality(noOpThermal),
+      known_work: thermalQuality(knownWorkThermal),
+      stability_threshold_relative_standard_deviation: null,
+    },
+  };
   for (const [counter, boundary] of Object.entries(UNAVAILABLE_CAPABILITIES)) inventory[counter] = {
     unit: boundary.unit,
     source: "platform capability inventory",
@@ -273,13 +326,15 @@ function capabilityInventory(noOpSamples: NoOpSample[], samples: Sample[]): Reco
 }
 
 export function validateArtifact(artifact: any): void {
-  requireValue(artifact.schema_version === 3 && artifact.profile_id === "zig-js-instrumentation-overhead-v3", "overhead schema identity drift");
+  requireValue(artifact.schema_version === 4 && artifact.profile_id === "zig-js-instrumentation-overhead-v4", "overhead schema identity drift");
   requireValue(artifact.metadata && artifact.metadata.pairs >= 2, "overhead metadata is incomplete");
   requireValue(["diagnostic", "quiet_reference"].includes(artifact.metadata.host_class), "overhead host class is invalid");
   if (artifact.metadata.host_class === "quiet_reference") {
     requireValue(artifact.metadata.environment.Power.includes("AC Power"), "quiet-reference overhead evidence requires AC power");
     for (const counter of ["instructions", "cycles", "process_energy_nj"])
       requireValue(artifact.counter_capabilities[counter].availability.status === "measured" && artifact.counter_capabilities[counter].calibration.known_work.status === "stable", `quiet-reference efficiency evidence requires stable known-work ${counter}`);
+    const thermal = artifact.counter_capabilities.thermal_state;
+    requireValue(thermal.availability.status === "measured" && thermal.calibration.no_op.status === "stable" && thermal.calibration.known_work.status === "stable" && JSON.stringify(thermal.calibration.no_op.states) === '["nominal"]' && JSON.stringify(thermal.calibration.known_work.states) === '["nominal"]' && artifact.summary.thermal_state.quality === "stable" && JSON.stringify(artifact.summary.thermal_state.states) === '["nominal"]', "quiet-reference efficiency evidence requires stable nominal thermal state");
   }
   requireValue(/^[0-9a-f]{64}$/.test(artifact.metadata.runner_sha256), "runner hash is invalid");
   requireValue(Number.isInteger(artifact.metadata.runner_size_bytes) && artifact.metadata.runner_size_bytes > 0, "runner size is invalid");
@@ -301,6 +356,10 @@ export function validateArtifact(artifact: any): void {
         if (observation.status === "measured") requireValue(Number.isFinite(observation.value) && observation.value >= 0, `pair ${pair} ${counter} value is invalid`);
         else requireValue(typeof observation.reason === "string" && observation.reason.length > 0, `pair ${pair} ${counter} reason is missing`);
       }
+      const thermal = row.metrics.thermal_state;
+      requireValue(["measured", "unavailable", "permission_denied"].includes(thermal.status), `pair ${pair} thermal state status is invalid`);
+      if (thermal.status === "measured") requireValue(THERMAL_STATES.includes(thermal.before) && THERMAL_STATES.includes(thermal.after), `pair ${pair} thermal state is invalid`);
+      else requireValue(typeof thermal.reason === "string" && thermal.reason.length > 0, `pair ${pair} thermal state reason is missing`);
     }
   }
   requireValue(artifact.calibration?.no_op?.command?.join(" ") === `env LC_ALL=C /usr/bin/time -l ${artifact.metadata.runner_path} --darwin-rusage-noop`, "no-op calibration command drift");
@@ -308,10 +367,11 @@ export function validateArtifact(artifact: any): void {
   artifact.calibration.no_op.samples.forEach((sample: NoOpSample, index: number) => {
     requireValue(sample.sample === index, `no-op calibration sample ${index} identity drift`);
     for (const counter of COUNTER_NAMES) requireValue(Boolean(sample.counters[counter]), `no-op calibration sample ${index} is missing ${counter}`);
+    requireValue(Boolean(sample.thermal_state), `no-op calibration sample ${index} is missing thermal state`);
   });
   requireValue(artifact.calibration.known_work.sample_state === "disabled", "known-work calibration state drift");
   requireValue(artifact.calibration.known_work.sample_pairs.length === artifact.metadata.pairs, "known-work calibration pair inventory drift");
-  const expectedCapabilities = [...COUNTER_NAMES, ...Object.keys(UNAVAILABLE_CAPABILITIES)].sort();
+  const expectedCapabilities = [...COUNTER_NAMES, "thermal_state", ...Object.keys(UNAVAILABLE_CAPABILITIES)].sort();
   requireValue(JSON.stringify(Object.keys(artifact.counter_capabilities).sort()) === JSON.stringify(expectedCapabilities), "counter capability inventory drift");
   for (const counter of expectedCapabilities) {
     const capability = artifact.counter_capabilities[counter];
@@ -334,6 +394,14 @@ export function validateArtifact(artifact: any): void {
       }
       requireValue(["stable", "noisy", "indeterminate"].includes(capability.calibration.no_op.status), `${counter} no-op quality is invalid`);
       requireValue(["stable", "noisy", "indeterminate"].includes(capability.calibration.known_work.status), `${counter} known-work quality is invalid`);
+    } else if (counter === "thermal_state") {
+      const observations: ThermalObservation[] = [
+        ...artifact.calibration.no_op.samples.map((sample: NoOpSample) => sample.thermal_state),
+        ...samples.map((sample) => sample.metrics.thermal_state),
+      ];
+      requireValue(capability.availability.status === thermalObservationStatus(observations), "thermal capability/sample status drift");
+      requireValue(["stable", "noisy", "indeterminate"].includes(capability.calibration.no_op.status) && ["stable", "noisy", "indeterminate"].includes(capability.calibration.known_work.status), "thermal calibration quality is invalid");
+      requireValue(artifact.summary.thermal_state.status === capability.availability.status, "thermal summary/capability status drift");
     }
   }
   requireValue(artifact.boundaries.retained_rss.status === "unavailable", "retained RSS must remain explicit");
@@ -390,11 +458,15 @@ export function render(artifact: any, rawPath = ""): string {
       ? `| \`${name}\` | ${metric.disabled.toFixed(3)} ${unit} | ${metric.enabled.toFixed(3)} ${unit} | ${(metric.enabled / metric.disabled).toFixed(4)}x |`
       : `| \`${name}\` | ${metric.status} | ${metric.status} | N/A |`);
   }
+  const thermal = summary.thermal_state;
+  rows.push(thermal.status === "measured"
+    ? `| \`thermal_state\` | ${thermal.states.join(", ")} | ${thermal.states.join(", ")} | ${thermal.boundaries_stable ? "stable" : "drifted"} |`
+    : `| \`thermal_state\` | ${thermal.status} | ${thermal.status} | N/A |`);
   rows.push(
     "",
     "## Counter capability and calibration",
     "",
-    "Counter availability is separate from sample quality. `noisy` retains every raw value but forbids a stable efficiency claim; unavailable multiplexing metadata is never treated as non-multiplexed. Instructions, cycles, process energy, wakeups, page-ins, and VM page-cache hits come from owned self-process `proc_pid_rusage(RUSAGE_INFO_V6)` deltas.",
+    "Counter availability is separate from sample quality. `noisy` retains every raw value but forbids a stable efficiency claim; unavailable multiplexing metadata is never treated as non-multiplexed. Instructions, cycles, process energy, wakeups, page-ins, and VM page-cache hits come from owned self-process `proc_pid_rusage(RUSAGE_INFO_V6)` deltas. System thermal state comes from public `NSProcessInfo.thermalState` snapshots outside both measured boundaries.",
     "",
     "| counter | availability | multiplexing | no-op quality | known-work quality |",
     "| --- | --- | --- | --- | --- |",
@@ -427,6 +499,7 @@ function syntheticSamples(): Sample[] {
         process_cpu_user_ns: 80,
         process_cpu_system_ns: 20,
         peak_rss_bytes: 10_000_000,
+        thermal_state: { status: "measured", before: "nominal", after: "nominal" },
         instructions: { status: "measured", value: 1000 + pair },
         cycles: { status: "measured", value: 500 + pair },
         process_energy_nj: { status: "measured", value: 200 + pair },
@@ -445,6 +518,7 @@ function syntheticSamples(): Sample[] {
 function syntheticNoOpSamples(): NoOpSample[] {
   return [0, 1].map((sample) => ({
     sample,
+    thermal_state: { status: "measured", before: "nominal", after: "nominal" },
     counters: {
       instructions: { status: "measured", value: 100 + sample },
       cycles: { status: "measured", value: 50 + sample },
@@ -473,11 +547,12 @@ export function selfTest(): void {
   requireValue(counterObservation(timing, "instructions retired").status === "measured", "measured counter classification drift");
   requireValue(counterObservation("operation not permitted", "cycles elapsed").status === "permission_denied", "permission counter classification drift");
   requireValue(counterObservation("", "cycles elapsed").status === "unavailable", "unavailable counter classification drift");
-  const owned = parseDarwinCounters("zig-js-darwin-rusage\tsingle\trepresentative_json\t110\t0\tmeasured\t1000\t500\t200\t1\t2\t0\t3\n", "single", "representative_json", 110);
-  requireValue(owned.instructions.status === "measured" && owned.process_energy_nj.value === 200 && owned.page_cache_hits.value === 3, "owned Darwin counter parse drift");
+  const darwinFixture = "zig-js-darwin-rusage\tsingle\trepresentative_json\t110\t0\tmeasured\t1000\t500\t200\t1\t2\t0\t3\t0\t0\n",
+    owned = parseDarwinCounters(darwinFixture, "single", "representative_json", 110), thermal = parseDarwinThermalState(darwinFixture, "single", "representative_json", 110);
+  requireValue(owned.instructions.status === "measured" && owned.process_energy_nj.value === 200 && owned.page_cache_hits.value === 3 && thermal.status === "measured" && thermal.before === "nominal", "owned Darwin telemetry parse drift");
   const samples = syntheticSamples(), noOpSamples = syntheticNoOpSamples(), artifact = {
-    schema_version: 3,
-    profile_id: "zig-js-instrumentation-overhead-v3",
+    schema_version: 4,
+    profile_id: "zig-js-instrumentation-overhead-v4",
     metadata: { pairs: 2, host_class: "diagnostic", runner_path: "/tmp/runner", runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", workload_source: "bench/representative_comparison.js", workload_source_sha256: "b".repeat(64), jobs: 110, expected_checksum: 5864992, revision: "c".repeat(40), environment: { Date: "2026-08-04", Host: "fixture", OS: "fixture", Zig: "fixture", "zig-gc": "d".repeat(40), "zig-regex": "e".repeat(40), Power: "Battery Power" } },
     samples,
     summary: summarize(samples),
@@ -491,6 +566,7 @@ export function selfTest(): void {
   validateArtifact(artifact);
   requireValue(artifact.counter_capabilities.instructions.availability.status === "measured", "measured capability drift");
   requireValue(artifact.counter_capabilities.cache_misses.availability.status === "unavailable", "unavailable capability drift");
+  requireValue(artifact.counter_capabilities.thermal_state.availability.status === "measured" && artifact.summary.thermal_state.boundaries_stable, "thermal capability drift");
   requireValue(artifact.counter_capabilities.instructions.multiplexing.status === "unavailable", "multiplexing boundary drift");
   requireValue(render(artifact, "docs/.data/fixture.json").includes("Raw samples: [`fixture.json`](fixture.json)"), "report provenance drift");
   const unavailable = JSON.parse(JSON.stringify(artifact));
@@ -505,6 +581,11 @@ export function selfTest(): void {
   const reference = JSON.parse(JSON.stringify(artifact)); reference.metadata.host_class = "quiet_reference";
   expectFailure(() => validateArtifact(reference), "requires AC power");
   reference.metadata.environment.Power = "AC Power";
+  const thermalDrift = JSON.parse(JSON.stringify(reference));
+  thermalDrift.samples[0].metrics.thermal_state.after = "fair";
+  thermalDrift.summary = summarize(thermalDrift.samples);
+  thermalDrift.counter_capabilities = capabilityInventory(thermalDrift.calibration.no_op.samples, thermalDrift.samples);
+  expectFailure(() => validateArtifact(thermalDrift), "requires stable nominal thermal state");
   (reference.samples.filter((sample: Sample) => sample.identity.state === "disabled")[1].metrics.process_energy_nj as any).value = 1000;
   reference.summary = summarize(reference.samples);
   reference.counter_capabilities = capabilityInventory(reference.calibration.no_op.samples, reference.samples);
@@ -552,8 +633,8 @@ function main(): void {
   const noOpSamples = collectNoOp(runner, pairs);
   const samples = collect(runner, workload, resolved.jobs, resolved.checksum, pairs), size = Number(run(["/usr/bin/stat", "-f", "%z", runner]).stdout.trim());
   const artifact = {
-    schema_version: 3,
-    profile_id: "zig-js-instrumentation-overhead-v3",
+    schema_version: 4,
+    profile_id: "zig-js-instrumentation-overhead-v4",
     metadata: {
       environment: info,
       host_class: hostClass,

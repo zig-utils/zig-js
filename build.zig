@@ -2052,6 +2052,11 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "js", .module = bench_js_mod }},
             }),
         });
+        comparison_zig_js.root_module.addCSourceFile(.{
+            .file = b.path("bench/benchmark_thermal_state.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        comparison_zig_js.root_module.linkFramework("Foundation", .{});
         const comparison_jsc = b.addExecutable(.{
             .name = "bench-comparison-jsc",
             .root_module = b.createModule(.{
