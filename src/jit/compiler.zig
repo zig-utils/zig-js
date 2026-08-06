@@ -35,11 +35,31 @@ pub fn isCandidate(chunk: *const Chunk) bool {
         chunk.local_count > max_slots or chunk.param_count > chunk.local_count)
         return false;
     for (chunk.code.items) |inst| switch (inst.op) {
-        .load_const, .load_undefined, .load_null, .load_true, .load_false,
-        .pop, .load_local, .store_local,
-        .add, .sub, .mul, .div, .mod,
-        .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict,
-        .jump, .jump_if_false, .ret, .ret_undef,
+        .load_const,
+        .load_undefined,
+        .load_null,
+        .load_true,
+        .load_false,
+        .pop,
+        .load_local,
+        .store_local,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        .eq,
+        .neq,
+        .eq_strict,
+        .neq_strict,
+        .jump,
+        .jump_if_false,
+        .ret,
+        .ret_undef,
         => {},
         else => return false,
     };
@@ -985,7 +1005,7 @@ fn emitCompletedExit(assembler: *aarch64.Assembler, result_register: u5, selecte
     try assembler.load64(10, 21, frameOffset("steps"));
     try assembler.store64(19, 10, 0);
     try assembler.store64(result_register, 21, frameOffset("result_bits"));
-    try assembler.movImmediate32(0, @intFromEnum(jit.ExitStatus.complete));
+    try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
     try emitRestoreAndReturn(assembler, selected_integers);
 }
 
@@ -1380,6 +1400,7 @@ fn compileNumeric(chunk: *const Chunk) !jit.CompiledCode {
     // the stable NativeFrame, x22 slots, x20 scratch, x19 exact steps, x24 the
     // checkpoint countdown, and x25 the remaining evaluation budget.
     try assembler.pushPair(29, 30);
+    try assembler.establishFramePointer();
     try assembler.pushPair(19, 20);
     try assembler.pushPair(21, 22);
     try assembler.pushPair(23, 24);
@@ -1860,6 +1881,11 @@ test "compiler executes a numeric local loop across a checkpoint" {
     const function_chunk = root.fns.items[0].chunk.?;
     var compiled = try compile(function_chunk);
     defer compiled.deinit();
+    const native_bytes = compiled.memory.executableBytes();
+    try std.testing.expectEqual(@as(u32, 0xa9bf_7bfd), std.mem.readInt(u32, native_bytes[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0x9100_03fd), std.mem.readInt(u32, native_bytes[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 0xa8c1_7bfd), std.mem.readInt(u32, native_bytes[native_bytes.len - 8 ..][0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0xd65f_03c0), std.mem.readInt(u32, native_bytes[native_bytes.len - 4 ..][0..4], .little));
 
     var slots: [3]u64 = undefined;
     var scratch: [jit.numeric_scratch_capacity]u64 = undefined;

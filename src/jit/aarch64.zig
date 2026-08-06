@@ -105,6 +105,13 @@ pub const Assembler = struct {
         try self.emit32(0xa9bf_0000 | (@as(u32, second) << 10) | (31 << 5) | first);
     }
 
+    /// Complete the canonical Darwin AArch64 frame record after saving x29/x30.
+    /// `add x29, sp, #0` names SP (not XZR) in the immediate form, leaving a
+    /// stable chain for asynchronous samplers across later stack spills.
+    pub fn establishFramePointer(self: *Assembler) error{NoSpace}!void {
+        try self.addImmediate64(29, 31, 0);
+    }
+
     pub fn popPair(self: *Assembler, first: u5, second: u5) error{NoSpace}!void {
         try self.emit32(0xa8c1_0000 | (@as(u32, second) << 10) | (31 << 5) | first);
     }
@@ -466,6 +473,18 @@ test "AArch64 preserves register-resident numeric stack" {
     try assembler.subtractImmediate64(25, 25, 9);
     try assembler.ret();
     const expected = [_]u32{ 0x6dbf_27e8, 0x6cc1_27e8, 0x1e60_4100, 0xf100_273f, 0xd100_2739, 0xd65f_03c0 };
+    for (expected, 0..) |instruction, index| {
+        try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
+    }
+}
+
+test "AArch64 emits a canonical frame-pointer record" {
+    var storage: [12]u8 = undefined;
+    var assembler = Assembler.init(&storage);
+    try assembler.pushPair(29, 30);
+    try assembler.establishFramePointer();
+    try assembler.popPair(29, 30);
+    const expected = [_]u32{ 0xa9bf_7bfd, 0x9100_03fd, 0xa8c1_7bfd };
     for (expected, 0..) |instruction, index| {
         try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
     }

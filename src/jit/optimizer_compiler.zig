@@ -2804,6 +2804,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     );
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
+    try assembler.pushPair(29, 30);
+    try assembler.establishFramePointer();
     try assembler.moveRegister64(12, 0); // stable NativeFrame
     try assembler.load64(13, 12, frameOffset("slots"));
     try assembler.load64(14, 12, frameOffset("scratch"));
@@ -3065,7 +3067,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         if (program.native_operations.len != 0 and suffix_steps != 0)
             try emitStepIncrement(&assembler, suffix_steps);
         try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
-        try assembler.ret();
+        try emitReturn(&assembler);
     }
     try memory.publish(assembler.bytes().len);
     const deopt = try jit.DeoptMetadata.create(
@@ -3112,6 +3114,11 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .has_side_exits = program.side_exit != null or program.side_exit_branch != null or
             program.finally_dispatch != null or programHasExceptionalOperations(program),
     };
+}
+
+fn emitReturn(assembler: *aarch64.Assembler) !void {
+    try assembler.popPair(29, 30);
+    try assembler.ret();
 }
 
 fn programHasExceptionalOperations(program: *const Program) bool {
@@ -3183,7 +3190,7 @@ fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operati
             const done = try assembler.branchPlaceholder();
             try assembler.patchConditionBranch(absent, assembler.position());
             try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
-            try assembler.ret();
+            try emitReturn(assembler);
             try assembler.patchBranch(done, assembler.position());
         },
         .lt, .le, .gt, .ge, .eq, .neq => {
@@ -3791,10 +3798,10 @@ fn emitDirectDenseArrayPush(
     try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.out_of_memory));
     const trap = try assembler.branchConditionPlaceholder(.ne);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.stop));
-    try assembler.ret();
+    try emitReturn(assembler);
     try assembler.patchConditionBranch(trap, assembler.position());
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
-    try assembler.ret();
+    try emitReturn(assembler);
     return direct;
 }
 
@@ -3836,7 +3843,7 @@ fn emitRuntimeOperation(
         const fallback = assembler.position();
         try direct.patchFallbacks(assembler, fallback);
         try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.side_exit));
-        try assembler.ret();
+        try emitReturn(assembler);
         try assembler.patchBranch(completed, assembler.position());
         return;
     }
@@ -3886,24 +3893,24 @@ fn emitRuntimeOperation(
         else
             jit.ExitStatus.operation_exception)),
     );
-    try assembler.ret();
+    try emitReturn(assembler);
 
     try assembler.patchConditionBranch(not_throw, assembler.position());
     try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.invalidated));
     const trap = try assembler.branchConditionPlaceholder(.ne);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.invalidated));
-    try assembler.ret();
+    try emitReturn(assembler);
 
     try assembler.patchConditionBranch(trap, assembler.position());
     try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.out_of_memory));
     const operation_trap = try assembler.branchConditionPlaceholder(.ne);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.stop));
-    try assembler.ret();
+    try emitReturn(assembler);
     const trap_position = assembler.position();
     try assembler.patchConditionBranch(absent, trap_position);
     try assembler.patchConditionBranch(operation_trap, trap_position);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
-    try assembler.ret();
+    try emitReturn(assembler);
     const completion_position = assembler.position();
     try assembler.patchBranch(done, completion_position);
     if (direct_runtime_access) |direct| try direct.patchCompletions(assembler, completion_position);
@@ -3925,7 +3932,7 @@ fn emitInvalidationPoll(assembler: *aarch64.Assembler) !void {
     try assembler.compareRegister64(10, 11);
     const current = try assembler.branchConditionPlaceholder(.eq);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.invalidated));
-    try assembler.ret();
+    try emitReturn(assembler);
     try assembler.patchConditionBranch(no_owner, assembler.position());
     try assembler.patchConditionBranch(current, assembler.position());
 }
@@ -3988,7 +3995,7 @@ fn emitSideExit(assembler: *aarch64.Assembler, deopt_index: u16, exit_ip: u32) !
     try assembler.movImmediate64(9, deopt_index);
     try assembler.store64(9, 12, frameOffset("deopt_index"));
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.side_exit));
-    try assembler.ret();
+    try emitReturn(assembler);
 }
 
 fn emitFinallyDispatch(assembler: *aarch64.Assembler, program: *const Program, dispatch: FinallyDispatch) !void {
@@ -4016,11 +4023,11 @@ fn emitFinallyDispatch(assembler: *aarch64.Assembler, program: *const Program, d
         try assembler.compareRegister64(9, 10);
         const next = try assembler.branchConditionPlaceholder(.ne);
         try assembler.movImmediate32(0, @intCast(@backingInt(case.status)));
-        try assembler.ret();
+        try emitReturn(assembler);
         try assembler.patchConditionBranch(next, assembler.position());
     }
     try assembler.movImmediate32(0, @intCast(@backingInt(jit.ExitStatus.operation_trap)));
-    try assembler.ret();
+    try emitReturn(assembler);
 }
 
 fn loadNumericOperands(assembler: *aarch64.Assembler, operation: Operation) !void {
@@ -4561,6 +4568,11 @@ test "optimizer executes to_numeric through the native operation ABI" {
     if (jit.supported and builtin.cpu.arch == .aarch64) {
         var compiled = try compileAarch64(&program);
         defer compiled.deinit();
+        const native_bytes = compiled.memory.executableBytes();
+        try std.testing.expectEqual(@as(u32, 0xa9bf_7bfd), std.mem.readInt(u32, native_bytes[0..4], .little));
+        try std.testing.expectEqual(@as(u32, 0x9100_03fd), std.mem.readInt(u32, native_bytes[4..8], .little));
+        try std.testing.expectEqual(@as(u32, 0xa8c1_7bfd), std.mem.readInt(u32, native_bytes[native_bytes.len - 8 ..][0..4], .little));
+        try std.testing.expectEqual(@as(u32, 0xd65f_03c0), std.mem.readInt(u32, native_bytes[native_bytes.len - 4 ..][0..4], .little));
         try std.testing.expect(compiled.manages_steps);
         var slots = [_]u64{Value.num(7).rawBits()};
         var scratch: [jit.numeric_scratch_capacity]u64 = undefined;

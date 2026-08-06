@@ -70,6 +70,15 @@ The entry returns a small status, not a Zig error union:
 This keeps exceptions and allocation in ordinary Zig runtime stubs. Native
 code never unwinds through Zig frames.
 
+On Darwin AArch64, every baseline numeric and optimizer entry that changes SP
+or calls a runtime helper creates the canonical frame record: it saves x29/x30,
+sets x29 to the resulting SP, and restores the pair on every return path. This
+keeps the native caller reachable to asynchronous frame-chain walkers after the
+two-instruction prologue. Constant-return leaf stubs remain frameless because
+they neither change SP nor call another function. Exact unwinding while stopped
+inside the prologue still requires per-artifact DWARF or compact-unwind records;
+those records are not emitted yet.
+
 ## First supported region
 
 The first useful compiler covers bytecode common to numeric functions and
@@ -194,12 +203,13 @@ already owns the protocol. LLDB disables this loader by default on macOS; use
 
 `zig build native-observability-lldb-test` drives the real LLDB loader. Its
 pending generated-symbol breakpoint must resolve at offset zero of the exact JIT
-section, and the symbol must disappear after Owner teardown. This is the
-debugger-symbol slice of the lifetime and identity boundary. System-profiler
-image publication, unwind records, source/inline maps in the external object,
-and crash-path integration remain separate work; the process-local registry
-alone still does not make anonymous `MAP_JIT` leaves visible to an external
-profiler.
+section. After the canonical frame prologue, LLDB must walk from the generated
+frame to the host binary, and the symbol must disappear after Context teardown.
+This is the debugger-symbol and frame-chain slice of the lifetime and identity
+boundary. System-profiler image publication, exact unwind records, source/inline
+maps in the external object, and crash-path integration remain separate work;
+the process-local registry alone still does not make anonymous `MAP_JIT` leaves
+visible to an external profiler.
 
 ## Correctness and performance gates
 
