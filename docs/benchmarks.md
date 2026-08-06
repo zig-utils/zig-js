@@ -557,14 +557,17 @@ the named parent is exactly the candidate commit's first parent, records hashes
 of both binaries and the workload source, alternates parent/candidate process
 order within every pair, enforces the exact expected checksum, and preserves
 process CPU and peak-RSS observations alongside the runner's timed wall value.
-Metrics not connected yet remain explicitly unavailable. The tool refuses a
-dirty tracked zig-js, zig-gc, or zig-regex worktree.
+Single, independent steady/cold, shared-realm, and module-cold rows additionally
+retain exact-boundary instructions, cycles, process energy, and before/after
+thermal state. Metrics not connected yet remain explicitly unavailable. The
+tool refuses a dirty tracked zig-js, zig-gc, or zig-regex worktree.
 
 ```sh
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/exact-parent-regression.ts /path/to/parent-runner /path/to/candidate-runner \
   --parent-revision HEAD^ --candidate-revision HEAD \
   --source bench/representative_comparison.js \
   --mode single --workload representative_json --jobs 2200 --lanes 1 \
+  --material-change cpu_work \
   --expected-checksum 324952086 --samples 7 \
   --timed-boundary "warmed persistent context; one exact invocation" \
   --raw-out docs/.data/exact-parent-YYYY-MM-DD.json \
@@ -574,9 +577,21 @@ dirty tracked zig-js, zig-gc, or zig-regex worktree.
 The default host class is `diagnostic`, which never blocks publication. Only a
 deliberately declared `quiet_reference` run gates: candidate wall time must be
 more than 110% of its exact parent while both variants have at most 5% RSD.
-Every smaller or noisier change remains in the artifact instead of being hidden.
-Hosted CI validates schemas, migrations, checksums, and gate behavior without
-executing reference-host measurements.
+Independently, reference-host efficiency publication requires parent and
+candidate instructions, cycles, and process energy to each remain at or below
+5% RSD and every thermal boundary to remain `nominal → nominal`. Unavailable or
+noisy efficiency data, non-nominal state, or thermal drift blocks publication
+even when wall time improves. This fail-closed rule lets #460/#461 require
+efficiency evidence for changes that add threads or CPU work. The
+`--material-change` categories are `cpu_work`, `threads`, `generated_code`, and
+`cache_traffic`; when the option is omitted, independent/shared modes default
+to `cpu_work,threads` and other modes default to `cpu_work`. A
+`generated_code` or `cache_traffic` publication additionally requires stable
+`generated_code_bytes` or `cache_misses`, so those claims fail closed while the
+exact-parent metric remains unavailable on the selected host. Every raw row
+remains visible instead of being hidden.
+Hosted CI validates schemas, migrations, checksums, thermal drift, and combined
+gate behavior without executing reference-host measurements.
 
 ## Latest GC fragmentation and compaction
 

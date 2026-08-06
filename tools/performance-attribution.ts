@@ -12,6 +12,7 @@ function requireValue(condition: boolean, message: string): void { if (!conditio
 const sameSet = (left: any[], right: any[]): boolean => left.length === right.length && left.every((value) => right.includes(value));
 const unique = (values: any[]): boolean => new Set(values.map((value) => JSON.stringify(value))).size === values.length;
 const isHex = (value: any, length: number): boolean => typeof value === "string" && value.length === length && /^[0-9a-f]+$/.test(value);
+const relativeRsd = (values: number[]): number => { if (values.length <= 1) return 0; const mean = values.reduce((sum, value) => sum + value, 0) / values.length; if (mean === 0) return Infinity; return Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1)) / mean; };
 
 export function loadSchema(path = DEFAULT_SCHEMA): any { const schema = JSON.parse(readText(path)); validateSchema(schema); return schema; }
 
@@ -127,6 +128,22 @@ export function validateArtifact(artifact: any, schema: any): void {
   for (const field of ["engine", "mode", "workload", "lanes", "jobs", "checksum"]) requireValue(new Set(identityRows.map((identity: any) => identity[field])).size === 1, `exact-parent ${field} drift`);
   for (const field of ["mode", "workload", "lanes", "jobs"]) requireValue(metadata[field] === identityRows[0][field], `exact-parent metadata/sample ${field} mismatch`);
   requireValue(metadata.expected_checksum === identityRows[0].checksum, "exact-parent frozen checksum mismatch");
+  const materialCategories = metadata.material_change_categories;
+  requireValue(Array.isArray(materialCategories) && materialCategories.length > 0 && materialCategories.every((value: any) => ["cpu_work", "threads", "generated_code", "cache_traffic"].includes(value)) && unique(materialCategories), "exact-parent material-change categories are invalid");
+  const categoryMetrics: Record<string, string[]> = { cpu_work: [], threads: [], generated_code: ["generated_code_bytes"], cache_traffic: ["cache_misses"] };
+  const requiredCategoryMetrics = [...new Set(materialCategories.flatMap((category: string) => categoryMetrics[category]))];
+  const unmetMetrics = requiredCategoryMetrics.filter((name) => !["parent", "candidate"].every((variant) => {
+    const values = samples.filter((sample: any) => sample.identity.variant === variant).map((sample: any) => sample.metrics[name]);
+    return values.every((value: any) => value.status === "measured") && relativeRsd(values.map((value: any) => Number(value.value))) <= schema.regression_policy.maximum_rsd;
+  }));
+  const efficiencyMetrics = ["instructions", "cycles", "energy_joules"], expectedEfficiencyStable = efficiencyMetrics.every((name) => ["parent", "candidate"].every((variant) => {
+    const values = samples.filter((sample: any) => sample.identity.variant === variant).map((sample: any) => sample.metrics[name]);
+    return values.every((value: any) => value.status === "measured") && relativeRsd(values.map((value: any) => Number(value.value))) <= schema.regression_policy.maximum_rsd;
+  })) && samples.every((sample: any) => sample.metrics.thermal_state.status === "measured" && sample.metrics.thermal_state.value === "nominal->nominal") && unmetMetrics.length === 0;
+  requireValue(JSON.stringify(artifact.summary?.efficiency?.required_categories) === JSON.stringify(materialCategories) && JSON.stringify(artifact.summary?.efficiency?.unmet_metrics) === JSON.stringify(unmetMetrics), "exact-parent efficiency requirement summary drift");
+  requireValue(artifact.summary?.efficiency?.stable === expectedEfficiencyStable, "exact-parent efficiency summary/sample drift");
+  requireValue(artifact.summary.efficiency.blocks_publication === (metadata.host_class === schema.regression_policy.gate_host_class && !expectedEfficiencyStable), "exact-parent efficiency publication decision drift");
+  requireValue(artifact.summary.blocks_publication === Boolean(artifact.summary.regression && artifact.summary.stable && artifact.summary.gating_host || artifact.summary.efficiency.blocks_publication), "exact-parent combined publication decision drift");
 }
 
 function parseTsv(text: string): string[][] {

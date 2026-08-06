@@ -618,6 +618,7 @@ fn runIndependentSteady(
     jobs: usize,
     samples: usize,
     lane_count: usize,
+    darwin_rusage: bool,
 ) !void {
     const lanes = try allocator.alloc(SteadyLane, lane_count);
     defer allocator.free(lanes);
@@ -650,10 +651,14 @@ fn runIndependentSteady(
     for (lanes) |*lane| if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
 
     for (0..samples) |sample| {
+        const thermal_before = if (darwin_rusage) try darwinThermalState() else undefined;
+        const counters_before = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
         const started = nowNs(io);
         for (lanes) |*lane| lane.start.post(io);
         for (0..lane_count) |_| done.waitUncancelable(io);
         const elapsed: u64 = @intCast(nowNs(io) - started);
+        const counters_after = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
+        const thermal_after = if (darwin_rusage) try darwinThermalState() else undefined;
 
         var checksum: f64 = 0;
         for (lanes) |*lane| {
@@ -661,6 +666,7 @@ fn runIndependentSteady(
             checksum += lane.checksum;
         }
         try printRow(writer, .independent_steady, workload, lane_count, jobs, sample, elapsed, checksum);
+        if (darwin_rusage) try printDarwinCounterRow(writer, .independent_steady, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
     }
 }
 
@@ -696,6 +702,7 @@ fn runIndependentCold(
     jobs: usize,
     samples: usize,
     lane_count: usize,
+    darwin_rusage: bool,
 ) !void {
     const lanes = try allocator.alloc(ColdLane, lane_count);
     defer allocator.free(lanes);
@@ -709,6 +716,8 @@ fn runIndependentCold(
             .lane = lane_index,
         };
 
+        const thermal_before = if (darwin_rusage) try darwinThermalState() else undefined;
+        const counters_before = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
         const started = nowNs(io);
         var spawned: usize = 0;
         for (lanes) |*lane| {
@@ -720,6 +729,8 @@ fn runIndependentCold(
         }
         for (threads) |thread| thread.join();
         const elapsed: u64 = @intCast(nowNs(io) - started);
+        const counters_after = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
+        const thermal_after = if (darwin_rusage) try darwinThermalState() else undefined;
 
         var checksum: f64 = 0;
         for (lanes) |*lane| {
@@ -727,6 +738,7 @@ fn runIndependentCold(
             checksum += lane.checksum;
         }
         try printRow(writer, .independent_cold, workload, lane_count, jobs, sample, elapsed, checksum);
+        if (darwin_rusage) try printDarwinCounterRow(writer, .independent_cold, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
     }
 }
 
@@ -763,6 +775,7 @@ fn runModuleCold(
     jobs: usize,
     samples: usize,
     lane_count: usize,
+    darwin_rusage: bool,
 ) !void {
     _ = representative_modules.profile(workload) orelse return error.InvalidWorkload;
     const lanes = try allocator.alloc(ModuleLane, lane_count);
@@ -777,6 +790,8 @@ fn runModuleCold(
             .lane = lane_index,
         };
 
+        const thermal_before = if (darwin_rusage) try darwinThermalState() else undefined;
+        const counters_before = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
         const started = nowNs(io);
         var spawned: usize = 0;
         for (lanes) |*lane| {
@@ -788,6 +803,8 @@ fn runModuleCold(
         }
         for (threads) |thread| thread.join();
         const elapsed: u64 = @intCast(nowNs(io) - started);
+        const counters_after = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
+        const thermal_after = if (darwin_rusage) try darwinThermalState() else undefined;
 
         var checksum: f64 = 0;
         for (lanes) |*lane| {
@@ -795,6 +812,7 @@ fn runModuleCold(
             checksum += lane.checksum;
         }
         try printRow(writer, .module_cold, workload, lane_count, jobs, sample, elapsed, checksum);
+        if (darwin_rusage) try printDarwinCounterRow(writer, .module_cold, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
     }
 }
 
@@ -883,6 +901,7 @@ fn runShared(
     samples: usize,
     lanes: usize,
     gc_telemetry: bool,
+    darwin_rusage: bool,
 ) !void {
     const ctx = try js.Context.createWith(allocator, .{
         .enable_threads = true,
@@ -913,13 +932,18 @@ fn runShared(
             js.jsthread.resetLifecycleStats();
             if (!ctx.beginCooperativeGcProfile()) return error.GcTelemetryUnavailable;
         }
+        const thermal_before = if (darwin_rusage) try darwinThermalState() else undefined;
+        const counters_before = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
         const started = nowNs(io);
         const result = try evaluateShared(ctx, shared_invocation);
         const elapsed: u64 = @intCast(nowNs(io) - started);
+        const counters_after = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
+        const thermal_after = if (darwin_rusage) try darwinThermalState() else undefined;
         const thread_stats = if (gc_telemetry) js.jsthread.contentionStats() else undefined;
         if (gc_telemetry) js.jsthread.disableLifecycleStats();
         const gc_stats = if (gc_telemetry) ctx.endCooperativeGcProfile().? else undefined;
         try printRow(writer, .shared, workload, lanes, jobs, sample, elapsed, result.toNumber());
+        if (darwin_rusage) try printDarwinCounterRow(writer, .shared, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
         if (gc_telemetry)
             try printGcTelemetryRow(writer, workload, lanes, jobs, sample, elapsed, result.toNumber(), before, gc_stats, thread_stats);
     }
@@ -940,17 +964,15 @@ pub fn main(init: std.process.Init) !void {
     const workload = args[2];
     const jobs = try std.fmt.parseUnsigned(usize, args[3], 10);
     const samples = try std.fmt.parseUnsigned(usize, args[4], 10);
-    const darwin_rusage = args.len == 6 and std.mem.eql(u8, args[5], "--darwin-rusage");
-    const lanes = if (mode == .single or mode == .single_profiled or mode == .attribution or mode == .module_attribution)
-        1
-    else if (args.len >= 6)
-        try std.fmt.parseUnsigned(usize, args[5], 10)
-    else
-        return error.InvalidArguments;
-    const gc_telemetry = args.len == 7 and std.mem.eql(u8, args[6], "--gc-telemetry");
-    if (args.len == 6 and !darwin_rusage and (mode == .single or mode == .single_profiled)) return error.InvalidArguments;
-    if (darwin_rusage and mode != .single and mode != .single_profiled) return error.InvalidArguments;
-    if (args.len == 7 and !gc_telemetry) return error.InvalidArguments;
+    const has_lanes = mode == .independent_steady or mode == .independent_cold or mode == .shared or mode == .shared_attribution or mode == .module_cold;
+    const base_len: usize = if (has_lanes) 6 else 5;
+    if (args.len != base_len and args.len != base_len + 1) return error.InvalidArguments;
+    const lanes = if (has_lanes) try std.fmt.parseUnsigned(usize, args[5], 10) else 1;
+    const option = if (args.len == base_len + 1) args[base_len] else "";
+    const darwin_rusage = std.mem.eql(u8, option, "--darwin-rusage");
+    const gc_telemetry = std.mem.eql(u8, option, "--gc-telemetry");
+    if (option.len != 0 and !darwin_rusage and !gc_telemetry) return error.InvalidArguments;
+    if (darwin_rusage and (mode == .attribution or mode == .shared_attribution or mode == .module_attribution)) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
     if ((mode == .attribution or mode == .shared_attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
@@ -962,12 +984,12 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
     switch (mode) {
         .single, .single_profiled => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples, darwin_rusage),
-        .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
-        .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
-        .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry),
+        .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
+        .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
+        .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry, darwin_rusage),
         .attribution => try runAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
         .shared_attribution => try runSharedAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs, lanes),
-        .module_cold => try runModuleCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
+        .module_cold => try runModuleCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
         .module_attribution => try runModuleAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
     }
     try stdout.flush();
