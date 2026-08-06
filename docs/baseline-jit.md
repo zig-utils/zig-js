@@ -271,7 +271,16 @@ interrupted PC from the host `ucontext`, and resolves an exact production JIT
 source row through `Context.lookupNativeCodeSignalSafe`. The handler performs
 no allocation, locking, or I/O; all identity verification and teardown happen
 after the sender proves the last targeted signal was handled. The same fixture
-accepts `-Dtsan=true` to cover its atomic handoff. Fatal crash-report transport,
+accepts `-Dtsan=true` to cover its atomic handoff.
+
+`zig build native-observability-crash-test` runs the same production JIT in a
+child process and targets its JavaScript thread with `SIGABRT`. Once the handler
+interrupts an exact generated source row, it copies the PC range, artifact,
+tier, symbol, function, script, and source identity into a fixed-size record,
+writes that record to a pipe opened before `exec`, and terminates with `_exit`.
+The handler performs no allocation, locking, formatting, or access to engine
+memory after the record is copied. The parent requires one complete record and
+validates every dynamic identity field against the interrupted PC. External
 system-profiler image publication, inline-frame maps, and logical
 async/deopt/Wasm stack reconstruction remain separate work; the Owner-local
 registry alone still does not make anonymous `MAP_JIT` leaves visible to an

@@ -229,6 +229,15 @@ pub fn build(b: *std.Build) void {
             "Sample and resolve a production-generated JavaScript PC from a POSIX signal handler",
         );
         native_observability_signal_test_step.dependOn(&run_native_observability_signal_fixture.step);
+
+        const run_native_observability_crash_fixture = b.addRunArtifact(native_observability_signal_fixture);
+        run_native_observability_crash_fixture.addArg("--crash-parent");
+        run_native_observability_crash_fixture.has_side_effects = true;
+        const native_observability_crash_test_step = b.step(
+            "native-observability-crash-test",
+            "Transport exact generated-code identity through a fatal POSIX signal handler",
+        );
+        native_observability_crash_test_step.dependOn(&run_native_observability_crash_fixture.step);
     }
 
     const private_abi_consumer = b.option(
