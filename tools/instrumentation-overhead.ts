@@ -6,6 +6,8 @@ import { run, sha256File, writeText } from "./lib/home";
 declare const __filename: string;
 
 type State = "disabled" | "enabled";
+type Instrumentation = "execution_attribution" | "native_observability";
+type Mode = "single" | "single_profiled" | "single_observed";
 const OWNED_COUNTER_NAMES = ["instructions", "cycles", "process_energy_nj", "package_idle_wakeups", "interrupt_wakeups", "pageins", "page_cache_hits"] as const;
 const TIME_COUNTER_NAMES = ["voluntary_context_switches", "involuntary_context_switches"] as const;
 const COUNTER_NAMES = [...OWNED_COUNTER_NAMES, ...TIME_COUNTER_NAMES] as const;
@@ -24,17 +26,39 @@ type ThermalObservation =
   | { status: "unavailable" | "permission_denied"; reason: string };
 type Measurement = {
   wall_time_ns: number;
+  process_wall_time_ns: number;
   process_cpu_user_ns: number;
   process_cpu_system_ns: number;
   peak_rss_bytes: number;
   thermal_state: ThermalObservation;
+  native_observability?: NativeObservabilityMeasurement;
 } & CounterMeasurements;
+type NativeObservabilityMeasurement = {
+  live_artifacts: number;
+  live_code_bytes: number;
+  baseline_publications: number;
+  optimizer_publications: number;
+  live_registrations: number;
+  live_symfile_bytes: number;
+  live_unwind_bytes: number;
+  registrations: number;
+  unregistrations: number;
+  live_peak_rss_bytes: number;
+  retained_rss_bytes: number;
+  post_teardown_live_registrations: number;
+  post_teardown_live_symfile_bytes: number;
+  post_teardown_live_unwind_bytes: number;
+  post_teardown_registrations: number;
+  post_teardown_unregistrations: number;
+  post_teardown_peak_rss_bytes: number;
+  post_teardown_retained_rss_bytes: number;
+};
 type Sample = {
   identity: {
     pair_sample: number;
     order: number;
     state: State;
-    mode: "single" | "single_profiled";
+    mode: Mode;
     workload: string;
     jobs: number;
     checksum: number;
@@ -93,7 +117,7 @@ function parseCounters(stdout: string, stderr: string, mode: string, workload: s
 
 export function parseRow(
   stdout: string,
-  mode: "single" | "single_profiled",
+  mode: Mode,
   workload: string,
   jobs: number,
 ): { wall_time_ns: number; checksum: number } {
@@ -112,14 +136,51 @@ export function parseRow(
   return { wall_time_ns: Number(fields[6]), checksum: Number(fields[7]) };
 }
 
+function parseNativeObservability(stdout: string, mode: Mode, workload: string, jobs: number): NativeObservabilityMeasurement {
+  const liveRows = stdout.split("\n").filter((line) => line.startsWith("zig-js-native-observability\t")),
+    retiredRows = stdout.split("\n").filter((line) => line.startsWith("zig-js-native-observability-retired\t"));
+  requireValue(liveRows.length === 1 && retiredRows.length === 1, "native observability telemetry row inventory drift");
+  const live = liveRows[0].split("\t"), retired = retiredRows[0].split("\t");
+  requireValue(live.length === 16 && live[1] === mode && live[2] === workload && Number(live[3]) === jobs && Number(live[4]) === 0, "native observability live identity drift");
+  requireValue(retired.length === 11 && retired[1] === mode && retired[2] === workload && Number(retired[3]) === jobs, "native observability retired identity drift");
+  const liveValues = live.slice(5).map(Number), retiredValues = retired.slice(4).map(Number);
+  requireValue([...liveValues, ...retiredValues].every((value) => Number.isInteger(value) && value >= 0), "native observability telemetry value is invalid");
+  return {
+    live_artifacts: liveValues[0],
+    live_code_bytes: liveValues[1],
+    baseline_publications: liveValues[2],
+    optimizer_publications: liveValues[3],
+    live_registrations: liveValues[4],
+    live_symfile_bytes: liveValues[5],
+    live_unwind_bytes: liveValues[6],
+    registrations: liveValues[7],
+    unregistrations: liveValues[8],
+    live_peak_rss_bytes: liveValues[9],
+    retained_rss_bytes: liveValues[10],
+    post_teardown_live_registrations: retiredValues[0],
+    post_teardown_live_symfile_bytes: retiredValues[1],
+    post_teardown_live_unwind_bytes: retiredValues[2],
+    post_teardown_registrations: retiredValues[3],
+    post_teardown_unregistrations: retiredValues[4],
+    post_teardown_peak_rss_bytes: retiredValues[5],
+    post_teardown_retained_rss_bytes: retiredValues[6],
+  };
+}
+
+function modeFor(instrumentation: Instrumentation, state: State): Mode {
+  if (state === "disabled") return "single";
+  return instrumentation === "execution_attribution" ? "single_profiled" : "single_observed";
+}
+
 function runOne(
   runner: string,
+  instrumentation: Instrumentation,
   state: State,
   workload: string,
   jobs: number,
-): { mode: "single" | "single_profiled"; measurement: Measurement; checksum: number } {
-  const mode = state === "disabled" ? "single" : "single_profiled";
-  const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", runner, mode, workload, String(jobs), "1", "--darwin-rusage"];
+): { mode: Mode; measurement: Measurement; checksum: number } {
+  const mode = modeFor(instrumentation, state), telemetry = instrumentation === "native_observability";
+  const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", runner, mode, workload, String(jobs), "1", telemetry ? "--native-observability-telemetry" : "--darwin-rusage"];
   console.error(`+ ${command.join(" ")}`);
   const completed = run(command);
   requireValue(completed.exitCode === 0, completed.stderr || `benchmark exited ${completed.exitCode}`);
@@ -130,10 +191,12 @@ function runOne(
     checksum: row.checksum,
     measurement: {
       wall_time_ns: row.wall_time_ns,
+      process_wall_time_ns: Math.round(timeMetric(completed.stderr, "real") * 1e9),
       process_cpu_user_ns: Math.round(timeMetric(completed.stderr, "user") * 1e9),
       process_cpu_system_ns: Math.round(timeMetric(completed.stderr, "sys") * 1e9),
       peak_rss_bytes: Math.round(timeMetric(completed.stderr, "maximum resident set size")),
       thermal_state: parseDarwinThermalState(completed.stdout, mode, workload, jobs),
+      ...(telemetry ? { native_observability: parseNativeObservability(completed.stdout, mode, workload, jobs) } : {}),
       ...counters,
     },
   };
@@ -155,6 +218,7 @@ function collectNoOp(runner: string, repetitions: number): NoOpSample[] {
 
 export function collect(
   runner: string,
+  instrumentation: Instrumentation,
   workload: string,
   jobs: number,
   expectedChecksum: number,
@@ -165,7 +229,7 @@ export function collect(
   for (let pair = 0; pair < pairs; pair += 1) {
     const order: State[] = pair % 2 === 0 ? ["disabled", "enabled"] : ["enabled", "disabled"];
     order.forEach((state, position) => {
-      const row = runOne(runner, state, workload, jobs);
+      const row = runOne(runner, instrumentation, state, workload, jobs);
       requireValue(
         row.checksum === expectedChecksum,
         `${state} pair ${pair} checksum ${row.checksum} != frozen ${expectedChecksum}`,
@@ -224,7 +288,7 @@ function dispersion(values: number[]): { samples: number; median: number | null;
 
 export function summarize(samples: Sample[]): any {
   const result: any = {};
-  for (const metric of ["wall_time_ns", "process_cpu_user_ns", "process_cpu_system_ns", "peak_rss_bytes"] as const) {
+  for (const metric of ["wall_time_ns", "process_wall_time_ns", "process_cpu_user_ns", "process_cpu_system_ns", "peak_rss_bytes"] as const) {
     const disabled = median(samples.filter((sample) => sample.identity.state === "disabled").map((sample) => sample.metrics[metric])),
       enabled = median(samples.filter((sample) => sample.identity.state === "enabled").map((sample) => sample.metrics[metric])),
       jobs = samples[0].identity.jobs;
@@ -262,6 +326,25 @@ export function summarize(samples: Sample[]): any {
   result.thermal_state = thermalStatus === "measured"
     ? { status: "measured", states: quality.states, boundaries_stable: quality.boundaries_stable, quality: quality.status }
     : { status: thermalStatus, states: [], boundaries_stable: false, quality: "indeterminate" };
+  if (samples.some((sample) => sample.metrics.native_observability)) {
+    result.native_observability = {};
+    for (const metric of [
+      "live_artifacts", "live_code_bytes", "baseline_publications", "optimizer_publications",
+      "live_registrations", "live_symfile_bytes", "live_unwind_bytes", "registrations", "unregistrations",
+      "live_peak_rss_bytes", "retained_rss_bytes", "post_teardown_live_registrations", "post_teardown_live_symfile_bytes",
+      "post_teardown_live_unwind_bytes", "post_teardown_registrations", "post_teardown_unregistrations",
+      "post_teardown_peak_rss_bytes", "post_teardown_retained_rss_bytes",
+    ] as const) {
+      const disabled = median(samples.filter((sample) => sample.identity.state === "disabled").map((sample) => sample.metrics.native_observability![metric])),
+        enabled = median(samples.filter((sample) => sample.identity.state === "enabled").map((sample) => sample.metrics.native_observability![metric]));
+      result.native_observability[metric] = {
+        disabled_median: disabled,
+        enabled_median: enabled,
+        enabled_minus_disabled: enabled - disabled,
+        enabled_over_disabled: disabled === 0 ? null : enabled / disabled,
+      };
+    }
+  }
   return result;
 }
 
@@ -326,8 +409,9 @@ function capabilityInventory(noOpSamples: NoOpSample[], samples: Sample[]): Reco
 }
 
 export function validateArtifact(artifact: any): void {
-  requireValue(artifact.schema_version === 4 && artifact.profile_id === "zig-js-instrumentation-overhead-v4", "overhead schema identity drift");
+  requireValue(artifact.schema_version === 5 && artifact.profile_id === "zig-js-instrumentation-overhead-v5", "overhead schema identity drift");
   requireValue(artifact.metadata && artifact.metadata.pairs >= 2, "overhead metadata is incomplete");
+  requireValue(["execution_attribution", "native_observability"].includes(artifact.metadata.instrumentation), "overhead instrumentation identity drift");
   requireValue(["diagnostic", "quiet_reference"].includes(artifact.metadata.host_class), "overhead host class is invalid");
   if (artifact.metadata.host_class === "quiet_reference") {
     requireValue(artifact.metadata.environment.Power.includes("AC Power"), "quiet-reference overhead evidence requires AC power");
@@ -346,10 +430,11 @@ export function validateArtifact(artifact: any): void {
     requireValue(rows.length === 2 && rows[0].identity.state === expected[0] && rows[1].identity.state === expected[1], `pair ${pair} order drift`);
     requireValue(new Set(rows.map((row) => row.identity.checksum)).size === 1, `pair ${pair} checksum drift`);
     for (const row of rows) {
-      requireValue(row.identity.mode === (row.identity.state === "disabled" ? "single" : "single_profiled"), `pair ${pair} mode/state drift`);
+      requireValue(row.identity.mode === modeFor(artifact.metadata.instrumentation, row.identity.state), `pair ${pair} mode/state drift`);
       requireValue(row.identity.workload === artifact.metadata.workload && row.identity.jobs === artifact.metadata.jobs && row.identity.checksum === artifact.metadata.expected_checksum, `pair ${pair} metadata identity drift`);
-      for (const metric of ["wall_time_ns", "process_cpu_user_ns", "process_cpu_system_ns", "peak_rss_bytes"] as const)
+      for (const metric of ["wall_time_ns", "process_wall_time_ns", "process_cpu_user_ns", "process_cpu_system_ns", "peak_rss_bytes"] as const)
         requireValue(Number.isFinite(row.metrics[metric]) && row.metrics[metric] >= 0, `pair ${pair} ${metric} is invalid`);
+      requireValue(row.metrics.process_wall_time_ns >= row.metrics.wall_time_ns, `pair ${pair} process wall boundary is narrower than invocation wall time`);
       for (const counter of COUNTER_NAMES) {
         const observation = row.metrics[counter];
         requireValue(["measured", "unavailable", "permission_denied"].includes(observation.status), `pair ${pair} ${counter} status is invalid`);
@@ -360,6 +445,26 @@ export function validateArtifact(artifact: any): void {
       requireValue(["measured", "unavailable", "permission_denied"].includes(thermal.status), `pair ${pair} thermal state status is invalid`);
       if (thermal.status === "measured") requireValue(THERMAL_STATES.includes(thermal.before) && THERMAL_STATES.includes(thermal.after), `pair ${pair} thermal state is invalid`);
       else requireValue(typeof thermal.reason === "string" && thermal.reason.length > 0, `pair ${pair} thermal state reason is missing`);
+      if (artifact.metadata.instrumentation === "native_observability") {
+        const native = row.metrics.native_observability;
+        requireValue(Boolean(native), `pair ${pair} native observability telemetry is missing`);
+        requireValue(Object.values(native!).every((value) => Number.isInteger(value) && (value as number) >= 0), `pair ${pair} native observability telemetry is invalid`);
+        requireValue(native!.retained_rss_bytes <= native!.live_peak_rss_bytes, `pair ${pair} retained RSS exceeds live-snapshot peak`);
+        requireValue(native!.post_teardown_retained_rss_bytes <= native!.post_teardown_peak_rss_bytes, `pair ${pair} post-teardown retained RSS exceeds peak`);
+        requireValue(native!.post_teardown_peak_rss_bytes >= native!.live_peak_rss_bytes, `pair ${pair} process peak decreased across teardown`);
+      } else requireValue(row.metrics.native_observability === undefined, `pair ${pair} unexpected native observability telemetry`);
+    }
+    if (artifact.metadata.instrumentation === "native_observability") {
+      const disabled = rows.find((row) => row.identity.state === "disabled")!.metrics.native_observability!,
+        enabled = rows.find((row) => row.identity.state === "enabled")!.metrics.native_observability!;
+      for (const metric of ["live_artifacts", "live_code_bytes", "baseline_publications", "optimizer_publications"] as const)
+        requireValue(disabled[metric] === enabled[metric], `pair ${pair} ${metric} tier parity drift`);
+      for (const metric of ["live_registrations", "live_symfile_bytes", "live_unwind_bytes", "registrations", "unregistrations", "post_teardown_live_registrations", "post_teardown_live_symfile_bytes", "post_teardown_live_unwind_bytes", "post_teardown_registrations", "post_teardown_unregistrations"] as const)
+        requireValue(disabled[metric] === 0, `pair ${pair} disabled publisher ${metric} is nonzero`);
+      requireValue(enabled.live_registrations > 0 && enabled.live_symfile_bytes > 0 && enabled.live_unwind_bytes > 0, `pair ${pair} enabled publisher did not retain complete metadata`);
+      requireValue(enabled.registrations - enabled.unregistrations === enabled.live_registrations, `pair ${pair} live publisher lifecycle is incoherent`);
+      requireValue(enabled.post_teardown_live_registrations === 0 && enabled.post_teardown_live_symfile_bytes === 0 && enabled.post_teardown_live_unwind_bytes === 0, `pair ${pair} publisher storage survived teardown`);
+      requireValue(enabled.post_teardown_registrations === enabled.registrations && enabled.post_teardown_unregistrations === enabled.registrations, `pair ${pair} publisher teardown lifecycle is incomplete`);
     }
   }
   requireValue(artifact.calibration?.no_op?.command?.join(" ") === `env LC_ALL=C /usr/bin/time -l ${artifact.metadata.runner_path} --darwin-rusage-noop`, "no-op calibration command drift");
@@ -404,7 +509,7 @@ export function validateArtifact(artifact: any): void {
       requireValue(artifact.summary.thermal_state.status === capability.availability.status, "thermal summary/capability status drift");
     }
   }
-  requireValue(artifact.boundaries.retained_rss.status === "unavailable", "retained RSS must remain explicit");
+  requireValue(artifact.boundaries.retained_rss.status === (artifact.metadata.instrumentation === "native_observability" ? "measured" : "unavailable"), "retained RSS boundary drift");
   requireValue(artifact.boundaries.contention.status === "not_applicable", "single-thread contention boundary drift");
   requireValue(artifact.boundaries.code_size.status === "same_binary", "runtime toggle must identify the same binary");
   if (artifact.counter_capabilities.process_energy_nj.availability.status === "measured")
@@ -429,6 +534,7 @@ export function render(artifact: any, rawPath = ""): string {
     `- zig-regex: \`${environment["zig-regex"]}\``,
     `- power: ${environment.Power}`,
     `- host class: \`${metadata_.host_class}\``,
+    `- instrumentation: \`${metadata_.instrumentation}\``,
     `- runner: \`${metadata_.runner_sha256}\` (${metadata_.runner_size_bytes} bytes; one binary for both states)`,
     `- workload source: \`${metadata_.workload_source}\` (SHA-256 \`${metadata_.workload_source_sha256}\`)`,
     `- sampling: ${metadata_.pairs} alternating disabled/enabled pairs; no discarded samples`,
@@ -439,7 +545,7 @@ export function render(artifact: any, rawPath = ""): string {
     "| --- | ---: | ---: | ---: |",
   ];
   const metricRows: [string, string][] = [
-    ["wall_time_ns", "ns"], ["process_cpu_user_ns", "ns"], ["process_cpu_system_ns", "ns"], ["peak_rss_bytes", "bytes"],
+    ["wall_time_ns", "ns"], ["process_wall_time_ns", "ns"], ["process_cpu_user_ns", "ns"], ["process_cpu_system_ns", "ns"], ["peak_rss_bytes", "bytes"],
     ...COUNTER_NAMES.map((name) => [name, name === "process_energy_nj" ? "nJ" : "count"] as [string, string]),
   ];
   for (const [name, unit] of metricRows) {
@@ -462,6 +568,19 @@ export function render(artifact: any, rawPath = ""): string {
   rows.push(thermal.status === "measured"
     ? `| \`thermal_state\` | ${thermal.states.join(", ")} | ${thermal.states.join(", ")} | ${thermal.boundaries_stable ? "stable" : "drifted"} |`
     : `| \`thermal_state\` | ${thermal.status} | ${thermal.status} | N/A |`);
+  if (summary.native_observability) {
+    rows.push(
+      "",
+      "## Native publication state",
+      "",
+      "These boundary medians are exact engine/publisher gauges, not inferred process-memory deltas. Zero-denominator ratios remain N/A and the absolute delta stays visible.",
+      "",
+      "| field | disabled median | enabled median | enabled - disabled | enabled / disabled |",
+      "| --- | ---: | ---: | ---: | ---: |",
+    );
+    for (const [name, metric] of Object.entries(summary.native_observability) as [string, any][])
+      rows.push(`| \`${name}\` | ${metric.disabled_median} | ${metric.enabled_median} | ${metric.enabled_minus_disabled} | ${metric.enabled_over_disabled === null ? "N/A" : metric.enabled_over_disabled.toFixed(4) + "x"} |`);
+  }
   rows.push(
     "",
     "## Counter capability and calibration",
@@ -479,7 +598,9 @@ export function render(artifact: any, rawPath = ""): string {
     "",
     `No-op calibration runs \`${artifact.calibration.no_op.command.join(" ")}\` ${artifact.calibration.no_op.samples.length} times outside the alternating A/B pairs. Known-work calibration references the ${metadata_.pairs} disabled samples with the same frozen workload, jobs, and checksum. The stability threshold is 5% relative standard deviation; no sample is discarded.`,
     "",
-    "Retained RSS is unavailable because each measurement exits after one sample. Lock contention is not applicable to this single-thread fixture. Both states use the exact same runner, so this runtime-toggle A/B does not claim to measure compile-time support code size.",
+    metadata_.instrumentation === "native_observability"
+      ? "Retained RSS is measured in the runner immediately before Context teardown and again immediately after it; peak and current bytes share the same Mach task_vm_info accounting domain. Lock contention is not applicable to this single-thread fixture. Both states use the exact same runner, so this runtime-toggle A/B does not claim to measure compile-time support code size."
+      : "Retained RSS is unavailable because each measurement exits after one sample. Lock contention is not applicable to this single-thread fixture. Both states use the exact same runner, so this runtime-toggle A/B does not claim to measure compile-time support code size.",
   );
   if (metadata_.host_class === "diagnostic")
     rows.push("", "This is diagnostic evidence. It does not establish a negligible-overhead publication claim; that requires an explicitly selected quiet reference host on AC power.");
@@ -488,17 +609,18 @@ export function render(artifact: any, rawPath = ""): string {
   return rows.join("\n");
 }
 
-function syntheticSamples(): Sample[] {
+function syntheticSamples(instrumentation: Instrumentation = "execution_attribution"): Sample[] {
   const rows: Sample[] = [];
   for (let pair = 0; pair < 2; pair += 1) {
     const order: State[] = pair % 2 === 0 ? ["disabled", "enabled"] : ["enabled", "disabled"];
     order.forEach((state, position) => rows.push({
-      identity: { pair_sample: pair, order: position, state, mode: state === "disabled" ? "single" : "single_profiled", workload: "representative_json", jobs: 110, checksum: 5864992 },
+      identity: { pair_sample: pair, order: position, state, mode: modeFor(instrumentation, state), workload: "representative_json", jobs: 110, checksum: 5864992 },
       metrics: {
         wall_time_ns: state === "disabled" ? 100 : 102,
+        process_wall_time_ns: state === "disabled" ? 200 : 204,
         process_cpu_user_ns: 80,
         process_cpu_system_ns: 20,
-        peak_rss_bytes: 10_000_000,
+        peak_rss_bytes: 10_200_000,
         thermal_state: { status: "measured", before: "nominal", after: "nominal" },
         instructions: { status: "measured", value: 1000 + pair },
         cycles: { status: "measured", value: 500 + pair },
@@ -509,6 +631,26 @@ function syntheticSamples(): Sample[] {
         page_cache_hits: { status: "measured", value: 3 },
         voluntary_context_switches: { status: "measured", value: 1 },
         involuntary_context_switches: { status: "measured", value: 2 },
+        ...(instrumentation === "native_observability" ? { native_observability: {
+          live_artifacts: 1,
+          live_code_bytes: 16384,
+          baseline_publications: 0,
+          optimizer_publications: 1,
+          live_registrations: state === "enabled" ? 1 : 0,
+          live_symfile_bytes: state === "enabled" ? 1335 : 0,
+          live_unwind_bytes: state === "enabled" ? 72 : 0,
+          registrations: state === "enabled" ? 1 : 0,
+          unregistrations: 0,
+          live_peak_rss_bytes: 10_200_000,
+          retained_rss_bytes: state === "enabled" ? 10_100_000 : 10_000_000,
+          post_teardown_live_registrations: 0,
+          post_teardown_live_symfile_bytes: 0,
+          post_teardown_live_unwind_bytes: 0,
+          post_teardown_registrations: state === "enabled" ? 1 : 0,
+          post_teardown_unregistrations: state === "enabled" ? 1 : 0,
+          post_teardown_peak_rss_bytes: 10_200_000,
+          post_teardown_retained_rss_bytes: state === "enabled" ? 9_100_000 : 9_000_000,
+        } } : {}),
       },
     }));
   }
@@ -550,10 +692,13 @@ export function selfTest(): void {
   const darwinFixture = "zig-js-darwin-rusage\tsingle\trepresentative_json\t110\t0\tmeasured\t1000\t500\t200\t1\t2\t0\t3\t0\t0\n",
     owned = parseDarwinCounters(darwinFixture, "single", "representative_json", 110), thermal = parseDarwinThermalState(darwinFixture, "single", "representative_json", 110);
   requireValue(owned.instructions.status === "measured" && owned.process_energy_nj.value === 200 && owned.page_cache_hits.value === 3 && thermal.status === "measured" && thermal.before === "nominal", "owned Darwin telemetry parse drift");
+  const nativeFixture = "zig-js-native-observability\tsingle_observed\trepresentative_json\t110\t0\t1\t16384\t0\t1\t1\t1335\t72\t1\t0\t10200000\t10100000\nzig-js-native-observability-retired\tsingle_observed\trepresentative_json\t110\t0\t0\t0\t1\t1\t10200000\t9100000\n",
+    nativeParsed = parseNativeObservability(nativeFixture, "single_observed", "representative_json", 110);
+  requireValue(nativeParsed.live_peak_rss_bytes === 10_200_000 && nativeParsed.retained_rss_bytes === 10_100_000 && nativeParsed.post_teardown_unregistrations === 1, "native observability telemetry parse drift");
   const samples = syntheticSamples(), noOpSamples = syntheticNoOpSamples(), artifact = {
-    schema_version: 4,
-    profile_id: "zig-js-instrumentation-overhead-v4",
-    metadata: { pairs: 2, host_class: "diagnostic", runner_path: "/tmp/runner", runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", workload_source: "bench/representative_comparison.js", workload_source_sha256: "b".repeat(64), jobs: 110, expected_checksum: 5864992, revision: "c".repeat(40), environment: { Date: "2026-08-04", Host: "fixture", OS: "fixture", Zig: "fixture", "zig-gc": "d".repeat(40), "zig-regex": "e".repeat(40), Power: "Battery Power" } },
+    schema_version: 5,
+    profile_id: "zig-js-instrumentation-overhead-v5",
+    metadata: { instrumentation: "execution_attribution", pairs: 2, host_class: "diagnostic", runner_path: "/tmp/runner", runner_sha256: "a".repeat(64), runner_size_bytes: 1, workload: "representative_json", workload_source: "bench/representative_comparison.js", workload_source_sha256: "b".repeat(64), jobs: 110, expected_checksum: 5864992, revision: "c".repeat(40), environment: { Date: "2026-08-04", Host: "fixture", OS: "fixture", Zig: "fixture", "zig-gc": "d".repeat(40), "zig-regex": "e".repeat(40), Power: "Battery Power" } },
     samples,
     summary: summarize(samples),
     calibration: {
@@ -590,6 +735,20 @@ export function selfTest(): void {
   reference.summary = summarize(reference.samples);
   reference.counter_capabilities = capabilityInventory(reference.calibration.no_op.samples, reference.samples);
   expectFailure(() => validateArtifact(reference), "requires stable known-work process_energy_nj");
+  const nativeSamples = syntheticSamples("native_observability"), native = JSON.parse(JSON.stringify(artifact));
+  native.metadata.instrumentation = "native_observability";
+  native.samples = nativeSamples;
+  native.summary = summarize(nativeSamples);
+  native.counter_capabilities = capabilityInventory(native.calibration.no_op.samples, nativeSamples);
+  native.boundaries.retained_rss = { status: "measured", source: "task_vm_info resident_size before and after Context teardown" };
+  validateArtifact(native);
+  requireValue(native.summary.native_observability.live_symfile_bytes.enabled_median === 1335, "native publisher byte summary drift");
+  const tierDrift = JSON.parse(JSON.stringify(native));
+  tierDrift.samples[0].metrics.native_observability.live_code_bytes += 4;
+  expectFailure(() => validateArtifact(tierDrift), "tier parity drift");
+  const teardownDrift = JSON.parse(JSON.stringify(native));
+  teardownDrift.samples.find((sample: Sample) => sample.identity.state === "enabled").metrics.native_observability.post_teardown_live_symfile_bytes = 1;
+  expectFailure(() => validateArtifact(teardownDrift), "survived teardown");
   console.log("OK instrumentation overhead self-test: parsing, alternation, checksums, capability states, calibration quality, and explicit boundaries verified");
 }
 
@@ -609,7 +768,7 @@ function main(): void {
   if (args.length === 1 && args[0] === "--self-test") { selfTest(); return; }
   const runner = args[0];
   requireValue(Boolean(runner) && Home.fileExists(runner), "instrumentation overhead runner does not exist");
-  let manifestPath = DEFAULT_MANIFEST, workload = "representative_json", pairs = 7, hostClass = "diagnostic", rawOut = "", markdownOut = "", quick = false;
+  let manifestPath = DEFAULT_MANIFEST, workload = "representative_json", pairs = 7, hostClass = "diagnostic", instrumentation: Instrumentation = "execution_attribution", rawOut = "", markdownOut = "", quick = false;
   for (let index = 1; index < args.length; index += 1) {
     const name = args[index];
     if (name === "--quick") quick = true;
@@ -619,6 +778,7 @@ function main(): void {
       else if (name === "--workload") workload = value;
       else if (name === "--pairs") pairs = Number(value);
       else if (name === "--host-class") hostClass = value;
+      else if (name === "--instrumentation") instrumentation = value as Instrumentation;
       else if (name === "--raw-out") rawOut = value;
       else if (name === "--markdown-out") markdownOut = value;
       else throw new Error(`unknown argument: ${name}`);
@@ -627,17 +787,19 @@ function main(): void {
   if (quick && pairs === 7) pairs = 2;
   requireValue(Boolean(rawOut) === Boolean(markdownOut), "raw and Markdown overhead outputs must be written together");
   requireValue(["diagnostic", "quiet_reference"].includes(hostClass), "host class must be diagnostic or quiet_reference");
+  requireValue(["execution_attribution", "native_observability"].includes(instrumentation), "instrumentation must be execution_attribution or native_observability");
   const manifest = loadManifest(manifestPath); validateManifest(manifest);
   const resolved = resolveWorkload(manifest, workload, quick), info = metadata();
   ensurePublishable(info, Boolean(rawOut));
   const noOpSamples = collectNoOp(runner, pairs);
-  const samples = collect(runner, workload, resolved.jobs, resolved.checksum, pairs), size = Number(run(["/usr/bin/stat", "-f", "%z", runner]).stdout.trim());
+  const samples = collect(runner, instrumentation, workload, resolved.jobs, resolved.checksum, pairs), size = Number(run(["/usr/bin/stat", "-f", "%z", runner]).stdout.trim());
   const artifact = {
-    schema_version: 4,
-    profile_id: "zig-js-instrumentation-overhead-v4",
+    schema_version: 5,
+    profile_id: "zig-js-instrumentation-overhead-v5",
     metadata: {
       environment: info,
       host_class: hostClass,
+      instrumentation,
       revision: info["zig-js"],
       runner_path: runner,
       runner_sha256: sha256File(runner),
@@ -648,7 +810,7 @@ function main(): void {
       jobs: resolved.jobs,
       expected_checksum: resolved.checksum,
       pairs,
-      timed_boundary: "one warmed single-context invocation; process CPU and peak RSS cover the fresh runner process",
+      timed_boundary: "one warmed single-context invocation; process wall/CPU and peak RSS cover the complete fresh runner lifecycle",
     },
     samples,
     summary: summarize(samples),
@@ -658,7 +820,9 @@ function main(): void {
     },
     counter_capabilities: capabilityInventory(noOpSamples, samples),
     boundaries: {
-      retained_rss: { status: "unavailable", reason: "the fresh runner process exits after each sample" },
+      retained_rss: instrumentation === "native_observability"
+        ? { status: "measured", source: "Mach task_vm_info resident_size immediately before and after Context teardown" }
+        : { status: "unavailable", reason: "the execution-attribution runner does not emit an in-process retained boundary" },
       contention: { status: "not_applicable", reason: "the fixture uses one JavaScript thread and one context" },
       code_size: { status: "same_binary", value: size, reason: "runtime-disabled and runtime-enabled states execute the exact same binary" },
     },

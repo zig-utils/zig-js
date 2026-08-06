@@ -285,9 +285,13 @@ the harness and frozen checksums but is not publication evidence.
 
 [`tools/instrumentation-overhead.ts`](../tools/instrumentation-overhead.ts),
 exposed as `zig build instrumentation-overhead`, alternates fresh-process
-`single`/`single_profiled` pairs from one ReleaseFast runner and rejects any
-workload, job-count, sample-index, or frozen-checksum mismatch. The raw artifact
-retains wall time, process user/system CPU, peak RSS, retired instructions,
+disabled/enabled pairs from one ReleaseFast runner and rejects any workload,
+job-count, sample-index, or frozen-checksum mismatch. The default
+`execution_attribution` profile compares `single` with `single_profiled`; the
+`native_observability` profile compares `single` with `single_observed` and also
+rejects generated-tier or live-code drift. The raw artifact retains invocation
+wall time, complete
+fresh-process wall time, process user/system CPU, peak RSS, retired instructions,
 cycles, cumulative process energy, package/interrupt wakeups, page-ins, VM
 page-cache hits, and voluntary/involuntary context switches for every sample.
 It derives cycles, instructions, and process-energy per frozen logical job,
@@ -296,8 +300,8 @@ Public `NSProcessInfo.thermalState` snapshots before and after each boundary
 retain nominal/fair/serious/critical state and detect within- or across-sample
 drift. No sample is discarded or reordered.
 
-Schema v4 (with historical schema-v1/v2/v3 artifacts left unchanged) keeps each OS
-counter as a status-bearing observation: `measured`,
+Schema v5 (with historical schema-v1/v2/v3/v4 artifacts left unchanged) keeps
+each OS counter as a status-bearing observation: `measured`,
 `unavailable`, or `permission_denied`. Before the alternating workload pairs it
 runs the same number of runner-owned no-op boundary probes, then compares their
 raw counter dispersion with the disabled known-work samples. Five-percent
@@ -325,16 +329,31 @@ zig build instrumentation-overhead \
 
 The two states execute the exact same binary, so the fixture records that
 binary's hash and size but does not pretend the runtime toggle measures
-compile-time support size. Retained RSS is unavailable after the fresh process
-exits, and single-thread lock contention is not applicable; both boundaries are
-encoded explicitly rather than as zero. Quick mode uses two reduced-work pairs
-to validate the harness and is never publication evidence.
+compile-time support size. In the default profile, retained RSS is unavailable
+after the fresh process exits. In the native-observability profile, runner-owned
+Mach `task_vm_info` snapshots record current RSS before and after Context
+teardown in the same accounting domain as their corresponding peak values. The
+runner also emits exact live artifact/code/tier counts and GDB JIT registration,
+symbol-object, unwind, and lifetime counters. Validation requires equal native
+code in both states, zero publisher state when disabled, live publisher storage
+when enabled, and zero live debugger storage after teardown. Single-thread lock
+contention remains explicitly not applicable. Quick mode uses two reduced-work
+pairs to validate the harness and is never publication evidence.
+
+```sh
+zig build instrumentation-overhead \
+  -Dinstrumentation-overhead-profile=native_observability \
+  -Dinstrumentation-overhead-raw-out=docs/.data/instrumentation-overhead-native-YYYY-MM-DD.json \
+  -Dinstrumentation-overhead-markdown-out=docs/.data/instrumentation-overhead-native-YYYY-MM-DD.md
+```
 
 Counter collection is a separate `--darwin-rusage` runner mode. Ordinary
 benchmark and production execution does not call `proc_pid_rusage`; the opt-in
-snapshots and counter row are absent from that path. The existing
-`single`/`single_profiled` exact-binary A/B continues to quantify the runtime
-attribution sink independently of this collector.
+snapshots and counter row are absent from that path. Native publisher telemetry
+is likewise an explicit runner option. The execution-attribution and
+native-observability profiles remain separate exact-binary A/B experiments, so
+neither profile attributes the other profile's measurement work to its enabled
+state.
 
 Runs default to `diagnostic`. A negligible-overhead publication claim requires
 `-Dinstrumentation-overhead-host-class=quiet_reference`; that classification

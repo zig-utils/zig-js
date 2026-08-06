@@ -2217,6 +2217,8 @@ pub fn build(b: *std.Build) void {
             run_instrumentation_overhead.addArgs(&.{ "--pairs", b.fmt("{d}", .{pairs}) });
         if (b.option([]const u8, "instrumentation-overhead-host-class", "Overhead host class: diagnostic or quiet_reference")) |host_class|
             run_instrumentation_overhead.addArgs(&.{ "--host-class", host_class });
+        if (b.option([]const u8, "instrumentation-overhead-profile", "Instrumentation profile: execution_attribution or native_observability")) |profile|
+            run_instrumentation_overhead.addArgs(&.{ "--instrumentation", profile });
         if (b.option([]const u8, "instrumentation-overhead-workload", "Representative workload used by the overhead fixture")) |workload|
             run_instrumentation_overhead.addArgs(&.{ "--workload", workload });
         if (b.option([]const u8, "instrumentation-overhead-raw-out", "Write raw instrumentation-overhead samples to this JSON path")) |path|

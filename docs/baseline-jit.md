@@ -240,6 +240,12 @@ which a debugger may read the object. The comparison runner's
 `single_observed` mode registers benchmark sources before evaluation and emits
 these exact fields plus generated-code and resident-memory gauges before and
 after Context teardown. Both benchmark states use that same binary.
+The `native_observability` profile of `zig build instrumentation-overhead`
+alternates that mode against the disabled `single` mode, rejects native
+tier/code/checksum drift, and requires all live debugger storage to retire
+before accepting a sample. Quick runs exercise the collector only; an overhead
+claim still requires the quiet-reference-host gates described in
+[`benchmarks.md`](benchmarks.md).
 
 `zig build native-observability-lldb-test` drives the real LLDB loader. Pending
 baseline and optimizer symbol breakpoints must resolve at offset zero of their
