@@ -3624,6 +3624,10 @@ pub const Context = struct {
         /// debugger, and crash-report adapters. Disabled contexts perform no
         /// metadata allocation or publication work.
         native_observability: bool = false,
+        /// Optional embedder-owned publication backend for debugger or profiler
+        /// integration. Supplying one implies `native_observability`; its
+        /// context must outlive this Context and every shared realm.
+        native_code_publisher: ?jit.NativeCodePublisher = null,
     };
 
     /// Test/conformance-only creation knobs. These model harness flags such as
@@ -3635,6 +3639,7 @@ pub const Context = struct {
         /// exercise forced execution modes without changing production defaults.
         profile_execution_tiers: bool = false,
         native_observability: bool = false,
+        native_code_publisher: ?jit.NativeCodePublisher = null,
         /// Force plain synchronous execution through one tier for exact
         /// differentials. `required` throws instead of silently accepting a
         /// compiler or template fallback as VM coverage.
@@ -4194,6 +4199,7 @@ pub const Context = struct {
             .wasm_features = options.wasm_features,
             .profile_execution_tiers = options.profile_execution_tiers,
             .native_observability = options.native_observability,
+            .native_code_publisher = options.native_code_publisher,
         });
     }
 
@@ -4216,6 +4222,7 @@ pub const Context = struct {
             .arena_state = primary.arena_state,
             .jit_owner = jit.Owner.initWithOptions(allocator, .{
                 .native_observability = primary.jit_owner.nativeObservabilityEnabled(),
+                .native_code_publisher = primary.jit_owner.nativeCodePublisher(),
             }),
             .shared_jit_owner = primary.shared_jit_owner orelse &primary.jit_owner,
             .enable_jit = primary.enable_jit,
@@ -4312,6 +4319,7 @@ pub const Context = struct {
             .bytecode_execution_mode = primary.bytecode_execution_mode,
             .profile_execution_tiers = primary.profile_execution_tiers,
             .native_observability = primary.jit_owner.nativeObservabilityEnabled(),
+            .native_code_publisher = primary.jit_owner.nativeCodePublisher(),
             .enable_gc = true,
             .wasm_features = primary.wasm_features,
         }, primary);
@@ -4395,6 +4403,7 @@ pub const Context = struct {
             .locked_arena = locked_arena,
             .jit_owner = jit.Owner.initWithOptions(context_gpa, .{
                 .native_observability = options.native_observability,
+                .native_code_publisher = options.native_code_publisher,
             }),
             .shared_jit_owner = if (shared_owner) |owner| owner.shared_jit_owner orelse &owner.jit_owner else null,
             .enable_jit = options.enable_jit,
@@ -16386,6 +16395,13 @@ test "Context native observability is opt in" {
     const observable = try Context.createWith(std.testing.allocator, .{ .native_observability = true });
     defer observable.destroy();
     try std.testing.expect(observable.jit_owner.nativeObservabilityEnabled());
+
+    const externally_published = try Context.createWith(std.testing.allocator, .{
+        .native_code_publisher = jit.gdbJitPublisher(),
+    });
+    defer externally_published.destroy();
+    try std.testing.expect(externally_published.jit_owner.nativeObservabilityEnabled());
+    try std.testing.expect(externally_published.jit_owner.nativeCodePublisher() != null);
 }
 
 test "Context native observability captures published function identity" {
@@ -16426,6 +16442,7 @@ test "Context native observability captures published function identity" {
 test "Context public Options expose only stable thread controls" {
     try std.testing.expect(@hasField(Context.Options, "enable_jit"));
     try std.testing.expect(@hasField(Context.Options, "native_observability"));
+    try std.testing.expect(@hasField(Context.Options, "native_code_publisher"));
     try std.testing.expect(@hasField(Context.Options, "enable_threads"));
     try std.testing.expect(@hasField(Context.Options, "gil"));
     try std.testing.expect(@hasField(Context.Options, "heap_limit_bytes"));

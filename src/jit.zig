@@ -9,6 +9,21 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const aarch64 = @import("jit/aarch64.zig");
+const native_observability = @import("jit/native_observability.zig");
+
+pub const NativeCodePublisher = native_observability.Publisher;
+pub const NativeCodePublicationError = native_observability.PublishError;
+
+/// Opt into the process-global GDB/LLDB JIT descriptor adapter. Keeping the
+/// import behind a lazily analyzed function prevents the embeddable library
+/// from defining that host-owned ABI unless a consumer explicitly selects it.
+pub fn gdbJitPublisher() NativeCodePublisher {
+    return @import("jit/gdb_jit.zig").publisher();
+}
+
+test {
+    _ = @import("jit/gdb_jit.zig");
+}
 
 fn isDarwin(os: std.Target.Os.Tag) bool {
     return switch (os) {
@@ -600,7 +615,7 @@ pub const NativeFrame = extern struct {
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
 
-pub const CodeKind = enum(u8) { baseline, optimizer };
+pub const CodeKind = native_observability.CodeKind;
 
 /// Source identity captured when one native artifact is published. The owner
 /// duplicates the strings only when native observability is enabled, so the
@@ -656,6 +671,7 @@ const NativeCodeMetadata = struct {
     source_byte_offset: usize,
     source_line: usize,
     source_column: usize,
+    publication: ?native_observability.Publication = null,
 
     fn create(
         allocator: std.mem.Allocator,
@@ -663,7 +679,8 @@ const NativeCodeMetadata = struct {
         kind: CodeKind,
         memory: *const CodeMemory,
         origin: NativeCodeOrigin,
-    ) std.mem.Allocator.Error!*NativeCodeMetadata {
+        publisher: ?NativeCodePublisher,
+    ) NativeCodePublicationError!*NativeCodeMetadata {
         const metadata = try allocator.create(NativeCodeMetadata);
         errdefer allocator.destroy(metadata);
         const function_name = try allocator.dupe(u8, origin.function_name);
@@ -696,11 +713,27 @@ const NativeCodeMetadata = struct {
             .source_line = origin.source_line,
             .source_column = origin.source_column,
         };
+        if (publisher) |external| {
+            metadata.publication = try external.publish(allocator, .{
+                .kind = kind,
+                .pc_start = pc_start,
+                .code = bytes,
+                .symbol_name = symbol_name,
+                .function_name = function_name,
+                .function_identity = origin.function_identity,
+                .script_id = origin.script_id,
+                .source_url = source_url,
+                .source_byte_offset = origin.source_byte_offset,
+                .source_line = origin.source_line,
+                .source_column = origin.source_column,
+            });
+        }
         return metadata;
     }
 
     fn destroy(self: *NativeCodeMetadata) void {
         const allocator = self.allocator;
+        if (self.publication) |*publication| publication.deinit();
         allocator.free(self.symbol_name);
         allocator.free(self.function_name);
         allocator.free(self.source_url);
@@ -1061,10 +1094,12 @@ pub const OwnerStats = struct {
 pub const Owner = struct {
     pub const Options = struct {
         native_observability: bool = false,
+        native_code_publisher: ?NativeCodePublisher = null,
     };
 
     allocator: ?std.mem.Allocator = null,
     native_observability: bool = false,
+    native_code_publisher: ?NativeCodePublisher = null,
     /// Protected by `lock`; zero is reserved for artifacts without metadata.
     next_native_artifact_id: u64 = 1,
     lock: std.atomic.Mutex = .unlocked,
@@ -1164,7 +1199,7 @@ pub const Owner = struct {
         for (&self.watched_shape_filter) |*word| word.store(0, .release);
     }
 
-    pub const AdoptError = std.mem.Allocator.Error || error{ Invalidated, NativeArtifactIdExhausted };
+    pub const AdoptError = NativeCodePublicationError || error{ Invalidated, NativeArtifactIdExhausted };
 
     pub const Compilation = struct {
         owner: *Owner,
@@ -1212,12 +1247,17 @@ pub const Owner = struct {
     pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) Owner {
         return .{
             .allocator = allocator,
-            .native_observability = options.native_observability,
+            .native_observability = options.native_observability or options.native_code_publisher != null,
+            .native_code_publisher = options.native_code_publisher,
         };
     }
 
     pub fn nativeObservabilityEnabled(self: *const Owner) bool {
         return self.native_observability;
+    }
+
+    pub fn nativeCodePublisher(self: *const Owner) ?NativeCodePublisher {
+        return self.native_code_publisher;
     }
 
     /// Atomically adopt a mapping, register its tier for later invalidation,
@@ -1554,7 +1594,14 @@ pub const Owner = struct {
         if (!self.native_observability) return null;
         const artifact_id = self.next_native_artifact_id;
         if (artifact_id == std.math.maxInt(u64)) return error.NativeArtifactIdExhausted;
-        const metadata = try NativeCodeMetadata.create(allocator, artifact_id, compiled.kind, &compiled.memory, origin);
+        const metadata = try NativeCodeMetadata.create(
+            allocator,
+            artifact_id,
+            compiled.kind,
+            &compiled.memory,
+            origin,
+            self.native_code_publisher,
+        );
         self.next_native_artifact_id = artifact_id + 1;
         return metadata;
     }

@@ -176,10 +176,29 @@ last execution lease releases and reclamation completes, the old PC no longer
 resolves; address reuse therefore cannot inherit a stale function identity.
 With the option disabled, publication allocates and retains no native metadata.
 
-This is the lifetime and identity boundary for profiler, crash-report, debugger,
-and inspector adapters. System-profiler image publication, unwind records, and
-exact native-PC-to-bytecode/inline maps remain separate work; enabling the
-registry alone does not make anonymous `MAP_JIT` leaves visible to an external
+`Context.Options.native_code_publisher` installs an embedder-owned external
+publisher and implies `native_observability`. Publication returns an opaque
+artifact-owned token; retirement invokes its infallible unregister callback
+before metadata destruction and executable unmapping. The publisher and its
+context must outlive the Context and its shared realms.
+
+`jit.gdbJitPublisher()` is the opt-in macOS adapter for the standard GDB JIT
+protocol, which LLDB also implements. It builds an in-memory Mach-O object whose
+single `__text` section has the exact existing executable address and byte size,
+then registers and unregisters that object with the artifact. It does not copy,
+link, or remap executable code. The process-global `__jit_debug_descriptor` and
+`__jit_debug_register_code` symbols are emitted only when an embedder selects
+this adapter, so the default static library does not collide with a host that
+already owns the protocol. LLDB disables this loader by default on macOS; use
+`settings set plugin.jit-loader.gdb.enable on`.
+
+`zig build native-observability-lldb-test` drives the real LLDB loader. Its
+pending generated-symbol breakpoint must resolve at offset zero of the exact JIT
+section, and the symbol must disappear after Owner teardown. This is the
+debugger-symbol slice of the lifetime and identity boundary. System-profiler
+image publication, unwind records, source/inline maps in the external object,
+and crash-path integration remain separate work; the process-local registry
+alone still does not make anonymous `MAP_JIT` leaves visible to an external
 profiler.
 
 ## Correctness and performance gates

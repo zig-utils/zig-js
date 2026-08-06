@@ -122,6 +122,62 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+
+    // Opt-in LLDB/GDB JIT-loader fixture (#501). This executable deliberately
+    // selects the process-global registration adapter; the embeddable library
+    // itself remains free of those host-owned symbols.
+    const native_observability_lldb_fixture = b.addExecutable(.{
+        .name = "native-observability-lldb",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/native_observability_lldb.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    const install_native_observability_lldb_fixture = b.addInstallArtifact(native_observability_lldb_fixture, .{});
+    const native_observability_lldb_fixture_step = b.step(
+        "native-observability-lldb-fixture",
+        "Build the opt-in LLDB/GDB native-symbol publication fixture",
+    );
+    native_observability_lldb_fixture_step.dependOn(&install_native_observability_lldb_fixture.step);
+    if (target.result.os.tag == .macos) {
+        const run_lldb_jit_registration_test = b.addSystemCommand(&.{
+            "/usr/bin/lldb",
+            "--batch",
+            "-o",
+            "settings set plugin.jit-loader.gdb.enable on",
+            "-o",
+            "breakpoint set --name main",
+            "-o",
+            "run",
+            "-o",
+            "breakpoint delete 1",
+            "-o",
+            "breakpoint set --name zig_js_baseline_1_observedNative",
+            "-o",
+            "continue",
+            "-o",
+            "script frame = lldb.debugger.GetSelectedTarget().GetProcess().GetSelectedThread().GetFrameAtIndex(0); assert frame.GetFunctionName() == 'zig_js_baseline_1_observedNative'; address = frame.GetPCAddress(); assert address.GetSection().GetName() == '__text'; assert address.GetOffset() == 0",
+            "-o",
+            "breakpoint set --name native_observability_after_unregister",
+            "-o",
+            "continue",
+            "-o",
+            "script target = lldb.debugger.GetSelectedTarget(); assert target.FindFunctions('zig_js_baseline_1_observedNative').GetSize() == 0",
+            "-o",
+            "continue",
+            "--",
+        });
+        run_lldb_jit_registration_test.addFileArg(native_observability_lldb_fixture.getEmittedBin());
+        run_lldb_jit_registration_test.has_side_effects = true;
+        const lldb_jit_registration_test_step = b.step(
+            "native-observability-lldb-test",
+            "Validate exact generated-code registration with the real LLDB JIT loader",
+        );
+        lldb_jit_registration_test_step.dependOn(&run_lldb_jit_registration_test.step);
+    }
+
     const private_abi_consumer = b.option(
         []const u8,
         "private-abi-consumer",
