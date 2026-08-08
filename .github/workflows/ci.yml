@@ -182,6 +182,13 @@ jobs:
           - name: focused-engine-tests
             home_tool: true
             cmd: zig build test-jit test-vm test-concurrency gc-relocation-inventory-check optimizer-release-inventory-check
+          # Execute real generated instructions and require both sides of W^X:
+          # unpublished pages fault on execute, and published pages fault on
+          # write. This Linux x86-64 leg exercises the POSIX backend directly.
+          - name: executable-memory-wx
+            cmd: |
+              zig build executable-memory-wx-test
+              zig build executable-memory-wx-test -Doptimize=ReleaseSafe
           # The inventories are executable contracts: parser regressions,
           # exported-but-uninventoried shims, stale statuses, and broken Home
           # runtime linkage all fail this bounded leg.

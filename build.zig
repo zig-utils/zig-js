@@ -105,6 +105,31 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const executable_memory_os = target.result.os.tag;
+    const executable_memory_arch = target.result.cpu.arch;
+    const executable_memory_target =
+        (executable_memory_os == .macos and executable_memory_arch == .aarch64) or
+        (executable_memory_os == .linux and
+            (executable_memory_arch == .aarch64 or executable_memory_arch == .x86_64));
+    if (executable_memory_target) {
+        const executable_memory_wx_fixture = b.addExecutable(.{
+            .name = "executable-memory-wx",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/executable_memory_wx.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "js", .module = mod }},
+            }),
+        });
+        const run_executable_memory_wx_fixture = b.addRunArtifact(executable_memory_wx_fixture);
+        run_executable_memory_wx_fixture.has_side_effects = true;
+        const executable_memory_wx_step = b.step(
+            "executable-memory-wx-test",
+            "Prove writable mappings are non-executable and published mappings are immutable",
+        );
+        executable_memory_wx_step.dependOn(&run_executable_memory_wx_fixture.step);
+    }
+
     // A static library exposing the implemented C API symbols. Some names are
     // JavaScriptCore-shaped for embedding convenience, but pre-stabilization API
     // cleanup should prefer clear zig-js semantics over inert compatibility shims.

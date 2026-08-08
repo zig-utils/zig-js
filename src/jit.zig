@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const aarch64 = @import("jit/aarch64.zig");
+const executable_memory = @import("jit/executable_memory.zig");
 const native_observability = @import("jit/native_observability.zig");
 
 pub const NativeCodePublisher = native_observability.Publisher;
@@ -43,25 +44,32 @@ pub fn gdbJitStats() GdbJitStats {
 }
 
 test {
+    _ = @import("jit/executable_memory.zig");
     _ = @import("jit/gdb_jit.zig");
     _ = @import("jit/perf_jitdump.zig");
 }
 
-fn isDarwin(os: std.Target.Os.Tag) bool {
-    return switch (os) {
-        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => true,
-        else => false,
-    };
+pub const ExecutableMemoryProfile = executable_memory.Profile;
+pub const ExecutableMemoryBackend = executable_memory.Backend;
+pub const ExecutableMemoryTargetOs = executable_memory.TargetOs;
+pub const ExecutableMemoryArchitecture = executable_memory.Architecture;
+pub const ExecutableMemoryCacheSynchronization = executable_memory.CacheSynchronization;
+pub const ExecutableMemoryWriteProtection = executable_memory.WriteProtection;
+pub const ExecutableMemoryPatching = executable_memory.Patching;
+pub const executable_memory_contract_version = executable_memory.contract_version;
+pub const executable_memory_profile = executable_memory.host_profile;
+pub const executable_memory_supported = executable_memory.supported;
+
+pub fn executableMemoryProfileFor(
+    os: std.Target.Os.Tag,
+    arch: std.Target.Cpu.Arch,
+) ?ExecutableMemoryProfile {
+    return executable_memory.profileFor(os, arch);
 }
 
-pub const supported = isDarwin(builtin.os.tag) and switch (builtin.cpu.arch) {
-    .aarch64, .x86_64 => true,
-    else => false,
-};
-
-/// The exact public optimizer code-generation matrix. Keep this narrower than
-/// `supported`: Darwin x86-64 can allocate executable mappings, but no x86-64
-/// optimizer emitter exists and it must therefore remain on baseline/bytecode.
+/// The exact public optimizer code-generation matrix. Executable-memory
+/// capability is a separate, wider contract: a mapping backend cannot by
+/// itself advertise an optimizer emitter.
 pub const OptimizerBackend = enum {
     macos_aarch64,
 };
@@ -73,6 +81,9 @@ pub fn optimizerBackend(os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch) ?Optim
 
 pub const optimizer_backend = optimizerBackend(builtin.os.tag, builtin.cpu.arch);
 pub const optimizer_supported = optimizer_backend != null;
+/// A target is advertised only when it has a real production code generator,
+/// not merely an executable-memory implementation.
+pub const supported = optimizer_supported;
 
 pub const TierState = enum(u8) { cold, compiling, ready, rejected };
 
@@ -2089,63 +2100,7 @@ fn codeListBytes(codes: []const *CompiledCode) usize {
     return total;
 }
 
-const State = enum { writable, executable };
-
-/// One immutable-after-publication native-code mapping.
-///
-/// Darwin's JIT write protection is thread-local. Consequently allocation,
-/// emission, and `publish` must happen on the compilation-claiming thread with
-/// no call into untrusted code between them. The tier state machine guarantees
-/// that only one thread owns a mapping before publication.
-pub const CodeMemory = struct {
-    mapping: []align(std.heap.page_size_min) u8,
-    used: usize = 0,
-    state: State = .writable,
-
-    pub fn init(min_capacity: usize) !CodeMemory {
-        if (!supported) return error.UnsupportedTarget;
-        if (min_capacity == 0) return error.InvalidCapacity;
-
-        const capacity = std.mem.alignForward(usize, min_capacity, std.heap.page_size_min);
-        const protection: std.posix.PROT = .{ .READ = true, .WRITE = true, .EXEC = true };
-        var flags: std.posix.MAP = .{ .TYPE = .PRIVATE, .ANONYMOUS = true };
-        flags.JIT = true;
-        const mapping = try std.posix.mmap(null, capacity, protection, flags, -1, 0);
-
-        // MAP_JIT pages are executable to other threads while this thread gets
-        // the writable view. Re-enable protection in publish/deinit.
-        pthread_jit_write_protect_np(0);
-        return .{ .mapping = mapping };
-    }
-
-    pub fn deinit(self: *CodeMemory) void {
-        if (self.state == .writable and supported) pthread_jit_write_protect_np(1);
-        std.posix.munmap(self.mapping);
-        self.* = undefined;
-    }
-
-    pub fn writableBytes(self: *CodeMemory) []u8 {
-        std.debug.assert(self.state == .writable);
-        return self.mapping;
-    }
-
-    /// Flush the emitted range and make it immutable on the compiling thread.
-    /// The caller may publish the returned entry pointer only after this call.
-    pub fn publish(self: *CodeMemory, used: usize) error{InvalidCodeSize}!void {
-        if (used == 0 or used > self.mapping.len) return error.InvalidCodeSize;
-        std.debug.assert(self.state == .writable);
-
-        self.used = used;
-        sys_icache_invalidate(self.mapping.ptr, used);
-        pthread_jit_write_protect_np(1);
-        self.state = .executable;
-    }
-
-    pub fn executableBytes(self: *const CodeMemory) []const u8 {
-        std.debug.assert(self.state == .executable);
-        return self.mapping[0..self.used];
-    }
-};
+pub const CodeMemory = executable_memory.Memory;
 
 /// Compile the smallest real native entry: publish one exact NaN-boxed word as
 /// a completed result. This is the backend/ABI bring-up primitive used before
@@ -2188,11 +2143,8 @@ fn compileConstantEntryWithPcMap(result_bits: u64, exit_bytecode_offset: ?usize)
     };
 }
 
-extern "c" fn pthread_jit_write_protect_np(enabled: c_int) void;
-extern "c" fn sys_icache_invalidate(start: *anyopaque, len: usize) void;
-
 test "CodeMemory rejects empty mappings" {
-    if (!supported) return error.SkipZigTest;
+    if (!executable_memory_supported) return error.SkipZigTest;
     try std.testing.expectError(error.InvalidCapacity, CodeMemory.init(0));
 }
 
@@ -2206,6 +2158,9 @@ test "optimizer backend matrix declares only macOS AArch64" {
     try std.testing.expect(optimizerBackend(.linux, .aarch64) == null);
     try std.testing.expect(optimizerBackend(.linux, .x86_64) == null);
     try std.testing.expectEqual(optimizer_backend != null, optimizer_supported);
+    try std.testing.expectEqual(optimizer_supported, supported);
+    try std.testing.expect(executable_memory.profileFor(.linux, .aarch64) != null);
+    try std.testing.expect(executable_memory.profileFor(.linux, .x86_64) != null);
 }
 
 test "Tier claims compilation exactly at its hot threshold" {
@@ -3240,7 +3195,7 @@ test "Owner retirement churn keeps executable memory at steady state" {
 }
 
 test "CodeMemory publishes and executes native code" {
-    if (!supported) return error.SkipZigTest;
+    if (!executable_memory_supported) return error.SkipZigTest;
 
     const machine_code = switch (builtin.cpu.arch) {
         // mov w0, #42; ret
