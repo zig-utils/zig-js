@@ -28,6 +28,12 @@ pub fn gdbJitPublisher() NativeCodePublisher {
     return @import("jit/gdb_jit.zig").publisher();
 }
 
+/// Owned, explicitly selected Linux perf jitdump stream. The writer creates
+/// perf's executable discovery mapping and publishes exact generated ranges;
+/// it is never initialized by the default embeddable library path.
+pub const PerfJitDumpWriter = @import("jit/perf_jitdump.zig").Writer;
+pub const PerfJitDumpStats = @import("jit/perf_jitdump.zig").Stats;
+
 pub const GdbJitStats = native_observability.GdbJitStats;
 
 /// Exact process-wide storage and lifecycle accounting for the opt-in adapter.
@@ -38,6 +44,7 @@ pub fn gdbJitStats() GdbJitStats {
 
 test {
     _ = @import("jit/gdb_jit.zig");
+    _ = @import("jit/perf_jitdump.zig");
 }
 
 fn isDarwin(os: std.Target.Os.Tag) bool {

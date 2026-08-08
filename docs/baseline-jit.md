@@ -238,6 +238,17 @@ this adapter, so the default static library does not collide with a host that
 already owns the protocol. LLDB disables this loader by default on macOS; use
 `settings set plugin.jit-loader.gdb.enable on`.
 
+Linux embedders can instead keep a `js.jit.PerfJitDumpWriter` at a stable
+address, pass its `publisher()` through `Context.Options.native_code_publisher`,
+and retire every using Context before calling `deinit()`. The writer creates
+the executable `jit-<pid>.dump` discovery mapping required by `perf record`,
+emits source-debug records before their matching code-load records, and leaves
+the closed dump on disk for `perf inject --jit`. Each exact PC-map span is a
+separate load record: source-bearing spans carry their exact one-based line,
+while prologue, epilogue, and synthetic spans remain named but source-unmapped.
+The adapter is Linux-only and opt-in; it does not claim Linux native execution
+before the backend release gates do.
+
 `jit.gdbJitStats()` returns one lock-coherent process-wide snapshot of the
 adapter's live registration count, owned symbol-object bytes, owned unwind
 bytes, and monotonic register/unregister totals. Live storage is incremented
