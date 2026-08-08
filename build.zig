@@ -157,6 +157,11 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/native_observability_lldb.zig"),
             .target = target,
             .optimize = .Debug,
+            // LLDB scans the linked symbol table for the GDB-JIT globals.
+            // A debug map also contributes an undefined descriptor row, which
+            // makes its address selection nondeterministic; the generated
+            // artifact still carries the JavaScript DWARF this gate inspects.
+            .strip = true,
             .imports = &.{.{ .name = "js", .module = mod }},
         }),
     });
