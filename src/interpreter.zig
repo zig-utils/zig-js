@@ -1606,6 +1606,10 @@ pub const Interpreter = struct {
     /// every peer has published the current generation. Atomic for the cross-thread
     /// read; `0` until the first publish.
     gc_published_gen: std.atomic.Value(u64) = .init(0),
+    /// Generator/async activation whose VM state is materialized in `gc_execs`
+    /// at the current bytecode safepoint. Type-erased to keep interpreter.zig
+    /// from importing vm.zig; the GC binding casts it back on the same thread.
+    gc_active_generator: ?*anyopaque = null,
     /// True only while `gc_parked` was published from a checkpoint that also
     /// declared `gc_precise_safepoint` + `gc_moving_safepoint`. A cooperative
     /// moving collector requires this token from every peer; ordinary native

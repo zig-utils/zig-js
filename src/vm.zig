@@ -388,6 +388,36 @@ pub const Generator = struct {
         self.requests_mutex.unlock(agent.engineIo());
     }
 
+    /// Freeze a non-running ordinary/async activation for concurrent tracing.
+    /// Async-generator pumping has several request-tail mutations outside the
+    /// `running` handoff, so it remains fail-closed unless traced by its owning
+    /// interpreter at an exact VM safepoint.
+    pub fn tryLockTrace(self: *Generator) bool {
+        if (self.is_async_gen or !self.resume_mutex.tryLock()) return false;
+        if (self.running.cmpxchgStrong(false, true, .acquire, .monotonic) != null) {
+            self.resume_mutex.unlock(agent.engineIo());
+            return false;
+        }
+        self.lockRequests();
+        return true;
+    }
+
+    pub fn unlockTrace(self: *Generator) void {
+        self.unlockRequests();
+        self.running.store(false, .release);
+        self.resume_mutex.unlock(agent.engineIo());
+    }
+
+    /// The owning interpreter already freezes `exec` at its bytecode safepoint;
+    /// only async-generator request publication can still arrive concurrently.
+    pub fn lockTraceRequests(self: *Generator) void {
+        self.lockRequests();
+    }
+
+    pub fn unlockTraceRequests(self: *Generator) void {
+        self.unlockRequests();
+    }
+
     fn claimAsyncResume(self: *Generator) void {
         var spins: usize = 0;
         while (self.running.cmpxchgWeak(false, true, .acquire, .monotonic) != null) : (spins += 1) {
@@ -5867,6 +5897,9 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
     vm.recordExecutionTier(.vm_entries);
+    const saved_gc_active_generator = vm.gc_active_generator;
+    vm.gc_active_generator = if (gen) |activation| @ptrCast(activation) else null;
+    defer vm.gc_active_generator = saved_gc_active_generator;
     chunk.optimizer_tier.beginProfiling();
     chunk.optimizer_profile.observeEntry();
     var optimizer_delta = jit.OptimizerProfile.Delta{};

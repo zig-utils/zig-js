@@ -6757,6 +6757,7 @@ pub const Context = struct {
         if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) return false;
         _ = self.gc_par_attempts.fetchAdd(1, .monotonic);
         defer self.gc_par_collector.store(null, .release);
+        defer self.gc_par_request.store(0, .release);
         // Allocation cannot make progress without a sweep. Give running peers a
         // larger scheduling window than routine opportunistic mid-script GC;
         // this stays bounded and still aborts without sweeping if publication
@@ -7861,6 +7862,16 @@ pub const Context = struct {
                 },
             }
         };
+        // Once script execution completes, its result is no longer present in
+        // the interpreter's operand stack. Child Threads can still elect a
+        // parallel collection while the host drains microtasks and waits for
+        // their completion, so keep a successful result in the precise root set
+        // for that whole interval rather than relying on a native local/register.
+        const result_root_mark = if (outcome) |result|
+            try machine.pushTempRoot(result)
+        else |_|
+            null;
+        defer if (result_root_mark) |mark| machine.restoreTempRoots(mark);
         const top_level_failed = if (outcome) |_| false else |_| true;
         if (outcome) |_| {} else |err| {
             if (err == error.Throw) {
@@ -7975,11 +7986,8 @@ pub const Context = struct {
         }
         if (outcome) |result| {
             // A script-visible `gc()` request is serviced before returning to
-            // the host, while this interpreter is still registered as an active
-            // root source. The script completion value itself is only in this
-            // native local, so root it explicitly across that collection.
-            const result_root_mark = try machine.pushTempRoot(result);
-            defer machine.restoreTempRoots(result_root_mark);
+            // the host, while this interpreter and its result root are still
+            // registered as precise root sources.
             self.collectRequestedGarbage();
             return result;
         } else |err| {
@@ -20970,9 +20978,10 @@ test "enable_gc concurrent (M3): mixed-workload stress amplifier stays correct +
     // environments, generators, and iterator-helper chains — so a single
     // collection cycle traces objects (locked), environments (binding_lock),
     // promises (Promise.lock), weak collections (isMarked clearing), and
-    // generators/iterator-helpers (deferred) concurrently with the mutator
-    // building and mutating all of them. Exact final tallies prove nothing live
-    // was wrongly freed; TSan-clean proves no path races the marker.
+    // generators/iterator-helpers (synchronized activation/state locks)
+    // concurrently with the mutator building and mutating all of them. Exact
+    // final tallies prove nothing live was wrongly freed; TSan-clean proves no
+    // path races the marker.
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .concurrent_gc = true });
     defer ctx.destroy();
@@ -22623,6 +22632,19 @@ test "parallel_js (M3): mid-script parallel collector reclaims garbage while thr
     try expectParallelGcTelemetryCoherent(ctx);
 }
 
+fn removeTestJsThreadRecord(ctx: *Context, record: *jsthread.ThreadRecord) void {
+    ctx.gil.?.lockApi();
+    defer ctx.gil.?.unlockApi();
+    var i: usize = ctx.js_threads.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (ctx.js_threads.items[i] == record) {
+            _ = ctx.js_threads.swapRemove(i);
+            return;
+        }
+    }
+}
+
 test "parallel_js heap_limit_bytes recovers GC cells while sibling Thread is alive" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -22641,18 +22663,7 @@ test "parallel_js heap_limit_bytes recovers GC cells while sibling Thread is ali
         try ctx.reserveJsThreadsLocked(1);
         ctx.js_threads.appendAssumeCapacity(&sibling);
     }
-    defer {
-        ctx.gil.?.lockApi();
-        var i: usize = ctx.js_threads.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (ctx.js_threads.items[i] == &sibling) {
-                _ = ctx.js_threads.swapRemove(i);
-                break;
-            }
-        }
-        ctx.gil.?.unlockApi();
-    }
+    defer removeTestJsThreadRecord(ctx, &sibling);
 
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
     const before_collections = ctx.gc_par_collections.load(.monotonic);
@@ -22779,18 +22790,7 @@ test "parallel_js heap_limit_bytes fails closed inside trace-sensitive locks" {
         try ctx.reserveJsThreadsLocked(1);
         ctx.js_threads.appendAssumeCapacity(&sibling);
     }
-    defer {
-        ctx.gil.?.lockApi();
-        var i: usize = ctx.js_threads.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (ctx.js_threads.items[i] == &sibling) {
-                _ = ctx.js_threads.swapRemove(i);
-                break;
-            }
-        }
-        ctx.gil.?.unlockApi();
-    }
+    defer removeTestJsThreadRecord(ctx, &sibling);
 
     var machine = ctx.interpreter();
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
@@ -22802,12 +22802,10 @@ test "parallel_js heap_limit_bytes fails closed inside trace-sensitive locks" {
     try std.testing.expectEqual(before_attempts, ctx.gc_par_attempts.load(.monotonic));
 }
 
-test "parallel_js heap_limit_bytes fails closed with deferred generator tracing" {
-    // #36 policy witness: a rooted suspended generator makes the parallel marker
-    // defer tracing its mutable execution buffers to a world-stopped finish.
-    // Allocation-failure recovery must not treat that as a successful no-GIL
-    // sweep while a peer is live; it aborts instead, preserving the invariant
-    // that generator/iterator side stores are not generically recoverable yet.
+test "parallel_js heap_limit_bytes traces a synchronized suspended generator" {
+    // A suspended ordinary generator is frozen by its resume/request locks, so
+    // no-GIL allocation recovery can trace its retained execution state and
+    // finish rather than conservatively aborting every collection attempt.
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,
@@ -22838,25 +22836,11 @@ test "parallel_js heap_limit_bytes fails closed with deferred generator tracing"
         try ctx.reserveJsThreadsLocked(1);
         ctx.js_threads.appendAssumeCapacity(&sibling);
     }
-    defer {
-        ctx.gil.?.lockApi();
-        var i: usize = ctx.js_threads.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (ctx.js_threads.items[i] == &sibling) {
-                _ = ctx.js_threads.swapRemove(i);
-                break;
-            }
-        }
-        ctx.gil.?.unlockApi();
-    }
+    defer removeTestJsThreadRecord(ctx, &sibling);
 
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
     const before_collections = ctx.gc_par_collections.load(.monotonic);
     const before_aborts = ctx.gc_par_aborts.load(.monotonic);
-    const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
-    const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
-    const before_deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
 
     const gc_saved = gc_mod.setActiveHeap(ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -22868,21 +22852,20 @@ test "parallel_js heap_limit_bytes fails closed with deferred generator tracing"
     const ai_saved = gc_mod.setActiveInterpreter(&machine);
     defer _ = gc_mod.setActiveInterpreter(ai_saved);
 
-    try std.testing.expect(!ctx.collectForAllocationFailure(&machine));
+    try std.testing.expect(ctx.collectForAllocationFailure(&machine));
     try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
-    try std.testing.expectEqual(before_collections, ctx.gc_par_collections.load(.monotonic));
-    try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
-    try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
-    try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
-    try std.testing.expect(ctx.gc_par_deferred_aborts.load(.monotonic) > before_deferred_aborts);
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
+    try std.testing.expectEqual(before_aborts, ctx.gc_par_aborts.load(.monotonic));
+    // End the synthetic peer lifetime before starting a fresh host evaluation;
+    // real Thread records likewise exit before evaluateWithThis joins them.
+    removeTestJsThreadRecord(ctx, &sibling);
+    try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("globalThis.__deferredRecoveryGenerator.next().value")).asNum());
 }
 
-test "parallel_js heap_limit_bytes fails closed with deferred generator handlers" {
-    // #36 handler-buffer witness: a generator suspended inside try/finally keeps
-    // resumable handler metadata in its GC-backed execution buffers. Because the
-    // parallel tracer defers generator cells, allocation-failure recovery must
-    // abort rather than sweep while that handler state requires a world-stopped
-    // finish.
+test "parallel_js heap_limit_bytes traces synchronized suspended generator handlers" {
+    // Handler metadata lives in the same activation guarded by resume ownership;
+    // tracing it under that guard preserves the pending finally across a
+    // successful no-GIL allocation-recovery sweep.
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,
@@ -22918,25 +22901,11 @@ test "parallel_js heap_limit_bytes fails closed with deferred generator handlers
         try ctx.reserveJsThreadsLocked(1);
         ctx.js_threads.appendAssumeCapacity(&sibling);
     }
-    defer {
-        ctx.gil.?.lockApi();
-        var i: usize = ctx.js_threads.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (ctx.js_threads.items[i] == &sibling) {
-                _ = ctx.js_threads.swapRemove(i);
-                break;
-            }
-        }
-        ctx.gil.?.unlockApi();
-    }
+    defer removeTestJsThreadRecord(ctx, &sibling);
 
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
     const before_collections = ctx.gc_par_collections.load(.monotonic);
     const before_aborts = ctx.gc_par_aborts.load(.monotonic);
-    const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
-    const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
-    const before_deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
 
     const gc_saved = gc_mod.setActiveHeap(ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -22948,21 +22917,20 @@ test "parallel_js heap_limit_bytes fails closed with deferred generator handlers
     const ai_saved = gc_mod.setActiveInterpreter(&machine);
     defer _ = gc_mod.setActiveInterpreter(ai_saved);
 
-    try std.testing.expect(!ctx.collectForAllocationFailure(&machine));
+    try std.testing.expect(ctx.collectForAllocationFailure(&machine));
     try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
-    try std.testing.expectEqual(before_collections, ctx.gc_par_collections.load(.monotonic));
-    try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
-    try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
-    try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
-    try std.testing.expect(ctx.gc_par_deferred_aborts.load(.monotonic) > before_deferred_aborts);
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
+    try std.testing.expectEqual(before_aborts, ctx.gc_par_aborts.load(.monotonic));
+    removeTestJsThreadRecord(ctx, &sibling);
+    try std.testing.expectEqual(@as(f64, 1), (try ctx.evaluate(
+        "globalThis.__deferredRecoveryHandlerGenerator.return(0); globalThis.__deferredHandlerFinally",
+    )).asNum());
 }
 
-test "parallel_js heap_limit_bytes fails closed with deferred iterator helper tracing" {
-    // #36 sibling policy witness for Iterator Helper cells. The parallel tracer
-    // defers helper state for the same reason as generators: mutable helper
-    // fields change around callback/source-iterator execution. No-GIL
-    // allocation-failure recovery must therefore abort rather than reporting a
-    // safe sweep while a rooted helper remains deferred.
+test "parallel_js heap_limit_bytes traces a synchronized iterator helper" {
+    // Iterator-helper mutations already use `lockState`; the parallel tracer
+    // takes the same lock, so allocation recovery can finish and retain the
+    // helper cursor/callback state without a blanket deferred abort.
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,
@@ -22990,25 +22958,11 @@ test "parallel_js heap_limit_bytes fails closed with deferred iterator helper tr
         try ctx.reserveJsThreadsLocked(1);
         ctx.js_threads.appendAssumeCapacity(&sibling);
     }
-    defer {
-        ctx.gil.?.lockApi();
-        var i: usize = ctx.js_threads.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (ctx.js_threads.items[i] == &sibling) {
-                _ = ctx.js_threads.swapRemove(i);
-                break;
-            }
-        }
-        ctx.gil.?.unlockApi();
-    }
+    defer removeTestJsThreadRecord(ctx, &sibling);
 
     const before_attempts = ctx.gc_par_attempts.load(.monotonic);
     const before_collections = ctx.gc_par_collections.load(.monotonic);
     const before_aborts = ctx.gc_par_aborts.load(.monotonic);
-    const before_round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
-    const before_deferred_rounds = ctx.gc_par_deferred_rounds.load(.monotonic);
-    const before_deferred_aborts = ctx.gc_par_deferred_aborts.load(.monotonic);
 
     const gc_saved = gc_mod.setActiveHeap(ctx.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
@@ -23020,13 +22974,12 @@ test "parallel_js heap_limit_bytes fails closed with deferred iterator helper tr
     const ai_saved = gc_mod.setActiveInterpreter(&machine);
     defer _ = gc_mod.setActiveInterpreter(ai_saved);
 
-    try std.testing.expect(!ctx.collectForAllocationFailure(&machine));
+    try std.testing.expect(ctx.collectForAllocationFailure(&machine));
     try std.testing.expect(ctx.gc_par_attempts.load(.monotonic) > before_attempts);
-    try std.testing.expectEqual(before_collections, ctx.gc_par_collections.load(.monotonic));
-    try std.testing.expect(ctx.gc_par_aborts.load(.monotonic) > before_aborts);
-    try std.testing.expect(ctx.gc_par_round_limit_aborts.load(.monotonic) > before_round_aborts);
-    try std.testing.expect(ctx.gc_par_deferred_rounds.load(.monotonic) > before_deferred_rounds);
-    try std.testing.expect(ctx.gc_par_deferred_aborts.load(.monotonic) > before_deferred_aborts);
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > before_collections);
+    try std.testing.expectEqual(before_aborts, ctx.gc_par_aborts.load(.monotonic));
+    removeTestJsThreadRecord(ctx, &sibling);
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate("globalThis.__deferredRecoveryHelper.next().value.value")).asNum());
 }
 
 test "parallel_js heap_limit_bytes fails closed with deferred async-generator requests" {
@@ -23520,6 +23473,47 @@ test "parallel_js: await joined asyncHold promise without releasing absent GIL" 
     var machine = ctx.interpreter();
     const result = try machine.awaitValue(promise_value);
     try std.testing.expectEqual(@as(f64, 37), result.asNum());
+}
+
+test "parallel_js: evaluate roots async completion through Thread keepalive GC" {
+    // Once the top-level VM returns this Promise, evaluateWithThis waits for the
+    // child records and drains their settlement jobs. A child-elected nursery
+    // collection during that interval must see the completed script result in
+    // the host interpreter's precise roots; it is no longer on an operand stack.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    const before_collections = ctx.gc.?.collections;
+
+    const promise_value = try ctx.evaluate(
+        \\(async () => {
+        \\  const lock = new Lock();
+        \\  const threads = [];
+        \\  lock.hold(() => {
+        \\    for (let i = 0; i < 3; i++) {
+        \\      threads.push(new Thread((lock, marker) => {
+        \\        const retained = { marker, nested: { live: true } };
+        \\        return lock.asyncHold().then(release => {
+        \\          if (!retained.nested.live) throw new Error("lost retained release root");
+        \\          release();
+        \\          return retained.marker;
+        \\        });
+        \\      }, lock, 31 + i));
+        \\    }
+        \\  });
+        \\  if (typeof gc === "function") gc();
+        \\  const joins = [];
+        \\  for (const thread of threads) joins.push(thread.join());
+        \\  const values = await Promise.all(joins);
+        \\  if (lock.locked) throw new Error("asyncHold release left lock held");
+        \\  return values[0] + values[1] + values[2];
+        \\})()
+    );
+    try std.testing.expect(promise.promiseOf(promise_value) != null);
+    var machine = ctx.interpreter();
+    const result = try machine.awaitValue(promise_value);
+    try std.testing.expectEqual(@as(f64, 96), result.asNum());
+    try std.testing.expect(ctx.gc.?.collections > before_collections);
 }
 
 test "parallel_js (M3 GIL-removal slice): property Atomics waiters notify without context GIL" {

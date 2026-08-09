@@ -7488,7 +7488,22 @@ fn runConditionAsyncFinalizationCleanupInterleavingKind(gpa: std.mem.Allocator, 
         return false;
     }
     if (midgc and ctx.gc_par_collections.load(.monotonic) <= before_collections) {
-        std.debug.print("seed {d}: condition async/finalization did not finish a parallel collection\n", .{seed});
+        std.debug.print(
+            "seed {d}: condition async/finalization did not finish a parallel collection " ++
+                "(attempts={d} aborts={d} publication-timeouts={d} round-limits={d} " ++
+                "deferred-aborts={d} deferred-rounds={d} born-growth={d} finish-retries={d})\n",
+            .{
+                seed,
+                ctx.gc_par_attempts.load(.monotonic) - before_attempts,
+                ctx.gc_par_aborts.load(.monotonic),
+                ctx.gc_par_publication_timeout_aborts.load(.monotonic),
+                ctx.gc_par_round_limit_aborts.load(.monotonic),
+                ctx.gc_par_deferred_aborts.load(.monotonic),
+                ctx.gc_par_deferred_rounds.load(.monotonic),
+                ctx.gc_par_born_growth_rounds.load(.monotonic),
+                ctx.gc_par_finish_retries.load(.monotonic),
+            },
+        );
         return false;
     }
 
@@ -11896,7 +11911,10 @@ fn runAsyncHoldReleaseWaiterCleanupInterleaving(gpa: std.mem.Allocator, seed: u6
         \\          target = null;
         \\        }}
         \\        const releaseRoot = {{ marker: base + 1000 + id, nested: {{ seed, label: 'asyncHold-release-function-root' }} }};
-        \\        return lock.asyncHold().then((release) => {{
+        \\        const ticket = lock.asyncHold();
+        \\        if (!(ticket instanceof Promise))
+        \\          throw new Error('asyncHold release cleanup did not return a Promise');
+        \\        return ticket.then((release) => {{
         \\          if (typeof release !== 'function')
         \\            throw new Error('asyncHold release cleanup grant did not deliver release');
         \\          if (releaseRoot.nested.seed !== seed)
@@ -12120,7 +12138,10 @@ fn runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa: std.mem.Allocator, see
         \\    for (let id = 0; id < {d}; id++) {{
         \\      releaseThreads.push(new Thread((lock, id, releaseBase, seedMarker) => {{
         \\        const releaseRoot = {{ marker: releaseBase + id, nested: {{ seed: seedMarker, label: 'tls-asynchold-release-root' }} }};
-        \\        return lock.asyncHold().then((release) => {{
+        \\        const ticket = lock.asyncHold();
+        \\        if (!(ticket instanceof Promise))
+        \\          throw new Error('ThreadLocal asyncHold did not return a Promise');
+        \\        return ticket.then((release) => {{
         \\          if (typeof release !== 'function')
         \\            throw new Error('ThreadLocal asyncHold release did not deliver a function');
         \\          if (releaseRoot.nested.seed !== seedMarker)
@@ -12213,11 +12234,19 @@ fn runThreadLocalAsyncHoldReleaseCleanupInterleaving(gpa: std.mem.Allocator, see
     };
     var machine = ctx.interpreter();
     const result = machine.awaitValue(promise_value) catch |err| {
-        const msg_txt = if (ctx.exception) |ex| blk: {
-            var render = ctx.interpreter();
-            break :blk render.toStringV(ex) catch "<unstringifiable>";
-        } else "<none>";
-        std.debug.print("seed {d}: ThreadLocal asyncHold cleanup await failed {s}: {s}\n", .{ seed, @errorName(err), msg_txt });
+        const msg_txt = if (!machine.exception.isUndefined())
+            machine.toStringV(machine.exception) catch "<unstringifiable>"
+        else
+            "<none>";
+        const stack_value = if (!machine.exception.isUndefined())
+            machine.getProperty(machine.exception, "stack") catch js.Value.undef()
+        else
+            js.Value.undef();
+        const stack_txt = if (!stack_value.isUndefined())
+            machine.toStringV(stack_value) catch "<unstringifiable>"
+        else
+            "<none>";
+        std.debug.print("seed {d}: ThreadLocal asyncHold cleanup await failed {s}: {s}\n{s}\n", .{ seed, @errorName(err), msg_txt, stack_txt });
         return false;
     };
     if (!result.isNumber() or result.asNum() != @as(f64, @floatFromInt(expected_total))) {

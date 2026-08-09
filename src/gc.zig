@@ -1753,9 +1753,8 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     }
 }
 
-/// Generator tracing is deferred to the world-stopped finish pass during a
-/// concurrent mark; relocation runs at that same boundary, so no mutator can
-/// race these arena-owned stacks, frames, or request records.
+/// Relocation remains world-stopped even though concurrent marking can trace a
+/// safely suspended activation under its resume/request locks.
 pub fn relocateGenerator(g: *vm.Generator, v: anytype) void {
     relocateChunk(g.chunk, v);
     gc_relocation.rewriteRequiredSlot(v, Environment, &g.env);
@@ -1807,6 +1806,9 @@ fn finalizeGenerator(g: *vm.Generator, a: std.mem.Allocator, live: *usize) void 
 }
 
 pub fn traceIterHelper(h: *value.IterHelper, v: anytype) void {
+    const lock_state = v.concurrent();
+    if (lock_state) h.lockState();
+    defer if (lock_state) h.unlockState();
     markValue(v, h.src);
     markValue(v, h.next_method);
     markValue(v, h.func);
@@ -3292,15 +3294,28 @@ pub const Binding = struct {
     }
 
     pub fn trace(cell: *anyopaque, kind: Kind, v: anytype) void {
-        // `generator` and `iter_helper` have mutable storage that is too
-        // entangled to read safely while the mutator runs (a running generator's
-        // `exec` is the live VM stack; an iterator helper's `inner`/`padding`
-        // update around JS callbacks and `inner` is a 16-byte `?Value`). Under a
-        // concurrent mark, defer their tracing to the world-stopped finish (the
-        // cell is already marked, so it survives; its edges are found at finish).
-        // Object/Environment/Promise are synchronized for concurrent tracing
-        // directly (per-structure locks / atomic slots), so they trace inline.
-        if (v.concurrent() and (kind == .generator or kind == .iter_helper)) {
+        // A running peer's generator owns mutable VM stack/request state, so it
+        // remains deferred unless this collector is paused inside that exact
+        // activation. Suspended ordinary/async activations can instead be
+        // frozen by their resume/request locks. Iterator helpers already funnel
+        // every state mutation through `lockState`, and traceIterHelper takes it.
+        if (v.concurrent() and kind == .generator) {
+            const generator: *vm.Generator = @ptrCast(@alignCast(cell));
+            const owns_active = if (active_interpreter) |machine|
+                machine.gc_active_generator == cell
+            else
+                false;
+            if (owns_active) {
+                generator.lockTraceRequests();
+                defer generator.unlockTraceRequests();
+                traceGenerator(generator, v);
+                return;
+            }
+            if (generator.tryLockTrace()) {
+                defer generator.unlockTrace();
+                traceGenerator(generator, v);
+                return;
+            }
             v.deferToFinish(cell);
             return;
         }
