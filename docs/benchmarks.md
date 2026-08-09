@@ -932,6 +932,17 @@ and power state. A one-sample invocation is useful while changing the harness,
 but it remains a diagnostic and is not promoted as repeated performance
 evidence.
 
+The first accepted three-sample collection is the
+[`build-feedback-2026-08-09.md`](.data/build-feedback-2026-08-09.md) report and
+its complete [`build-feedback-2026-08-09.json`](.data/build-feedback-2026-08-09.json)
+raw artifact from clean revision `6582207afca3275981df29ca1d7d4604bba7e8db`
+on the 11-core Apple M3 Pro reference host. Median clean library, first focused
+unit relink, cold-history full unit, warm-history full unit, and focused TSan
+walls were 67.08, 33.42, 214.08, 170.33, and 53.86 seconds respectively. The
+immediate incremental library and cached focused-filter medians were 0.13 and
+0.35 seconds. Read the report's ranges, CPU, peak RSS, exact command boundaries,
+and full raw output before comparing a future run.
+
 ## VM and tree-walker baseline
 
 `zig build bench` remains the smaller internal baseline. It parses setup once, then times the same hot snippet through the bytecode VM and tree-walker. Its no-shared-state thread table answers whether aggregate compute throughput scales; the comparison suite above adds a second engine, repeat sampling, checksums, and a preserved report.
