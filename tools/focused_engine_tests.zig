@@ -1,4 +1,5 @@
-//! Small semantic gates for VM and concurrency development (#53).
+//! Small semantic gates for frontend, VM, and concurrency development (#53,
+//! #494).
 //!
 //! This is an executable rather than a Zig test root: importing `vm.zig`
 //! through `zig test` recursively discovers the interpreter, Thread, Context,
@@ -12,6 +13,72 @@ const Case = struct {
     name: []const u8,
     source: []const u8,
     expected: f64,
+};
+
+const ErrorCase = struct {
+    name: []const u8,
+    source: []const u8,
+};
+
+const frontend_cases = [_]Case{
+    .{
+        .name = "operator precedence",
+        .source = "1 + 2 * 3",
+        .expected = 7,
+    },
+    .{
+        .name = "automatic semicolon insertion",
+        .source = "let x = 1\nx + 2",
+        .expected = 3,
+    },
+    .{
+        .name = "nested destructuring binding",
+        .source = "let { a, b: { c } } = { a: 4, b: { c: 5 } }; a + c",
+        .expected = 9,
+    },
+    .{
+        .name = "template interpolation",
+        .source = "let x = 3; `v${x}` === 'v3' ? 1 : 0",
+        .expected = 1,
+    },
+    .{
+        .name = "class private field",
+        .source = "class C { #x = 7; get() { return this.#x; } } new C().get()",
+        .expected = 7,
+    },
+    .{
+        .name = "optional chain with nullish fallback",
+        .source = "let o = null; (o?.x ?? 41) + 1",
+        .expected = 42,
+    },
+    .{
+        .name = "regexp literal",
+        .source = "/a+/.test('aaa') ? 1 : 0",
+        .expected = 1,
+    },
+};
+
+const frontend_error_cases = [_]ErrorCase{
+    .{
+        .name = "duplicate lexical binding rejected",
+        .source = "let x; let x;",
+    },
+    .{
+        .name = "top-level new target rejected",
+        .source = "new.target",
+    },
+    .{
+        .name = "parenthesized destructuring target rejected",
+        .source = "({ a }) = { a: 1 };",
+    },
+    .{
+        .name = "undeclared private name rejected",
+        .source = "class C { #x; read(o) { return o.#missing; } }",
+    },
+    .{
+        .name = "malformed for-of head rejected",
+        .source = "for (let x = 0 of []) {}",
+    },
 };
 
 const vm_cases = [_]Case{
@@ -131,6 +198,21 @@ fn runCases(gpa: std.mem.Allocator, cases: []const Case, filter: []const u8, ena
     return ran;
 }
 
+fn runErrorCases(gpa: std.mem.Allocator, cases: []const ErrorCase, filter: []const u8) !usize {
+    var ran: usize = 0;
+    for (cases) |case| {
+        if (!matchesFilter(case.name, filter)) continue;
+        const ctx = try js.Context.create(gpa);
+        defer ctx.destroy();
+        if (ctx.evaluate(case.source)) |_| {
+            std.debug.print("focused frontend test '{s}' unexpectedly parsed\n", .{case.name});
+            return error.FocusedTestFailed;
+        } else |_| {}
+        ran += 1;
+    }
+    return ran;
+}
+
 pub fn main(init: std.process.Init) !void {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
@@ -138,7 +220,11 @@ pub fn main(init: std.process.Init) !void {
     const filter = args.next() orelse "";
     const gpa = std.heap.page_allocator;
 
-    const ran = if (std.mem.eql(u8, suite, "vm"))
+    const ran = if (std.mem.eql(u8, suite, "frontend")) blk: {
+        const valid = try runCases(gpa, &frontend_cases, filter, false, false);
+        const invalid = try runErrorCases(gpa, &frontend_error_cases, filter);
+        break :blk valid + invalid;
+    } else if (std.mem.eql(u8, suite, "vm"))
         try runCases(gpa, &vm_cases, filter, false, false)
     else if (std.mem.eql(u8, suite, "jit")) blk: {
         const interpreted = try runCases(gpa, &jit_cases, filter, false, false);

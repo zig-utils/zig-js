@@ -118,6 +118,7 @@ zig build build-feedback-test   # validate build-feedback evidence parsing only
 ```bash
 zig build test-parallel         # ALWAYS use this for a full local run
 zig build test -Dtest-filter=<substr>   # focused; runtime filter reuses the linked binary
+zig build test-frontend -Dtest-filter=<substr> # smaller parser/evaluator probe
 zig build test -Dtsan=true      # ThreadSanitizer
 ```
 
@@ -133,6 +134,10 @@ GC stress tests. Per-shard logs and the auditable `plan.tsv` are written under
 Any edit under `src/` relinks the test artifact — budget ~4–6 min per build,
 ~8–10 min per filtered probe cycle. Prefer **one instrumentation pass that
 answers several questions** over several narrow ones.
+
+`test-frontend` uses a smaller production-module executable for focused parser
+and evaluator work. It exercises representative accepted and rejected programs;
+the combined unit suite remains the integration gate.
 
 ### Conformance
 

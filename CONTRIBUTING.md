@@ -114,6 +114,7 @@ run. See [`docs/advanced/execution-tiers.md`](docs/advanced/execution-tiers.md).
 zig build test-parallel                  # ALWAYS use this for a full local run
 zig build test-parallel -Dunit-jobs=8    # pick the shard count (no relink cost)
 zig build test -Dtest-filter=<substr>    # focused run
+zig build test-frontend -Dtest-filter=<substr> # fast parser/evaluator probe
 zig build test -Dtsan=true               # ThreadSanitizer
 ```
 
@@ -126,6 +127,10 @@ Any edit under `src/` relinks the test artifact — budget ~4–6 minutes. Test-
 filters are applied by the runner, so changing only `-Dtest-filter` reuses the
 linked binary. Target, optimization, and sanitizer changes still build distinct
 artifacts.
+
+`test-frontend` links a smaller production-module executable for focused parser
+and evaluator work. It covers representative accepted and rejected programs;
+the combined unit suite remains the integration gate.
 
 ### Conformance (test262)
 

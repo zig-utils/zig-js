@@ -1671,7 +1671,7 @@ pub fn build(b: *std.Build) void {
         },
     }) else mod;
 
-    // VM/concurrency semantic gates use an executable so importing the
+    // Frontend/VM/concurrency semantic gates use an executable so importing the
     // production interpreter does not recursively link every inline unit test.
     // `-Dtest-filter` is a runtime case selector here, so changing it reuses
     // the same compiled binary instead of creating another cache-heavy image.
@@ -1686,6 +1686,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     for ([_]struct { step_name: []const u8, suite: []const u8, description: []const u8 }{
+        .{ .step_name = "test-frontend", .suite = "frontend", .description = "Run focused production lexer/parser semantic tests" },
         .{ .step_name = "test-vm", .suite = "vm", .description = "Run focused production bytecode/VM semantic tests" },
         .{ .step_name = "test-concurrency", .suite = "concurrency", .description = "Run focused production concurrency semantic tests" },
     }) |spec| {
