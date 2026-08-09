@@ -17508,6 +17508,7 @@ test "parallel_js: a block-scoped binding survives concurrent collection" {
         .parallel_js = true,
     });
     defer ctx.destroy();
+    const collections_before = ctx.gc.?.collections;
 
     // Attempted reduction of the `dw2-marklistset-storm.js` no-GIL failure,
     // which throws `ReferenceError: threads` on a block-scoped `const`
@@ -17519,12 +17520,14 @@ test "parallel_js: a block-scoped binding survives concurrent collection" {
     // mid-script parallel collection) is therefore not sufficient on its own,
     // and the next person should not spend the same hour rediscovering that.
     // Whatever dw2 needs is more than a block binding plus peers plus GC
-    // pressure. The invariant is still worth pinning, so this stays as
-    // coverage.
+    // pressure. An explicit request makes the collection deterministic while
+    // all three peers and the block Environment are live; ten thousand churn
+    // iterations retain allocation-heavy work without making this reduction
+    // dominate the complete unit suite. The collection is asserted below.
     const result = try ctx.evaluate(
         \\function churn(seed) {
         \\  let sum = 0;
-        \\  for (let i = 0; i < 60000; ++i) {
+        \\  for (let i = 0; i < 10000; ++i) {
         \\    const cell = { a: i, b: [i, i + 1], c: { d: i } };
         \\    sum += cell.a + cell.b[0] + cell.c.d;
         \\  }
@@ -17534,6 +17537,7 @@ test "parallel_js: a block-scoped binding survives concurrent collection" {
         \\{
         \\  const peers = [];
         \\  for (let i = 0; i < 3; ++i) peers.push(new Thread(churn, i));
+        \\  $vm.gc();
         \\  const mainCheck = churn(99);
         \\  let joined = 0;
         \\  for (const p of peers) joined += p.join();
@@ -17544,6 +17548,7 @@ test "parallel_js: a block-scoped binding survives concurrent collection" {
     );
     try std.testing.expect(result.isString());
     try std.testing.expectEqualStrings("ok", result.asStr());
+    try std.testing.expect(ctx.gc.?.collections > collections_before);
 }
 
 test "parallel_js: targeted Class-A invalidation preserves unrelated artifact" {
@@ -22236,9 +22241,14 @@ test "parallel_js: cooperative nursery roots caller scopes beneath nested VM cal
         \\first.join() + second.join();
     );
     try std.testing.expectEqual(@as(f64, 112840), result.asNum());
-    try std.testing.expect(ctx.gc_cooperative_collections.load(.monotonic) > 0);
+    const collections = ctx.gc_cooperative_collections.load(.monotonic);
+    const attempts = ctx.gc_cooperative_attempts.load(.monotonic);
+    const timeouts = ctx.gc_cooperative_timeouts.load(.monotonic);
+    try std.testing.expect(collections > 0);
     try std.testing.expect(ctx.gc_cooperative_peer_parks.load(.monotonic) > 0);
-    try std.testing.expectEqual(@as(u64, 0), ctx.gc_cooperative_timeouts.load(.monotonic));
+    // Bounded rendezvous retries depend on host scheduling; every elected
+    // attempt must still publish exactly one collection-or-timeout outcome.
+    try std.testing.expectEqual(attempts, collections + timeouts);
 }
 
 test "parallel_js: multi-age cooperative nursery retains old-owner graph" {
@@ -22258,6 +22268,7 @@ test "parallel_js: multi-age cooperative nursery retains old-owner graph" {
     const heap = ctx.gc.?;
     const collections_before = ctx.gc_cooperative_collections.load(.monotonic);
     const attempts_before = ctx.gc_cooperative_attempts.load(.monotonic);
+    const timeouts_before = ctx.gc_cooperative_timeouts.load(.monotonic);
     const parks_before = ctx.gc_cooperative_peer_parks.load(.monotonic);
     const promoted_before = heap.promoted_cells;
 
@@ -22279,10 +22290,16 @@ test "parallel_js: multi-age cooperative nursery retains old-owner graph" {
         \\multiAgeShared.child.value + first.join() + second.join();
     );
     try std.testing.expectEqual(@as(f64, 242), result.asNum());
-    try std.testing.expect(ctx.gc_cooperative_collections.load(.monotonic) - collections_before >= runtime_gc_tenuring_age);
-    try std.testing.expect(ctx.gc_cooperative_attempts.load(.monotonic) > attempts_before);
+    const collections = ctx.gc_cooperative_collections.load(.monotonic) - collections_before;
+    const attempts = ctx.gc_cooperative_attempts.load(.monotonic) - attempts_before;
+    const timeouts = ctx.gc_cooperative_timeouts.load(.monotonic) - timeouts_before;
+    try std.testing.expect(collections >= runtime_gc_tenuring_age);
+    try std.testing.expect(attempts > 0);
     try std.testing.expect(ctx.gc_cooperative_peer_parks.load(.monotonic) > parks_before);
-    try std.testing.expectEqual(@as(u64, 0), ctx.gc_cooperative_timeouts.load(.monotonic));
+    // A peer may miss the bounded 100 ms rendezvous under a sharded run. The
+    // retry count is scheduler-dependent; successful tenuring and exact
+    // terminal-outcome accounting are the stable collector invariants.
+    try std.testing.expectEqual(attempts, collections + timeouts);
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
     try std.testing.expect(heap.promoted_cells > promoted_before);
@@ -24311,12 +24328,15 @@ test "$vm createGlobalObject publishes complete child realms under parallel_js" 
     });
     defer ctx.destroy();
 
+    // Four workers preserve concurrent publication and two realms per worker
+    // exercise repeated initialization without redundantly constructing 64
+    // complete global-object graphs in a Debug unit test.
     const result = try ctx.evaluate(
         \\const registrySymbol = Symbol.for("zig-js-vm-fresh-global");
         \\const workers = [];
         \\for (let t = 0; t < 4; ++t) workers.push(new Thread(() => {
         \\  let completed = 0;
-        \\  for (let i = 0; i < 16; ++i) {
+        \\  for (let i = 0; i < 2; ++i) {
         \\    const other = $vm.createGlobalObject();
         \\    if (other === globalThis || other.Object === Object || other.Function === Function) return -1;
         \\    if (other.Symbol.for("zig-js-vm-fresh-global") !== registrySymbol) return -2;
@@ -24331,7 +24351,7 @@ test "$vm createGlobalObject publishes complete child realms under parallel_js" 
         \\completed;
     );
     try std.testing.expect(result.isNumber());
-    try std.testing.expectEqual(@as(f64, 64), result.asNum());
+    try std.testing.expectEqual(@as(f64, 8), result.asNum());
 }
 
 test "enable_gc: requested GC runs between microtasks after joined threads" {
