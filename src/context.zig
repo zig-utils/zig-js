@@ -18751,6 +18751,69 @@ test "moving nursery rewrites persistent roots across staggered age promotion" {
     try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
 }
 
+test "moving nursery rewrites strings held only by suspended captured VM frames" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\function captureFrameValue(value) {
+        \\  return function readCapturedFrameValue() { return value; };
+        \\}
+        \\for (let i = 0; i < 12; i++)
+        \\  globalThis.movingCapturedFrame = captureFrameValue("captured-" + i);
+    );
+
+    const closure_value = ctx.global_object.getOwn("movingCapturedFrame") orelse
+        return error.TestUnexpectedResult;
+    const closure = interp.Interpreter.funcOf(closure_value) orelse
+        return error.TestUnexpectedResult;
+    const frame: *vm.Frame = if (closure.frame) |raw|
+        @ptrCast(@alignCast(raw))
+    else
+        return error.TestUnexpectedResult;
+    var captured_slot: ?usize = null;
+    for (frame.slots, 0..) |slot, index| {
+        if (slot.isString() and slot.asStringCell().isGcManaged()) {
+            captured_slot = index;
+            break;
+        }
+    }
+    const slot_index = captured_slot orelse return error.TestUnexpectedResult;
+    const original_string = frame.slots[slot_index].asStringCell();
+    const stable_id = heap.cellMetadata(@constCast(original_string)).?.id;
+
+    // The closure Function is the only owner of this arena frame while it is
+    // suspended. Moving the string must therefore rewrite the Function.frame
+    // edge before the old payload/header is released.
+    const first = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, first.status);
+    const first_string = frame.slots[slot_index].asStringCell();
+    try std.testing.expect(original_string != first_string);
+    try std.testing.expectEqual(stable_id, heap.cellMetadata(@constCast(first_string)).?.id);
+    try std.testing.expectEqualStrings(
+        "captured-11",
+        (try ctx.evaluate("movingCapturedFrame()")).asStr(),
+    );
+
+    // Re-entering the closure makes the captured frame an active VM ancestor.
+    // A second moving collection used to encounter the stale first address and
+    // fail the strict GC-header check from the shared/JIT benchmark path.
+    const second = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, second.status);
+    try std.testing.expectEqualStrings(
+        "captured-11",
+        (try ctx.evaluate("movingCapturedFrame()")).asStr(),
+    );
+}
+
 test "moving nursery preserves live ephemerons and clears weak finalization state" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
     defer ctx.destroy();

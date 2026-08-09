@@ -125,6 +125,17 @@ pub inline fn markValueVariable(v: anytype, name: []const u8, val: Value) void {
     }
 }
 
+pub inline fn markValueInternal(v: anytype, name: []const u8, val: Value) void {
+    if (val.isObject()) {
+        markCellEdge(v, "markInternal", name, val.asObj());
+    } else if (val.isString()) {
+        const cell = val.asStringCell();
+        const include_unmanaged = comptime @hasDecl(@TypeOf(v.*), "includeUnmanagedStrings");
+        if (cell.isGcManaged() or (include_unmanaged and v.includeUnmanagedStrings()))
+            markCellEdge(v, "markInternal", name, @constCast(cell));
+    }
+}
+
 inline fn markInternal(v: anytype, name: []const u8, cell: anytype) void {
     markCellEdge(v, "markInternal", name, cell);
 }
@@ -1368,6 +1379,29 @@ fn relocateChunk(chunk: *bytecode.Chunk, v: anytype) void {
         if (template.chunk) |nested| relocateChunk(nested, v);
 }
 
+/// A VM closure keeps its lexical bindings in the defining activation's
+/// arena-owned `Frame`, not in the managed Function cell itself. The frame may
+/// outlive that activation and can be shared by several closures, so its slots
+/// are a precise Function edge and concurrent tracing must serialize with
+/// `load_upval` / `store_upval` through the frame slot lock.
+fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
+    var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
+    const lock_slots = if (comptime @hasDecl(@TypeOf(v.*), "concurrent")) v.concurrent() else false;
+    while (frame) |current| : (frame = current.parent) {
+        const held = current.lockSlots(lock_slots);
+        for (current.slots) |slot| markValueInternal(v, "captured VM frame slot", slot);
+        current.unlockSlots(held);
+    }
+}
+
+/// Relocation runs after every realm mutator has parked, so the same captured
+/// frame chain is stable and must be rewritten without taking mutator locks.
+fn relocateCapturedFrame(raw: ?*anyopaque, v: anytype) void {
+    var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
+    while (frame) |current| : (frame = current.parent)
+        for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+}
+
 pub fn traceFunction(f: *interp.Function, v: anytype) void {
     markManaged(v, f.closure);
     v.mark(f.realm_global);
@@ -1379,6 +1413,7 @@ pub fn traceFunction(f: *interp.Function, v: anytype) void {
     markValue(v, f.arrow_new_target);
     if (f.this_cell) |cell| markValue(v, cell.value);
     for (f.with_stack) |object| v.mark(object);
+    traceCapturedFrame(f.frame, v);
     if (f.chunk) |chunk| traceChunk(chunk, v);
     if (f.gen_chunk) |chunk| traceChunk(chunk, v);
     if (f.async_chunk) |chunk| traceChunk(chunk, v);
@@ -1402,6 +1437,7 @@ pub fn relocateFunction(f: *interp.Function, v: anytype) void {
     if (f.this_cell) |cell| gc_relocation.rewriteValueSlot(v, &cell.value);
     for (f.with_stack) |*object|
         gc_relocation.rewriteRequiredSlot(v, Object, object);
+    relocateCapturedFrame(f.frame, v);
     if (f.chunk) |chunk| relocateChunk(chunk, v);
     if (f.gen_chunk) |chunk| relocateChunk(chunk, v);
     if (f.async_chunk) |chunk| relocateChunk(chunk, v);
@@ -1416,8 +1452,8 @@ test "Function marking and relocation cover every managed field" {
         .arena = std.testing.allocator,
         .gc_managed = true,
     };
-    var old_objects: [13]Object = undefined;
-    var new_objects: [13]Object = undefined;
+    var old_objects: [15]Object = undefined;
+    var new_objects: [15]Object = undefined;
     var body: ast.Node = .undefined_lit;
     var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[4] };
     var this_cell = interp.ThisCell{
@@ -1434,6 +1470,10 @@ test "Function marking and relocation cover every managed field" {
     generator_chunk.consts = .{ .items = &generator_constants, .capacity = generator_constants.len };
     var async_chunk = bytecode.Chunk.init(std.testing.allocator);
     async_chunk.consts = .{ .items = &async_constants, .capacity = async_constants.len };
+    var parent_frame_slots = [_]Value{Value.obj(&old_objects[13])};
+    var parent_frame = vm.Frame{ .slots = &parent_frame_slots, .parent = null };
+    var captured_frame_slots = [_]Value{Value.obj(&old_objects[14])};
+    var captured_frame = vm.Frame{ .slots = &captured_frame_slots, .parent = &parent_frame };
     var function = interp.Function{
         .params = &.{},
         .body = &body,
@@ -1448,6 +1488,7 @@ test "Function marking and relocation cover every managed field" {
         .arrow_new_target = Value.obj(&old_objects[6]),
         .this_cell = &this_cell,
         .with_stack = &with_stack,
+        .frame = &captured_frame,
         .chunk = &plain_chunk,
         .gen_chunk = &generator_chunk,
         .async_chunk = &async_chunk,
@@ -1471,13 +1512,13 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expect(trace.seen.contains(@intFromPtr(&old_environment)));
     for (&old_objects) |*object|
         try std.testing.expect(trace.seen.contains(@intFromPtr(object)));
-    try std.testing.expectEqual(@as(usize, 14), trace.seen.count());
+    try std.testing.expectEqual(@as(usize, 16), trace.seen.count());
 
     const Plan = struct {
         old_environment: *Environment,
         new_environment: *Environment,
-        old_objects: *[13]Object,
-        new_objects: *[13]Object,
+        old_objects: *[15]Object,
+        new_objects: *[15]Object,
 
         pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
             if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
@@ -1510,6 +1551,8 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expectEqual(&new_objects[10], plain_constants[0].asObj());
     try std.testing.expectEqual(&new_objects[11], generator_constants[0].asObj());
     try std.testing.expectEqual(&new_objects[12], async_constants[0].asObj());
+    try std.testing.expectEqual(&new_objects[13], parent_frame_slots[0].asObj());
+    try std.testing.expectEqual(&new_objects[14], captured_frame_slots[0].asObj());
     try std.testing.expect(Binding.traceOldOnMinor(.function));
 }
 
@@ -2247,8 +2290,8 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     // before collecting, so these reads are current.
     for (machine.gc_execs.items) |exec| {
         if (exec.chunk) |chunk| traceChunk(chunk, v);
-        for (exec.stack.items) |s| markValue(v, s);
-        markValue(v, exec.acc);
+        for (exec.stack.items) |s| markValueInternal(v, "interpreter VM operand stack", s);
+        markValueInternal(v, "interpreter VM accumulator", exec.acc);
         for (exec.handlers.items) |handler|
             if (handler.environment) |environment| markManaged(v, environment);
         v.mark(exec.saved_home_object);
@@ -2272,7 +2315,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         var fr: ?*vm.Frame = exec.frame;
         while (fr) |f| : (fr = f.parent) {
             const held = f.lockSlots(lock_slots);
-            for (f.slots) |slot| markValue(v, slot);
+            for (f.slots) |slot| markValueInternal(v, "interpreter VM frame slot", slot);
             f.unlockSlots(held);
         }
     }
