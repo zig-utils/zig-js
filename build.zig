@@ -1431,10 +1431,10 @@ pub fn build(b: *std.Build) void {
 
     // `zig build test` runs the whole suite in one single-threaded process,
     // which on this suite is hours on one core while every other core idles.
-    // The runner has always accepted UNIT_SHARD_INDEX/UNIT_SHARD_COUNT; this
-    // step is what actually spends the cores. Shards share the one built
-    // binary, so changing `-Dunit-jobs` costs no relink. The serial step stays
-    // as-is for CI legs that already shard themselves.
+    // The driver discovers the exact linked test list and assigns it using
+    // timing history from the prior run. Shards share the one built binary, so
+    // changing `-Dunit-jobs` costs no relink. The serial step stays as-is for
+    // CI legs that already shard themselves.
     const parallel_driver_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/unit-test-parallel.ts", "--self-test" });
     const parallel_tests = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/unit-test-parallel.ts" });
     parallel_tests.addFileArg(tests.getEmittedBin());

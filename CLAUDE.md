@@ -122,8 +122,12 @@ zig build test -Dtsan=true      # ThreadSanitizer
 
 `zig build test` is single-threaded per process; unsharded it uses one core and
 takes hours. `test-parallel` builds once and runs N shards against that same
-binary (`-Dunit-jobs=N`, per-shard logs in `.zig-cache/unit-shards/`). Measured
-reference point: ~1,430 tests, ~170 s across 10 shards.
+binary. It discovers the exact linked test list and uses timings from the prior
+run to move at most one long-tail test per `-Dunit-jobs=N` shard while preserving
+the established modulo distribution for the rest; a cold cache uses deterministic
+equal-cost scheduling. This avoids synchronizing the suite's internally parallel
+GC stress tests. Per-shard logs and the auditable `plan.tsv` are written under
+`.zig-cache/unit-shards/`.
 
 Any edit under `src/` relinks the test artifact — budget ~4–6 min per build,
 ~8–10 min per filtered probe cycle. Prefer **one instrumentation pass that

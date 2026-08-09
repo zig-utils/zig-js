@@ -8,6 +8,8 @@
 //!
 //!   UNIT_SHARD_INDEX=<zero-based> UNIT_SHARD_COUNT=<positive>
 //!   UNIT_TEST_FILTER=<test-name substring>
+//!   UNIT_SHARD_PLAN=<comma-separated shard index per matched test>
+//!   UNIT_LIST_TESTS=1
 //!
 //! Every test also reports its own wall time, and the run ends with the ten
 //! slowest. A single unsharded run of this suite takes hours, and without
@@ -33,6 +35,17 @@ pub fn main(init: std.process.Init.Minimal) void {
     const owned_filter = readEnv(init, "UNIT_TEST_FILTER");
     defer if (owned_filter) |value| std.heap.page_allocator.free(value);
     const filter = owned_filter orelse "";
+    const owned_plan = readEnv(init, "UNIT_SHARD_PLAN");
+    defer if (owned_plan) |value| std.heap.page_allocator.free(value);
+    const owned_list_tests = readEnv(init, "UNIT_LIST_TESTS");
+    defer if (owned_list_tests) |value| std.heap.page_allocator.free(value);
+    const list_tests = if (owned_list_tests) |value| blk: {
+        if (!std.mem.eql(u8, value, "1")) {
+            std.debug.print("UNIT_LIST_TESTS must be 1, got '{s}'\n", .{value});
+            std.process.exit(1);
+        }
+        break :blk true;
+    } else false;
     if (shard_count == 0) {
         std.debug.print("UNIT_SHARD_COUNT must be greater than zero\n", .{});
         std.process.exit(1);
@@ -47,15 +60,41 @@ pub fn main(init: std.process.Init.Minimal) void {
     var selected: usize = 0;
     for (test_fns) |test_fn| {
         if (!matchesFilter(test_fn.name, filter)) continue;
-        if (matched % shard_count == shard_index) selected += 1;
         matched += 1;
     }
 
-    if (filter.len != 0) {
-        if (matched == 0) {
-            std.debug.print("zig-js unit tests: filter '{s}' matched 0 of {d} tests\n", .{ filter, test_fns.len });
+    if (matched == 0) {
+        if (filter.len != 0)
+            std.debug.print("zig-js unit tests: filter '{s}' matched 0 of {d} tests\n", .{ filter, test_fns.len })
+        else
+            std.debug.print("zig-js unit tests: discovered 0 tests\n", .{});
+        std.process.exit(1);
+    }
+    if (list_tests) {
+        for (test_fns) |test_fn| {
+            if (!matchesFilter(test_fn.name, filter)) continue;
+            if (std.mem.indexOfAny(u8, test_fn.name, "\t\r\n") != null) {
+                std.debug.print("test name cannot be represented in discovery output: {s}\n", .{test_fn.name});
+                std.process.exit(1);
+            }
+            std.debug.print("UNIT_TEST_NAME\t{s}\n", .{test_fn.name});
+        }
+        return;
+    }
+
+    const plan = if (owned_plan) |raw|
+        parseShardPlan(std.heap.page_allocator, raw, matched, shard_count) catch |err| {
+            std.debug.print("invalid UNIT_SHARD_PLAN ({t})\n", .{err});
             std.process.exit(1);
         }
+    else
+        null;
+    defer if (plan) |assignments| std.heap.page_allocator.free(assignments);
+    for (0..matched) |matched_index| {
+        if (selectedShard(plan, matched_index, shard_count) == shard_index) selected += 1;
+    }
+
+    if (filter.len != 0) {
         std.debug.print("zig-js unit tests: filter '{s}' matched {d} of {d} tests; shard {d}/{d} running {d}\n", .{
             filter,
             matched,
@@ -86,7 +125,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         if (!matchesFilter(test_fn.name, filter)) continue;
         const selected_index = matched_index;
         matched_index += 1;
-        if (selected_index % shard_count != shard_index) continue;
+        if (selectedShard(plan, selected_index, shard_count) != shard_index) continue;
         seen += 1;
 
         std.testing.allocator_instance = .init(std.heap.page_allocator, .{
@@ -240,6 +279,40 @@ fn readEnv(init: std.process.Init.Minimal, comptime name: []const u8) ?[]u8 {
 
 fn matchesFilter(name: []const u8, filter: []const u8) bool {
     return filter.len == 0 or std.mem.indexOf(u8, name, filter) != null;
+}
+
+const ShardPlanError = std.mem.Allocator.Error || error{
+    EmptyAssignment,
+    InvalidAssignment,
+    AssignmentOutOfRange,
+    AssignmentCountMismatch,
+};
+
+fn parseShardPlan(
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+    expected_count: usize,
+    shard_count: usize,
+) ShardPlanError![]usize {
+    const assignments = try allocator.alloc(usize, expected_count);
+    errdefer allocator.free(assignments);
+    var tokens = std.mem.splitScalar(u8, raw, ',');
+    var count: usize = 0;
+    while (tokens.next()) |token| {
+        if (token.len == 0) return error.EmptyAssignment;
+        if (count >= assignments.len) return error.AssignmentCountMismatch;
+        const assignment = std.fmt.parseUnsigned(usize, token, 10) catch
+            return error.InvalidAssignment;
+        if (assignment >= shard_count) return error.AssignmentOutOfRange;
+        assignments[count] = assignment;
+        count += 1;
+    }
+    if (count != expected_count) return error.AssignmentCountMismatch;
+    return assignments;
+}
+
+fn selectedShard(plan: ?[]const usize, matched_index: usize, shard_count: usize) usize {
+    return if (plan) |assignments| assignments[matched_index] else matched_index % shard_count;
 }
 
 fn log(
