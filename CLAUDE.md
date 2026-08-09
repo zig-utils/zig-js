@@ -110,6 +110,7 @@ Always prefer the cheapest command that answers the question.
 zig build                       # libzig-js.a + headers into zig-out/
 zig build test262-bin           # build the corpus runner only (no run)
 zig build threads-test-bin      # ~40 s; then drive zig-out/bin/threads-test directly
+zig build build-feedback-test   # validate build-feedback evidence parsing only
 ```
 
 ### Unit tests

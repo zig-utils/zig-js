@@ -1444,6 +1444,9 @@ pub fn build(b: *std.Build) void {
     if (b.option(usize, "unit-jobs", "Parallel shard count for `zig build test-parallel`")) |jobs| {
         parallel_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
     }
+    if (b.option([]const u8, "unit-log-dir", "Per-shard log/history directory for `zig build test-parallel`")) |log_dir| {
+        parallel_tests.addArgs(&.{ "--log-dir", log_dir });
+    }
     parallel_tests.has_side_effects = true;
     const parallel_test_step = b.step("test-parallel", "Run zig-js unit tests as parallel shards");
     parallel_test_step.dependOn(&parallel_driver_test.step);
@@ -2151,6 +2154,7 @@ pub fn build(b: *std.Build) void {
     const representative_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-benchmark.ts", "--self-test" });
     const representative_tier_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-tier-attribution.ts", "--self-test" });
     const instrumentation_overhead_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/instrumentation-overhead.ts", "--self-test" });
+    const build_feedback_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/build-feedback.ts", "--self-test" });
     const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
     const generation_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-generation-benchmark.ts", "--self-test" });
@@ -2167,6 +2171,7 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&representative_benchmark_test.step);
     comparison_harness_test_step.dependOn(&representative_tier_attribution_test.step);
     comparison_harness_test_step.dependOn(&instrumentation_overhead_test.step);
+    comparison_harness_test_step.dependOn(&build_feedback_test.step);
     comparison_harness_test_step.dependOn(&performance_attribution_test.step);
     comparison_harness_test_step.dependOn(&exact_parent_regression_test.step);
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
@@ -2183,6 +2188,29 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(independent_suite_jsc_self_test_step);
     const optimizer_release_inventory_step = b.step("optimizer-release-inventory-check", "Validate the optimizer backend, correctness, sanitizer, and performance evidence");
     optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);
+
+    const build_feedback_test_step = b.step("build-feedback-test", "Test build feedback evidence parsing and validation");
+    build_feedback_test_step.dependOn(&build_feedback_test.step);
+    const build_feedback_step = b.step("build-feedback", "Measure clean, incremental, focused, full, and TSan build feedback");
+    if (b.option([]const u8, "build-feedback-raw-out", "Build feedback raw JSON output")) |raw_out| {
+        if (b.option([]const u8, "build-feedback-markdown-out", "Build feedback Markdown output")) |markdown_out| {
+            const collect_build_feedback = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/build-feedback.ts", "--zig", b.graph.zig_exe, "--raw-out", raw_out, "--markdown-out", markdown_out });
+            if (b.option(usize, "build-feedback-samples", "Sequential sample count for every build feedback phase")) |samples| {
+                collect_build_feedback.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
+            }
+            if (b.option(usize, "build-feedback-jobs", "Full unit shard count in the build feedback matrix")) |jobs| {
+                collect_build_feedback.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
+            }
+            collect_build_feedback.has_side_effects = true;
+            build_feedback_step.dependOn(&collect_build_feedback.step);
+        } else {
+            const missing_markdown = b.addFail("build-feedback requires -Dbuild-feedback-markdown-out=<path>");
+            build_feedback_step.dependOn(&missing_markdown.step);
+        }
+    } else {
+        const missing_raw = b.addFail("build-feedback requires -Dbuild-feedback-raw-out=<path>");
+        build_feedback_step.dependOn(&missing_raw.step);
+    }
 
     const comparison_step = b.step("benchmark-comparison", "Compare zig-js direct/independent/shared throughput with system JavaScriptCore (macOS)");
     const representative_step = b.step("representative-benchmark", "Run the versioned representative zig-js / system-JSC matrix (macOS)");

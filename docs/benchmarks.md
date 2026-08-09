@@ -894,6 +894,44 @@ a per-row history report, or rejects the run when its controlled metadata does
 not match. Promote a workflow artifact into `docs/.data` only after that review
 and rerunning any causal candidate on the reference host.
 
+## Build feedback evidence
+
+[`tools/build-feedback.ts`](../tools/build-feedback.ts) measures the complete
+developer feedback path without deleting or reusing the checkout's ordinary
+build cache. Each sample sequence gets isolated local/global Zig caches, an
+isolated install prefix, and an isolated unit-shard history directory. It runs
+these phases in order:
+
+1. a clean library/header build;
+2. the immediate incremental cache-hit build;
+3. the first combined Debug unit-artifact link plus a focused runtime filter;
+4. a different focused filter against that cached artifact;
+5. the complete unit suite with empty shard history;
+6. the complete unit suite with the immediately preceding history; and
+7. a focused TSan artifact build and run.
+
+Every raw sample retains the exact command, exit/timeout state, complete
+stdout/stderr, Zig build summary, wall/user/system time, peak RSS, and (for
+full-suite phases) the exact `plan.tsv`. `/usr/bin/time -lp` observes the whole
+build process and its children; these are scenario-level process resources,
+not invented compiler-internal phase counters. Samples run sequentially and no
+outlier is discarded.
+
+```sh
+zig build build-feedback-test
+zig build build-feedback \
+  -Dbuild-feedback-samples=3 \
+  -Dbuild-feedback-jobs=10 \
+  -Dbuild-feedback-raw-out=docs/.data/build-feedback-YYYY-MM-DD.json \
+  -Dbuild-feedback-markdown-out=docs/.data/build-feedback-YYYY-MM-DD.md
+```
+
+The collector refuses dirty tracked zig-js, zig-gc, or zig-regex inputs and
+records their exact revisions, the Zig executable/version, host/OS/CPU/memory,
+and power state. A one-sample invocation is useful while changing the harness,
+but it remains a diagnostic and is not promoted as repeated performance
+evidence.
+
 ## VM and tree-walker baseline
 
 `zig build bench` remains the smaller internal baseline. It parses setup once, then times the same hot snippet through the bytecode VM and tree-walker. Its no-shared-state thread table answers whether aggregate compute throughput scales; the comparison suite above adds a second engine, repeat sampling, checksums, and a preserved report.
