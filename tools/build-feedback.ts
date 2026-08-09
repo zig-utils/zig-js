@@ -30,6 +30,7 @@ type Sample = {
   scenario: ScenarioName;
   sample: number;
   command: string[];
+  environment: Record<string, string>;
   exit_code: number | null;
   timed_out: boolean;
   wall_seconds: number;
@@ -202,7 +203,8 @@ function runSample(
   cacheRoot: string,
 ): Sample {
   const scenarioArgs = scenario.args.slice(),
-    unitLogDir = `${cacheRoot}/unit-shards`;
+    unitLogDir = `${cacheRoot}/unit-shards`,
+    environment = { ZIG_GLOBAL_CACHE_DIR: `${cacheRoot}/global` };
   if (scenario.name === "full_unit_cold_history" || scenario.name === "full_unit_warm_history")
     scenarioArgs.push(`-Dunit-log-dir=${unitLogDir}`);
   const command = [
@@ -211,8 +213,6 @@ function runSample(
       ...scenarioArgs,
       "--cache-dir",
       `${cacheRoot}/local`,
-      "--global-cache-dir",
-      `${cacheRoot}/global`,
       "--prefix",
       `${cacheRoot}/prefix`,
       "--summary",
@@ -220,6 +220,7 @@ function runSample(
     ],
     result = run(["/usr/bin/time", "-lp", ...command], {
       timeoutMs: 3 * 60 * 60 * 1000,
+      env: environment,
       inheritEnv: true,
     }),
     timing = parseTime(result.stderr);
@@ -227,6 +228,7 @@ function runSample(
     scenario: scenario.name,
     sample,
     command,
+    environment,
     exit_code: result.exitCode,
     timed_out: result.timedOut,
     ...timing,
@@ -355,6 +357,7 @@ function selfTest(): void {
           scenario: "clean_library",
           sample: 0,
           command: ["zig", "build"],
+          environment: { ZIG_GLOBAL_CACHE_DIR: "/tmp/global" },
           exit_code: 0,
           timed_out: false,
           ...parsed,
