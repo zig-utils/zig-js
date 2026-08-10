@@ -419,7 +419,8 @@ function selectRepresentativeDateSetter(width, control) {
   };
 }
 
-// Exercise every non-locale Date string conversion at deterministic
+// Exercise every non-locale Date string conversion (including the Date fast
+// path through toJSON) at deterministic
 // 1K/2K/4K widths. The noon-UTC inputs keep the date prefix equal on this
 // reference host while the checksum deliberately ignores local-time digits and
 // zone names, whose exact spelling is outside the cross-engine contract. Every
@@ -442,6 +443,8 @@ function selectRepresentativeDateString(width, control) {
         var timeText = date.toTimeString();
         var fullText = date.toString();
         var utcText = date.toUTCString();
+        var isoText = date.toISOString();
+        var jsonText = date.toJSON();
         for (var dateIndex = 0; dateIndex < 15; dateIndex = dateIndex + 1) {
           total = total + dateText.charCodeAt(dateIndex);
           total = total + fullText.charCodeAt(dateIndex);
@@ -451,6 +454,10 @@ function selectRepresentativeDateString(width, control) {
           timeText.charCodeAt(10) + timeText.charCodeAt(11);
         for (var utcIndex = 0; utcIndex < utcText.length; utcIndex = utcIndex + 1)
           total = total + utcText.charCodeAt(utcIndex);
+        for (var isoIndex = 0; isoIndex < isoText.length; isoIndex = isoIndex + 1) {
+          total = total + isoText.charCodeAt(isoIndex);
+          total = total + jsonText.charCodeAt(isoIndex);
+        }
       }
     }
     return total;
