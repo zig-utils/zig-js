@@ -344,6 +344,58 @@ function representativeWeakCollections(jobs, lane, variant) {
   return total;
 }
 
+// Keep every weak key strongly reachable through this fixture, then let the
+// zig-js runner compact the precise heap between warmup and scored invocation.
+// Mixed ordinary-object and non-registered-Symbol keys cover both weak-key
+// kinds. The untouched control row uses the identical setup without movement.
+var representativeWeakLookupSelected = null;
+function selectRepresentativeWeakLookup(width) {
+  // Create an unreachable prefix before the live fixture so explicit
+  // compaction has real holes to fill instead of returning no_candidates.
+  var dead = [];
+  for (var garbage = 0; garbage < width; garbage = garbage + 1)
+    dead.push({ garbage: garbage, pad: garbage & 7 });
+  dead = null;
+
+  var weakMap = new WeakMap();
+  var weakSet = new WeakSet();
+  var keys = [];
+  for (var index = 0; index < width; index = index + 1) {
+    var key = (index & 1) === 0
+      ? { index: index, pad: index & 7 }
+      : Symbol("weak-identity:" + index);
+    keys.push(key);
+    weakMap.set(key, index * 3 + 7);
+    weakSet.add(key);
+  }
+  representativeWeakLookupSelected = {
+    weakMap: weakMap,
+    weakSet: weakSet,
+    keys: keys,
+    missObject: { miss: true },
+    missSymbol: Symbol("weak-identity:miss")
+  };
+  return representativeWeakLookup;
+}
+
+function representativeWeakLookup(jobs, lane) {
+  var total = 0;
+  var selected = representativeWeakLookupSelected;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var lookup = selected.keys.length - 1; lookup >= 0; lookup = lookup - 1) {
+      var key = selected.keys[lookup];
+      total = total + selected.weakMap.get(key) +
+        (selected.weakMap.has(key) ? 1 : 0) +
+        (selected.weakSet.has(key) ? 2 : 0);
+    }
+    total = total +
+      (selected.weakMap.get(selected.missObject) === undefined ? 100 : 0) +
+      (!selected.weakMap.has(selected.missSymbol) ? 200 : 0) +
+      (!selected.weakSet.has(selected.missObject) ? 400 : 0) + lane;
+  }
+  return total;
+}
+
 function representativeTypedData(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -645,6 +697,10 @@ function benchmarkFunction(name) {
   if (name === "representative_strong_identity_collections_variant") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 1); };
   if (name === "representative_weak_collections") return function (jobs, lane) { return representativeWeakCollections(jobs, lane, 0); };
   if (name === "representative_weak_collections_variant") return function (jobs, lane) { return representativeWeakCollections(jobs, lane, 1); };
+  if (name === "representative_weak_post_compact_1024") return selectRepresentativeWeakLookup(1024);
+  if (name === "representative_weak_post_compact_2048") return selectRepresentativeWeakLookup(2048);
+  if (name === "representative_weak_post_compact_4096") return selectRepresentativeWeakLookup(4096);
+  if (name === "representative_weak_lookup_control_4096") return selectRepresentativeWeakLookup(4096);
   if (name === "representative_typed_data") return function (jobs, lane) { return representativeTypedData(jobs, lane, 0); };
   if (name === "representative_typed_data_variant") return function (jobs, lane) { return representativeTypedData(jobs, lane, 1); };
   if (name === "representative_classes") return function (jobs, lane) { return representativeClasses(jobs, lane, 0); };

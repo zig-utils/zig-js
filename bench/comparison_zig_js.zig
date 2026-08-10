@@ -602,6 +602,13 @@ fn warm(ctx: *js.Context, warm_jobs: usize, jobs: usize, lane: usize, checkpoint
     _ = try ctx.evaluate(restore);
 }
 
+fn preparePostWarmupFixture(ctx: *js.Context, workload: []const u8) !void {
+    if (!std.mem.startsWith(u8, workload, "representative_weak_post_compact_")) return;
+    const result = ctx.compactGarbage();
+    if (result.status != .compacted or result.moved_cells == 0)
+        return error.BenchmarkMovingCollectionUnavailable;
+}
+
 fn runSingle(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -628,6 +635,7 @@ fn runSingle(
     errdefer if (context_live) ctx.destroy();
     const checkpoint = try configure(ctx, workload, jobs, 0, observed);
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
+    try preparePostWarmupFixture(ctx, workload);
 
     for (0..samples) |sample| {
         const thermal_before = if (darwin_rusage) try darwinThermalState() else undefined;
