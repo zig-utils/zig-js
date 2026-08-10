@@ -3218,6 +3218,25 @@ const JsonParser = struct {
 
     fn parseString(p: *JsonParser) JErr![]const u8 {
         p.i += 1; // opening quote
+        const source_start = p.i;
+        while (p.i < p.s.len) : (p.i += 1) {
+            const c = p.s[p.i];
+            if (c == '"') {
+                const result = p.s[source_start..p.i];
+                p.i += 1;
+                return result;
+            }
+            if (c == '\\') break;
+            if (c < 0x20) return error.Invalid;
+        }
+
+        // Escapes require decoding into owned scratch. The overwhelmingly
+        // common unescaped case above returns a validated view into the input;
+        // its caller immediately establishes the final runtime string/property
+        // ownership, avoiding one arena allocation and one complete byte copy.
+        // Restart from the first source byte so the escape path remains one
+        // exact implementation for all prefix and Unicode combinations.
+        p.i = source_start;
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         const a = p.interp.arena;
         while (p.i < p.s.len) {
@@ -3346,6 +3365,34 @@ const JsonParser = struct {
         }
     }
 };
+
+test "JSON parser borrows validated unescaped strings without scratch allocation" {
+    var owner_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer owner_arena.deinit();
+    const owner = owner_arena.allocator();
+    const root_shape = try @import("shape.zig").Shape.createRoot(owner);
+
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    const scratch = failing.allocator();
+    var env: interpreter.Environment = .{ .arena = scratch, .fn_scope = true };
+    var machine: Interpreter = .{ .arena = scratch, .env = &env, .root_shape = root_shape };
+
+    const plain = "\"plain \xF0\x9F\x98\x80\"";
+    var parser = JsonParser{ .s = plain, .i = 0, .interp = &machine };
+    const parsed = try parser.parseString();
+    try std.testing.expectEqualStrings("plain \xF0\x9F\x98\x80", parsed);
+    try std.testing.expect(parsed.ptr == plain.ptr + 1);
+    try std.testing.expectEqual(plain.len, parser.i);
+
+    // The first escape switches to the decoding buffer. A fail-on-first-use
+    // allocator therefore proves the successful plain path made no hidden
+    // scratch allocation while the escaped path still reports OOM exactly.
+    var escaped = JsonParser{ .s = "\"a\\nb\"", .i = 0, .interp = &machine };
+    try std.testing.expectError(error.OutOfMemory, escaped.parseString());
+
+    var control = JsonParser{ .s = "\"a\x01b\"", .i = 0, .interp = &machine };
+    try std.testing.expectError(error.Invalid, control.parseString());
+}
 
 // ===== URI handling (encodeURI / decodeURI / …) ======================
 
