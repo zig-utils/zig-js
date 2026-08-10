@@ -37,6 +37,50 @@ function representativeFrontendStrictParams(jobs, lane) {
   return total;
 }
 
+// Own-key fixtures are selected before warmup so the timed rows isolate
+// enumeration and Proxy invariant work. The ordered fixture adds one accessor,
+// which activates the exact cross-storage creation-order list without paying
+// unrelated deletion/rebuild cost during setup.
+var representativeOwnKeysSelected = null;
+function selectRepresentativeOwnKeys(kind, width) {
+  var target = kind === "array" ? [] : {};
+  for (var index = 0; index < width; index = index + 1) {
+    if (kind === "array") {
+      target[index * 2] = index;
+      target["field-" + index] = index;
+    } else {
+      target["field-" + index] = index;
+    }
+  }
+  if (kind === "ordered")
+    Object.defineProperty(target, "accessor", {
+      get: function () { return width; },
+      enumerable: true,
+      configurable: true
+    });
+  if (kind === "proxy") {
+    var trapKeys = Reflect.ownKeys(target);
+    Object.preventExtensions(target);
+    target = new Proxy(target, {
+      ownKeys: function () { return trapKeys; }
+    });
+  }
+  representativeOwnKeysSelected = target;
+  return representativeOwnKeys;
+}
+
+function representativeOwnKeys(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var keys = Reflect.ownKeys(representativeOwnKeysSelected);
+    var first = keys[0];
+    var last = keys[keys.length - 1];
+    total = total + keys.length + first.length + last.length +
+      first.charCodeAt(0) + last.charCodeAt(last.length - 1) + lane;
+  }
+  return total;
+}
+
 function representativeStrings(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -520,6 +564,11 @@ function benchmarkFunction(name) {
   if (name === "representative_frontend_strict_params_1024") return selectRepresentativeStrictParams(1024);
   if (name === "representative_frontend_strict_params_2048") return selectRepresentativeStrictParams(2048);
   if (name === "representative_frontend_strict_params_4096") return selectRepresentativeStrictParams(4096);
+  if (name === "representative_own_keys_ordered_1024") return selectRepresentativeOwnKeys("ordered", 1024);
+  if (name === "representative_own_keys_ordered_2048") return selectRepresentativeOwnKeys("ordered", 2048);
+  if (name === "representative_own_keys_ordered_4096") return selectRepresentativeOwnKeys("ordered", 4096);
+  if (name === "representative_own_keys_sparse_array") return selectRepresentativeOwnKeys("array", 2048);
+  if (name === "representative_own_keys_proxy_invariants") return selectRepresentativeOwnKeys("proxy", 2048);
   if (name === "representative_strings") return function (jobs, lane) { return representativeStrings(jobs, lane, 0); };
   if (name === "representative_strings_variant") return function (jobs, lane) { return representativeStrings(jobs, lane, 1); };
   if (name === "representative_regexp") return function (jobs, lane) { return representativeRegExp(jobs, lane, 0); };

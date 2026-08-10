@@ -21,7 +21,7 @@ const js = @import("js");
 const representative_modules = @import("representative_modules.zig");
 
 const workload_source = @embedFile("comparison.js");
-// Workload-specific fixtures are selected before the runner warmup boundary.
+// Workload-specific fixtures are selected and configured before warmup.
 const representative_workload_source = @embedFile("representative_comparison.js");
 const wasm_simd_workload_source = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source = @embedFile("wasm_threads_comparison.js");
