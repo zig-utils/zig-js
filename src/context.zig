@@ -4112,6 +4112,13 @@ pub const Context = struct {
         backing: GcCellBacking,
         realms: GcRealmRegistry,
         conductor: JitGcConductor,
+        /// Promotion debt since the last *quiescent* full sweep. A mid-script
+        /// full collection can observe a whole Promise/job burst as live and
+        /// raise the ordinary old-heap threshold accordingly. These markers
+        /// belong to the shared heap rather than one realm so sibling entries
+        /// make one conductor-serialized boundary decision.
+        quiescent_full_promoted_bytes: usize,
+        quiescent_full_live_bytes: usize,
     };
     pub const CooperativeGcProfile = struct {
         attempts: u64,
@@ -4461,6 +4468,8 @@ pub const Context = struct {
             gc_state.binding = .{ .context = self };
             gc_state.realms = .{ .owner = self };
             gc_state.conductor = .{};
+            gc_state.quiescent_full_promoted_bytes = 0;
+            gc_state.quiescent_full_live_bytes = 0;
             // GC cells are individually collectable, but their allocation shape
             // is regular: one 16-byte-aligned slab per cell. Use the reusable
             // size-class backing for every GC mode. Keep the heap/backing in
@@ -6512,6 +6521,7 @@ pub const Context = struct {
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null) return;
         self.finishConcurrentGCIfActive(); // close or abort any in-flight mark first
         h.collect();
+        self.noteQuiescentFullCollection(h);
         wasm_api.collectWasmGarbage(self);
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
         self.gc_requested.store(false, .monotonic);
@@ -6619,6 +6629,8 @@ pub const Context = struct {
         backing.beginRelocationPlanning();
         defer backing.endRelocationPlanning();
         const result = h.collectAndCompact();
+        if (!moving_safepoint and result.status != .unsupported and result.status != .out_of_memory)
+            self.noteQuiescentFullCollection(h);
         wasm_api.collectWasmGarbage(self);
         if (result.status == .compacted or result.status == .no_candidates)
             _ = backing.trimCompactedTailChunks();
@@ -6686,9 +6698,30 @@ pub const Context = struct {
             self.gc_auto_compaction_pending.store(false, .release);
     }
 
+    fn noteQuiescentFullCollection(self: *Context, h: *GcHeap) void {
+        const state = self.gc_state orelse return;
+        state.quiescent_full_promoted_bytes = h.total_minor_promoted_bytes;
+        state.quiescent_full_live_bytes = h.bytes_live;
+    }
+
+    fn hasQuiescentPromotionDebt(self: *const Context, h: *const GcHeap) bool {
+        const state = self.gc_state orelse return false;
+        const promoted_since_full = h.total_minor_promoted_bytes -| state.quiescent_full_promoted_bytes;
+        const trusted_live_baseline = @max(
+            GcHeap.min_nursery_threshold_bytes,
+            state.quiescent_full_live_bytes,
+        );
+        return promoted_since_full >= trusted_live_baseline;
+    }
+
     /// Automatic quiescent policy used at evaluation boundaries. Young space is
     /// collected only after its nursery threshold; once tenured bytes cross the
-    /// full-heap threshold, the existing precise collector reclaims old garbage.
+    /// full-heap threshold, or promotions since the last quiescent full sweep
+    /// equal that sweep's live baseline, the precise collector reclaims old
+    /// garbage. The promotion-debt path closes a gap where a mid-script full
+    /// sweep observes a transient Promise burst as live, inflates the old-heap
+    /// threshold, and otherwise lets that now-dead tenured graph cross host-task
+    /// boundaries.
     /// A full collection that leaves a large fragmented or retained slab suffix
     /// schedules one guarded moving pass and records whether the same movement
     /// gates accepted it.
@@ -6699,10 +6732,14 @@ pub const Context = struct {
         self.enterJitGcConductor();
         defer self.leaveJitGcConductor();
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null) return;
+        const full_before_finish = h.full_collections;
         self.finishConcurrentGCIfActive();
+        if (h.full_collections != full_before_finish)
+            self.noteQuiescentFullCollection(h);
         var full_collection = false;
-        if (h.shouldCollectOld()) {
+        if (h.shouldCollectOld() or self.hasQuiescentPromotionDebt(h)) {
             h.collect();
+            self.noteQuiescentFullCollection(h);
             full_collection = true;
         } else if (h.shouldCollectYoung()) {
             const result = self.collectYoungAfterRootValidation(h);
@@ -18758,6 +18795,46 @@ test "enable_gc nursery: quiescent minor collection reclaims young garbage" {
     try std.testing.expectEqual(@as(usize, 0), heap.young_cells);
     try std.testing.expectEqual(minor_before + 1, heap.minor_collections);
     try std.testing.expectEqual(full_before, heap.full_collections);
+}
+
+test "enable_gc: quiescent promotion debt reclaims a transient tenured burst" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    const debt_target = @max(
+        Context.GcHeap.min_nursery_threshold_bytes,
+        ctx.gc_state.?.quiescent_full_live_bytes,
+    );
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+
+    var head = ctx.global_object;
+    while (heap.young_bytes < debt_target) {
+        const object = try heap.create(value.Object, .object);
+        object.* = .{ .proto = head };
+        object.initInlineSlots();
+        head = object;
+    }
+    const handle = try ctx.protectValue(Value.obj(head));
+    var protected = true;
+    defer if (protected) std.debug.assert(ctx.unprotectValue(handle));
+
+    for (0..runtime_gc_tenuring_age) |_| heap.collectYoung();
+    try std.testing.expect(heap.total_minor_promoted_bytes -| ctx.gc_state.?.quiescent_full_promoted_bytes >= debt_target);
+    try std.testing.expectEqual(@as(usize, 0), heap.young_bytes);
+
+    std.debug.assert(ctx.unprotectValue(handle));
+    protected = false;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    const full_before = heap.full_collections;
+    const live_before = heap.live_cells;
+    ctx.collectQuiescentGarbage();
+    try std.testing.expect(heap.full_collections > full_before);
+    try std.testing.expect(heap.live_cells < live_before);
+    try std.testing.expectEqual(heap.total_minor_promoted_bytes, ctx.gc_state.?.quiescent_full_promoted_bytes);
+    try std.testing.expectEqual(heap.bytes_live, ctx.gc_state.?.quiescent_full_live_bytes);
 }
 
 test "moving nursery rewrites persistent roots across staggered age promotion" {
