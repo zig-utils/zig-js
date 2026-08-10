@@ -135,6 +135,23 @@ function representativeJsonStringifyReplacer(jobs, lane) {
   return total;
 }
 
+// Isolate PropertyList membership from object construction/property lookup.
+// JSON.stringify must still consume and deduplicate the complete replacer even
+// when the serialized object has no matching properties.
+function representativeJsonStringifyReplacerMembership(jobs, lane) {
+  var width = 16384;
+  var replacer = [];
+  for (var i = 0; i < width; i = i + 1)
+    replacer.push("field-" + ((i * 17 + lane) & (width - 1)));
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var encoded = JSON.stringify({}, replacer);
+    total = total + encoded.length + replacer.length +
+      replacer[0].length + replacer[replacer.length - 1].length;
+  }
+  return total;
+}
+
 function representativeCollections(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -485,6 +502,7 @@ function benchmarkFunction(name) {
   if (name === "representative_json_reviver_source") return representativeJsonReviverSource;
   if (name === "representative_json_escaped_strings") return representativeJsonEscapedStrings;
   if (name === "representative_json_stringify_replacer") return representativeJsonStringifyReplacer;
+  if (name === "representative_json_stringify_replacer_membership") return representativeJsonStringifyReplacerMembership;
   if (name === "representative_collections") return function (jobs, lane) { return representativeCollections(jobs, lane, 0); };
   if (name === "representative_collections_variant") return function (jobs, lane) { return representativeCollections(jobs, lane, 1); };
   if (name === "representative_strong_identity_collections") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 0); };
