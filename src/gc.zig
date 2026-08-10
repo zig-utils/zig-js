@@ -250,6 +250,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     markValueOpt(v, cold.boxed_primitive);
     markValueOpt(v, cold.async_context_callback);
     markValueOpt(v, cold.async_context);
+    markValueOpt(v, cold.collection_iterator_source);
     markValueOpt(v, cold.getter_setter_getter);
     markValueOpt(v, cold.getter_setter_setter);
     if (cold.weak_ref_target_slot) |slot| markWeakObject(v, slot); // stable cold-slot address
@@ -356,6 +357,7 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
         .module_ns => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.module_ns.ptr),
         .generator => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.generator.ptr),
         .iter_helper => gc_relocation.rewriteOptionalSlot(v, value.IterHelper, &cold.rare.iter_helper.ptr),
+        .collection_iterator => gc_relocation.rewriteValueSlot(v, &cold.rare.collection_iterator.source),
         .bound_function => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.bound_function.ptr),
         .async_context_frame => {
             gc_relocation.rewriteValueSlot(v, &cold.rare.async_context_frame.callback);
@@ -500,7 +502,7 @@ test "Object rare strong relocation mutates every active managed payload" {
     const allocator = arena.allocator();
     var old_objects: [8]Object = undefined;
     var new_objects: [8]Object = undefined;
-    var rare_objects: [13]Object = undefined;
+    var rare_objects: [14]Object = undefined;
     for (&rare_objects) |*object| object.* = .{};
     var old_environment: Environment = undefined;
     var new_environment: Environment = undefined;
@@ -553,6 +555,7 @@ test "Object rare strong relocation mutates every active managed payload" {
     );
     try rare_objects[12].setPromiseData(allocator, @ptrCast(&old_promise));
     try rare_objects[12].spillPromiseData(allocator);
+    try rare_objects[13].initCollectionIterator(allocator, Value.obj(&old_objects[2]), 2);
 
     const Plan = struct {
         old_objects: *[8]Object,
@@ -632,6 +635,7 @@ test "Object rare strong relocation mutates every active managed payload" {
     try std.testing.expect(rare_objects[12].coldState().?.hasRare(.promise));
     try std.testing.expectEqual(&new_objects[0], async_context_frame.callback.asObj());
     try std.testing.expectEqual(&new_objects[7], async_context_frame.context.asObj());
+    try std.testing.expectEqual(&new_objects[2], rare_objects[13].collectionIteratorState().?.source.asObj());
 }
 
 test "Wasm relocation: Object rare state rewrites every JavaScript-bearing slot" {
@@ -870,6 +874,7 @@ pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
         .boxed_primitive,
         .generator,
         .iter_helper,
+        .collection_iterator,
         .bound_function,
         .async_context_frame,
         .proxy,
@@ -1308,6 +1313,8 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         collection.coll_index = .empty;
         collection.coll_next.deinit(a);
         collection.coll_next = .empty;
+        collection.coll_serials.deinit(a);
+        collection.coll_serials = .empty;
         released += 1;
     }
     if (flags.collection_state) {

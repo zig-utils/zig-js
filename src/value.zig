@@ -1144,6 +1144,7 @@ pub const ObjectRareTag = enum(u8) {
     boxed_primitive,
     generator,
     iter_helper,
+    collection_iterator,
     bound_function,
     async_context_frame,
     proxy,
@@ -1219,6 +1220,15 @@ pub const ObjectRareState = union(ObjectRareTag) {
     boxed_primitive: struct { value: Value = Value.undef() },
     generator: struct { ptr: ?*anyopaque = null },
     iter_helper: struct { ptr: ?*IterHelper = null },
+    collection_iterator: struct {
+        /// Strong [[IteratedMap]] / [[IteratedSet]] edge. The logical cursor is
+        /// an insertion serial rather than an ordered-storage position so the
+        /// collection may compact tombstones without invalidating iterators.
+        source: Value = Value.undef(),
+        next_serial: u64 = 0,
+        kind: u8 = 0,
+        done: bool = false,
+    },
     bound_function: struct { ptr: ?*anyopaque = null },
     async_context_frame: struct {
         callback: Value = Value.undef(),
@@ -1329,6 +1339,11 @@ pub const ObjectCollectionState = struct {
     /// pointers, so both survive moving collection without tracing/relocation.
     coll_index: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     coll_next: std.ArrayListUnmanaged(u32) = .empty,
+    /// Monotonic insertion serials aligned one-for-one with the ordered
+    /// `elements` list. Unlike physical positions, these remain stable across
+    /// tombstone compaction and are never reset by `clear()`.
+    coll_serials: std.ArrayListUnmanaged(u64) = .empty,
+    coll_next_serial: u64 = 0,
     coll_hash_seed: u64 = 0,
     coll_hash_seeded: bool = false,
     /// Exact live Map/Set entry count. Guarded by the owning object's
@@ -2033,6 +2048,20 @@ pub const Object = struct {
         return &@field(cold.rare, @tagName(tag));
     }
 
+    pub fn initCollectionIterator(self: *Object, fallback: std.mem.Allocator, source: Value, kind: u8) std.mem.Allocator.Error!void {
+        gcBarrier(self, source);
+        _ = try self.ensureRare(fallback, .collection_iterator, .{
+            .source = source,
+            .kind = kind,
+        });
+    }
+
+    pub inline fn collectionIteratorState(self: *Object) ?*@FieldType(ObjectRareState, "collection_iterator") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.collection_iterator)) return null;
+        return &cold.rare.collection_iterator;
+    }
+
     /// GC-visible Object edges out of the WebAssembly rare states (issue #141).
     /// At most one wasm rare tag is active per object, so a single flat
     /// snapshot covers all of them; null/empty fields mark nothing.
@@ -2068,6 +2097,7 @@ pub const Object = struct {
         promise_data: ?*anyopaque,
         generator: ?*anyopaque,
         iterator_helper: ?*IterHelper,
+        collection_iterator_source: ?Value,
         module_ns: ?*anyopaque,
         arg_map_env: ?*anyopaque,
         typed_array: ?*TypedArrayData,
@@ -2095,6 +2125,7 @@ pub const Object = struct {
             .promise_data = self.promiseData(),
             .generator = self.generator(),
             .iterator_helper = self.iteratorHelper(),
+            .collection_iterator_source = if (self.collectionIteratorState()) |state| state.source else null,
             .module_ns = self.moduleNs(),
             .arg_map_env = if (cold) |state| state.arg_map_env else null,
             .typed_array = self.typedArray(),
@@ -3368,9 +3399,23 @@ pub const Object = struct {
         defer self.unlockElements(elements_locked);
         return self.collectionState().?.coll_live_count;
     }
-    /// Caller holds `elements_lock`; the ordered entry is already live.
-    pub fn collRecordInsert(self: *Object) void {
+    /// Reserve the logical serial before publishing an ordered entry. The
+    /// serial list and elements list are then committed together without an
+    /// allocation point between them, preserving their one-for-one invariant.
+    /// Caller holds `elements_lock`.
+    pub fn collPrepareInsert(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!u64 {
+        const state = try self.ensureCollectionState(fallback);
+        if (state.coll_next_serial == std.math.maxInt(u64)) return error.OutOfMemory;
+        const alloc = try self.ensureBackingFor(fallback, "coll_index");
+        try state.coll_serials.ensureUnusedCapacity(alloc, 1);
+        return state.coll_next_serial;
+    }
+    /// Caller holds `elements_lock`; the ordered entry has been published.
+    pub fn collCommitInsert(self: *Object, serial: u64) void {
         const state = self.collectionState().?;
+        std.debug.assert(serial == state.coll_next_serial);
+        state.coll_serials.appendAssumeCapacity(serial);
+        state.coll_next_serial += 1;
         state.coll_live_count += 1;
     }
     /// Caller holds `elements_lock`; the ordered entry is still live.
@@ -3378,6 +3423,26 @@ pub const Object = struct {
         const state = self.collectionState().?;
         std.debug.assert(state.coll_live_count > 0);
         state.coll_live_count -= 1;
+    }
+    /// First ordered position whose insertion serial is at least `serial`.
+    /// Caller holds `elements_lock`; serials are strictly increasing.
+    pub fn collCursorPosition(self: *Object, serial: u64) ?usize {
+        const state = self.collectionState() orelse return null;
+        var lo: usize = 0;
+        var hi = state.coll_serials.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (state.coll_serials.items[mid] < serial)
+                lo = mid + 1
+            else
+                hi = mid;
+        }
+        return if (lo < state.coll_serials.items.len) lo else null;
+    }
+    /// Serial at an ordered position returned by `collCursorPosition`.
+    /// Caller holds `elements_lock`.
+    pub fn collSerialAt(self: *Object, pos: usize) u64 {
+        return self.collectionState().?.coll_serials.items[pos];
     }
     /// Permanently drop to linear scanning after index allocation failure or a
     /// structural invariant failure. Needs cold state so the flag persists.
@@ -3392,6 +3457,7 @@ pub const Object = struct {
         if (self.collectionState()) |state| {
             state.coll_index.clearRetainingCapacity();
             state.coll_next.clearRetainingCapacity();
+            state.coll_serials.clearRetainingCapacity();
             state.coll_live_count = 0;
             state.coll_unindexed = false;
         }
@@ -5653,6 +5719,32 @@ test "strong collection index allocation failure never publishes a partial bucke
         try std.testing.expect(o.collUnindexed());
         try std.testing.expectEqual(@as(?u32, null), o.collIndexHead(0xabc));
     }
+}
+
+test "strong collection insertion serial reservation is atomic and clear is monotonic" {
+    const a = std.testing.allocator;
+    var o = Object{ .is_map = true };
+    const cold = try o.ensureCold(a);
+    const collection = try o.ensureStrongCollectionState(a, 0x514);
+    defer a.destroy(o.storageState().?);
+    defer a.destroy(cold);
+    defer a.destroy(collection);
+    defer collection.coll_index.deinit(a);
+    defer collection.coll_next.deinit(a);
+    defer collection.coll_serials.deinit(a);
+
+    var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, o.collPrepareInsert(failing.allocator()));
+    try std.testing.expectEqual(@as(usize, 0), collection.coll_serials.items.len);
+    try std.testing.expectEqual(@as(u64, 0), collection.coll_next_serial);
+    try std.testing.expectEqual(@as(usize, 0), collection.coll_live_count);
+
+    const first = try o.collPrepareInsert(a);
+    o.collCommitInsert(first);
+    try std.testing.expectEqual(@as(u64, 0), collection.coll_serials.items[0]);
+    o.collIndexReset();
+    try std.testing.expectEqual(@as(usize, 0), collection.coll_serials.items.len);
+    try std.testing.expectEqual(@as(u64, 1), try o.collPrepareInsert(a));
 }
 
 test "FinalizationRegistry unregister stable-compacts matching records" {

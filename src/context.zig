@@ -12717,10 +12717,42 @@ test "Map and Set size use the exact live count after historical churn" {
     const set = ctx.global_object.getOwn("__sizeSet").?.asObj();
     try std.testing.expectEqual(@as(usize, 64), map.collectionState().?.coll_live_count);
     try std.testing.expectEqual(@as(usize, 64), set.collectionState().?.coll_live_count);
-    // This slice proves size no longer depends on the historical list. #514
-    // retains compaction of these tombstones as its next boundary.
-    try std.testing.expectEqual(@as(usize, 4160), map.elementsLen());
-    try std.testing.expectEqual(@as(usize, 4160), set.elementsLen());
+    // Deletion compacts in-place whenever tombstones dominate a historical
+    // list of at least 64 slots. This exact churn empties each 64-slot window,
+    // so only the final live entries remain.
+    try std.testing.expectEqual(@as(usize, 64), map.elementsLen());
+    try std.testing.expectEqual(@as(usize, 64), set.elementsLen());
+}
+
+test "Map logical cursors survive moving GC and tombstone compaction" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(f64, 0), (try ctx.evaluate(
+        \\globalThis.__cursorMap = new Map();
+        \\for (let i = 0; i <= 128; i++) __cursorMap.set(i, i);
+        \\globalThis.__cursor = __cursorMap.keys();
+        \\__cursor.next().value
+    )).asNum());
+
+    // The iterator's internal [[IteratedMap]] edge must relocate with the map.
+    ctx.collectGarbage();
+    const result = try ctx.evaluate(
+        \\for (let i = 1; i <= 65; i++) __cursorMap.delete(i);
+        \\__cursorMap.set(2, 200);
+        \\let remaining = [];
+        \\for (let step = __cursor.next(); !step.done; step = __cursor.next()) remaining.push(step.value);
+        \\let walked = [];
+        \\let second = new Map();
+        \\for (let i = 0; i <= 128; i++) second.set(i, i);
+        \\second.forEach(function(value, key) {
+        \\  walked.push(key);
+        \\  if (key === 0) for (let i = 1; i <= 65; i++) second.delete(i);
+        \\});
+        \\remaining.length === 64 && remaining[0] === 66 && remaining[63] === 2 &&
+        \\walked.length === 64 && walked[0] === 0 && walked[1] === 66 && walked[63] === 128
+    );
+    try std.testing.expect(result.asBool());
+    try std.testing.expectEqual(@as(usize, 65), ctx.global_object.getOwn("__cursorMap").?.asObj().elementsLen());
 }
 
 test "Set operations keep live-index semantics when set-like callbacks mutate this" {
@@ -22424,6 +22456,43 @@ test "parallel_js (M3 GIL-removal slice): real Thread contends Atomics.Mutex wit
         \\shared.n;
     );
     try std.testing.expectEqual(@as(f64, 2000), result.asNum());
+}
+
+test "parallel_js: Map iterator cursor advances atomically without GIL" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\if ($vm.useThreadGIL() !== false) throw new Error("parallel_js did not drop the thread GIL");
+        \\const map = new Map();
+        \\for (let i = 0; i < 1024; i++) map.set(i, i);
+        \\const iterator = map.values();
+        \\function drain() {
+        \\  let count = 0, sum = 0;
+        \\  while (true) {
+        \\    const step = iterator.next();
+        \\    if (step.done) return count * 1000000 + sum;
+        \\    count++;
+        \\    sum += step.value;
+        \\  }
+        \\}
+        \\const threads = [];
+        \\for (let i = 0; i < 4; i++) threads.push(new Thread(drain));
+        \\let count = 0, sum = 0;
+        \\for (const thread of threads) {
+        \\  const packed = thread.join();
+        \\  count += Math.floor(packed / 1000000);
+        \\  sum += packed % 1000000;
+        \\}
+        \\count === 1024 && sum === 523776 && iterator.next().done === true
+    );
+    try std.testing.expect(result.asBool());
 }
 
 test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {

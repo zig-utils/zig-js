@@ -10543,8 +10543,9 @@ pub const Interpreter = struct {
             gc_mod.barrierCellFrom(o, @ptrCast(pair)); // new entry hidden behind the live map
             const elements = try o.ensureElementsList(self.arena);
             const pos: u32 = @intCast(elements.items.len);
+            const serial = try o.collPrepareInsert(self.arena);
             try elements.append(o.elementsAllocator(self.arena), Value.obj(pair));
-            o.collRecordInsert();
+            o.collCommitInsert(serial);
             if (!o.collUnindexed()) if (o.collHashSeed()) |seed| {
                 const hkey = hashKey(seed, key);
                 if (!o.collIndexPut(self.arena, hkey, pos)) o.collDisableIndex(self.arena);
@@ -10570,6 +10571,7 @@ pub const Interpreter = struct {
                 o.collRecordDelete();
                 if (!o.collUnindexed()) if (o.collHashSeed()) |seed|
                     o.collIndexRemove(hashKey(seed, key), @intCast(pos));
+                maybeCompactStrongCollection(o, self.arena);
                 return Value.boolVal(true);
             }
             return Value.boolVal(false);
@@ -10581,21 +10583,24 @@ pub const Interpreter = struct {
         if (eq(name, "forEach")) {
             const cb = arg0(args);
             if (!cb.isCallable()) return self.throwError("TypeError", "Map.prototype.forEach callback is not callable");
-            var i: usize = 0;
-            while (true) : (i += 1) {
-                var end = false;
-                const entry = blk: {
-                    const elements_locked_5 = o.lockElements();
-                    defer o.unlockElements(elements_locked_5);
-                    if (i >= o.elementsItems().len) {
-                        end = true;
-                        break :blk null;
-                    }
-                    break :blk liveMapEntry(o.elementsItems()[i]);
-                };
-                if (end) break;
-                const live_entry = entry orelse continue;
-                _ = try self.callValueWithThis(cb, &.{ mapEntryValue(live_entry), live_entry.elementAt(0) orelse Value.undef(), self_v }, arg(args, 1));
+            var next_serial: u64 = 0;
+            while (true) {
+                var found = false;
+                var entry_key: Value = Value.undef();
+                var entry_value: Value = Value.undef();
+                const elements_locked_5 = o.lockElements();
+                while (o.collCursorPosition(next_serial)) |pos| {
+                    const serial = o.collSerialAt(pos);
+                    next_serial = serial + 1;
+                    const entry = liveMapEntry(o.elementsItems()[pos]) orelse continue;
+                    entry_key = entry.elementAt(0) orelse Value.undef();
+                    entry_value = mapEntryValue(entry);
+                    found = true;
+                    break;
+                }
+                o.unlockElements(elements_locked_5);
+                if (!found) break;
+                _ = try self.callValueWithThis(cb, &.{ entry_value, entry_key, self_v }, arg(args, 1));
             }
             return Value.undef();
         }
@@ -10691,8 +10696,9 @@ pub const Interpreter = struct {
             gc_mod.barrierValueFrom(o, key); // new key hidden behind the live set
             const elements = try o.ensureElementsList(self.arena);
             const pos: u32 = @intCast(elements.items.len);
+            const serial = try o.collPrepareInsert(self.arena);
             try elements.append(o.elementsAllocator(self.arena), key);
-            o.collRecordInsert();
+            o.collCommitInsert(serial);
             if (!o.collUnindexed()) if (o.collHashSeed()) |seed| {
                 const hkey = hashKey(seed, key);
                 if (!o.collIndexPut(self.arena, hkey, pos)) o.collDisableIndex(self.arena);
@@ -10714,6 +10720,7 @@ pub const Interpreter = struct {
                 o.collRecordDelete();
                 if (!o.collUnindexed()) if (o.collHashSeed()) |seed|
                     o.collIndexRemove(hashKey(seed, key), @intCast(pos));
+                maybeCompactStrongCollection(o, self.arena);
                 return Value.boolVal(true);
             }
             return Value.boolVal(false);
@@ -10725,21 +10732,19 @@ pub const Interpreter = struct {
         if (eq(name, "forEach")) {
             const cb = arg0(args);
             if (!cb.isCallable()) return self.throwError("TypeError", "Set.prototype.forEach callback is not callable");
-            var i: usize = 0;
-            while (true) : (i += 1) {
-                var end = false;
-                const e = blk: {
-                    const elements_locked_10 = o.lockElements();
-                    defer o.unlockElements(elements_locked_10);
-                    if (i >= o.elementsItems().len) {
-                        end = true;
-                        break :blk null;
-                    }
-                    break :blk liveSetEntry(o.elementsItems()[i]);
-                };
-                if (end) break;
-                const live_entry = e orelse continue;
-                _ = try self.callValueWithThis(cb, &.{ live_entry, live_entry, self_v }, arg(args, 1));
+            var next_serial: u64 = 0;
+            while (true) {
+                var live_entry: ?Value = null;
+                const elements_locked_10 = o.lockElements();
+                while (o.collCursorPosition(next_serial)) |pos| {
+                    const serial = o.collSerialAt(pos);
+                    next_serial = serial + 1;
+                    live_entry = liveSetEntry(o.elementsItems()[pos]) orelse continue;
+                    break;
+                }
+                o.unlockElements(elements_locked_10);
+                if (live_entry == null) break;
+                _ = try self.callValueWithThis(cb, &.{ live_entry.?, live_entry.?, self_v }, arg(args, 1));
             }
             return Value.undef();
         }
@@ -13612,8 +13617,9 @@ pub const Interpreter = struct {
         return self.makeAsyncFromSyncIterator(try self.iteratorOf(v));
     }
 
-    /// Wrap an array/string/collection in an iterator object: `__src` + `__i`
-    /// own properties plus a shared native `next` that reads/advances them.
+    /// Wrap an array/string/collection in an iterator object. Map/Set use true
+    /// internal slots and a logical insertion cursor; the generic array/string
+    /// path retains its existing indexed cursor.
     fn makeCursorIterator(self: *Interpreter, src: Value) EvalError!Value {
         return self.makeCursorIteratorWithKind(src, 0);
     }
@@ -13621,9 +13627,15 @@ pub const Interpreter = struct {
     fn makeCursorIteratorWithKind(self: *Interpreter, src: Value, kind: u8) EvalError!Value {
         const it = try gc_mod.allocObj(self.arena);
         it.* = .{};
-        try self.setProp(it, "__src", src);
-        try self.setProp(it, "__i", Value.num(0));
-        try self.setProp(it, "__kind", Value.num(@floatFromInt(kind)));
+        const is_strong_collection = src.isObject() and
+            (src.asObj().is_map or src.asObj().is_set) and !src.asObj().is_weak;
+        if (is_strong_collection) {
+            try it.initCollectionIterator(self.arena, src, kind);
+        } else {
+            try self.setProp(it, "__src", src);
+            try self.setProp(it, "__i", Value.num(0));
+            try self.setProp(it, "__kind", Value.num(@floatFromInt(kind)));
+        }
         // Inherit the per-kind built-in iterator prototype (%ArrayIteratorPrototype%
         // etc.) — which carries `next`, the @@toStringTag, and (via
         // %IteratorPrototype%) the iterator-helper methods.
@@ -31799,6 +31811,50 @@ fn hashKey(seed: u64, key: Value) u64 {
     }
 }
 
+/// Bound historical Map/Set storage without changing observable insertion
+/// order. Logical serial cursors make physical positions unobservable; stable
+/// in-place compaction can therefore discard tombstones once they dominate.
+/// The acceleration index is rebuilt from retained capacity, so this delete
+/// path introduces no allocation requirement. Caller holds `elements_lock`.
+fn maybeCompactStrongCollection(o: *value.Object, arena: std.mem.Allocator) void {
+    const state = o.collectionState() orelse return;
+    const len = o.elementsItems().len;
+    std.debug.assert(state.coll_serials.items.len == len);
+    if (len < 64 or len - state.coll_live_count <= state.coll_live_count) return;
+
+    var write: usize = 0;
+    for (0..len) |read| {
+        const live = if (o.is_map)
+            liveMapEntry(o.elementsItems()[read]) != null
+        else
+            liveSetEntry(o.elementsItems()[read]) != null;
+        if (!live) continue;
+        if (write != read) {
+            o.elementsItems()[write] = o.elementsItems()[read];
+            state.coll_serials.items[write] = state.coll_serials.items[read];
+        }
+        write += 1;
+    }
+    std.debug.assert(write == state.coll_live_count);
+    o.elementsState().?.list.shrinkRetainingCapacity(write);
+    state.coll_serials.shrinkRetainingCapacity(write);
+
+    if (state.coll_unindexed) return;
+    state.coll_index.clearRetainingCapacity();
+    state.coll_next.clearRetainingCapacity();
+    const seed = state.coll_hash_seed;
+    for (o.elementsItems(), 0..) |entry_value, pos| {
+        const key = if (o.is_map)
+            liveMapEntry(entry_value).?.elementAt(0) orelse Value.undef()
+        else
+            entry_value;
+        if (!o.collIndexPut(arena, hashKey(seed, key), @intCast(pos))) {
+            o.collDisableIndex(arena);
+            return;
+        }
+    }
+}
+
 /// Position of the live Map entry for `key` in `o.elementsItems()`, or null.
 /// Consults the exact-equality collision chain: an exhausted bucket is an
 /// authoritative absence. Only a prior index-allocation failure falls back to
@@ -31893,11 +31949,85 @@ fn arrayIteratorValue(self: *Interpreter, kind: usize, index: usize, elem: Value
     };
 }
 
+/// Map/Set iterator `next` over logical insertion serials. The iterator's
+/// property lock makes concurrent `next()` calls one atomic cursor advance;
+/// the collection's elements lock then snapshots one live result. Both locks
+/// are released before allocating the observable IteratorResult/entry array.
+fn collectionCursorIterNext(self: *Interpreter, iterator: *value.Object) value.HostError!Value {
+    var done = false;
+    var kind: u8 = 0;
+    var entry_key: Value = Value.undef();
+    var entry_value: Value = Value.undef();
+    var is_map = false;
+
+    iterator.lockProperties();
+    const cursor = iterator.collectionIteratorState() orelse {
+        iterator.unlockProperties();
+        return self.throwError("TypeError", "next called on an incompatible receiver");
+    };
+    if (cursor.done) {
+        iterator.unlockProperties();
+        return self.iterResultObj(Value.undef(), true);
+    }
+    kind = cursor.kind;
+    const src = cursor.source;
+    if (!src.isObject() or (!(src.asObj().is_map or src.asObj().is_set)) or src.asObj().is_weak) {
+        iterator.unlockProperties();
+        return self.throwError("TypeError", "next called on an incompatible receiver");
+    }
+    const collection = src.asObj();
+    is_map = collection.is_map;
+    const source_elements_locked = collection.lockElements();
+    var search_serial = cursor.next_serial;
+    while (collection.collCursorPosition(search_serial)) |pos| {
+        const serial = collection.collSerialAt(pos);
+        // Insertions reject maxInt(u64), so increment cannot wrap and every
+        // tombstone consumes cursor progress exactly once.
+        search_serial = serial + 1;
+        cursor.next_serial = search_serial;
+        if (is_map) {
+            const entry = liveMapEntry(collection.elementsItems()[pos]) orelse continue;
+            entry_key = entry.elementAt(0) orelse Value.undef();
+            entry_value = mapEntryValue(entry);
+        } else {
+            entry_value = liveSetEntry(collection.elementsItems()[pos]) orelse continue;
+            entry_key = entry_value;
+        }
+        break;
+    } else {
+        cursor.done = true;
+        done = true;
+    }
+    collection.unlockElements(source_elements_locked);
+    iterator.unlockProperties();
+
+    if (done) return self.iterResultObj(Value.undef(), true);
+    const result = if (is_map)
+        switch (kind) {
+            1 => entry_key,
+            2 => pair: {
+                const entry = (try self.newArray()).asObj();
+                try entry.appendElement(self.arena, entry_key);
+                try entry.appendElement(self.arena, entry_value);
+                break :pair Value.obj(entry);
+            },
+            else => entry_value,
+        }
+    else if (kind == 2) pair: {
+        const entry = (try self.newArray()).asObj();
+        try entry.appendElement(self.arena, entry_value);
+        try entry.appendElement(self.arena, entry_value);
+        break :pair Value.obj(entry);
+    } else entry_value;
+    return self.iterResultObj(result, false);
+}
+
 fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "next called on non-object");
     const o = this.asObj();
+    if (o.collectionIteratorState() != null) return collectionCursorIterNext(self, o);
     // Brand check: a genuine Array/Map/Set/String iterator carries its `__src`
     // cursor slot as an OWN property. A bare object, a boxed primitive, the
     // iterator *prototype* itself, or `Object.create(anIterator)` (which only
@@ -49277,6 +49407,37 @@ test "interpreter Map and Set" {
         \\ok = ok && e[0] === 1 && e[1] === 1;
         \\ok
     )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let m = new Map([[1, 'one'], [2, 'two'], [3, 'three']]);
+        \\let it = m.entries();
+        \\let first = it.next().value;
+        \\let ok = first[0] === 1 && Object.getOwnPropertyNames(it).length === 0;
+        \\m.delete(2);
+        \\m.set(2, 'two-again');
+        \\let second = it.next().value;
+        \\let third = it.next().value;
+        \\ok = ok && second[0] === 3 && third[0] === 2 && third[1] === 'two-again';
+        \\ok = ok && it.next().done === true;
+        \\let cleared = m.keys();
+        \\ok = ok && cleared.next().value === 1;
+        \\m.clear();
+        \\m.set(4, 'four');
+        \\m.set(5, 'five');
+        \\ok = ok && cleared.next().value === 4 && cleared.next().value === 5 && cleared.next().done === true;
+        \\let a = m.values(), b = m.values();
+        \\ok = ok && a.next().value === 'four' && b.next().value === 'four';
+        \\ok
+    )).asBool());
+    try std.testing.expectEqualStrings("1|3|2", (try evalSource(a,
+        \\let s = new Set([1, 2, 3]);
+        \\let out = [];
+        \\let moved = false;
+        \\s.forEach(function(v) {
+        \\  out.push(v);
+        \\  if (v === 1 && !moved) { moved = true; s.delete(2); s.add(2); }
+        \\});
+        \\out.join('|')
+    )).asStr());
 }
 
 test "interpreter TypedArray iterators" {
