@@ -4235,16 +4235,6 @@ pub inline fn allocationsAreManaged() bool {
     return active_heap != null;
 }
 
-/// Allocator whose owned byte slices can transfer directly into a StringCell
-/// in the active realm. Parsers/builders use this only for bytes whose next
-/// operation is `Value.strOwned`; temporary property-key and syntax buffers
-/// stay on their normal arena so they cannot leak into persistent backing.
-pub fn stringOwnedAllocator(fallback: std.mem.Allocator) std.mem.Allocator {
-    if (active_heap == null) return fallback;
-    const realm = active_realm_context orelse return fallback;
-    return realm.gpa;
-}
-
 /// Relocation-stable identity for a live cell in the current precise heap.
 /// Map/Set hashing calls this only from a mutator-owned operation; moving
 /// collection is world-stopped and concurrent marking never reclaims cells.
