@@ -12722,6 +12722,25 @@ test "Map and Set size use the exact live count after historical churn" {
     // so only the final live entries remain.
     try std.testing.expectEqual(@as(usize, 64), map.elementsLen());
     try std.testing.expectEqual(@as(usize, 64), set.elementsLen());
+    for ([_]*value.Object{ map, set }) |collection| {
+        const state = collection.collectionState().?;
+        try std.testing.expect(collection.elementsState().?.list.capacity <= 128);
+        try std.testing.expect(state.coll_serials.capacity <= 128);
+        try std.testing.expect(state.coll_next.capacity <= 128);
+        try std.testing.expect(state.coll_index.capacity() <= 128);
+    }
+
+    _ = try ctx.evaluate("__sizeMap.clear(); __sizeSet.clear(); 0");
+    for ([_]*value.Object{ map, set }) |collection| {
+        const state = collection.collectionState().?;
+        try std.testing.expectEqual(@as(usize, 0), collection.elementsState().?.list.capacity);
+        try std.testing.expectEqual(@as(usize, 0), state.coll_serials.capacity);
+        try std.testing.expectEqual(@as(usize, 0), state.coll_next.capacity);
+        try std.testing.expectEqual(@as(u32, 0), state.coll_index.capacity());
+    }
+    const never_populated = (try ctx.evaluate("globalThis.__emptyMap = new Map(); __emptyMap.clear(); __emptyMap")).asObj();
+    try std.testing.expect(never_populated.elementsState() == null);
+    try std.testing.expect(!never_populated.backingFlagsSnapshot().elements);
 }
 
 test "Map logical cursors survive moving GC and tombstone compaction" {

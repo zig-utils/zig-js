@@ -3462,14 +3462,27 @@ pub const Object = struct {
             state.coll_unindexed = false;
         }
     }
-    /// Clear ordered collection data and its authoritative index as one
-    /// elements-lock transaction. Keeping these two writes indivisible avoids
-    /// a peer insertion being published immediately before a stale index reset.
-    pub fn clearStrongCollectionRetainingCapacity(self: *Object) void {
+    /// Clear ordered collection data and release its high-water backing as one
+    /// elements-lock transaction. `clear()` is an explicit memory boundary:
+    /// retaining adversarial peak capacity would make repeated fill/clear
+    /// cycles permanently grow the realm even though no entries stay live.
+    pub fn clearStrongCollection(self: *Object, fallback: std.mem.Allocator) void {
         const elements_locked = self.lockElements();
         defer self.unlockElements(elements_locked);
-        if (self.elementsState()) |state| state.list.clearRetainingCapacity();
-        self.collIndexReset();
+        // Do not activate a new backing category when clear() is called on a
+        // never-populated collection. Existing collection buffers, when any,
+        // use the object's published backing allocator.
+        const alloc = self.backingAllocatorIfActive() orelse fallback;
+        if (self.elementsState()) |state| state.list.clearAndFree(alloc);
+        if (self.collectionState()) |state| {
+            state.coll_index.clearAndFree(alloc);
+            state.coll_next.clearAndFree(alloc);
+            state.coll_serials.clearAndFree(alloc);
+            state.coll_live_count = 0;
+            state.coll_unindexed = false;
+            // Do not reset coll_next_serial: an iterator that has not yet
+            // become done must observe entries appended after clear().
+        }
     }
 
     fn weakIndexKey(key: ?*anyopaque) usize {

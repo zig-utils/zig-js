@@ -10577,7 +10577,7 @@ pub const Interpreter = struct {
             return Value.boolVal(false);
         }
         if (eq(name, "clear")) {
-            o.clearStrongCollectionRetainingCapacity();
+            o.clearStrongCollection(self.arena);
             return Value.undef();
         }
         if (eq(name, "forEach")) {
@@ -10726,7 +10726,7 @@ pub const Interpreter = struct {
             return Value.boolVal(false);
         }
         if (eq(name, "clear")) {
-            o.clearStrongCollectionRetainingCapacity();
+            o.clearStrongCollection(self.arena);
             return Value.undef();
         }
         if (eq(name, "forEach")) {
@@ -31811,6 +31811,22 @@ fn hashKey(seed: u64, key: Value) u64 {
     }
 }
 
+/// Release an ArrayList's unused tail only when the allocator can resize it in
+/// place. This never moves elements and never allocates; allocators that cannot
+/// contract the block simply retain the already-bounded high-water reserve.
+fn trimCollectionListCapacity(list: anytype, allocator: std.mem.Allocator) void {
+    if (list.capacity == list.items.len) return;
+    if (list.items.len == 0) {
+        list.clearAndFree(allocator);
+        return;
+    }
+    const old = list.items.ptr[0..list.capacity];
+    if (allocator.resize(old, list.items.len)) {
+        list.capacity = list.items.len;
+        list.items = old.ptr[0..list.items.len];
+    }
+}
+
 /// Bound historical Map/Set storage without changing observable insertion
 /// order. Logical serial cursors make physical positions unobservable; stable
 /// in-place compaction can therefore discard tombstones once they dominate.
@@ -31839,6 +31855,18 @@ fn maybeCompactStrongCollection(o: *value.Object, arena: std.mem.Allocator) void
     o.elementsState().?.list.shrinkRetainingCapacity(write);
     state.coll_serials.shrinkRetainingCapacity(write);
 
+    const alloc = o.elementsAllocator(arena);
+    if (write == 0) {
+        o.elementsState().?.list.clearAndFree(alloc);
+        state.coll_serials.clearAndFree(alloc);
+        state.coll_index.clearAndFree(alloc);
+        state.coll_next.clearAndFree(alloc);
+        state.coll_unindexed = false;
+        return;
+    }
+    trimCollectionListCapacity(&o.elementsState().?.list, alloc);
+    trimCollectionListCapacity(&state.coll_serials, alloc);
+
     if (state.coll_unindexed) return;
     state.coll_index.clearRetainingCapacity();
     state.coll_next.clearRetainingCapacity();
@@ -31853,6 +31881,7 @@ fn maybeCompactStrongCollection(o: *value.Object, arena: std.mem.Allocator) void
             return;
         }
     }
+    trimCollectionListCapacity(&state.coll_next, alloc);
 }
 
 /// Position of the live Map entry for `key` in `o.elementsItems()`, or null.
