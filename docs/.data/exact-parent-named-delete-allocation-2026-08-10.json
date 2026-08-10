@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "kind": "exact_parent_attribution_delta",
+  "parent_revision": "00848706d4b24487c9a2caf83e12fe7a1b04695f",
+  "candidate_revision": "253b5b079d8b3698f086e403a86d6052d0eacecd",
+  "candidate_first_parent": "00848706d4b24487c9a2caf83e12fe7a1b04695f",
+  "parent_binary_sha256": "57fa021a1d583564d56cb2f29b136eefa7995a3b770673e324f7e2f6121099ba",
+  "candidate_binary_sha256": "0b88bbce6e774630d728dbb825650b35f3eb116e6af3688975c15c0d8e8a0c3b",
+  "command_shape": "bench-comparison-zig-js attribution <workload> 1 1",
+  "measurement": "invocation snapshot minus warmup snapshot; one deterministic attribution run per exact revision and workload",
+  "workloads": [
+    {
+      "name": "representative_named_delete_4096",
+      "expected_checksum": 1504112,
+      "parent": {
+        "warmup": { "backing_allocations": 62022, "backing_allocation_bytes": 36037507, "backing_growths": 557, "backing_growth_bytes": 926406, "backing_releases": 303, "backing_released_bytes": 3447594, "backing_current_bytes": 33516319, "backing_peak_bytes": 33516319, "gc_cell_allocations": 47875, "gc_cell_bytes": 3174976 },
+        "invocation": { "backing_allocations": 66153, "backing_allocation_bytes": 51799785, "backing_growths": 618, "backing_growth_bytes": 1013830, "backing_releases": 319, "backing_released_bytes": 3770892, "backing_current_bytes": 49042723, "backing_peak_bytes": 49042723, "gc_cell_allocations": 51969, "gc_cell_bytes": 3437504 },
+        "delta": { "backing_allocations": 4131, "backing_allocation_bytes": 15762278, "backing_growths": 61, "backing_growth_bytes": 87424, "backing_releases": 16, "backing_released_bytes": 323298, "backing_current_bytes": 15526404, "backing_peak_bytes": 15526404, "gc_cell_allocations": 4094, "gc_cell_bytes": 262528 }
+      },
+      "candidate": {
+        "warmup": { "backing_allocations": 62179, "backing_allocation_bytes": 22056857, "backing_growths": 403, "backing_growth_bytes": 604208, "backing_releases": 442, "backing_released_bytes": 6086192, "backing_current_bytes": 16574873, "backing_peak_bytes": 16574873, "gc_cell_allocations": 47875, "gc_cell_bytes": 3174976 },
+        "invocation": { "backing_allocations": 66320, "backing_allocation_bytes": 29561071, "backing_growths": 414, "backing_growth_bytes": 639536, "backing_releases": 466, "backing_released_bytes": 6660528, "backing_current_bytes": 23540079, "backing_peak_bytes": 23540079, "gc_cell_allocations": 51969, "gc_cell_bytes": 3437504 },
+        "delta": { "backing_allocations": 4141, "backing_allocation_bytes": 7504214, "backing_growths": 11, "backing_growth_bytes": 35328, "backing_releases": 24, "backing_released_bytes": 574336, "backing_current_bytes": 6965206, "backing_peak_bytes": 6965206, "gc_cell_allocations": 4094, "gc_cell_bytes": 262528 }
+      }
+    },
+    {
+      "name": "representative_named_delete_readd_4096",
+      "expected_checksum": 1504123,
+      "parent": {
+        "warmup": { "backing_allocations": 62067, "backing_allocation_bytes": 36038171, "backing_growths": 558, "backing_growth_bytes": 926518, "backing_releases": 303, "backing_released_bytes": 3447594, "backing_current_bytes": 33517095, "backing_peak_bytes": 33517095, "gc_cell_allocations": 47940, "gc_cell_bytes": 3181056 },
+        "invocation": { "backing_allocations": 66208, "backing_allocation_bytes": 51917397, "backing_growths": 581, "backing_growth_bytes": 1005742, "backing_releases": 319, "backing_released_bytes": 3770892, "backing_current_bytes": 49152247, "backing_peak_bytes": 49152247, "gc_cell_allocations": 52046, "gc_cell_bytes": 3444544 },
+        "delta": { "backing_allocations": 4141, "backing_allocation_bytes": 15879226, "backing_growths": 23, "backing_growth_bytes": 79224, "backing_releases": 16, "backing_released_bytes": 323298, "backing_current_bytes": 15635152, "backing_peak_bytes": 15635152, "gc_cell_allocations": 4106, "gc_cell_bytes": 263488 }
+      },
+      "candidate": {
+        "warmup": { "backing_allocations": 62237, "backing_allocation_bytes": 22058069, "backing_growths": 403, "backing_growth_bytes": 604208, "backing_releases": 443, "backing_released_bytes": 6086376, "backing_current_bytes": 16575901, "backing_peak_bytes": 16575901, "gc_cell_allocations": 47940, "gc_cell_bytes": 3181056 },
+        "invocation": { "backing_allocations": 66389, "backing_allocation_bytes": 29562505, "backing_growths": 414, "backing_growth_bytes": 639536, "backing_releases": 467, "backing_released_bytes": 6660712, "backing_current_bytes": 23541329, "backing_peak_bytes": 23541329, "gc_cell_allocations": 52046, "gc_cell_bytes": 3444544 },
+        "delta": { "backing_allocations": 4152, "backing_allocation_bytes": 7504436, "backing_growths": 11, "backing_growth_bytes": 35328, "backing_releases": 24, "backing_released_bytes": 574336, "backing_current_bytes": 6965428, "backing_peak_bytes": 6965428, "gc_cell_allocations": 4106, "gc_cell_bytes": 263488 }
+      }
+    }
+  ]
+}
