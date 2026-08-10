@@ -12635,6 +12635,17 @@ test "Map/Set expose [Symbol.iterator]; Set keys === values" {
         \\var out = []; for (var e of m) out.push(e[0] + ',' + e[1]); out.join('|')
     );
     try expectEvalStr("1,2,3", "[...new Set([1, 2, 3])].join(',')");
+    try expectEvalStr("1:2|true|true",
+        \\var m = new Map([['a', 1], ['b', 2]]);
+        \\var iterator = m.entries();
+        \\var first = iterator.next().value;
+        \\var second = iterator.next().value;
+        \\first[0] = 'mutated'; first[1] = 99;
+        \\second[0] = 'also-mutated'; second[1] = 100;
+        \\m.get('a') + ':' + m.get('b') + '|' +
+        \\  (first !== second) + '|' +
+        \\  (m[Symbol.iterator]().next().value !== first)
+    );
 }
 
 test "Map/Set forEach tolerate deletion during iteration" {

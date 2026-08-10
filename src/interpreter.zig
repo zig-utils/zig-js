@@ -31952,12 +31952,20 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 }
             } else if (so.is_map) {
                 var j = i;
+                var entry_key: Value = Value.undef();
+                var entry_value: Value = Value.undef();
                 const source_elements_locked = so.lockElements();
                 while (j < so.elementsItems().len) : (j += 1) {
                     const entry = liveMapEntry(so.elementsItems()[j]) orelse continue;
                     val = switch (kind) {
                         1 => entry.elementAt(0) orelse Value.undef(), // keys
-                        2 => Value.obj(entry), // entries: the stored [key, value] pair
+                        2 => capture: {
+                            // Iterator entry arrays are fresh observable values,
+                            // never the engine's internal Map storage pair.
+                            entry_key = entry.elementAt(0) orelse Value.undef();
+                            entry_value = mapEntryValue(entry);
+                            break :capture Value.undef();
+                        },
                         else => mapEntryValue(entry), // values
                     };
                     done = false;
@@ -31965,6 +31973,12 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                     break;
                 }
                 so.unlockElements(source_elements_locked);
+                if (!done and kind == 2) {
+                    const pair = (try self.newArray()).asObj();
+                    try pair.appendElement(self.arena, entry_key);
+                    try pair.appendElement(self.arena, entry_value);
+                    val = Value.obj(pair);
+                }
             } else if (so.is_set) {
                 var j = i;
                 var entry_value: ?Value = null;
