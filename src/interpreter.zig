@@ -1927,6 +1927,17 @@ pub const Interpreter = struct {
     vm_inline_call_depth: u8 = 0,
     vm_inline_calls_disabled: bool = false,
 
+    /// Bytes in the explicit Promise/next-tick root frontier at a precise
+    /// safepoint. Nursery scheduling uses this to amortize a root scan against
+    /// at least the same amount of young allocation; a multi-million-job burst
+    /// must not retrace its whole tail for every fixed-size nursery refill.
+    pub fn preciseJobRootBytes(self: *const Interpreter) usize {
+        var jobs = self.current_microtask_batch.len +| @intFromBool(self.current_microtask != null);
+        if (self.microtasks) |queue| jobs +|= queue.pendingLen();
+        if (self.next_ticks) |queue| jobs +|= queue.pendingLen();
+        return jobs *| @sizeOf(promise.Microtask);
+    }
+
     /// Guard a function call against native-stack exhaustion: throw a catchable
     /// `RangeError` when either the logical call-depth limit or the real OS
     /// stack (probed via `stack_scan.nearLimit`) would be exceeded by recursing

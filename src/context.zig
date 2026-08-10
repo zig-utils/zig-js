@@ -6840,10 +6840,29 @@ pub const Context = struct {
     fn collectYoungMidScriptIfNeeded(self: *Context, h: *GcHeap, machine: *interp.Interpreter) bool {
         if (h.marking.load(.acquire) or h.concurrent.load(.acquire)) return false;
         const precise_roots = machine.gc_precise_safepoint;
+        const precise_root_amortization_bytes = if (precise_roots and !h.parallel)
+            @max(
+                @min(precise_gc_nursery_threshold_bytes, h.nursery_threshold_bytes),
+                machine.preciseJobRootBytes(),
+            )
+        else
+            0;
         // Exact single-mutator checkpoints have no conservative false roots,
         // so reclaim a cache-local young batch before the wider general nursery
-        // threshold. Generic, concurrent, and shared checkpoints keep zig-gc's
-        // established cadence to avoid repeated promotion of ambiguous roots.
+        // threshold. Amortize that collection against the explicit job-root
+        // frontier: otherwise a large Promise burst retraces nearly its entire
+        // pending tail for every fixed-size nursery refill. A remembered-set
+        // failure remains fail-closed and bypasses the amortization floor. With
+        // no queued-job frontier, an explicitly lower nursery threshold remains
+        // authoritative (including exact moving-nursery checkpoints).
+        // Generic, concurrent, and shared checkpoints keep zig-gc's established
+        // cadence to avoid repeated promotion of ambiguous roots.
+        const force_young_collection = h.nursery_force_full.load(.acquire);
+        const below_precise_amortization =
+            precise_root_amortization_bytes != 0 and
+            h.young_bytes < precise_root_amortization_bytes and
+            !force_young_collection;
+        if (below_precise_amortization) return false;
         const precise_cache_batch =
             precise_roots and !h.parallel and h.young_bytes >= precise_gc_nursery_threshold_bytes;
         if (!h.shouldCollectYoung() and !precise_cache_batch) return false;
@@ -20985,6 +21004,57 @@ test "enable_gc: precise checkpoints reclaim a cache-local nursery batch" {
     try std.testing.expect(ctx.collectYoungMidScriptIfNeeded(heap, &machine));
     try std.testing.expectEqual(minor_before + 1, heap.minor_collections);
     try std.testing.expect(heap.young_bytes < precise_gc_nursery_threshold_bytes);
+}
+
+test "enable_gc: precise nursery cadence amortizes large microtask roots" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = precise_gc_nursery_threshold_bytes;
+
+    const root_count = precise_gc_nursery_threshold_bytes / @sizeOf(promise.Microtask) + 256;
+    const roots = try std.testing.allocator.alloc(promise.Microtask, root_count);
+    defer std.testing.allocator.free(roots);
+    @memset(roots, .{
+        .kind = .callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+    });
+
+    var machine = ctx.interpreter();
+    machine.gc_precise_safepoint = true;
+    machine.current_microtask_batch = roots;
+    const amortized_bytes = machine.preciseJobRootBytes();
+    try std.testing.expect(amortized_bytes > precise_gc_nursery_threshold_bytes);
+
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    while (heap.young_bytes < precise_gc_nursery_threshold_bytes) {
+        const object = try heap.create(value.Object, .object);
+        object.* = .{};
+        object.initInlineSlots();
+    }
+    try std.testing.expect(heap.shouldCollectYoung());
+    try std.testing.expect(!ctx.collectYoungMidScriptIfNeeded(heap, &machine));
+
+    // Remembered-set publication failure is a correctness request, not a
+    // heuristic threshold: it must bypass root-scan amortization and force the
+    // nursery path to fall back to a full collection immediately.
+    const full_before = heap.full_collections;
+    heap.nursery_force_full.store(true, .release);
+    try std.testing.expect(ctx.collectYoungMidScriptIfNeeded(heap, &machine));
+    try std.testing.expect(heap.full_collections > full_before);
+    try std.testing.expect(!heap.nursery_force_full.load(.acquire));
+
+    while (heap.young_bytes < amortized_bytes) {
+        const object = try heap.create(value.Object, .object);
+        object.* = .{};
+        object.initInlineSlots();
+    }
+    const minor_before = heap.minor_collections;
+    try std.testing.expect(ctx.collectYoungMidScriptIfNeeded(heap, &machine));
+    try std.testing.expectEqual(minor_before + 1, heap.minor_collections);
 }
 
 test "enable_gc: mid-script safepoints collect nursery before old heap" {
