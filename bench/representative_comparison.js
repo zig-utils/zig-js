@@ -13,6 +13,30 @@ var representativeCorpus = [
   "emoji: 😀🚀🧪; combining: é"
 ];
 
+// Valid wide strict parameter lists keep the timed boundary on frontend parsing
+// and compilation. Sources are created lazily during the runner warmup, so the
+// scored steady-state row does not measure string construction and unrelated
+// workloads do not pay for it. Every name is unique; duplicate-name and
+// reserved-name rejection stay semantic tests.
+var representativeStrictParamsSelectedSource = "";
+function selectRepresentativeStrictParams(width) {
+  var chunks = ["(function strictWidth("];
+  for (var parameter = 0; parameter < width; parameter = parameter + 1)
+    chunks.push((parameter === 0 ? "" : ",") + "parameter" + parameter);
+  chunks.push("){\"use strict\";return 7;})");
+  representativeStrictParamsSelectedSource = chunks.join("");
+  return representativeFrontendStrictParams;
+}
+
+function representativeFrontendStrictParams(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var parsed = eval(representativeStrictParamsSelectedSource);
+    total = total + parsed.length + parsed() + lane;
+  }
+  return total;
+}
+
 function representativeStrings(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -493,6 +517,9 @@ function representativeModulePublicProbe() {
 }
 
 function benchmarkFunction(name) {
+  if (name === "representative_frontend_strict_params_1024") return selectRepresentativeStrictParams(1024);
+  if (name === "representative_frontend_strict_params_2048") return selectRepresentativeStrictParams(2048);
+  if (name === "representative_frontend_strict_params_4096") return selectRepresentativeStrictParams(4096);
   if (name === "representative_strings") return function (jobs, lane) { return representativeStrings(jobs, lane, 0); };
   if (name === "representative_strings_variant") return function (jobs, lane) { return representativeStrings(jobs, lane, 1); };
   if (name === "representative_regexp") return function (jobs, lane) { return representativeRegExp(jobs, lane, 0); };
