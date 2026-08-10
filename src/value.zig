@@ -1079,7 +1079,35 @@ pub const IterHelper = struct {
 pub const WeakCollectionEntry = struct {
     key: ?*anyopaque = null,
     value: Value = Value.undef(),
+    /// zig-gc stable cell id, or a lifetime-stable arena address. This remains
+    /// unchanged when `key` is rewritten by moving collection.
+    identity: u64 = 0,
 };
+
+pub const WeakIdentityHashContext = struct {
+    seed: u64,
+
+    pub fn hash(self: @This(), identity: u64) u64 {
+        // Keyed SplitMix64 finalization is a full-width permutation: distinct
+        // stable identities remain distinct before the table truncates bucket
+        // bits, while the secure per-collection seed hides placement.
+        var mixed = identity +% self.seed +% 0x9e3779b97f4a7c15;
+        mixed = (mixed ^ (mixed >> 30)) *% 0xbf58476d1ce4e5b9;
+        mixed = (mixed ^ (mixed >> 27)) *% 0x94d049bb133111eb;
+        return mixed ^ (mixed >> 31);
+    }
+
+    pub fn eql(_: @This(), a: u64, b: u64) bool {
+        return a == b;
+    }
+};
+
+pub const WeakIdentityIndex = std.HashMapUnmanaged(
+    u64,
+    usize,
+    WeakIdentityHashContext,
+    std.hash_map.default_max_load_percentage,
+);
 
 pub const FinalizationRecord = struct {
     target: ?*anyopaque = null,
@@ -1335,7 +1363,10 @@ pub const GetterSetterCellData = struct {
 /// `elements_lock`.
 pub const ObjectCollectionState = struct {
     weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
-    weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    /// Relocation-stable weak identity → exact entry position. The custom
+    /// context securely seeds bucket placement; stored identities remain the
+    /// equality authority when different hashes share a probe sequence.
+    weak_index: WeakIdentityIndex = .empty,
     /// Strong Map/Set acceleration index: seeded content/identity hash → head
     /// position in the ordered `elements` list. `coll_next` links exact-equality
     /// collision buckets by position. Neither structure contains managed
@@ -1352,6 +1383,8 @@ pub const ObjectCollectionState = struct {
     /// to make a stale cursor appear current.
     coll_layout_generation: u64 = 0,
     coll_layout_hints_disabled: bool = false,
+    /// Per-collection secure hash seed shared by strong and weak indexes (a
+    /// collection is exactly one of those kinds).
     coll_hash_seed: u64 = 0,
     coll_hash_seeded: bool = false,
     /// Exact live Map/Set entry count. Guarded by the owning object's
@@ -1957,17 +1990,25 @@ pub const Object = struct {
         return state;
     }
 
-    pub fn ensureStrongCollectionState(self: *Object, fallback: std.mem.Allocator, hash_seed: u64) std.mem.Allocator.Error!*ObjectCollectionState {
+    fn ensureHashedCollectionState(self: *Object, fallback: std.mem.Allocator, hash_seed: u64, comptime backing_field: []const u8) std.mem.Allocator.Error!*ObjectCollectionState {
         const state = try self.ensureCollectionState(fallback);
-        // Activate the shared index/serial backing once while the collection is
-        // still private. Hot insertions can then use the immutable published
-        // allocator without reacquiring backing_lock for each container.
-        _ = try self.ensureBackingFor(fallback, "coll_index");
+        // Activate the relevant index backing before publication. Hot
+        // insertions can then use the immutable allocator without reacquiring
+        // backing_lock for each container.
+        _ = try self.ensureBackingFor(fallback, backing_field);
         if (!state.coll_hash_seeded) {
             state.coll_hash_seed = hash_seed;
             state.coll_hash_seeded = true;
         }
         return state;
+    }
+
+    pub fn ensureStrongCollectionState(self: *Object, fallback: std.mem.Allocator, hash_seed: u64) std.mem.Allocator.Error!*ObjectCollectionState {
+        return self.ensureHashedCollectionState(fallback, hash_seed, "coll_index");
+    }
+
+    pub fn ensureWeakCollectionState(self: *Object, fallback: std.mem.Allocator, hash_seed: u64) std.mem.Allocator.Error!*ObjectCollectionState {
+        return self.ensureHashedCollectionState(fallback, hash_seed, "weak_entries");
     }
 
     /// Allocator for strong collection position/serial storage. Construction
@@ -3321,14 +3362,20 @@ pub const Object = struct {
         defer self.unlockElements(elements_locked_20);
         const state = try self.ensureCollectionState(fallback);
         const alloc = try self.weakEntriesAllocator(fallback);
+        const identity = weakEntryIdentity(key);
         if (self.weakEntryIndexUnlocked(key)) |i| {
             state.weak_entries.items[i].value = v;
-            self.weakIndexPut(alloc, key, i);
             return;
         }
+
+        // ECMA-262 WeakMap.prototype.set publishes the entry only after both
+        // owned containers can accept it. There is no fallible point between
+        // these reservations and the aligned list/index commit.
+        try state.weak_entries.ensureUnusedCapacity(alloc, 1);
+        try state.weak_index.ensureUnusedCapacityContext(alloc, 1, weakIdentityHashContext(state));
         const i = state.weak_entries.items.len;
-        try state.weak_entries.append(alloc, .{ .key = key, .value = v });
-        self.weakIndexPut(alloc, key, i);
+        state.weak_entries.appendAssumeCapacity(.{ .key = key, .value = v, .identity = identity });
+        state.weak_index.putAssumeCapacityNoClobberContext(identity, i, weakIdentityHashContext(state));
     }
 
     /// WeakSet `add`: append `key` if it is not already present.
@@ -3338,13 +3385,13 @@ pub const Object = struct {
         defer self.unlockElements(elements_locked_21);
         const state = try self.ensureCollectionState(fallback);
         const alloc = try self.weakEntriesAllocator(fallback);
-        if (self.weakEntryIndexUnlocked(key)) |i| {
-            self.weakIndexPut(alloc, key, i);
-            return;
-        }
+        if (self.weakEntryIndexUnlocked(key) != null) return;
+        const identity = weakEntryIdentity(key);
+        try state.weak_entries.ensureUnusedCapacity(alloc, 1);
+        try state.weak_index.ensureUnusedCapacityContext(alloc, 1, weakIdentityHashContext(state));
         const i = state.weak_entries.items.len;
-        try state.weak_entries.append(alloc, .{ .key = key });
-        self.weakIndexPut(alloc, key, i);
+        state.weak_entries.appendAssumeCapacity(.{ .key = key, .identity = identity });
+        state.weak_index.putAssumeCapacityNoClobberContext(identity, i, weakIdentityHashContext(state));
     }
 
     /// WeakMap/WeakSet `delete`: remove the entry for `key`; returns whether one
@@ -3537,36 +3584,78 @@ pub const Object = struct {
         }
     }
 
-    fn weakIndexKey(key: ?*anyopaque) usize {
-        return if (key) |ptr| @intFromPtr(ptr) else 0;
+    fn weakEntryIdentity(key: ?*anyopaque) u64 {
+        if (gc_runtime.stableCellIdentity(key)) |identity| return identity;
+        return if (key) |ptr| @intCast(@intFromPtr(ptr)) else 0;
+    }
+
+    fn weakIdentityHashContext(state: *const ObjectCollectionState) WeakIdentityHashContext {
+        // Runtime WeakMap/WeakSet insertions initialize this from secure host
+        // entropy before the first entry. Zero is retained only for direct
+        // arena-backed structural tests, where pointer identity is not exposed.
+        return .{ .seed = if (state.coll_hash_seeded) state.coll_hash_seed else 0 };
     }
 
     fn weakEntryIndexUnlocked(self: *Object, key: ?*anyopaque) ?usize {
         const state = self.collectionState() orelse return null;
-        const k = weakIndexKey(key);
-        if (state.weak_index.get(k)) |i| {
-            if (i < state.weak_entries.items.len and state.weak_entries.items[i].key == key) return i;
-        }
-        for (state.weak_entries.items, 0..) |entry, i| {
-            if (entry.key == key) return i;
-        }
-        return null;
-    }
-
-    fn weakIndexPut(self: *Object, alloc: std.mem.Allocator, key: ?*anyopaque, i: usize) void {
-        self.collectionState().?.weak_index.put(alloc, weakIndexKey(key), i) catch {};
+        const identity = weakEntryIdentity(key);
+        const i = state.weak_index.getContext(identity, weakIdentityHashContext(state)) orelse return null;
+        if (i >= state.weak_entries.items.len) return null;
+        const entry = state.weak_entries.items[i];
+        return if (entry.identity == identity and entry.key == key) i else null;
     }
 
     pub fn weakEntrySwapRemoveAtUnlocked(self: *Object, i: usize) void {
         const state = self.collectionState().?;
-        const removed_key = state.weak_entries.items[i].key;
+        const removed_identity = state.weak_entries.items[i].identity;
         const last_i = state.weak_entries.items.len - 1;
-        const moved_key = state.weak_entries.items[last_i].key;
+        const moved_identity = state.weak_entries.items[last_i].identity;
         _ = state.weak_entries.swapRemove(i);
-        _ = state.weak_index.remove(weakIndexKey(removed_key));
+        const hash_context = weakIdentityHashContext(state);
+        _ = state.weak_index.removeContext(removed_identity, hash_context);
         if (i != last_i) {
-            if (state.weak_index.getPtr(weakIndexKey(moved_key))) |slot| slot.* = i;
+            if (state.weak_index.getPtrContext(moved_identity, hash_context)) |slot| slot.* = i;
         }
+    }
+
+    /// Release dead-key high-water backing after the collector has pruned the
+    /// entry set. The replacement is built completely before publication;
+    /// allocation failure retains the old exact index and retries next cycle.
+    /// Caller holds `elements_lock` at a world-stopped weak finish.
+    pub fn maybeCompactWeakEntriesAfterPrune(self: *Object) void {
+        const state = self.collectionState() orelse return;
+        const alloc = self.backingAllocatorIfActive() orelse return;
+        const len = state.weak_entries.items.len;
+        std.debug.assert(state.weak_index.count() == len);
+        if (len == 0) {
+            state.weak_entries.clearAndFree(alloc);
+            state.weak_index.clearAndFree(alloc);
+            return;
+        }
+
+        const list_oversized = state.weak_entries.capacity >= 64 and state.weak_entries.capacity / 2 > len;
+        const index_oversized = state.weak_index.capacity() >= 64 and state.weak_index.capacity() / 2 > len;
+        if (!list_oversized and !index_oversized) return;
+
+        var entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty;
+        entries.ensureTotalCapacityPrecise(alloc, len) catch return;
+        var index: WeakIdentityIndex = .empty;
+        const hash_context = weakIdentityHashContext(state);
+        index.ensureTotalCapacityContext(alloc, @intCast(len), hash_context) catch {
+            entries.deinit(alloc);
+            return;
+        };
+        for (state.weak_entries.items, 0..) |entry, position| {
+            entries.appendAssumeCapacity(entry);
+            index.putAssumeCapacityNoClobberContext(entry.identity, position, hash_context);
+        }
+
+        var old_entries = state.weak_entries;
+        var old_index = state.weak_index;
+        state.weak_entries = entries;
+        state.weak_index = index;
+        old_entries.deinit(alloc);
+        old_index.deinit(alloc);
     }
 
     /// FinalizationRegistry `register`: append a record (the strong `held` value
@@ -6044,6 +6133,72 @@ test "WeakMap and WeakSet entry delete is unordered tail removal" {
     try std.testing.expect(o.weakEntryHas(@ptrCast(&key2)));
     try std.testing.expect(o.weakEntryHas(@ptrCast(&key3)));
     try std.testing.expectEqual(@intFromPtr(&key3), @intFromPtr(collection.weak_entries.items[0].key.?));
+}
+
+test "weak collection insertion reserves entry and authoritative index atomically" {
+    const a = std.testing.allocator;
+    for (0..2) |fail_index| {
+        var o = Object{ .is_weak = true, .is_map = true };
+        const cold = try o.ensureCold(a);
+        const collection = try o.ensureWeakCollectionState(a, 0x523);
+        defer a.destroy(o.storageState().?);
+        defer a.destroy(cold);
+        defer a.destroy(collection);
+        defer collection.weak_entries.deinit(a);
+        defer collection.weak_index.deinit(a);
+
+        var key: u8 = 1;
+        var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = fail_index });
+        try std.testing.expectError(
+            error.OutOfMemory,
+            o.weakEntrySet(failing.allocator(), @ptrCast(&key), Value.num(7)),
+        );
+        try std.testing.expectEqual(@as(usize, 0), collection.weak_entries.items.len);
+        try std.testing.expectEqual(@as(usize, 0), collection.weak_index.count());
+        try std.testing.expect(!o.weakEntryHas(@ptrCast(&key)));
+
+        try o.weakEntrySet(a, @ptrCast(&key), Value.num(9));
+        try std.testing.expectEqual(@as(f64, 9), o.weakEntryGet(@ptrCast(&key)).?.asNum());
+        try std.testing.expectEqual(@as(usize, 1), collection.weak_index.count());
+    }
+}
+
+test "weak collection shrink failure retains the exact authoritative index" {
+    const a = std.testing.allocator;
+    var o = Object{ .is_weak = true, .is_map = true };
+    var collection = ObjectCollectionState{
+        .coll_hash_seed = 0x523,
+        .coll_hash_seeded = true,
+    };
+    var cold = ObjectColdState{ .collection_state = &collection };
+    var storage = ObjectStorageState{ .owner_allocator = a };
+    storage.cold.store(&cold, .release);
+    o.storage.store(&storage, .release);
+    defer collection.weak_entries.deinit(a);
+    defer collection.weak_index.deinit(a);
+
+    var keys: [128]u8 = undefined;
+    for (&keys, 0..) |*key, index| {
+        key.* = @intCast(index);
+        try o.weakEntrySet(a, @ptrCast(key), Value.num(@floatFromInt(index)));
+    }
+    for (keys[0 .. keys.len - 1]) |*key|
+        try std.testing.expect(o.weakEntryDelete(@ptrCast(key)));
+    try std.testing.expectEqual(@as(usize, 1), collection.weak_entries.items.len);
+    const old_list_capacity = collection.weak_entries.capacity;
+    const old_index_capacity = collection.weak_index.capacity();
+
+    var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0 });
+    storage.backing_allocator = failing.allocator();
+    storage.backing_flags.allocator_active = true;
+    storage.backing_flags.weak_entries = true;
+    o.maybeCompactWeakEntriesAfterPrune();
+    storage.backing_allocator = a;
+
+    try std.testing.expectEqual(old_list_capacity, collection.weak_entries.capacity);
+    try std.testing.expectEqual(old_index_capacity, collection.weak_index.capacity());
+    try std.testing.expectEqual(@as(f64, 127), o.weakEntryGet(@ptrCast(&keys[127])).?.asNum());
+    try std.testing.expectEqual(@as(usize, 1), collection.weak_index.count());
 }
 
 test "strong collection index keeps exact collision chains through deletion" {

@@ -924,6 +924,7 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
                 i += 1;
             }
         }
+        o.maybeCompactWeakEntriesAfterPrune();
     }
     if (o.behavior.is_finalization_registry) {
         const cold = o.coldState() orelse return cleanup_ready;
@@ -951,10 +952,9 @@ pub fn relocateObjectWeakState(o: *Object, v: anytype) void {
     if (cold.hasRare(.weak_ref))
         gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.weak_ref.target);
     if (o.is_weak and (o.is_map or o.is_set)) {
-        // The pointer-keyed lookup table is only a cache; clear its old-address
-        // keys. Linear lookup remains correct and later mutations repopulate it.
+        // The authoritative index is keyed by relocation-stable cell identity,
+        // so only the weak entry pointer/value edges need rewriting.
         if (cold.collection_state) |collection| {
-            collection.weak_index.clearRetainingCapacity();
             for (collection.weak_entries.items) |*entry| {
                 gc_relocation.rewriteOptionalSlot(v, anyopaque, &entry.key);
                 gc_relocation.rewriteValueSlot(v, &entry.value);
@@ -1077,7 +1077,7 @@ test "weak and finalization relocation never resolves dead targets" {
     const weak_entry = weak_map.collectionState().?.weak_entries.items[0];
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[1])), weak_entry.key.?);
     try std.testing.expectEqual(&new_objects[2], weak_entry.value.asObj());
-    try std.testing.expectEqual(@as(usize, 0), weak_map.collectionState().?.weak_index.count());
+    try std.testing.expectEqual(@as(usize, 1), weak_map.collectionState().?.weak_index.count());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[3])), records.items[0].target.?);
     try std.testing.expectEqual(&new_objects[4], records.items[0].held.asObj());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[5])), records.items[0].token.?);
@@ -2999,7 +2999,7 @@ fn verifyObjectWeakRelocation(o: *Object, v: anytype) void {
     const cold = o.coldState() orelse return;
     if (o.is_weak and (o.is_map or o.is_set)) {
         if (cold.collection_state) |collection| {
-            std.debug.assert(collection.weak_index.count() == 0);
+            std.debug.assert(collection.weak_index.count() == collection.weak_entries.items.len);
             for (collection.weak_entries.items) |entry| {
                 v.mark(entry.key);
                 markValue(v, entry.value);
@@ -4113,6 +4113,42 @@ fn installActiveRealm(heap: *Heap, realm: *ContextMod.Context) void {
     } });
 }
 
+threadlocal var stable_identity_range_heap: ?*anyopaque = null;
+threadlocal var stable_identity_range_epoch: u64 = 0;
+threadlocal var stable_identity_range_start: usize = 0;
+threadlocal var stable_identity_range_end: usize = 0;
+threadlocal var stable_identity_range_slot_size: usize = 0;
+
+fn stableIdentityThunk(raw: *anyopaque, cell: ?*anyopaque, epoch: u64) ?u64 {
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    const pointer = cell orelse return null;
+    const backing = heap.ctx.context.gc_cell_backing.?;
+    const header_stride = std.mem.alignForward(usize, @sizeOf(Heap.Header), 16);
+    const header_address = @intFromPtr(pointer) - header_stride;
+    if (epoch != std.math.maxInt(u64) and stable_identity_range_heap == raw and stable_identity_range_epoch == epoch and
+        header_address >= stable_identity_range_start and header_address < stable_identity_range_end and
+        (header_address - stable_identity_range_start) % stable_identity_range_slot_size == 0)
+    {
+        const header: *Heap.Header = @ptrFromInt(header_address);
+        return @backingInt(header.stable_id);
+    }
+
+    const metadata = heap.cellMetadata(pointer) orelse return null;
+    if (epoch != std.math.maxInt(u64)) if (backing.stableIdentityRange(@ptrFromInt(header_address))) |range| {
+        stable_identity_range_heap = raw;
+        stable_identity_range_epoch = epoch;
+        stable_identity_range_start = range.start;
+        stable_identity_range_end = range.end;
+        stable_identity_range_slot_size = range.slot_size;
+    };
+    return @backingInt(metadata.id);
+}
+
+fn stableIdentityEpochThunk(raw: *anyopaque) u64 {
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    return heap.ctx.context.gc_cell_backing.?.stableIdentityEpoch();
+}
+
 /// Install `h` as this thread's active heap, returning the previous value (so
 /// nested entry points can restore it). Pass null for the arena engine.
 pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
@@ -4127,12 +4163,14 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
             .create_owned = allocManagedStringOwned,
         });
         _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk);
+        _ = gc_runtime.setStableIdentity(raw, stableIdentityThunk, stableIdentityEpochThunk);
     } else {
         active_realm_context = null;
         active_realm_id = ContextMod.GcCellBacking.no_realm;
         _ = strcell.setActiveManagedFactory(null);
         _ = gc_runtime.setActive(.{});
         _ = gc_runtime.setBarrier(null, null, null);
+        _ = gc_runtime.setStableIdentity(null, null, null);
     }
     return prev;
 }
@@ -4252,9 +4290,7 @@ pub fn temporaryAllocator(fallback: std.mem.Allocator) std.mem.Allocator {
 /// collection is world-stopped and concurrent marking never reclaims cells.
 /// Arena/static objects return null and use their lifetime-stable address.
 pub fn stableCellIdentity(cell: ?*anyopaque) ?u64 {
-    const raw = active_heap orelse return null;
-    const heap: *Heap = @ptrCast(@alignCast(raw));
-    return if (heap.cellMetadata(cell)) |metadata| @intFromEnum(metadata.id) else null;
+    return gc_runtime.stableCellIdentity(cell);
 }
 
 /// Install the interpreter currently executing JS on this thread. Allocation

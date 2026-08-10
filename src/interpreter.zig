@@ -10384,6 +10384,11 @@ pub const Interpreter = struct {
         _ = try o.ensureStrongCollectionState(self.arena, try self.newCollectionHashSeed());
     }
 
+    pub fn prepareWeakCollection(self: *Interpreter, o: *value.Object) EvalError!void {
+        if (o.collHashSeed() != null) return;
+        _ = try o.ensureWeakCollectionState(self.arena, try self.newCollectionHashSeed());
+    }
+
     fn noteWeakWork(self: *Interpreter) void {
         if (self.gc_weak_work) |flag| flag.store(true, .release);
     }
@@ -10506,6 +10511,7 @@ pub const Interpreter = struct {
             // weak_entries access goes through the elements_lock'd helpers so a
             // concurrent GC marker reading them never races an append/remove.
             if (eq(name, "set")) {
+                try self.prepareWeakCollection(o);
                 try o.weakEntrySet(self.arena, key_obj, arg(args, 1));
                 return self_v;
             }
@@ -10528,6 +10534,7 @@ pub const Interpreter = struct {
                 // The callback runs with no lock held (it may re-enter the map);
                 // the upsert then keeps existing-entry-wins semantics.
                 const v = if (eq(name, "getOrInsertComputed")) try self.callValue(cb, &.{key}) else arg(args, 1);
+                try self.prepareWeakCollection(o);
                 try o.weakEntrySet(self.arena, key_obj, v);
                 return v;
             }
@@ -10687,6 +10694,7 @@ pub const Interpreter = struct {
             const key_obj = weakKeyPtr(key);
             // elements_lock'd helpers — race-free against a concurrent GC marker.
             if (eq(name, "add")) {
+                try self.prepareWeakCollection(o);
                 try o.weakEntryAdd(self.arena, key_obj);
                 return self_v;
             }

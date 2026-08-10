@@ -75,6 +75,15 @@ const BarrierFn = *const fn (*anyopaque, ?*anyopaque, ?*anyopaque) void;
 const WeakBarrierFn = *const fn (*anyopaque, ?*anyopaque) void;
 threadlocal var barrier_fn: ?BarrierFn = null;
 threadlocal var weak_barrier_fn: ?WeakBarrierFn = null;
+const StableIdentityFn = *const fn (*anyopaque, ?*anyopaque, u64) ?u64;
+const StableIdentityEpochFn = *const fn (*anyopaque) u64;
+threadlocal var stable_identity_context: ?*anyopaque = null;
+threadlocal var stable_identity_fn: ?StableIdentityFn = null;
+threadlocal var stable_identity_epoch_fn: ?StableIdentityEpochFn = null;
+threadlocal var stable_identity_cached_context: ?*anyopaque = null;
+threadlocal var stable_identity_cached_cell: ?*anyopaque = null;
+threadlocal var stable_identity_cached_epoch: u64 = 0;
+threadlocal var stable_identity_cached_value: u64 = 0;
 
 /// Install (or clear) the active heap's write-barrier thunk for this thread.
 /// Returns the previous (heap, fn) so nested entry points can restore it.
@@ -84,6 +93,75 @@ pub fn setBarrier(heap: ?*anyopaque, f: ?BarrierFn, weak_f: ?WeakBarrierFn) stru
     barrier_fn = f;
     weak_barrier_fn = weak_f;
     return prev;
+}
+
+/// Install relocation-stable cell identity lookup beside the active heap.
+/// Value-level containers import this acyclic shim rather than `gc.zig`.
+pub fn setStableIdentity(context: ?*anyopaque, f: ?StableIdentityFn, epoch_f: ?StableIdentityEpochFn) struct { ?*anyopaque, ?StableIdentityFn, ?StableIdentityEpochFn } {
+    const prev = .{ stable_identity_context, stable_identity_fn, stable_identity_epoch_fn };
+    stable_identity_context = context;
+    stable_identity_fn = f;
+    stable_identity_epoch_fn = epoch_f;
+    stable_identity_cached_context = null;
+    stable_identity_cached_cell = null;
+    stable_identity_cached_epoch = 0;
+    stable_identity_cached_value = 0;
+    return prev;
+}
+
+/// Stable identity for a managed cell, or null for arena/static storage.
+pub inline fn stableCellIdentity(cell: ?*anyopaque) ?u64 {
+    const pointer = cell orelse return null;
+    const context = stable_identity_context orelse return null;
+    const f = stable_identity_fn orelse return null;
+    const epoch_f = stable_identity_epoch_fn orelse return f(context, pointer, 0);
+    const epoch = epoch_f(context);
+    if (epoch == std.math.maxInt(u64)) return f(context, pointer, epoch);
+    if (stable_identity_cached_context == context and
+        stable_identity_cached_cell == pointer and
+        stable_identity_cached_epoch == epoch)
+        return stable_identity_cached_value;
+    const identity = f(context, pointer, epoch) orelse return null;
+    stable_identity_cached_context = context;
+    stable_identity_cached_cell = pointer;
+    stable_identity_cached_epoch = epoch;
+    stable_identity_cached_value = identity;
+    return identity;
+}
+
+test "stable identity cache follows the provider reuse epoch" {
+    const Provider = struct {
+        epoch: u64 = 1,
+        identity: u64 = 11,
+        calls: usize = 0,
+
+        fn lookup(raw: *anyopaque, _: ?*anyopaque, _: u64) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return self.identity;
+        }
+
+        fn currentEpoch(raw: *anyopaque) u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.epoch;
+        }
+    };
+    var provider = Provider{};
+    var cell: u8 = 0;
+    _ = setStableIdentity(&provider, Provider.lookup, Provider.currentEpoch);
+    defer _ = setStableIdentity(null, null, null);
+    try std.testing.expectEqual(@as(?u64, 11), stableCellIdentity(&cell));
+    try std.testing.expectEqual(@as(?u64, 11), stableCellIdentity(&cell));
+    try std.testing.expectEqual(@as(usize, 1), provider.calls);
+    provider.identity = 12;
+    provider.epoch += 1;
+    try std.testing.expectEqual(@as(?u64, 12), stableCellIdentity(&cell));
+    try std.testing.expectEqual(@as(usize, 2), provider.calls);
+    provider.identity = 13;
+    provider.epoch = std.math.maxInt(u64);
+    try std.testing.expectEqual(@as(?u64, 13), stableCellIdentity(&cell));
+    try std.testing.expectEqual(@as(?u64, 13), stableCellIdentity(&cell));
+    try std.testing.expectEqual(@as(usize, 4), provider.calls);
 }
 
 /// Shade `cell` grey if the active heap is incrementally marking. Safe to call

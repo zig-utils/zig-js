@@ -962,6 +962,11 @@ pub const GcCellBacking = struct {
         end: usize,
         chunk_idx: usize,
     };
+    pub const StableIdentityRange = struct {
+        start: usize,
+        end: usize,
+        slot_size: usize,
+    };
     pub const Stats = struct {
         chunks: usize = 0,
         capacity_bytes: usize = 0,
@@ -1060,6 +1065,9 @@ pub const GcCellBacking = struct {
     /// scanning the other exact ranges. Atomic because parallel marking can
     /// classify cells concurrently with mutators allocating private cells.
     owned_bucket_hint: std.atomic.Value(u8) = .init(bucket_count),
+    /// Invalidates thread-local stable-identity hits before a reclaimed or
+    /// relocated slab address can name a different cell.
+    stable_identity_epoch: std.atomic.Value(u64) = .init(1),
     bucket_addr_min: [bucket_count]usize = .{
         std.math.maxInt(usize),
         std.math.maxInt(usize),
@@ -1322,6 +1330,50 @@ pub const GcCellBacking = struct {
         return false;
     }
 
+    /// Return the exact still-published slab range containing one validated
+    /// cell header. Callers may cache this geometry only with
+    /// `stableIdentityEpoch`; unpublication/relocation advances that epoch
+    /// before an address can be reused.
+    pub fn stableIdentityRange(self: *GcCellBacking, allocation: *anyopaque) ?StableIdentityRange {
+        const ptr: [*]u8 = @ptrCast(allocation);
+        const hint_idx: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
+        if (hint_idx < bucket_count) {
+            self.acquireBucket(hint_idx);
+            const chunk_idx = self.ownedChunkIndexLocked(hint_idx, ptr);
+            const published = chunk_idx != null and self.publishedSlotLocked(hint_idx, ptr);
+            const range = if (published) blk: {
+                const chunk = self.bucket_chunks[hint_idx].items[chunk_idx.?];
+                break :blk StableIdentityRange{
+                    .start = @intFromPtr(chunk.ptr),
+                    .end = @intFromPtr(chunk.ptr) + chunk.len,
+                    .slot_size = bucket_sizes[hint_idx],
+                };
+            } else null;
+            self.unlockBucket(hint_idx);
+            if (range) |result| return result;
+        }
+        for (0..bucket_count) |idx| {
+            if (idx == hint_idx) continue;
+            self.acquireBucket(idx);
+            const chunk_idx = self.ownedChunkIndexLocked(idx, ptr);
+            const published = chunk_idx != null and self.publishedSlotLocked(idx, ptr);
+            const range = if (published) blk: {
+                const chunk = self.bucket_chunks[idx].items[chunk_idx.?];
+                break :blk StableIdentityRange{
+                    .start = @intFromPtr(chunk.ptr),
+                    .end = @intFromPtr(chunk.ptr) + chunk.len,
+                    .slot_size = bucket_sizes[idx],
+                };
+            } else null;
+            self.unlockBucket(idx);
+            if (range) |result| {
+                self.owned_bucket_hint.store(@intCast(idx), .monotonic);
+                return result;
+            }
+        }
+        return null;
+    }
+
     fn classifyInteriorInBucketLocked(self: *GcCellBacking, idx: usize, address: usize) ?@import("gc").InteriorOwnership {
         if (address < self.bucket_addr_min[idx] or address >= self.bucket_addr_max[idx]) return null;
         const entry = self.findChunkAddrLocked(idx, address) orelse return null;
@@ -1468,6 +1520,22 @@ pub const GcCellBacking = struct {
 
     pub fn unpublishCellAllocation(self: *GcCellBacking, allocation: *anyopaque, total: usize) void {
         self.setCellPublished(total, allocation, false, no_realm);
+        self.advanceStableIdentityEpoch();
+    }
+
+    pub inline fn stableIdentityEpoch(self: *const GcCellBacking) u64 {
+        return @constCast(&self.stable_identity_epoch).load(.acquire);
+    }
+
+    fn advanceStableIdentityEpoch(self: *GcCellBacking) void {
+        var current = self.stable_identity_epoch.load(.monotonic);
+        while (current != std.math.maxInt(u64)) {
+            if (self.stable_identity_epoch.cmpxchgWeak(current, current + 1, .release, .monotonic)) |observed| {
+                current = observed;
+            } else return;
+        }
+        // Saturation permanently disables identity caches rather than letting
+        // a wrapped epoch validate an address that has since been reused.
     }
 
     fn realmIdForAddressInBucketLocked(self: *GcCellBacking, idx: usize, address: usize) RealmId {
@@ -1680,6 +1748,7 @@ pub const GcCellBacking = struct {
         self.setCellPublishedLocked(idx, old, false, no_realm);
         self.setCellPublishedLocked(idx, new, true, realm_id);
         std.debug.assert(self.freeOwnedSlotLocked(idx, old_ptr));
+        self.advanceStableIdentityEpoch();
     }
 
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
@@ -17487,6 +17556,11 @@ test "GC compaction is fail-closed, rewrites a protected graph, and reaches a de
     try std.testing.expect(backing_after_first.chunks < backing_before.chunks);
     try std.testing.expect(backing_after_first.capacity_bytes < backing_before.capacity_bytes);
     try std.testing.expectEqual(backing_before.live_slots, backing_after_first.live_slots);
+    const moved_weak_map = ctx.global_object.getOwn("compactWeakMap").?.asObj().collectionState().?;
+    const moved_weak_set = ctx.global_object.getOwn("compactWeakSet").?.asObj().collectionState().?;
+    try std.testing.expectEqual(@as(usize, 1), moved_weak_map.weak_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), moved_weak_map.weak_index.count());
+    try std.testing.expectEqual(@as(usize, 1), moved_weak_set.weak_index.count());
 
     const first_root_address = @intFromPtr(first_root);
     const second = ctx.compactGarbage();
@@ -22689,6 +22763,57 @@ test "parallel_js: Map iterator cursor advances atomically without GIL" {
     try std.testing.expect(result.asBool());
 }
 
+test "parallel_js: WeakMap and WeakSet identity indexes serialize disjoint mutation" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\if ($vm.useThreadGIL() !== false) throw new Error("parallel_js did not drop the thread GIL");
+        \\const weakKeys = [];
+        \\const weakMap = new WeakMap();
+        \\const weakSet = new WeakSet();
+        \\for (let i = 0; i < 512; i++) {
+        \\  const key = (i & 1) === 0 ? { index: i } : Symbol("parallel-weak:" + i);
+        \\  weakKeys.push(key);
+        \\  weakMap.set(key, i);
+        \\  weakSet.add(key);
+        \\}
+        \\function mutateWeakLane(lane) {
+        \\  for (let i = lane; i < weakKeys.length; i += 4) {
+        \\    const key = weakKeys[i];
+        \\    for (let round = 0; round < 8; round++) {
+        \\      weakMap.set(key, i + round);
+        \\      weakSet.add(key);
+        \\      if (weakMap.get(key) !== i + round || !weakMap.has(key) || !weakSet.has(key)) return false;
+        \\      if (round === 3) {
+        \\        if (!weakMap.delete(key) || weakMap.has(key)) return false;
+        \\        if (!weakSet.delete(key) || weakSet.has(key)) return false;
+        \\        weakMap.set(key, i + round);
+        \\        weakSet.add(key);
+        \\      }
+        \\    }
+        \\  }
+        \\  return true;
+        \\}
+        \\const threads = [];
+        \\for (let lane = 0; lane < 4; lane++) threads.push(new Thread(mutateWeakLane, lane));
+        \\for (const thread of threads) if (thread.join() !== true) throw new Error("weak worker failed");
+        \\let checksum = 0;
+        \\for (let i = 0; i < weakKeys.length; i++) {
+        \\  if (weakMap.get(weakKeys[i]) !== i + 7 || !weakSet.has(weakKeys[i])) throw new Error("weak result drift");
+        \\  checksum += weakMap.get(weakKeys[i]);
+        \\}
+        \\checksum
+    );
+    try std.testing.expectEqual(@as(f64, 134_400), result.asNum());
+}
+
 test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -22791,7 +22916,16 @@ test "parallel_js moving nursery copies survivors at a shared exact rendezvous" 
     const heap = ctx.gc.?;
     heap.nursery_threshold_bytes = 1024 * 1024;
     _ = try ctx.evaluate(
-        "globalThis.movingNurseryWitness = { marker: 365, child: { live: true } };",
+        \\globalThis.movingNurseryWitness = { marker: 365, child: { live: true } };
+        \\globalThis.movingNurseryWeakKeys = [];
+        \\globalThis.movingNurseryWeakMap = new WeakMap();
+        \\globalThis.movingNurseryWeakSet = new WeakSet();
+        \\for (let i = 0; i < 256; i++) {
+        \\  const key = (i & 1) === 0 ? { index: i } : Symbol("moving-nursery:" + i);
+        \\  movingNurseryWeakKeys.push(key);
+        \\  movingNurseryWeakMap.set(key, i * 3);
+        \\  movingNurseryWeakSet.add(key);
+        \\}
     );
     const handle = try ctx.protectValue(ctx.global_object.getOwn("movingNurseryWitness").?);
     defer std.debug.assert(ctx.unprotectValue(handle));
@@ -22828,6 +22962,18 @@ test "parallel_js moving nursery copies survivors at a shared exact rendezvous" 
     try std.testing.expect(vm.optimizerOsrEntriesForTesting() > osr_before);
     try std.testing.expect(witness_before != @intFromPtr(handle.get().asObj()));
     try std.testing.expectEqual(@as(f64, 365), handle.get().asObj().getOwn("marker").?.asNum());
+    const weak_result = try ctx.evaluate(
+        \\let movingWeakChecksum = 0;
+        \\for (let i = 0; i < movingNurseryWeakKeys.length; i++) {
+        \\  const key = movingNurseryWeakKeys[i];
+        \\  if (!movingNurseryWeakMap.has(key) || !movingNurseryWeakSet.has(key)) throw new Error("moved weak key missing");
+        \\  movingWeakChecksum += movingNurseryWeakMap.get(key);
+        \\}
+        \\movingWeakChecksum
+    );
+    try std.testing.expectEqual(@as(f64, 97_920), weak_result.asNum());
+    const moving_weak_state = ctx.global_object.getOwn("movingNurseryWeakMap").?.asObj().collectionState().?;
+    try std.testing.expectEqual(@as(usize, 256), moving_weak_state.weak_index.count());
     try std.testing.expect(!ctx.gc_moving_checkpoint_requested.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
@@ -25925,6 +26071,57 @@ test "enable_gc: WeakMap value is live only while weak key is live" {
     ctx.collectGarbage();
     const cleared = try ctx.evaluate("globalThis.valueRef.deref() === undefined");
     try std.testing.expectEqual(true, cleared.asBool());
+}
+
+test "enable_gc: weak collection pruning releases historical entry and index capacity" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\(() => {
+        \\  globalThis.weakCapacityKeys = [];
+        \\  globalThis.weakCapacityMap = new WeakMap();
+        \\  globalThis.weakCapacitySet = new WeakSet();
+        \\  for (let i = 0; i < 512; i++) {
+        \\    const key = { index: i };
+        \\    weakCapacityKeys.push(key);
+        \\    weakCapacityMap.set(key, i);
+        \\    weakCapacitySet.add(key);
+        \\  }
+        \\})();
+        \\0
+    );
+    ctx.collectGarbage();
+    const map_before = ctx.global_object.getOwn("weakCapacityMap").?.asObj().collectionState().?;
+    const set_before = ctx.global_object.getOwn("weakCapacitySet").?.asObj().collectionState().?;
+    try std.testing.expectEqual(@as(usize, 512), map_before.weak_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 512), map_before.weak_index.count());
+    try std.testing.expectEqual(@as(usize, 512), set_before.weak_index.count());
+
+    _ = try ctx.evaluate("weakCapacityKeys = [weakCapacityKeys[511]]; 0");
+    ctx.collectGarbage();
+    const map_one = ctx.global_object.getOwn("weakCapacityMap").?.asObj().collectionState().?;
+    const set_one = ctx.global_object.getOwn("weakCapacitySet").?.asObj().collectionState().?;
+    try std.testing.expectEqual(@as(usize, 1), map_one.weak_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), map_one.weak_index.count());
+    try std.testing.expect(map_one.weak_entries.capacity <= 2);
+    try std.testing.expect(map_one.weak_index.capacity() <= 16);
+    try std.testing.expect(set_one.weak_entries.capacity <= 2);
+    try std.testing.expect(set_one.weak_index.capacity() <= 16);
+    const survivor = try ctx.evaluate(
+        "weakCapacityMap.get(weakCapacityKeys[0]) === 511 && weakCapacitySet.has(weakCapacityKeys[0])",
+    );
+    try std.testing.expect(survivor.asBool());
+
+    _ = try ctx.evaluate("weakCapacityKeys = undefined; 0");
+    ctx.collectGarbage();
+    const map_empty = ctx.global_object.getOwn("weakCapacityMap").?.asObj().collectionState().?;
+    const set_empty = ctx.global_object.getOwn("weakCapacitySet").?.asObj().collectionState().?;
+    try std.testing.expectEqual(@as(usize, 0), map_empty.weak_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), map_empty.weak_entries.capacity);
+    try std.testing.expectEqual(@as(usize, 0), map_empty.weak_index.capacity());
+    try std.testing.expectEqual(@as(usize, 0), set_empty.weak_entries.capacity);
+    try std.testing.expectEqual(@as(usize, 0), set_empty.weak_index.capacity());
 }
 
 test "enable_gc: WeakSet does not keep value alive" {
