@@ -1226,6 +1226,9 @@ pub const ObjectRareState = union(ObjectRareTag) {
         /// collection may compact tombstones without invalidating iterators.
         source: Value = Value.undef(),
         next_serial: u64 = 0,
+        next_pos: usize = 0,
+        layout_generation: u64 = 0,
+        layout_hint_valid: bool = false,
         kind: u8 = 0,
         done: bool = false,
     },
@@ -1344,6 +1347,11 @@ pub const ObjectCollectionState = struct {
     /// tombstone compaction and are never reset by `clear()`.
     coll_serials: std.ArrayListUnmanaged(u64) = .empty,
     coll_next_serial: u64 = 0,
+    /// Physical cursor hints are valid only within one layout generation.
+    /// Saturation disables hints permanently rather than permitting wraparound
+    /// to make a stale cursor appear current.
+    coll_layout_generation: u64 = 0,
+    coll_layout_hints_disabled: bool = false,
     coll_hash_seed: u64 = 0,
     coll_hash_seeded: bool = false,
     /// Exact live Map/Set entry count. Guarded by the owning object's
@@ -3439,6 +3447,31 @@ pub const Object = struct {
         }
         return if (lo < state.coll_serials.items.len) lo else null;
     }
+    /// Starting physical position for a logical cursor. Sequential iteration
+    /// reuses its O(1) hint while the layout is unchanged; clear/compaction
+    /// invalidates the hint and pays one O(log n) serial lookup.
+    pub fn collCursorStart(self: *Object, serial: u64, hint: usize, known_generation: ?u64) usize {
+        const state = self.collectionState().?;
+        if (!state.coll_layout_hints_disabled and known_generation != null and
+            known_generation.? == state.coll_layout_generation)
+            return @min(hint, state.coll_serials.items.len);
+        return self.collCursorPosition(serial) orelse state.coll_serials.items.len;
+    }
+    /// Current layout generation, or null after impossible-in-practice counter
+    /// saturation forces conservative logical lookups forever.
+    pub fn collLayoutGeneration(self: *Object) ?u64 {
+        const state = self.collectionState().?;
+        return if (state.coll_layout_hints_disabled) null else state.coll_layout_generation;
+    }
+    /// Caller holds `elements_lock` and has completed a physical layout change.
+    pub fn collRecordLayoutChange(self: *Object) void {
+        const state = self.collectionState().?;
+        if (state.coll_layout_generation == std.math.maxInt(u64)) {
+            state.coll_layout_hints_disabled = true;
+        } else {
+            state.coll_layout_generation += 1;
+        }
+    }
     /// Serial at an ordered position returned by `collCursorPosition`.
     /// Caller holds `elements_lock`.
     pub fn collSerialAt(self: *Object, pos: usize) u64 {
@@ -3480,6 +3513,7 @@ pub const Object = struct {
             state.coll_serials.clearAndFree(alloc);
             state.coll_live_count = 0;
             state.coll_unindexed = false;
+            self.collRecordLayoutChange();
             // Do not reset coll_next_serial: an iterator that has not yet
             // become done must observe entries appended after clear().
         }

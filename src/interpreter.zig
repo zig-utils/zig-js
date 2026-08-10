@@ -10584,14 +10584,19 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             if (!cb.isCallable()) return self.throwError("TypeError", "Map.prototype.forEach callback is not callable");
             var next_serial: u64 = 0;
+            var next_pos: usize = 0;
+            var layout_generation: ?u64 = null;
             while (true) {
                 var found = false;
                 var entry_key: Value = Value.undef();
                 var entry_value: Value = Value.undef();
                 const elements_locked_5 = o.lockElements();
-                while (o.collCursorPosition(next_serial)) |pos| {
+                var pos = o.collCursorStart(next_serial, next_pos, layout_generation);
+                layout_generation = o.collLayoutGeneration();
+                while (pos < o.elementsItems().len) : (pos += 1) {
                     const serial = o.collSerialAt(pos);
                     next_serial = serial + 1;
+                    next_pos = pos + 1;
                     const entry = liveMapEntry(o.elementsItems()[pos]) orelse continue;
                     entry_key = entry.elementAt(0) orelse Value.undef();
                     entry_value = mapEntryValue(entry);
@@ -10733,12 +10738,17 @@ pub const Interpreter = struct {
             const cb = arg0(args);
             if (!cb.isCallable()) return self.throwError("TypeError", "Set.prototype.forEach callback is not callable");
             var next_serial: u64 = 0;
+            var next_pos: usize = 0;
+            var layout_generation: ?u64 = null;
             while (true) {
                 var live_entry: ?Value = null;
                 const elements_locked_10 = o.lockElements();
-                while (o.collCursorPosition(next_serial)) |pos| {
+                var pos = o.collCursorStart(next_serial, next_pos, layout_generation);
+                layout_generation = o.collLayoutGeneration();
+                while (pos < o.elementsItems().len) : (pos += 1) {
                     const serial = o.collSerialAt(pos);
                     next_serial = serial + 1;
+                    next_pos = pos + 1;
                     live_entry = liveSetEntry(o.elementsItems()[pos]) orelse continue;
                     break;
                 }
@@ -31862,10 +31872,12 @@ fn maybeCompactStrongCollection(o: *value.Object, arena: std.mem.Allocator) void
         state.coll_index.clearAndFree(alloc);
         state.coll_next.clearAndFree(alloc);
         state.coll_unindexed = false;
+        o.collRecordLayoutChange();
         return;
     }
     trimCollectionListCapacity(&o.elementsState().?.list, alloc);
     trimCollectionListCapacity(&state.coll_serials, alloc);
+    o.collRecordLayoutChange();
 
     if (state.coll_unindexed) return;
     state.coll_index.clearRetainingCapacity();
@@ -32008,12 +32020,24 @@ fn collectionCursorIterNext(self: *Interpreter, iterator: *value.Object) value.H
     is_map = collection.is_map;
     const source_elements_locked = collection.lockElements();
     var search_serial = cursor.next_serial;
-    while (collection.collCursorPosition(search_serial)) |pos| {
+    var pos = collection.collCursorStart(
+        search_serial,
+        cursor.next_pos,
+        if (cursor.layout_hint_valid) cursor.layout_generation else null,
+    );
+    if (collection.collLayoutGeneration()) |generation| {
+        cursor.layout_generation = generation;
+        cursor.layout_hint_valid = true;
+    } else {
+        cursor.layout_hint_valid = false;
+    }
+    while (pos < collection.elementsItems().len) : (pos += 1) {
         const serial = collection.collSerialAt(pos);
         // Insertions reject maxInt(u64), so increment cannot wrap and every
         // tombstone consumes cursor progress exactly once.
         search_serial = serial + 1;
         cursor.next_serial = search_serial;
+        cursor.next_pos = pos + 1;
         if (is_map) {
             const entry = liveMapEntry(collection.elementsItems()[pos]) orelse continue;
             entry_key = entry.elementAt(0) orelse Value.undef();
