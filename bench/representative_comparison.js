@@ -65,6 +65,31 @@ function representativeJson(jobs, lane, variant) {
   return total;
 }
 
+// Callback-observable JSON.parse source metadata. A wide primitive array makes
+// per-property metadata lookup cost visible without conflating the row with
+// nesting limits or user callback work.
+function representativeJsonReviverSource(jobs, lane) {
+  var width = 8192;
+  var chunks = ["["];
+  for (var i = 0; i < width; i = i + 1)
+    chunks.push((i === 0 ? "" : ",") + String(i + lane));
+  chunks.push("]");
+  var encoded = chunks.join("");
+  var total = 0;
+  function sourceReviver(key, current, context) {
+    if (key !== "") {
+      if (context.source === undefined) throw new Error("missing JSON source context");
+      total = total + current + context.source.length;
+    }
+    return current;
+  }
+  for (var job = 0; job < jobs; job = job + 1) {
+    var parsed = JSON.parse(encoded, sourceReviver);
+    total = total + parsed.length + parsed[(job * 17 + lane) & (width - 1)];
+  }
+  return total;
+}
+
 function representativeCollections(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -412,6 +437,7 @@ function benchmarkFunction(name) {
   if (name === "representative_regexp_variant") return function (jobs, lane) { return representativeRegExp(jobs, lane, 1); };
   if (name === "representative_json") return function (jobs, lane) { return representativeJson(jobs, lane, 0); };
   if (name === "representative_json_variant") return function (jobs, lane) { return representativeJson(jobs, lane, 1); };
+  if (name === "representative_json_reviver_source") return representativeJsonReviverSource;
   if (name === "representative_collections") return function (jobs, lane) { return representativeCollections(jobs, lane, 0); };
   if (name === "representative_collections_variant") return function (jobs, lane) { return representativeCollections(jobs, lane, 1); };
   if (name === "representative_strong_identity_collections") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 0); };
