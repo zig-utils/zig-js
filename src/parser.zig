@@ -54,6 +54,9 @@ pub const Parser = struct {
     tokens: []Token,
     pos: usize = 0,
     arena: std.mem.Allocator,
+    /// Freeable backing for invocation-local indexes. AST nodes, tokens, and
+    /// source-derived names remain arena-owned; scratch tables never own keys.
+    scratch_allocator: std.mem.Allocator,
     /// The original source text, so function definitions can capture their exact
     /// source span for `Function.prototype.toString`.
     source: []const u8 = "",
@@ -182,10 +185,19 @@ pub const Parser = struct {
 
     pub fn init(arena: std.mem.Allocator, source: []const u8) ParseError!Parser {
         var ignored: ?SourceLocation = null;
-        return initWithDiagnostic(arena, source, &ignored);
+        return initWithScratchDiagnostic(arena, arena, source, &ignored);
+    }
+
+    pub fn initWithScratch(arena: std.mem.Allocator, scratch_allocator: std.mem.Allocator, source: []const u8) ParseError!Parser {
+        var ignored: ?SourceLocation = null;
+        return initWithScratchDiagnostic(arena, scratch_allocator, source, &ignored);
     }
 
     pub fn initWithDiagnostic(arena: std.mem.Allocator, source: []const u8, diagnostic: *?SourceLocation) ParseError!Parser {
+        return initWithScratchDiagnostic(arena, arena, source, diagnostic);
+    }
+
+    pub fn initWithScratchDiagnostic(arena: std.mem.Allocator, scratch_allocator: std.mem.Allocator, source: []const u8, diagnostic: *?SourceLocation) ParseError!Parser {
         diagnostic.* = null;
         var lx = lex.Lexer.init(arena, source);
         var list: std.ArrayListUnmanaged(Token) = .empty;
@@ -197,7 +209,7 @@ pub const Parser = struct {
             try list.append(arena, t);
             if (t.kind == .eof) break;
         }
-        return .{ .tokens = list.items, .arena = arena, .source = source };
+        return .{ .tokens = list.items, .arena = arena, .scratch_allocator = scratch_allocator, .source = source };
     }
 
     /// Source slice from the start position of the token at `start_pos` through
@@ -2094,12 +2106,13 @@ pub const Parser = struct {
     /// `eval`/`arguments`, or any duplicate parameter name, is a SyntaxError.
     fn validateStrictParams(self: *Parser, params: []const ast.Param) ParseError!void {
         var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(self.scratch_allocator);
         for (params) |p| {
             if (p.pattern != null) continue;
             if (std.mem.eql(u8, p.name, "eval") or std.mem.eql(u8, p.name, "arguments"))
                 return ParseError.UnexpectedToken;
             if (isStrictReservedBinding(p.name)) return ParseError.UnexpectedToken;
-            const entry = try seen.getOrPut(self.arena, p.name);
+            const entry = try seen.getOrPut(self.scratch_allocator, p.name);
             if (entry.found_existing) return ParseError.UnexpectedToken;
         }
     }
@@ -3014,7 +3027,7 @@ pub const Parser = struct {
                 lit = .empty;
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
-                var sub = try Parser.init(self.arena, raw[expr_start..expr_end]);
+                var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
                 // A `${ }` substitution inherits the enclosing parsing context, so
                 // `yield`/`await`/`#x`/strict-mode keywords are recognized inside a
                 // template in a generator/async/class/strict/module body.
@@ -3063,7 +3076,7 @@ pub const Parser = struct {
                 span_invalid = false;
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
-                var sub = try Parser.init(self.arena, raw[expr_start..expr_end]);
+                var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
                 // A `${ }` substitution inherits the enclosing parsing context, so
                 // `yield`/`await`/`#x`/strict-mode keywords are recognized inside a
                 // template in a generator/async/class/strict/module body.
@@ -4334,13 +4347,13 @@ test "parser validates wide strict parameter lists without changing duplicate se
         try source.appendSlice(a, try std.fmt.allocPrint(a, "parameter{d}", .{index}));
     }
     try source.appendSlice(a, "){\"use strict\";return 7;}");
-    var wide = try Parser.init(a, source.items);
+    var wide = try Parser.initWithScratch(a, std.testing.allocator, source.items);
     _ = try wide.parseProgram();
 
-    var strict_duplicate = try Parser.init(a, "function duplicate(first, second, first) { \"use strict\"; }");
+    var strict_duplicate = try Parser.initWithScratch(a, std.testing.allocator, "function duplicate(first, second, first) { \"use strict\"; }");
     try std.testing.expectError(ParseError.UnexpectedToken, strict_duplicate.parseProgram());
 
-    var sloppy_duplicate = try Parser.init(a, "function duplicate(first, second, first) {}");
+    var sloppy_duplicate = try Parser.initWithScratch(a, std.testing.allocator, "function duplicate(first, second, first) {}");
     _ = try sloppy_duplicate.parseProgram();
 }
 

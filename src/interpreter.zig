@@ -1360,6 +1360,9 @@ pub const InheritedPropertyObservation = struct {
 /// value of the last statement, which is what `JSEvaluateScript` hands back.
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
+    /// Context-owned freeable backing for parser-only scratch indexes. Standalone
+    /// interpreters fall back to their arena lifetime.
+    parser_scratch_allocator: ?std.mem.Allocator = null,
     env: *Environment,
     /// Context-owned registry for immutable native code. Null in standalone
     /// interpreter helpers and agent realms, which remain bytecode-only.
@@ -4046,7 +4049,7 @@ pub const Interpreter = struct {
     /// itself runs.
     pub fn evaluateForDebugger(self: *Interpreter, source: []const u8, environment: *Environment, this_value: Value, strict: bool) EvalError!Value {
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
-        var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
+        var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
             return self.throwParserSyntaxErrorAt("debugger evaluation", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
         parser.strict = strict;
         const program = parser.parseProgram() catch |err| return self.throwParserSyntaxError("debugger evaluation", source, &parser, err);
@@ -16996,7 +16999,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     const src = args[0].asStr();
     if (sourceOnlyEmptyBlocks(src)) return Value.undef();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
-    var parser = Parser.initWithDiagnostic(self.arena, src, &lex_diagnostic) catch |err|
+    var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("eval", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
     // Direct eval inherits the caller's strictness for early errors; indirect
     // eval is global code in the eval function's realm and only becomes strict
@@ -19034,7 +19037,7 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else Value.undef();
     const src = args[0].asStr();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
-    var parser = Parser.initWithDiagnostic(self.arena, src, &lex_diagnostic) catch |err|
+    var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("evalScript", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("evalScript", src, &parser, err);
     const prog_strict = parser.strict;
@@ -19344,7 +19347,7 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
     const source = src.asStr();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
-    var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
+    var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAtInRealm(caller_env, "ShadowRealm.evaluate", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, &parser, err);
     const prog_strict = parser.strict;
@@ -21739,7 +21742,7 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             // trailing Annex B HTML-open-comment param doesn't comment out the `)`.
             const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
             var param_lex_diagnostic: ?parser_mod.SourceLocation = null;
-            var param_parser = Parser.initWithDiagnostic(self.arena, param_source, &param_lex_diagnostic) catch |err|
+            var param_parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, param_source, &param_lex_diagnostic) catch |err|
                 return self.throwParserSyntaxErrorAt("Function parameters", param_lex_diagnostic orelse parser_mod.sourceLocationAt(param_source, 0), err);
             param_parser.parseDynamicFunctionParams(kind == .generator or kind == .async_generator, kind == .async_fn or kind == .async_generator) catch |err|
                 return self.throwParserSyntaxError("Function parameters", param_source, &param_parser, err);
@@ -21750,7 +21753,7 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             };
             const source = try std.fmt.allocPrint(self.arena, "({s}({s}\n) {{\n{s}\n}})", .{ prefix, params.items, body });
             var lex_diagnostic: ?parser_mod.SourceLocation = null;
-            var parser = Parser.initWithDiagnostic(self.arena, source, &lex_diagnostic) catch |err|
+            var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
                 return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
             const prog = parser.parseProgram() catch |err|
                 return self.throwParserSyntaxError("Function body", source, &parser, err);

@@ -4660,6 +4660,7 @@ pub const Context = struct {
     pub fn interpreter(self: *Context) interp.Interpreter {
         return .{
             .arena = self.arena(),
+            .parser_scratch_allocator = self.gpa,
             .env = &self.env,
             .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null and self.profile_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
             .jit_invalidation_ctx = if (self.parallel_js and self.enable_jit) self else null,
@@ -7789,7 +7790,7 @@ pub const Context = struct {
         const owned_source = try a.dupe(u8, source);
         self.last_evaluation_diagnostic = null;
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
-        var parser = Parser.initWithDiagnostic(a, owned_source, &lex_diagnostic) catch |err| {
+        var parser = Parser.initWithScratchDiagnostic(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
             self.last_evaluation_diagnostic = lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0);
             return err;
         };
@@ -7833,7 +7834,7 @@ pub const Context = struct {
         const owned_source = try a.dupe(u8, source);
         self.last_evaluation_diagnostic = null;
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
-        var parser = Parser.initWithDiagnostic(a, owned_source, &lex_diagnostic) catch |err| {
+        var parser = Parser.initWithScratchDiagnostic(a, self.gpa, owned_source, &lex_diagnostic) catch |err| {
             self.last_evaluation_diagnostic = lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0);
             return err;
         };
@@ -8369,7 +8370,7 @@ pub const Context = struct {
         const a = self.arena();
 
         const owned_source = try a.dupe(u8, source);
-        var parser = try Parser.init(a, owned_source);
+        var parser = try Parser.initWithScratch(a, self.gpa, owned_source);
         const prog = try parser.parseModule();
         _ = try self.registerDebugScriptWithLocations(
             owned_source,
