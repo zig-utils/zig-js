@@ -396,6 +396,29 @@ function representativeWeakLookup(jobs, lane) {
   return total;
 }
 
+// Exercise Date's widest setter signature at deterministic 1K/2K/4K widths.
+// The setTime control performs the identical timestamp mutation and checksum
+// without entering the generic component-setter argument-copy path.
+function selectRepresentativeDateSetter(width, control) {
+  return function (jobs, lane) {
+    var total = 0;
+    for (var job = 0; job < jobs; job = job + 1) {
+      var date = new Date(0);
+      for (var index = 0; index < width; index = index + 1) {
+        var hour = (index + job + lane) % 24;
+        var minute = (index * 3 + lane) % 60;
+        var second = (index * 7 + job) % 60;
+        var millisecond = (index * 17 + job + lane) % 1000;
+        var timestamp = control
+          ? date.setTime(hour * 3600000 + minute * 60000 + second * 1000 + millisecond)
+          : date.setUTCHours(hour, minute, second, millisecond);
+        total = total + (timestamp % 1000003) + date.getUTCMilliseconds();
+      }
+    }
+    return total;
+  };
+}
+
 function representativeTypedData(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -701,6 +724,10 @@ function benchmarkFunction(name) {
   if (name === "representative_weak_post_compact_2048") return selectRepresentativeWeakLookup(2048);
   if (name === "representative_weak_post_compact_4096") return selectRepresentativeWeakLookup(4096);
   if (name === "representative_weak_lookup_control_4096") return selectRepresentativeWeakLookup(4096);
+  if (name === "representative_date_setter_1024") return selectRepresentativeDateSetter(1024, false);
+  if (name === "representative_date_setter_2048") return selectRepresentativeDateSetter(2048, false);
+  if (name === "representative_date_setter_4096") return selectRepresentativeDateSetter(4096, false);
+  if (name === "representative_date_settime_control_4096") return selectRepresentativeDateSetter(4096, true);
   if (name === "representative_typed_data") return function (jobs, lane) { return representativeTypedData(jobs, lane, 0); };
   if (name === "representative_typed_data_variant") return function (jobs, lane) { return representativeTypedData(jobs, lane, 1); };
   if (name === "representative_classes") return function (jobs, lane) { return representativeClasses(jobs, lane, 0); };
