@@ -90,6 +90,30 @@ function representativeJsonReviverSource(jobs, lane) {
   return total;
 }
 
+// Escaped JSON strings exercise the owned decoding path. The three suffixes
+// cover ordinary escapes, a lone UTF-16 surrogate represented as WTF-8, and
+// repeated Unicode escapes without letting one fixed spelling dominate.
+function representativeJsonEscapedStrings(jobs, lane) {
+  var width = 1024;
+  var chunks = ["["];
+  for (var i = 0; i < width; i = i + 1) {
+    var suffix = i % 3 === 0 ? "\\n\\t\\u263a" :
+      (i % 3 === 1 ? "\\r\\b\\f\\ud834" : "\\u0061\\u0062\\u0063");
+    chunks.push((i === 0 ? "" : ",") + "\"row-" + (i + lane) + suffix + "-tail\"");
+  }
+  chunks.push("]");
+  var encoded = chunks.join("");
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var parsed = JSON.parse(encoded);
+    for (var index = 0; index < parsed.length; index = index + 1) {
+      var text = parsed[index];
+      total = total + text.length + text.charCodeAt(0) + text.charCodeAt(text.length - 1);
+    }
+  }
+  return total;
+}
+
 function representativeCollections(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -438,6 +462,7 @@ function benchmarkFunction(name) {
   if (name === "representative_json") return function (jobs, lane) { return representativeJson(jobs, lane, 0); };
   if (name === "representative_json_variant") return function (jobs, lane) { return representativeJson(jobs, lane, 1); };
   if (name === "representative_json_reviver_source") return representativeJsonReviverSource;
+  if (name === "representative_json_escaped_strings") return representativeJsonEscapedStrings;
   if (name === "representative_collections") return function (jobs, lane) { return representativeCollections(jobs, lane, 0); };
   if (name === "representative_collections_variant") return function (jobs, lane) { return representativeCollections(jobs, lane, 1); };
   if (name === "representative_strong_identity_collections") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 0); };
