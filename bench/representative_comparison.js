@@ -81,6 +81,60 @@ function representativeOwnKeys(jobs, lane) {
   return total;
 }
 
+// Named deletion grows one immutable fixture before warmup, then deletes a
+// different middle key on every invocation. That keeps construction outside
+// the timed boundary while every warmup/sample still pays one real deletion.
+// The re-add variant restores the deleted key with non-default attributes and
+// verifies that its new creation position is the end of the string-key order.
+var representativeNamedDeleteTarget = null;
+var representativeNamedDeleteWidth = 0;
+var representativeNamedDeleteCursor = 0;
+var representativeNamedDeleteReadd = false;
+function selectRepresentativeNamedDelete(width, readd) {
+  var target = {};
+  for (var index = 0; index < width; index = index + 1)
+    target["field-" + index] = index;
+  representativeNamedDeleteTarget = target;
+  representativeNamedDeleteWidth = width;
+  representativeNamedDeleteCursor = 0;
+  representativeNamedDeleteReadd = readd;
+  return representativeNamedDelete;
+}
+
+function representativeNamedDelete(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var index = (representativeNamedDeleteWidth >> 1) + representativeNamedDeleteCursor;
+    representativeNamedDeleteCursor = representativeNamedDeleteCursor + 1;
+    var key = "field-" + index;
+    var before = Object.getOwnPropertyDescriptor(representativeNamedDeleteTarget, key);
+    var deleted = delete representativeNamedDeleteTarget[key];
+    var absent = !Object.prototype.hasOwnProperty.call(representativeNamedDeleteTarget, key);
+    var keys;
+    var descriptorExact = before.value === index && before.writable && before.enumerable && before.configurable;
+    if (representativeNamedDeleteReadd) {
+      Object.defineProperty(representativeNamedDeleteTarget, key, {
+        value: index + 1,
+        writable: false,
+        enumerable: false,
+        configurable: true
+      });
+      keys = Reflect.ownKeys(representativeNamedDeleteTarget);
+      var after = Object.getOwnPropertyDescriptor(representativeNamedDeleteTarget, key);
+      descriptorExact = descriptorExact && after.value === index + 1 &&
+        !after.writable && !after.enumerable && after.configurable;
+    } else {
+      keys = Reflect.ownKeys(representativeNamedDeleteTarget);
+    }
+    var orderExact = keys[0] === "field-0" &&
+      keys[keys.length - 1] === (representativeNamedDeleteReadd ? key : "field-" + (representativeNamedDeleteWidth - 1));
+    total = total + keys.length + key.length + keys[0].length + keys[keys.length - 1].length +
+      (deleted ? 100000 : 0) + (absent ? 200000 : 0) +
+      (descriptorExact ? 400000 : 0) + (orderExact ? 800000 : 0) + lane;
+  }
+  return total;
+}
+
 function representativeStrings(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -569,6 +623,12 @@ function benchmarkFunction(name) {
   if (name === "representative_own_keys_ordered_4096") return selectRepresentativeOwnKeys("ordered", 4096);
   if (name === "representative_own_keys_sparse_array") return selectRepresentativeOwnKeys("array", 2048);
   if (name === "representative_own_keys_proxy_invariants") return selectRepresentativeOwnKeys("proxy", 2048);
+  if (name === "representative_named_delete_1024") return selectRepresentativeNamedDelete(1024, false);
+  if (name === "representative_named_delete_2048") return selectRepresentativeNamedDelete(2048, false);
+  if (name === "representative_named_delete_4096") return selectRepresentativeNamedDelete(4096, false);
+  if (name === "representative_named_delete_readd_1024") return selectRepresentativeNamedDelete(1024, true);
+  if (name === "representative_named_delete_readd_2048") return selectRepresentativeNamedDelete(2048, true);
+  if (name === "representative_named_delete_readd_4096") return selectRepresentativeNamedDelete(4096, true);
   if (name === "representative_strings") return function (jobs, lane) { return representativeStrings(jobs, lane, 0); };
   if (name === "representative_strings_variant") return function (jobs, lane) { return representativeStrings(jobs, lane, 1); };
   if (name === "representative_regexp") return function (jobs, lane) { return representativeRegExp(jobs, lane, 0); };
