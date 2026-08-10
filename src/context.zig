@@ -12019,6 +12019,60 @@ test "Date setters + string conversions" {
     try std.testing.expect((try evalIn("new Date(NaN).toJSON() === null")).asBool());
 }
 
+test "Date component setters ignore arguments beyond their specification arity" {
+    try std.testing.expect((try evalIn(
+        \\var calls = 0;
+        \\var extra = { valueOf: function () { calls++; throw new Error("extra argument coerced"); } };
+        \\var cases = [
+        \\  function (d) { d.setFullYear(1970, 0, 1, extra); },
+        \\  function (d) { d.setUTCFullYear(1970, 0, 1, extra); },
+        \\  function (d) { d.setYear(70, extra); },
+        \\  function (d) { d.setMonth(0, 1, extra); },
+        \\  function (d) { d.setUTCMonth(0, 1, extra); },
+        \\  function (d) { d.setDate(1, extra); },
+        \\  function (d) { d.setUTCDate(1, extra); },
+        \\  function (d) { d.setHours(0, 0, 0, 0, extra); },
+        \\  function (d) { d.setUTCHours(0, 0, 0, 0, extra); },
+        \\  function (d) { d.setMinutes(0, 0, 0, extra); },
+        \\  function (d) { d.setUTCMinutes(0, 0, 0, extra); },
+        \\  function (d) { d.setSeconds(0, 0, extra); },
+        \\  function (d) { d.setUTCSeconds(0, 0, extra); },
+        \\  function (d) { d.setMilliseconds(0, extra); },
+        \\  function (d) { d.setUTCMilliseconds(0, extra); }
+        \\];
+        \\for (var i = 0; i < cases.length; i++) cases[i](new Date(0));
+        \\calls === 0
+    )).asBool());
+}
+
+test "parallel_js: Date setter coercion uses bounded thread-local arguments" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\function dateSetterLane(lane) {
+        \\  var calls = 0;
+        \\  var extra = { valueOf: function () { calls++; throw new Error("extra argument coerced"); } };
+        \\  var date = new Date(0);
+        \\  for (var i = 0; i < 2048; i++)
+        \\    date.setUTCHours((i + lane) % 24, (i * 3) % 60, (i * 7) % 60, (i * 17) % 1000, extra);
+        \\  return calls === 0 && date.getUTCMilliseconds() === (2047 * 17) % 1000 ? 1 : 0;
+        \\}
+        \\var dateSetterThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) dateSetterThreads.push(new Thread(dateSetterLane, lane));
+        \\var dateSetterTotal = 0;
+        \\for (var index = 0; index < dateSetterThreads.length; index++) dateSetterTotal += dateSetterThreads[index].join();
+        \\dateSetterTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "Function constructor builds callable functions from source" {
     // Params + body, called and constructed.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).asNum());

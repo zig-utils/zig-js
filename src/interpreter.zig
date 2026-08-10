@@ -10165,13 +10165,18 @@ pub const Interpreter = struct {
         if (std.mem.startsWith(u8, name, "set")) {
             const fy = eq(name, "setFullYear") or eq(name, "setUTCFullYear");
             const sy = eq(name, "setYear"); // Annex B B.2.4.2 (revives like setFullYear)
-            // ToNumber each provided argument once, left-to-right (object args
-            // invoke valueOf exactly once), BEFORE consulting the stored time —
-            // the spec reads [[DateValue]] first (captured in `t` above) but still
-            // coerces every argument even when the date is invalid. A Symbol/
-            // BigInt argument throws here (toNumberV).
-            const a = try self.arena.alloc(Value, args.len);
-            for (args, 0..) |av, idx| a[idx] = Value.num(try self.toNumberV(av));
+            const setter_arity: usize = if (fy) 3 else if (sy) 1 else if (eq(name, "setMonth") or eq(name, "setUTCMonth")) 2 else if (eq(name, "setDate") or eq(name, "setUTCDate")) 1 else if (eq(name, "setHours") or eq(name, "setUTCHours")) 4 else if (eq(name, "setMinutes") or eq(name, "setUTCMinutes")) 3 else if (eq(name, "setSeconds") or eq(name, "setUTCSeconds")) 2 else if (eq(name, "setMilliseconds") or eq(name, "setUTCMilliseconds")) 1 else 0;
+            if (setter_arity == 0) return null;
+            // Each setter converts only the arguments named by its ECMA-262
+            // algorithm. Extra arguments are unobservable. Keep the at-most-four
+            // converted values in native storage: the DateValue was captured in
+            // `t` above, and in-arity values still convert once, left-to-right,
+            // before any store, including when the date is invalid.
+            var converted: [4]Value = @splat(Value.undef());
+            const converted_len = @min(args.len, setter_arity);
+            for (args[0..converted_len], 0..) |av, idx|
+                converted[idx] = Value.num(try self.toNumberV(av));
+            const a = converted[0..converted_len];
             // Non-fullyear setters on an invalid date stay invalid (arguments were
             // still coerced above); setFullYear revives it from a zero base.
             if (std.math.isNan(t) and !fy and !sy) return Value.num(nan);
