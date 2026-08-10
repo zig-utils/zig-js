@@ -21625,9 +21625,9 @@ test "parallel_gc (M3 GIL-removal bring-up): parse+compile+VM-execute disjoint s
             const sa = strcell.setActiveArena(s.ctx.arena());
             defer _ = strcell.setActiveArena(sa);
             const a = s.ctx.arena();
-            const src = "(function(){ let s = 0; for (let i = 0; i < 2000; i++) { const o = { x: i }; s += o.x; } return s; })()";
+            const src = "(function(parameter0,parameter1,parameter2,parameter3,parameter4,parameter5,parameter6,parameter7,parameter8,parameter9,parameter10,parameter11,parameter12,parameter13,parameter14,parameter15){ \"use strict\"; let s = 0; for (let i = 0; i < 2000; i++) { const o = { x: i }; s += o.x; } return s; })()";
             const owned = a.dupe(u8, src) catch return;
-            var parser = Parser.init(a, owned) catch return;
+            var parser = Parser.initWithScratch(a, s.ctx.gpa, owned) catch return;
             const prog = parser.parseProgram() catch return;
             var machine = s.ctx.interpreter();
             s.ctx.pushActiveInterpreter(&machine) catch return; // exercises active_interp_lock
