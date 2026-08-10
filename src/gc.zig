@@ -347,6 +347,8 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
         gc_relocation.rewriteValueSlot(v, &o.inline_slots[0]);
         gc_relocation.rewriteValueSlot(v, &o.inline_slots[1]);
     }
+    if (o.private_data_tag == .promise)
+        gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
     const cold = o.coldState() orelse return;
     gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.arg_map_env);
     switch (cold.rare_tag.load(.acquire)) {
@@ -498,7 +500,7 @@ test "Object rare strong relocation mutates every active managed payload" {
     const allocator = arena.allocator();
     var old_objects: [8]Object = undefined;
     var new_objects: [8]Object = undefined;
-    var rare_objects: [12]Object = undefined;
+    var rare_objects: [13]Object = undefined;
     for (&rare_objects) |*object| object.* = .{};
     var old_environment: Environment = undefined;
     var new_environment: Environment = undefined;
@@ -549,6 +551,8 @@ test "Object rare strong relocation mutates every active managed payload" {
         Value.obj(&old_objects[0]),
         Value.obj(&old_objects[7]),
     );
+    try rare_objects[12].setPromiseData(allocator, @ptrCast(&old_promise));
+    try rare_objects[12].spillPromiseData(allocator);
 
     const Plan = struct {
         old_objects: *[8]Object,
@@ -617,12 +621,15 @@ test "Object rare strong relocation mutates every active managed payload" {
     try std.testing.expectEqual(&new_objects[3], rare_objects[6].typedArray().?.buffer);
     try std.testing.expectEqual(&new_objects[4], rare_objects[6].dataView().?.buffer);
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_promise)), rare_objects[7].promiseData().?);
+    try std.testing.expect(rare_objects[7].storageState() == null);
     try std.testing.expectEqual(&new_objects[5], rare_objects[8].ctorRef().?);
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_function)), rare_objects[9].jsFunction().?);
     const getter_setter = rare_objects[10].getterSetterCellData().?;
     try std.testing.expectEqual(&new_objects[6], getter_setter.getterValue().?.asObj());
     try std.testing.expectEqual(&new_objects[7], getter_setter.setterValue().?.asObj());
     const async_context_frame = rare_objects[11].asyncContextFrame().?;
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_promise)), rare_objects[12].promiseData().?);
+    try std.testing.expect(rare_objects[12].coldState().?.hasRare(.promise));
     try std.testing.expectEqual(&new_objects[0], async_context_frame.callback.asObj());
     try std.testing.expectEqual(&new_objects[7], async_context_frame.context.asObj());
 }

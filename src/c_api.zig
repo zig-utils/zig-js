@@ -2300,6 +2300,10 @@ fn attachClassToExistingObject(ctx: JSContextRef, c: *Context, obj: *Object, cla
         releaseClass(class);
         return false;
     };
+    obj.spillPromiseData(c.arena()) catch {
+        owner.finishOnce();
+        return false;
+    };
     obj.private_data = data;
     obj.private_data_tag = .host;
     obj.setCApiObjectClass(c.arena(), owner, &c_api_class_hooks) catch {
@@ -20017,11 +20021,15 @@ export fn JSObjectGetProxyTarget(object: JSObjectRef) callconv(.c) JSObjectRef {
 }
 
 export fn JSObjectSetPrivate(object: JSObjectRef, data: ?*anyopaque) callconv(.c) bool {
+    const boxed = boxedFrom(object) orelse return false;
     const obj = objectFromHandleInspection(object) orelse return false;
     if (obj.private_data_tag == .host) {
         obj.private_data = data;
         return true;
     }
+    const gc_saved = gc_mod.setActiveContext(boxed.owner);
+    defer gc_mod.restoreActiveContext(gc_saved);
+    obj.spillPromiseData(boxed.owner.arena()) catch return false;
     if (obj.private_data_tag == .none and obj.private_data == null) {
         obj.private_data = data;
         obj.private_data_tag = .host;
@@ -26518,6 +26526,20 @@ test "C-API: JSObject private data is host-owned and guarded" {
     try std.testing.expect(JSObjectGetPrivate(date_ctor) == null);
     try std.testing.expect(!JSObjectSetPrivate(date_ctor, engine_probe_ptr));
     try std.testing.expect(JSObjectGetPrivate(date_ctor) == null);
+
+    var exception: JSValueRef = null;
+    const promise_source = JSStringCreateWithUTF8CString("Promise.resolve(42)") orelse return error.StringInitFailed;
+    defer JSStringRelease(promise_source);
+    const promise_ref = JSEvaluateScript(ctx, promise_source, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const promise_obj = JSValueToObject(ctx, promise_ref, &exception) orelse return error.ObjectCreateFailed;
+    try std.testing.expect(exception == null);
+    const promise_cell = objectFromHandleInspection(promise_obj).?.promiseData().?;
+    try std.testing.expect(objectFromHandleInspection(promise_obj).?.storageState() == null);
+    try std.testing.expect(JSObjectSetPrivate(promise_obj, engine_probe_ptr));
+    try std.testing.expectEqual(@intFromPtr(engine_probe_ptr), @intFromPtr(JSObjectGetPrivate(promise_obj).?));
+    try std.testing.expectEqual(@intFromPtr(promise_cell), @intFromPtr(objectFromHandleInspection(promise_obj).?.promiseData().?));
+    try std.testing.expect(objectFromHandleInspection(promise_obj).?.coldState().?.hasRare(.promise));
 }
 
 test "C-API: JSObjectMake creates ordinary realm objects" {

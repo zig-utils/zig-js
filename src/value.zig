@@ -1469,6 +1469,10 @@ pub const ObjectBehaviorFlags = packed struct(u16) {
 pub const ObjectPrivateDataTag = enum(u8) {
     none,
     host,
+    /// Promise wrappers use the otherwise-idle hot private-data word for their
+    /// state-cell edge. If a C-API client attaches host data, the Promise edge
+    /// is first spilled to ordinary rare state so both identities survive.
+    promise,
     jsthread_thread,
     jsthread_lock,
     jsthread_condition,
@@ -2557,14 +2561,34 @@ pub const Object = struct {
     }
 
     pub inline fn promiseData(self: *const Object) ?*anyopaque {
+        if (self.private_data_tag == .promise) return self.private_data;
         const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.promise)) return null;
         return cold.rare.promise.ptr;
     }
 
     pub fn setPromiseData(self: *Object, fallback: std.mem.Allocator, data: *anyopaque) std.mem.Allocator.Error!void {
+        // A Promise wrapper is created unpublished with no native/host payload.
+        // Reuse that hot word instead of allocating ObjectStorageState plus the
+        // full exotic sidecar for one pointer on every Promise allocation.
+        if (self.private_data_tag == .none and self.private_data == null) {
+            self.private_data = data;
+            self.private_data_tag = .promise;
+            return;
+        }
         const state = try self.ensureRare(fallback, .promise, .{});
         state.ptr = data;
+    }
+
+    /// Preserve the intrinsic Promise edge before `private_data` is transferred
+    /// to a C-API host. Ordinary JavaScript never pays for this cold allocation.
+    pub fn spillPromiseData(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!void {
+        if (self.private_data_tag != .promise) return;
+        const data = self.private_data orelse return;
+        const state = try self.ensureRare(fallback, .promise, .{});
+        state.ptr = data;
+        self.private_data = null;
+        self.private_data_tag = .none;
     }
 
     pub inline fn ctorRef(self: *const Object) ?*Object {

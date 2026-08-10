@@ -1594,7 +1594,7 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
             v.mark(st.lock.owner);
             traceLockRecordRoots(st.lock, v);
         },
-        .jsthread_thread, .jsthread_unlock_token, .abort_signal, .form_data_native_blob, .fetch_headers, .host, .none => {},
+        .jsthread_thread, .jsthread_unlock_token, .abort_signal, .form_data_native_blob, .fetch_headers, .promise, .host, .none => {},
     }
 }
 
@@ -1637,7 +1637,7 @@ pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
             const state: *ReleaseState = @ptrCast(@alignCast(pd));
             relocateLockRecordRoots(state.lock, v);
         },
-        .jsthread_thread, .jsthread_unlock_token, .abort_signal, .form_data_native_blob, .fetch_headers, .host, .none => {},
+        .jsthread_thread, .jsthread_unlock_token, .abort_signal, .form_data_native_blob, .fetch_headers, .promise, .host, .none => {},
     }
 }
 

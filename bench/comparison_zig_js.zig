@@ -359,6 +359,33 @@ fn printNativeObservabilityRetiredRow(
     });
 }
 
+fn printPromiseProfileRow(
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    lanes: usize,
+    jobs: usize,
+    samples: usize,
+    stats: js.promise_profile.PromiseStats,
+    process: ProcessResourceSnapshot,
+) !void {
+    try writer.print("{{\"kind\":\"zig-js-promise-profile\",\"mode\":\"independent_steady\",\"workload\":\"{s}\",\"lanes\":{d},\"jobs\":{d},\"samples\":{d},\"counters\":{{", .{
+        workload,
+        lanes,
+        jobs,
+        samples,
+    });
+    inline for (comptime std.meta.fieldNames(js.promise_profile.PromiseStats), 0..) |name, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\":{d}", .{ name, @field(stats, name) });
+    }
+    try writer.print("}},\"process\":{{\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"peak_rss_bytes\":{d},\"retained_rss_bytes\":{d}}}}}\n", .{
+        process.cpu_user_ns,
+        process.cpu_system_ns,
+        process.peak_rss_bytes,
+        process.retained_rss_bytes,
+    });
+}
+
 fn printTierAttributionRow(
     writer: *std.Io.Writer,
     mode: []const u8,
@@ -710,6 +737,7 @@ fn runIndependentSteady(
     samples: usize,
     lane_count: usize,
     darwin_rusage: bool,
+    promise_profile_enabled: bool,
 ) !void {
     const lanes = try allocator.alloc(SteadyLane, lane_count);
     defer allocator.free(lanes);
@@ -741,6 +769,9 @@ fn runIndependentSteady(
     for (0..lane_count) |_| ready.waitUncancelable(io);
     for (lanes) |*lane| if (lane.failed.load(.acquire)) return error.BenchmarkWorkerFailure;
 
+    if (promise_profile_enabled) js.promise_profile.resetPromiseStats();
+    errdefer if (promise_profile_enabled) js.promise_profile.disablePromiseStats();
+
     for (0..samples) |sample| {
         const thermal_before = if (darwin_rusage) try darwinThermalState() else undefined;
         const counters_before = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
@@ -758,6 +789,11 @@ fn runIndependentSteady(
         }
         try printRow(writer, .independent_steady, workload, lane_count, jobs, sample, elapsed, checksum);
         if (darwin_rusage) try printDarwinCounterRow(writer, .independent_steady, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
+    }
+    if (promise_profile_enabled) {
+        const stats = js.promise_profile.promiseStats();
+        js.promise_profile.disablePromiseStats();
+        try printPromiseProfileRow(writer, workload, lane_count, jobs, samples, stats, try processResourceSnapshot());
     }
 }
 
@@ -1063,10 +1099,12 @@ pub fn main(init: std.process.Init) !void {
     const native_observability_telemetry = std.mem.eql(u8, option, "--native-observability-telemetry");
     const darwin_rusage = std.mem.eql(u8, option, "--darwin-rusage") or native_observability_telemetry;
     const gc_telemetry = std.mem.eql(u8, option, "--gc-telemetry");
-    if (option.len != 0 and !darwin_rusage and !gc_telemetry) return error.InvalidArguments;
+    const promise_profile_enabled = std.mem.eql(u8, option, "--promise-profile");
+    if (option.len != 0 and !darwin_rusage and !gc_telemetry and !promise_profile_enabled) return error.InvalidArguments;
     if (darwin_rusage and (mode == .attribution or mode == .shared_attribution or mode == .module_attribution)) return error.InvalidArguments;
     if (native_observability_telemetry and mode != .single and mode != .single_observed) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
+    if (promise_profile_enabled and mode != .independent_steady) return error.InvalidArguments;
     if ((mode == .attribution or mode == .shared_attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
     if (std.mem.eql(u8, workload, "wasm_threads_wait_notify") and
@@ -1077,7 +1115,7 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
     switch (mode) {
         .single, .single_profiled, .single_observed => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples, darwin_rusage, native_observability_telemetry),
-        .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
+        .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage, promise_profile_enabled),
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
         .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry, darwin_rusage),
         .attribution => try runAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
