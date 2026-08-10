@@ -2219,6 +2219,18 @@ pub fn build(b: *std.Build) void {
     const representative_attribution_step = b.step("representative-tier-attribution", "Record representative base/variant execution-tier attribution (macOS)");
     const instrumentation_overhead_step = b.step("instrumentation-overhead", "Measure execution-attribution overhead and counter capabilities (macOS)");
     const comparison_bin_step = b.step("benchmark-comparison-bin", "Build the zig-js and system-JSC comparison runners (macOS)");
+    const frontend_parse_benchmark = b.addExecutable(.{
+        .name = "frontend-parse-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/frontend_parse.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "js", .module = bench_js_mod }},
+        }),
+    });
+    const install_frontend_parse_benchmark = b.addInstallArtifact(frontend_parse_benchmark, .{});
+    const frontend_parse_benchmark_step = b.step("frontend-parse-benchmark-bin", "Build the parser-only frontend growth runner");
+    frontend_parse_benchmark_step.dependOn(&install_frontend_parse_benchmark.step);
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{
             .name = "bench-comparison-zig-js",
