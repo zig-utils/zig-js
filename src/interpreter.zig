@@ -48741,6 +48741,24 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     return interp.eval(prog);
 }
 
+test "Date ISO result ownership is failure-atomic" {
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+
+    // Allocation zero is the final byte buffer; allocation one is its
+    // StringCell. The latter failure must release the already-owned bytes.
+    // std.testing.allocator turns a missed errdefer into a test leak.
+    for (0..2) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        var machine = Interpreter{
+            .arena = failing.allocator(),
+            .env = undefined,
+            .root_shape = undefined,
+        };
+        try std.testing.expectError(error.OutOfMemory, machine.dateISOStringValue(0));
+    }
+}
+
 test "interpreter evaluates arithmetic with precedence" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
