@@ -7284,7 +7284,7 @@ fn privatePublishPropertyTypeError(context: *Context, message: []const u8) void 
 }
 
 fn privatePutDirectData(machine: *interp.Interpreter, object: *Object, property: []const u8, stored: Value) !void {
-    switch (try object.deleteAccessorOwn(machine.arena, property)) {
+    switch (try object.deleteAccessorOwnPreserveOrder(machine.arena, property)) {
         .blocked => return machine.throwError("TypeError", "Cannot replace non-configurable property"),
         .absent, .removed_continue, .deleted => {},
     }
@@ -7455,7 +7455,7 @@ export fn JSC__JSValue__putRecord(
     // defineOwnProperty(..., { writable, enumerable, configurable: true }) plus
     // putDirect: replace a configurable own accessor and never run a prototype
     // setter.  Default PropAttr is the exact all-true descriptor.
-    switch (target.asObj().deleteAccessorOwn(machine.arena, property) catch |err| {
+    switch (target.asObj().deleteAccessorOwnPreserveOrder(machine.arena, property) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return;
     }) {
@@ -10854,7 +10854,7 @@ fn privateDeepSeen(items: []const *Object, needle: *Object) bool {
 }
 
 fn privateDeepReplace(machine: *interp.Interpreter, target: *Object, key: []const u8, replacement: Value) interp.EvalError!void {
-    switch (try target.deleteAccessorOwn(machine.arena, key)) {
+    switch (try target.deleteAccessorOwnPreserveOrder(machine.arena, key)) {
         .blocked => return machine.throwError("TypeError", "Cannot replace non-configurable asymmetric-matcher property"),
         else => {},
     }

@@ -68,8 +68,18 @@ pub const Shape = struct {
     name: ?[]const u8,
     /// Slot index of `name` (meaningful only when `name != null`).
     slot: u32,
-    /// Total number of properties described by this shape.
+    /// Whether this operation removes `name` instead of publishing its slot.
+    /// The first matching operation while walking toward the root wins.
+    deleted: bool,
+    /// Physical slot span described by this shape. Deletion transitions retain
+    /// stable offsets; re-adding a deleted name reuses its prior slot.
     count: u32,
+    /// Exact live named-data property count after this operation.
+    live_count: u32,
+    /// Number of immutable operations from the root. Unlike `count`, this also
+    /// includes tombstones and re-adds, so Objects can bound historical lookup
+    /// work independently of their physical slot span.
+    depth: u32,
     /// Edges to child shapes that add one more property, keyed by that name.
     /// Shared and cached so identical construction sequences converge.
     transitions: std.StringHashMapUnmanaged(*Shape) = .{},
@@ -93,28 +103,51 @@ pub const Shape = struct {
     /// Create the empty root shape for a Context.
     pub fn createRoot(arena: std.mem.Allocator) std.mem.Allocator.Error!*Shape {
         const root = try arena.create(Shape);
-        root.* = .{ .parent = null, .name = null, .slot = 0, .count = 0, .arena = arena };
+        root.* = .{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .arena = arena };
         return root;
+    }
+
+    pub const LookupState = union(enum) {
+        absent,
+        deleted: u32,
+        present: u32,
+    };
+
+    pub fn lookupState(self: *Shape, name: []const u8) LookupState {
+        var shape: ?*Shape = self;
+        while (shape) |current| {
+            if (current.name) |candidate| {
+                if (std.mem.eql(u8, candidate, name))
+                    return if (current.deleted) .{ .deleted = current.slot } else .{ .present = current.slot };
+            }
+            shape = current.parent;
+        }
+        return .absent;
     }
 
     /// Find the slot for `name` in this shape, or null if absent. Walks the
     /// parent chain (O(property count)); small objects — the common case — are
     /// a few hops, and inline caches at access sites skip this on a hit.
     pub fn lookup(self: *Shape, name: []const u8) ?u32 {
-        var s: ?*Shape = self;
-        while (s) |sh| {
-            if (sh.name) |n| {
-                if (std.mem.eql(u8, n, name)) return sh.slot;
-            }
-            s = sh.parent;
-        }
-        return null;
+        return switch (self.lookupState(name)) {
+            .present => |slot| slot,
+            .absent, .deleted => null,
+        };
     }
 
     /// The shape that results from adding `name` to this one. Cached: the same
     /// `name` added to the same shape always returns the same child, so objects
     /// share structure.
     pub fn transition(self: *Shape, name: []const u8) std.mem.Allocator.Error!*Shape {
+        return self.transitionFromState(name, self.lookupState(name));
+    }
+
+    pub fn transitionFromState(self: *Shape, name: []const u8, state: LookupState) std.mem.Allocator.Error!*Shape {
+        if (state == .present) return self;
+        // An immediate delete/re-add is an exact undo: return to the immutable
+        // parent shape and create no historical shape or slot capacity.
+        if (state == .deleted and self.deleted and self.name != null and std.mem.eql(u8, self.name.?, name))
+            return self.parent.?;
         bumpShapeStat("transition_requests");
 
         if (self.findTransitionCached(name)) |child| {
@@ -138,11 +171,55 @@ pub const Shape = struct {
         bumpShapeStat("transition_misses");
         const owned = try self.arena.dupe(u8, name);
         const child = try self.arena.create(Shape);
+        const slot = switch (state) {
+            .deleted => |deleted_slot| deleted_slot,
+            .absent => self.count,
+            .present => unreachable,
+        };
         child.* = .{
             .parent = self,
             .name = owned,
-            .slot = self.count,
-            .count = self.count + 1,
+            .slot = slot,
+            .deleted = false,
+            .count = if (state == .absent) self.count + 1 else self.count,
+            .live_count = self.live_count + 1,
+            .depth = self.depth + 1,
+            .arena = self.arena,
+        };
+        try self.transitions.put(self.arena, owned, child);
+        self.publishTransition(child);
+        return child;
+    }
+
+    /// Shape token for removing a present property while retaining its stable
+    /// physical slot. Deleting the most recently added operation can return its
+    /// parent directly; all other deletion shapes are cached like additions.
+    pub fn deleteTransition(self: *Shape, name: []const u8) std.mem.Allocator.Error!?*Shape {
+        const slot = switch (self.lookupState(name)) {
+            .present => |present_slot| present_slot,
+            .absent, .deleted => return null,
+        };
+        if (!self.deleted and self.name != null and std.mem.eql(u8, self.name.?, name))
+            return self.parent;
+
+        if (self.findTransitionCached(name)) |child| return child;
+        switch (self.lockTransitionsOrCached(name)) {
+            .locked => {},
+            .cached => |child| return child,
+        }
+        defer self.transition_lock.unlock();
+        if (self.transitions.get(name)) |child| return child;
+
+        const owned = try self.arena.dupe(u8, name);
+        const child = try self.arena.create(Shape);
+        child.* = .{
+            .parent = self,
+            .name = owned,
+            .slot = slot,
+            .deleted = true,
+            .count = self.count,
+            .live_count = self.live_count - 1,
+            .depth = self.depth + 1,
             .arena = self.arena,
         };
         try self.transitions.put(self.arena, owned, child);
@@ -199,6 +276,52 @@ test "shape transitions share structure and assign sequential slots" {
     try std.testing.expectEqual(sab, sab2);
 }
 
+test "shape deletion transitions preserve slots and undo immediate re-adds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try Shape.createRoot(arena.allocator());
+    const a = try root.transition("a");
+    const ab = try a.transition("b");
+    const abc = try ab.transition("c");
+
+    const without_b = (try abc.deleteTransition("b")).?;
+    try std.testing.expectEqual(@as(?u32, null), without_b.lookup("b"));
+    try std.testing.expectEqual(@as(?u32, 0), without_b.lookup("a"));
+    try std.testing.expectEqual(@as(?u32, 2), without_b.lookup("c"));
+    try std.testing.expectEqual(@as(u32, 3), without_b.count);
+    try std.testing.expectEqual(@as(u32, 2), without_b.live_count);
+    try std.testing.expectEqual(without_b, (try abc.deleteTransition("b")).?);
+
+    const restored = try without_b.transition("b");
+    try std.testing.expectEqual(abc, restored);
+    try std.testing.expectEqual(@as(?u32, 1), restored.lookup("b"));
+
+    // The newest add can be removed by returning directly to its parent; its
+    // physical tail slot no longer belongs to the resulting shape.
+    const without_c = (try abc.deleteTransition("c")).?;
+    try std.testing.expectEqual(ab, without_c);
+    try std.testing.expectEqual(@as(u32, 2), without_c.count);
+    try std.testing.expectEqual(@as(u32, 2), without_c.live_count);
+}
+
+test "shape deletion transitions converge under concurrent same-name removal" {
+    const root = try Shape.createRoot(std.heap.page_allocator);
+    const a = try root.transition("a");
+    const ab = try a.transition("b");
+    const abc = try ab.transition("c");
+
+    const Worker = struct {
+        fn run(shape: *Shape, out: **Shape) void {
+            out.* = (shape.deleteTransition("b") catch @panic("shape delete transition failed")) orelse @panic("missing property");
+        }
+    };
+    var children: [8]*Shape = undefined;
+    var threads: [children.len]std.Thread = undefined;
+    for (&threads, &children) |*thread, *child| thread.* = try std.Thread.spawn(.{}, Worker.run, .{ abc, child });
+    for (threads) |thread| thread.join();
+    for (children[1..]) |child| try std.testing.expectEqual(children[0], child);
+}
+
 test "shape transition stats reset and snapshot" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -239,7 +362,10 @@ test "shape transition lock wait observes published cache" {
         .parent = root,
         .name = owned,
         .slot = 0,
+        .deleted = false,
         .count = 1,
+        .live_count = 1,
+        .depth = 1,
         .arena = a,
     };
     root.publishTransition(child);

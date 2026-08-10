@@ -2032,7 +2032,7 @@ pub const Interpreter = struct {
     }
 
     fn defineOwnDataProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value, attr: value.PropAttr) EvalError!void {
-        switch (try obj.deleteAccessorOwn(self.arena, key)) {
+        switch (try obj.deleteAccessorOwnPreserveOrder(self.arena, key)) {
             .absent, .removed_continue, .deleted => {},
             .blocked => return self.throwError("TypeError", "Cannot redefine non-configurable accessor"),
         }
@@ -6231,7 +6231,7 @@ pub const Interpreter = struct {
                     // Name a computed/symbol-keyed method ("[desc]"); a plain
                     // `m(){}` already carries its parser-assigned name.
                     try self.maybeNameAnon(fv, m.func.?, name_str);
-                    if (!value.isPrivateKey(key)) switch (try home.deleteAccessorOwn(self.arena, key)) {
+                    if (!value.isPrivateKey(key)) switch (try home.deleteAccessorOwnPreserveOrder(self.arena, key)) {
                         .absent, .deleted, .removed_continue => {},
                         .blocked => return self.throwError("TypeError", "Cannot redefine class element"),
                     };

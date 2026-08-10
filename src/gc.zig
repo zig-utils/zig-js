@@ -439,7 +439,10 @@ test "Object property relocation covers inline external accessor and dense stora
         .parent = null,
         .name = "b",
         .slot = 1,
+        .deleted = false,
         .count = 2,
+        .live_count = 2,
+        .depth = 2,
         .arena = allocator,
     };
     var inline_object = Object{
@@ -1274,7 +1277,7 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     }
     if (flags.key_order) {
         if (o.keyOrder()) |ord| {
-            for (ord.items) |key| a.free(key);
+            for (ord.items) |entry| a.free(entry.key);
             ord.deinit(a);
             a.destroy(ord);
             o.coldState().?.key_order.store(null, .monotonic);
@@ -4456,7 +4459,10 @@ test "gc binding: real Object graph — proto/slots/accessors survive, garbage s
         .parent = null,
         .name = "edge",
         .slot = 0,
+        .deleted = false,
         .count = 1,
+        .live_count = 1,
+        .depth = 1,
         .arena = a,
     };
     root.shape = &occupied_shape;

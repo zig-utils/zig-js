@@ -1842,7 +1842,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             // to acquire that non-reentrant lock a second time. Remove only the
             // accessor representation; the shape invalidation ran before the
             // mutation and setOwn below installs the replacement data value.
-            switch (try target.deleteAccessorOwn(self.arena, key)) {
+            switch (try target.deleteAccessorOwnPreserveOrder(self.arena, key)) {
                 .deleted, .removed_continue => {},
                 .blocked => return false,
                 .absent => unreachable,
@@ -2178,25 +2178,11 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
     if (o.is_array) {
         if (frozen and o.getAttr("length").writable) return false;
     }
-    var s = o.shape;
-    while (s) |sh| {
-        if (sh.name) |n| {
-            if (value.isPrivateKey(n)) {
-                s = sh.parent;
-                continue;
-            }
-            const a = o.getAttr(n);
-            if (a.configurable) return false;
-            if (frozen and a.writable) return false;
-        }
-        s = sh.parent;
-    }
-    // Locked snapshot, not live iteration: a concurrent `setAccessor` on a shared
-    // object under `parallel_js` may grow this map mid-walk. See
-    // `Object.accessorKeysSnapshot`.
-    for (try o.accessorKeysSnapshot(self.arena)) |k| {
-        if (value.isPrivateKey(k)) continue;
-        if (o.getAttr(k).configurable) return false;
+    for (try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena)) |key| {
+        if (value.isPrivateKey(key)) continue;
+        const attr = o.getAttr(key);
+        if (attr.configurable) return false;
+        if (frozen and attr.writable) return false;
     }
     return true;
 }

@@ -1360,6 +1360,11 @@ pub const ObjectCollectionState = struct {
     coll_unindexed: bool = false,
 };
 
+pub const KeyOrderEntry = struct {
+    key: []const u8,
+    deleted: bool = false,
+};
+
 pub const ObjectColdState = struct {
     /// One-time publication tag for `rare`. Exotic state is initialized while
     /// `Object.backing_lock` is held, then this tag is released. Unlocked
@@ -1380,7 +1385,7 @@ pub const ObjectColdState = struct {
     restricted_to: std.atomic.Value(u64) = .init(0),
     /// Mixed data/accessor insertion order is needed only after an accessor or
     /// dictionary-style rebuild. Ordinary shape-only objects stay sidecar-free.
-    key_order: std.atomic.Value(?*std.ArrayListUnmanaged([]const u8)) = .init(null),
+    key_order: std.atomic.Value(?*std.ArrayListUnmanaged(KeyOrderEntry)) = .init(null),
     /// Per-property attribute overrides are rare on ordinary objects. Keep the
     /// atomically published map pointer off the common allocation payload.
     attrs: ?*std.StringHashMapUnmanaged(PropAttr) = null,
@@ -2016,7 +2021,7 @@ pub const Object = struct {
 
     /// Atomic view of the cold key-order pointer. Contents remain protected by
     /// `property_lock`; null is the shape-chain-only common case.
-    pub inline fn keyOrder(self: *const Object) ?*std.ArrayListUnmanaged([]const u8) {
+    pub inline fn keyOrder(self: *const Object) ?*std.ArrayListUnmanaged(KeyOrderEntry) {
         const cold = self.coldState() orelse return null;
         return cold.key_order.load(.monotonic);
     }
@@ -2042,7 +2047,7 @@ pub const Object = struct {
         return cold.restricted_to.cmpxchgStrong(0, tid, .acq_rel, .acquire);
     }
 
-    inline fn setKeyOrder(self: *Object, order: ?*std.ArrayListUnmanaged([]const u8)) void {
+    inline fn setKeyOrder(self: *Object, order: ?*std.ArrayListUnmanaged(KeyOrderEntry)) void {
         const cold = self.coldState() orelse {
             std.debug.assert(order == null);
             return;
@@ -2799,7 +2804,7 @@ pub const Object = struct {
             const child = cursor orelse return null;
             const name = child.name orelse return null;
             const index = remaining - 1;
-            if (child.slot != index or child.count != remaining or canonicalIndex(name) != null)
+            if (child.deleted or child.slot != index or child.count != remaining or child.live_count != remaining or canonicalIndex(name) != null)
                 return null;
             chain[index] = child;
             cursor = child.parent;
@@ -3907,7 +3912,7 @@ pub const Object = struct {
     fn deinitKeyOrderUnlocked(self: *Object) void {
         if (self.keyOrder()) |ord| {
             if (self.activeBackingAllocator("key_order")) |a| {
-                for (ord.items) |key| a.free(key);
+                for (ord.items) |entry| a.free(entry.key);
                 ord.deinit(a);
                 a.destroy(ord);
                 self.deactivateBacking("key_order");
@@ -3924,10 +3929,10 @@ pub const Object = struct {
 
     fn replaceKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator, names: []const []const u8) std.mem.Allocator.Error!void {
         // Build the replacement list FIRST, then free the old one: `names` may
-        // alias the current `key_order`'s key strings (the `deleteNamedDataOwn`
-        // rebuild passes its surviving keys, which point into this very table), so
-        // deiniting before copying frees the bytes `dupe` then reads - a
-        // use-after-free. Copying first makes the new list self-owned. Do not
+        // alias the current `key_order`'s key strings (history compaction passes
+        // its live keys, which point into this very table), so deiniting before
+        // copying frees the bytes `dupe` then reads - a use-after-free. Copying
+        // first makes the new list self-owned. Do not
         // call `deinitKeyOrderUnlocked` for the swap: it deactivates the backing
         // flag, but the replacement list uses that same backing store and still
         // needs to be visible to the GC finalizer.
@@ -3938,18 +3943,18 @@ pub const Object = struct {
         const backing = self.backingForTracked(arena, "key_order");
         const alloc = backing.allocator;
         errdefer if (backing.activated) self.deactivateBacking("key_order");
-        const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
+        const ko = try alloc.create(std.ArrayListUnmanaged(KeyOrderEntry));
         ko.* = .empty;
         errdefer {
-            for (ko.items) |key| alloc.free(key);
+            for (ko.items) |entry| alloc.free(entry.key);
             ko.deinit(alloc);
             alloc.destroy(ko);
         }
-        for (names) |name| try appendOwnedKey(ko, alloc, name);
+        for (names) |name| try appendOwnedKeyOrder(ko, alloc, name, false);
         if (old_key_order) |ord| {
             if (old_uses_backing) {
                 const a = old_backing_allocator.?;
-                for (ord.items) |key| a.free(key);
+                for (ord.items) |entry| a.free(entry.key);
                 ord.deinit(a);
                 a.destroy(ord);
             }
@@ -4019,24 +4024,30 @@ pub const Object = struct {
             // Index current liveness from the shape/accessor stores once. Walking
             // key_order backward then transitions each live spelling from pending
             // to emitted without a linear shape lookup per historical entry.
-            var membership: std.StringHashMapUnmanaged(bool) = .empty;
+            const Membership = enum { absent, pending, emitted };
+            var membership: std.StringHashMapUnmanaged(Membership) = .empty;
             defer membership.deinit(scratch);
             var shape = self.shape;
             while (shape) |sh| {
-                if (sh.name) |name| try membership.put(scratch, name, false);
+                if (sh.name) |name| {
+                    const entry = try membership.getOrPut(scratch, name);
+                    if (!entry.found_existing) entry.value_ptr.* = if (sh.deleted) .absent else .pending;
+                }
                 shape = sh.parent;
             }
             if (self.accessorsMap()) |accessors| {
                 var it = accessors.iterator();
-                while (it.next()) |entry| try membership.put(scratch, entry.key_ptr.*, false);
+                while (it.next()) |entry| try membership.put(scratch, entry.key_ptr.*, .pending);
             }
             var index = ord.items.len;
             while (index > 0) {
                 index -= 1;
-                const k = ord.items[index];
-                const emitted = membership.getPtr(k) orelse continue;
-                if (emitted.*) continue;
-                emitted.* = true;
+                const operation = ord.items[index];
+                if (operation.deleted) continue;
+                const k = operation.key;
+                const state = membership.getPtr(k) orelse continue;
+                if (state.* != .pending) continue;
+                state.* = .emitted;
                 try insertion.append(arena, k);
             }
             std.mem.reverse([]const u8, insertion.items);
@@ -4045,9 +4056,9 @@ pub const Object = struct {
             var s2 = self.shape;
             while (s2) |sh| {
                 if (sh.name) |n| {
-                    const emitted = membership.getPtr(n).?;
-                    if (!emitted.*) {
-                        emitted.* = true;
+                    const state = membership.getPtr(n).?;
+                    if (state.* == .pending) {
+                        state.* = .emitted;
                         try insertion.append(arena, n);
                     }
                 }
@@ -4057,18 +4068,25 @@ pub const Object = struct {
                 var it = m.iterator();
                 while (it.next()) |entry| {
                     const k = entry.key_ptr.*;
-                    const emitted = membership.getPtr(k).?;
-                    if (!emitted.*) {
-                        emitted.* = true;
+                    const state = membership.getPtr(k).?;
+                    if (state.* == .pending) {
+                        state.* = .emitted;
                         try insertion.append(arena, k);
                     }
                 }
             }
         } else {
-            // No accessors ever added: data slots in shape-chain insertion order.
+            // No accessors ever added: the newest operation for each spelling
+            // decides liveness; reversing the surviving additions restores the
+            // creation order of the last add after any delete/re-add sequence.
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(scratch);
             var s = self.shape;
             while (s) |sh| {
-                if (sh.name) |n| try insertion.append(arena, n);
+                if (sh.name) |n| {
+                    const entry = try seen.getOrPut(scratch, n);
+                    if (!entry.found_existing and !sh.deleted) try insertion.append(arena, n);
+                }
                 s = sh.parent;
             }
             std.mem.reverse([]const u8, insertion.items); // chain is newest-first → insertion order
@@ -4345,9 +4363,9 @@ pub const Object = struct {
 
     fn recordKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
         const ko = self.keyOrder() orelse return;
-        for (ko.items) |e| if (std.mem.eql(u8, e, name)) return;
+        if (!keyOrderNeedsAdd(ko, name)) return;
         const alloc = try self.keyOrderAllocator(arena);
-        try appendOwnedKey(ko, alloc, name);
+        try appendOwnedKeyOrder(ko, alloc, name, false);
     }
 
     /// Lazily build `key_order`, seeding it with the current data keys in
@@ -4364,22 +4382,27 @@ pub const Object = struct {
         const backing = self.backingForTracked(arena, "key_order");
         const alloc = backing.allocator;
         errdefer if (backing.activated) self.deactivateBacking("key_order");
-        const ko = try alloc.create(std.ArrayListUnmanaged([]const u8));
+        const ko = try alloc.create(std.ArrayListUnmanaged(KeyOrderEntry));
         ko.* = .empty;
         errdefer {
-            for (ko.items) |key| alloc.free(key);
+            for (ko.items) |entry| alloc.free(entry.key);
             ko.deinit(alloc);
             alloc.destroy(ko);
         }
         var seed: std.ArrayListUnmanaged([]const u8) = .empty;
         defer seed.deinit(arena);
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(alloc);
         var s = self.shape;
         while (s) |sh| {
-            if (sh.name) |n| try seed.append(arena, n);
+            if (sh.name) |n| {
+                const entry = try seen.getOrPut(alloc, n);
+                if (!entry.found_existing and !sh.deleted) try seed.append(arena, n);
+            }
             s = sh.parent;
         }
         std.mem.reverse([]const u8, seed.items); // newest-first → insertion order
-        for (seed.items) |n| try appendOwnedKey(ko, alloc, n);
+        for (seed.items) |n| try appendOwnedKeyOrder(ko, alloc, n, false);
         cold.key_order.store(ko, .monotonic);
     }
 
@@ -4434,24 +4457,55 @@ pub const Object = struct {
 
     pub fn setOwnUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
         gcBarrier(self, v); // stored into this cell's slots on either path below
-        if (self.shape) |sh| {
-            if (sh.lookup(name)) |slot| {
+        const base = self.shape orelse root;
+        const state = base.lookupState(name);
+        switch (state) {
+            .present => |slot| {
                 self.slotsItems()[slot] = v;
                 return;
+            },
+            .absent, .deleted => {},
+        }
+        const child = try base.transitionFromState(name, state);
+        var pending_order_key: ?[]u8 = null;
+        var pending_order_allocator: ?std.mem.Allocator = null;
+        errdefer if (pending_order_key) |owned| pending_order_allocator.?.free(owned);
+        if (self.keyOrder()) |order| {
+            const should_append = keyOrderNeedsAdd(order, name);
+            if (should_append) {
+                const alloc = try self.keyOrderAllocator(arena);
+                const owned = try alloc.dupe(u8, name);
+                order.ensureUnusedCapacity(alloc, 1) catch |err| {
+                    alloc.free(owned);
+                    return err;
+                };
+                pending_order_key = owned;
+                pending_order_allocator = alloc;
             }
         }
-        const base = self.shape orelse root;
-        const child = try base.transition(name);
-        try self.appendSlot(arena, v); // new slot index == base.count == child.slot
+        const target_slot = switch (state) {
+            .deleted => |deleted_slot| deleted_slot,
+            .absent => child.slot,
+            .present => unreachable,
+        };
+        if (target_slot < self.slotsItems().len) {
+            self.slotsItems()[target_slot] = v;
+        } else {
+            try self.appendSlot(arena, v);
+        }
         self.shape = child;
         if (canonicalIndex(name) != null) {
             self.has_indexed_property.store(true, .monotonic);
             self.indexed_own_seen.store(true, .release);
         }
         // A new data key on an accessor-bearing object records its creation order
-        // (a data↔accessor conversion keeps its position; deleteOwn drops stale
-        // entries so a genuinely re-added key lands at the end).
-        if (self.keyOrder() != null) try self.recordKeyOrderUnlocked(arena, name);
+        // (a data↔accessor conversion keeps its position; an explicit delete
+        // operation makes a genuinely re-added key land at the end).
+        if (pending_order_key) |owned| {
+            self.keyOrder().?.appendAssumeCapacity(.{ .key = owned });
+            pending_order_key = null;
+        }
+        self.maybeCompactKeyOrderUnlocked(arena);
     }
 
     /// JSC's `putDirectOffset`: replace an existing shape slot without a
@@ -4477,16 +4531,37 @@ pub const Object = struct {
     pub fn deleteAccessorOwn(self: *Object, arena: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!AccessorDeleteResult {
         self.lockProperties();
         defer self.unlockProperties();
-        return self.deleteAccessorOwnUnlocked(arena, key);
+        return self.deleteAccessorOwnUnlocked(arena, key, false);
     }
 
-    fn deleteAccessorOwnUnlocked(self: *Object, arena: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!AccessorDeleteResult {
+    pub fn deleteAccessorOwnPreserveOrder(self: *Object, arena: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!AccessorDeleteResult {
+        self.lockProperties();
+        defer self.unlockProperties();
+        return self.deleteAccessorOwnUnlocked(arena, key, true);
+    }
+
+    fn deleteAccessorOwnUnlocked(self: *Object, arena: std.mem.Allocator, key: []const u8, preserve_order: bool) std.mem.Allocator.Error!AccessorDeleteResult {
         const m = self.accessorsMap() orelse return .absent;
         if (m.getPtr(key) == null) return .absent;
         if (!self.getAttrUnlocked(key).configurable) return .blocked;
-        if (m.fetchRemove(key)) |removed| {
-            if (self.activeBackingAllocator("accessors")) |allocator| allocator.free(removed.key);
+        var pending_order_key: ?[]u8 = null;
+        var pending_order_allocator: ?std.mem.Allocator = null;
+        errdefer if (pending_order_key) |owned| pending_order_allocator.?.free(owned);
+        if (!preserve_order) {
+            try self.ensureKeyOrderUnlocked(arena);
+            const order = self.keyOrder().?;
+            const alloc = try self.keyOrderAllocator(arena);
+            const owned = try alloc.dupe(u8, key);
+            order.ensureUnusedCapacity(alloc, 1) catch |err| {
+                alloc.free(owned);
+                return err;
+            };
+            pending_order_key = owned;
+            pending_order_allocator = alloc;
         }
+        // Finish the only remaining fallible indexed mutation before removing
+        // the accessor. Once this succeeds, publication below cannot expose a
+        // half-deleted property on allocation failure.
         if (self.is_array) {
             if (canonicalIndex(key)) |i| {
                 const elements_locked_48 = self.lockElements();
@@ -4494,7 +4569,16 @@ pub const Object = struct {
                 if (i < self.elementsItems().len) try self.markHoleUnlocked(arena, i);
             }
         }
-        return if (self.getOwnUnlocked(key) == null) .deleted else .removed_continue;
+        if (m.fetchRemove(key)) |removed| {
+            if (self.activeBackingAllocator("accessors")) |allocator| allocator.free(removed.key);
+        }
+        if (pending_order_key) |owned| {
+            self.keyOrder().?.appendAssumeCapacity(.{ .key = owned, .deleted = true });
+            pending_order_key = null;
+        }
+        const result: AccessorDeleteResult = if (self.getOwnUnlocked(key) == null) .deleted else .removed_continue;
+        self.maybeCompactKeyOrderUnlocked(arena);
+        return result;
     }
 
     /// Object-literal data initialization is CreateDataProperty: replace any
@@ -4507,7 +4591,7 @@ pub const Object = struct {
     pub fn defineLiteralDataOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8, v: Value) std.mem.Allocator.Error!AccessorDeleteResult {
         self.lockProperties();
         defer self.unlockProperties();
-        const deleted = try self.deleteAccessorOwnUnlocked(arena, key);
+        const deleted = try self.deleteAccessorOwnUnlocked(arena, key, true);
         if (deleted == .blocked) return .blocked;
         try self.setOwnUnlocked(arena, root, key, v);
         return deleted;
@@ -4548,53 +4632,152 @@ pub const Object = struct {
     fn deleteNamedDataOwnInternal(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8, preserve_order: bool) std.mem.Allocator.Error!bool {
         self.lockProperties();
         defer self.unlockProperties();
-        if (self.getOwnUnlocked(key) == null) return true;
+        const current = self.shape orelse return true;
+        const slot = switch (current.lookupState(key)) {
+            .present => |present_slot| present_slot,
+            .absent, .deleted => return true,
+        };
         if (!self.getAttrUnlocked(key).configurable) return false;
-        if (preserve_order) try self.ensureKeyOrderUnlocked(arena);
-
-        const keys = try self.ownKeysUnlocked(arena);
-        const Entry = struct { k: []const u8, v: Value, a: PropAttr };
-        var saved: std.ArrayListUnmanaged(Entry) = .empty;
-        var survived: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (keys) |k| {
-            if (std.mem.eql(u8, k, key)) continue;
-            try survived.append(arena, k);
-            const v = self.getOwnUnlocked(k) orelse continue;
-            try saved.append(arena, .{ .k = k, .v = v, .a = self.getAttrUnlocked(k) });
+        // Deletion followed by re-add creates a new order position even when no
+        // accessor has ever existed. Snapshot once before mutation; later
+        // deletes retain historical entries and ownKeys selects the last live
+        // occurrence without rebuilding the list per deletion.
+        try self.ensureKeyOrderUnlocked(arena);
+        var pending_order_key: ?[]u8 = null;
+        var pending_order_allocator: ?std.mem.Allocator = null;
+        errdefer if (pending_order_key) |owned| pending_order_allocator.?.free(owned);
+        if (!preserve_order) {
+            const order = self.keyOrder().?;
+            const alloc = try self.keyOrderAllocator(arena);
+            const owned = try alloc.dupe(u8, key);
+            order.ensureUnusedCapacity(alloc, 1) catch |err| {
+                alloc.free(owned);
+                return err;
+            };
+            pending_order_key = owned;
+            pending_order_allocator = alloc;
         }
+        const next = (try current.deleteTransition(key)) orelse return true;
 
-        const old_key_order = self.keyOrder();
-        self.shape = root;
-        self.resetSlotsForRebuildUnlocked();
+        self.slotsItems()[slot] = Value.undef();
+        if (next.count < current.count) {
+            if (self.slotsState()) |slots| slots.list.shrinkRetainingCapacity(next.count);
+        }
+        self.shape = next;
         self.deleteAttrUnlocked(key);
-        self.setKeyOrder(null);
-        for (saved.items) |entry| {
-            try self.setOwnUnlocked(arena, root, entry.k, entry.v);
-            try self.setAttrUnlocked(arena, entry.k, entry.a);
+        if (pending_order_key) |owned| {
+            self.keyOrder().?.appendAssumeCapacity(.{ .key = owned, .deleted = true });
+            pending_order_key = null;
         }
-        self.setKeyOrder(old_key_order);
-        if (preserve_order) {
-            // Data->accessor conversion keeps the property's original creation
-            // position; `setAccessor` will reuse this existing key-order entry.
-        } else if (self.accessorsMap() != null) {
-            try self.replaceKeyOrderUnlocked(arena, survived.items);
-        } else {
-            self.deinitKeyOrderUnlocked();
-        }
+        self.maybeCompactNamedDataUnlocked(arena, root);
+        self.maybeCompactKeyOrderUnlocked(arena);
         return true;
+    }
+
+    fn maybeCompactKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator) void {
+        const order = self.keyOrder() orelse return;
+        const data_count: usize = if (self.shape) |shape| @intCast(shape.live_count) else 0;
+        const accessor_count = if (self.accessorsMap()) |accessors| accessors.count() else 0;
+        const live_count = data_count + accessor_count;
+        const threshold = @max(@as(usize, 64), live_count *| 2 +| 8);
+        if (order.items.len <= threshold) return;
+
+        const alloc = self.keyOrderAllocator(arena) catch return;
+        var scratch_state = std.heap.ArenaAllocator.init(alloc);
+        defer scratch_state.deinit();
+        const scratch = scratch_state.allocator();
+        const live = self.ownKeysUnlockedWithScratch(scratch, scratch) catch return;
+        self.replaceKeyOrderUnlocked(arena, live) catch return;
+    }
+
+    fn maybeCompactNamedDataUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape) void {
+        const current = self.shape orelse return;
+        const slot_pressure = current.count >= 64 and current.live_count * 2 < current.count;
+        const history_threshold = @max(@as(u32, 64), current.live_count *| 2 +| 8);
+        const history_pressure = current.depth > history_threshold;
+        if (!slot_pressure and !history_pressure) return;
+        self.compactNamedDataUnlocked(arena, root) catch return;
+    }
+
+    /// Build a packed shape/slot representation off to the side, then publish
+    /// it in one property-lock transaction. Shape transitions created before an
+    /// OOM are immutable Context cache entries; the Object itself is unchanged
+    /// until every fallible allocation has succeeded.
+    fn compactNamedDataUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape) std.mem.Allocator.Error!void {
+        const current = self.shape orelse return;
+        const slot_alloc = self.slotsAllocator(arena);
+        var scratch_state = std.heap.ArenaAllocator.init(slot_alloc);
+        defer scratch_state.deinit();
+        const scratch = scratch_state.allocator();
+        const Entry = struct { name: []const u8, value: Value };
+        var entries: std.ArrayListUnmanaged(Entry) = .empty;
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        var shape: ?*Shape = current;
+        while (shape) |operation| {
+            if (operation.name) |name| {
+                const membership = try seen.getOrPut(scratch, name);
+                if (!membership.found_existing and !operation.deleted)
+                    try entries.append(scratch, .{ .name = name, .value = self.slotsItems()[operation.slot] });
+            }
+            shape = operation.parent;
+        }
+        std.mem.reverse(Entry, entries.items);
+        std.debug.assert(entries.items.len == current.live_count);
+
+        var compact_shape = root;
+        for (entries.items) |entry|
+            compact_shape = try compact_shape.transitionFromState(entry.name, .absent);
+
+        var replacement: ?*ObjectSlotsState = null;
+        if (entries.items.len > inline_slot_capacity) {
+            const state = try slot_alloc.create(ObjectSlotsState);
+            state.* = .{};
+            errdefer slot_alloc.destroy(state);
+            try state.list.ensureTotalCapacityPrecise(slot_alloc, entries.items.len);
+            errdefer state.list.deinit(slot_alloc);
+            for (entries.items) |entry| state.list.appendAssumeCapacity(entry.value);
+            replacement = state;
+        }
+
+        for (entries.items) |entry| gcBarrier(self, entry.value);
+        const storage = self.storageState().?;
+        const old_slots = self.slotsState();
+        if (replacement) |state| {
+            storage.slots.store(state, .release);
+        } else {
+            for (entries.items, 0..) |entry, index| self.inline_slots[index] = entry.value;
+            storage.slots.store(null, .release);
+        }
+        self.shape = compact_shape;
+        if (old_slots) |state| {
+            state.list.deinit(slot_alloc);
+            slot_alloc.destroy(state);
+        }
+        if (replacement == null) self.deactivateBacking("slots");
     }
 };
 
 /// Append a self-owned property name without leaking the duplicate when list
 /// growth fails. Callers that build an unpublished list still own rollback for
 /// entries appended by earlier iterations.
-fn appendOwnedKey(
-    list: *std.ArrayListUnmanaged([]const u8),
+fn keyOrderNeedsAdd(list: *const std.ArrayListUnmanaged(KeyOrderEntry), name: []const u8) bool {
+    var index = list.items.len;
+    while (index > 0) {
+        index -= 1;
+        const entry = list.items[index];
+        if (std.mem.eql(u8, entry.key, name)) return entry.deleted;
+    }
+    return true;
+}
+
+fn appendOwnedKeyOrder(
+    list: *std.ArrayListUnmanaged(KeyOrderEntry),
     allocator: std.mem.Allocator,
     name: []const u8,
+    deleted: bool,
 ) std.mem.Allocator.Error!void {
     const owned = try allocator.dupe(u8, name);
-    list.append(allocator, owned) catch |err| {
+    list.append(allocator, .{ .key = owned, .deleted = deleted }) catch |err| {
         allocator.free(owned);
         return err;
     };
@@ -5352,7 +5535,10 @@ fn exerciseExternalSlotsOomRollback(allocator: std.mem.Allocator) !void {
         .parent = null,
         .name = "d",
         .slot = 3,
+        .deleted = false,
         .count = Object.inline_slot_capacity,
+        .live_count = Object.inline_slot_capacity,
+        .depth = Object.inline_slot_capacity,
         .arena = allocator,
     };
     var object = Object{ .shape = &four_slot_shape };
@@ -5440,16 +5626,16 @@ test "Object storage wrapper converges across concurrent slot and element instal
 }
 
 fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
-    var root = Shape{ .parent = null, .name = null, .slot = 0, .count = 0, .arena = allocator };
-    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .count = 1, .arena = allocator };
-    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .count = 2, .arena = allocator };
-    var gamma = Shape{ .parent = &beta, .name = "gamma", .slot = 2, .count = 3, .arena = allocator };
+    var root = Shape{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .arena = allocator };
+    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .arena = allocator };
+    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .arena = allocator };
+    var gamma = Shape{ .parent = &beta, .name = "gamma", .slot = 2, .deleted = false, .count = 3, .live_count = 3, .depth = 3, .arena = allocator };
     var object = Object{ .shape = &gamma };
     object.initInlineSlots();
     defer if (object.storageState()) |storage| allocator.destroy(storage);
     defer if (object.coldState()) |cold| allocator.destroy(cold);
     defer if (object.keyOrder()) |order| {
-        for (order.items) |key| allocator.free(key);
+        for (order.items) |entry| allocator.free(entry.key);
         order.deinit(allocator);
         allocator.destroy(order);
     };
@@ -5459,8 +5645,8 @@ fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
 
     const order = object.keyOrder().?;
     try std.testing.expectEqual(@as(usize, 4), order.items.len);
-    try std.testing.expectEqualStrings("alpha", order.items[0]);
-    try std.testing.expectEqualStrings("delta", order.items[3]);
+    try std.testing.expectEqualStrings("alpha", order.items[0].key);
+    try std.testing.expectEqualStrings("delta", order.items[3].key);
 }
 
 test "object key-order construction rolls back every allocation failure" {
@@ -5472,11 +5658,15 @@ test "object key-order construction rolls back every allocation failure" {
 }
 
 test "ownKeys releases its membership index without changing result ownership" {
-    var root = Shape{ .parent = null, .name = null, .slot = 0, .count = 0, .arena = std.testing.allocator };
-    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .count = 1, .arena = std.testing.allocator };
-    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .count = 2, .arena = std.testing.allocator };
-    var order = std.ArrayListUnmanaged([]const u8).empty;
-    try order.appendSlice(std.testing.allocator, &.{ "alpha", "beta", "alpha" });
+    var root = Shape{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .arena = std.testing.allocator };
+    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .arena = std.testing.allocator };
+    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .arena = std.testing.allocator };
+    var order = std.ArrayListUnmanaged(KeyOrderEntry).empty;
+    try order.appendSlice(std.testing.allocator, &.{
+        .{ .key = "alpha" },
+        .{ .key = "beta" },
+        .{ .key = "alpha" },
+    });
     defer order.deinit(std.testing.allocator);
 
     var cold = ObjectColdState{ .key_order = .init(&order) };
@@ -5557,7 +5747,7 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     attributed.initInlineSlots();
     try std.testing.expect(!attributed.initializePreparedInlineLiteralShape(prepared, &values));
 
-    var key_order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var key_order: std.ArrayListUnmanaged(KeyOrderEntry) = .empty;
     var ordered = Object{};
     ordered.initInlineSlots();
     var ordered_cold = ObjectColdState{ .key_order = .init(&key_order) };
@@ -5572,7 +5762,7 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     try std.testing.expect(!sealed.initializePreparedInlineLiteralShape(prepared, &values));
 }
 
-test "object named property delete rebuild serializes with writers" {
+test "object named property deletion serializes tombstone transitions with writers" {
     const root = try Shape.createRoot(std.heap.page_allocator);
     var object = Object{};
     try object.setOwn(std.heap.page_allocator, root, "anchor", Value.num(1));
@@ -5594,13 +5784,94 @@ test "object named property delete rebuild serializes with writers" {
     for (threads) |thread| thread.join();
 
     try std.testing.expect(object.getOwn("anchor") != null);
-    var count: usize = 0;
-    var shape = object.shape;
-    while (shape) |s| {
-        if (s.name != null) count += 1;
-        shape = s.parent;
+    var key_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer key_arena.deinit();
+    try std.testing.expectEqual(@as(usize, object.shape.?.count), object.slotsItems().len);
+    try std.testing.expectEqual(@as(usize, object.shape.?.live_count), (try object.ownKeys(key_arena.allocator())).len);
+}
+
+test "named deletion compacts tombstone slots and creation-order history" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{};
+    var names: [128][]const u8 = undefined;
+    for (&names, 0..) |*name, index| {
+        name.* = try std.fmt.allocPrint(arena, "field-{d}", .{index});
+        try object.setOwn(arena, root, name.*, Value.num(@floatFromInt(index)));
     }
-    try std.testing.expectEqual(count, object.slotsItems().len);
+    try object.setAttr(arena, names[127], .{ .writable = false, .enumerable = false, .configurable = true });
+    for (names[0..100]) |name| try std.testing.expect(try object.deleteNamedDataOwn(arena, root, name));
+
+    try std.testing.expect(object.shape.?.count < 64);
+    try std.testing.expect(object.slotsItems().len < 64);
+    try std.testing.expect(object.keyOrder().?.items.len <= 64);
+    try std.testing.expectEqual(@as(f64, 127), object.getOwn(names[127]).?.asNum());
+    try std.testing.expect(!object.getAttr(names[127]).writable);
+    const keys = try object.ownKeys(arena);
+    try std.testing.expectEqual(@as(usize, 28), keys.len);
+    try std.testing.expectEqualStrings("field-100", keys[0]);
+    try std.testing.expectEqualStrings("field-127", keys[27]);
+
+    // Repeatedly toggling one stable slot must not grow either its shape chain
+    // or its order history without bound.
+    for (0..500) |index| {
+        try std.testing.expect(try object.deleteNamedDataOwn(arena, root, names[110]));
+        try object.setOwn(arena, root, names[110], Value.num(@floatFromInt(index)));
+    }
+    try std.testing.expect(object.keyOrder().?.items.len <= 64);
+    try std.testing.expect(object.shape.?.depth <= 64);
+    try std.testing.expectEqualStrings("field-110", (try object.ownKeys(arena))[27]);
+}
+
+test "named deletion OOM leaves shape slots and order exact" {
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    const fail = failing.allocator();
+    var root = Shape{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .arena = fail };
+    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .arena = fail };
+    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .arena = fail };
+    var order = std.ArrayListUnmanaged(KeyOrderEntry).empty;
+    try order.appendSlice(std.testing.allocator, &.{ .{ .key = "alpha" }, .{ .key = "beta" } });
+    defer order.deinit(std.testing.allocator);
+    var cold = ObjectColdState{ .key_order = .init(&order) };
+    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator };
+    storage.cold.store(&cold, .monotonic);
+    var object = Object{ .shape = &beta };
+    object.storage.store(&storage, .monotonic);
+    object.inline_slots[0] = Value.num(1);
+    object.inline_slots[1] = Value.num(2);
+
+    try std.testing.expectError(error.OutOfMemory, object.deleteNamedDataOwn(std.testing.allocator, &root, "alpha"));
+    try std.testing.expectEqual(&beta, object.shape.?);
+    try std.testing.expectEqual(@as(f64, 1), object.getOwn("alpha").?.asNum());
+    try std.testing.expectEqual(@as(f64, 2), object.getOwn("beta").?.asNum());
+    try std.testing.expectEqual(@as(usize, 2), object.keyOrder().?.items.len);
+}
+
+test "accessor deletion OOM preserves accessor and creation order" {
+    var accessors: std.StringHashMapUnmanaged(Accessor) = .empty;
+    defer accessors.deinit(std.testing.allocator);
+    try accessors.put(std.testing.allocator, "accessor", .{ .get = Value.num(7) });
+    var order = std.ArrayListUnmanaged(KeyOrderEntry).empty;
+    defer order.deinit(std.testing.allocator);
+    try order.append(std.testing.allocator, .{ .key = "accessor" });
+    var cold = ObjectColdState{
+        .accessors = .init(&accessors),
+        .key_order = .init(&order),
+    };
+    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator };
+    storage.cold.store(&cold, .monotonic);
+    var object = Object{};
+    object.storage.store(&storage, .monotonic);
+
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    try std.testing.expectError(error.OutOfMemory, object.deleteAccessorOwn(failing.allocator(), "accessor"));
+    try std.testing.expectEqual(@as(f64, 7), object.getAccessor("accessor").?.get.?.asNum());
+    try std.testing.expectEqual(@as(usize, 1), object.keyOrder().?.items.len);
+    try std.testing.expect(!object.keyOrder().?.items[0].deleted);
 }
 
 // ---- no-GIL regression tests (issue #1): the atomic/seqlock primitives that

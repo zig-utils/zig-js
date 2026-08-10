@@ -16542,13 +16542,10 @@ test "tree-walker entry into a VM closure resolves frame upvalues (native callba
 }
 
 test "deleting a data property from an object that has accessors does not use-after-free" {
-    // Regression (broadened concurrent fuzzer, but single-threaded): when an object
-    // carries an accessor, `deleteNamedDataOwn` rebuilds its key order through
-    // `replaceKeyOrderUnlocked`, which used to free the old key_order *before*
-    // copying the surviving key names - and those names alias the freed storage, so
-    // the copy read freed memory (a segfault under churn). The fix copies first,
-    // then frees. Many delete+re-add cycles on an accessor-bearing object must stay
-    // correct and not crash.
+    // Regression (broadened concurrent fuzzer, but single-threaded): historical
+    // key-order compaction copies live names before releasing the owned operation
+    // log. Churn an accessor-bearing object far beyond the compaction threshold so
+    // stale order storage cannot be read or retained.
     const ctx = try Context.createWith(std.testing.allocator, .{});
     defer ctx.destroy();
     const v = try ctx.evaluate(
@@ -16561,6 +16558,147 @@ test "deleting a data property from an object that has accessors does not use-af
     );
     try std.testing.expect(v.isString());
     try std.testing.expectEqualStrings("19999:19999:19999", v.asStr()); // i=19999: c, gs, and k3 (19999&3==3)
+}
+
+test "named deletion preserves slots descriptors and creation order" {
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\var o = { a: 1, b: 2, c: 3 };
+        \\Object.defineProperty(o, "accessor", { get: function () { return 4; }, enumerable: true, configurable: true });
+        \\var deleted = delete o.b;
+        \\var afterDelete = Reflect.ownKeys(o).join(",");
+        \\o.b = 20;
+        \\var afterReadd = Reflect.ownKeys(o).join(",");
+        \\var descriptor = Object.getOwnPropertyDescriptor(o, "b");
+        \\var frozen = { keep: 1, drop: 2 };
+        \\delete frozen.drop;
+        \\Object.freeze(frozen);
+        \\deleted && o.a === 1 && o.c === 3 && o.accessor === 4 &&
+        \\afterDelete === "a,c,accessor" && afterReadd === "a,c,accessor,b" &&
+        \\descriptor.value === 20 && descriptor.writable && descriptor.enumerable && descriptor.configurable &&
+        \\Object.isFrozen(frozen) && Reflect.ownKeys(frozen).join(",") === "keep"
+    );
+    try std.testing.expect(result.asBool());
+}
+
+test "accessor deletion and representation conversion preserve exact creation order" {
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\var deletedAccessor = { a: 1 };
+        \\Object.defineProperty(deletedAccessor, "x", { get: function () { return 2; }, enumerable: true, configurable: true });
+        \\deletedAccessor.b = 3;
+        \\delete deletedAccessor.x;
+        \\Object.defineProperty(deletedAccessor, "x", { get: function () { return 4; }, enumerable: true, configurable: true });
+        \\var dataToAccessor = { a: 1, x: 2, b: 3 };
+        \\Object.defineProperty(dataToAccessor, "x", { get: function () { return 4; }, enumerable: true, configurable: true });
+        \\var accessorToData = { a: 1 };
+        \\Object.defineProperty(accessorToData, "x", { get: function () { return 2; }, enumerable: true, configurable: true });
+        \\accessorToData.b = 3;
+        \\Object.defineProperty(accessorToData, "x", { value: 4, writable: true, enumerable: true, configurable: true });
+        \\Reflect.ownKeys(deletedAccessor).join(",") === "a,b,x" &&
+        \\Reflect.ownKeys(dataToAccessor).join(",") === "a,x,b" &&
+        \\Reflect.ownKeys(accessorToData).join(",") === "a,x,b" &&
+        \\deletedAccessor.x === 4 && dataToAccessor.x === 4 && accessorToData.x === 4
+    );
+    try std.testing.expect(result.asBool());
+}
+
+test "indexed deletion preserves dense holes sparse names and canonical order" {
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\var sparse = { "9": "nine", a: 1, "2": "two" };
+        \\delete sparse[2];
+        \\Object.defineProperty(sparse, "2", { value: "TWO", writable: false, enumerable: false, configurable: true });
+        \\var sparseDescriptor = Object.getOwnPropertyDescriptor(sparse, "2");
+        \\var dense = [0, 1, 2];
+        \\dense.extra = 4;
+        \\delete dense[1];
+        \\var denseAfterDelete = Reflect.ownKeys(dense).join(",");
+        \\dense[1] = 10;
+        \\Reflect.ownKeys(sparse).join(",") === "2,9,a" &&
+        \\sparseDescriptor.value === "TWO" && !sparseDescriptor.writable &&
+        \\!sparseDescriptor.enumerable && sparseDescriptor.configurable &&
+        \\denseAfterDelete === "0,2,length,extra" &&
+        \\Reflect.ownKeys(dense).join(",") === "0,1,2,length,extra" && dense[1] === 10
+    );
+    try std.testing.expect(result.asBool());
+}
+
+test "named deletion sidecars survive moving GC relocation" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\globalThis.namedDeletionDiscard = [];
+        \\for (let i = 0; i < 4096; i++) namedDeletionDiscard.push({ i: i, dead: true });
+        \\namedDeletionDiscard = null;
+        \\globalThis.namedDeletionGc = {};
+        \\for (let i = 0; i < 128; i++) namedDeletionGc["field-" + i] = i;
+        \\Object.defineProperty(namedDeletionGc, "accessor", { get: function () { return 900; }, enumerable: true, configurable: true });
+        \\for (let i = 0; i < 96; i++) delete namedDeletionGc["field-" + i];
+        \\Object.defineProperty(namedDeletionGc, "field-0", { value: 1000, writable: false, enumerable: false, configurable: true });
+    );
+    ctx.collectGarbage();
+    const compacted = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+    try std.testing.expect(compacted.moved_cells > 0);
+
+    const result = try ctx.evaluate(
+        \\var keys = Reflect.ownKeys(namedDeletionGc);
+        \\var descriptor = Object.getOwnPropertyDescriptor(namedDeletionGc, "field-0");
+        \\keys.length === 34 && keys[0] === "field-96" && keys[31] === "field-127" &&
+        \\keys[32] === "accessor" && keys[33] === "field-0" &&
+        \\namedDeletionGc.accessor === 900 && namedDeletionGc["field-127"] === 127 &&
+        \\descriptor.value === 1000 && !descriptor.writable && !descriptor.enumerable && descriptor.configurable
+    );
+    try std.testing.expect(result.asBool());
+}
+
+test "parallel_js named deletion serializes shape slots descriptors and compaction" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\globalThis.namedDeleteShared = { anchor: 7 };
+        \\for (let i = 0; i < 128; i++) namedDeleteShared["field-" + i] = i;
+        \\function churnNamedDelete(lane) {
+        \\  for (let round = 0; round < 16; round++) {
+        \\    for (let i = lane; i < 128; i += 4) {
+        \\      let key = "field-" + i;
+        \\      if (!delete namedDeleteShared[key]) throw new Error("delete failed");
+        \\      Object.defineProperty(namedDeleteShared, key, {
+        \\        value: round * 1000 + i, writable: false, enumerable: false, configurable: true
+        \\      });
+        \\    }
+        \\  }
+        \\  return lane;
+        \\}
+        \\var namedDeleteThreads = [];
+        \\for (let lane = 0; lane < 4; lane++) namedDeleteThreads.push(new Thread(churnNamedDelete, lane));
+        \\var joined = 0;
+        \\for (let thread of namedDeleteThreads) joined += thread.join();
+        \\var exact = namedDeleteShared.anchor === 7 && joined === 6 && Reflect.ownKeys(namedDeleteShared).length === 129;
+        \\for (let i = 0; i < 128; i++) {
+        \\  let descriptor = Object.getOwnPropertyDescriptor(namedDeleteShared, "field-" + i);
+        \\  exact = exact && descriptor.value === 15000 + i && !descriptor.writable &&
+        \\    !descriptor.enumerable && descriptor.configurable;
+        \\}
+        \\exact;
+    );
+    try std.testing.expect(result.asBool());
+
+    const object = ctx.global_object.getOwn("namedDeleteShared").?.asObj();
+    const live = object.shape.?.live_count;
+    try std.testing.expect(object.shape.?.depth <= @max(@as(u32, 64), live *| 2 +| 8));
+    try std.testing.expect(object.keyOrder().?.items.len <= @max(@as(usize, 64), @as(usize, live) *| 2 +| 8));
 }
 
 test "Context threads run parallel by default; gil option opts into serialized mode" {
