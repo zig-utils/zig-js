@@ -114,6 +114,27 @@ function representativeJsonEscapedStrings(jobs, lane) {
   return total;
 }
 
+// A wide callback-observable PropertyList isolates replacer-array membership
+// and first-occurrence ordering from JSON nesting and parse costs.
+function representativeJsonStringifyReplacer(jobs, lane) {
+  var width = 4096;
+  var record = {};
+  var replacer = [];
+  for (var i = 0; i < width; i = i + 1) {
+    var index = (i * 17) & (width - 1);
+    var key = "field-" + index;
+    record[key] = index + lane;
+    replacer.push(key);
+  }
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var encoded = JSON.stringify(record, replacer);
+    total = total + encoded.length + encoded.charCodeAt(0) +
+      encoded.charCodeAt(encoded.length - 1) + encoded.indexOf("field-0");
+  }
+  return total;
+}
+
 function representativeCollections(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -463,6 +484,7 @@ function benchmarkFunction(name) {
   if (name === "representative_json_variant") return function (jobs, lane) { return representativeJson(jobs, lane, 1); };
   if (name === "representative_json_reviver_source") return representativeJsonReviverSource;
   if (name === "representative_json_escaped_strings") return representativeJsonEscapedStrings;
+  if (name === "representative_json_stringify_replacer") return representativeJsonStringifyReplacer;
   if (name === "representative_collections") return function (jobs, lane) { return representativeCollections(jobs, lane, 0); };
   if (name === "representative_collections_variant") return function (jobs, lane) { return representativeCollections(jobs, lane, 1); };
   if (name === "representative_strong_identity_collections") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 0); };
