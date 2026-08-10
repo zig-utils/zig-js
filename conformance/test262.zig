@@ -529,7 +529,10 @@ fn captureDetail(gpa: std.mem.Allocator, ctx: *js.Context, err: anyerror, d: *st
                     return;
                 }
             }
-            const s = ex.toString(gpa) catch "<throw>";
+            // The detail list owns its copy; render through the Context arena
+            // so an object conversion cannot strand an ambiguously owned GPA
+            // string after the diagnostic is appended.
+            const s = ex.toString(ctx.arena()) catch "<throw>";
             d.appendSlice(gpa, s) catch {};
             return;
         }
@@ -557,15 +560,17 @@ fn harnessIncludeOverride(abs_path: []const u8, name: []const u8) ?[]const u8 {
 fn runEval(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     const out = std.Io.File.stdout();
     const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_test_source_bytes)) catch return;
+    defer gpa.free(src);
     const ctx = js.Context.create(gpa) catch return;
     defer ctx.destroy();
     var buf: [4096]u8 = undefined;
     if (ctx.evaluate(src)) |v| {
-        const s = v.toString(gpa) catch "?";
+        const s = v.toString(ctx.arena()) catch "?";
         const line = std.fmt.bufPrint(&buf, "OK {s}\n", .{s}) catch "OK\n";
         out.writeStreamingAll(io, line) catch {};
     } else |err| {
         var d: std.ArrayListUnmanaged(u8) = .empty;
+        defer d.deinit(gpa);
         captureDetail(gpa, ctx, err, &d);
         const line = std.fmt.bufPrint(&buf, "ERR {s}\n", .{d.items}) catch "ERR\n";
         out.writeStreamingAll(io, line) catch {};
