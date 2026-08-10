@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "kind": "exact_parent_attribution_delta",
+  "parent_revision": "e2348ffdd64aa999f3d5872607a91f397414921f",
+  "candidate_revision": "ddaae8a53005610ee646d3d3f9571bdc5f4073b3",
+  "candidate_first_parent": "e2348ffdd64aa999f3d5872607a91f397414921f",
+  "parent_binary_sha256": "08787c2927a44934e38aa25635dca58e2498e6ded302be335b54d5db4f1c9cad",
+  "candidate_binary_sha256": "6eabd2094b13049aa6f2dcf0a1e3198d687c820993e819b0ebddb24a08503db1",
+  "command_shape": "bench-comparison-zig-js attribution representative_date_setter_4096 1 1",
+  "measurement": "one deterministic attribution run per exact revision; warmup snapshot minus configuration covers ten 4096-call setUTCHours passes; invocation snapshot minus warmup covers one scored 4096-call pass",
+  "expected_checksum": 2008733666,
+  "parent": {
+    "configuration": { "backing_allocations": 12475, "backing_allocation_bytes": 9485106, "backing_growths": 249, "backing_growth_bytes": 54474, "backing_releases": 191, "backing_released_bytes": 64176, "backing_current_bytes": 9475404, "backing_peak_bytes": 9475404, "gc_cell_allocations": 2725, "gc_cell_bytes": 283008 },
+    "warmup": { "backing_allocations": 12627, "backing_allocation_bytes": 24928660, "backing_growths": 357, "backing_growth_bytes": 69338, "backing_releases": 201, "backing_released_bytes": 66416, "backing_current_bytes": 24931582, "backing_peak_bytes": 24931582, "gc_cell_allocations": 2755, "gc_cell_bytes": 289408 },
+    "warmup_delta": { "backing_allocations": 152, "backing_allocation_bytes": 15443554, "backing_growths": 108, "backing_growth_bytes": 14864, "backing_releases": 10, "backing_released_bytes": 2240, "backing_current_bytes": 15456178, "backing_peak_bytes": 15456178, "gc_cell_allocations": 30, "gc_cell_bytes": 6400 },
+    "invocation": { "backing_allocations": 12642, "backing_allocation_bytes": 24929633, "backing_growths": 357, "backing_growth_bytes": 69338, "backing_releases": 202, "backing_released_bytes": 66640, "backing_current_bytes": 24932331, "backing_peak_bytes": 24932331, "gc_cell_allocations": 2758, "gc_cell_bytes": 290048 },
+    "invocation_delta": { "backing_allocations": 15, "backing_allocation_bytes": 973, "backing_growths": 0, "backing_growth_bytes": 0, "backing_releases": 1, "backing_released_bytes": 224, "backing_current_bytes": 749, "backing_peak_bytes": 749, "gc_cell_allocations": 3, "gc_cell_bytes": 640 }
+  },
+  "candidate": {
+    "configuration": { "backing_allocations": 12475, "backing_allocation_bytes": 9485106, "backing_growths": 249, "backing_growth_bytes": 54474, "backing_releases": 191, "backing_released_bytes": 64176, "backing_current_bytes": 9475404, "backing_peak_bytes": 9475404, "gc_cell_allocations": 2725, "gc_cell_bytes": 283008 },
+    "warmup": { "backing_allocations": 12626, "backing_allocation_bytes": 15663328, "backing_growths": 287, "backing_growth_bytes": 61118, "backing_releases": 201, "backing_released_bytes": 66416, "backing_current_bytes": 15658030, "backing_peak_bytes": 15658030, "gc_cell_allocations": 2755, "gc_cell_bytes": 289408 },
+    "warmup_delta": { "backing_allocations": 151, "backing_allocation_bytes": 6178222, "backing_growths": 38, "backing_growth_bytes": 6644, "backing_releases": 10, "backing_released_bytes": 2240, "backing_current_bytes": 6182626, "backing_peak_bytes": 6182626, "gc_cell_allocations": 30, "gc_cell_bytes": 6400 },
+    "invocation": { "backing_allocations": 12641, "backing_allocation_bytes": 15664301, "backing_growths": 287, "backing_growth_bytes": 61118, "backing_releases": 202, "backing_released_bytes": 66640, "backing_current_bytes": 15658779, "backing_peak_bytes": 15658779, "gc_cell_allocations": 2758, "gc_cell_bytes": 290048 },
+    "invocation_delta": { "backing_allocations": 15, "backing_allocation_bytes": 973, "backing_growths": 0, "backing_growth_bytes": 0, "backing_releases": 1, "backing_released_bytes": 224, "backing_current_bytes": 749, "backing_peak_bytes": 749, "gc_cell_allocations": 3, "gc_cell_bytes": 640 }
+  },
+  "warmup_candidate_minus_parent": {
+    "backing_allocations": -1,
+    "backing_allocation_bytes": -9265332,
+    "backing_growths": -70,
+    "backing_growth_bytes": -8220,
+    "backing_releases": 0,
+    "backing_released_bytes": 0,
+    "backing_current_bytes": -9273552,
+    "backing_peak_bytes": -9273552,
+    "gc_cell_allocations": 0,
+    "gc_cell_bytes": 0
+  }
+}
