@@ -15654,6 +15654,11 @@ test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
         \\  e: new TypeError("boom") });
         \\if (!(t.m instanceof Map) || t.m.get(1) !== "one") throw new Error("Map");
         \\if (!(t.s instanceof Set) || !t.s.has("x")) throw new Error("Set");
+        \\const objectKey = { id: 513 };
+        \\const keyed = structuredClone({ objectKey,
+        \\  map: new Map([[objectKey, "indexed"]]), set: new Set([objectKey]) });
+        \\if (keyed.map.get(keyed.objectKey) !== "indexed" || !keyed.set.has(keyed.objectKey))
+        \\  throw new Error("object-key collection index");
         \\const dm = new Map([[1, "live"], [2, "dead"]]); dm.delete(2);
         \\const ds = new Set(["live", "dead"]); ds.delete("dead");
         \\const deleted = structuredClone({ dm, ds });
@@ -18915,6 +18920,73 @@ test "moving nursery rewrites persistent roots across staggered age promotion" {
     try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
 }
 
+test "moving nursery preserves seeded Map and Set indexes for object and Symbol keys" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    const count = 1024;
+    const expected: f64 = count * count;
+    const setup = try ctx.evaluate(
+        \\globalThis.__indexedKeys = [];
+        \\globalThis.__indexedMap = new Map();
+        \\globalThis.__indexedSet = new Set();
+        \\for (let i = 0; i < 1024; i++) {
+        \\  const objectKey = { i };
+        \\  const symbolKey = Symbol("k" + i);
+        \\  __indexedKeys.push(objectKey, symbolKey);
+        \\  __indexedMap.set(objectKey, i);
+        \\  __indexedMap.set(symbolKey, i + 1);
+        \\  __indexedSet.add(objectKey);
+        \\  __indexedSet.add(symbolKey);
+        \\}
+        \\__indexedMap.size + __indexedSet.size
+    );
+    try std.testing.expectEqual(@as(f64, 4 * count), setup.asNum());
+
+    const map_before = ctx.global_object.getOwn("__indexedMap").?.asObj();
+    const set_before = ctx.global_object.getOwn("__indexedSet").?.asObj();
+    const map_state = map_before.collectionState().?;
+    const set_state = set_before.collectionState().?;
+    try std.testing.expect(!map_state.coll_unindexed);
+    try std.testing.expect(!set_state.coll_unindexed);
+    try std.testing.expectEqual(@as(usize, 2 * count), map_state.coll_next.items.len);
+    try std.testing.expectEqual(@as(usize, 2 * count), set_state.coll_next.items.len);
+
+    const moved = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const map_after = ctx.global_object.getOwn("__indexedMap").?.asObj();
+    const set_after = ctx.global_object.getOwn("__indexedSet").?.asObj();
+    try std.testing.expect(map_before != map_after);
+    try std.testing.expect(set_before != set_after);
+    try std.testing.expectEqual(map_state, map_after.collectionState().?);
+    try std.testing.expectEqual(set_state, set_after.collectionState().?);
+
+    interp.resetCollectionKeyComparisonsForTesting();
+    const checksum = try ctx.evaluate(
+        \\let total = 0;
+        \\for (let i = 0; i < __indexedKeys.length; i++) {
+        \\  const key = __indexedKeys[i];
+        \\  if (!__indexedSet.has(key)) throw new Error("moving Set index lost a key");
+        \\  total += __indexedMap.get(key);
+        \\}
+        \\total
+    );
+    try std.testing.expectEqual(expected, checksum.asNum());
+    // Successful lookups need at least one exact check each. Allow one extra
+    // check per operation for a legitimate seeded-hash collision while still
+    // bounding growth linearly; the former object/Symbol path scanned ordered
+    // prefixes and performs millions of checks at this size.
+    const comparisons = interp.collectionKeyComparisonsForTesting();
+    try std.testing.expect(comparisons >= 4 * count);
+    try std.testing.expect(comparisons <= 8 * count);
+    try std.testing.expect(!map_after.collUnindexed());
+    try std.testing.expect(!set_after.collUnindexed());
+}
+
 test "moving nursery rewrites strings held only by suspended captured VM frames" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
@@ -21757,20 +21829,30 @@ test "parallel_gc (M3 GIL-removal bring-up): concurrent first .prototype access 
     for (&workers) |*w| try std.testing.expectEqual(@as(i64, 112), w.result.load(.monotonic));
 }
 
-test "parallel_gc (M3 GIL-removal bring-up): contended Map.set on a shared Map via real bytecode" {
+test "parallel_gc (M3 GIL-removal bring-up): contended primitive and identity collection indexes via real bytecode" {
     // A distinct shared subsystem under real parallel bytecode: N threads each
-    // insert a disjoint block of keys into ONE shared `Map` via `m.set(k, v)`,
-    // contending the Map's `elements_lock` (which funnels insertion + table
-    // rehash). The global `m` lookup goes through `binding_lock`, the method
-    // dispatch + entry storage through `elements_lock`. After join the map must
-    // hold exactly N*M entries with the right values — no insert lost or torn,
-    // no rehash corruption. TSan-clean proves the Map insertion/rehash funnel is
-    // race-free under parallel mutation.
+    // insert disjoint primitive, object, and Symbol keys into shared Map/Set
+    // cells, contending their `elements_lock` (which funnels insertion, bucket
+    // chains, and rehash). After join every exact-identity lookup must survive:
+    // no insert lost or torn, no bucket corruption. TSan-clean proves the index
+    // and relocation-stable identity reads are race-free under parallel mutation.
     if (builtin.single_threaded) return error.SkipZigTest;
-    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .parallel_gc = true, .enable_threads = true });
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
     defer ctx.destroy();
 
-    _ = try ctx.evaluate("globalThis.m = new Map();");
+    _ = try ctx.evaluate(
+        \\globalThis.m = new Map();
+        \\globalThis.identityMap = new Map();
+        \\globalThis.identitySet = new Set();
+        \\globalThis.identityKeys = [];
+        \\for (let i = 0; i < 1000; i++)
+        \\  identityKeys.push({ i }, Symbol("shared:" + i));
+    );
 
     const nthreads = 4;
     const per = 250;
@@ -21784,10 +21866,22 @@ test "parallel_gc (M3 GIL-removal bring-up): contended Map.set on a shared Map v
             const sa = strcell.setActiveArena(s.ctx.arena());
             defer _ = strcell.setActiveArena(sa);
             const a = s.ctx.arena();
-            // Each thread writes its own [base, base+per) block; values = key*2.
-            var buf: [128]u8 = undefined;
+            // Each thread writes its own [base, base+per) block. Identity keys
+            // were allocated before the race and remain read-only here.
+            var buf: [512]u8 = undefined;
             const src = std.fmt.bufPrint(&buf,
-                \\(function(){{ for (var i = {d}; i < {d}; i++) m.set(i, i * 2); return true; }})()
+                \\(function(){{
+                \\  for (var i = {d}; i < {d}; i++) {{
+                \\    m.set(i, i * 2);
+                \\    var objectKey = identityKeys[i * 2];
+                \\    var symbolKey = identityKeys[i * 2 + 1];
+                \\    identityMap.set(objectKey, i * 3);
+                \\    identityMap.set(symbolKey, i * 5);
+                \\    identitySet.add(objectKey);
+                \\    identitySet.add(symbolKey);
+                \\  }}
+                \\  return true;
+                \\}})()
             , .{ s.base, s.base + per }) catch return;
             const owned = a.dupe(u8, src) catch return;
             var parser = Parser.init(a, owned) catch return;
@@ -21809,14 +21903,20 @@ test "parallel_gc (M3 GIL-removal bring-up): contended Map.set on a shared Map v
     for (&pool) |*th| th.join();
 
     for (&workers) |*w| try std.testing.expect(w.ok.load(.acquire));
-    // Exactly N*M entries, each key k mapping to k*2 — verified through the
-    // engine on the main thread (quiescent).
+    // Verify primitive and exact-identity indexes on the quiescent main thread.
     const size = try ctx.evaluate("m.size");
     try std.testing.expectEqual(@as(f64, nthreads * per), size.asNum());
     const allok = try ctx.evaluate(
         \\(function(){
-        \\  for (var k = 0; k < 1000; k++) { if (m.get(k) !== k * 2) return false; }
-        \\  return m.size === 1000;
+        \\  for (var k = 0; k < 1000; k++) {
+        \\    if (m.get(k) !== k * 2) return false;
+        \\    var objectKey = identityKeys[k * 2];
+        \\    var symbolKey = identityKeys[k * 2 + 1];
+        \\    if (identityMap.get(objectKey) !== k * 3 || identityMap.get(symbolKey) !== k * 5)
+        \\      return false;
+        \\    if (!identitySet.has(objectKey) || !identitySet.has(symbolKey)) return false;
+        \\  }
+        \\  return m.size === 1000 && identityMap.size === 2000 && identitySet.size === 2000;
         \\})()
     );
     try std.testing.expect(allok.isBoolean() and allok.asBool());

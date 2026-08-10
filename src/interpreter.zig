@@ -1680,6 +1680,12 @@ pub const Interpreter = struct {
     /// Null only in isolated interpreter unit helpers.
     private_name_serial: ?*std.atomic.Value(u64) = null,
     private_name_serial_local: u64 = 0,
+    /// Per-interpreter stream for strong-collection hash seeds. It is seeded
+    /// once from the engine's secure provider, so constructing a Map/Set does
+    /// not perform one OS entropy request per instance. Interpreter ownership
+    /// makes the stream race-free under shared-realm parallel execution.
+    collection_hash_prng_seeded: bool = false,
+    collection_hash_prng: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
     /// Host-defined `[[CanBlock]]` policy for this VM. Spawned `$262.agent`
     /// threads override it through their threadlocal agent record.
     main_can_block: bool = true,
@@ -10355,6 +10361,25 @@ pub const Interpreter = struct {
         return self.makeMapWithIntrinsic(init_v, "Map");
     }
 
+    fn newCollectionHashSeed(self: *Interpreter) EvalError!u64 {
+        if (!self.collection_hash_prng_seeded) {
+            var bytes: [8]u8 = undefined;
+            // Collection hashes are an algorithmic-complexity boundary. Fail
+            // construction if the host cannot supply entropy; a predictable
+            // clock/thread fallback would silently restore adversarial hashes.
+            agent.engineIo().randomSecure(&bytes) catch return error.OutOfMemory;
+            const seed = std.mem.readInt(u64, &bytes, .little);
+            self.collection_hash_prng = std.Random.DefaultPrng.init(seed);
+            self.collection_hash_prng_seeded = true;
+        }
+        return self.collection_hash_prng.random().int(u64);
+    }
+
+    pub fn prepareStrongCollection(self: *Interpreter, o: *value.Object) EvalError!void {
+        if (o.collHashSeed() != null) return;
+        _ = try o.ensureStrongCollectionState(self.arena, try self.newCollectionHashSeed());
+    }
+
     fn noteWeakWork(self: *Interpreter) void {
         if (self.gc_weak_work) |flag| flag.store(true, .release);
     }
@@ -10376,7 +10401,14 @@ pub const Interpreter = struct {
             }
         }
         o.is_weak = self.protoReachesCtorProto("WeakMap", o.protoAtomic());
-        if (o.is_weak) self.noteWeakWork();
+        if (o.is_weak) {
+            self.noteWeakWork();
+        } else {
+            // A strong collection always owns its seeded index state. Failing
+            // construction is preferable to later publishing an index that
+            // omits entries inserted during an earlier sidecar OOM.
+            try self.prepareStrongCollection(o);
+        }
         try self.addEntriesFromIterable(o, init_v, false);
         return Value.obj(o);
     }
@@ -10405,7 +10437,11 @@ pub const Interpreter = struct {
             }
         }
         o.is_weak = self.protoReachesCtorProto("WeakSet", o.protoAtomic());
-        if (o.is_weak) self.noteWeakWork();
+        if (o.is_weak) {
+            self.noteWeakWork();
+        } else {
+            try self.prepareStrongCollection(o);
+        }
         try self.addEntriesFromIterable(o, init_v, true);
         return Value.obj(o);
     }
@@ -10508,7 +10544,8 @@ pub const Interpreter = struct {
             const elements = try o.ensureElementsList(self.arena);
             const pos: u32 = @intCast(elements.items.len);
             try elements.append(o.elementsAllocator(self.arena), Value.obj(pair));
-            if (!o.collUnindexed()) if (hashKey(key)) |hkey| {
+            if (!o.collUnindexed()) if (o.collHashSeed()) |seed| {
+                const hkey = hashKey(seed, key);
                 if (!o.collIndexPut(self.arena, hkey, pos)) o.collDisableIndex(self.arena);
             };
             return self_v;
@@ -10529,14 +10566,14 @@ pub const Interpreter = struct {
             defer o.unlockElements(elements_locked_4);
             if (mapFindPos(o, key, self.arena)) |pos| {
                 liveMapEntry(o.elementsItems()[pos]).?.clearElementsRetainingCapacity();
-                if (!o.collUnindexed()) if (hashKey(key)) |hkey| o.collIndexRemove(hkey);
+                if (!o.collUnindexed()) if (o.collHashSeed()) |seed|
+                    o.collIndexRemove(hashKey(seed, key), @intCast(pos));
                 return Value.boolVal(true);
             }
             return Value.boolVal(false);
         }
         if (eq(name, "clear")) {
-            o.clearElementsRetainingCapacity();
-            o.collIndexReset();
+            o.clearStrongCollectionRetainingCapacity();
             return Value.undef();
         }
         if (eq(name, "forEach")) {
@@ -10619,6 +10656,10 @@ pub const Interpreter = struct {
         return liveSetEntryCount(set);
     }
 
+    pub fn nativeSetAdd(self: *Interpreter, set: *value.Object, key: Value) EvalError!void {
+        _ = (try self.setMethod(set, "add", &.{key})) orelse Value.undef();
+    }
+
     fn setMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         const self_v = Value.obj(o);
         // A WeakSet value must be holdable weakly (object or non-registered
@@ -10649,7 +10690,8 @@ pub const Interpreter = struct {
             const elements = try o.ensureElementsList(self.arena);
             const pos: u32 = @intCast(elements.items.len);
             try elements.append(o.elementsAllocator(self.arena), key);
-            if (!o.collUnindexed()) if (hashKey(key)) |hkey| {
+            if (!o.collUnindexed()) if (o.collHashSeed()) |seed| {
+                const hkey = hashKey(seed, key);
                 if (!o.collIndexPut(self.arena, hkey, pos)) o.collDisableIndex(self.arena);
             };
             return self_v;
@@ -10666,14 +10708,14 @@ pub const Interpreter = struct {
             defer o.unlockElements(elements_locked_9);
             if (setFindPos(o, key, self.arena)) |pos| {
                 o.elementsItems()[pos] = Value.obj(tomb);
-                if (!o.collUnindexed()) if (hashKey(key)) |hkey| o.collIndexRemove(hkey);
+                if (!o.collUnindexed()) if (o.collHashSeed()) |seed|
+                    o.collIndexRemove(hashKey(seed, key), @intCast(pos));
                 return Value.boolVal(true);
             }
             return Value.boolVal(false);
         }
         if (eq(name, "clear")) {
-            o.clearElementsRetainingCapacity();
-            o.collIndexReset();
+            o.clearStrongCollectionRetainingCapacity();
             return Value.undef();
         }
         if (eq(name, "forEach")) {
@@ -31639,6 +31681,21 @@ fn canonicalCollectionKey(v: Value) Value {
     return if (v.isNumber() and v.asNum() == 0) Value.num(0) else v;
 }
 
+var collection_key_comparisons_for_testing: std.atomic.Value(u64) = .init(0);
+
+pub fn resetCollectionKeyComparisonsForTesting() void {
+    if (builtin.is_test) collection_key_comparisons_for_testing.store(0, .release);
+}
+
+pub fn collectionKeyComparisonsForTesting() u64 {
+    return if (builtin.is_test) collection_key_comparisons_for_testing.load(.acquire) else 0;
+}
+
+inline fn collectionKeyEquals(a: Value, b: Value) bool {
+    if (builtin.is_test) _ = collection_key_comparisons_for_testing.fetchAdd(1, .monotonic);
+    return value.sameValueZero(a, b);
+}
+
 fn liveMapEntry(v: Value) ?*value.Object {
     if (!v.isObject() or v.asObj().elementsLen() < 2) return null;
     return v.asObj();
@@ -31646,7 +31703,7 @@ fn liveMapEntry(v: Value) ?*value.Object {
 
 fn mapEntryMatches(entry: *value.Object, key: Value) bool {
     const entry_key = entry.elementAt(0) orelse return false;
-    return value.sameValueZero(entry_key, key);
+    return collectionKeyEquals(entry_key, key);
 }
 
 fn mapEntryValue(entry: *value.Object) Value {
@@ -31685,12 +31742,12 @@ fn liveSetEntryCount(o: *value.Object) usize {
     return n;
 }
 
-/// Content hash of a Map/Set key, consistent with `sameValueZero`, or null for a
-/// non-indexable key (a plain object or symbol — compared by identity, whose
-/// pointer would move under a compacting GC). Per-kind tag bytes keep the
-/// primitive kinds from colliding cheaply. `-0`/`+0` and all NaN each hash alike.
-fn hashKey(key: Value) ?u64 {
-    var h = std.hash.Wyhash.init(0);
+/// Seeded hash of every Map/Set key kind, consistent with `SameValueZero`.
+/// Precise-heap objects use zig-gc's relocation-stable identity; arena objects
+/// use their lifetime-stable address. Per-kind tags separate primitive domains,
+/// while exact equality in the bucket chain remains authoritative on collision.
+fn hashKey(seed: u64, key: Value) u64 {
+    var h = std.hash.Wyhash.init(seed);
     switch (key.kind()) {
         .number => {
             const n = key.asNum();
@@ -31725,10 +31782,22 @@ fn hashKey(key: Value) ?u64 {
         },
         .object => {
             const o = key.asObj();
-            if (!o.is_bigint) return null; // object / symbol → identity, not indexable
+            if (!o.is_bigint) {
+                h.update("o");
+                const identity = gc_mod.stableCellIdentity(@ptrCast(o)) orelse @as(u64, @intCast(@intFromPtr(o)));
+                h.update(std.mem.asBytes(&identity));
+                return h.final();
+            }
             h.update("i");
             if (o.bigIntText()) |t| {
-                h.update(t);
+                // `bigIntEquals` permits a canonical decimal sidecar to equal
+                // an i128-backed value. Hash that overlap through the same
+                // binary representation so equal BigInts share one bucket.
+                if (std.fmt.parseInt(i128, t, 10)) |small| {
+                    h.update(std.mem.asBytes(&small));
+                } else |_| {
+                    h.update(t);
+                }
             } else {
                 const v = o.bigIntValue();
                 h.update(std.mem.asBytes(&v));
@@ -31739,22 +31808,26 @@ fn hashKey(key: Value) ?u64 {
 }
 
 /// Position of the live Map entry for `key` in `o.elementsItems()`, or null.
-/// Consults the acceleration index for a primitive key: an index miss is an
-/// authoritative "absent" (no scan). Object/symbol keys, an unindexed map, or a
-/// hash collision fall through to the ordered linear scan. Caller holds the lock.
+/// Consults the exact-equality collision chain: an exhausted bucket is an
+/// authoritative absence. Only a prior index-allocation failure falls back to
+/// the ordered scan. Caller holds the elements lock.
 fn mapFindPos(o: *value.Object, key: Value, arena: std.mem.Allocator) ?usize {
-    if (!o.collUnindexed()) {
-        if (hashKey(key)) |hkey| {
-            if (o.collIndexGet(hkey)) |pos| {
-                if (pos < o.elementsItems().len)
-                    if (liveMapEntry(o.elementsItems()[pos])) |entry|
-                        if (mapEntryMatches(entry, key)) return pos;
-                // Hash present but no matching live entry ⇒ collision; the index
-                // can no longer answer "absent" authoritatively — drop it.
+    if (!o.collUnindexed()) if (o.collHashSeed()) |seed| {
+        const hkey = hashKey(seed, key);
+        var cursor = o.collIndexHead(hkey);
+        var remaining = o.elementsItems().len;
+        while (cursor) |pos| {
+            if (remaining == 0 or pos >= o.elementsItems().len) {
                 o.collDisableIndex(arena);
-            } else return null; // authoritative: no primitive entry with this hash
+                break;
+            }
+            remaining -= 1;
+            if (liveMapEntry(o.elementsItems()[pos])) |entry|
+                if (mapEntryMatches(entry, key)) return pos;
+            cursor = o.collIndexNext(pos);
         }
-    }
+        if (!o.collUnindexed()) return null;
+    };
     for (o.elementsItems(), 0..) |e, i|
         if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return i;
     return null;
@@ -31762,18 +31835,24 @@ fn mapFindPos(o: *value.Object, key: Value, arena: std.mem.Allocator) ?usize {
 
 /// Set analogue of `mapFindPos`: position of the live Set entry equal to `val`.
 fn setFindPos(o: *value.Object, val: Value, arena: std.mem.Allocator) ?usize {
-    if (!o.collUnindexed()) {
-        if (hashKey(val)) |hkey| {
-            if (o.collIndexGet(hkey)) |pos| {
-                if (pos < o.elementsItems().len)
-                    if (liveSetEntry(o.elementsItems()[pos])) |entry|
-                        if (value.sameValueZero(entry, val)) return pos;
+    if (!o.collUnindexed()) if (o.collHashSeed()) |seed| {
+        const hkey = hashKey(seed, val);
+        var cursor = o.collIndexHead(hkey);
+        var remaining = o.elementsItems().len;
+        while (cursor) |pos| {
+            if (remaining == 0 or pos >= o.elementsItems().len) {
                 o.collDisableIndex(arena);
-            } else return null;
+                break;
+            }
+            remaining -= 1;
+            if (liveSetEntry(o.elementsItems()[pos])) |entry|
+                if (collectionKeyEquals(entry, val)) return pos;
+            cursor = o.collIndexNext(pos);
         }
-    }
+        if (!o.collUnindexed()) return null;
+    };
     for (o.elementsItems(), 0..) |e, i|
-        if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, val)) return i;
+        if (liveSetEntry(e)) |entry| if (collectionKeyEquals(entry, val)) return i;
     return null;
 }
 

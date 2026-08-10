@@ -1306,6 +1306,8 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         const collection = o.collectionState().?;
         collection.coll_index.deinit(a);
         collection.coll_index = .empty;
+        collection.coll_next.deinit(a);
+        collection.coll_next = .empty;
         released += 1;
     }
     if (flags.collection_state) {
@@ -4224,6 +4226,16 @@ fn allocManagedStringOwned(
 /// cell types that can also be embedded in a Context or allocated by an arena.
 pub inline fn allocationsAreManaged() bool {
     return active_heap != null;
+}
+
+/// Relocation-stable identity for a live cell in the current precise heap.
+/// Map/Set hashing calls this only from a mutator-owned operation; moving
+/// collection is world-stopped and concurrent marking never reclaims cells.
+/// Arena/static objects return null and use their lifetime-stable address.
+pub fn stableCellIdentity(cell: ?*anyopaque) ?u64 {
+    const raw = active_heap orelse return null;
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    return if (heap.cellMetadata(cell)) |metadata| @intFromEnum(metadata.id) else null;
 }
 
 /// Install the interpreter currently executing JS on this thread. Allocation

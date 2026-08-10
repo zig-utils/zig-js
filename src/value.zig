@@ -1323,10 +1323,14 @@ pub const GetterSetterCellData = struct {
 pub const ObjectCollectionState = struct {
     weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
     weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
-    /// Strong Map/Set acceleration index: content-hash(key) → position in the
-    /// ordered `elements` list. It contains no managed pointers and therefore
-    /// survives moving collection without tracing.
+    /// Strong Map/Set acceleration index: seeded content/identity hash → head
+    /// position in the ordered `elements` list. `coll_next` links exact-equality
+    /// collision buckets by position. Neither structure contains managed
+    /// pointers, so both survive moving collection without tracing/relocation.
     coll_index: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    coll_next: std.ArrayListUnmanaged(u32) = .empty,
+    coll_hash_seed: u64 = 0,
+    coll_hash_seeded: bool = false,
     coll_unindexed: bool = false,
 };
 
@@ -1919,6 +1923,15 @@ pub const Object = struct {
         };
         state.* = .{};
         cold.collection_state = state;
+        return state;
+    }
+
+    pub fn ensureStrongCollectionState(self: *Object, fallback: std.mem.Allocator, hash_seed: u64) std.mem.Allocator.Error!*ObjectCollectionState {
+        const state = try self.ensureCollectionState(fallback);
+        if (!state.coll_hash_seeded) {
+            state.coll_hash_seed = hash_seed;
+            state.coll_hash_seeded = true;
+        }
         return state;
     }
 
@@ -3287,40 +3300,90 @@ pub const Object = struct {
     // ---- Strong Map/Set acceleration index ---------------------------------
     // All of these assume the caller holds `lockElements()` (the index is
     // logically part of the ordered `elements` list it accelerates).
-    /// Stored position for `hash`, or null. Null is authoritative ("absent")
-    /// only while `collUnindexed()` is false.
-    pub fn collIndexGet(self: *Object, hash: u64) ?u32 {
+    pub fn collHashSeed(self: *const Object) ?u64 {
+        const state = self.collectionState() orelse return null;
+        return if (state.coll_hash_seeded) state.coll_hash_seed else null;
+    }
+    /// Head position for `hash`, or null. Null is authoritative ("absent")
+    /// only while `collUnindexed()` is false and a collection state exists.
+    pub fn collIndexHead(self: *Object, hash: u64) ?u32 {
         const state = self.collectionState() orelse return null;
         return state.coll_index.get(hash);
     }
-    /// Record hash→position. Ensures cold state and the backing allocator first
-    /// (like the weak path). Returns false if it could not be recorded (OOM); the
-    /// caller must then `collDisableIndex` so lookups stay correct.
+    pub fn collIndexNext(self: *Object, pos: u32) ?u32 {
+        const state = self.collectionState() orelse return null;
+        if (pos >= state.coll_next.items.len) return null;
+        const next = state.coll_next.items[pos];
+        return if (next == std.math.maxInt(u32)) null else next;
+    }
+    /// Add `pos` to this hash bucket. Positions are appended in lock-step with
+    /// the ordered elements list; reserving both containers before either is
+    /// mutated prevents a partially authoritative index on OOM.
     pub fn collIndexPut(self: *Object, fallback: std.mem.Allocator, hash: u64, pos: u32) bool {
         const state = self.ensureCollectionState(fallback) catch return false;
         const alloc = self.ensureBackingFor(fallback, "coll_index") catch return false;
-        state.coll_index.put(alloc, hash, pos) catch return false;
+        if (pos != state.coll_next.items.len) return false;
+        state.coll_next.ensureUnusedCapacity(alloc, 1) catch return false;
+        state.coll_index.ensureUnusedCapacity(alloc, 1) catch return false;
+        const previous = state.coll_index.get(hash) orelse std.math.maxInt(u32);
+        state.coll_next.appendAssumeCapacity(previous);
+        state.coll_index.putAssumeCapacity(hash, pos);
         return true;
     }
-    pub fn collIndexRemove(self: *Object, hash: u64) void {
-        if (self.collectionState()) |state| _ = state.coll_index.remove(hash);
+    /// Unlink one exact ordered position without disturbing other colliding
+    /// entries. The ordered element itself remains a tombstone per Map/Set.
+    pub fn collIndexRemove(self: *Object, hash: u64, pos: u32) void {
+        const state = self.collectionState() orelse return;
+        const end = std.math.maxInt(u32);
+        const head = state.coll_index.get(hash) orelse return;
+        const removed_next = if (pos < state.coll_next.items.len) state.coll_next.items[pos] else end;
+        if (head == pos) {
+            if (removed_next == end)
+                _ = state.coll_index.remove(hash)
+            else
+                state.coll_index.getPtr(hash).?.* = removed_next;
+            if (pos < state.coll_next.items.len) state.coll_next.items[pos] = end;
+            return;
+        }
+        var current = head;
+        while (current < state.coll_next.items.len) {
+            const next = state.coll_next.items[current];
+            if (next == pos) {
+                state.coll_next.items[current] = removed_next;
+                if (pos < state.coll_next.items.len) state.coll_next.items[pos] = end;
+                return;
+            }
+            if (next == end) return;
+            current = next;
+        }
     }
     pub fn collUnindexed(self: *Object) bool {
         return if (self.collectionState()) |state| state.coll_unindexed else false;
     }
-    /// Permanently drop to linear scanning (a non-indexable key or hash
-    /// collision appeared). Needs cold state so the flag persists.
+    /// Permanently drop to linear scanning after index allocation failure or a
+    /// structural invariant failure. Needs cold state so the flag persists.
     pub fn collDisableIndex(self: *Object, fallback: std.mem.Allocator) void {
         const state = self.ensureCollectionState(fallback) catch return;
         state.coll_unindexed = true;
         state.coll_index.clearRetainingCapacity();
+        state.coll_next.clearRetainingCapacity();
     }
     /// `clear()` empties the collection: wipe the index and re-enable it.
     pub fn collIndexReset(self: *Object) void {
         if (self.collectionState()) |state| {
             state.coll_index.clearRetainingCapacity();
+            state.coll_next.clearRetainingCapacity();
             state.coll_unindexed = false;
         }
+    }
+    /// Clear ordered collection data and its authoritative index as one
+    /// elements-lock transaction. Keeping these two writes indivisible avoids
+    /// a peer insertion being published immediately before a stale index reset.
+    pub fn clearStrongCollectionRetainingCapacity(self: *Object) void {
+        const elements_locked = self.lockElements();
+        defer self.unlockElements(elements_locked);
+        if (self.elementsState()) |state| state.list.clearRetainingCapacity();
+        self.collIndexReset();
     }
 
     fn weakIndexKey(key: ?*anyopaque) usize {
@@ -5511,6 +5574,65 @@ test "WeakMap and WeakSet entry delete is unordered tail removal" {
     try std.testing.expect(o.weakEntryHas(@ptrCast(&key2)));
     try std.testing.expect(o.weakEntryHas(@ptrCast(&key3)));
     try std.testing.expectEqual(@intFromPtr(&key3), @intFromPtr(collection.weak_entries.items[0].key.?));
+}
+
+test "strong collection index keeps exact collision chains through deletion" {
+    const a = std.testing.allocator;
+    var o = Object{ .is_map = true };
+    const cold = try o.ensureCold(a);
+    const collection = try o.ensureCollectionState(a);
+    defer a.destroy(o.storageState().?);
+    defer a.destroy(cold);
+    defer a.destroy(collection);
+    defer collection.coll_index.deinit(a);
+    defer collection.coll_next.deinit(a);
+
+    const hash: u64 = 0x513;
+    try std.testing.expect(o.collIndexPut(a, hash, 0));
+    try std.testing.expect(o.collIndexPut(a, hash, 1));
+    try std.testing.expect(o.collIndexPut(a, hash, 2));
+    try std.testing.expectEqual(@as(?u32, 2), o.collIndexHead(hash));
+    try std.testing.expectEqual(@as(?u32, 1), o.collIndexNext(2));
+    try std.testing.expectEqual(@as(?u32, 0), o.collIndexNext(1));
+    try std.testing.expectEqual(@as(?u32, null), o.collIndexNext(0));
+
+    o.collIndexRemove(hash, 1);
+    try std.testing.expectEqual(@as(?u32, 2), o.collIndexHead(hash));
+    try std.testing.expectEqual(@as(?u32, 0), o.collIndexNext(2));
+    o.collIndexRemove(hash, 2);
+    try std.testing.expectEqual(@as(?u32, 0), o.collIndexHead(hash));
+    o.collIndexRemove(hash, 0);
+    try std.testing.expectEqual(@as(?u32, null), o.collIndexHead(hash));
+
+    o.collIndexReset();
+    try std.testing.expectEqual(@as(usize, 0), collection.coll_next.items.len);
+    try std.testing.expect(!collection.coll_unindexed);
+}
+
+test "strong collection index allocation failure never publishes a partial bucket" {
+    const a = std.testing.allocator;
+    // Exercise failure before either reserve and between the two reserves. The
+    // latter may retain unused capacity, but neither path may publish a chain
+    // element or a hash head that an absent lookup could trust.
+    for (0..2) |fail_index| {
+        var o = Object{ .is_set = true };
+        const cold = try o.ensureCold(a);
+        const collection = try o.ensureStrongCollectionState(a, 0x513);
+        defer a.destroy(o.storageState().?);
+        defer a.destroy(cold);
+        defer a.destroy(collection);
+        defer collection.coll_index.deinit(a);
+        defer collection.coll_next.deinit(a);
+
+        var failing: std.testing.FailingAllocator = .init(a, .{ .fail_index = fail_index });
+        try std.testing.expect(!o.collIndexPut(failing.allocator(), 0xabc, 0));
+        try std.testing.expectEqual(@as(usize, 0), collection.coll_index.count());
+        try std.testing.expectEqual(@as(usize, 0), collection.coll_next.items.len);
+
+        o.collDisableIndex(a);
+        try std.testing.expect(o.collUnindexed());
+        try std.testing.expectEqual(@as(?u32, null), o.collIndexHead(0xabc));
+    }
 }
 
 test "FinalizationRegistry unregister stable-compacts matching records" {

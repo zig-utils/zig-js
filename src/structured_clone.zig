@@ -1027,21 +1027,15 @@ const Deserializer = struct {
                 try d.objs.append(a, o);
                 o.is_map = true;
                 if (d.protoFor("Map")) |p| o.proto = p;
+                try d.self.prepareStrongCollection(o);
                 const n = d.r.int(u32) catch return d.fail();
                 const child_depth = if (n == 0) 0 else try d.childDepth(depth);
                 var i: u32 = 0;
                 while (i < n) : (i += 1) {
                     const k = try d.deser(child_depth);
                     const v = try d.deser(child_depth);
-                    const pair = (try d.self.newArray()).asObj();
-                    try pair.appendElement(a, k);
-                    try pair.appendElement(a, v);
-                    try o.appendInternalElement(a, Value.obj(pair));
+                    try d.self.nativeMapSet(o, k, v);
                 }
-                // Entries were appended directly (not via Map.set), so the
-                // primitive-key acceleration index was not maintained; keep it
-                // off so lookups stay correct (they linear-scan).
-                if (n > 0) o.collDisableIndex(a);
                 return Value.obj(o);
             },
             .set => {
@@ -1049,11 +1043,11 @@ const Deserializer = struct {
                 try d.objs.append(a, o);
                 o.is_set = true;
                 if (d.protoFor("Set")) |p| o.proto = p;
+                try d.self.prepareStrongCollection(o);
                 const n = d.r.int(u32) catch return d.fail();
                 const child_depth = if (n == 0) 0 else try d.childDepth(depth);
                 var i: u32 = 0;
-                while (i < n) : (i += 1) try o.appendInternalElement(a, try d.deser(child_depth));
-                if (n > 0) o.collDisableIndex(a); // see the .map case
+                while (i < n) : (i += 1) try d.self.nativeSetAdd(o, try d.deser(child_depth));
                 return Value.obj(o);
             },
             .error_obj => {
