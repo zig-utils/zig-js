@@ -2983,7 +2983,12 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
         return self.throwError("SyntaxError", "JSON.rawJSON text must be non-empty and not start or end with whitespace");
     var p = JsonParser{ .s = s, .i = 0, .interp = self };
     p.skipWs();
-    const parsed = p.parseValue() catch return self.throwError("SyntaxError", "JSON.rawJSON: invalid JSON");
+    const parsed = p.parseValue() catch |err| switch (err) {
+        error.Invalid => return self.throwError("SyntaxError", "JSON.rawJSON: invalid JSON"),
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Throw => return error.Throw,
+        error.OptShortCircuit => return error.OptShortCircuit,
+    };
     const v = parsed.value;
     p.skipWs();
     if (p.i != s.len) return self.throwError("SyntaxError", "JSON.rawJSON: trailing characters");
@@ -3019,7 +3024,12 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const text = try self.toStringWtf8(arg(args, 0));
     var p = JsonParser{ .s = text, .i = 0, .interp = self };
     p.skipWs();
-    const parsed = p.parseValue() catch return self.throwError("SyntaxError", "JSON.parse: invalid JSON");
+    const parsed = p.parseValue() catch |err| switch (err) {
+        error.Invalid => return self.throwError("SyntaxError", "JSON.parse: invalid JSON"),
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Throw => return error.Throw,
+        error.OptShortCircuit => return error.OptShortCircuit,
+    };
     const v = parsed.value;
     p.skipWs();
     if (p.i != text.len) return self.throwError("SyntaxError", "JSON.parse: trailing characters");
@@ -3041,6 +3051,12 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 /// InternalizeJSONProperty: recursively apply `reviver` to `holder[key]` and its
 /// nested elements/properties (children first), returning the reviver's result.
 fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: Value, sources: []const JsonSourceEntry) HostError!Value {
+    // InternalizeJSONProperty is recursive even though parsing has completed.
+    // A reviver must not turn the parser's bounded-depth guarantee into a
+    // second native-stack overflow while walking the accepted result graph.
+    self.depth += 1;
+    defer self.depth -= 1;
+    try self.stackGuard();
     const a = self.arena;
     const val = try self.getProperty(holder, key);
     if (val.isObject() and !val.asObj().isCallableObject()) {
@@ -3136,8 +3152,23 @@ const JsonParser = struct {
         if (p.i >= p.s.len) return error.Invalid;
         const c = p.s[p.i];
         switch (c) {
-            '{' => return p.parseObject(),
-            '[' => return p.parseArray(),
+            // Only containers recurse back into parseValue. Charge their
+            // nesting to the engine's logical/native stack guard so hostile
+            // valid JSON fails with the normal catchable RangeError before the
+            // Zig call stack can overflow. Flat scalar arrays keep the shallow
+            // fast path and pay no per-element stack probe.
+            '{' => {
+                p.interp.depth += 1;
+                defer p.interp.depth -= 1;
+                try p.interp.stackGuard();
+                return p.parseObject();
+            },
+            '[' => {
+                p.interp.depth += 1;
+                defer p.interp.depth -= 1;
+                try p.interp.stackGuard();
+                return p.parseArray();
+            },
             '"' => {
                 const start = p.i;
                 const s = try p.parseString();

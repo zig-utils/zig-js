@@ -181,7 +181,9 @@ jobs:
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
             home_tool: true
-            cmd: zig build test-jit test-vm test-concurrency gc-relocation-inventory-check optimizer-release-inventory-check
+            cmd: |
+              zig build test-jit test-vm test-runtime test-concurrency gc-relocation-inventory-check optimizer-release-inventory-check
+              zig build test-runtime -Dtsan=true
           # Execute real generated instructions and require both sides of W^X:
           # unpublished pages fault on execute, and published pages fault on
           # write. This Linux x86-64 leg exercises the POSIX backend directly.

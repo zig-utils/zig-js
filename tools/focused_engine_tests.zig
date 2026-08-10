@@ -122,6 +122,33 @@ const jit_cases = [_]Case{
     },
 };
 
+const runtime_cases = [_]Case{
+    .{
+        .name = "JSON hostile nesting is catchable",
+        .source =
+        \\function rejectsDepth(text) {
+        \\  try { JSON.parse(text); return false; }
+        \\  catch (error) { return error instanceof RangeError && error.message === "Maximum call stack size exceeded"; }
+        \\}
+        \\let shallow = "[".repeat(96) + "7" + "]".repeat(96);
+        \\let value = JSON.parse(shallow);
+        \\for (let i = 0; i < 96; i++) value = value[0];
+        \\let revived = JSON.parse(shallow, function (key, child) { return child; });
+        \\for (let i = 0; i < 96; i++) revived = revived[0];
+        \\let syntax = false;
+        \\try { JSON.parse("[1,"); } catch (error) { syntax = error instanceof SyntaxError; }
+        \\let arrays = rejectsDepth("[".repeat(50000) + "0" + "]".repeat(50000));
+        \\let objects = rejectsDepth("{\"v\":".repeat(50000) + "0" + "}".repeat(50000));
+        \\let mixed = rejectsDepth("[{\"v\":".repeat(20000) + "0" + "}]".repeat(20000));
+        \\let raw = false;
+        \\try { JSON.rawJSON("[".repeat(50000) + "0" + "]".repeat(50000)); }
+        \\catch (error) { raw = error instanceof RangeError && error.message === "Maximum call stack size exceeded"; }
+        \\value === 7 && revived === 7 && syntax && arrays && objects && mixed && raw ? 1 : 0
+        ,
+        .expected = 1,
+    },
+};
+
 const concurrency_cases = [_]Case{
     .{
         .name = "atomic increments",
@@ -226,6 +253,8 @@ pub fn main(init: std.process.Init) !void {
         break :blk valid + invalid;
     } else if (std.mem.eql(u8, suite, "vm"))
         try runCases(gpa, &vm_cases, filter, false, false)
+    else if (std.mem.eql(u8, suite, "runtime"))
+        try runCases(gpa, &runtime_cases, filter, false, false)
     else if (std.mem.eql(u8, suite, "jit")) blk: {
         const interpreted = try runCases(gpa, &jit_cases, filter, false, false);
         const native = try runCases(gpa, &jit_cases, filter, true, false);

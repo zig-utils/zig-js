@@ -1688,6 +1688,7 @@ pub fn build(b: *std.Build) void {
     for ([_]struct { step_name: []const u8, suite: []const u8, description: []const u8 }{
         .{ .step_name = "test-frontend", .suite = "frontend", .description = "Run focused production lexer/parser semantic tests" },
         .{ .step_name = "test-vm", .suite = "vm", .description = "Run focused production bytecode/VM semantic tests" },
+        .{ .step_name = "test-runtime", .suite = "runtime", .description = "Run focused production runtime security tests" },
         .{ .step_name = "test-concurrency", .suite = "concurrency", .description = "Run focused production concurrency semantic tests" },
     }) |spec| {
         const run_focused_engine_tests = b.addRunArtifact(focused_engine_tests);
