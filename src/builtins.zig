@@ -2981,7 +2981,7 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
     }.f;
     if (s.len == 0 or isJsonWs(s[0]) or isJsonWs(s[s.len - 1]))
         return self.throwError("SyntaxError", "JSON.rawJSON text must be non-empty and not start or end with whitespace");
-    var p = JsonParser{ .s = s, .i = 0, .interp = self };
+    var p = JsonParser{ .s = s, .i = 0, .interp = self, .value_string_allocator = gc_mod.stringOwnedAllocator(self.arena) };
     p.skipWs();
     const parsed = p.parseValue() catch |err| switch (err) {
         error.Invalid => return self.throwError("SyntaxError", "JSON.rawJSON: invalid JSON"),
@@ -3024,7 +3024,7 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const text = try self.toStringWtf8(arg(args, 0));
     const reviver = arg(args, 1);
     const has_reviver = reviver.isObject() and reviver.asObj().isCallableObject();
-    var p = JsonParser{ .s = text, .i = 0, .interp = self, .track_records = has_reviver };
+    var p = JsonParser{ .s = text, .i = 0, .interp = self, .value_string_allocator = gc_mod.stringOwnedAllocator(self.arena), .track_records = has_reviver };
     p.skipWs();
     const parsed = p.parseValue() catch |err| switch (err) {
         error.Invalid => return self.throwError("SyntaxError", "JSON.parse: invalid JSON"),
@@ -3136,19 +3136,22 @@ const JsonParsed = struct {
 
 const JsonString = union(enum) {
     borrowed: []const u8,
-    owned: []u8,
+    owned: struct {
+        bytes: []u8,
+        allocator: std.mem.Allocator,
+    },
 
     fn bytes(string: JsonString) []const u8 {
         return switch (string) {
             .borrowed => |data| data,
-            .owned => |data| data,
+            .owned => |data| data.bytes,
         };
     }
 
     fn intoValue(string: JsonString, allocator: std.mem.Allocator) std.mem.Allocator.Error!Value {
         return switch (string) {
             .borrowed => |data| Value.strAlloc(allocator, data),
-            .owned => |data| Value.strOwned(allocator, data),
+            .owned => |data| Value.strOwned(data.allocator, data.bytes),
         };
     }
 };
@@ -3169,6 +3172,7 @@ const JsonParser = struct {
     s: []const u8,
     i: usize,
     interp: *Interpreter,
+    value_string_allocator: std.mem.Allocator,
     track_records: bool = false,
 
     fn parsed(p: *JsonParser, val: Value, source: ?[]const u8, children: JsonParseChildren) std.mem.Allocator.Error!JsonParsed {
@@ -3206,7 +3210,7 @@ const JsonParser = struct {
             },
             '"' => {
                 const start = p.i;
-                const s = try p.parseString();
+                const s = try p.parseString(p.value_string_allocator);
                 const val = try s.intoValue(p.interp.arena);
                 return p.parsed(val, p.s[start..p.i], .none);
             },
@@ -3252,7 +3256,7 @@ const JsonParser = struct {
         return p.parsed(Value.num(n), p.s[start..p.i], .none);
     }
 
-    fn parseString(p: *JsonParser) JErr!JsonString {
+    fn parseString(p: *JsonParser, allocator: std.mem.Allocator) JErr!JsonString {
         p.i += 1; // opening quote
         const source_start = p.i;
         while (p.i < p.s.len) : (p.i += 1) {
@@ -3274,12 +3278,13 @@ const JsonParser = struct {
         // exact implementation for all prefix and Unicode combinations.
         p.i = source_start;
         var buf: std.ArrayListUnmanaged(u8) = .empty;
-        const a = p.interp.arena;
+        errdefer buf.deinit(allocator);
+        const a = allocator;
         while (p.i < p.s.len) {
             const c = p.s[p.i];
             if (c == '"') {
                 p.i += 1;
-                return .{ .owned = try buf.toOwnedSlice(a) };
+                return .{ .owned = .{ .bytes = try buf.toOwnedSlice(a), .allocator = a } };
             }
             if (c == '\\') {
                 p.i += 1;
@@ -3373,7 +3378,7 @@ const JsonParser = struct {
         while (true) {
             p.skipWs();
             if (p.i >= p.s.len or p.s[p.i] != '"') return error.Invalid;
-            const key = (try p.parseString()).bytes();
+            const key = (try p.parseString(p.interp.arena)).bytes();
             p.skipWs();
             if (p.i >= p.s.len or p.s[p.i] != ':') return error.Invalid;
             p.i += 1;
@@ -3410,8 +3415,8 @@ test "JSON parser borrows plain and transfers escaped string storage" {
     var machine: Interpreter = .{ .arena = scratch, .env = &env, .root_shape = root_shape };
 
     const plain = "\"plain \xF0\x9F\x98\x80\"";
-    var parser = JsonParser{ .s = plain, .i = 0, .interp = &machine };
-    const parsed = try parser.parseString();
+    var parser = JsonParser{ .s = plain, .i = 0, .interp = &machine, .value_string_allocator = scratch };
+    const parsed = try parser.parseString(scratch);
     try std.testing.expectEqualStrings("plain \xF0\x9F\x98\x80", parsed.bytes());
     switch (parsed) {
         .borrowed => |bytes| try std.testing.expect(bytes.ptr == plain.ptr + 1),
@@ -3422,26 +3427,26 @@ test "JSON parser borrows plain and transfers escaped string storage" {
     // The first escape switches to the decoding buffer. A fail-on-first-use
     // allocator therefore proves the successful plain path made no hidden
     // scratch allocation while the escaped path still reports OOM exactly.
-    var escaped = JsonParser{ .s = "\"a\\nb\"", .i = 0, .interp = &machine };
-    try std.testing.expectError(error.OutOfMemory, escaped.parseString());
+    var escaped = JsonParser{ .s = "\"a\\nb\"", .i = 0, .interp = &machine, .value_string_allocator = scratch };
+    try std.testing.expectError(error.OutOfMemory, escaped.parseString(scratch));
 
     // The decoded buffer is already the final byte image. Transferring it into
     // an ASCII StringCell must preserve the allocation rather than duplicating
     // the bytes a second time.
     var owned_env: interpreter.Environment = .{ .arena = owner, .fn_scope = true };
     var owned_machine: Interpreter = .{ .arena = owner, .env = &owned_env, .root_shape = root_shape };
-    var owned_parser = JsonParser{ .s = "\"a\\nb\"", .i = 0, .interp = &owned_machine };
-    const decoded = try owned_parser.parseString();
+    var owned_parser = JsonParser{ .s = "\"a\\nb\"", .i = 0, .interp = &owned_machine, .value_string_allocator = owner };
+    const decoded = try owned_parser.parseString(owner);
     const decoded_ptr = switch (decoded) {
-        .owned => |bytes| bytes.ptr,
+        .owned => |data| data.bytes.ptr,
         .borrowed => return error.TestUnexpectedResult,
     };
     const decoded_value = try decoded.intoValue(owner);
     try std.testing.expectEqualStrings("a\nb", decoded_value.asStr());
     try std.testing.expectEqual(decoded_ptr, decoded_value.asStr().ptr);
 
-    var control = JsonParser{ .s = "\"a\x01b\"", .i = 0, .interp = &machine };
-    try std.testing.expectError(error.Invalid, control.parseString());
+    var control = JsonParser{ .s = "\"a\x01b\"", .i = 0, .interp = &machine, .value_string_allocator = scratch };
+    try std.testing.expectError(error.Invalid, control.parseString(scratch));
 }
 
 // ===== URI handling (encodeURI / decodeURI / …) ======================
