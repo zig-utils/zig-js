@@ -1,0 +1,4915 @@
+{
+  "schema_version": 1,
+  "profile_id": "zig-js-performance-attribution-v1",
+  "kind": "exact_parent_ab",
+  "metadata": {
+    "parent_revision": "cbd4cb55c848fe8722aaeaf9df0fd780678a9210",
+    "candidate_revision": "ae933649e19fdf18c77e158ecb8fe45eb49bafb7",
+    "candidate_first_parent": "cbd4cb55c848fe8722aaeaf9df0fd780678a9210",
+    "zig_gc_revision": "89b6652c81ba892119b7b9ce3b0d07fc78a009ff",
+    "zig_regex_revision": "719673318b0c6250898d7ced3603876c148e370b",
+    "zig_version": "0.17.0-dev.1441+d5181a9c9",
+    "os": "Darwin Chris-MacBook 27.0.0 Darwin Kernel Version 27.0.0: Tue Jul 14 21:38:48 PDT 2026; root:xnu-13432.0.94.501.4~1/RELEASE_ARM64_T6030 arm64 arm Darwin",
+    "hardware": "arm64; Apple M3 Pro",
+    "power": "Now drawing from 'Battery Power' -InternalBattery-0 (id=23527523) 69%; discharging; (no estimate) present: true",
+    "host_class": "diagnostic",
+    "material_change_categories": [
+      "cpu_work",
+      "cache_traffic"
+    ],
+    "workload_source_sha256": "8ebd7f2eac703336c36d323cb1ef304bbccfb16d1c5cf2832e65a63a90ed5911",
+    "parent_binary_sha256": "9e5c3d13ef593d8f5aaf83889626b963c3c1206d7bae1da7262071a4e4e32a59",
+    "candidate_binary_sha256": "94ee30406dcdfcdaa48113c2ff03cc3ce81b6b0dc4a663d92c70454a5cbc74e9",
+    "samples": 7,
+    "timed_boundary": "one invocation in a persistent context after ten reduced-work warmups",
+    "mode": "single",
+    "workload": "representative_collections_variant",
+    "lanes": 1,
+    "jobs": 450,
+    "expected_checksum": 112270500
+  },
+  "samples": [
+    {
+      "identity": {
+        "variant": "parent",
+        "pair_sample": 0,
+        "order": 0,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 319990416,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 650000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30441472,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1177767000,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5598514376,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.472390335,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "candidate",
+        "pair_sample": 0,
+        "order": 1,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 311409708,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 620000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30359552,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1147127425,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5506938166,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.423698499,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "candidate",
+        "pair_sample": 1,
+        "order": 0,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 311666208,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 620000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30474240,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1147616707,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5508533003,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.41145302,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "parent",
+        "pair_sample": 1,
+        "order": 1,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 322807125,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 640000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30359552,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1182742902,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5599923563,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.489266341,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "parent",
+        "pair_sample": 2,
+        "order": 0,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 361478500,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 670000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30457856,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1230055601,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5601471895,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.399382547,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "candidate",
+        "pair_sample": 2,
+        "order": 1,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 313152583,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 620000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30392320,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1152083493,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5508009149,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.411148406,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "candidate",
+        "pair_sample": 3,
+        "order": 0,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 309498833,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 620000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30392320,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1142034127,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5507960925,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.417132194,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "parent",
+        "pair_sample": 3,
+        "order": 1,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 318308209,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 630000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30392320,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1174475103,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5598343215,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.455510383,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "parent",
+        "pair_sample": 4,
+        "order": 0,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 317765583,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 630000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30326784,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1173980656,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5597416676,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.4781846,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "candidate",
+        "pair_sample": 4,
+        "order": 1,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 308399792,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 620000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30375936,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1143038364,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5506864139,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.449755123,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "candidate",
+        "pair_sample": 5,
+        "order": 0,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 312416292,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 620000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30392320,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1145590025,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5508419781,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.446948227,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "parent",
+        "pair_sample": 5,
+        "order": 1,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 321357333,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 640000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30425088,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1180629732,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5598568169,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.463710136,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "parent",
+        "pair_sample": 6,
+        "order": 0,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 318009625,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 630000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30375936,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1176223942,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5598506651,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.469746715,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    },
+    {
+      "identity": {
+        "variant": "candidate",
+        "pair_sample": 6,
+        "order": 1,
+        "engine": "zig-js",
+        "mode": "single",
+        "workload": "representative_collections_variant",
+        "lanes": 1,
+        "jobs": 450,
+        "checksum": 112270500
+      },
+      "metrics": {
+        "wall_time_ns": {
+          "status": "measured",
+          "value": 311277083,
+          "source": "benchmark_runner.elapsed_ns",
+          "reason": ""
+        },
+        "process_cpu_user_ns": {
+          "status": "measured",
+          "value": 620000000,
+          "source": "/usr/bin/time -l user",
+          "reason": ""
+        },
+        "process_cpu_system_ns": {
+          "status": "measured",
+          "value": 0,
+          "source": "/usr/bin/time -l sys",
+          "reason": ""
+        },
+        "peak_rss_bytes": {
+          "status": "measured",
+          "value": 30392320,
+          "source": "/usr/bin/time -l maximum resident set size",
+          "reason": ""
+        },
+        "retained_rss_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocated_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "interpreter_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "vm_quick_kernel_hits": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "baseline_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_compilations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_publications": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_osr_entries": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "optimizer_deopts": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_rejections": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "tier_up_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "compilation_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "deoptimization_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "generated_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "retired_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "reclaimed_code_bytes": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "invalidations": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "runtime_operation_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "host_callbacks": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "wasm_dispatches": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_minor_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_full_cycles": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_total_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p50_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_p95_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_pause_max_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_prepare_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_trace_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "gc_post_sweep_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_calls": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_cells": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "allocator_publication_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "shape_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "property_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "element_lock_contentions": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "lock_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_runs": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_run_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "worker_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "thread_join_wait_ns": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "cycles": {
+          "status": "measured",
+          "value": 1137590108,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
+          "reason": ""
+        },
+        "instructions": {
+          "status": "measured",
+          "value": 5506971557,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
+          "reason": ""
+        },
+        "cache_misses": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "energy_joules": {
+          "status": "measured",
+          "value": 1.448975823,
+          "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
+          "reason": ""
+        },
+        "thermal_state": {
+          "status": "measured",
+          "value": "nominal->nominal",
+          "source": "NSProcessInfo.thermalState before->after",
+          "reason": ""
+        },
+        "symbolized_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        },
+        "anonymous_native_samples": {
+          "status": "unavailable",
+          "value": null,
+          "source": "",
+          "reason": "instrumentation is not yet connected for this metric; absence is explicit and is not a zero"
+        }
+      }
+    }
+  ],
+  "summary": {
+    "parent_wall_median_ns": 319990416,
+    "candidate_wall_median_ns": 311409708,
+    "candidate_over_parent": 0.973184484375307,
+    "parent_wall_rsd": 0.048818611219909026,
+    "candidate_wall_rsd": 0.005289060972066799,
+    "stable": true,
+    "gating_host": false,
+    "regression": false,
+    "efficiency": {
+      "metrics": {
+        "instructions": {
+          "parent_median": 5598514376,
+          "candidate_median": 5507960925,
+          "candidate_over_parent": 0.9838254499464735,
+          "parent_rsd": 0.00023692200244229404,
+          "candidate_rsd": 0.000132169104223502,
+          "stable": true
+        },
+        "cycles": {
+          "parent_median": 1177767000,
+          "candidate_median": 1145590025,
+          "candidate_over_parent": 0.972679676880062,
+          "parent_rsd": 0.016930707456806512,
+          "candidate_rsd": 0.0040565860332143775,
+          "stable": true
+        },
+        "energy_joules": {
+          "parent_median": 1.469746715,
+          "candidate_median": 1.423698499,
+          "candidate_over_parent": 0.9686692846256845,
+          "parent_rsd": 0.020020454135067135,
+          "candidate_rsd": 0.012582502352175846,
+          "stable": true
+        }
+      },
+      "thermal_states": [
+        "nominal->nominal"
+      ],
+      "required_categories": [
+        "cpu_work",
+        "cache_traffic"
+      ],
+      "unmet_metrics": [
+        "cache_misses"
+      ],
+      "stable": false,
+      "blocks_publication": false
+    },
+    "blocks_publication": false,
+    "status": "diagnostic_only"
+  }
+}
