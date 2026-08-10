@@ -1654,6 +1654,11 @@ pub const Interpreter = struct {
     /// live only in Zig locals. VM values are covered by `gc_execs`; this stack
     /// covers interpreter paths such as iterator records/results in `for...of`.
     gc_temp_roots: std.ArrayListUnmanaged(Value) = .empty,
+    /// Native Promise helpers retain raw Promise cells rather than their JS
+    /// wrapper Values. Keep those pointer slots in a separate relocatable stack
+    /// so a JIT safepoint reached through a handler/getter can compact the cell
+    /// and the helper resumes from the rewritten address.
+    gc_temp_promise_roots: std.ArrayListUnmanaged(*promise.Promise) = .empty,
     /// Default-initialized Object cells reserved by the fixed-shape allocation
     /// loop. A bounded per-interpreter tranche amortizes shared-heap publication
     /// across multiple step checkpoints; tracing this list keeps the unused
@@ -7970,7 +7975,7 @@ pub const Interpreter = struct {
                 const job = batch.items[i];
                 self.current_microtask_batch = batch.items[i + 1 ..];
                 self.current_microtask = job;
-                promise.runJob(self, job) catch |err| {
+                promise.runJob(self, &self.current_microtask.?) catch |err| {
                     if (job.kind == .next_tick and err == error.Throw) {
                         const thrown = self.exception;
                         self.exception = Value.undef();
@@ -8189,6 +8194,28 @@ pub const Interpreter = struct {
     pub fn restoreTempRoots(self: *Interpreter, mark: usize) void {
         if (self.gc == null) return;
         self.gc_temp_roots.shrinkRetainingCapacity(mark);
+    }
+
+    pub fn tempRoot(self: *Interpreter, mark: usize, fallback: Value) Value {
+        if (self.gc == null) return fallback;
+        return self.gc_temp_roots.items[mark];
+    }
+
+    pub fn pushTempPromiseRoot(self: *Interpreter, p: *promise.Promise) EvalError!usize {
+        if (self.gc == null) return 0;
+        const mark = self.gc_temp_promise_roots.items.len;
+        try self.gc_temp_promise_roots.append(self.arena, p);
+        return mark;
+    }
+
+    pub fn tempPromiseRoot(self: *Interpreter, mark: usize, fallback: *promise.Promise) *promise.Promise {
+        if (self.gc == null) return fallback;
+        return self.gc_temp_promise_roots.items[mark];
+    }
+
+    pub fn restoreTempPromiseRoots(self: *Interpreter, mark: usize) void {
+        if (self.gc == null) return;
+        self.gc_temp_promise_roots.shrinkRetainingCapacity(mark);
     }
 
     /// Run a guarded mid-script collection at a step checkpoint. The Context
@@ -8467,7 +8494,7 @@ pub const Interpreter = struct {
     fn runOneMicrotask(self: *Interpreter) EvalError!bool {
         if (self.microtaskDequeue()) |job| {
             self.current_microtask = job;
-            promise.runJob(self, job) catch |err| {
+            promise.runJob(self, &self.current_microtask.?) catch |err| {
                 self.current_microtask = null;
                 return err;
             };

@@ -2352,6 +2352,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         traceEnv(env, v);
     }
     for (machine.gc_temp_roots.items) |root| markValue(v, root);
+    for (machine.gc_temp_promise_roots.items) |root| markManaged(v, root);
     for (machine.gc_object_reserve.items) |object| v.mark(object);
     var literal_it = machine.string_literal_cache.valueIterator();
     while (literal_it.next()) |literal| markValue(v, literal.*);
@@ -2428,6 +2429,8 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         relocateEnv(environment.*, v);
     }
     for (machine.gc_temp_roots.items) |*root| gc_relocation.rewriteValueSlot(v, root);
+    for (machine.gc_temp_promise_roots.items) |*root|
+        gc_relocation.rewriteRequiredSlot(v, promise.Promise, root);
     for (machine.gc_object_reserve.items) |*object|
         gc_relocation.rewriteRequiredSlot(v, Object, object);
     var literal_it = machine.string_literal_cache.valueIterator();
@@ -2475,6 +2478,8 @@ test "realm root relocation rewrites active interpreter containers" {
     var machine = context.interpreter();
     var old_objects: [27]Object = undefined;
     var new_objects: [27]Object = undefined;
+    var old_promise = promise.Promise{ .gc_owned = true };
+    var new_promise = promise.Promise{ .gc_owned = true };
     var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
     var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
 
@@ -2491,6 +2496,7 @@ test "realm root relocation rewrites active interpreter containers" {
     var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[10] };
     machine.import_meta_slot = &import_meta;
     try machine.gc_temp_roots.append(machine.arena, Value.obj(&old_objects[11]));
+    try machine.gc_temp_promise_roots.append(machine.arena, &old_promise);
     try machine.gc_object_reserve.append(machine.arena, &old_objects[12]);
     try machine.with_stack.append(machine.arena, &old_objects[13]);
     var literal_node: ast.Node = .undefined_lit;
@@ -2545,6 +2551,8 @@ test "realm root relocation rewrites active interpreter containers" {
         new_objects: *[27]Object,
         old_environment: *Environment,
         new_environment: *Environment,
+        old_promise: *promise.Promise,
+        new_promise: *promise.Promise,
 
         pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
             for (self.old_objects, 0..) |*object, index|
@@ -2552,6 +2560,8 @@ test "realm root relocation rewrites active interpreter containers" {
                     return @ptrCast(&self.new_objects[index]);
             if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
                 return @ptrCast(self.new_environment);
+            if (old == @as(*anyopaque, @ptrCast(self.old_promise)))
+                return @ptrCast(self.new_promise);
             return old;
         }
     };
@@ -2560,6 +2570,8 @@ test "realm root relocation rewrites active interpreter containers" {
         .new_objects = &new_objects,
         .old_environment = &old_environment,
         .new_environment = &new_environment,
+        .old_promise = &old_promise,
+        .new_promise = &new_promise,
     };
     relocateInterpreterRoots(&machine, &plan);
 
@@ -2575,6 +2587,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[9], machine.super_ctor.?);
     try std.testing.expectEqual(&new_objects[10], import_meta.obj.?);
     try std.testing.expectEqual(&new_objects[11], machine.gc_temp_roots.items[0].asObj());
+    try std.testing.expectEqual(&new_promise, machine.gc_temp_promise_roots.items[0]);
     try std.testing.expectEqual(&new_objects[12], machine.gc_object_reserve.items[0]);
     try std.testing.expectEqual(&new_objects[13], machine.with_stack.items[0]);
     try std.testing.expectEqual(&new_objects[14], machine.string_literal_cache.get(&literal_node).?.asObj());

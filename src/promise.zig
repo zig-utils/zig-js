@@ -707,21 +707,27 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
 /// Fulfill `p` with `v` (no-op if already settled). If `v` is itself a thenable,
 /// adopt its state instead (resolution).
 pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
-    if (!isPending(p)) return;
-    if (promiseOf(v)) |inner| if (inner == p) {
-        const err = try self.makeError("TypeError", "Cannot resolve promise with itself");
-        try reject(self, p, err);
-        return;
-    };
+    const promise_mark = try self.pushTempPromiseRoot(p);
+    defer self.restoreTempPromiseRoots(promise_mark);
+    const value_mark = try self.pushTempRoot(v);
+    defer self.restoreTempRoots(value_mark);
+
+    if (!isPending(self.tempPromiseRoot(promise_mark, p))) return;
+    if (promiseOf(self.tempRoot(value_mark, v))) |inner|
+        if (inner == self.tempPromiseRoot(promise_mark, p)) {
+            const err = try self.makeError("TypeError", "Cannot resolve promise with itself");
+            try reject(self, self.tempPromiseRoot(promise_mark, p), err);
+            return;
+        };
     // Thenable assimilation: `then` is read synchronously from every object
     // resolution (including native promises and arrays), then invoked from the
     // queued PromiseResolveThenableJob.
-    if (v.isObject()) {
-        const then_fn = self.getProperty(v, "then") catch |err| {
+    if (self.tempRoot(value_mark, v).isObject()) {
+        const then_fn = self.getProperty(self.tempRoot(value_mark, v), "then") catch |err| {
             if (err == error.Throw) {
                 const reason = self.exception;
                 self.exception = Value.undef();
-                try reject(self, p, reason);
+                try reject(self, self.tempPromiseRoot(promise_mark, p), reason);
                 return;
             }
             return err;
@@ -732,20 +738,35 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
                 .reaction = undefined,
                 .argument = Value.undef(),
                 .fulfilled = true,
-                .thenable = v,
+                .thenable = self.tempRoot(value_mark, v),
                 .then_fn = then_fn,
-                .promise = p,
+                .promise = self.tempPromiseRoot(promise_mark, p),
             });
-            if (promiseOf(v)) |inner| linkAsyncForward(inner, p);
+            if (promiseOf(self.tempRoot(value_mark, v))) |inner|
+                linkAsyncForward(inner, self.tempPromiseRoot(promise_mark, p));
             return;
         }
     }
-    try settle(self, p, .fulfilled, v);
+    try settle(
+        self,
+        self.tempPromiseRoot(promise_mark, p),
+        .fulfilled,
+        self.tempRoot(value_mark, v),
+    );
 }
 
 /// Reject `p` with `reason` (no-op if already settled).
 pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
-    try settle(self, p, .rejected, reason);
+    const promise_mark = try self.pushTempPromiseRoot(p);
+    defer self.restoreTempPromiseRoots(promise_mark);
+    const reason_mark = try self.pushTempRoot(reason);
+    defer self.restoreTempRoots(reason_mark);
+    try settle(
+        self,
+        self.tempPromiseRoot(promise_mark, p),
+        .rejected,
+        self.tempRoot(reason_mark, reason),
+    );
 }
 
 /// `p.then(onFulfilled, onRejected)` → a new promise settled by running the
@@ -753,16 +774,43 @@ pub fn reject(self: *Interpreter, p: *Promise, reason: Value) EvalError!void {
 /// Native resolve/reject closures over `p`'s state (a capability whose promise
 /// is the native `p`). Used wherever the result is an intrinsic promise.
 pub fn nativeResolveReject(self: *Interpreter, p: *Promise) EvalError!struct { resolve: Value, reject: Value } {
+    const promise_mark = try self.pushTempPromiseRoot(p);
+    defer self.restoreTempPromiseRoots(promise_mark);
     promise_profile.recordResolvingFunctionPair();
     const res = try gc_mod.allocObj(self.arena);
+    const resolve_mark = try self.pushTempRoot(Value.obj(res));
+    defer self.restoreTempRoots(resolve_mark);
     promise_profile.recordResolvingFunctionObject();
-    res.* = .{ .native = resolveThunk, .private_data = @ptrCast(p) };
-    try interp.installNativeProps(self.arena, self.root_shape, res, "", 1);
+    self.tempRoot(resolve_mark, Value.obj(res)).asObj().* = .{
+        .native = resolveThunk,
+        .private_data = @ptrCast(self.tempPromiseRoot(promise_mark, p)),
+    };
+    try interp.installNativeProps(
+        self.arena,
+        self.root_shape,
+        self.tempRoot(resolve_mark, Value.obj(res)).asObj(),
+        "",
+        1,
+    );
     const rej = try gc_mod.allocObj(self.arena);
+    const reject_mark = try self.pushTempRoot(Value.obj(rej));
+    defer self.restoreTempRoots(reject_mark);
     promise_profile.recordResolvingFunctionObject();
-    rej.* = .{ .native = rejectThunk, .private_data = @ptrCast(res) };
-    try interp.installNativeProps(self.arena, self.root_shape, rej, "", 1);
-    return .{ .resolve = Value.obj(res), .reject = Value.obj(rej) };
+    self.tempRoot(reject_mark, Value.obj(rej)).asObj().* = .{
+        .native = rejectThunk,
+        .private_data = @ptrCast(self.tempRoot(resolve_mark, Value.obj(res)).asObj()),
+    };
+    try interp.installNativeProps(
+        self.arena,
+        self.root_shape,
+        self.tempRoot(reject_mark, Value.obj(rej)).asObj(),
+        "",
+        1,
+    );
+    return .{
+        .resolve = self.tempRoot(resolve_mark, Value.obj(res)),
+        .reject = self.tempRoot(reject_mark, Value.obj(rej)),
+    };
 }
 
 /// `p.then(...)` with an intrinsic result promise (the non-species path used
@@ -975,7 +1023,7 @@ fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
 
 /// Run one reaction job: invoke the handler (or pass through) and settle the
 /// dependent promise. A handler that throws rejects the dependent promise.
-fn settleReaction(self: *Interpreter, r: Reaction, fulfilled: bool, arg: Value) EvalError!void {
+fn settleReaction(self: *Interpreter, r: *Reaction, fulfilled: bool, arg: Value) EvalError!void {
     if (r.result) |result| {
         if (fulfilled) try resolve(self, result, arg) else try reject(self, result, arg);
         return;
@@ -983,7 +1031,7 @@ fn settleReaction(self: *Interpreter, r: Reaction, fulfilled: bool, arg: Value) 
     if (fulfilled) _ = try self.callValue(r.resolve, &.{arg}) else _ = try self.callValue(r.reject, &.{arg});
 }
 
-pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
+pub fn runJob(self: *Interpreter, task: *Microtask) EvalError!void {
     if (task.kind == .native_callback) {
         promise_profile.recordMicrotaskRun(false);
         if (task.native_callback) |callback| callback(task.native_callback_context);
@@ -1006,20 +1054,27 @@ pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
     }
     if (task.kind == .thenable) {
         promise_profile.recordMicrotaskRun(true);
-        const p = task.promise orelse return;
-        if (!isPending(p)) return;
-        const nr = try nativeResolveReject(self, p);
-        if (self.callValueWithThis(task.then_fn, &.{ nr.resolve, nr.reject }, task.thenable)) |_| {} else |err| {
+        if (task.promise == null or !isPending(task.promise.?)) return;
+        const nr = try nativeResolveReject(self, task.promise.?);
+        const resolve_mark = try self.pushTempRoot(nr.resolve);
+        defer self.restoreTempRoots(resolve_mark);
+        const reject_mark = try self.pushTempRoot(nr.reject);
+        defer self.restoreTempRoots(reject_mark);
+        if (self.callValueWithThis(
+            task.then_fn,
+            &.{ self.tempRoot(resolve_mark, nr.resolve), self.tempRoot(reject_mark, nr.reject) },
+            task.thenable,
+        )) |_| {} else |err| {
             if (err == error.Throw) {
                 const reason = self.exception;
                 self.exception = Value.undef();
-                _ = try self.callValue(nr.reject, &.{reason});
+                _ = try self.callValue(self.tempRoot(reject_mark, nr.reject), &.{reason});
             } else return err;
         }
         return;
     }
     promise_profile.recordMicrotaskRun(false);
-    const r = task.reaction;
+    const r = &task.reaction;
     if (r.handler) |h| {
         const result = if (r.extra_argument) |extra|
             self.callValueWithThis(h, &.{ task.argument, extra }, Value.undef())

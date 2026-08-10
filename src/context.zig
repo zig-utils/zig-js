@@ -17376,6 +17376,67 @@ test "GC requested compaction resumes the same baseline tier from a precise nati
     try std.testing.expectEqual(Context.GcHeap.CompactionStatus.no_candidates, ctx.compactGarbage().status);
 }
 
+test "GC requested compaction rewrites active Promise job native roots" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+    });
+    defer ctx.destroy();
+    ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+
+    _ = try ctx.evaluate(
+        \\globalThis.promiseMovingDiscard = [];
+        \\for (var i = 0; i < 2048; i = i + 1) {
+        \\  promiseMovingDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\}
+        \\function promiseMovingLoop(n) {
+        \\  var total = 0;
+        \\  var i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\function promiseMovingThenGetter() {
+        \\  promiseMovingLoop(20000);
+        \\  return function (resolve) { resolve(this.marker); };
+        \\}
+        \\function promiseMovingHandler(value) {
+        \\  var thenable = { marker: value.marker };
+        \\  Object.defineProperty(thenable, "then", { get: promiseMovingThenGetter });
+        \\  return thenable;
+        \\}
+        \\for (var warm = 0; warm < 10; warm = warm + 1) {
+        \\  promiseMovingLoop(64);
+        \\  promiseMovingThenGetter.call({ marker: warm });
+        \\}
+        \\globalThis.promiseMovingWitness = { marker: 511 };
+        \\globalThis.promiseMovingResult = 0;
+        \\promiseMovingDiscard = null;
+    );
+    ctx.collectGarbage();
+    const compactions_before = ctx.gc_moving_safepoint_compactions.load(.monotonic);
+
+    try std.testing.expect(ctx.requestGarbageCompaction());
+    _ = try ctx.evaluate(
+        \\Promise.resolve(promiseMovingWitness)
+        \\  .then(promiseMovingHandler)
+        \\  .then(function (value) { promiseMovingResult = value; });
+        \\0
+    );
+
+    try std.testing.expectEqual(
+        @as(f64, 511),
+        (try ctx.evaluate("promiseMovingResult")).asNum(),
+    );
+    try std.testing.expectEqual(
+        compactions_before + 1,
+        ctx.gc_moving_safepoint_compactions.load(.monotonic),
+    );
+    try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+}
+
 fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions) !void {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
