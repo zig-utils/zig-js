@@ -1360,9 +1360,10 @@ pub const InheritedPropertyObservation = struct {
 /// value of the last statement, which is what `JSEvaluateScript` hands back.
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
-    /// Context-owned freeable backing for parser-only scratch indexes. Standalone
-    /// interpreters fall back to their arena lifetime.
-    parser_scratch_allocator: ?std.mem.Allocator = null,
+    /// Context-owned freeable backing for invocation-local indexes whose keys
+    /// and results are owned elsewhere. Standalone interpreters fall back to
+    /// their arena lifetime.
+    scratch_allocator: ?std.mem.Allocator = null,
     env: *Environment,
     /// Context-owned registry for immutable native code. Null in standalone
     /// interpreter helpers and agent realms, which remain bytecode-only.
@@ -4049,7 +4050,7 @@ pub const Interpreter = struct {
     /// itself runs.
     pub fn evaluateForDebugger(self: *Interpreter, source: []const u8, environment: *Environment, this_value: Value, strict: bool) EvalError!Value {
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
-        var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
+        var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
             return self.throwParserSyntaxErrorAt("debugger evaluation", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
         parser.strict = strict;
         const program = parser.parseProgram() catch |err| return self.throwParserSyntaxError("debugger evaluation", source, &parser, err);
@@ -4292,7 +4293,7 @@ pub const Interpreter = struct {
             const own_keys = if (o.proxyHandler() != null or o.proxy_revoked or o.moduleNs() != null)
                 try self.objectOwnKeysList(o)
             else
-                try o.ownKeys(self.arena);
+                try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena);
             for (own_keys) |k| {
                 if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
                 if (visited.contains(k)) continue;
@@ -11089,7 +11090,7 @@ pub const Interpreter = struct {
             // canonical Symbol object on the global `Symbol` so identity holds
             // (e.g. getOwnPropertySymbols/Reflect.ownKeys surfacing @@toStringTag).
             if (self.env.get("Symbol")) |symv| if (symv.isObject()) {
-                const ks = symv.asObj().ownKeys(self.arena) catch &.{};
+                const ks = symv.asObj().ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena) catch &.{};
                 for (ks) |k| {
                     const v = symv.asObj().getOwn(k) orelse continue;
                     if (v.isObject() and v.asObj().is_symbol and std.mem.eql(u8, v.asObj().symbolKey(), key)) {
@@ -11315,6 +11316,7 @@ pub const Interpreter = struct {
     /// outside the shape).
     pub fn objectOwnKeysList(self: *Interpreter, t: *value.Object) EvalError![]const []const u8 {
         if (t.proxyHandler() != null or t.proxy_revoked) return self.proxyOwnKeys(t);
+        const scratch = self.scratch_allocator orelse self.arena;
         const appendReflectable = struct {
             fn f(arena: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8), k: []const u8) !void {
                 if (value.isPrivateKey(k)) return;
@@ -11337,26 +11339,25 @@ pub const Interpreter = struct {
                 // other string keys in insertion order, then symbols.
                 var indices: std.ArrayListUnmanaged([]const u8) = .empty;
                 var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
+                defer seen.deinit(scratch);
                 for (0..utf16LenOfValue(p)) |i| {
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-                    try seen.put(self.arena, i, {});
+                    try seen.put(scratch, i, {});
                 }
                 for (try t.denseElementIndices(self.arena)) |dense_i| {
-                    if (seen.contains(dense_i)) continue;
-                    try seen.put(self.arena, dense_i, {});
+                    const entry = try seen.getOrPut(scratch, dense_i);
+                    if (entry.found_existing) continue;
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
                 }
                 var strings: std.ArrayListUnmanaged([]const u8) = .empty;
                 var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
-                for (try t.ownKeys(self.arena)) |k| {
+                for (try t.ownKeysWithScratch(self.arena, scratch)) |k| {
                     if (std.mem.eql(u8, k, "length") or value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                     if (value.isRealSymbolKey(k)) {
                         try symbols.append(self.arena, k);
                     } else if (value.canonicalIndex(k)) |idx| {
-                        if (!seen.contains(idx)) {
-                            try seen.put(self.arena, idx, {});
-                            try indices.append(self.arena, k);
-                        }
+                        const entry = try seen.getOrPut(scratch, idx);
+                        if (!entry.found_existing) try indices.append(self.arena, k);
                     } else try strings.append(self.arena, k);
                 }
                 std.mem.sort([]const u8, indices.items, {}, struct {
@@ -11379,7 +11380,7 @@ pub const Interpreter = struct {
             var i: usize = 0;
             const cur = ta.currentLength() orelse 0;
             while (i < cur) : (i += 1) try list.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-            for (try t.ownKeys(self.arena)) |k| try appendReflectable(self.arena, &list, k);
+            for (try t.ownKeysWithScratch(self.arena, scratch)) |k| try appendReflectable(self.arena, &list, k);
             return list.items;
         }
         if (t.is_array) {
@@ -11389,21 +11390,20 @@ pub const Interpreter = struct {
             // construction so it precedes any user-added string key — then symbols.
             var indices: std.ArrayListUnmanaged([]const u8) = .empty;
             var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
+            defer seen.deinit(scratch);
             for (try t.denseElementIndices(self.arena)) |i| {
                 try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-                try seen.put(self.arena, i, {});
+                try seen.put(scratch, i, {});
             }
             var strings: std.ArrayListUnmanaged([]const u8) = .empty;
             var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
-            for (try t.ownKeys(self.arena)) |k| {
+            for (try t.ownKeysWithScratch(self.arena, scratch)) |k| {
                 if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                 if (value.isRealSymbolKey(k)) {
                     try symbols.append(self.arena, k);
                 } else if (value.canonicalIndex(k)) |idx| {
-                    if (!seen.contains(idx)) {
-                        try seen.put(self.arena, idx, {});
-                        try indices.append(self.arena, k);
-                    }
+                    const entry = try seen.getOrPut(scratch, idx);
+                    if (!entry.found_existing) try indices.append(self.arena, k);
                 } else {
                     try strings.append(self.arena, k);
                 }
@@ -11429,13 +11429,15 @@ pub const Interpreter = struct {
         if (fn_has_proto) try self.materializeFunctionPrototype(t);
         var indices: std.ArrayListUnmanaged([]const u8) = .empty;
         var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
+        defer seen.deinit(scratch);
         for (try t.denseElementIndices(self.arena)) |dense_i| {
             try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
-            try seen.put(self.arena, dense_i, {});
+            try seen.put(scratch, dense_i, {});
         }
         var strings: std.ArrayListUnmanaged([]const u8) = .empty;
         var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
         var seen_strings: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen_strings.deinit(scratch);
         if (t.hostClassHooks()) |hooks| if (hooks.own_keys) |own_keys| {
             self.recordExecutionTier(.host_callbacks);
             for (try own_keys(@ptrCast(self), t)) |k| {
@@ -11443,28 +11445,24 @@ pub const Interpreter = struct {
                 if (value.isRealSymbolKey(k)) {
                     try symbols.append(self.arena, k);
                 } else if (value.canonicalIndex(k)) |idx| {
-                    if (!seen.contains(idx)) {
-                        try seen.put(self.arena, idx, {});
-                        try indices.append(self.arena, k);
-                    }
-                } else if (!seen_strings.contains(k)) {
-                    try seen_strings.put(self.arena, k, {});
-                    try strings.append(self.arena, k);
+                    const entry = try seen.getOrPut(scratch, idx);
+                    if (!entry.found_existing) try indices.append(self.arena, k);
+                } else {
+                    const entry = try seen_strings.getOrPut(scratch, k);
+                    if (!entry.found_existing) try strings.append(self.arena, k);
                 }
             }
         };
-        for (try t.ownKeys(self.arena)) |k| {
+        for (try t.ownKeysWithScratch(self.arena, scratch)) |k| {
             if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
             if (value.isRealSymbolKey(k)) {
                 try symbols.append(self.arena, k);
             } else if (value.canonicalIndex(k)) |idx| {
-                if (!seen.contains(idx)) {
-                    try seen.put(self.arena, idx, {});
-                    try indices.append(self.arena, k);
-                }
-            } else if (!seen_strings.contains(k)) {
-                try seen_strings.put(self.arena, k, {});
-                try strings.append(self.arena, k);
+                const entry = try seen.getOrPut(scratch, idx);
+                if (!entry.found_existing) try indices.append(self.arena, k);
+            } else {
+                const entry = try seen_strings.getOrPut(scratch, k);
+                if (!entry.found_existing) try strings.append(self.arena, k);
             }
         }
         std.mem.sort([]const u8, indices.items, {}, struct {
@@ -11499,6 +11497,7 @@ pub const Interpreter = struct {
         try self.proxyDepth();
         self.depth += 1;
         defer self.depth -= 1;
+        const scratch = self.scratch_allocator orelse self.arena;
         const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'ownKeys' on a proxy that has been revoked");
         if (try self.proxyTrap(o, "ownKeys")) |trap| {
             const res = try self.callValueWithThis(trap, &.{Value.obj(target)}, Value.obj(o.proxyHandler().?));
@@ -11518,9 +11517,10 @@ pub const Interpreter = struct {
             // non-configurable target key must be present; for a non-extensible
             // target the result must be exactly the target's keys.
             var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(scratch);
             for (list.items) |k| {
-                if (seen.contains(k)) return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
-                try seen.put(self.arena, k, {});
+                const entry = try seen.getOrPut(scratch, k);
+                if (entry.found_existing) return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
             }
             const extensible = target.isExtensible();
             const tkeys = try self.objectOwnKeysList(target);
@@ -11529,21 +11529,19 @@ pub const Interpreter = struct {
                 if (objectHasOwn(target, tk) and !target.getAttr(tk).configurable) has_nonconfig = true;
             }
             if (!extensible or has_nonconfig) {
-                var unchecked: std.StringHashMapUnmanaged(void) = .empty;
-                for (list.items) |k| try unchecked.put(self.arena, k, {});
                 // Every non-configurable target key must appear.
                 for (tkeys) |tk| {
                     if (!objectHasOwn(target, tk) or target.getAttr(tk).configurable) continue;
-                    if (!unchecked.remove(tk)) return self.throwError("TypeError", "ownKeys trap omitted a non-configurable key");
+                    if (!seen.remove(tk)) return self.throwError("TypeError", "ownKeys trap omitted a non-configurable key");
                 }
                 if (!extensible) {
                     // Non-extensible: the remaining (configurable) target keys must
                     // also appear, and nothing extra may be present.
                     for (tkeys) |tk| {
                         if (!objectHasOwn(target, tk) or !target.getAttr(tk).configurable) continue;
-                        if (!unchecked.remove(tk)) return self.throwError("TypeError", "ownKeys trap omitted a key on a non-extensible target");
+                        if (!seen.remove(tk)) return self.throwError("TypeError", "ownKeys trap omitted a key on a non-extensible target");
                     }
-                    if (unchecked.count() != 0) return self.throwError("TypeError", "ownKeys trap added a key absent from a non-extensible target");
+                    if (seen.count() != 0) return self.throwError("TypeError", "ownKeys trap added a key absent from a non-extensible target");
                 }
             }
             return list.items;
@@ -14217,7 +14215,7 @@ pub const Interpreter = struct {
     /// search methods can visit them without walking the whole logical length.
     fn arrSparseIndices(self: *Interpreter, o: *value.Object, lo: usize, hi: usize) EvalError![]usize {
         var list: std.ArrayListUnmanaged(usize) = .empty;
-        const keys = try o.ownKeys(self.arena);
+        const keys = try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena);
         for (keys) |k| {
             if (arrayIndex(k)) |idx| {
                 if (idx >= lo and idx < hi) try list.append(self.arena, idx);
@@ -14970,7 +14968,7 @@ pub const Interpreter = struct {
                 o.packedDenseElementsCoverLength();
             if (dense_plain_array) {
                 // Drop any sparse named-index props (their values are in `ps`).
-                for (try o.ownKeys(self.arena)) |k| if (value.canonicalIndex(k) != null) {
+                for (try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena)) |k| if (value.canonicalIndex(k) != null) {
                     _ = try self.deleteOwn(o, k);
                 };
                 try o.replaceDenseElementsAndSetLength(self.arena, ps, ilen); // indices past the sorted run read as holes
@@ -16999,7 +16997,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     const src = args[0].asStr();
     if (sourceOnlyEmptyBlocks(src)) return Value.undef();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
-    var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
+    var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("eval", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
     // Direct eval inherits the caller's strictness for early errors; indirect
     // eval is global code in the eval function's realm and only becomes strict
@@ -19037,7 +19035,7 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else Value.undef();
     const src = args[0].asStr();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
-    var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
+    var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("evalScript", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("evalScript", src, &parser, err);
     const prog_strict = parser.strict;
@@ -19347,7 +19345,7 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
     const source = src.asStr();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
-    var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
+    var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAtInRealm(caller_env, "ShadowRealm.evaluate", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, &parser, err);
     const prog_strict = parser.strict;
@@ -21742,7 +21740,7 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             // trailing Annex B HTML-open-comment param doesn't comment out the `)`.
             const param_source = try std.fmt.allocPrint(self.arena, "({s}\n)", .{params.items});
             var param_lex_diagnostic: ?parser_mod.SourceLocation = null;
-            var param_parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, param_source, &param_lex_diagnostic) catch |err|
+            var param_parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, param_source, &param_lex_diagnostic) catch |err|
                 return self.throwParserSyntaxErrorAt("Function parameters", param_lex_diagnostic orelse parser_mod.sourceLocationAt(param_source, 0), err);
             param_parser.parseDynamicFunctionParams(kind == .generator or kind == .async_generator, kind == .async_fn or kind == .async_generator) catch |err|
                 return self.throwParserSyntaxError("Function parameters", param_source, &param_parser, err);
@@ -21753,7 +21751,7 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             };
             const source = try std.fmt.allocPrint(self.arena, "({s}({s}\n) {{\n{s}\n}})", .{ prefix, params.items, body });
             var lex_diagnostic: ?parser_mod.SourceLocation = null;
-            var parser = Parser.initWithScratchDiagnostic(self.arena, self.parser_scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
+            var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
                 return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
             const prog = parser.parseProgram() catch |err|
                 return self.throwParserSyntaxError("Function body", source, &parser, err);

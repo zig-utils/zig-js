@@ -2089,7 +2089,7 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, o: *value.Object, free
 /// Make every own property non-configurable (and, when `freeze`, every data
 /// property non-writable). Backs `seal`/`freeze`.
 fn lockKeys(self: *Interpreter, o: *value.Object, freeze: bool) HostError!void {
-    for (try o.ownKeys(self.arena)) |k| {
+    for (try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena)) |k| {
         if (value.isPrivateKey(k)) continue;
         var a = o.getAttr(k);
         a.configurable = false;

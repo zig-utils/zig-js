@@ -4660,7 +4660,7 @@ pub const Context = struct {
     pub fn interpreter(self: *Context) interp.Interpreter {
         return .{
             .arena = self.arena(),
-            .parser_scratch_allocator = self.gpa,
+            .scratch_allocator = self.gpa,
             .env = &self.env,
             .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null and self.profile_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
             .jit_invalidation_ctx = if (self.parallel_js and self.enable_jit) self else null,
@@ -13022,6 +13022,42 @@ test "Reflect: prototype, toStringTag, array-like argumentsList" {
     // apply on a non-callable target throws; a throwing length getter propagates.
     try std.testing.expectError(error.Throw, evalIn("Reflect.apply({}, null, [])"));
     try std.testing.expectError(error.Throw, evalIn("Reflect.apply(function(){}, null, { get length() { throw new TypeError('x'); } })"));
+}
+
+test "own-key enumeration preserves ordinary sparse array and proxy semantics" {
+    try std.testing.expect((try evalIn(
+        \\var ordinary = {};
+        \\for (var i = 0; i < 256; i++) ordinary["field-" + i] = i;
+        \\Object.defineProperty(ordinary, "accessor", { enumerable: true, get: function () { return 1; } });
+        \\var ordinaryKeys = Reflect.ownKeys(ordinary);
+        \\var sparse = [];
+        \\sparse[4096] = 1;
+        \\sparse[3] = 2;
+        \\sparse.named = 3;
+        \\var sparseKeys = Reflect.ownKeys(sparse);
+        \\var fixed = {};
+        \\Object.defineProperty(fixed, "required", { configurable: false });
+        \\Object.preventExtensions(fixed);
+        \\var exact = Reflect.ownKeys(new Proxy(fixed, { ownKeys: function () { return ["required"]; } }));
+        \\var omittedThrows = false;
+        \\try { Reflect.ownKeys(new Proxy(fixed, { ownKeys: function () { return []; } })); }
+        \\catch (e) { omittedThrows = e instanceof TypeError; }
+        \\var extraThrows = false;
+        \\try { Reflect.ownKeys(new Proxy(fixed, { ownKeys: function () { return ["required", "extra"]; } })); }
+        \\catch (e) { extraThrows = e instanceof TypeError; }
+        \\var duplicateThrows = false;
+        \\try { Reflect.ownKeys(new Proxy({}, { ownKeys: function () { return ["x", "x"]; } })); }
+        \\catch (e) { duplicateThrows = e instanceof TypeError; }
+        \\var trapThrows = false;
+        \\try { Reflect.ownKeys(new Proxy({}, { ownKeys: function () { throw "trap"; } })); }
+        \\catch (e) { trapThrows = e === "trap"; }
+        \\ordinaryKeys.length === 257 && ordinaryKeys[0] === "field-0" &&
+        \\ordinaryKeys[255] === "field-255" && ordinaryKeys[256] === "accessor" &&
+        \\sparseKeys.join(",") === "3,4096,length,named" &&
+        \\exact.length === 1 && exact[0] === "required" && omittedThrows && extraThrows &&
+        \\duplicateThrows && trapThrows &&
+        \\JSON.stringify(ordinary).indexOf('"field-0":0') === 1
+    )).asBool());
 }
 
 test "Reflect.* require a real Object target (Symbol/primitive throws)" {

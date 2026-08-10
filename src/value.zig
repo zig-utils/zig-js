@@ -3996,50 +3996,72 @@ pub const Object = struct {
 
     /// Own named property keys in insertion order (for `for-in` / enumeration).
     pub fn ownKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
+        return self.ownKeysWithScratch(arena, arena);
+    }
+
+    /// Own keys retain arena-backed result slices while transient membership
+    /// indexes use separately freeable scratch backing.
+    pub fn ownKeysWithScratch(self: *const Object, arena: std.mem.Allocator, scratch: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         self.lockProperties();
         defer self.unlockProperties();
-        return self.ownKeysUnlocked(arena);
+        return self.ownKeysUnlockedWithScratch(arena, scratch);
     }
 
     fn ownKeysUnlocked(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
+        return self.ownKeysUnlockedWithScratch(arena, arena);
+    }
+
+    fn ownKeysUnlockedWithScratch(self: *const Object, arena: std.mem.Allocator, scratch: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         var insertion: std.ArrayListUnmanaged([]const u8) = .empty;
-        const has_own = struct {
-            fn f(o: *const Object, k: []const u8) bool {
-                return o.getOwnUnlocked(k) != null or (o.accessorsMap() orelse return false).get(k) != null;
-            }
-        }.f;
-        const contains = struct {
-            fn f(list: []const []const u8, k: []const u8) bool {
-                for (list) |e| if (std.mem.eql(u8, e, k)) return true;
-                return false;
-            }
-        }.f;
         if (self.keyOrder()) |ord| {
             // Creation order across data + accessor keys. Keep each present key's
             // LAST occurrence (a deleted-then-re-added key sorts to its new spot).
-            for (ord.items, 0..) |k, i| {
-                if (!has_own(self, k)) continue;
-                var later = false;
-                var j = i + 1;
-                while (j < ord.items.len) : (j += 1) if (std.mem.eql(u8, ord.items[j], k)) {
-                    later = true;
-                    break;
-                };
-                if (later) continue;
+            // Index current liveness from the shape/accessor stores once. Walking
+            // key_order backward then transitions each live spelling from pending
+            // to emitted without a linear shape lookup per historical entry.
+            var membership: std.StringHashMapUnmanaged(bool) = .empty;
+            defer membership.deinit(scratch);
+            var shape = self.shape;
+            while (shape) |sh| {
+                if (sh.name) |name| try membership.put(scratch, name, false);
+                shape = sh.parent;
+            }
+            if (self.accessorsMap()) |accessors| {
+                var it = accessors.iterator();
+                while (it.next()) |entry| try membership.put(scratch, entry.key_ptr.*, false);
+            }
+            var index = ord.items.len;
+            while (index > 0) {
+                index -= 1;
+                const k = ord.items[index];
+                const emitted = membership.getPtr(k) orelse continue;
+                if (emitted.*) continue;
+                emitted.* = true;
                 try insertion.append(arena, k);
             }
+            std.mem.reverse([]const u8, insertion.items);
             // Safety net: surface any current data slot or accessor that somehow
             // bypassed key_order, so no key is ever dropped (order best-effort).
             var s2 = self.shape;
             while (s2) |sh| {
-                if (sh.name) |n| if (!contains(insertion.items, n)) try insertion.append(arena, n);
+                if (sh.name) |n| {
+                    const emitted = membership.getPtr(n).?;
+                    if (!emitted.*) {
+                        emitted.* = true;
+                        try insertion.append(arena, n);
+                    }
+                }
                 s2 = sh.parent;
             }
             if (self.accessorsMap()) |m| {
                 var it = m.iterator();
                 while (it.next()) |entry| {
                     const k = entry.key_ptr.*;
-                    if (!contains(insertion.items, k)) try insertion.append(arena, k);
+                    const emitted = membership.getPtr(k).?;
+                    if (!emitted.*) {
+                        emitted.* = true;
+                        try insertion.append(arena, k);
+                    }
                 }
             }
         } else {
@@ -5447,6 +5469,37 @@ test "object key-order construction rolls back every allocation failure" {
         exerciseKeyOrderOomRollback,
         .{},
     );
+}
+
+test "ownKeys releases its membership index without changing result ownership" {
+    var root = Shape{ .parent = null, .name = null, .slot = 0, .count = 0, .arena = std.testing.allocator };
+    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .count = 1, .arena = std.testing.allocator };
+    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .count = 2, .arena = std.testing.allocator };
+    var order = std.ArrayListUnmanaged([]const u8).empty;
+    try order.appendSlice(std.testing.allocator, &.{ "alpha", "beta", "alpha" });
+    defer order.deinit(std.testing.allocator);
+
+    var cold = ObjectColdState{ .key_order = .init(&order) };
+    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator };
+    storage.cold.store(&cold, .monotonic);
+    var object = Object{ .shape = &beta };
+    object.storage.store(&storage, .monotonic);
+    object.initInlineSlots();
+    object.inline_slots[0] = Value.num(1);
+    object.inline_slots[1] = Value.num(2);
+
+    var result_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena.deinit();
+    var scratch_storage: [4096]u8 = undefined;
+    var scratch = std.heap.FixedBufferAllocator.init(&scratch_storage);
+    const keys = try object.ownKeysWithScratch(result_arena.allocator(), scratch.allocator());
+
+    // The last alpha occurrence defines its creation position, and result
+    // storage remains live after the invocation-local index is released.
+    try std.testing.expectEqual(@as(usize, 0), scratch.end_index);
+    try std.testing.expectEqual(@as(usize, 2), keys.len);
+    try std.testing.expectEqualStrings("beta", keys[0]);
+    try std.testing.expectEqualStrings("alpha", keys[1]);
 }
 
 test "fixed-shape object allocation publishes validated literal shape into inline slots" {

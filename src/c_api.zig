@@ -18214,7 +18214,7 @@ fn inspectorProperties(arena: std.mem.Allocator, session: *CInspectorSession, re
             const raw = valueFromContext(session.state.context, value_ref) orelse return error.InvalidRemoteObject;
             if (!raw.isObject() or raw.asObj().is_symbol or raw.asObj().is_bigint) return error.InvalidRemoteObject;
             const object = raw.asObj();
-            const keys = try object.ownKeys(arena);
+            const keys = try object.ownKeysWithScratch(arena, session.state.context.gpa);
             for (keys) |key| {
                 const attr = object.getAttr(key);
                 if (object.getOwn(key)) |property_value| {
