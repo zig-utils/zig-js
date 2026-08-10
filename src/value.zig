@@ -1954,11 +1954,24 @@ pub const Object = struct {
 
     pub fn ensureStrongCollectionState(self: *Object, fallback: std.mem.Allocator, hash_seed: u64) std.mem.Allocator.Error!*ObjectCollectionState {
         const state = try self.ensureCollectionState(fallback);
+        // Activate the shared index/serial backing once while the collection is
+        // still private. Hot insertions can then use the immutable published
+        // allocator without reacquiring backing_lock for each container.
+        _ = try self.ensureBackingFor(fallback, "coll_index");
         if (!state.coll_hash_seeded) {
             state.coll_hash_seed = hash_seed;
             state.coll_hash_seeded = true;
         }
         return state;
+    }
+
+    /// Allocator for strong collection position/serial storage. Construction
+    /// activates this backing category before publication; the slow path keeps
+    /// direct test/embedding-created collection cells ownership-correct.
+    fn collAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        if (self.backingFlagsSnapshot().coll_index)
+            return self.backingAllocatorIfActive() orelse fallback;
+        return self.ensureBackingFor(fallback, "coll_index");
     }
 
     pub inline fn collectionState(self: *const Object) ?*ObjectCollectionState {
@@ -3362,8 +3375,8 @@ pub const Object = struct {
     /// the ordered elements list; reserving both containers before either is
     /// mutated prevents a partially authoritative index on OOM.
     pub fn collIndexPut(self: *Object, fallback: std.mem.Allocator, hash: u64, pos: u32) bool {
-        const state = self.ensureCollectionState(fallback) catch return false;
-        const alloc = self.ensureBackingFor(fallback, "coll_index") catch return false;
+        const state = self.collectionState() orelse self.ensureCollectionState(fallback) catch return false;
+        const alloc = self.collAllocator(fallback) catch return false;
         if (pos != state.coll_next.items.len) return false;
         state.coll_next.ensureUnusedCapacity(alloc, 1) catch return false;
         state.coll_index.ensureUnusedCapacity(alloc, 1) catch return false;
@@ -3412,9 +3425,9 @@ pub const Object = struct {
     /// allocation point between them, preserving their one-for-one invariant.
     /// Caller holds `elements_lock`.
     pub fn collPrepareInsert(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!u64 {
-        const state = try self.ensureCollectionState(fallback);
+        const state = self.collectionState() orelse try self.ensureCollectionState(fallback);
         if (state.coll_next_serial == std.math.maxInt(u64)) return error.OutOfMemory;
-        const alloc = try self.ensureBackingFor(fallback, "coll_index");
+        const alloc = try self.collAllocator(fallback);
         try state.coll_serials.ensureUnusedCapacity(alloc, 1);
         return state.coll_next_serial;
     }
