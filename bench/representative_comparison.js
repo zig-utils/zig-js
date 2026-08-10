@@ -419,6 +419,44 @@ function selectRepresentativeDateSetter(width, control) {
   };
 }
 
+// Exercise every non-locale Date string conversion at deterministic
+// 1K/2K/4K widths. The noon-UTC inputs keep the date prefix equal on this
+// reference host while the checksum deliberately ignores local-time digits and
+// zone names, whose exact spelling is outside the cross-engine contract. Every
+// complete result is still constructed and consumed. The getter control keeps
+// the identical Date mutation and component reads without formatting a string.
+function selectRepresentativeDateString(width, control) {
+  return function (jobs, lane) {
+    var total = 0;
+    for (var job = 0; job < jobs; job = job + 1) {
+      var date = new Date(0);
+      for (var index = 0; index < width; index = index + 1) {
+        var day = (index + job * 17 + lane * 29) % 7305;
+        date.setTime(946728000000 + day * 86400000);
+        if (control) {
+          total = total + date.getUTCFullYear() + date.getUTCMonth() +
+            date.getUTCDate() + date.getUTCDay() + date.getUTCHours();
+          continue;
+        }
+        var dateText = date.toDateString();
+        var timeText = date.toTimeString();
+        var fullText = date.toString();
+        var utcText = date.toUTCString();
+        for (var dateIndex = 0; dateIndex < 15; dateIndex = dateIndex + 1) {
+          total = total + dateText.charCodeAt(dateIndex);
+          total = total + fullText.charCodeAt(dateIndex);
+        }
+        total = total + timeText.charCodeAt(2) + timeText.charCodeAt(5) +
+          timeText.charCodeAt(8) + timeText.charCodeAt(9) +
+          timeText.charCodeAt(10) + timeText.charCodeAt(11);
+        for (var utcIndex = 0; utcIndex < utcText.length; utcIndex = utcIndex + 1)
+          total = total + utcText.charCodeAt(utcIndex);
+      }
+    }
+    return total;
+  };
+}
+
 function representativeTypedData(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -728,6 +766,10 @@ function benchmarkFunction(name) {
   if (name === "representative_date_setter_2048") return selectRepresentativeDateSetter(2048, false);
   if (name === "representative_date_setter_4096") return selectRepresentativeDateSetter(4096, false);
   if (name === "representative_date_settime_control_4096") return selectRepresentativeDateSetter(4096, true);
+  if (name === "representative_date_string_1024") return selectRepresentativeDateString(1024, false);
+  if (name === "representative_date_string_2048") return selectRepresentativeDateString(2048, false);
+  if (name === "representative_date_string_4096") return selectRepresentativeDateString(4096, false);
+  if (name === "representative_date_getter_control_4096") return selectRepresentativeDateString(4096, true);
   if (name === "representative_typed_data") return function (jobs, lane) { return representativeTypedData(jobs, lane, 0); };
   if (name === "representative_typed_data_variant") return function (jobs, lane) { return representativeTypedData(jobs, lane, 1); };
   if (name === "representative_classes") return function (jobs, lane) { return representativeClasses(jobs, lane, 0); };
