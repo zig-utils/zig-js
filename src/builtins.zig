@@ -3022,7 +3022,9 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     // a Symbol throws) before parsing. Read as WTF-8 so a flat-latin1 input cell
     // is tokenized as canonical WTF-8 (parsed keys/values then store correctly).
     const text = try self.toStringWtf8(arg(args, 0));
-    var p = JsonParser{ .s = text, .i = 0, .interp = self };
+    const reviver = arg(args, 1);
+    const has_reviver = reviver.isObject() and reviver.asObj().isCallableObject();
+    var p = JsonParser{ .s = text, .i = 0, .interp = self, .track_records = has_reviver };
     p.skipWs();
     const parsed = p.parseValue() catch |err| switch (err) {
         error.Invalid => return self.throwError("SyntaxError", "JSON.parse: invalid JSON"),
@@ -3036,21 +3038,19 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 
     // Optional reviver: walk the result bottom-up, replacing (or deleting, when
     // the reviver returns undefined) each property by the reviver's return.
-    const reviver = arg(args, 1);
-    if (reviver.isObject() and reviver.asObj().isCallableObject()) {
+    if (has_reviver) {
         const holder = (try self.newObject()).asObj();
         // CreateDataPropertyOrThrow(holder, "", v) — not [[Set]], so an inherited
         // Object.prototype[""] setter is not invoked.
         try holder.setOwn(self.arena, self.root_shape, "", v);
-        if (parsed.source) |src| try p.sources.append(self.arena, .{ .holder = holder, .key = "", .value = v, .source = src });
-        return internalizeJson(self, Value.obj(holder), "", reviver, p.sources.items);
+        return internalizeJson(self, Value.obj(holder), "", reviver, parsed.record);
     }
     return v;
 }
 
 /// InternalizeJSONProperty: recursively apply `reviver` to `holder[key]` and its
 /// nested elements/properties (children first), returning the reviver's result.
-fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: Value, sources: []const JsonSourceEntry) HostError!Value {
+fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: Value, parse_record: ?*const JsonParseRecord) HostError!Value {
     // InternalizeJSONProperty is recursive even though parsing has completed.
     // A reviver must not turn the parser's bounded-depth guarantee into a
     // second native-stack overflow while walking the accepted result graph.
@@ -3059,7 +3059,20 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
     try self.stackGuard();
     const a = self.arena;
     const val = try self.getProperty(holder, key);
-    if (val.isObject() and !val.asObj().isCallableObject()) {
+    // ECMA-262 25.5.2.4: a mutation keeps its parse record only when the
+    // current value is SameValue with the value initially parsed at this exact
+    // tree position. In particular, +0 and -0 differ, and moving a parsed
+    // object into a sibling must not move its source metadata with it.
+    const record = if (parse_record) |candidate|
+        if (value.sameValue(candidate.value, val)) candidate else null
+    else
+        null;
+    const context = (try self.newObject()).asObj();
+    if (record) |matched| {
+        if (matched.source) |source|
+            try context.setOwn(a, self.root_shape, "source", try Value.strAlloc(a, source));
+    }
+    if (val.isObject()) {
         const o = val.asObj();
         if (try interpreter.objectToStringIsArray(self, o)) {
             var i: usize = 0;
@@ -3068,34 +3081,25 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
             const len = interpreter.toLen(try self.toNumberV(try self.getProperty(val, "length")));
             while (i < len) : (i += 1) {
                 const k = try std.fmt.allocPrint(a, "{d}", .{i});
-                const nv = try internalizeJson(self, val, k, reviver, sources);
+                const child_record = if (record) |matched| switch (matched.children) {
+                    .elements => |elements| if (i < elements.items.len) elements.items[i] else null,
+                    else => null,
+                } else null;
+                const nv = try internalizeJson(self, val, k, reviver, child_record);
                 try internalizeStore(self, o, val, k, nv);
             }
         } else {
             for (try ownEnumerableKeys(self, o)) |k| {
-                const nv = try internalizeJson(self, val, k, reviver, sources);
+                const child_record = if (record) |matched| switch (matched.children) {
+                    .entries => |entries| entries.get(k),
+                    else => null,
+                } else null;
+                const nv = try internalizeJson(self, val, k, reviver, child_record);
                 try internalizeStore(self, o, val, k, nv);
             }
         }
     }
-    const context = try jsonReviverContext(self, holder, key, val, sources);
-    return self.callValueWithThis(reviver, &.{ try Value.strAlloc(self.arena, value.decodeStringKey(key)), val, context }, holder);
-}
-
-fn jsonReviverContext(self: *Interpreter, holder: Value, key: []const u8, val: Value, sources: []const JsonSourceEntry) HostError!Value {
-    const ctx = (try self.newObject()).asObj();
-    if (holder.isObject()) {
-        var i = sources.len;
-        while (i > 0) {
-            i -= 1;
-            const entry = sources[i];
-            if (entry.holder == holder.asObj() and std.mem.eql(u8, entry.key, key) and value.strictEquals(entry.value, val)) {
-                try ctx.setOwn(self.arena, self.root_shape, "source", try Value.strAlloc(self.arena, entry.source));
-                break;
-            }
-        }
-    }
-    return Value.obj(ctx);
+    return self.callValueWithThis(reviver, &.{ try Value.strAlloc(a, value.decodeStringKey(key)), val, Value.obj(context) }, holder);
 }
 
 /// InternalizeJSONProperty's store step: `undefined` ⇒ DeletePropertyOrThrow,
@@ -3127,21 +3131,33 @@ const JErr = error{Invalid} || HostError;
 
 const JsonParsed = struct {
     value: Value,
-    source: ?[]const u8 = null,
+    record: ?*JsonParseRecord = null,
 };
 
-const JsonSourceEntry = struct {
-    holder: *value.Object,
-    key: []const u8,
+const JsonParseChildren = union(enum) {
+    none,
+    elements: std.ArrayListUnmanaged(*JsonParseRecord),
+    entries: std.StringHashMapUnmanaged(*JsonParseRecord),
+};
+
+const JsonParseRecord = struct {
     value: Value,
-    source: []const u8,
+    source: ?[]const u8 = null,
+    children: JsonParseChildren = .none,
 };
 
 const JsonParser = struct {
     s: []const u8,
     i: usize,
     interp: *Interpreter,
-    sources: std.ArrayListUnmanaged(JsonSourceEntry) = .empty,
+    track_records: bool = false,
+
+    fn parsed(p: *JsonParser, val: Value, source: ?[]const u8, children: JsonParseChildren) std.mem.Allocator.Error!JsonParsed {
+        if (!p.track_records) return .{ .value = val };
+        const record = try p.interp.arena.create(JsonParseRecord);
+        record.* = .{ .value = val, .source = source, .children = children };
+        return .{ .value = val, .record = record };
+    }
 
     fn skipWs(p: *JsonParser) void {
         while (p.i < p.s.len and (p.s[p.i] == ' ' or p.s[p.i] == '\t' or p.s[p.i] == '\n' or p.s[p.i] == '\r')) p.i += 1;
@@ -3172,7 +3188,8 @@ const JsonParser = struct {
             '"' => {
                 const start = p.i;
                 const s = try p.parseString();
-                return .{ .value = try Value.strAlloc(p.interp.arena, s), .source = p.s[start..p.i] };
+                const val = try Value.strAlloc(p.interp.arena, s);
+                return p.parsed(val, p.s[start..p.i], .none);
             },
             't' => return p.parseLiteral("true", Value.boolVal(true)),
             'f' => return p.parseLiteral("false", Value.boolVal(false)),
@@ -3185,7 +3202,7 @@ const JsonParser = struct {
         const start = p.i;
         if (p.i + lit.len > p.s.len or !std.mem.eql(u8, p.s[p.i .. p.i + lit.len], lit)) return error.Invalid;
         p.i += lit.len;
-        return .{ .value = v, .source = p.s[start..p.i] };
+        return p.parsed(v, p.s[start..p.i], .none);
     }
 
     fn parseNumber(p: *JsonParser) JErr!JsonParsed {
@@ -3213,7 +3230,7 @@ const JsonParser = struct {
             while (p.i < p.s.len and digit(p.s[p.i])) p.i += 1;
         }
         const n = std.fmt.parseFloat(f64, p.s[start..p.i]) catch return error.Invalid;
-        return .{ .value = Value.num(n), .source = p.s[start..p.i] };
+        return p.parsed(Value.num(n), p.s[start..p.i], .none);
     }
 
     fn parseString(p: *JsonParser) JErr![]const u8 {
@@ -3301,20 +3318,16 @@ const JsonParser = struct {
     fn parseArray(p: *JsonParser) JErr!JsonParsed {
         p.i += 1; // [
         const result = try p.interp.newArray();
+        var elements: std.ArrayListUnmanaged(*JsonParseRecord) = .empty;
         p.skipWs();
         if (p.i < p.s.len and p.s[p.i] == ']') {
             p.i += 1;
-            return .{ .value = result };
+            return p.parsed(result, null, .{ .elements = elements });
         }
-        var index: usize = 0;
         while (true) {
             const child = try p.parseValue();
             try result.asObj().appendElement(p.interp.arena, child.value);
-            if (child.source) |src| {
-                const key = try std.fmt.allocPrint(p.interp.arena, "{d}", .{index});
-                try p.sources.append(p.interp.arena, .{ .holder = result.asObj(), .key = key, .value = child.value, .source = src });
-            }
-            index += 1;
+            if (p.track_records) try elements.append(p.interp.arena, child.record.?);
             p.skipWs();
             if (p.i >= p.s.len) return error.Invalid;
             if (p.s[p.i] == ',') {
@@ -3323,7 +3336,7 @@ const JsonParser = struct {
             }
             if (p.s[p.i] == ']') {
                 p.i += 1;
-                return .{ .value = result };
+                return p.parsed(result, null, .{ .elements = elements });
             }
             return error.Invalid;
         }
@@ -3332,10 +3345,11 @@ const JsonParser = struct {
     fn parseObject(p: *JsonParser) JErr!JsonParsed {
         p.i += 1; // {
         const result = try p.interp.newObject();
+        var entries: std.StringHashMapUnmanaged(*JsonParseRecord) = .empty;
         p.skipWs();
         if (p.i < p.s.len and p.s[p.i] == '}') {
             p.i += 1;
-            return .{ .value = result };
+            return p.parsed(result, null, .{ .entries = entries });
         }
         while (true) {
             p.skipWs();
@@ -3349,8 +3363,7 @@ const JsonParser = struct {
             // attrs). Not [[Set]] — so "__proto__" becomes a normal own property
             // and duplicate keys overwrite without invoking inherited setters.
             try result.asObj().setOwn(p.interp.arena, p.interp.root_shape, key, child.value);
-            if (child.source) |src|
-                try p.sources.append(p.interp.arena, .{ .holder = result.asObj(), .key = key, .value = child.value, .source = src });
+            if (p.track_records) try entries.put(p.interp.arena, key, child.record.?);
             p.skipWs();
             if (p.i >= p.s.len) return error.Invalid;
             if (p.s[p.i] == ',') {
@@ -3359,7 +3372,7 @@ const JsonParser = struct {
             }
             if (p.s[p.i] == '}') {
                 p.i += 1;
-                return .{ .value = result };
+                return p.parsed(result, null, .{ .entries = entries });
             }
             return error.Invalid;
         }

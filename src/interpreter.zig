@@ -49746,6 +49746,25 @@ test "interpreter JSON, Object, Number builtins" {
         \\});
         \\seen
     )).asNum());
+    try std.testing.expect((try evalSource(a,
+        \\let visits = [];
+        \\let parsed = JSON.parse('{"2":20,"1":10,"dup":1,"dup":-0,"a\\u0062":3,"keep":1,"keep":2}', function(k, v, context) {
+        \\  if (k === "1") { this["2"] = 99; this.dup = 0; }
+        \\  visits.push(k + ":" + (context.source === undefined ? "missing" : context.source));
+        \\  return v;
+        \\});
+        \\visits.join("|") === "1:10|2:missing|dup:missing|ab:3|keep:2|:missing" &&
+        \\parsed[2] === 99 && Object.is(parsed.dup, 0)
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let sources = [];
+        \\JSON.parse('[[1],[2]]', function(k, v, context) {
+        \\  if (typeof v === "number") sources.push(context.source === undefined ? "missing" : context.source);
+        \\  if (k === "0" && Array.isArray(this) && Array.isArray(v)) this[1] = v;
+        \\  return v;
+        \\});
+        \\sources.join("|") === "1|missing"
+    )).asBool());
     // Object.create + getPrototypeOf
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let p = { x: 7 }; let o = Object.create(p); o.x")).asNum());
     try std.testing.expect((try evalSource(a, "let o = Object.create(null); Object.getPrototypeOf(o) === null && o.constructor === undefined && !('constructor' in o)")).asBool());
