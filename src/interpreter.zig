@@ -10544,6 +10544,7 @@ pub const Interpreter = struct {
             const elements = try o.ensureElementsList(self.arena);
             const pos: u32 = @intCast(elements.items.len);
             try elements.append(o.elementsAllocator(self.arena), Value.obj(pair));
+            o.collRecordInsert();
             if (!o.collUnindexed()) if (o.collHashSeed()) |seed| {
                 const hkey = hashKey(seed, key);
                 if (!o.collIndexPut(self.arena, hkey, pos)) o.collDisableIndex(self.arena);
@@ -10566,6 +10567,7 @@ pub const Interpreter = struct {
             defer o.unlockElements(elements_locked_4);
             if (mapFindPos(o, key, self.arena)) |pos| {
                 liveMapEntry(o.elementsItems()[pos]).?.clearElementsRetainingCapacity();
+                o.collRecordDelete();
                 if (!o.collUnindexed()) if (o.collHashSeed()) |seed|
                     o.collIndexRemove(hashKey(seed, key), @intCast(pos));
                 return Value.boolVal(true);
@@ -10690,6 +10692,7 @@ pub const Interpreter = struct {
             const elements = try o.ensureElementsList(self.arena);
             const pos: u32 = @intCast(elements.items.len);
             try elements.append(o.elementsAllocator(self.arena), key);
+            o.collRecordInsert();
             if (!o.collUnindexed()) if (o.collHashSeed()) |seed| {
                 const hkey = hashKey(seed, key);
                 if (!o.collIndexPut(self.arena, hkey, pos)) o.collDisableIndex(self.arena);
@@ -10708,6 +10711,7 @@ pub const Interpreter = struct {
             defer o.unlockElements(elements_locked_9);
             if (setFindPos(o, key, self.arena)) |pos| {
                 o.elementsItems()[pos] = Value.obj(tomb);
+                o.collRecordDelete();
                 if (!o.collUnindexed()) if (o.collHashSeed()) |seed|
                     o.collIndexRemove(hashKey(seed, key), @intCast(pos));
                 return Value.boolVal(true);
@@ -31711,13 +31715,7 @@ fn mapEntryValue(entry: *value.Object) Value {
 }
 
 fn liveMapEntryCount(o: *value.Object) usize {
-    var n: usize = 0;
-    const elements_locked_19 = o.lockElements();
-    defer o.unlockElements(elements_locked_19);
-    for (o.elementsItems()) |entry| {
-        if (liveMapEntry(entry) != null) n += 1;
-    }
-    return n;
+    return o.strongCollectionLiveCount();
 }
 
 fn liveSetEntry(v: Value) ?Value {
@@ -31733,13 +31731,7 @@ fn liveSetEntryAt(o: *value.Object, i: usize) ?Value {
 }
 
 fn liveSetEntryCount(o: *value.Object) usize {
-    var n: usize = 0;
-    const elements_locked_21 = o.lockElements();
-    defer o.unlockElements(elements_locked_21);
-    for (o.elementsItems()) |entry| {
-        if (liveSetEntry(entry) != null) n += 1;
-    }
-    return n;
+    return o.strongCollectionLiveCount();
 }
 
 /// Seeded hash of every Map/Set key kind, consistent with `SameValueZero`.

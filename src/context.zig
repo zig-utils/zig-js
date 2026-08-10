@@ -12682,6 +12682,36 @@ test "Map/Set forEach tolerate deletion during iteration" {
     )).asNum());
 }
 
+test "Map and Set size use the exact live count after historical churn" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\globalThis.__sizeMap = new Map();
+        \\globalThis.__sizeSet = new Set();
+        \\for (let i = 0; i < 4096; i++) {
+        \\  __sizeMap.set(i, i);
+        \\  __sizeSet.add(i);
+        \\  __sizeMap.delete(i);
+        \\  __sizeSet.delete(i);
+        \\}
+        \\for (let i = 0; i < 64; i++) {
+        \\  __sizeMap.set(i, i * 2);
+        \\  __sizeSet.add(i);
+        \\}
+        \\__sizeMap.size * 1000 + __sizeSet.size
+    );
+    try std.testing.expectEqual(@as(f64, 64064), result.asNum());
+
+    const map = ctx.global_object.getOwn("__sizeMap").?.asObj();
+    const set = ctx.global_object.getOwn("__sizeSet").?.asObj();
+    try std.testing.expectEqual(@as(usize, 64), map.collectionState().?.coll_live_count);
+    try std.testing.expectEqual(@as(usize, 64), set.collectionState().?.coll_live_count);
+    // This slice proves size no longer depends on the historical list. #514
+    // retains compaction of these tombstones as its next boundary.
+    try std.testing.expectEqual(@as(usize, 4160), map.elementsLen());
+    try std.testing.expectEqual(@as(usize, 4160), set.elementsLen());
+}
+
 test "Set operations keep live-index semantics when set-like callbacks mutate this" {
     try expectEvalStr("true|1|1",
         \\var s = new Set([1, 2]);

@@ -1331,6 +1331,9 @@ pub const ObjectCollectionState = struct {
     coll_next: std.ArrayListUnmanaged(u32) = .empty,
     coll_hash_seed: u64 = 0,
     coll_hash_seeded: bool = false,
+    /// Exact live Map/Set entry count. Guarded by the owning object's
+    /// `elements_lock`, alongside the ordered list and acceleration index.
+    coll_live_count: usize = 0,
     coll_unindexed: bool = false,
 };
 
@@ -3360,6 +3363,22 @@ pub const Object = struct {
     pub fn collUnindexed(self: *Object) bool {
         return if (self.collectionState()) |state| state.coll_unindexed else false;
     }
+    pub fn strongCollectionLiveCount(self: *Object) usize {
+        const elements_locked = self.lockElements();
+        defer self.unlockElements(elements_locked);
+        return self.collectionState().?.coll_live_count;
+    }
+    /// Caller holds `elements_lock`; the ordered entry is already live.
+    pub fn collRecordInsert(self: *Object) void {
+        const state = self.collectionState().?;
+        state.coll_live_count += 1;
+    }
+    /// Caller holds `elements_lock`; the ordered entry is still live.
+    pub fn collRecordDelete(self: *Object) void {
+        const state = self.collectionState().?;
+        std.debug.assert(state.coll_live_count > 0);
+        state.coll_live_count -= 1;
+    }
     /// Permanently drop to linear scanning after index allocation failure or a
     /// structural invariant failure. Needs cold state so the flag persists.
     pub fn collDisableIndex(self: *Object, fallback: std.mem.Allocator) void {
@@ -3373,6 +3392,7 @@ pub const Object = struct {
         if (self.collectionState()) |state| {
             state.coll_index.clearRetainingCapacity();
             state.coll_next.clearRetainingCapacity();
+            state.coll_live_count = 0;
             state.coll_unindexed = false;
         }
     }
