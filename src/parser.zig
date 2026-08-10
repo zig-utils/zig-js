@@ -2092,15 +2092,15 @@ pub const Parser = struct {
 
     /// Strict-mode early errors on a formal parameter list: a parameter named
     /// `eval`/`arguments`, or any duplicate parameter name, is a SyntaxError.
-    fn validateStrictParams(params: []const ast.Param) ParseError!void {
-        for (params, 0..) |p, i| {
+    fn validateStrictParams(self: *Parser, params: []const ast.Param) ParseError!void {
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        for (params) |p| {
             if (p.pattern != null) continue;
             if (std.mem.eql(u8, p.name, "eval") or std.mem.eql(u8, p.name, "arguments"))
                 return ParseError.UnexpectedToken;
             if (isStrictReservedBinding(p.name)) return ParseError.UnexpectedToken;
-            for (params[0..i]) |q| {
-                if (q.pattern == null and std.mem.eql(u8, q.name, p.name)) return ParseError.UnexpectedToken;
-            }
+            const entry = try seen.getOrPut(self.arena, p.name);
+            if (entry.found_existing) return ParseError.UnexpectedToken;
         }
     }
 
@@ -2172,7 +2172,7 @@ pub const Parser = struct {
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
         if (fn_strict and (isStrictReservedBinding(name_tok.text) or isEvalOrArguments(name_tok.text))) return ParseError.UnexpectedToken;
-        if (fn_strict) try validateStrictParams(params);
+        if (fn_strict) try self.validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
         // A generator/async function, or ANY function with a non-simple parameter
         // list (a default/rest/destructuring), has UniqueFormalParameters:
@@ -2217,7 +2217,7 @@ pub const Parser = struct {
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
         if (fn_strict and name.len > 0 and (isStrictReservedBinding(name) or isEvalOrArguments(name))) return ParseError.UnexpectedToken;
-        if (fn_strict) try validateStrictParams(params);
+        if (fn_strict) try self.validateStrictParams(params);
         try self.forbidSuperInFunction(body, params);
         // A generator/async function, or ANY function with a non-simple parameter
         // list (a default/rest/destructuring), has UniqueFormalParameters:
@@ -4059,7 +4059,7 @@ pub const Parser = struct {
         const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
         const body = try self.parseFnBody(is_gen, is_async);
         if (own_use_strict and hasNonSimpleParams(params)) return ParseError.UnexpectedToken;
-        if (fn_strict) try validateStrictParams(params);
+        if (fn_strict) try self.validateStrictParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
         fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true, .uses_arguments = ast.sourceMayUseArguments(self.sourceFrom(start)) };
@@ -4320,6 +4320,28 @@ test "parser init reports lexer failure source location" {
     const loc = diagnostic orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), loc.line);
     try std.testing.expectEqual(@as(usize, 2), loc.column);
+}
+
+test "parser validates wide strict parameter lists without changing duplicate semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(a, "function wide(");
+    for (0..4096) |index| {
+        if (index != 0) try source.append(a, ',');
+        try source.appendSlice(a, try std.fmt.allocPrint(a, "parameter{d}", .{index}));
+    }
+    try source.appendSlice(a, "){\"use strict\";return 7;}");
+    var wide = try Parser.init(a, source.items);
+    _ = try wide.parseProgram();
+
+    var strict_duplicate = try Parser.init(a, "function duplicate(first, second, first) { \"use strict\"; }");
+    try std.testing.expectError(ParseError.UnexpectedToken, strict_duplicate.parseProgram());
+
+    var sloppy_duplicate = try Parser.init(a, "function duplicate(first, second, first) {}");
+    _ = try sloppy_duplicate.parseProgram();
 }
 
 test "parser builds precedence-correct tree" {
