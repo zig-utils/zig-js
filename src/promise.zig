@@ -59,6 +59,10 @@ pub const Reaction = struct {
 
 pub const Promise = struct {
     lock: std.atomic.Mutex = .unlocked,
+    /// Immutable after construction. Concurrent-marker and parallel-mutator
+    /// contexts take `lock`; serialized contexts rely on their execution policy
+    /// while retaining the trace-sensitive guard below.
+    state_locking: bool = false,
     state: State = .pending,
     value: Value = Value.undef(),
     /// The unique JavaScript wrapper for this internal Promise cell. The host
@@ -88,14 +92,16 @@ pub const Promise = struct {
     rejection_handled_notified: bool = false,
 
     pub fn lockState(self: *Promise) void {
-        promise_profile.recordPromiseLockAcquire();
-        var spins: usize = 0;
-        while (!self.lock.tryLock()) : (spins += 1) {
-            if ((spins & 0xff) == 0) {
-                promise_profile.recordPromiseLockYield();
-                std.Thread.yield() catch {};
-            } else {
-                std.atomic.spinLoopHint();
+        if (self.state_locking) {
+            promise_profile.recordPromiseLockAcquire();
+            var spins: usize = 0;
+            while (!self.lock.tryLock()) : (spins += 1) {
+                if ((spins & 0xff) == 0) {
+                    promise_profile.recordPromiseLockYield();
+                    std.Thread.yield() catch {};
+                } else {
+                    std.atomic.spinLoopHint();
+                }
             }
         }
         gc_runtime.enterTraceSensitiveLock();
@@ -103,7 +109,7 @@ pub const Promise = struct {
 
     pub fn unlockState(self: *Promise) void {
         gc_runtime.leaveTraceSensitiveLock();
-        self.lock.unlock();
+        if (self.state_locking) self.lock.unlock();
     }
 };
 
@@ -320,6 +326,26 @@ test "MicrotaskQueue lock is trace-sensitive" {
     try std.testing.expect(gc_runtime.inTraceSensitiveLock());
 }
 
+test "Promise state mutex is conditional but mutations remain trace-sensitive" {
+    promise_profile.resetPromiseStats();
+    defer promise_profile.disablePromiseStats();
+    var p = Promise{};
+
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    p.lockState();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    p.unlockState();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    try std.testing.expectEqual(@as(u64, 0), promise_profile.promiseStats().promise_lock_acquires);
+
+    p.state_locking = true;
+    p.lockState();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    p.unlockState();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    try std.testing.expectEqual(@as(u64, 1), promise_profile.promiseStats().promise_lock_acquires);
+}
+
 test "Promise reactions keep first entry inline then reserve overflow chunks" {
     const a = std.testing.allocator;
     var live: usize = 0;
@@ -525,7 +551,10 @@ test "promise native private relocation mirrors resolving closure tracing" {
 pub fn newPromise(self: *Interpreter) EvalError!*Object {
     const p = try gc_mod.allocPromise(self.arena);
     promise_profile.recordPromiseStateCell();
-    p.* = .{ .gc_owned = gc_mod.allocationsAreManaged() };
+    p.* = .{
+        .gc_owned = gc_mod.allocationsAreManaged(),
+        .state_locking = self.lock_promise_state,
+    };
     const obj = try gc_mod.allocObj(self.arena);
     promise_profile.recordPromiseWrapperObject();
     obj.* = .{};

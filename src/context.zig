@@ -3319,6 +3319,10 @@ pub const Context = struct {
     /// no-GIL default; tests can also drive it through `TestingOptions` without
     /// exposing it as a stable embedder option.
     parallel_js: bool = false,
+    /// Immutable creation-time policy copied into every Promise state cell.
+    /// Concurrent marking and either parallel-mutator mode require the mutex;
+    /// ordinary single-mutator and GIL-serialized contexts do not.
+    promise_state_locking: bool = false,
     /// Optional cap on live shared-realm `Thread`s. Null means only the
     /// intrinsic id-space limit applies.
     max_js_threads: ?u32 = null,
@@ -4418,6 +4422,7 @@ pub const Context = struct {
             .main_can_block = options.main_can_block,
             .max_js_threads = options.max_js_threads,
             .parallel_js = options.parallel_js,
+            .promise_state_locking = options.concurrent_gc or options.parallel_gc or options.parallel_js,
             .wasm_features = options.wasm_features,
         };
         self.gc_par_enabled = options.parallel_midscript_gc;
@@ -4677,6 +4682,7 @@ pub const Context = struct {
             // Only engage per-queue microtask locking in no-GIL mode;
             // single-threaded and `.gil = true` execution stay lock-free.
             .lock_microtasks = self.parallel_js,
+            .lock_promise_state = self.promise_state_locking,
             .realm_lock = if (self.parallel_js) &self.realm_lock else null,
             .prototype_lock = if (self.parallel_js) &self.prototype_lock else null,
             .print_buffer = &self.print_buffer,
@@ -13039,6 +13045,7 @@ test "parallel_js: Promise combinators tolerate concurrent input settlement" {
         .parallel_js = true,
     });
     defer ctx.destroy();
+    try std.testing.expect(ctx.promise_state_locking);
 
     const result = try ctx.evaluate(
         \\const gate = new SharedArrayBuffer(4);

@@ -1443,6 +1443,10 @@ pub const Interpreter = struct {
     /// on the queue itself so independent spawned-thread queues do not contend
     /// on a realm-wide lock.
     lock_microtasks: bool = false,
+    /// Promise state needs a mutex only when a marker or peer mutator can read
+    /// it concurrently. Serialized contexts still enter the trace-sensitive
+    /// guard around mutations so allocator recovery cannot observe half-state.
+    lock_promise_state: bool = false,
     /// When non-null (only under `parallel_js`), the Context's `realm_lock`,
     /// serializing this interpreter's mutation of the shared realm queues it can
     /// touch off-collector — currently `finalization_cleanup_jobs`, which the
