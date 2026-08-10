@@ -12010,6 +12010,19 @@ test "Date setters + string conversions" {
     try expectEvalStr("Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)", "new Date(0).toString()");
     try expectEvalStr("Thu Jan 01 1970", "new Date(0).toDateString()");
     try expectEvalStr("00:00:00 GMT+0000 (Coordinated Universal Time)", "new Date(0).toTimeString()");
+    try expectEvalStr("Fri Jan 01 -0001", "new Date(-62198755200000).toDateString()");
+    try expectEvalStr("Fri, 01 Jan -0001 00:00:00 GMT", "new Date(-62198755200000).toUTCString()");
+    try expectEvalStr("Sat Jan 01 10000 00:00:00 GMT+0000 (Coordinated Universal Time)", "new Date(253402300800000).toString()");
+    try std.testing.expect((try evalIn(
+        \\var d = new Date(-62198755200000);
+        \\d.toGMTString() === d.toUTCString() &&
+        \\  d.toString() === d.toDateString() + " " + d.toTimeString()
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var d = new Date(NaN);
+        \\[d.toString(), d.toDateString(), d.toTimeString(), d.toUTCString(), d.toGMTString()]
+        \\  .every(function (text) { return text === "Invalid Date"; })
+    )).asBool());
     // toISOString throws RangeError on an invalid date; toJSON returns null.
     try std.testing.expect((try evalIn(
         \\var t = false;
@@ -12069,6 +12082,86 @@ test "parallel_js: Date setter coercion uses bounded thread-local arguments" {
         \\var dateSetterTotal = 0;
         \\for (var index = 0; index < dateSetterThreads.length; index++) dateSetterTotal += dateSetterThreads[index].join();
         \\dateSetterTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
+test "Date string conversions release intermediate storage under a bounded precise heap" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var boundedDate = new Date(0);
+        \\var boundedDateChecksum = 0;
+        \\for (var i = 0; i < 4096; i++) {
+        \\  boundedDate.setTime(946728000000 + (i % 7305) * 86400000);
+        \\  boundedDateChecksum += boundedDate.toDateString().charCodeAt(0);
+        \\  boundedDateChecksum += boundedDate.toTimeString().charCodeAt(2);
+        \\  boundedDateChecksum += boundedDate.toString().charCodeAt(3);
+        \\  boundedDateChecksum += boundedDate.toUTCString().charCodeAt(4);
+        \\  boundedDateChecksum += boundedDate.toISOString().charCodeAt(7);
+        \\  boundedDateChecksum += boundedDate.toJSON().charCodeAt(10);
+        \\  if ((i & 255) === 255) gc();
+        \\}
+        \\gc();
+        \\boundedDateChecksum > 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "moving nursery rewrites a Date string result without losing its bytes" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.__movingDateString = new Date(-62198755200000).toString();
+    );
+    const before = ctx.global_object.getOwn("__movingDateString").?.asStringCell();
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("__movingDateString").?.asStringCell();
+    try std.testing.expect(before != after);
+    try std.testing.expect((try ctx.evaluate(
+        \\__movingDateString === "Fri Jan 01 -0001 00:00:00 GMT+0000 (Coordinated Universal Time)"
+    )).asBool());
+}
+
+test "parallel_js: Date string formatting uses invocation-local native storage" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\function dateStringLane(lane) {
+        \\  var date = new Date(946728000000 + lane * 86400000);
+        \\  for (var i = 0; i < 512; i++) {
+        \\    date.setTime(946728000000 + ((i + lane * 29) % 7305) * 86400000);
+        \\    if (date.toString() !== date.toDateString() + " " + date.toTimeString()) return 0;
+        \\    if (date.toUTCString() !== date.toGMTString()) return 0;
+        \\    if (date.toISOString() !== date.toJSON()) return 0;
+        \\  }
+        \\  return 1;
+        \\}
+        \\var dateStringThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) dateStringThreads.push(new Thread(dateStringLane, lane));
+        \\var dateStringTotal = 0;
+        \\for (var index = 0; index < dateStringThreads.length; index++) dateStringTotal += dateStringThreads[index].join();
+        \\dateStringTotal;
     );
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }

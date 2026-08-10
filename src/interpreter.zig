@@ -10094,9 +10094,22 @@ pub const Interpreter = struct {
         };
     }
 
-    fn dateYearString(self: *Interpreter, y: i64) EvalError![]const u8 {
-        if (y < 0) return std.fmt.allocPrint(self.arena, "-{d:0>4}", .{@as(u64, @intCast(-y))});
-        return std.fmt.allocPrint(self.arena, "{d:0>4}", .{@as(u64, @intCast(y))});
+    /// Render the implementation's existing Date year spelling into bounded
+    /// caller storage. A clipped Date is limited to six digits, but leave room
+    /// for the full i64 domain so private raw-Date embeddings cannot overflow
+    /// this helper before their existing decomposition boundary.
+    fn writeDateYear(y: i64, out: *[32]u8) []const u8 {
+        return if (y < 0)
+            std.fmt.bufPrint(out, "-{d:0>4}", .{@as(u64, @intCast(-y))}) catch unreachable
+        else
+            std.fmt.bufPrint(out, "{d:0>4}", .{@as(u64, @intCast(y))}) catch unreachable;
+    }
+
+    /// Format through the active precise realm's backing allocator so its
+    /// managed StringCell factory can take the final bytes directly;
+    /// standalone interpreters keep arena ownership.
+    fn dateStringResultAllocator(self: *Interpreter) std.mem.Allocator {
+        return gc_mod.temporaryAllocator(self.arena);
     }
 
     fn dateTimeClip(t: f64) f64 {
@@ -10240,31 +10253,44 @@ pub const Interpreter = struct {
         // ---- string conversions ----------------------------------------------
         if (eq(name, "toISOString")) {
             if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
-            return try Value.strAlloc(self.arena, try self.dateISO(t));
+            return try self.dateISOStringValue(t);
         }
         if (eq(name, "toJSON")) {
             // The Date-receiver fast path (the generic `dateToJSONFn` native
             // handles a borrowed/non-Date `this`): a non-finite time is null.
             if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return Value.nul();
-            return try Value.strAlloc(self.arena, try self.dateISO(t));
+            return try self.dateISOStringValue(t);
         }
         if (eq(name, "toUTCString") or eq(name, "toGMTString")) {
             if (std.math.isNan(t)) return Value.str("Invalid Date");
             const c = dateDecompose(t);
-            return try Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{s}, {d:0>2} {s} {s} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-                day_names[@intCast(c.wday)], dnz(c.d), month_names[@intCast(c.mo)], try self.dateYearString(c.y), dnz(c.h), dnz(c.mi), dnz(c.s),
+            var year_buffer: [32]u8 = undefined;
+            const year = writeDateYear(c.y, &year_buffer);
+            const allocator = self.dateStringResultAllocator();
+            return try Value.strOwned(allocator, try std.fmt.allocPrint(allocator, "{s}, {d:0>2} {s} {s} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+                day_names[@intCast(c.wday)], dnz(c.d), month_names[@intCast(c.mo)], year, dnz(c.h), dnz(c.mi), dnz(c.s),
             }));
         }
-        if (eq(name, "toDateString") or eq(name, "toString") or eq(name, "toTimeString") or
-            eq(name, "toLocaleString") or eq(name, "toLocaleDateString") or eq(name, "toLocaleTimeString"))
-        {
+        if (eq(name, "toDateString") or eq(name, "toString") or eq(name, "toTimeString")) {
             if (std.math.isNan(t)) return Value.str("Invalid Date");
             const c = dateDecompose(t);
-            const date_str = try std.fmt.allocPrint(self.arena, "{s} {s} {d:0>2} {s}", .{ day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), try self.dateYearString(c.y) });
-            const time_str = try std.fmt.allocPrint(self.arena, "{d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{ dnz(c.h), dnz(c.mi), dnz(c.s) });
-            if (eq(name, "toDateString") or eq(name, "toLocaleDateString")) return try Value.strAlloc(self.arena, date_str);
-            if (eq(name, "toTimeString") or eq(name, "toLocaleTimeString")) return try Value.strAlloc(self.arena, time_str);
-            return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ date_str, " ", time_str }));
+            var year_buffer: [32]u8 = undefined;
+            const year = writeDateYear(c.y, &year_buffer);
+            const allocator = self.dateStringResultAllocator();
+            // ECMA-262 Date string methods first obtain the complete result and
+            // return that one String value. Format only the selected method's
+            // fields and transfer the exact final buffer into its StringCell.
+            if (eq(name, "toDateString"))
+                return try Value.strOwned(allocator, try std.fmt.allocPrint(allocator, "{s} {s} {d:0>2} {s}", .{
+                    day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), year,
+                }));
+            if (eq(name, "toTimeString"))
+                return try Value.strOwned(allocator, try std.fmt.allocPrint(allocator, "{d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{
+                    dnz(c.h), dnz(c.mi), dnz(c.s),
+                }));
+            return try Value.strOwned(allocator, try std.fmt.allocPrint(allocator, "{s} {s} {d:0>2} {s} {d:0>2}:{d:0>2}:{d:0>2} GMT+0000 (Coordinated Universal Time)", .{
+                day_names[@intCast(c.wday)], month_names[@intCast(c.mo)], dnz(c.d), year, dnz(c.h), dnz(c.mi), dnz(c.s),
+            }));
         }
 
         // ---- getters ----------------------------------------------------------
@@ -10309,11 +10335,13 @@ pub const Interpreter = struct {
         return rendered.len;
     }
 
-    /// ISO 8601 rendering of a finite epoch-ms time (`2020-01-15T00:00:00.000Z`).
-    fn dateISO(self: *Interpreter, t: f64) EvalError![]const u8 {
+    /// Turn the stack-rendered ISO image into one owned runtime string. The
+    /// caller has already applied the toISOString/toJSON invalid-time rule.
+    fn dateISOStringValue(self: *Interpreter, t: f64) EvalError!Value {
         var buffer: [28]u8 = undefined;
         const len = writeDateISOString(t, &buffer) orelse unreachable;
-        return self.arena.dupe(u8, buffer[0..len]);
+        const allocator = self.dateStringResultAllocator();
+        return Value.strOwned(allocator, try allocator.dupe(u8, buffer[0..len]));
     }
 
     /// Compute a Date's epoch-ms from constructor arguments.
