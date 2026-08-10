@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "kind": "exact_parent_attribution_delta",
+  "parent_revision": "bfc795fddf36240eab5124fcb04c5a670368c114",
+  "candidate_revision": "6989099bb20f05ae19c3b0811b879bcc8439f414",
+  "candidate_first_parent": "bfc795fddf36240eab5124fcb04c5a670368c114",
+  "parent_binary_sha256": "99421a315c6eaa848d3a46d7738872ad48aae92330cfc8c0929fbfcc0ab2890b",
+  "candidate_binary_sha256": "b4719226c9a0c2f82b5ebe6b2861abb578c22dce3577d60860cad2ba0828f09a",
+  "command_shape": "bench-comparison-zig-js attribution representative_weak_post_compact_4096 1 1",
+  "measurement": "one deterministic attribution run per exact revision; configuration contains the identical 4096-key mixed object/Symbol WeakMap and WeakSet fixture; invocation snapshot minus warmup snapshot measures one complete exact lookup pass",
+  "expected_checksum": 25201340,
+  "parent": {
+    "configuration": {
+      "backing_allocations": 18687,
+      "backing_allocation_bytes": 11841343,
+      "backing_growths": 309,
+      "backing_growth_bytes": 321490,
+      "backing_releases": 212,
+      "backing_released_bytes": 343136,
+      "backing_current_bytes": 11819697,
+      "backing_peak_bytes": 11819697,
+      "gc_cell_allocations": 12964,
+      "gc_cell_bytes": 1462016
+    },
+    "warmup": {
+      "backing_allocations": 18779,
+      "backing_allocation_bytes": 27282037,
+      "backing_growths": 488,
+      "backing_growth_bytes": 336306,
+      "backing_releases": 222,
+      "backing_released_bytes": 345376,
+      "backing_current_bytes": 27272967,
+      "backing_peak_bytes": 27272967,
+      "gc_cell_allocations": 12984,
+      "gc_cell_bytes": 1467136
+    },
+    "invocation": {
+      "backing_allocations": 18788,
+      "backing_allocation_bytes": 27282718,
+      "backing_growths": 488,
+      "backing_growth_bytes": 336306,
+      "backing_releases": 223,
+      "backing_released_bytes": 345600,
+      "backing_current_bytes": 27273424,
+      "backing_peak_bytes": 27273645,
+      "gc_cell_allocations": 12986,
+      "gc_cell_bytes": 1467648
+    },
+    "invocation_delta": {
+      "backing_allocations": 9,
+      "backing_allocation_bytes": 681,
+      "backing_growths": 0,
+      "backing_growth_bytes": 0,
+      "backing_releases": 1,
+      "backing_released_bytes": 224,
+      "backing_current_bytes": 457,
+      "backing_peak_bytes": 678,
+      "gc_cell_allocations": 2,
+      "gc_cell_bytes": 512
+    }
+  },
+  "candidate": {
+    "configuration": {
+      "backing_allocations": 18687,
+      "backing_allocation_bytes": 11841351,
+      "backing_growths": 311,
+      "backing_growth_bytes": 407794,
+      "backing_releases": 212,
+      "backing_released_bytes": 343136,
+      "backing_current_bytes": 11906009,
+      "backing_peak_bytes": 11906009,
+      "gc_cell_allocations": 12964,
+      "gc_cell_bytes": 1462016
+    },
+    "warmup": {
+      "backing_allocations": 18779,
+      "backing_allocation_bytes": 27282045,
+      "backing_growths": 490,
+      "backing_growth_bytes": 422610,
+      "backing_releases": 222,
+      "backing_released_bytes": 345376,
+      "backing_current_bytes": 27359279,
+      "backing_peak_bytes": 27359279,
+      "gc_cell_allocations": 12984,
+      "gc_cell_bytes": 1467136
+    },
+    "invocation": {
+      "backing_allocations": 18788,
+      "backing_allocation_bytes": 27282726,
+      "backing_growths": 490,
+      "backing_growth_bytes": 422610,
+      "backing_releases": 223,
+      "backing_released_bytes": 345600,
+      "backing_current_bytes": 27359736,
+      "backing_peak_bytes": 27359957,
+      "gc_cell_allocations": 12986,
+      "gc_cell_bytes": 1467648
+    },
+    "invocation_delta": {
+      "backing_allocations": 9,
+      "backing_allocation_bytes": 681,
+      "backing_growths": 0,
+      "backing_growth_bytes": 0,
+      "backing_releases": 1,
+      "backing_released_bytes": 224,
+      "backing_current_bytes": 457,
+      "backing_peak_bytes": 678,
+      "gc_cell_allocations": 2,
+      "gc_cell_bytes": 512
+    }
+  },
+  "configuration_delta": {
+    "backing_allocations": 0,
+    "backing_allocation_bytes": 8,
+    "backing_growths": 2,
+    "backing_growth_bytes": 86304,
+    "backing_releases": 0,
+    "backing_released_bytes": 0,
+    "backing_current_bytes": 86312,
+    "backing_peak_bytes": 86312,
+    "gc_cell_allocations": 0,
+    "gc_cell_bytes": 0
+  }
+}
