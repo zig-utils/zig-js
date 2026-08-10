@@ -49724,6 +49724,29 @@ test "interpreter JSON, Object, Number builtins" {
     try std.testing.expectEqualStrings("{\"a\":1,\"b\":[2,3]}", (try evalSource(a, "JSON.stringify({ a: 1, b: [2, 3] })")).asStr());
     try std.testing.expectEqualStrings("[1,\"x\",true,null]", (try evalSource(a, "JSON.stringify([1, 'x', true, null])")).asStr());
     try std.testing.expect((try evalSource(a,
+        \\let coercions = [];
+        \\let stringKey = new String("b");
+        \\stringKey.toString = function () { coercions.push("string"); return "b"; };
+        \\let numberKey = new Number(0);
+        \\numberKey.toString = function () { coercions.push("number"); return "0"; };
+        \\let ignored = { toString() { coercions.push("ignored"); return "c"; } };
+        \\let nulKey = "\u0000x";
+        \\let object = { a: 1, b: 2, c: 3, 0: 4 };
+        \\object[nulKey] = 5;
+        \\let encoded = JSON.stringify(object, [nulKey, stringKey, "a", stringKey, numberKey, ignored, true, null, "a"]);
+        \\let getterThrows = false;
+        \\let getterList = [];
+        \\Object.defineProperty(getterList, "0", { get() { throw new RangeError("get"); } });
+        \\getterList.length = 1;
+        \\try { JSON.stringify(object, getterList); } catch (error) { getterThrows = error instanceof RangeError; }
+        \\let coercionThrows = false;
+        \\let badKey = new String("x");
+        \\badKey.toString = function () { throw new TypeError("key"); };
+        \\try { JSON.stringify(object, [badKey]); } catch (error) { coercionThrows = error instanceof TypeError; }
+        \\encoded === "{\"\\u0000x\":5,\"b\":2,\"a\":1,\"0\":4}" &&
+        \\coercions.join(",") === "string,string,number" && getterThrows && coercionThrows
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
         \\let nulKey = "\u0000\u000b";
         \\let alphaNulKey = "\u0000alpha";
         \\let o = {};
