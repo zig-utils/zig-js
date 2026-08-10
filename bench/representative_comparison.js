@@ -85,6 +85,37 @@ function representativeCollections(jobs, lane, variant) {
   return total;
 }
 
+function representativeStrongIdentityCollections(jobs, lane, variant) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var map = new Map();
+    var set = new Set();
+    var objects = [];
+    var symbols = [];
+    for (var i = 0; i < 256; i = i + 1) {
+      var object = variant ? { pad: i & 7, index: i } : { index: i, pad: i & 7 };
+      var symbol = Symbol("identity:" + (variant ? ((i * 17) & 255) : i));
+      var value = (i + job + lane) & 65535;
+      objects.push(object);
+      symbols.push(symbol);
+      map.set(object, value);
+      map.set(symbol, value + 1);
+      set.add(object);
+      set.add(symbol);
+    }
+    for (var lookup = 0; lookup < 256; lookup = lookup + 1) {
+      var index = variant ? 255 - lookup : lookup;
+      total = total + map.get(objects[index]) + map.get(symbols[index]);
+      total = total + (set.has(objects[index]) ? 1 : 0) + (set.has(symbols[index]) ? 1 : 0);
+    }
+    for (var remove = 0; remove < 256; remove = remove + 2) {
+      total = total + (map.delete(objects[remove]) ? 1 : 0) + (map.delete(symbols[remove]) ? 1 : 0);
+      total = total + (set.delete(objects[remove]) ? 1 : 0) + (set.delete(symbols[remove]) ? 1 : 0);
+    }
+  }
+  return total;
+}
+
 function representativeWeakCollections(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -383,6 +414,8 @@ function benchmarkFunction(name) {
   if (name === "representative_json_variant") return function (jobs, lane) { return representativeJson(jobs, lane, 1); };
   if (name === "representative_collections") return function (jobs, lane) { return representativeCollections(jobs, lane, 0); };
   if (name === "representative_collections_variant") return function (jobs, lane) { return representativeCollections(jobs, lane, 1); };
+  if (name === "representative_strong_identity_collections") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 0); };
+  if (name === "representative_strong_identity_collections_variant") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 1); };
   if (name === "representative_weak_collections") return function (jobs, lane) { return representativeWeakCollections(jobs, lane, 0); };
   if (name === "representative_weak_collections_variant") return function (jobs, lane) { return representativeWeakCollections(jobs, lane, 1); };
   if (name === "representative_typed_data") return function (jobs, lane) { return representativeTypedData(jobs, lane, 0); };
