@@ -4235,6 +4235,15 @@ pub inline fn allocationsAreManaged() bool {
     return active_heap != null;
 }
 
+/// Freeable allocator for invocation-local indexes whose keys/values are owned
+/// elsewhere. Precise realms use the same accounted backing allocator as their
+/// managed cells; arena-only interpreters fall back to their existing lifetime.
+pub fn temporaryAllocator(fallback: std.mem.Allocator) std.mem.Allocator {
+    if (active_heap == null) return fallback;
+    const realm = active_realm_context orelse return fallback;
+    return realm.gpa;
+}
+
 /// Relocation-stable identity for a live cell in the current precise heap.
 /// Map/Set hashing calls this only from a mutator-owned operation; moving
 /// collection is world-stopped and concurrent marking never reclaims cells.

@@ -2641,7 +2641,9 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
             // PropertyList: read via LengthOfArrayLike + Get(replacer, ToString(i))
             // so a Proxy/array-like replacer's traps run (and abrupts propagate).
             var allow: std.ArrayListUnmanaged([]const u8) = .empty;
+            const membership_allocator = gc_mod.temporaryAllocator(a);
             var allow_seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer allow_seen.deinit(membership_allocator);
             const rlen = interpreter.toLen(try self.toNumberV(try self.getProperty(replacer, "length")));
             var idx: usize = 0;
             while (idx < rlen) : (idx += 1) {
@@ -2663,7 +2665,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
                 }
                 if (k) |key| {
                     const storage_key = try value.encodeStringKey(a, key);
-                    const seen = try allow_seen.getOrPut(a, storage_key);
+                    const seen = try allow_seen.getOrPut(membership_allocator, storage_key);
                     if (!seen.found_existing) try allow.append(a, storage_key);
                 }
             }
