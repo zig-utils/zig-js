@@ -497,6 +497,56 @@ function representativeLocaleList(jobs, lane) {
   return total;
 }
 
+// Generic Array iteration rows keep fixture construction outside the timed
+// boundary. Plain array-likes force the exact HasProperty/Get path for every
+// present index; the sparse Proxy records both traps while exposing only even
+// indices. The dense control performs identical callback work without generic
+// numeric-property keys.
+var representativeArrayTraversalSelected = null;
+var representativeArrayTraversalProxy = false;
+var representativeArrayTraversalHasTraps = 0;
+var representativeArrayTraversalGetTraps = 0;
+function selectRepresentativeArrayTraversal(width, kind) {
+  var target = kind === "dense" ? [] : { length: width };
+  for (var index = 0; index < width; index = index + 1) {
+    if (kind !== "proxy" || (index & 1) === 0)
+      target[index] = index * 3 + 1;
+  }
+  representativeArrayTraversalProxy = kind === "proxy";
+  representativeArrayTraversalSelected = representativeArrayTraversalProxy
+    ? new Proxy(target, {
+        has: function (object, key) {
+          representativeArrayTraversalHasTraps = representativeArrayTraversalHasTraps + 1;
+          return Reflect.has(object, key);
+        },
+        get: function (object, key) {
+          if (key !== "length")
+            representativeArrayTraversalGetTraps = representativeArrayTraversalGetTraps + 1;
+          return Reflect.get(object, key);
+        }
+      })
+    : target;
+  return representativeArrayTraversal;
+}
+
+function representativeArrayTraversal(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    representativeArrayTraversalHasTraps = 0;
+    representativeArrayTraversalGetTraps = 0;
+    var callbacks = 0;
+    var callbackTotal = 0;
+    Array.prototype.forEach.call(representativeArrayTraversalSelected, function (value, index, source) {
+      callbackTotal = callbackTotal + value + index + lane;
+      callbacks = callbacks + (source === representativeArrayTraversalSelected ? 1 : 1000000);
+    });
+    total = total + callbackTotal + callbacks;
+    if (representativeArrayTraversalProxy)
+      total = total + representativeArrayTraversalHasTraps * 5 + representativeArrayTraversalGetTraps * 7;
+  }
+  return total;
+}
+
 function representativeTypedData(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -815,6 +865,11 @@ function benchmarkFunction(name) {
   if (name === "representative_locale_list_2048") return selectRepresentativeLocaleList(2048, false);
   if (name === "representative_locale_list_4096") return selectRepresentativeLocaleList(4096, false);
   if (name === "representative_locale_list_duplicates_4096") return selectRepresentativeLocaleList(4096, true);
+  if (name === "representative_array_like_1024") return selectRepresentativeArrayTraversal(1024, "generic");
+  if (name === "representative_array_like_2048") return selectRepresentativeArrayTraversal(2048, "generic");
+  if (name === "representative_array_like_4096") return selectRepresentativeArrayTraversal(4096, "generic");
+  if (name === "representative_array_like_sparse_proxy_4096") return selectRepresentativeArrayTraversal(4096, "proxy");
+  if (name === "representative_array_dense_control_4096") return selectRepresentativeArrayTraversal(4096, "dense");
   if (name === "representative_typed_data") return function (jobs, lane) { return representativeTypedData(jobs, lane, 0); };
   if (name === "representative_typed_data_variant") return function (jobs, lane) { return representativeTypedData(jobs, lane, 1); };
   if (name === "representative_classes") return function (jobs, lane) { return representativeClasses(jobs, lane, 0); };
