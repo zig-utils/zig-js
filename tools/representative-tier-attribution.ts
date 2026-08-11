@@ -142,6 +142,16 @@ const synchronizationMetrics = [
   "env_lock_acquires",
   "env_lock_contentions",
   "env_lock_spins",
+  "env_read_lock_acquires",
+  "env_read_root_lock_acquires",
+  "env_read_captured_lock_acquires",
+  "env_read_other_lock_acquires",
+  "env_write_lock_acquires",
+  "env_write_private_lock_acquires",
+  "env_write_root_lock_acquires",
+  "env_write_captured_lock_acquires",
+  "env_write_other_lock_acquires",
+  "env_trace_lock_acquires",
   "object_backing_lock_acquires",
   "object_backing_lock_contentions",
   "object_backing_lock_spins",
@@ -610,6 +620,19 @@ function validateRows(
         row.synchronization.worker_run_ns >= row.synchronization.worker_run_ns_max &&
           row.synchronization.arena_lock_acquires >= row.synchronization.arena_lock_contentions &&
           row.synchronization.env_lock_acquires >= row.synchronization.env_lock_contentions &&
+          row.synchronization.env_lock_acquires ===
+            row.synchronization.env_read_lock_acquires +
+              row.synchronization.env_write_lock_acquires +
+              row.synchronization.env_trace_lock_acquires &&
+          row.synchronization.env_read_lock_acquires ===
+            row.synchronization.env_read_root_lock_acquires +
+              row.synchronization.env_read_captured_lock_acquires +
+              row.synchronization.env_read_other_lock_acquires &&
+          row.synchronization.env_write_lock_acquires ===
+            row.synchronization.env_write_private_lock_acquires +
+              row.synchronization.env_write_root_lock_acquires +
+              row.synchronization.env_write_captured_lock_acquires +
+              row.synchronization.env_write_other_lock_acquires &&
           row.synchronization.object_backing_lock_acquires >= row.synchronization.object_backing_lock_contentions &&
           row.synchronization.object_property_lock_acquires >= row.synchronization.object_property_lock_contentions &&
           row.synchronization.object_element_lock_acquires >= row.synchronization.object_element_lock_contentions,
@@ -1168,6 +1191,12 @@ export function selfTest(): void {
   incoherentSynchronization[0].synchronization.arena_lock_contentions = 1;
   expectFailure(
     () => validate(incoherentSynchronization, manifest, true),
+    "synchronization attribution is incoherent",
+  );
+  const incoherentEnvironmentReads = JSON.parse(JSON.stringify(rows));
+  incoherentEnvironmentReads[0].synchronization.env_read_root_lock_acquires = 1;
+  expectFailure(
+    () => validate(incoherentEnvironmentReads, manifest, true),
     "synchronization attribution is incoherent",
   );
   const allocation = JSON.parse(JSON.stringify(rows));

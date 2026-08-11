@@ -639,22 +639,53 @@ pub const Environment = struct {
 
     /// Acquire the binding lock for a table read unless this is an uncaptured,
     /// mutator-private activation. Returns whether the caller must unlock.
-    fn lockBindingsForRead(self: *Environment) bool {
+    pub fn lockBindingsForRead(self: *Environment) bool {
         if (self.private_activation and !self.captured) return false;
         self.lockBindings();
+        jsthread.recordEnvReadLockAcquire(if (self.parent == null)
+            .root
+        else if (self.captured)
+            .captured
+        else
+            .other);
         return true;
     }
 
-    fn unlockBindingsForRead(self: *Environment, locked: bool) void {
+    pub fn unlockBindingsForRead(self: *Environment, locked: bool) void {
         if (locked) self.unlockBindings();
+    }
+
+    pub fn lockBindingsForWrite(self: *Environment) void {
+        self.lockBindings();
+        jsthread.recordEnvWriteLockAcquire(if (self.private_activation and !self.captured)
+            .private
+        else if (self.parent == null)
+            .root
+        else if (self.captured)
+            .captured
+        else
+            .other);
+    }
+
+    pub fn unlockBindingsForWrite(self: *Environment) void {
+        self.unlockBindings();
+    }
+
+    pub fn lockBindingsForTrace(self: *Environment) void {
+        self.lockBindings();
+        jsthread.recordEnvTraceLockAcquire();
+    }
+
+    pub fn unlockBindingsForTrace(self: *Environment) void {
+        self.unlockBindings();
     }
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
         gc_mod.barrierValueFrom(self, v); // binding stored into this GC-cell environment
         const a = self.bindingAllocator();
-        self.lockBindings();
-        defer self.unlockBindings();
+        self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite();
         const gop = try self.vars.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
         gop.value_ptr.* = v;
@@ -664,8 +695,8 @@ pub const Environment = struct {
     pub fn putConst(self: *Environment, name: []const u8, v: Value) EvalError!void {
         try self.put(name, v);
         const a = self.bindingAllocator();
-        self.lockBindings(); // serialize the consts table vs a concurrent isConst read
-        defer self.unlockBindings();
+        self.lockBindingsForWrite(); // serialize the consts table vs a concurrent isConst read
+        defer self.unlockBindingsForWrite();
         const gop = try self.consts.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -676,8 +707,8 @@ pub const Environment = struct {
     /// global-object property.
     pub fn markLexical(self: *Environment, name: []const u8) EvalError!void {
         const a = self.bindingAllocator();
-        self.lockBindings();
-        defer self.unlockBindings();
+        self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite();
         const gop = try self.lexicals.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -686,8 +717,8 @@ pub const Environment = struct {
     pub fn putFnName(self: *Environment, name: []const u8, v: Value) EvalError!void {
         try self.put(name, v);
         const a = self.bindingAllocator();
-        self.lockBindings(); // serialize the fn_names table vs a concurrent isFnName read
-        defer self.unlockBindings();
+        self.lockBindingsForWrite(); // serialize the fn_names table vs a concurrent isFnName read
+        defer self.unlockBindingsForWrite();
         const gop = try self.fn_names.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -695,8 +726,8 @@ pub const Environment = struct {
     /// Mark a binding in *this* scope as deletable (a sloppy eval-created var/fn).
     pub fn markDeletable(self: *Environment, name: []const u8) EvalError!void {
         const a = self.bindingAllocator();
-        self.lockBindings();
-        defer self.unlockBindings();
+        self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite();
         const gop = try self.deletable.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -705,8 +736,8 @@ pub const Environment = struct {
     /// eval var). Drops it from `vars` and every side table so it no longer
     /// resolves. Returns whether a binding was present.
     pub fn removeVar(self: *Environment, name: []const u8) bool {
-        self.lockBindings();
-        defer self.unlockBindings();
+        self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite();
         const removed = self.vars.remove(name);
         _ = self.consts.remove(name);
         _ = self.fn_names.remove(name);
@@ -789,14 +820,14 @@ pub const Environment = struct {
             // stays valid for the write because no rehash can occur under the
             // lock. Private activations still take it for writes because the
             // concurrent marker can read their tables.
-            e.lockBindings();
+            e.lockBindingsForWrite();
             if (e.vars.getPtr(name)) |ptr| {
                 gc_mod.barrierValueFrom(e, v); // reassigned binding in a GC-cell env
                 ptr.* = v;
-                e.unlockBindings();
+                e.unlockBindingsForWrite();
                 return;
             }
-            e.unlockBindings();
+            e.unlockBindingsForWrite();
             env = e.parent;
         }
         var root = self;
@@ -810,8 +841,8 @@ pub const Environment = struct {
     /// Install an indirect binding `local` → `target.name` (a module import).
     pub fn putAlias(self: *Environment, local: []const u8, target: *Environment, name: []const u8) EvalError!void {
         const a = self.bindingAllocator();
-        self.lockBindings(); // traceEnv reads `aliases`; serialize the structural write
-        defer self.unlockBindings();
+        self.lockBindingsForWrite(); // traceEnv reads `aliases`; serialize the structural write
+        defer self.unlockBindingsForWrite();
         const gop = try self.aliases.getOrPut(a, local);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(local);
         gop.value_ptr.* = .{ .env = target, .name = try self.dupeBindingName(name) };
@@ -877,8 +908,8 @@ pub const Environment = struct {
     /// Returns false if the binding is absent; callers that need sloppy global
     /// creation should use `assign` instead.
     pub fn assignLocal(self: *Environment, name: []const u8, v: Value) bool {
-        self.lockBindings();
-        defer self.unlockBindings();
+        self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite();
         if (self.vars.getPtr(name)) |ptr| {
             gc_mod.barrierValueFrom(self, v);
             ptr.* = v;
@@ -939,7 +970,12 @@ test "Environment private activation reads elide locks until capture" {
     try std.testing.expect(!parent.private_activation);
     try std.testing.expectEqual(@as(?Value, Value.num(7)), child.get("local"));
     try std.testing.expectEqual(@as(?Value, Value.num(11)), child.get("outer"));
-    try std.testing.expectEqual(@as(u64, 3), jsthread.contentionStats().env_lock_acquires);
+    const stats = jsthread.contentionStats();
+    try std.testing.expectEqual(@as(u64, 3), stats.env_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 3), stats.env_read_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.env_read_root_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 2), stats.env_read_captured_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), stats.env_read_other_lock_acquires);
 }
 
 /// The shared, mutable `this` binding of a derived constructor activation. A
@@ -2715,8 +2751,8 @@ pub const Interpreter = struct {
     pub fn addDisposable(self: *Interpreter, val: Value, is_async: bool) EvalError!void {
         if (val.isNull() or val.isUndefined()) {
             if (!is_async) return;
-            self.env.lockBindings(); // traceEnv reads disposables; serialize the append
-            defer self.env.unlockBindings();
+            self.env.lockBindingsForWrite(); // traceEnv reads disposables; serialize the append
+            defer self.env.unlockBindingsForWrite();
             try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = Value.undef(), .method = Value.undef(), .is_async = true, .await_result = true });
             return;
         }
@@ -2735,8 +2771,8 @@ pub const Interpreter = struct {
         if (!method.isCallable()) return self.throwError("TypeError", "a 'using' declaration value must have a [Symbol.dispose] method");
         gc_mod.barrierValueFrom(self.env, val);
         gc_mod.barrierValueFrom(self.env, method);
-        self.env.lockBindings(); // traceEnv reads disposables; serialize the append
-        defer self.env.unlockBindings();
+        self.env.lockBindingsForWrite(); // traceEnv reads disposables; serialize the append
+        defer self.env.unlockBindingsForWrite();
         try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = val, .method = method, .is_async = is_async, .await_result = await_result });
     }
 
@@ -8865,12 +8901,12 @@ pub const Interpreter = struct {
     pub fn objectProto(self: *Interpreter) ?*value.Object {
         var realm = self.env;
         while (realm.parent) |parent| realm = parent;
-        realm.lockBindings();
+        const read_locked = realm.lockBindingsForRead();
         if (realm.object_proto_intrinsic) |cached| {
-            realm.unlockBindings();
+            realm.unlockBindingsForRead(read_locked);
             return cached;
         }
-        realm.unlockBindings();
+        realm.unlockBindingsForRead(read_locked);
 
         const ov = realm.get("Object") orelse return null;
         if (!ov.isObject()) return null;
@@ -8878,10 +8914,10 @@ pub const Interpreter = struct {
         if (!p.isObject()) return null;
         const intrinsic = p.asObj();
         gc_mod.barrierCellFrom(realm, @ptrCast(intrinsic));
-        realm.lockBindings();
+        realm.lockBindingsForWrite();
         if (realm.object_proto_intrinsic == null) realm.object_proto_intrinsic = intrinsic;
         const cached = realm.object_proto_intrinsic;
-        realm.unlockBindings();
+        realm.unlockBindingsForWrite();
         return cached;
     }
 
@@ -12956,8 +12992,8 @@ pub const Interpreter = struct {
             // consts + vars read under one lock hold: a peer `putConst` writes
             // consts under this lock (the no-GIL Environment race class), so the
             // membership test must not read it unlocked.
-            root.lockBindings();
-            defer root.unlockBindings();
+            root.lockBindingsForWrite();
+            defer root.unlockBindingsForWrite();
             if (!root.consts.contains(key)) {
                 if (root.vars.getPtr(key)) |slot| slot.* = v;
             }

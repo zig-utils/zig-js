@@ -1094,7 +1094,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     // (or a `put` rehash / append could tear the iteration). `parent`/`with_object`
     // are set at env creation and never rewritten, so they need no lock.
     const concurrent = v.concurrent();
-    if (concurrent) e.lockBindings();
+    if (concurrent) e.lockBindingsForTrace();
     var vit = e.vars.iterator();
     while (vit.next()) |entry| markValueVariable(v, entry.key_ptr.*, entry.value_ptr.*);
     for (e.disposables.items) |d| {
@@ -1105,7 +1105,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     var ait = e.aliases.valueIterator();
     while (ait.next()) |a| markManaged(v, a.env);
     if (e.object_proto_intrinsic) |o| v.mark(o);
-    if (concurrent) e.unlockBindings();
+    if (concurrent) e.unlockBindingsForTrace();
     if (e.parent) |p| markManaged(v, p);
     if (e.with_object) |o| v.mark(o);
 }

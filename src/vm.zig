@@ -1622,12 +1622,12 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
     var cursor: ?*Environment = start;
     while (cursor) |env| : (cursor = env.parent) {
         if (env.with_object != null) return;
-        env.lockBindings();
+        const locked = env.lockBindingsForRead();
         const alias = env.aliases.contains(name);
         const found = env.vars.contains(name);
         const root_global_data = found and env.parent == null and
             !env.consts.contains(name) and !env.lexicals.contains(name);
-        env.unlockBindings();
+        env.unlockBindingsForRead(locked);
         if (alias) return;
         if (found) {
             if (root_global_data) {
@@ -2083,11 +2083,11 @@ fn quickImmutableLocalBinding(vm: *Interpreter, name: []const u8) ?Value {
     var cursor: ?*Environment = vm.env;
     while (cursor) |env| : (cursor = env.parent) {
         if (env.with_object != null) return null;
-        env.lockBindings();
+        const locked = env.lockBindingsForRead();
         const alias = env.aliases.contains(name);
         const binding = env.vars.get(name);
         const immutable = binding != null and env.consts.contains(name);
-        env.unlockBindings();
+        env.unlockBindingsForRead(locked);
         if (alias) return null;
         if (binding) |callee| return if (immutable) callee else null;
     }

@@ -18185,9 +18185,9 @@ fn inspectorProperties(arena: std.mem.Allocator, session: *CInspectorSession, re
             var raw_bindings: std.ArrayListUnmanaged(RawBinding) = .empty;
             const AliasSnapshot = struct { local_name: []const u8, target: interp.Environment.Alias };
             var aliases: std.ArrayListUnmanaged(AliasSnapshot) = .empty;
-            environment.lockBindings();
+            const locked = environment.lockBindingsForRead();
             {
-                defer environment.unlockBindings();
+                defer environment.unlockBindingsForRead(locked);
                 var iterator = environment.vars.iterator();
                 while (iterator.next()) |entry| try raw_bindings.append(arena, .{
                     .name = entry.key_ptr.*,
@@ -18250,8 +18250,8 @@ fn inspectorScopeChain(arena: std.mem.Allocator, session: *CInspectorSession, st
         var bindings: std.ArrayListUnmanaged(InspectorScopeBinding) = .empty;
         var aliases: std.ArrayListUnmanaged(AliasSnapshot) = .empty;
         const binding_count = locked: {
-            environment.lockBindings();
-            defer environment.unlockBindings();
+            const locked = environment.lockBindingsForRead();
+            defer environment.unlockBindingsForRead(locked);
             const count = environment.vars.count() + environment.aliases.count();
             if (!is_global) {
                 var iterator = environment.vars.iterator();
