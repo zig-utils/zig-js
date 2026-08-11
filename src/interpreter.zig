@@ -8755,7 +8755,8 @@ pub const Interpreter = struct {
         }
         if (index < std.math.maxInt(u32))
             try array.extendArrayLengthFloor(self.arena, i + 1);
-        const key = try std.fmt.allocPrint(self.arena, "{d}", .{index});
+        var key_storage: [32]u8 = undefined;
+        const key = borrowedIndexKey(&key_storage, index);
         try self.setProp(array, key, out);
     }
 
@@ -8768,8 +8769,10 @@ pub const Interpreter = struct {
     }
 
     pub fn getDirectIndex(self: *Interpreter, object: *value.Object, index: u32) EvalError!?Value {
+        _ = self;
         if (object.denseElement(index)) |direct| return direct;
-        const key = try std.fmt.allocPrint(self.arena, "{d}", .{index});
+        var key_storage: [32]u8 = undefined;
+        const key = borrowedIndexKey(&key_storage, index);
         return object.getOwn(key);
     }
 
@@ -13632,7 +13635,8 @@ pub const Interpreter = struct {
             // CreateDataPropertyOrThrow(result, ToString(idx), v) — a non-Array
             // species result (or one carrying accessors) takes the generic define
             // path, which throws if the index is non-writable / non-extensible.
-            const k = try std.fmt.allocPrint(self.arena, "{d}", .{idx});
+            var key_storage: [32]u8 = undefined;
+            const k = borrowedIndexKey(&key_storage, idx);
             const desc = (try self.newObject()).asObj();
             try desc.setOwn(self.arena, self.root_shape, "value", v);
             try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
@@ -14132,6 +14136,16 @@ pub const Interpreter = struct {
         return false;
     }
 
+    /// Decimal index keys are invocation-local observations, not realm state.
+    /// Every consumer below either finishes synchronously (including Proxy traps,
+    /// which first materialize a JS String) or copies a newly published ordinary
+    /// property into its Shape/key-order owner before returning. Keeping this
+    /// contract explicit prevents attacker-controlled logical lengths from
+    /// retaining one arena allocation per observed index (#529).
+    fn borrowedIndexKey(storage: *[32]u8, index: anytype) []const u8 {
+        return std.fmt.bufPrint(storage, "{d}", .{index}) catch unreachable;
+    }
+
     /// Whether array/array-like index `i` is present (own dense non-hole, own
     /// sparse named, or inherited) — the HasProperty the iteration methods use to
     /// skip holes.
@@ -14145,7 +14159,8 @@ pub const Interpreter = struct {
         if (o.typedArray()) |ta| {
             if (i < (ta.currentLength() orelse 0)) return true;
         }
-        const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        var key_storage: [32]u8 = undefined;
+        const ks = borrowedIndexKey(&key_storage, i);
         return try self.hasPropertyResult(o, ks);
     }
 
@@ -14157,7 +14172,8 @@ pub const Interpreter = struct {
         if (o.is_array and o.accessorsMap() == null) {
             if (o.denseElement(i)) |v| return v;
         }
-        const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        var key_storage: [32]u8 = undefined;
+        const ks = borrowedIndexKey(&key_storage, i);
         return self.getProperty(Value.obj(o), ks);
     }
 
@@ -14166,22 +14182,24 @@ pub const Interpreter = struct {
         // Dense fast path, mirroring `arrIndexPresent`/`arrIndexGet` above: on a
         // plain extensible array with no accessors/attributes and a clean
         // prototype chain, [[Set]] of an integer index *is* the dense store, so
-        // no key is needed at all. The generic path below formats the index into
-        // the realm arena, whose memory is never reclaimed within a Context, so
-        // a whole-array `fill`/`copyWithin` burned one permanently-retained key
-        // per element. Under `heap_limit_bytes` that made a single
+        // no key is needed at all. Before #529, the generic path formatted the
+        // index into the realm arena, whose memory is never reclaimed within a
+        // Context, so a whole-array `fill`/`copyWithin` burned one permanently-
+        // retained key per element. Under `heap_limit_bytes` that made a single
         // `new Array(1 << 16).fill(2)` consume megabytes of budget that no
         // collection could recover, turning a later ordinary allocation into an
         // unrecoverable OOM (#100).
         if (try self.setFastArrayNumericIndex(Value.obj(o), i, v)) return;
-        const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        var key_storage: [32]u8 = undefined;
+        const ks = borrowedIndexKey(&key_storage, i);
         if (!try self.setMemberResult(Value.obj(o), ks, v, Value.obj(o)))
             return self.throwError("TypeError", "Cannot set array index");
     }
 
     /// DeletePropertyOrThrow(O, ToString(i)).
     fn arrIndexDeleteOrThrow(self: *Interpreter, o: *value.Object, i: usize) EvalError!void {
-        const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        var key_storage: [32]u8 = undefined;
+        const ks = borrowedIndexKey(&key_storage, i);
         if (!try self.deleteOwn(o, ks))
             return self.throwError("TypeError", "Cannot delete array index");
     }
@@ -14294,7 +14312,8 @@ pub const Interpreter = struct {
     /// / non-writable slot (forcing strict so the rejection throws). User setters
     /// keep their own strictness.
     fn arraySetIndexThrowing(self: *Interpreter, o: *value.Object, i: usize, v: Value) EvalError!void {
-        const idx = try std.fmt.allocPrint(self.arena, "{d}", .{i});
+        var key_storage: [32]u8 = undefined;
+        const idx = borrowedIndexKey(&key_storage, i);
         const saved = self.strict;
         self.strict = true;
         defer self.strict = saved;
@@ -14417,7 +14436,8 @@ pub const Interpreter = struct {
                 return Value.undef();
             }
             const last = ilen - 1;
-            const idx = try std.fmt.allocPrint(self.arena, "{d}", .{last});
+            var key_storage: [32]u8 = undefined;
+            const idx = borrowedIndexKey(&key_storage, last);
             // [[Get]] the last element first (fires an inherited accessor when the
             // slot is a hole — that is how the spec's order is observed).
             const element = try self.getProperty(Value.obj(o), idx);
@@ -48866,6 +48886,39 @@ test "Date ISO result ownership is failure-atomic" {
         };
         try std.testing.expectError(error.OutOfMemory, machine.dateISOStringValue(0));
     }
+}
+
+fn publishBorrowedIndexWithAllocationFailures(backing: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root = try Shape.createRoot(allocator);
+    var object = value.Object{};
+
+    var key_storage: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_storage, "{d}", .{@as(usize, 4096)}) catch unreachable;
+    object.setOwn(allocator, root, key, Value.num(17)) catch |err| {
+        // No object-visible slot/shape or transition edge may be published when
+        // taking ownership of the caller's borrowed bytes fails.
+        try std.testing.expect(object.shape == null);
+        try std.testing.expectEqual(@as(usize, 0), object.slotsItems().len);
+        try std.testing.expectEqual(@as(usize, 0), root.transitions.count());
+        return err;
+    };
+
+    @memset(&key_storage, 'x');
+    try std.testing.expectEqual(@as(f64, 17), object.getOwn("4096").?.asNum());
+    try std.testing.expect(object.getOwn("xxxx") == null);
+}
+
+test "ordinary property publication owns borrowed Array index keys or rolls back" {
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        publishBorrowedIndexWithAllocationFailures,
+        .{},
+    );
 }
 
 test "interpreter evaluates arithmetic with precedence" {

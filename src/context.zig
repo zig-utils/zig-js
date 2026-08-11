@@ -10332,6 +10332,137 @@ test "Array.prototype generics on array-likes" {
     )).asBool());
 }
 
+test "generic Array traversal preserves live Proxy and inherited-hole order" {
+    try std.testing.expect((try evalIn(
+        \\var log = [];
+        \\var proto = {};
+        \\Object.defineProperty(proto, "1", {
+        \\  get: function () { log.push("getter:1"); return 20; },
+        \\  configurable: true
+        \\});
+        \\var target = Object.create(proto);
+        \\target.length = 3;
+        \\target[0] = 10;
+        \\target[2] = 30;
+        \\var proxy = new Proxy(target, {
+        \\  has: function (object, key) { log.push("has:" + key); return Reflect.has(object, key); },
+        \\  get: function (object, key, receiver) { log.push("get:" + key); return Reflect.get(object, key, receiver); }
+        \\});
+        \\Array.prototype.forEach.call(proxy, function (value, index, source) {
+        \\  log.push("callback:" + index + ":" + value + ":" + (source === proxy));
+        \\  if (index === 0) delete target[2];
+        \\});
+        \\log.join("|") === "get:length|has:0|get:0|callback:0:10:true|has:1|get:1|getter:1|callback:1:20:true|has:2"
+    )).asBool());
+}
+
+test "generic Array Set Delete and species definition own borrowed index keys" {
+    try std.testing.expect((try evalIn(
+        \\var observed = [];
+        \\var target = { length: 3, 0: "left" };
+        \\var proxy = new Proxy(target, {
+        \\  set: function (object, key, value, receiver) {
+        \\    if (key !== "length") observed.push("set:" + key);
+        \\    return Reflect.set(object, key, value, receiver);
+        \\  },
+        \\  deleteProperty: function (object, key) {
+        \\    observed.push("delete:" + key);
+        \\    return Reflect.deleteProperty(object, key);
+        \\  }
+        \\});
+        \\Array.prototype.reverse.call(proxy);
+        \\var source = [4, 5];
+        \\source.constructor = {};
+        \\source.constructor[Symbol.species] = function () {
+        \\  return new Proxy({}, {
+        \\    defineProperty: function (object, key, descriptor) {
+        \\      observed.push("define:" + key + ":" + descriptor.value);
+        \\      return Reflect.defineProperty(object, key, descriptor);
+        \\    }
+        \\  });
+        \\};
+        \\var mapped = source.map(function (value) { return value * 2; });
+        \\observed.join("|") === "delete:0|set:2|define:0:8|define:1:10" &&
+        \\  target[2] === "left" && !("0" in target) && mapped[0] === 8 && mapped[1] === 10
+    )).asBool());
+}
+
+test "generic Array borrowed index keys survive collection and moving GC" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\var genericMovingTarget = { length: 5, 0: 3, 2: 5, 4: 7 };
+        \\var genericMovingProxy = new Proxy(genericMovingTarget, {
+        \\  has: function (object, key) { gc(); return Reflect.has(object, key); },
+        \\  get: function (object, key, receiver) { return Reflect.get(object, key, receiver); }
+        \\});
+        \\globalThis.genericMovingResult = Array.prototype.map.call(
+        \\  genericMovingProxy,
+        \\  function (value, index) { if (index === 2) gc(); return value + index; }
+        \\);
+        \\globalThis.genericMovingDiscard = [];
+        \\for (var i = 0; i < 4096; i++) genericMovingDiscard.push({ index: i, dead: true });
+        \\genericMovingDiscard = null;
+        \\globalThis.genericMovingRelocated = Array.prototype.map.call(
+        \\  { length: 3, 0: 11, 2: 13 },
+        \\  function (value, index) { return value + index; }
+        \\);
+    );
+    // The trap/callback collections above prove the borrowed key is safe across
+    // re-entrant GC. Promote the surviving graph, then compact it explicitly so
+    // the stored result/property graph is also verified after relocation.
+    ctx.collectGarbage();
+    const before = ctx.global_object.getOwn("genericMovingRelocated").?.asObj();
+    const moved = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("genericMovingRelocated").?.asObj();
+    try std.testing.expect(before != after);
+    try std.testing.expect((try ctx.evaluate(
+        \\genericMovingResult.length === 5 && genericMovingResult[0] === 3 &&
+        \\  !(1 in genericMovingResult) && genericMovingResult[2] === 7 &&
+        \\  !(3 in genericMovingResult) && genericMovingResult[4] === 11 &&
+        \\  genericMovingTarget[4] === 7 && genericMovingRelocated.length === 3 &&
+        \\  genericMovingRelocated[0] === 11 && !(1 in genericMovingRelocated) && genericMovingRelocated[2] === 15
+    )).asBool());
+}
+
+test "parallel_js generic Array index keys remain invocation local" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\function genericArrayLane(lane) {
+        \\  var input = { length: 256 };
+        \\  for (var i = lane; i < input.length; i += 4) input[i] = i + lane;
+        \\  var checksum = 0;
+        \\  for (var round = 0; round < 4; round++) {
+        \\    Array.prototype.forEach.call(input, function (value, index, source) {
+        \\      if (source !== input) throw new Error("wrong callback source");
+        \\      checksum += value + index + round;
+        \\    });
+        \\  }
+        \\  return checksum;
+        \\}
+        \\var genericArrayThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) genericArrayThreads.push(new Thread(genericArrayLane, lane));
+        \\var genericArrayTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) genericArrayTotal += genericArrayThreads[lane].join();
+        \\genericArrayTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 264192), result.asNum());
+}
+
 test "array instances inherit from Array.prototype (incl. holes)" {
     try std.testing.expect((try evalIn("Object.getPrototypeOf([]) === Array.prototype")).asBool());
     try std.testing.expect((try evalIn("[].map === Array.prototype.map")).asBool());
@@ -17325,6 +17456,35 @@ test "Context whole-array fill leaves no unreclaimable per-element residue" {
     // Twelve rounds of retained keys ran to several megabytes that no collection
     // could win back; the collected arrays themselves leave nothing behind.
     try std.testing.expect(after -| before < 2 * 1024 * 1024);
+}
+
+test "Context generic Array traversal leaves no unreclaimable index-key residue" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 32 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    // The source intentionally has no indexed properties: HasProperty must still
+    // observe every logical index, but the workload does not retain callback
+    // results or object mutations that could obscure temporary key ownership.
+    // Warm up once before the collected baseline so only repeated traversal is
+    // measured below.
+    _ = try ctx.evaluate(
+        \\globalThis.genericBoundedSource = { length: 1 << 16 };
+        \\Array.prototype.forEach.call(genericBoundedSource, function () { throw new Error("hole visited"); });
+        \\gc();
+    );
+    const before = ctx.heapBudgetStats().?.used_bytes;
+
+    _ = try ctx.evaluate(
+        \\for (var round = 0; round < 12; round++)
+        \\  Array.prototype.forEach.call(genericBoundedSource, function () { throw new Error("hole visited"); });
+        \\gc();
+    );
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.used_bytes -| before < 2 * 1024 * 1024);
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
 test "Context without a heap limit leaves a host allocator failure unnamed" {
