@@ -14096,6 +14096,46 @@ test "property descriptors: defineProperty attrs + getOwnPropertyDescriptor" {
     )).asBool());
 }
 
+test "ordinary named get and set preserve descriptor and receiver semantics" {
+    try std.testing.expect((try evalIn(
+        \\var calls = [];
+        \\var proto = {};
+        \\Object.defineProperty(proto, "value", {
+        \\  get: function () { calls.push("get:" + this.seen); return this.seen; },
+        \\  set: function (v) { calls.push("set:" + v); this.seen = v; },
+        \\  configurable: true
+        \\});
+        \\var receiver = Object.create(proto);
+        \\receiver.value = 7;
+        \\var observed = receiver.value;
+        \\Object.defineProperty(proto, "blocked", { value: 1, writable: false });
+        \\var inheritedBlocked = Reflect.set(proto, "blocked", 9, receiver) === false;
+        \\var holder = { plain: 1 };
+        \\var other = {};
+        \\var created = Reflect.set(holder, "plain", 4, other) && other.plain === 4 &&
+        \\  holder.plain === 1 && Object.prototype.hasOwnProperty.call(other, "plain");
+        \\Object.defineProperty(other, "plain", { value: 2, writable: false });
+        \\var receiverBlocked = Reflect.set(holder, "plain", 5, other) === false && other.plain === 2;
+        \\Object.defineProperty(proto, "readonly", { get: function () { return 5; } });
+        \\var missingSetter = Reflect.set(receiver, "readonly", 6) === false;
+        \\var exoticSetterCalls = 0;
+        \\var higher = { set length(v) { ++exoticSetterCalls; } };
+        \\var arrayHolder = [1, 2];
+        \\Object.setPrototypeOf(arrayHolder, higher);
+        \\var arrayReceiver = {};
+        \\var arrayLengthOwn = Reflect.set(arrayHolder, "length", 9, arrayReceiver) &&
+        \\  arrayReceiver.length === 9 && exoticSetterCalls === 0;
+        \\var stringHolder = Object("ab");
+        \\Object.setPrototypeOf(stringHolder, higher);
+        \\var stringReceiver = {};
+        \\var stringLengthBlocked = Reflect.set(stringHolder, "length", 9, stringReceiver) === false &&
+        \\  !Object.prototype.hasOwnProperty.call(stringReceiver, "length") && exoticSetterCalls === 0;
+        \\observed === 7 && calls.join(",") === "set:7,get:7" &&
+        \\  inheritedBlocked && created && receiverBlocked && missingSetter &&
+        \\  arrayLengthOwn && stringLengthBlocked
+    )).asBool());
+}
+
 test "Object.getOwnPropertySymbols rejects nullish inputs" {
     try std.testing.expect((try evalIn(
         \\var count = 0;

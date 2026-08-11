@@ -11957,7 +11957,9 @@ pub const Interpreter = struct {
                             if (c.getOwn("length")) |l| return l;
                         } else return Value.num(@floatFromInt(c.arrayLength())); // locked length read (grow-vs-read)
                     }
-                    if (c.getAccessor(key)) |acc| {
+                    const named_own = c.namedOwnPropertySnapshot(key);
+                    if (named_own == .accessor) {
+                        const acc = named_own.accessor;
                         // An explicit `get: undefined` is stored as the undefined
                         // value but means "no getter".
                         if (acc.get) |g| {
@@ -11984,7 +11986,8 @@ pub const Interpreter = struct {
                             }
                         }
                     }
-                    if (c.getOwnSnapshot(key)) |own| {
+                    if (named_own == .data) {
+                        const own = named_own.data;
                         if (prototype_depth == 1) if (inherited_observation) |observation| {
                             observation.* = .{
                                 .receiver_shape = o.shapeSnapshot(),
@@ -12819,23 +12822,54 @@ pub const Interpreter = struct {
             // further up the chain is never reached.
             if (c.typedArray() != null and canonicalNumericIndexString(key) != null)
                 return self.setMemberResult(Value.obj(c), key, v, receiver);
-            if (c.getAccessor(key)) |acc| {
-                if (acc.set) |s| {
-                    // An explicit `set: undefined` means "no setter".
-                    if (!s.isUndefined()) {
-                        _ = try self.callValueWithThis(s, &.{v}, receiver);
-                        return true;
-                    }
-                }
-                return false;
-            }
-            // OrdinarySet consults only the FIRST own descriptor on the chain: an
-            // own data property here shadows any inherited accessor above it. A
-            // non-writable one fails the set; a writable one falls through to the
-            // ordinary data-write on the receiver.
-            if (objectHasOwn(c, key)) {
-                if (!c.getAttr(key).writable) return false;
+            // String exotic character/length descriptors are non-writable own
+            // data properties. They terminate OrdinarySet before an accessor
+            // higher in the prototype chain can observe the write.
+            if (c.boxedPrimitive()) |primitive| if (primitive.isString()) {
+                if (std.mem.eql(u8, key, "length")) return false;
+                if (arrayIndex(key)) |index| if (index < utf16LenOfValue(primitive)) return false;
+            };
+            // A real Array's `length` is an exotic own data descriptor rather
+            // than a shape slot. A writable descriptor continues with the
+            // Receiver; a frozen length rejects the set at this holder.
+            if (c.is_array and !c.is_arguments and std.mem.eql(u8, key, "length")) {
+                if (c.attrsMap() != null and !c.getAttr("length").writable) return false;
                 break;
+            }
+            if (arrayElementIndex(key) == null and !isLazyFunctionPrototypeSlot(c, key)) {
+                switch (c.namedOwnPropertySnapshot(key)) {
+                    .accessor => |own| {
+                        if (own.set) |s| {
+                            // An explicit `set: undefined` means "no setter".
+                            if (!s.isUndefined()) {
+                                _ = try self.callValueWithThis(s, &.{v}, receiver);
+                                return true;
+                            }
+                        }
+                        return false;
+                    },
+                    .data => |own| {
+                        if (!own.attr.writable) return false;
+                        break;
+                    },
+                    .absent => {},
+                }
+            } else {
+                if (c.getAccessor(key)) |acc| {
+                    if (acc.set) |s| {
+                        if (!s.isUndefined()) {
+                            _ = try self.callValueWithThis(s, &.{v}, receiver);
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                // Integer-indexed/dense exotic descriptors are not represented
+                // by the ordinary named-property snapshot.
+                if (objectHasOwn(c, key)) {
+                    if (!c.getAttr(key).writable) return false;
+                    break;
+                }
             }
             if (c.hostClassHooks()) |hooks| if (hooks.set) |set| {
                 self.recordExecutionTier(.host_callbacks);
@@ -12848,8 +12882,10 @@ pub const Interpreter = struct {
             cur = self.effectiveProto(c);
         }
         // [[Set]] attribute checks.
-        if (o.getOwn(key)) |_| {
-            if (!o.getAttr(key).writable) return false;
+        if (arrayElementIndex(key) != null or isLazyFunctionPrototypeSlot(o, key)) {
+            if (o.getOwn(key)) |_| {
+                if (!o.getAttr(key).writable) return false;
+            }
         }
         if (!builtins.isRealObject(receiver)) return false;
         const ro = receiver.asObj();
@@ -12878,12 +12914,28 @@ pub const Interpreter = struct {
             _ = try moduleNsDesc(self, ro, key);
             return false;
         }
-        if (ro.getAccessor(key) != null) return false;
-        const had_receiver_own = ro.getOwn(key) != null or
-            (if (arrayElementIndex(key)) |i| ro.denseElementPresent(i) else false);
-        if (had_receiver_own) {
-            if (!ro.getAttr(key).writable) return false;
-        } else if (!ro.isExtensible()) return false;
+        const plain_named_receiver = arrayElementIndex(key) == null and !isLazyFunctionPrototypeSlot(ro, key);
+        const had_receiver_own = if (plain_named_receiver) own: {
+            switch (ro.namedOwnPropertySnapshot(key)) {
+                .accessor => return false,
+                .data => |own| {
+                    if (!own.attr.writable) return false;
+                    break :own true;
+                },
+                .absent => {
+                    if (!ro.isExtensible()) return false;
+                    break :own false;
+                },
+            }
+        } else own: {
+            if (ro.getAccessor(key) != null) return false;
+            const present = ro.getOwn(key) != null or
+                (if (arrayElementIndex(key)) |i| ro.denseElementPresent(i) else false);
+            if (present) {
+                if (!ro.getAttr(key).writable) return false;
+            } else if (!ro.isExtensible()) return false;
+            break :own present;
+        };
         if (ro.is_array and !ro.is_arguments) {
             if (arrayElementIndex(key)) |i| {
                 const old_len = ro.arrayLength();

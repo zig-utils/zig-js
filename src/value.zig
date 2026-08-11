@@ -4507,6 +4507,37 @@ pub const Object = struct {
         slot: u32,
     };
 
+    /// One lock-scoped snapshot of an ordinary named descriptor. Interpreter
+    /// [[Get]]/[[Set]] paths need accessor/data/attribute state from the same
+    /// object; probing each map separately multiplies atomic lock traffic and
+    /// can combine states from different concurrent mutations.
+    pub const NamedOwnPropertySnapshot = union(enum) {
+        absent,
+        data: struct {
+            value: Value,
+            shape: *Shape,
+            slot: u32,
+            attr: PropAttr,
+        },
+        accessor: Accessor,
+    };
+
+    pub fn namedOwnPropertySnapshot(self: *const Object, name: []const u8) NamedOwnPropertySnapshot {
+        self.lockProperties();
+        defer self.unlockProperties();
+        if (self.getAccessorUnlocked(name)) |accessor| {
+            return .{ .accessor = accessor };
+        }
+        const shape = self.shape orelse return .absent;
+        const slot = (@constCast(shape)).lookup(name) orelse return .absent;
+        return .{ .data = .{
+            .value = self.slotsItems()[slot],
+            .shape = shape,
+            .slot = slot,
+            .attr = self.getAttrUnlocked(name),
+        } };
+    }
+
     /// Read an own named property together with the immutable shape/slot pair
     /// that located it. In shared realms the whole observation belongs to one
     /// `property_lock` snapshot; rereading `shape` after `getOwn` returns would
@@ -5594,6 +5625,43 @@ test "object named properties serialize concurrent same-name writes" {
     try std.testing.expectEqual(@as(usize, 1), object.slotsItems().len);
     try std.testing.expectEqual(@as(?u32, 0), object.shape.?.lookup("shared"));
     try std.testing.expect(value.isNumber());
+}
+
+test "ordinary named descriptor snapshot is coherent under one property lock" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{};
+    try object.setOwn(arena, root, "field", Value.num(17));
+    try object.setAttr(arena, "field", .{ .writable = false, .enumerable = true, .configurable = false });
+
+    object_profile.reset();
+    defer object_profile.disable();
+    switch (object.namedOwnPropertySnapshot("field")) {
+        .data => |own| {
+            try std.testing.expectEqual(@as(f64, 17), own.value.asNum());
+            try std.testing.expectEqual(object.shape.?, own.shape);
+            try std.testing.expectEqual(@as(u32, 0), own.slot);
+            try std.testing.expect(!own.attr.writable);
+            try std.testing.expect(own.attr.enumerable);
+            try std.testing.expect(!own.attr.configurable);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+
+    try object.setAccessor(arena, "field", Value.num(3), Value.num(5));
+    object_profile.reset();
+    switch (object.namedOwnPropertySnapshot("field")) {
+        .accessor => |own| {
+            try std.testing.expectEqual(@as(f64, 3), own.get.?.asNum());
+            try std.testing.expectEqual(@as(f64, 5), own.set.?.asNum());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+    try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
 }
 
 test "ordinary object keeps four named property values inline before migrating" {
