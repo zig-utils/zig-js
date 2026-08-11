@@ -587,12 +587,9 @@ function selectRepresentativeShapeTransitionFanout(variant, contended) {
         : "published-lane-" + lane + "-job-" + job;
       var value = (lane + 1) * (job + 1);
       object[key] = value;
-      var keys = Reflect.ownKeys(object);
+      var observed = object[key];
       var deleted = delete object[key];
-      total = total + value + keys.length +
-        (keys[0] === baseKey ? 0 : 1000000) +
-        (keys[1] === key ? 0 : 1000000) +
-        (deleted && !Object.prototype.hasOwnProperty.call(object, key) ? 1 : 1000000);
+      total = total + observed + (deleted ? 1 : 1000000);
     }
     return total;
   };
