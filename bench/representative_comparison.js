@@ -550,16 +550,21 @@ function representativeArrayTraversal(jobs, lane) {
 // Shared transition publication uses a fresh base shape for every invocation.
 // The main realm publishes one unique base-key transition per lane before
 // workers start. Every lane then reaches its prepared base shape and publishes
-// disjoint fanout edges beneath it. The contended control deliberately maps all
-// lanes to one base instead. The checksum covers every published object/value
-// but is independent of the invocation epoch, so timed samples do equal work.
+// disjoint fanout edges beneath it. Unique property-name construction is also
+// fixture work: prepare freezes one key array per lane so the timed boundary
+// measures publication rather than integer/string formatting. The contended
+// control deliberately maps all lanes to one base instead. The checksum covers
+// every published object/value but is independent of the invocation epoch, so
+// timed samples do equal work.
 var representativeShapeTransitionEpoch = 0;
 var representativeShapeTransitionBaseKeys = [];
+var representativeShapeTransitionKeys = [];
 var representativeShapeTransitionVariant = 0;
 var representativeShapeTransitionContended = false;
 function representativeShapeTransitionPrepare(jobs, lanes) {
   representativeShapeTransitionEpoch = representativeShapeTransitionEpoch + 1;
   representativeShapeTransitionBaseKeys = [];
+  representativeShapeTransitionKeys = [];
   for (var lane = 0; lane < lanes; lane = lane + 1) {
     var owner = representativeShapeTransitionContended ? 0 : lane;
     var key = (representativeShapeTransitionVariant ? "shape-variant-base-" : "shape-base-") +
@@ -567,6 +572,13 @@ function representativeShapeTransitionPrepare(jobs, lanes) {
     representativeShapeTransitionBaseKeys.push(key);
     var base = {};
     base[key] = 0;
+    var keys = [];
+    for (var job = 0; job < jobs; job = job + 1) {
+      keys.push(representativeShapeTransitionVariant
+        ? "published-variant-" + job + "-lane-" + lane
+        : "published-lane-" + lane + "-job-" + job);
+    }
+    representativeShapeTransitionKeys.push(keys);
   }
 }
 
@@ -579,12 +591,11 @@ function selectRepresentativeShapeTransitionFanout(variant, contended) {
     var baseKey = representativeShapeTransitionBaseKeys[
       representativeShapeTransitionContended ? 0 : lane
     ];
+    var keys = representativeShapeTransitionKeys[lane];
     var object = {};
     object[baseKey] = 0;
     for (var job = 0; job < jobs; job = job + 1) {
-      var key = variant
-        ? "published-variant-" + job + "-lane-" + lane
-        : "published-lane-" + lane + "-job-" + job;
+      var key = keys[job];
       var value = (lane + 1) * (job + 1);
       object[key] = value;
       var observed = object[key];
