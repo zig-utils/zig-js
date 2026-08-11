@@ -151,6 +151,7 @@ const synchronizationMetrics = [
   "env_write_root_lock_acquires",
   "env_write_captured_lock_acquires",
   "env_write_other_lock_acquires",
+  "env_write_private_elisions",
   "env_trace_lock_acquires",
   "object_backing_lock_acquires",
   "object_backing_lock_contentions",

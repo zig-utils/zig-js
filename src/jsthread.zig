@@ -135,6 +135,7 @@ pub const ContentionStats = struct {
     env_write_root_lock_acquires: u64 = 0,
     env_write_captured_lock_acquires: u64 = 0,
     env_write_other_lock_acquires: u64 = 0,
+    env_write_private_elisions: u64 = 0,
     env_trace_lock_acquires: u64 = 0,
     object_backing_lock_acquires: u64 = 0,
     object_backing_lock_contentions: u64 = 0,
@@ -216,6 +217,7 @@ const ContentionCounters = struct {
     env_write_root_lock_acquires: std.atomic.Value(u64) = .init(0),
     env_write_captured_lock_acquires: std.atomic.Value(u64) = .init(0),
     env_write_other_lock_acquires: std.atomic.Value(u64) = .init(0),
+    env_write_private_elisions: std.atomic.Value(u64) = .init(0),
     env_trace_lock_acquires: std.atomic.Value(u64) = .init(0),
     worker_runs: std.atomic.Value(u64) = .init(0),
     worker_run_ns: std.atomic.Value(u64) = .init(0),
@@ -274,6 +276,7 @@ pub fn resetContentionStats() void {
     contention_counters.env_write_root_lock_acquires.store(0, .release);
     contention_counters.env_write_captured_lock_acquires.store(0, .release);
     contention_counters.env_write_other_lock_acquires.store(0, .release);
+    contention_counters.env_write_private_elisions.store(0, .release);
     contention_counters.env_trace_lock_acquires.store(0, .release);
     contention_counters.worker_runs.store(0, .release);
     contention_counters.worker_run_ns.store(0, .release);
@@ -348,6 +351,7 @@ pub fn contentionStats() ContentionStats {
         .env_write_root_lock_acquires = contention_counters.env_write_root_lock_acquires.load(.acquire),
         .env_write_captured_lock_acquires = contention_counters.env_write_captured_lock_acquires.load(.acquire),
         .env_write_other_lock_acquires = contention_counters.env_write_other_lock_acquires.load(.acquire),
+        .env_write_private_elisions = contention_counters.env_write_private_elisions.load(.acquire),
         .env_trace_lock_acquires = contention_counters.env_trace_lock_acquires.load(.acquire),
         .object_backing_lock_acquires = object.object_backing_lock_acquires,
         .object_backing_lock_contentions = object.object_backing_lock_contentions,
@@ -428,6 +432,10 @@ pub inline fn recordEnvWriteLockAcquire(kind: EnvWriteLockKind) void {
         .captured => bumpContention("env_write_captured_lock_acquires"),
         .other => bumpContention("env_write_other_lock_acquires"),
     }
+}
+
+pub inline fn recordEnvPrivateWriteElision() void {
+    bumpContention("env_write_private_elisions");
 }
 
 pub inline fn recordEnvTraceLockAcquire() void {
@@ -610,6 +618,7 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), contentionStats().env_write_root_lock_acquires);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().env_write_captured_lock_acquires);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().env_write_other_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), contentionStats().env_write_private_elisions);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().env_trace_lock_acquires);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().object_backing_lock_acquires);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().object_backing_lock_contentions);

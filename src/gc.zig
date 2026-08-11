@@ -1089,10 +1089,11 @@ test "weak and finalization relocation never resolves dead targets" {
 }
 
 pub fn traceEnv(e: *Environment, v: anytype) void {
-    // `vars`/`disposables`/`aliases` are mutated by binding writes; under a
-    // concurrent mark read them under the same `binding_lock` those writers take
-    // (or a `put` rehash / append could tear the iteration). `parent`/`with_object`
-    // are set at env creation and never rewritten, so they need no lock.
+    // `vars`/`disposables`/`aliases` are mutated by binding writes. Concurrent
+    // tracing arms the Context handshake before reaching here: pre-existing
+    // private writes have drained and later writers take this same lock, so a
+    // `put` rehash or append cannot tear iteration. `parent`/`with_object` are
+    // set at env creation and never rewritten, so they need no lock.
     const concurrent = v.concurrent();
     if (concurrent) e.lockBindingsForTrace();
     var vit = e.vars.iterator();
@@ -4304,6 +4305,26 @@ pub fn setActiveInterpreter(machine: ?*interp.Interpreter) ?*interp.Interpreter 
 
 pub fn currentInterpreter() ?*interp.Interpreter {
     return active_interpreter;
+}
+
+/// Enter the fast half of the private Environment write/collector handshake.
+/// The seq_cst counter/flag pair forms a Dekker-style gate: either the mutator
+/// observes an armed tracer and falls back to `binding_lock`, or the collector
+/// observes this counter and waits until the private write has completed.
+pub fn tryEnterPrivateEnvironmentWrite() bool {
+    const machine = active_interpreter orelse return false;
+    const trace_active = machine.gc_environment_trace_active orelse return false;
+    _ = machine.gc_private_environment_writes.fetchAdd(1, .seq_cst);
+    if (!trace_active.load(.seq_cst)) return true;
+    const previous = machine.gc_private_environment_writes.fetchSub(1, .seq_cst);
+    std.debug.assert(previous > 0);
+    return false;
+}
+
+pub fn leavePrivateEnvironmentWrite() void {
+    const machine = active_interpreter orelse unreachable;
+    const previous = machine.gc_private_environment_writes.fetchSub(1, .seq_cst);
+    std.debug.assert(previous > 0);
 }
 
 /// Type-erased entry the `gc_runtime` shim calls at reference-store sites. The

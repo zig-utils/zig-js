@@ -4181,6 +4181,10 @@ pub const Context = struct {
         backing: GcCellBacking,
         realms: GcRealmRegistry,
         conductor: JitGcConductor,
+        /// Collector half of the private Environment write handshake. This is
+        /// heap-wide because one precise collection traces every registered
+        /// realm. See `gc.tryEnterPrivateEnvironmentWrite` for the mutator half.
+        environment_trace_active: std.atomic.Value(bool) = .init(false),
         /// Promotion debt since the last *quiescent* full sweep. A mid-script
         /// full collection can observe a whole Promise/job burst as live and
         /// raise the ordinary old-heap threshold accordingly. These markers
@@ -4537,6 +4541,7 @@ pub const Context = struct {
             gc_state.binding = .{ .context = self };
             gc_state.realms = .{ .owner = self };
             gc_state.conductor = .{};
+            gc_state.environment_trace_active = .init(false);
             gc_state.quiescent_full_promoted_bytes = 0;
             gc_state.quiescent_full_live_bytes = 0;
             // GC cells are individually collectable, but their allocation shape
@@ -4792,6 +4797,7 @@ pub const Context = struct {
             .gil = self.gil,
             .gc = self.gc,
             .gc_realm_context = if (self.gc != null) self else null,
+            .gc_environment_trace_active = if (self.gc_state) |state| &state.environment_trace_active else null,
             // Interpreter-owned buffers are reclaimable side storage, not GC
             // cells. Allocate them directly from the Context allocator so a
             // budget miss can trigger collection before retrying. Routing them
@@ -6218,6 +6224,68 @@ pub const Context = struct {
         self.active_interp_lock.store(0, .release);
     }
 
+    fn realmHasPrivateEnvironmentWrite(realm: *Context) bool {
+        realm.lockActiveInterpreters();
+        defer realm.unlockActiveInterpreters();
+        for (realm.active_interpreters.items) |machine|
+            if (machine.gc_private_environment_writes.load(.seq_cst) != 0) return true;
+        return false;
+    }
+
+    /// Publish concurrent Environment tracing across the shared precise heap
+    /// before the collector can touch a binding table, then wait for private
+    /// writes in every registered realm that entered before that publication.
+    /// Later private writes observe the flag and take each Environment's
+    /// ordinary binding lock. The seq_cst pairing with
+    /// `gc.tryEnterPrivateEnvironmentWrite` prevents both sides from missing
+    /// one another on weakly ordered targets.
+    fn beginConcurrentEnvironmentTrace(self: *Context) void {
+        const state = self.gc_state orelse unreachable;
+        std.debug.assert(state.environment_trace_active.cmpxchgStrong(
+            false,
+            true,
+            .seq_cst,
+            .seq_cst,
+        ) == null);
+        // Binding.traceRoots already establishes registry -> active-interpreter
+        // as the lock order. Holding the registry keeps the live realm set fixed
+        // while pre-publication writers drain. Include bootstrapping realms so
+        // one cannot become a live root source with an older private write still
+        // running; retiring realms are included as a fail-closed lifecycle
+        // invariant even though retirement already requires quiescence.
+        state.realms.acquire();
+        defer state.realms.release();
+        var spins: usize = 0;
+        while (true) : (spins += 1) {
+            var private_write_active = realmHasPrivateEnvironmentWrite(state.realms.owner);
+            if (!private_write_active) for (state.realms.siblings.items) |realm| {
+                if (realmHasPrivateEnvironmentWrite(realm)) {
+                    private_write_active = true;
+                    break;
+                }
+            };
+            if (!private_write_active) for (state.realms.bootstrapping.items) |realm| {
+                if (realmHasPrivateEnvironmentWrite(realm)) {
+                    private_write_active = true;
+                    break;
+                }
+            };
+            if (!private_write_active) for (state.realms.retiring.items) |realm| {
+                if (realmHasPrivateEnvironmentWrite(realm)) {
+                    private_write_active = true;
+                    break;
+                }
+            };
+            if (!private_write_active) return;
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    fn endConcurrentEnvironmentTrace(self: *Context) void {
+        const state = self.gc_state orelse unreachable;
+        std.debug.assert(state.environment_trace_active.swap(false, .seq_cst));
+    }
+
     /// Lock `realm_lock` only under `parallel_js` (a no-op in GIL mode, so those
     /// realm-list mutations stay byte-identical there). Guards `async_waiters`,
     /// public `timers`, `protected_values`, `c_api_handles`, and
@@ -6935,6 +7003,7 @@ pub const Context = struct {
             self.gc_scan_native_stack = true;
             defer self.gc_scan_native_stack = false;
             h.finishConcurrentMark();
+            self.endConcurrentEnvironmentTrace();
         }
     }
 
@@ -7316,6 +7385,7 @@ pub const Context = struct {
             if (h.concurrent.load(.acquire)) {
                 self.finishConcurrentGCIfActive();
             } else if (h.shouldCollectOld()) {
+                self.beginConcurrentEnvironmentTrace();
                 self.gc_scan_native_stack = true;
                 h.beginConcurrentMark();
                 self.gc_scan_native_stack = false;
@@ -7324,6 +7394,7 @@ pub const Context = struct {
                     self.gc_scan_native_stack = true;
                     h.finishConcurrentMark();
                     self.gc_scan_native_stack = false;
+                    self.endConcurrentEnvironmentTrace();
                     break :blk null;
                 };
             }
@@ -7513,6 +7584,8 @@ pub const Context = struct {
         // interpreter + native stack, and parked peers' frozen stacks. Running
         // peers self-publish via the handshake (traceRoots reads gc_par_collector
         // to skip them). gc_par_collector is already set to `machine`.
+        self.beginConcurrentEnvironmentTrace();
+        defer self.endConcurrentEnvironmentTrace();
         self.gc_scan_native_stack = true;
         h.beginConcurrentMarkParallel();
         self.gc_scan_native_stack = false;
@@ -25400,6 +25473,53 @@ test "enable_gc: active interpreter root list reserves capacity chunks" {
     while (i > 0) : (i -= 1) ctx.popActiveInterpreter(&machines[i]);
     ctx.popActiveInterpreter(&machines[0]);
     try std.testing.expectEqual(@as(usize, 0), ctx.active_interpreters.items.len);
+}
+
+test "enable_gc: concurrent Environment tracing drains entered private writes across shared realms" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const sibling = try Context.createSharedPreciseRealm(ctx);
+    var sibling_destroyed = false;
+    defer if (!sibling_destroyed) sibling.destroySharedPreciseRealm() catch unreachable;
+
+    var machine = sibling.interpreter();
+    try sibling.pushActiveInterpreter(&machine);
+    var machine_active = true;
+    defer if (machine_active) sibling.popActiveInterpreter(&machine);
+    try std.testing.expectEqual(
+        &ctx.gc_state.?.environment_trace_active,
+        machine.gc_environment_trace_active.?,
+    );
+    machine.gc_private_environment_writes.store(1, .seq_cst);
+
+    const Collector = struct {
+        ctx: *Context,
+        returned: std.atomic.Value(bool) = .init(false),
+        allow_end: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.ctx.beginConcurrentEnvironmentTrace();
+            self.returned.store(true, .release);
+            while (!self.allow_end.load(.acquire)) std.atomic.spinLoopHint();
+            self.ctx.endConcurrentEnvironmentTrace();
+        }
+    };
+    var collector = Collector{ .ctx = ctx };
+    const thread = try std.Thread.spawn(.{}, Collector.run, .{&collector});
+
+    while (!ctx.gc_state.?.environment_trace_active.load(.seq_cst)) std.atomic.spinLoopHint();
+    const returned_while_write_active = collector.returned.load(.acquire);
+    machine.gc_private_environment_writes.store(0, .seq_cst);
+    while (!collector.returned.load(.acquire)) std.atomic.spinLoopHint();
+    collector.allow_end.store(true, .release);
+    thread.join();
+    try std.testing.expect(!returned_while_write_active);
+    try std.testing.expect(!ctx.gc_state.?.environment_trace_active.load(.seq_cst));
+    sibling.popActiveInterpreter(&machine);
+    machine_active = false;
+    try sibling.destroySharedPreciseRealm();
+    sibling_destroyed = true;
 }
 
 test "enable_gc: evaluate roots completion value across requested GC" {

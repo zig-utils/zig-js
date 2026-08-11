@@ -580,12 +580,12 @@ pub const Environment = struct {
     fn_scope: bool = false,
     /// True while this declarative Environment belongs exclusively to one
     /// running function activation. The concurrent GC marker may inspect it,
-    /// but only the owning mutator can read or write its bindings. Binding
-    /// writes still take `binding_lock` against the marker; binding reads can
-    /// skip it because the marker never mutates the tables. Closure capture
-    /// clears this flag before the Environment can be published to another
-    /// mutator. Root and module environments never opt into this proof; nested
-    /// scopes inherit it only from a still-private activation.
+    /// but only the owning mutator can read or write its bindings. Reads skip
+    /// `binding_lock`; writes use the interpreter/collector entry handshake and
+    /// fall back to the lock while concurrent tracing is active. Closure
+    /// capture clears this flag before the Environment can be published to
+    /// another mutator. Root and module environments never opt into this proof;
+    /// nested scopes inherit it only from a still-private activation.
     private_activation: bool = false,
     /// True for the *function body* block — a real block env (so it can hold the
     /// body's top-level `let`/`const`) but treated like the variable scope for
@@ -607,10 +607,10 @@ pub const Environment = struct {
     /// Phase 7 / M3: serializes the binding storage a concurrent GC marker reads
     /// in `traceEnv` (`vars` values, `disposables`, `aliases`) against the
     /// mutator's binding writes (`put`/`assign`/`putAlias`, `using` registration).
-    /// Like `Object.property_lock`: writers and shared/captured lookups take it.
-    /// Reads from an uncaptured private activation may elide it because only the
-    /// owning mutator can change those tables and the concurrent marker is
-    /// read-only. The uncontended shared path is a single atomic CAS.
+    /// Like `Object.property_lock`: shared/captured writers and lookups take it.
+    /// Uncaptured private activations may elide it under the collector handshake
+    /// because only their owning mutator changes the tables. The uncontended
+    /// shared path is a single atomic CAS.
     binding_lock: std.atomic.Mutex = .unlocked,
 
     /// Binding locks are only needed when a context runs the GC marker
@@ -618,8 +618,8 @@ pub const Environment = struct {
     /// (`parallel_gc`). This is process-wide and intentionally starts enabled:
     /// concurrent context creation can otherwise flip false→true between a
     /// lock helper's load and its paired unlock helper, making the unlock act on
-    /// an unheld mutex. A future owner-token guard can recover the fast path;
-    /// correctness wins here.
+    /// an unheld mutex. Private writes use a separate per-interpreter handshake;
+    /// this flag remains the fail-safe policy for every actual lock pair.
     pub var binding_locks_enabled: std.atomic.Value(bool) = .init(true);
 
     pub fn lockBindings(self: *Environment) void {
@@ -655,7 +655,19 @@ pub const Environment = struct {
         if (locked) self.unlockBindings();
     }
 
-    pub fn lockBindingsForWrite(self: *Environment) void {
+    /// Enter a binding-table write. Uncaptured private activations use the
+    /// active interpreter's marker handshake instead of the per-Environment
+    /// mutex; every other Environment retains the ordinary lock. Returns true
+    /// when the caller owns `binding_lock`, false when it owns the private-write
+    /// guard. Allocation recovery treats both as trace-sensitive regions.
+    pub fn lockBindingsForWrite(self: *Environment) bool {
+        if (self.private_activation and !self.captured and
+            gc_mod.tryEnterPrivateEnvironmentWrite())
+        {
+            gc_runtime.enterTraceSensitiveLock();
+            jsthread.recordEnvPrivateWriteElision();
+            return false;
+        }
         self.lockBindings();
         jsthread.recordEnvWriteLockAcquire(if (self.private_activation and !self.captured)
             .private
@@ -665,10 +677,16 @@ pub const Environment = struct {
             .captured
         else
             .other);
+        return true;
     }
 
-    pub fn unlockBindingsForWrite(self: *Environment) void {
-        self.unlockBindings();
+    pub fn unlockBindingsForWrite(self: *Environment, locked: bool) void {
+        if (locked) {
+            self.unlockBindings();
+        } else {
+            gc_runtime.leaveTraceSensitiveLock();
+            gc_mod.leavePrivateEnvironmentWrite();
+        }
     }
 
     pub fn lockBindingsForTrace(self: *Environment) void {
@@ -684,8 +702,8 @@ pub const Environment = struct {
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
         gc_mod.barrierValueFrom(self, v); // binding stored into this GC-cell environment
         const a = self.bindingAllocator();
-        self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite();
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
         const gop = try self.vars.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
         gop.value_ptr.* = v;
@@ -695,8 +713,8 @@ pub const Environment = struct {
     pub fn putConst(self: *Environment, name: []const u8, v: Value) EvalError!void {
         try self.put(name, v);
         const a = self.bindingAllocator();
-        self.lockBindingsForWrite(); // serialize the consts table vs a concurrent isConst read
-        defer self.unlockBindingsForWrite();
+        const locked = self.lockBindingsForWrite(); // serialize the consts table vs a concurrent isConst read
+        defer self.unlockBindingsForWrite(locked);
         const gop = try self.consts.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -707,8 +725,8 @@ pub const Environment = struct {
     /// global-object property.
     pub fn markLexical(self: *Environment, name: []const u8) EvalError!void {
         const a = self.bindingAllocator();
-        self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite();
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
         const gop = try self.lexicals.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -717,8 +735,8 @@ pub const Environment = struct {
     pub fn putFnName(self: *Environment, name: []const u8, v: Value) EvalError!void {
         try self.put(name, v);
         const a = self.bindingAllocator();
-        self.lockBindingsForWrite(); // serialize the fn_names table vs a concurrent isFnName read
-        defer self.unlockBindingsForWrite();
+        const locked = self.lockBindingsForWrite(); // serialize the fn_names table vs a concurrent isFnName read
+        defer self.unlockBindingsForWrite(locked);
         const gop = try self.fn_names.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -726,8 +744,8 @@ pub const Environment = struct {
     /// Mark a binding in *this* scope as deletable (a sloppy eval-created var/fn).
     pub fn markDeletable(self: *Environment, name: []const u8) EvalError!void {
         const a = self.bindingAllocator();
-        self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite();
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
         const gop = try self.deletable.getOrPut(a, name);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
     }
@@ -736,8 +754,8 @@ pub const Environment = struct {
     /// eval var). Drops it from `vars` and every side table so it no longer
     /// resolves. Returns whether a binding was present.
     pub fn removeVar(self: *Environment, name: []const u8) bool {
-        self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite();
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
         const removed = self.vars.remove(name);
         _ = self.consts.remove(name);
         _ = self.fn_names.remove(name);
@@ -818,16 +836,16 @@ pub const Environment = struct {
             // lookup here races the grow — the systemic no-GIL Environment race
             // (Linux tsan-threadfuzz: globalDefine put vs assign getPtr). `ptr`
             // stays valid for the write because no rehash can occur under the
-            // lock. Private activations still take it for writes because the
-            // concurrent marker can read their tables.
-            e.lockBindingsForWrite();
+            // lock. A private activation instead owns the table exclusively and
+            // uses the marker handshake until capture revokes that proof.
+            const locked = e.lockBindingsForWrite();
             if (e.vars.getPtr(name)) |ptr| {
                 gc_mod.barrierValueFrom(e, v); // reassigned binding in a GC-cell env
                 ptr.* = v;
-                e.unlockBindingsForWrite();
+                e.unlockBindingsForWrite(locked);
                 return;
             }
-            e.unlockBindingsForWrite();
+            e.unlockBindingsForWrite(locked);
             env = e.parent;
         }
         var root = self;
@@ -841,8 +859,8 @@ pub const Environment = struct {
     /// Install an indirect binding `local` → `target.name` (a module import).
     pub fn putAlias(self: *Environment, local: []const u8, target: *Environment, name: []const u8) EvalError!void {
         const a = self.bindingAllocator();
-        self.lockBindingsForWrite(); // traceEnv reads `aliases`; serialize the structural write
-        defer self.unlockBindingsForWrite();
+        const locked = self.lockBindingsForWrite(); // traceEnv reads `aliases`; serialize the structural write
+        defer self.unlockBindingsForWrite(locked);
         const gop = try self.aliases.getOrPut(a, local);
         if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(local);
         gop.value_ptr.* = .{ .env = target, .name = try self.dupeBindingName(name) };
@@ -876,7 +894,7 @@ pub const Environment = struct {
             // Shared/captured scopes read under `binding_lock` so a concurrent
             // `put`/`putAlias` rehash cannot tear the read or free the table.
             // Uncaptured private activations have one mutator and may read
-            // lock-free; their writes still lock against the concurrent marker.
+            // lock-free; their writes use the marker handshake above.
             const locked = e.lockBindingsForRead();
             if (e.aliases.count() != 0) {
                 if (e.aliases.get(name)) |a| {
@@ -908,8 +926,8 @@ pub const Environment = struct {
     /// Returns false if the binding is absent; callers that need sloppy global
     /// creation should use `assign` instead.
     pub fn assignLocal(self: *Environment, name: []const u8, v: Value) bool {
-        self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite();
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
         if (self.vars.getPtr(name)) |ptr| {
             gc_mod.barrierValueFrom(self, v);
             ptr.* = v;
@@ -976,6 +994,52 @@ test "Environment private activation reads elide locks until capture" {
     try std.testing.expectEqual(@as(u64, 1), stats.env_read_root_lock_acquires);
     try std.testing.expectEqual(@as(u64, 2), stats.env_read_captured_lock_acquires);
     try std.testing.expectEqual(@as(u64, 0), stats.env_read_other_lock_acquires);
+}
+
+test "Environment private activation writes use the collector handshake until capture" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var root = Environment{ .arena = arena.allocator(), .fn_scope = true };
+    var env = Environment{
+        .arena = arena.allocator(),
+        .parent = &root,
+        .gc_managed = true,
+        .fn_scope = true,
+        .private_activation = true,
+    };
+    var trace_active: std.atomic.Value(bool) = .init(false);
+    var machine = Interpreter{
+        .arena = arena.allocator(),
+        .env = &env,
+        .root_shape = undefined,
+        .gc_environment_trace_active = &trace_active,
+    };
+    const previous = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(previous);
+
+    jsthread.resetContentionStats();
+    defer jsthread.disableContentionStats();
+    try env.put("value", Value.num(1));
+    try std.testing.expectEqual(@as(u32, 0), machine.gc_private_environment_writes.load(.seq_cst));
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    var stats = jsthread.contentionStats();
+    try std.testing.expectEqual(@as(u64, 0), stats.env_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.env_write_private_elisions);
+
+    trace_active.store(true, .seq_cst);
+    try std.testing.expect(env.assignLocal("value", Value.num(2)));
+    trace_active.store(false, .seq_cst);
+    stats = jsthread.contentionStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.env_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.env_write_private_lock_acquires);
+
+    env.markCaptured();
+    try std.testing.expect(env.assignLocal("value", Value.num(3)));
+    stats = jsthread.contentionStats();
+    try std.testing.expectEqual(@as(u64, 2), stats.env_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.env_write_captured_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), stats.env_write_private_elisions);
 }
 
 /// The shared, mutable `this` binding of a derived constructor activation. A
@@ -1642,6 +1706,12 @@ pub const Interpreter = struct {
     /// Context evaluate entry point (for example Worker structured clone).
     /// Type-erased to keep the interpreter module independent of Context.
     gc_realm_context: ?*anyopaque = null,
+    /// Per-mutator half of the Environment private-write/collector handshake.
+    /// A private write increments before checking the Context trace flag; a
+    /// collector publishes that flag before waiting for every active counter to
+    /// drain. Sequential consistency closes the two-atomic entry race.
+    gc_private_environment_writes: std.atomic.Value(u32) = .init(0),
+    gc_environment_trace_active: ?*const std.atomic.Value(bool) = null,
     /// Backing allocator for GC-owned object side data. Null keeps the legacy
     /// arena ownership path; non-null means ArrayBuffer metadata/bytes must be
     /// released by the GC finalizer.
@@ -2751,8 +2821,8 @@ pub const Interpreter = struct {
     pub fn addDisposable(self: *Interpreter, val: Value, is_async: bool) EvalError!void {
         if (val.isNull() or val.isUndefined()) {
             if (!is_async) return;
-            self.env.lockBindingsForWrite(); // traceEnv reads disposables; serialize the append
-            defer self.env.unlockBindingsForWrite();
+            const locked = self.env.lockBindingsForWrite(); // traceEnv reads disposables; serialize the append
+            defer self.env.unlockBindingsForWrite(locked);
             try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = Value.undef(), .method = Value.undef(), .is_async = true, .await_result = true });
             return;
         }
@@ -2771,8 +2841,8 @@ pub const Interpreter = struct {
         if (!method.isCallable()) return self.throwError("TypeError", "a 'using' declaration value must have a [Symbol.dispose] method");
         gc_mod.barrierValueFrom(self.env, val);
         gc_mod.barrierValueFrom(self.env, method);
-        self.env.lockBindingsForWrite(); // traceEnv reads disposables; serialize the append
-        defer self.env.unlockBindingsForWrite();
+        const locked = self.env.lockBindingsForWrite(); // traceEnv reads disposables; serialize the append
+        defer self.env.unlockBindingsForWrite(locked);
         try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = val, .method = method, .is_async = is_async, .await_result = await_result });
     }
 
@@ -8914,10 +8984,10 @@ pub const Interpreter = struct {
         if (!p.isObject()) return null;
         const intrinsic = p.asObj();
         gc_mod.barrierCellFrom(realm, @ptrCast(intrinsic));
-        realm.lockBindingsForWrite();
+        const write_locked = realm.lockBindingsForWrite();
         if (realm.object_proto_intrinsic == null) realm.object_proto_intrinsic = intrinsic;
         const cached = realm.object_proto_intrinsic;
-        realm.unlockBindingsForWrite();
+        realm.unlockBindingsForWrite(write_locked);
         return cached;
     }
 
@@ -12992,8 +13062,8 @@ pub const Interpreter = struct {
             // consts + vars read under one lock hold: a peer `putConst` writes
             // consts under this lock (the no-GIL Environment race class), so the
             // membership test must not read it unlocked.
-            root.lockBindingsForWrite();
-            defer root.unlockBindingsForWrite();
+            const locked = root.lockBindingsForWrite();
+            defer root.unlockBindingsForWrite(locked);
             if (!root.consts.contains(key)) {
                 if (root.vars.getPtr(key)) |slot| slot.* = v;
             }
