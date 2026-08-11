@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "kind": "exact_parent_attribution_delta",
+  "issue": 529,
+  "workload": "representative_array_like_1024",
+  "jobs": 100,
+  "expected_checksum": 209715200,
+  "command_shape": "bench-comparison-zig-js attribution representative_array_like_1024 100 1",
+  "measurement": "one deterministic attribution run per exact revision; invocation snapshot minus warmup isolates one scored 100-job pass over a prebuilt 1,024-element plain array-like object",
+  "source_sha256": "f9983bb937c814f7f4d4b430b9a2e15249dde019e952a11cf69c9ecaf2e4ad07",
+  "revisions": {
+    "benchmark_parent": "6e519a751126fa237c8893eb37e778cd9f08a206",
+    "candidate": "bbe18b9dcda051dc013d58635b3f2e8dfd12ca28"
+  },
+  "exact_parent_edge": [
+    "6e519a751126fa237c8893eb37e778cd9f08a206",
+    "bbe18b9dcda051dc013d58635b3f2e8dfd12ca28"
+  ],
+  "binary_sha256": {
+    "benchmark_parent": "01dba1b26f25f80725860977551f69191e53818bf6a73a662f82cb92b31dd246",
+    "candidate": "72f5f12e326ee510bc532ef287aaba2c05323caa5d425e5f1841e6dd5704b656"
+  },
+  "zig_gc_revision": "89b6652c81ba892119b7b9ce3b0d07fc78a009ff",
+  "zig_regex_revision": "719673318b0c6250898d7ced3603876c148e370b",
+  "benchmark_parent": {
+    "warmup": {
+      "backing_allocations": 422849,
+      "backing_allocation_bytes": 53822171,
+      "backing_growths": 406,
+      "backing_growth_bytes": 82768,
+      "backing_releases": 400753,
+      "backing_released_bytes": 24114354,
+      "backing_current_bytes": 29790585,
+      "backing_peak_bytes": 31253091,
+      "gc_cell_allocations": 207873,
+      "gc_cell_bytes": 52791232,
+      "gc_cell_fresh_allocations": 19826,
+      "gc_cell_reused_allocations": 188047,
+      "gc_cell_relocation_allocations": 0,
+      "gc_cell_delegated_allocations": 0,
+      "gc_cell_frees": 200293,
+      "gc_cell_freed_bytes": 51255680
+    },
+    "invocation": {
+      "backing_allocations": 833059,
+      "backing_allocation_bytes": 113246101,
+      "backing_growths": 621,
+      "backing_growth_bytes": 106906,
+      "backing_releases": 806856,
+      "backing_released_bytes": 48491984,
+      "backing_current_bytes": 64861023,
+      "backing_peak_bytes": 64861023,
+      "gc_cell_allocations": 412975,
+      "gc_cell_bytes": 105290944,
+      "gc_cell_fresh_allocations": 19826,
+      "gc_cell_reused_allocations": 393149,
+      "gc_cell_relocation_allocations": 0,
+      "gc_cell_delegated_allocations": 0,
+      "gc_cell_frees": 403346,
+      "gc_cell_freed_bytes": 103230912
+    },
+    "invocation_delta": {
+      "backing_allocations": 410210,
+      "backing_allocation_bytes": 59423930,
+      "backing_growths": 215,
+      "backing_growth_bytes": 24138,
+      "backing_releases": 406103,
+      "backing_released_bytes": 24377630,
+      "backing_current_bytes": 35070438,
+      "backing_peak_bytes": 33607932,
+      "gc_cell_allocations": 205102,
+      "gc_cell_bytes": 52499712,
+      "gc_cell_fresh_allocations": 0,
+      "gc_cell_reused_allocations": 205102,
+      "gc_cell_relocation_allocations": 0,
+      "gc_cell_delegated_allocations": 0,
+      "gc_cell_frees": 203053,
+      "gc_cell_freed_bytes": 51975232
+    },
+    "invocation_process": {
+      "peak_rss_bytes": 55230464,
+      "retained_rss_bytes": 55230464
+    }
+  },
+  "candidate": {
+    "warmup": {
+      "backing_allocations": 422849,
+      "backing_allocation_bytes": 53822569,
+      "backing_growths": 311,
+      "backing_growth_bytes": 82526,
+      "backing_releases": 400753,
+      "backing_released_bytes": 24114354,
+      "backing_current_bytes": 29790741,
+      "backing_peak_bytes": 31253247,
+      "gc_cell_allocations": 207873,
+      "gc_cell_bytes": 52791232,
+      "gc_cell_fresh_allocations": 19826,
+      "gc_cell_reused_allocations": 188047,
+      "gc_cell_relocation_allocations": 0,
+      "gc_cell_delegated_allocations": 0,
+      "gc_cell_frees": 200293,
+      "gc_cell_freed_bytes": 51255680
+    },
+    "invocation": {
+      "backing_allocations": 833058,
+      "backing_allocation_bytes": 92356911,
+      "backing_growths": 339,
+      "backing_growth_bytes": 90494,
+      "backing_releases": 806856,
+      "backing_released_bytes": 48491984,
+      "backing_current_bytes": 43955421,
+      "backing_peak_bytes": 45167391,
+      "gc_cell_allocations": 412975,
+      "gc_cell_bytes": 105290944,
+      "gc_cell_fresh_allocations": 19826,
+      "gc_cell_reused_allocations": 393149,
+      "gc_cell_relocation_allocations": 0,
+      "gc_cell_delegated_allocations": 0,
+      "gc_cell_frees": 403346,
+      "gc_cell_freed_bytes": 103230912
+    },
+    "invocation_delta": {
+      "backing_allocations": 410209,
+      "backing_allocation_bytes": 38534342,
+      "backing_growths": 28,
+      "backing_growth_bytes": 7968,
+      "backing_releases": 406103,
+      "backing_released_bytes": 24377630,
+      "backing_current_bytes": 14164680,
+      "backing_peak_bytes": 13914144,
+      "gc_cell_allocations": 205102,
+      "gc_cell_bytes": 52499712,
+      "gc_cell_fresh_allocations": 0,
+      "gc_cell_reused_allocations": 205102,
+      "gc_cell_relocation_allocations": 0,
+      "gc_cell_delegated_allocations": 0,
+      "gc_cell_frees": 203053,
+      "gc_cell_freed_bytes": 51975232
+    },
+    "invocation_process": {
+      "peak_rss_bytes": 53477376,
+      "retained_rss_bytes": 53477376
+    }
+  }
+}
