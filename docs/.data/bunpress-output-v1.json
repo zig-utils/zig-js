@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generator": "bunpress",
-  "generator_version": "0.2.0",
+  "generator_version": "0.2.1",
   "outputs": [
     {
       "path": "404.html",
@@ -50,8 +50,8 @@
     },
     {
       "path": "architecture/index.html",
-      "bytes": 207387,
-      "sha256": "cd6d02dd6001674699e7c2e8cee799b9450836e5890526af2d837e08934762b4"
+      "bytes": 207521,
+      "sha256": "7f6b167bff0b8ffde87bc196c5e5ab5f9e2534745248c4bdf5790fbf3b6337cc"
     },
     {
       "path": "baseline-jit/index.html",
@@ -146,7 +146,7 @@
     {
       "path": "index.html",
       "bytes": 221662,
-      "sha256": "aacf051ac203a35021b8ce93269f5a3116e578cf19753ec5ce4c6a23c3c850de"
+      "sha256": "3af53fc1cac5249245c175f8c60c91e68ef83ae32c9e4d9ed25c63df34e7394d"
     },
     {
       "path": "inspector/index.html",
@@ -176,7 +176,7 @@
     {
       "path": "search-index.json",
       "bytes": 254740,
-      "sha256": "91ee8f3223685ddcb4608c7cabfd9449012b5b6c3cb87218f7161f00799ae166"
+      "sha256": "d0eae0025094d194cbbadc6c6ae5e3c9c4c50e6c940b6faa0e800ac0fd90b2b6"
     },
     {
       "path": "sitemap.xml",
@@ -269,5 +269,5 @@
       "sha256": "9066daf739fccedb8e29d6dc762f62191b9c7150dc08208b3a183629e9886df2"
     }
   ],
-  "tree_sha256": "d301b1cf2a2c8684ed2ac008d0bdc1883d0e52e1e55b4c90c7d3f067f1e19170"
+  "tree_sha256": "20703e7453b6a54ca2e6f3519348c302a05028d2f012ac5e2a19b48e4c33e7f2"
 }

@@ -14,7 +14,7 @@ zig-js runs JavaScript through a tree-walking interpreter and a suspendable byte
 | **Tree-walk** | A direct AST evaluator (`interpreter.zig`). | The correctness baseline and the default path for nearly all code. |
 | **Bytecode VM** | AST lowered to a linear instruction stream (`compiler.zig`) run on a stack machine (`vm.zig`). | Suspend/resume for generators, async functions, and async generators; and a heap-allocated activation stack (`vm.runDriver`) so deep recursion and proper tail calls are bounded by the logical call-depth cap, not the native OS stack. Not a general speedup. |
 | **Slots & closures** | Slot-allocated locals and frame-linked closures. | Removes hash lookups for locals and captured variables on the VM path. |
-| **Shapes & inline caches** | Hidden classes (`shape.zig`) + monomorphic property-access caches. | Object property access without per-access hashmap cost. |
+| **Shapes & inline caches** | Hidden classes (`shape.zig`), collision-free persistent indexes for deep shapes, and monomorphic property-access caches. | Compact shallow objects with logarithmically bounded deep lookup. |
 | **Baseline native tier** | AArch64 code compiled at a chunk entry from proven-hot bytecode (`jit.zig`, `jit/aarch64.zig`). | General native throughput, with an exact bytecode fallback for anything the tier cannot represent. |
 | **Optimizing tier** | Speculative compilation over an exact documented subset (`jit/optimizer*.zig`). | Profile-driven specialization, with deoptimization back to a precise interpreter state. |
 
@@ -64,7 +64,7 @@ coverage. Production contexts always use automatic admission.
 | `vm.zig` | Stack-based bytecode interpreter. |
 | `bytecode.zig` | The `Op` instruction-set definition. |
 | `value.zig` | The 8-byte NaN-boxed `Value` and the `Object` struct; coercions (`ToNumber`/`ToString`/…), equality, `typeof`. |
-| `shape.zig` | Object shapes: a shared transition tree + flat per-object slots. |
+| `shape.zig` | Object shapes: shallow parent chains, persistent exact-key lookup/transition trees for deep or wide shapes, and flat per-object slots. |
 | `context.zig` | The engine instance (`JSGlobalContextRef` analog): arena allocator, globals, exception state, microtask queue. |
 | `builtins.zig` | Every built-in constructor and prototype method. |
 | `promise.zig` | Promise runtime + microtask queue. |
