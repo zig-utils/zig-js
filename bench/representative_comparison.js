@@ -547,6 +547,57 @@ function representativeArrayTraversal(jobs, lane) {
   return total;
 }
 
+// Shared transition publication uses a fresh base shape for every invocation.
+// The main realm publishes one unique base-key transition per lane before
+// workers start. Every lane then reaches its prepared base shape and publishes
+// disjoint fanout edges beneath it. The contended control deliberately maps all
+// lanes to one base instead. The checksum covers every published object/value
+// but is independent of the invocation epoch, so timed samples do equal work.
+var representativeShapeTransitionEpoch = 0;
+var representativeShapeTransitionBaseKeys = [];
+var representativeShapeTransitionVariant = 0;
+var representativeShapeTransitionContended = false;
+function representativeShapeTransitionPrepare(jobs, lanes) {
+  representativeShapeTransitionEpoch = representativeShapeTransitionEpoch + 1;
+  representativeShapeTransitionBaseKeys = [];
+  for (var lane = 0; lane < lanes; lane = lane + 1) {
+    var owner = representativeShapeTransitionContended ? 0 : lane;
+    var key = (representativeShapeTransitionVariant ? "shape-variant-base-" : "shape-base-") +
+      representativeShapeTransitionEpoch + "-owner-" + owner;
+    representativeShapeTransitionBaseKeys.push(key);
+    var base = {};
+    base[key] = 0;
+  }
+}
+
+function selectRepresentativeShapeTransitionFanout(variant, contended) {
+  representativeShapeTransitionVariant = variant;
+  representativeShapeTransitionContended = contended;
+  globalThis.__benchmarkPrepare = representativeShapeTransitionPrepare;
+  return function (jobs, lane) {
+    var total = 0;
+    var baseKey = representativeShapeTransitionBaseKeys[
+      representativeShapeTransitionContended ? 0 : lane
+    ];
+    var object = {};
+    object[baseKey] = 0;
+    for (var job = 0; job < jobs; job = job + 1) {
+      var key = variant
+        ? "published-variant-" + job + "-lane-" + lane
+        : "published-lane-" + lane + "-job-" + job;
+      var value = (lane + 1) * (job + 1);
+      object[key] = value;
+      var keys = Reflect.ownKeys(object);
+      var deleted = delete object[key];
+      total = total + value + keys.length +
+        (keys[0] === baseKey ? 0 : 1000000) +
+        (keys[1] === key ? 0 : 1000000) +
+        (deleted && !Object.prototype.hasOwnProperty.call(object, key) ? 1 : 1000000);
+    }
+    return total;
+  };
+}
+
 function representativeTypedData(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -870,6 +921,9 @@ function benchmarkFunction(name) {
   if (name === "representative_array_like_4096") return selectRepresentativeArrayTraversal(4096, "generic");
   if (name === "representative_array_like_sparse_proxy_4096") return selectRepresentativeArrayTraversal(4096, "proxy");
   if (name === "representative_array_dense_control_4096") return selectRepresentativeArrayTraversal(4096, "dense");
+  if (name === "representative_shape_transition_fanout") return selectRepresentativeShapeTransitionFanout(0, false);
+  if (name === "representative_shape_transition_fanout_variant") return selectRepresentativeShapeTransitionFanout(1, false);
+  if (name === "representative_shape_transition_fanout_contended") return selectRepresentativeShapeTransitionFanout(0, true);
   if (name === "representative_typed_data") return function (jobs, lane) { return representativeTypedData(jobs, lane, 0); };
   if (name === "representative_typed_data_variant") return function (jobs, lane) { return representativeTypedData(jobs, lane, 1); };
   if (name === "representative_classes") return function (jobs, lane) { return representativeClasses(jobs, lane, 0); };
