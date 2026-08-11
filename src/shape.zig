@@ -16,6 +16,7 @@
 //! depend on the optional GIL fallback for convergence or hash-table integrity.
 
 const std = @import("std");
+const agent = @import("agent.zig");
 
 pub const ShapeStats = struct {
     transition_requests: u64 = 0,
@@ -175,6 +176,151 @@ fn PersistentStringTree(comptime ValueType: type) type {
     };
 }
 
+/// Append-only concurrent exact string map. One writer per owning Shape is
+/// already serialized by `transition_lock`; readers traverse immutable keys and
+/// release-published forward links without taking that lock. SipHash-keyed
+/// levels keep the expected search bound logarithmic even when property names
+/// are attacker-controlled, while one node per edge avoids the AVL path-copy
+/// amplification that made independent transition publishers saturate memory.
+fn ConcurrentStringSkipList(comptime ValueType: type) type {
+    return struct {
+        pub const max_level: usize = 24;
+        const Link = std.atomic.Value(?*const Node);
+        const SipHash = std.crypto.auth.siphash.SipHash64(2, 4);
+
+        pub const Node = struct {
+            next: [max_level]Link,
+            key: []const u8,
+            value: ValueType,
+            height: u8,
+        };
+
+        pub const Head = struct {
+            next: [max_level]Link,
+            height: std.atomic.Value(u8) = .init(1),
+            seed: [SipHash.key_length]u8,
+        };
+
+        fn emptyLinks() [max_level]Link {
+            var links: [max_level]Link = undefined;
+            for (&links) |*link| link.* = .init(null);
+            return links;
+        }
+
+        pub fn createHead(arena: std.mem.Allocator) std.mem.Allocator.Error!*Head {
+            const head = try arena.create(Head);
+            var seed: [SipHash.key_length]u8 = undefined;
+            // Algorithmic-complexity protection fails closed when the host has
+            // no secure entropy, matching attacker-controlled collection hashes.
+            agent.engineIo().randomSecure(&seed) catch return error.OutOfMemory;
+            head.* = .{ .next = emptyLinks(), .seed = seed };
+            return head;
+        }
+
+        fn nodeHeight(head: *const Head, key: []const u8) u8 {
+            const hash = SipHash.toInt(key, &head.seed);
+            return @intCast(@min(@as(usize, @ctz(hash)) + 1, max_level));
+        }
+
+        pub fn get(head: ?*const Head, key: []const u8) ?ValueType {
+            const list = head orelse return null;
+            var predecessor: ?*const Node = null;
+            var level: usize = list.height.load(.acquire);
+            while (level > 0) {
+                level -= 1;
+                var cursor = if (predecessor) |node|
+                    node.next[level].load(.acquire)
+                else
+                    list.next[level].load(.acquire);
+                while (cursor) |node| {
+                    switch (std.mem.order(u8, node.key, key)) {
+                        .lt => {
+                            predecessor = node;
+                            cursor = node.next[level].load(.acquire);
+                        },
+                        .eq => return node.value,
+                        .gt => break,
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// Insert while the owning Shape's writer lock is held. No fallible work
+        /// occurs after the node allocation, so allocation failure publishes no
+        /// partial edge.
+        pub fn put(
+            arena: std.mem.Allocator,
+            head: *Head,
+            key: []const u8,
+            list_value: ValueType,
+        ) std.mem.Allocator.Error!void {
+            var predecessors: [max_level]*Link = undefined;
+            var predecessor: ?*const Node = null;
+            const current_height: usize = head.height.load(.monotonic);
+            for (current_height..max_level) |index| predecessors[index] = &head.next[index];
+            var level = current_height;
+            while (level > 0) {
+                level -= 1;
+                var link: *Link = if (predecessor) |node|
+                    @constCast(&node.next[level])
+                else
+                    &head.next[level];
+                var cursor = link.load(.acquire);
+                while (cursor) |node| {
+                    switch (std.mem.order(u8, node.key, key)) {
+                        .lt => {
+                            predecessor = node;
+                            link = @constCast(&node.next[level]);
+                            cursor = link.load(.acquire);
+                        },
+                        .eq => return,
+                        .gt => break,
+                    }
+                }
+                predecessors[level] = link;
+            }
+
+            const height = nodeHeight(head, key);
+            const node = try arena.create(Node);
+            node.* = .{ .next = emptyLinks(), .key = key, .value = list_value, .height = height };
+            for (0..height) |index|
+                node.next[index].store(predecessors[index].load(.monotonic), .monotonic);
+            // Level zero makes the node reachable to every reader. Higher-level
+            // links are accelerators and may appear afterward without affecting
+            // exactness.
+            for (0..height) |index| predecessors[index].store(node, .release);
+            if (height > head.height.load(.monotonic)) head.height.store(height, .release);
+        }
+
+        pub fn getComparisonCount(head: ?*const Head, key: []const u8) usize {
+            const list = head orelse return 0;
+            var predecessor: ?*const Node = null;
+            var comparisons: usize = 0;
+            var level: usize = list.height.load(.acquire);
+            while (level > 0) {
+                level -= 1;
+                var cursor = if (predecessor) |node|
+                    node.next[level].load(.acquire)
+                else
+                    list.next[level].load(.acquire);
+                while (cursor) |node| {
+                    comparisons += 1;
+                    switch (std.mem.order(u8, node.key, key)) {
+                        .lt => {
+                            predecessor = node;
+                            cursor = node.next[level].load(.acquire);
+                        },
+                        .eq, .gt => break,
+                    }
+                    if (std.mem.eql(u8, node.key, key)) return comparisons;
+                }
+            }
+            return comparisons;
+        }
+    };
+}
+
 pub const Shape = struct {
     /// The shape this one extends (null for the root/empty shape).
     parent: ?*Shape,
@@ -197,10 +343,10 @@ pub const Shape = struct {
     /// Deep shapes carry a persistent exact name -> latest-operation index.
     /// Shallow shapes retain the compact parent-chain representation.
     lookup_root: ?*const LookupTree.Node = null,
-    /// Transition fanout is also an exact persistent AVL rather than a
-    /// predictable hash table. Readers acquire one immutable root; writers
-    /// path-copy under `transition_lock` and publish only a complete new root.
-    transition_root: std.atomic.Value(?*const TransitionTree.Node) = .init(null),
+    /// Transition fanout is an append-only, keyed skip list. Readers acquire
+    /// published links without locking; the existing per-Shape writer lock
+    /// serializes insertion and same-name convergence.
+    transition_head: std.atomic.Value(?*TransitionList.Head) = .init(null),
     transition_count: std.atomic.Value(usize) = .init(0),
     transition_lock: std.atomic.Mutex = .unlocked,
     arena: std.mem.Allocator,
@@ -226,7 +372,7 @@ pub const Shape = struct {
     };
 
     const LookupTree = PersistentStringTree(LookupState);
-    const TransitionTree = PersistentStringTree(*Shape);
+    const TransitionList = ConcurrentStringSkipList(*Shape);
 
     pub fn lookupState(self: *Shape, name: []const u8) LookupState {
         if (self.lookup_root) |root|
@@ -347,17 +493,14 @@ pub const Shape = struct {
     }
 
     fn findTransitionCached(self: *Shape, name: []const u8) ?*Shape {
-        return TransitionTree.get(self.transition_root.load(.acquire), name);
+        return TransitionList.get(self.transition_head.load(.acquire), name);
     }
 
     fn publishTransition(self: *Shape, child: *Shape) std.mem.Allocator.Error!void {
-        const next_root = try TransitionTree.put(
-            self.arena,
-            self.transition_root.load(.monotonic),
-            child.name.?,
-            child,
-        );
-        self.transition_root.store(next_root, .release);
+        const existing = self.transition_head.load(.monotonic);
+        const head = existing orelse try TransitionList.createHead(self.arena);
+        try TransitionList.put(self.arena, head, child.name.?, child);
+        if (existing == null) self.transition_head.store(head, .release);
         _ = self.transition_count.fetchAdd(1, .release);
     }
 
@@ -418,11 +561,11 @@ pub const Shape = struct {
     }
 
     pub fn transitionComparisonCountForTesting(self: *const Shape, name: []const u8) usize {
-        return TransitionTree.getComparisonCount(self.transition_root.load(.acquire), name);
+        return TransitionList.getComparisonCount(self.transition_head.load(.acquire), name);
     }
 
     pub fn transitionIndexHeightForTesting(self: *const Shape) u8 {
-        return if (self.transition_root.load(.acquire)) |root| root.height else 0;
+        return if (self.transition_head.load(.acquire)) |head| head.height.load(.acquire) else 0;
     }
 
     fn lockTransitionsOrCached(self: *Shape, name: []const u8) TransitionLockResult {
@@ -632,7 +775,7 @@ test "deep shape lookup is exact and logarithmically bounded without hashing" {
     try std.testing.expectEqual(@as(?u32, 2048), restored.lookup("property-2048"));
 }
 
-test "shape transition fanout is collision-free and logarithmically bounded" {
+test "shape transition fanout is exact and keyed-logarithmic" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const root = try Shape.createRoot(arena.allocator());
@@ -646,14 +789,14 @@ test "shape transition fanout is collision-free and logarithmically bounded" {
     try std.testing.expectEqual(children.len, root.transitionCount());
     const height = root.transitionIndexHeightForTesting();
     try std.testing.expect(height > 0);
-    try std.testing.expect(height <= 16);
+    try std.testing.expect(height <= 24);
 
     for (children, 0..) |expected, index| {
         const key = std.fmt.bufPrint(&key_storage, "fanout-{d:0>4}", .{index}) catch unreachable;
         try std.testing.expectEqual(expected, try root.transition(key));
-        try std.testing.expect(root.transitionComparisonCountForTesting(key) <= height);
+        try std.testing.expect(root.transitionComparisonCountForTesting(key) <= 128);
     }
-    try std.testing.expect(root.transitionComparisonCountForTesting("fanout-missing") <= height);
+    try std.testing.expect(root.transitionComparisonCountForTesting("fanout-missing") <= 128);
 }
 
 fn exerciseDeepShapeAllocationFailures(backing: std.mem.Allocator) !void {
@@ -667,8 +810,8 @@ fn exerciseDeepShapeAllocationFailures(backing: std.mem.Allocator) !void {
         const key = std.fmt.bufPrint(&key_storage, "oom-{d:0>3}", .{index}) catch unreachable;
         const before_transitions = shape.transitionCount();
         shape = shape.transition(key) catch |err| {
-            // A failed persistent-tree path copy cannot publish either the child
-            // edge or a lookup result backed by the caller's borrowed key.
+            // A failed index insertion cannot publish either the child edge or a
+            // lookup result backed by the caller's borrowed key.
             try std.testing.expectEqual(before_transitions, shape.transitionCount());
             try std.testing.expectEqual(@as(?u32, null), shape.lookup(key));
             return err;
