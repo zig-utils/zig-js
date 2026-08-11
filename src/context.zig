@@ -17473,15 +17473,18 @@ test "Context heap_limit_bytes never publishes a torn object under recovery pres
     });
     defer ctx.destroy();
 
-    // A live hoard parks the budget at the recovery boundary, so every later
-    // allocation runs where `reserveWithRecovery` has to collect first. An
+    // A live hoard drives the budget through allocation-failure recovery. An
     // allocation that survives that boundary must be complete: the PR-249 OOM
     // witness fails outright on a successfully returned but torn object (#100).
-    // Every round at the boundary forces a recovery collection, so the counts
-    // stay small deliberately: this is a correctness witness, not a stress run.
+    // Record the fill's OOM explicitly instead of requiring a second OOM after
+    // recovery: the amount reclaimed at the boundary legitimately changes with
+    // object/shape representation size. The counts stay small deliberately;
+    // this is a correctness witness, not a stress run.
+    const full_collections_before = ctx.runtimeHeapAccounting().full_collections;
     const result = try ctx.evaluate(
         \\const hoard = [];
-        \\try { for (let i = 0; i < 50000; ++i) hoard.push({ i: i, j: i + 1 }); } catch (e) {}
+        \\let pressureOoms = 0;
+        \\try { for (let i = 0; i < 50000; ++i) hoard.push({ i: i, j: i + 1 }); } catch (e) { ++pressureOoms; }
         \\let torn = 0, made = 0, ooms = 0;
         \\for (let r = 0; r < 500; ++r) {
         \\  try {
@@ -17491,10 +17494,14 @@ test "Context heap_limit_bytes never publishes a torn object under recovery pres
         \\  } catch (e) { ++ooms; }
         \\}
         \\if (torn !== 0) throw new Error("torn " + torn + " of " + made + " (ooms " + ooms + ")");
-        \\ooms;
+        \\pressureOoms * 1000000 + made * 1000 + ooms;
     );
-    // The run is only meaningful if the cap actually bit.
-    try std.testing.expect(result.asNum() > 0);
+    const encoded: usize = @intFromFloat(result.asNum());
+    const pressure_ooms = encoded / 1_000_000;
+    const made = (encoded / 1_000) % 1_000;
+    try std.testing.expect(pressure_ooms > 0); // the cap actually bit
+    try std.testing.expect(made > 0); // at least one post-recovery object was validated
+    try std.testing.expect(ctx.runtimeHeapAccounting().full_collections > full_collections_before);
 }
 
 test "Context whole-array fill leaves no unreclaimable per-element residue" {
