@@ -1684,12 +1684,13 @@ pub const Interpreter = struct {
     /// Null only in isolated interpreter unit helpers.
     private_name_serial: ?*std.atomic.Value(u64) = null,
     private_name_serial_local: u64 = 0,
-    /// Per-interpreter stream for strong-collection hash seeds. It is seeded
-    /// once from the engine's secure provider, so constructing a Map/Set does
-    /// not perform one OS entropy request per instance. Interpreter ownership
-    /// makes the stream race-free under shared-realm parallel execution.
-    collection_hash_prng_seeded: bool = false,
-    collection_hash_prng: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
+    /// Per-interpreter stream for algorithmic-complexity hash seeds. It is
+    /// seeded once from the engine's secure provider, so Map/Set construction
+    /// and invocation-local native indexes do not request OS entropy per table.
+    /// Interpreter ownership makes the stream race-free under shared-realm
+    /// parallel execution.
+    secure_hash_prng_seeded: bool = false,
+    secure_hash_prng: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
     /// Host-defined `[[CanBlock]]` policy for this VM. Spawned `$262.agent`
     /// threads override it through their threadlocal agent record.
     main_can_block: bool = true,
@@ -10398,28 +10399,29 @@ pub const Interpreter = struct {
         return self.makeMapWithIntrinsic(init_v, "Map");
     }
 
-    fn newCollectionHashSeed(self: *Interpreter) EvalError!u64 {
-        if (!self.collection_hash_prng_seeded) {
+    fn newSecureHashSeed(self: *Interpreter) EvalError!u64 {
+        if (!self.secure_hash_prng_seeded) {
             var bytes: [8]u8 = undefined;
-            // Collection hashes are an algorithmic-complexity boundary. Fail
-            // construction if the host cannot supply entropy; a predictable
-            // clock/thread fallback would silently restore adversarial hashes.
+            // Hash tables on attacker-controlled content are an algorithmic-
+            // complexity boundary. Fail if the host cannot supply entropy; a
+            // predictable clock/thread fallback silently restores adversarial
+            // placement.
             agent.engineIo().randomSecure(&bytes) catch return error.OutOfMemory;
             const seed = std.mem.readInt(u64, &bytes, .little);
-            self.collection_hash_prng = std.Random.DefaultPrng.init(seed);
-            self.collection_hash_prng_seeded = true;
+            self.secure_hash_prng = std.Random.DefaultPrng.init(seed);
+            self.secure_hash_prng_seeded = true;
         }
-        return self.collection_hash_prng.random().int(u64);
+        return self.secure_hash_prng.random().int(u64);
     }
 
     pub fn prepareStrongCollection(self: *Interpreter, o: *value.Object) EvalError!void {
         if (o.collHashSeed() != null) return;
-        _ = try o.ensureStrongCollectionState(self.arena, try self.newCollectionHashSeed());
+        _ = try o.ensureStrongCollectionState(self.arena, try self.newSecureHashSeed());
     }
 
     pub fn prepareWeakCollection(self: *Interpreter, o: *value.Object) EvalError!void {
         if (o.collHashSeed() != null) return;
-        _ = try o.ensureWeakCollectionState(self.arena, try self.newCollectionHashSeed());
+        _ = try o.ensureWeakCollectionState(self.arena, try self.newSecureHashSeed());
     }
 
     fn noteWeakWork(self: *Interpreter) void {
@@ -23911,8 +23913,8 @@ fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     return true;
 }
 
-fn lowerDup(a: std.mem.Allocator, s: []const u8) []const u8 {
-    return std.ascii.allocLowerString(a, s) catch s;
+fn lowerDup(a: std.mem.Allocator, s: []const u8) ?[]const u8 {
+    return std.ascii.allocLowerString(a, s) catch null;
 }
 
 const ReparsedLangId = struct {
@@ -23945,27 +23947,27 @@ fn tripleEql(x: Triple, y: Triple) bool {
 }
 
 /// Look up the maximal triple for `t` per the Add-Likely-Subtags search order.
-fn cldrLookupLikely(a: std.mem.Allocator, t: Triple) ?Triple {
+fn cldrLookupLikely(a: std.mem.Allocator, t: Triple) error{OutOfMemory}!?Triple {
     const l = if (t.l.len == 0) "und" else t.l;
     if (t.s.len > 0 and t.r.len > 0) {
-        if (cldr_locale.likely(std.fmt.allocPrint(a, "{s}-{s}-{s}", .{ l, t.s, t.r }) catch return null)) |v| return parseTriple(v);
+        if (cldr_locale.likely(try std.fmt.allocPrint(a, "{s}-{s}-{s}", .{ l, t.s, t.r }))) |v| return parseTriple(v);
     }
     if (t.r.len > 0) {
-        if (cldr_locale.likely(std.fmt.allocPrint(a, "{s}-{s}", .{ l, t.r }) catch return null)) |v| return parseTriple(v);
+        if (cldr_locale.likely(try std.fmt.allocPrint(a, "{s}-{s}", .{ l, t.r }))) |v| return parseTriple(v);
     }
     if (t.s.len > 0) {
-        if (cldr_locale.likely(std.fmt.allocPrint(a, "{s}-{s}", .{ l, t.s }) catch return null)) |v| return parseTriple(v);
+        if (cldr_locale.likely(try std.fmt.allocPrint(a, "{s}-{s}", .{ l, t.s }))) |v| return parseTriple(v);
     }
     if (cldr_locale.likely(l)) |v| return parseTriple(v);
     if (t.s.len > 0) {
-        if (cldr_locale.likely(std.fmt.allocPrint(a, "und-{s}", .{t.s}) catch return null)) |v| return parseTriple(v);
+        if (cldr_locale.likely(try std.fmt.allocPrint(a, "und-{s}", .{t.s}))) |v| return parseTriple(v);
     }
     return null;
 }
 
 /// AddLikelySubtags: fill in missing script/region (and language) from CLDR.
-fn cldrMaximize(a: std.mem.Allocator, t: Triple) ?Triple {
-    const m = cldrLookupLikely(a, t) orelse return null;
+fn cldrMaximize(a: std.mem.Allocator, t: Triple) error{OutOfMemory}!?Triple {
+    const m = (try cldrLookupLikely(a, t)) orelse return null;
     return .{
         .l = if (t.l.len > 0 and !std.mem.eql(u8, t.l, "und")) t.l else m.l,
         .s = if (t.s.len > 0) t.s else m.s,
@@ -23974,15 +23976,15 @@ fn cldrMaximize(a: std.mem.Allocator, t: Triple) ?Triple {
 }
 
 /// RemoveLikelySubtags: the shortest triple that maximizes back to the same.
-fn cldrMinimize(a: std.mem.Allocator, t: Triple) ?Triple {
-    const max = cldrMaximize(a, t) orelse return null;
+fn cldrMinimize(a: std.mem.Allocator, t: Triple) error{OutOfMemory}!?Triple {
+    const max = (try cldrMaximize(a, t)) orelse return null;
     const tries = [_]Triple{
         .{ .l = max.l },
         .{ .l = max.l, .r = max.r },
         .{ .l = max.l, .s = max.s },
     };
     for (tries) |cand| {
-        if (cldrMaximize(a, cand)) |cm| if (tripleEql(cm, max)) return cand;
+        if (try cldrMaximize(a, cand)) |cm| if (tripleEql(cm, max)) return cand;
     }
     return max;
 }
@@ -23992,7 +23994,7 @@ fn cldrMinimize(a: std.mem.Allocator, t: Triple) ?Triple {
 fn cldrReparse(a: std.mem.Allocator, s: []const u8) ?ReparsedLangId {
     var r: ReparsedLangId = .{ .lang = "" };
     var it = std.mem.splitScalar(u8, s, '-');
-    r.lang = lowerDup(a, it.next() orelse return null);
+    r.lang = lowerDup(a, it.next() orelse return null) orelse return null;
     while (it.next()) |part| {
         if (r.script.len == 0 and r.region.len == 0 and r.variants.items.len == 0 and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
             const sc = a.alloc(u8, 4) catch return null;
@@ -24002,7 +24004,7 @@ fn cldrReparse(a: std.mem.Allocator, s: []const u8) ?ReparsedLangId {
         } else if (r.region.len == 0 and r.variants.items.len == 0 and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
             r.region = std.ascii.allocUpperString(a, part) catch return null;
         } else {
-            r.variants.append(a, lowerDup(a, part)) catch return null;
+            r.variants.append(a, lowerDup(a, part) orelse return null) catch return null;
         }
     }
     return r;
@@ -24030,7 +24032,7 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
     var priv: []const u8 = ""; // the "x-..." private-use sequence (lowercased)
 
     var it = std.mem.splitScalar(u8, tag, '-');
-    lang = lowerDup(a, it.next().?);
+    lang = lowerDup(a, it.next().?) orelse return null;
 
     // Walk the language-id subtags.
     var pending: ?[]const u8 = null; // first subtag of an extension/private-use
@@ -24047,7 +24049,7 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
         } else if (region.len == 0 and variants.items.len == 0 and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
             region = std.ascii.allocUpperString(a, part) catch return null;
         } else {
-            variants.append(a, lowerDup(a, part)) catch return null;
+            variants.append(a, lowerDup(a, part) orelse return null) catch return null;
         }
     }
     // --- CLDR alias substitution (CanonicalizeLanguageTag) ---
@@ -24055,8 +24057,8 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
         // Ordered lowercased base subtags, for grandfathered/legacy matching.
         var subs: std.ArrayListUnmanaged([]const u8) = .empty;
         subs.append(a, lang) catch return null;
-        if (script.len > 0) subs.append(a, lowerDup(a, script)) catch return null;
-        if (region.len > 0) subs.append(a, lowerDup(a, region)) catch return null;
+        if (script.len > 0) subs.append(a, lowerDup(a, script) orelse return null) catch return null;
+        if (region.len > 0) subs.append(a, lowerDup(a, region) orelse return null) catch return null;
         for (variants.items) |v| subs.append(a, v) catch return null;
         // A grandfathered/redundant alias matches the longest prefix of the
         // language-id (>=2 subtags); the remaining subtags are kept (e.g.
@@ -24115,7 +24117,7 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
                     var chosen: []const u8 = r[0..std.mem.indexOfScalar(u8, r, ' ').?];
                     var slo: [8]u8 = undefined;
                     for (script, 0..) |c, i| slo[i] = std.ascii.toLower(c);
-                    if (cldrMaximize(a, .{ .l = lang, .s = slo[0..script.len] })) |mx| {
+                    if (cldrMaximize(a, .{ .l = lang, .s = slo[0..script.len] }) catch return null) |mx| {
                         if (mx.r.len > 0) {
                             var toks = std.mem.splitScalar(u8, r, ' ');
                             while (toks.next()) |tok| if (std.mem.eql(u8, tok, mx.r)) {
@@ -24177,7 +24179,7 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
                 pending = part;
                 break;
             }
-            subs.append(a, lowerDup(a, part)) catch return null;
+            subs.append(a, lowerDup(a, part) orelse return null) catch return null;
         }
         if (sing == 'x') {
             var b: std.ArrayListUnmanaged(u8) = .empty;
@@ -24226,6 +24228,17 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
         out.appendSlice(a, priv) catch return null;
     }
     return out.toOwnedSlice(a) catch null;
+}
+
+/// Separate invalid language tags from allocation failure. Once structural
+/// validation succeeds, every null exit from the owned canonicalizer is an
+/// allocation failure (the checked-in CLDR alias replacements are themselves
+/// structurally valid). This prevents memory pressure from being surfaced as a
+/// user-visible RangeError or, worse, a partially lowercased locale.
+fn canonicalizeLocaleTagForIntl(self: *Interpreter, a: std.mem.Allocator, tag: []const u8) EvalError![]const u8 {
+    if (!isStructurallyValidLanguageTag(tag))
+        return self.throwError("RangeError", "Incorrect locale information provided");
+    return canonicalizeLocaleTag(a, tag) orelse error.OutOfMemory;
 }
 
 /// Canonicalize one extension's subtag body (already lowercased). For `-u-`:
@@ -24395,16 +24408,69 @@ fn canonExtBody(a: std.mem.Allocator, sing: u8, subs: [][]const u8) ?[]const u8 
     return b.toOwnedSlice(a) catch null;
 }
 
+const CanonicalLocaleHashContext = struct {
+    seed: u64,
+
+    pub fn hash(ctx: @This(), tag: []const u8) u64 {
+        return std.hash.Wyhash.hash(ctx.seed, tag);
+    }
+
+    pub fn eql(_: @This(), a: []const u8, b: []const u8) bool {
+        return std.mem.eql(u8, a, b);
+    }
+};
+
+const CanonicalLocaleIndex = std.HashMapUnmanaged([]const u8, void, CanonicalLocaleHashContext, std.hash_map.default_max_load_percentage);
+const canonical_locale_index_threshold = 8;
+
+const CanonicalLocaleScratchIndex = struct {
+    arena: std.heap.ArenaAllocator,
+    entries: CanonicalLocaleIndex = .empty,
+    context: CanonicalLocaleHashContext,
+
+    fn init(backing: std.mem.Allocator, context: CanonicalLocaleHashContext) @This() {
+        return .{ .arena = std.heap.ArenaAllocator.init(backing), .context = context };
+    }
+
+    fn deinit(self: *@This()) void {
+        self.arena.deinit();
+    }
+
+    fn contains(self: *const @This(), tag: []const u8) bool {
+        return self.entries.containsContext(tag, self.context);
+    }
+
+    fn ensureTotalCapacity(self: *@This(), total: usize) error{OutOfMemory}!void {
+        try self.entries.ensureTotalCapacityContext(self.arena.allocator(), @intCast(total), self.context);
+    }
+
+    /// Copy before indexing: the caller's canonicalization arena is released at
+    /// the end of each element and a later Proxy callback may move GC strings.
+    /// The invocation arena makes both a failed map growth and successful table
+    /// teardown failure-atomic.
+    fn put(self: *@This(), tag: []const u8) error{OutOfMemory}!bool {
+        if (self.contains(tag)) return false;
+        const indexed = try self.arena.allocator().dupe(u8, tag);
+        try self.entries.putContext(self.arena.allocator(), indexed, {}, self.context);
+        return true;
+    }
+};
+
 /// CanonicalizeLocaleList: a string → [tag]; an array → each element ToString'd,
-/// validated, canonicalized, and de-duplicated.
+/// validated, canonicalized, and de-duplicated. Small lists retain their cheaper
+/// linear path. Wider lists promote once to a securely seeded native content
+/// index; exact canonical bytes remain authoritative under hash collisions.
 fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object {
     const arr = (try self.newArray()).asObj();
     if (v.isUndefined()) return arr;
+    const scratch = gc_mod.temporaryAllocator(self.arena);
     // A string or a single Intl.Locale is wrapped as a one-element list (its
     // [[Locale]] slot is used; toString is not observed).
     if (v.isString() or (v.isObject() and v.asObj().getOwn("\x00locale") != null)) {
         const s = if (v.isString()) v.asStr() else v.asObj().getOwn("\x00locale").?.asStr();
-        const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+        var canonical_arena = std.heap.ArenaAllocator.init(scratch);
+        defer canonical_arena.deinit();
+        const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
         try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
         return arr;
     }
@@ -24412,12 +24478,22 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     // above; a Symbol/BigInt/number/boolean becomes a wrapper, length 0).
     const ov: Value = Value.obj(try self.toObject(v));
     const len = toLen((try self.toNumberV(try self.getProperty(ov, "length"))));
+    // The map and its key copies share one invocation arena so all native index
+    // storage is released together on success, invalid input, a user throw, or
+    // OOM. Key copies cannot be invalidated by a moving GC triggered from a
+    // later Proxy trap or locale-object conversion.
+    var locale_index: ?CanonicalLocaleScratchIndex = null;
+    defer if (locale_index) |*index| index.deinit();
     var i: usize = 0;
     while (i < len) : (i += 1) {
         // CanonicalizeLocaleList checks HasProperty (honoring a Proxy `has` trap)
-        // before reading each index; a missing index is skipped.
-        const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-        if (!try self.inOperator(try Value.strAlloc(self.arena, key), ov)) continue;
+        // before reading each index; a missing index is skipped. The decimal key
+        // is consumed synchronously by both operations, so bounded native storage
+        // avoids publishing invocation scratch into realm ownership.
+        var key_storage: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_storage, "{d}", .{i}) catch unreachable;
+        try self.checkRestricted(ov.asObj());
+        if (!try self.hasPropertyResult(ov.asObj(), key)) continue;
         const ev = try self.getProperty(ov, key);
         if (!ev.isString() and !ev.isObject()) return self.throwError("TypeError", "Intl: locale must be a string or object");
         // An Intl.Locale element contributes its [[Locale]] slot directly (its
@@ -24426,8 +24502,37 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
             ev.asObj().getOwn("\x00locale").?.asStr()
         else
             try self.toStringV(ev);
-        const c = canonicalizeLocaleTag(self.arena, s) orelse return self.throwError("RangeError", "Incorrect locale information provided");
-        if (!localeListContains(arr, c)) try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
+        var canonical_arena = std.heap.ArenaAllocator.init(scratch);
+        defer canonical_arena.deinit();
+        const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
+        var duplicate = if (locale_index) |*index|
+            index.contains(c)
+        else
+            localeListContains(arr, c);
+
+        // Promote immediately before the ninth unique result. Pre-sizing the
+        // invocation-local table makes publication failure-atomic: no output
+        // append occurs unless every existing first occurrence is indexed.
+        if (!duplicate and locale_index == null and arr.elementsLen() == canonical_locale_index_threshold) {
+            const ctx = CanonicalLocaleHashContext{ .seed = try self.newSecureHashSeed() };
+            locale_index = CanonicalLocaleScratchIndex.init(scratch, ctx);
+            const index = &locale_index.?;
+            try index.ensureTotalCapacity(arr.elementsLen() + 1);
+            for (arr.elementsItems()) |locale| {
+                if (!locale.isString()) continue;
+                const inserted = try index.put(locale.asStr());
+                std.debug.assert(inserted);
+            }
+            duplicate = index.contains(c);
+        }
+
+        if (!duplicate) {
+            if (locale_index) |*index| {
+                const inserted = try index.put(c);
+                std.debug.assert(inserted);
+            }
+            try arr.appendElement(self.arena, try Value.strAlloc(self.arena, c));
+        }
     }
     return arr;
 }
@@ -24632,7 +24737,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
         tagv.asObj().getOwn("\x00locale").?.asStr()
     else
         try self.toStringV(tagv);
-    var canon = canonicalizeLocaleTag(self.arena, tag_raw) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+    var canon = try canonicalizeLocaleTagForIntl(self, self.arena, tag_raw);
 
     // Apply the options bag (ApplyOptionsToTag + per-keyword -u- options).
     const optsv = if (args.len > 1) args[1] else Value.undef();
@@ -24737,7 +24842,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
             try buf.appendSlice(self.arena, "-u");
             try buf.appendSlice(self.arena, u_buf.items);
         }
-        canon = canonicalizeLocaleTag(self.arena, buf.items) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+        canon = try canonicalizeLocaleTagForIntl(self, self.arena, buf.items);
     }
 
     const o = (try self.newObject()).asObj();
@@ -24837,18 +24942,18 @@ fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
             var variants: std.ArrayListUnmanaged([]const u8) = .empty;
             {
                 var bit = std.mem.splitScalar(u8, base, '-');
-                t.l = lowerDup(a, bit.next() orelse "");
+                t.l = lowerDup(a, bit.next() orelse "") orelse return error.OutOfMemory;
                 while (bit.next()) |part| {
                     if (t.s.len == 0 and t.r.len == 0 and variants.items.len == 0 and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
-                        t.s = lowerDup(a, part);
+                        t.s = lowerDup(a, part) orelse return error.OutOfMemory;
                     } else if (t.r.len == 0 and variants.items.len == 0 and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
-                        t.r = lowerDup(a, part);
+                        t.r = lowerDup(a, part) orelse return error.OutOfMemory;
                     } else {
-                        try variants.append(a, lowerDup(a, part));
+                        try variants.append(a, lowerDup(a, part) orelse return error.OutOfMemory);
                     }
                 }
             }
-            const res = (if (kind == .max) cldrMaximize(a, t) else cldrMinimize(a, t)) orelse t;
+            const res = (try if (kind == .max) cldrMaximize(a, t) else cldrMinimize(a, t)) orelse t;
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             try buf.appendSlice(a, res.l);
             if (res.s.len > 0) {
@@ -24865,7 +24970,7 @@ fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
                 try buf.appendSlice(a, v);
             }
             try buf.appendSlice(a, tail);
-            const canon = canonicalizeLocaleTag(a, buf.items) orelse return self.throwError("RangeError", "Incorrect locale information provided");
+            const canon = try canonicalizeLocaleTagForIntl(self, a, buf.items);
             const o = (try self.newObject()).asObj();
             o.setProtoAtomic(this.asObj().proto);
             try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, canon));
@@ -24889,7 +24994,7 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
             // tag has no region).
             var tri = parseTriple(tag);
             if ((which == .calendars or which == .hour_cycles) and tri.r.len == 0)
-                if (cldrMaximize(self.arena, tri)) |m| {
+                if (try cldrMaximize(self.arena, tri)) |m| {
                     tri = m;
                 };
             switch (which) {
@@ -24929,7 +25034,7 @@ fn intlLocaleTextInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const o = (try self.newObject()).asObj();
     const tag = this.asObj().getOwn("\x00locale").?.asStr();
     var tri = parseTriple(tag);
-    if (tri.s.len == 0) if (cldrMaximize(self.arena, tri)) |m| {
+    if (tri.s.len == 0) if (try cldrMaximize(self.arena, tri)) |m| {
         tri = m;
     };
     const rtl_scripts = [_][]const u8{ "Arab", "Hebr", "Syrc", "Thaa", "Nkoo", "Rohg", "Mand", "Mend", "Adlm", "Yezi", "Ougr", "Phlp", "Samr", "Armi", "Sarb" };
@@ -24949,7 +25054,7 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const o = (try self.newObject()).asObj();
     // Region drives the CLDR week data; maximize when the tag has no region.
     var tri = parseTriple(tag);
-    if (tri.r.len == 0) if (cldrMaximize(self.arena, tri)) |m| {
+    if (tri.r.len == 0) if (try cldrMaximize(self.arena, tri)) |m| {
         tri = m;
     };
     // firstDay: the -u-fw- keyword overrides; else the region default.
@@ -25288,11 +25393,11 @@ fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequire
 /// explicit hour12 picks the locale's 12-/24-hour variant; else an explicit
 /// hourCycle option or the locale's -u-hc keyword; else the territory default.
 /// `locale` is the resolved BCP-47 tag; opt_hc/opt_h12 come from the options.
-fn dtfResolveHourCycle(self: *Interpreter, locale: []const u8, opt_hc: []const u8, opt_h12: ?bool) []const u8 {
+fn dtfResolveHourCycle(self: *Interpreter, locale: []const u8, opt_hc: []const u8, opt_h12: ?bool) EvalError![]const u8 {
     const t = parseTriple(locale);
     var region: []const u8 = t.r;
     if (region.len == 0) {
-        if (cldrMaximize(self.arena, t)) |m| region = m.r;
+        if (try cldrMaximize(self.arena, t)) |m| region = m.r;
     }
     if (region.len == 0) region = "001";
     var rbuf: [8]u8 = undefined;
@@ -25389,7 +25494,7 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalE
     // hour component or a timeStyle); otherwise [[HourCycle]] is undefined and
     // resolvedOptions omits hourCycle/hour12.
     if (r.hour.len > 0 or r.time_style.len > 0) {
-        const hc = dtfResolveHourCycle(self, tag, r.hour_cycle, r.hour12);
+        const hc = try dtfResolveHourCycle(self, tag, r.hour_cycle, r.hour12);
         r.hour_cycle = hc;
         r.hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
     } else {
@@ -26285,7 +26390,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     };
     if (temporal_kind != null and !explicit_hour_setting and o_hour.len > 0) {
         const loc = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
-        hour_cycle = dtfResolveHourCycle(self, loc, hour_cycle, null);
+        hour_cycle = try dtfResolveHourCycle(self, loc, hour_cycle, null);
         hour12 = std.mem.eql(u8, hour_cycle, "h11") or std.mem.eql(u8, hour_cycle, "h12");
     }
     if (temporal_kind == null or temporal_kind.? == .instant) {
@@ -49623,6 +49728,78 @@ test "Intl.PluralRules validates localeMatcher option" {
         \\let valid = new Intl.PluralRules("en", { localeMatcher: "lookup" }).select(1) === "one";
         \\invalid && nul && valid
     )).asBool());
+}
+
+test "Intl locale-list indexing preserves first occurrence and Proxy order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalSource(arena.allocator(),
+        \\let log = [];
+        \\let target = {
+        \\  length: 14,
+        \\  0: "EN-x-a", 1: "FR-x-b", 2: "DE-x-c", 3: "ES-x-d",
+        \\  5: "PT-x-f", 6: "NL-x-g", 7: "SV-x-h",
+        \\  8: { toString() { log.push("toString:8"); return "IT-x-i"; } },
+        \\  9: "PL-x-j", 10: "CS-x-k", 11: "DA-x-l",
+        \\  12: "en-X-a", 13: "de-X-c"
+        \\};
+        \\let locales = new Proxy(target, {
+        \\  has(t, key) { log.push("has:" + key); return Reflect.has(t, key); },
+        \\  get(t, key) { log.push("get:" + key); return Reflect.get(t, key); }
+        \\});
+        \\let actual = Intl.getCanonicalLocales(locales);
+        \\let expectedLog = ["get:length"];
+        \\for (let i = 0; i < 14; i++) {
+        \\  expectedLog.push("has:" + i);
+        \\  if (i !== 4) {
+        \\    expectedLog.push("get:" + i);
+        \\    if (i === 8) expectedLog.push("toString:8");
+        \\  }
+        \\}
+        \\actual.join(",") === "en-x-a,fr-x-b,de-x-c,es-x-d,pt-x-f,nl-x-g,sv-x-h,it-x-i,pl-x-j,cs-x-k,da-x-l" &&
+        \\  log.join("|") === expectedLog.join("|")
+    );
+    try std.testing.expect(result.asBool());
+}
+
+test "Intl locale-list canonicalization and index publication are OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+
+            var machine = Interpreter{
+                .arena = arena.allocator(),
+                .env = undefined,
+                .root_shape = undefined,
+            };
+            var index = CanonicalLocaleScratchIndex.init(arena.allocator(), .{ .seed = 0x1b8735936d4a2f01 });
+            defer index.deinit();
+            try index.ensureTotalCapacity(12);
+
+            const inputs = [_][]const u8{
+                "EN-x-a", "FR-x-b", "DE-x-c", "ES-x-d", "PT-x-e", "NL-x-f",
+                "SV-x-g", "IT-x-h", "PL-x-i", "CS-x-j", "DA-x-k", "en-X-a",
+            };
+            var unique: usize = 0;
+            for (inputs) |input| {
+                var canonical_arena = std.heap.ArenaAllocator.init(arena.allocator());
+                defer canonical_arena.deinit();
+                const canonical = try canonicalizeLocaleTagForIntl(&machine, canonical_arena.allocator(), input);
+                if (try index.put(canonical)) {
+                    // Model publication into the result array: both the owned
+                    // bytes and StringCell must propagate OOM after the native
+                    // index has accepted the candidate.
+                    _ = try Value.strAlloc(arena.allocator(), canonical);
+                    unique += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 11), unique);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
 }
 
 test "Intl remaining conformance edge cases" {

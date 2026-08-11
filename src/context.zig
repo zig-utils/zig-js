@@ -12166,6 +12166,86 @@ test "parallel_js: Date string formatting uses invocation-local native storage" 
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl locale-list scratch is reclaimed under a bounded precise heap" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var boundedLocales = [];
+        \\for (var i = 0; i < 64; i++) boundedLocales.push("en-x-" + i.toString(36));
+        \\var boundedLocaleChecksum = 0;
+        \\for (var round = 0; round < 128; round++) {
+        \\  var result = Intl.getCanonicalLocales(boundedLocales);
+        \\  boundedLocaleChecksum += result.length + result[round & 63].length;
+        \\  if ((round & 15) === 15) gc();
+        \\}
+        \\gc();
+        \\boundedLocaleChecksum === 9016;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "moving nursery rewrites canonical locale-list results" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.__movingLocales = Intl.getCanonicalLocales([
+        \\  "EN-x-a", "FR-x-b", "DE-x-c", "ES-x-d", "PT-x-e", "NL-x-f",
+        \\  "SV-x-g", "IT-x-h", "PL-x-i", "CS-x-j", "DA-x-k", "en-X-a"
+        \\]);
+    );
+    const before = ctx.global_object.getOwn("__movingLocales").?.asObj();
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("__movingLocales").?.asObj();
+    try std.testing.expect(before != after);
+    try std.testing.expect((try ctx.evaluate(
+        \\__movingLocales.join(",") === "en-x-a,fr-x-b,de-x-c,es-x-d,pt-x-e,nl-x-f,sv-x-g,it-x-h,pl-x-i,cs-x-j,da-x-k"
+    )).asBool());
+}
+
+test "parallel_js: Intl locale-list indexes stay invocation local" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\function localeListLane(lane) {
+        \\  var input = [];
+        \\  for (var i = 0; i < 64; i++) input.push((i & 1 ? "EN-x-" : "en-X-") + (i + lane * 64).toString(36));
+        \\  var checksum = 0;
+        \\  for (var round = 0; round < 8; round++) {
+        \\    var output = Intl.getCanonicalLocales(input);
+        \\    if (output.length !== 64) return 0;
+        \\    checksum += output[(round + lane) & 63].charCodeAt(0);
+        \\  }
+        \\  return checksum === 808 ? 1 : 0;
+        \\}
+        \\var localeListThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) localeListThreads.push(new Thread(localeListLane, lane));
+        \\var localeListTotal = 0;
+        \\for (var index = 0; index < localeListThreads.length; index++) localeListTotal += localeListThreads[index].join();
+        \\localeListTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "Function constructor builds callable functions from source" {
     // Params + body, called and constructed.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).asNum());
