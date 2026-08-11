@@ -464,6 +464,39 @@ function selectRepresentativeDateString(width, control) {
   };
 }
 
+// CanonicalizeLocaleList rows keep fixture construction outside the timed
+// boundary, then force every indexed HasProperty/Get/canonicalization step on
+// each invocation. Private-use subtags provide thousands of distinct, valid
+// language tags without depending on host locale availability. The duplicate
+// row preserves the same input width but collapses it to 32 first occurrences;
+// the small row guards the ordinary-list path against indexing overhead.
+var representativeLocaleListSelected = null;
+function selectRepresentativeLocaleList(width, duplicateHeavy) {
+  var locales = [];
+  for (var index = 0; index < width; index = index + 1) {
+    var identity = duplicateHeavy ? index % 32 : index;
+    var privateUse = identity.toString(36);
+    locales.push((index & 1 ? "EN-x-" : "en-X-") + privateUse);
+  }
+  representativeLocaleListSelected = locales;
+  return representativeLocaleList;
+}
+
+function representativeLocaleList(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var locales = Intl.getCanonicalLocales(representativeLocaleListSelected);
+    var first = locales[0];
+    var middle = locales[locales.length >> 1];
+    var last = locales[locales.length - 1];
+    total = total + locales.length + first.length + middle.length + last.length +
+      first.charCodeAt(first.length - 1) +
+      middle.charCodeAt(middle.length - 1) +
+      last.charCodeAt(last.length - 1) + lane;
+  }
+  return total;
+}
+
 function representativeTypedData(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -777,6 +810,11 @@ function benchmarkFunction(name) {
   if (name === "representative_date_string_2048") return selectRepresentativeDateString(2048, false);
   if (name === "representative_date_string_4096") return selectRepresentativeDateString(4096, false);
   if (name === "representative_date_getter_control_4096") return selectRepresentativeDateString(4096, true);
+  if (name === "representative_locale_list_8") return selectRepresentativeLocaleList(8, false);
+  if (name === "representative_locale_list_1024") return selectRepresentativeLocaleList(1024, false);
+  if (name === "representative_locale_list_2048") return selectRepresentativeLocaleList(2048, false);
+  if (name === "representative_locale_list_4096") return selectRepresentativeLocaleList(4096, false);
+  if (name === "representative_locale_list_duplicates_4096") return selectRepresentativeLocaleList(4096, true);
   if (name === "representative_typed_data") return function (jobs, lane) { return representativeTypedData(jobs, lane, 0); };
   if (name === "representative_typed_data_variant") return function (jobs, lane) { return representativeTypedData(jobs, lane, 1); };
   if (name === "representative_classes") return function (jobs, lane) { return representativeClasses(jobs, lane, 0); };
