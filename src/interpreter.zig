@@ -48902,7 +48902,7 @@ fn publishBorrowedIndexWithAllocationFailures(backing: std.mem.Allocator) !void 
         // taking ownership of the caller's borrowed bytes fails.
         try std.testing.expect(object.shape == null);
         try std.testing.expectEqual(@as(usize, 0), object.slotsItems().len);
-        try std.testing.expectEqual(@as(usize, 0), root.transitions.count());
+        try std.testing.expectEqual(@as(usize, 0), root.transitionCount());
         return err;
     };
 

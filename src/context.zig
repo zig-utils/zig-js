@@ -17083,6 +17083,78 @@ test "named deletion sidecars survive moving GC relocation" {
     try std.testing.expect(result.asBool());
 }
 
+test "deep shape indexes survive bounded allocation and moving GC" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .heap_limit_bytes = 32 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.deepShapeDiscard = [];
+        \\for (var i = 0; i < 4096; i++) deepShapeDiscard.push({ index: i, dead: true });
+        \\globalThis.deepShapeIndexed = {};
+        \\for (var i = 0; i < 4096; i++) deepShapeIndexed["property-" + i] = i;
+        \\deepShapeDiscard = null;
+    );
+    ctx.collectGarbage();
+    const before = ctx.global_object.getOwn("deepShapeIndexed").?.asObj();
+    const moved = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("deepShapeIndexed").?.asObj();
+    try std.testing.expect(before != after);
+
+    const result = try ctx.evaluate(
+        \\var deepShapeChecksum = 0;
+        \\for (var i = 0; i < 4096; i++) {
+        \\  if ((i & 511) === 0) gc();
+        \\  deepShapeChecksum += deepShapeIndexed["property-" + i];
+        \\}
+        \\deepShapeChecksum;
+    );
+    try std.testing.expectEqual(@as(f64, 8386560), result.asNum());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "parallel_js deep shape lookup and transition publication converge" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\function deepShapeLane(lane) {
+        \\  var total = 0;
+        \\  for (var round = 0; round < 4; round++) {
+        \\    var object = { anchor: lane };
+        \\    for (var i = 0; i < 256; i++) object["shared-property-" + i] = i + lane;
+        \\    for (var i = 0; i < 256; i++) total += object["shared-property-" + i];
+        \\  }
+        \\  for (var round = 0; round < 64; round++) {
+        \\    var branch = { fanoutAnchor: true };
+        \\    var key = "lane-" + lane + "-round-" + round;
+        \\    branch[key] = lane + round;
+        \\    total += branch[key];
+        \\  }
+        \\  return total;
+        \\}
+        \\var deepShapeThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) deepShapeThreads.push(new Thread(deepShapeLane, lane));
+        \\var deepShapeTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) deepShapeTotal += deepShapeThreads[lane].join();
+        \\deepShapeTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 536832), result.asNum());
+}
+
 test "parallel_js named deletion serializes shape slots descriptors and compaction" {
     if (builtin.single_threaded) return error.SkipZigTest;
 

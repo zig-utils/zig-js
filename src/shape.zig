@@ -61,6 +61,120 @@ inline fn bumpShapeStat(comptime field: []const u8) void {
     _ = @field(shape_counters, field).fetchAdd(1, .monotonic);
 }
 
+/// Immutable collision-free string map. Every update path-copies an AVL spine,
+/// so a published root and all nodes reachable from it remain read-only forever.
+/// Byte ordering gives a worst-case O(log entries) tree bound independently of
+/// attacker-controlled hash collisions; comparisons themselves remain
+/// proportional to the exact property-name bytes they distinguish.
+fn PersistentStringTree(comptime ValueType: type) type {
+    return struct {
+        pub const Node = struct {
+            left: ?*const Node,
+            right: ?*const Node,
+            key: []const u8,
+            value: ValueType,
+            height: u8,
+        };
+
+        fn height(node: ?*const Node) u8 {
+            return if (node) |present| present.height else 0;
+        }
+
+        fn create(
+            arena: std.mem.Allocator,
+            left: ?*const Node,
+            right: ?*const Node,
+            key: []const u8,
+            tree_value: ValueType,
+        ) std.mem.Allocator.Error!*const Node {
+            const node = try arena.create(Node);
+            node.* = .{
+                .left = left,
+                .right = right,
+                .key = key,
+                .value = tree_value,
+                .height = 1 + @max(height(left), height(right)),
+            };
+            return node;
+        }
+
+        fn assemble(
+            arena: std.mem.Allocator,
+            left: ?*const Node,
+            right: ?*const Node,
+            key: []const u8,
+            tree_value: ValueType,
+        ) std.mem.Allocator.Error!*const Node {
+            const left_height: i16 = height(left);
+            const right_height: i16 = height(right);
+            const balance = left_height - right_height;
+            if (balance > 1) {
+                const branch = left.?;
+                if (height(branch.left) >= height(branch.right)) {
+                    const rotated_right = try create(arena, branch.right, right, key, tree_value);
+                    return create(arena, branch.left, rotated_right, branch.key, branch.value);
+                }
+                const pivot = branch.right.?;
+                const rotated_left = try create(arena, branch.left, pivot.left, branch.key, branch.value);
+                const rotated_right = try create(arena, pivot.right, right, key, tree_value);
+                return create(arena, rotated_left, rotated_right, pivot.key, pivot.value);
+            }
+            if (balance < -1) {
+                const branch = right.?;
+                if (height(branch.right) >= height(branch.left)) {
+                    const rotated_left = try create(arena, left, branch.left, key, tree_value);
+                    return create(arena, rotated_left, branch.right, branch.key, branch.value);
+                }
+                const pivot = branch.left.?;
+                const rotated_left = try create(arena, left, pivot.left, key, tree_value);
+                const rotated_right = try create(arena, pivot.right, branch.right, branch.key, branch.value);
+                return create(arena, rotated_left, rotated_right, pivot.key, pivot.value);
+            }
+            return create(arena, left, right, key, tree_value);
+        }
+
+        pub fn put(
+            arena: std.mem.Allocator,
+            root: ?*const Node,
+            key: []const u8,
+            tree_value: ValueType,
+        ) std.mem.Allocator.Error!*const Node {
+            const current = root orelse return create(arena, null, null, key, tree_value);
+            return switch (std.mem.order(u8, key, current.key)) {
+                .lt => assemble(arena, try put(arena, current.left, key, tree_value), current.right, current.key, current.value),
+                .gt => assemble(arena, current.left, try put(arena, current.right, key, tree_value), current.key, current.value),
+                .eq => create(arena, current.left, current.right, key, tree_value),
+            };
+        }
+
+        pub fn get(root: ?*const Node, key: []const u8) ?ValueType {
+            var cursor = root;
+            while (cursor) |current| {
+                switch (std.mem.order(u8, key, current.key)) {
+                    .lt => cursor = current.left,
+                    .gt => cursor = current.right,
+                    .eq => return current.value,
+                }
+            }
+            return null;
+        }
+
+        pub fn getComparisonCount(root: ?*const Node, key: []const u8) usize {
+            var cursor = root;
+            var comparisons: usize = 0;
+            while (cursor) |current| {
+                comparisons += 1;
+                switch (std.mem.order(u8, key, current.key)) {
+                    .lt => cursor = current.left,
+                    .gt => cursor = current.right,
+                    .eq => return comparisons,
+                }
+            }
+            return comparisons;
+        }
+    };
+}
+
 pub const Shape = struct {
     /// The shape this one extends (null for the root/empty shape).
     parent: ?*Shape,
@@ -80,20 +194,18 @@ pub const Shape = struct {
     /// includes tombstones and re-adds, so Objects can bound historical lookup
     /// work independently of their physical slot span.
     depth: u32,
-    /// Edges to child shapes that add one more property, keyed by that name.
-    /// Shared and cached so identical construction sequences converge.
-    transitions: std.StringHashMapUnmanaged(*Shape) = .{},
-    /// Append-only read cache of `transitions`.
-    ///
-    /// Shape transitions are never deleted and shapes live for the whole owning
-    /// Context. Once a child is fully initialized and inserted while holding
-    /// `transition_lock`, it is published here with release ordering so cached
-    /// transition hits can traverse immutable child links without taking the
-    /// transition lock.
-    transition_head: std.atomic.Value(?*Shape) = .init(null),
-    transition_next: ?*Shape = null,
+    /// Deep shapes carry a persistent exact name -> latest-operation index.
+    /// Shallow shapes retain the compact parent-chain representation.
+    lookup_root: ?*const LookupTree.Node = null,
+    /// Transition fanout is also an exact persistent AVL rather than a
+    /// predictable hash table. Readers acquire one immutable root; writers
+    /// path-copy under `transition_lock` and publish only a complete new root.
+    transition_root: std.atomic.Value(?*const TransitionTree.Node) = .init(null),
+    transition_count: std.atomic.Value(usize) = .init(0),
     transition_lock: std.atomic.Mutex = .unlocked,
     arena: std.mem.Allocator,
+
+    const lookup_index_threshold: u32 = 32;
 
     const TransitionLockResult = union(enum) {
         locked,
@@ -113,7 +225,12 @@ pub const Shape = struct {
         present: u32,
     };
 
+    const LookupTree = PersistentStringTree(LookupState);
+    const TransitionTree = PersistentStringTree(*Shape);
+
     pub fn lookupState(self: *Shape, name: []const u8) LookupState {
+        if (self.lookup_root) |root|
+            return LookupTree.get(root, name) orelse .absent;
         var shape: ?*Shape = self;
         while (shape) |current| {
             if (current.name) |candidate| {
@@ -125,9 +242,9 @@ pub const Shape = struct {
         return .absent;
     }
 
-    /// Find the slot for `name` in this shape, or null if absent. Walks the
-    /// parent chain (O(property count)); small objects — the common case — are
-    /// a few hops, and inline caches at access sites skip this on a hit.
+    /// Find the slot for `name` in this shape, or null if absent. Small shapes
+    /// walk a compact parent chain; deep shapes use the immutable exact AVL.
+    /// Inline caches at stable access sites skip either path on a hit.
     pub fn lookup(self: *Shape, name: []const u8) ?u32 {
         return switch (self.lookupState(name)) {
             .present => |slot| slot,
@@ -164,7 +281,7 @@ pub const Shape = struct {
         }
         defer self.transition_lock.unlock();
 
-        if (self.transitions.get(name)) |child| {
+        if (self.findTransitionCached(name)) |child| {
             bumpShapeStat("transition_hits");
             return child;
         }
@@ -176,6 +293,7 @@ pub const Shape = struct {
             .absent => self.count,
             .present => unreachable,
         };
+        const lookup_root = try self.nextLookupRoot(owned, slot, false);
         child.* = .{
             .parent = self,
             .name = owned,
@@ -184,10 +302,10 @@ pub const Shape = struct {
             .count = if (state == .absent) self.count + 1 else self.count,
             .live_count = self.live_count + 1,
             .depth = self.depth + 1,
+            .lookup_root = lookup_root,
             .arena = self.arena,
         };
-        try self.transitions.put(self.arena, owned, child);
-        self.publishTransition(child);
+        try self.publishTransition(child);
         return child;
     }
 
@@ -208,10 +326,11 @@ pub const Shape = struct {
             .cached => |child| return child,
         }
         defer self.transition_lock.unlock();
-        if (self.transitions.get(name)) |child| return child;
+        if (self.findTransitionCached(name)) |child| return child;
 
         const owned = try self.arena.dupe(u8, name);
         const child = try self.arena.create(Shape);
+        const lookup_root = try self.nextLookupRoot(owned, slot, true);
         child.* = .{
             .parent = self,
             .name = owned,
@@ -220,27 +339,90 @@ pub const Shape = struct {
             .count = self.count,
             .live_count = self.live_count - 1,
             .depth = self.depth + 1,
+            .lookup_root = lookup_root,
             .arena = self.arena,
         };
-        try self.transitions.put(self.arena, owned, child);
-        self.publishTransition(child);
+        try self.publishTransition(child);
         return child;
     }
 
     fn findTransitionCached(self: *Shape, name: []const u8) ?*Shape {
-        var child = self.transition_head.load(.acquire);
-        while (child) |sh| {
-            if (sh.name) |n| {
-                if (std.mem.eql(u8, n, name)) return sh;
-            }
-            child = sh.transition_next;
-        }
-        return null;
+        return TransitionTree.get(self.transition_root.load(.acquire), name);
     }
 
-    fn publishTransition(self: *Shape, child: *Shape) void {
-        child.transition_next = self.transition_head.load(.acquire);
-        self.transition_head.store(child, .release);
+    fn publishTransition(self: *Shape, child: *Shape) std.mem.Allocator.Error!void {
+        const next_root = try TransitionTree.put(
+            self.arena,
+            self.transition_root.load(.monotonic),
+            child.name.?,
+            child,
+        );
+        self.transition_root.store(next_root, .release);
+        _ = self.transition_count.fetchAdd(1, .release);
+    }
+
+    pub fn transitionCount(self: *const Shape) usize {
+        return @constCast(&self.transition_count).load(.acquire);
+    }
+
+    fn stateForOperation(shape: *const Shape) LookupState {
+        return if (shape.deleted) .{ .deleted = shape.slot } else .{ .present = shape.slot };
+    }
+
+    fn nextLookupRoot(
+        self: *Shape,
+        owned_name: []const u8,
+        slot: u32,
+        deleted: bool,
+    ) std.mem.Allocator.Error!?*const LookupTree.Node {
+        const child_depth = self.depth + 1;
+        if (child_depth < lookup_index_threshold) return null;
+        const next_state: LookupState = if (deleted) .{ .deleted = slot } else .{ .present = slot };
+        if (child_depth > lookup_index_threshold)
+            return try LookupTree.put(self.arena, self.lookup_root.?, owned_name, next_state);
+
+        var operations: [lookup_index_threshold - 1]*Shape = undefined;
+        var count: usize = 0;
+        var cursor: ?*Shape = self;
+        while (cursor) |operation| : (cursor = operation.parent) {
+            if (operation.name == null) break;
+            operations[count] = operation;
+            count += 1;
+        }
+        std.debug.assert(count == lookup_index_threshold - 1);
+
+        var root: ?*const LookupTree.Node = null;
+        while (count > 0) {
+            count -= 1;
+            const operation = operations[count];
+            root = try LookupTree.put(self.arena, root, operation.name.?, stateForOperation(operation));
+        }
+        return try LookupTree.put(self.arena, root, owned_name, next_state);
+    }
+
+    pub fn lookupComparisonCountForTesting(self: *const Shape, name: []const u8) usize {
+        if (self.lookup_root) |root| return LookupTree.getComparisonCount(root, name);
+        var comparisons: usize = 0;
+        var cursor: ?*const Shape = self;
+        while (cursor) |operation| : (cursor = operation.parent) {
+            if (operation.name) |candidate| {
+                comparisons += 1;
+                if (std.mem.eql(u8, candidate, name)) break;
+            }
+        }
+        return comparisons;
+    }
+
+    pub fn lookupIndexHeightForTesting(self: *const Shape) u8 {
+        return if (self.lookup_root) |root| root.height else 0;
+    }
+
+    pub fn transitionComparisonCountForTesting(self: *const Shape, name: []const u8) usize {
+        return TransitionTree.getComparisonCount(self.transition_root.load(.acquire), name);
+    }
+
+    pub fn transitionIndexHeightForTesting(self: *const Shape) u8 {
+        return if (self.transition_root.load(.acquire)) |root| root.height else 0;
     }
 
     fn lockTransitionsOrCached(self: *Shape, name: []const u8) TransitionLockResult {
@@ -368,7 +550,7 @@ test "shape transition lock wait observes published cache" {
         .depth = 1,
         .arena = a,
     };
-    root.publishTransition(child);
+    try root.publishTransition(child);
 
     try std.testing.expect(root.transition_lock.tryLock());
     defer root.transition_lock.unlock();
@@ -396,6 +578,112 @@ test "shape transitions converge under concurrent same-name insertion" {
     for (threads) |t| t.join();
 
     for (children[1..]) |child| try std.testing.expectEqual(children[0], child);
-    try std.testing.expectEqual(@as(usize, 1), root.transitions.count());
+    try std.testing.expectEqual(@as(usize, 1), root.transitionCount());
     try std.testing.expectEqual(@as(?u32, 0), children[0].lookup("shared"));
+}
+
+test "persistent exact string tree balances single and double rotations" {
+    const Tree = PersistentStringTree(u32);
+    const orders = [_][5][]const u8{
+        .{ "a", "b", "c", "d", "e" },
+        .{ "e", "d", "c", "b", "a" },
+        .{ "c", "a", "b", "e", "d" },
+        .{ "c", "e", "d", "a", "b" },
+    };
+    for (orders) |order| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var root: ?*const Tree.Node = null;
+        for (order, 0..) |key, index| root = try Tree.put(arena.allocator(), root, key, @intCast(index));
+        try std.testing.expect(root.?.height <= 3);
+        for (order, 0..) |key, index| try std.testing.expectEqual(@as(?u32, @intCast(index)), Tree.get(root, key));
+        try std.testing.expectEqual(@as(?u32, null), Tree.get(root, "missing"));
+    }
+}
+
+test "deep shape lookup is exact and logarithmically bounded without hashing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try Shape.createRoot(arena.allocator());
+    var shape = root;
+
+    var key_storage: [32]u8 = undefined;
+    for (0..4096) |index| {
+        const key = std.fmt.bufPrint(&key_storage, "property-{d:0>4}", .{index}) catch unreachable;
+        shape = try shape.transition(key);
+    }
+
+    const height = shape.lookupIndexHeightForTesting();
+    try std.testing.expect(height > 0);
+    try std.testing.expect(height <= 16);
+    for (0..4096) |index| {
+        const key = std.fmt.bufPrint(&key_storage, "property-{d:0>4}", .{index}) catch unreachable;
+        try std.testing.expectEqual(@as(?u32, @intCast(index)), shape.lookup(key));
+        try std.testing.expect(shape.lookupComparisonCountForTesting(key) <= height);
+    }
+    try std.testing.expectEqual(@as(?u32, null), shape.lookup("property-missing"));
+    try std.testing.expect(shape.lookupComparisonCountForTesting("property-missing") <= height);
+
+    const without_middle = (try shape.deleteTransition("property-2048")).?;
+    try std.testing.expectEqual(@as(?u32, null), without_middle.lookup("property-2048"));
+    try std.testing.expectEqual(@as(?u32, 4095), without_middle.lookup("property-4095"));
+    const restored = try without_middle.transition("property-2048");
+    try std.testing.expectEqual(shape, restored);
+    try std.testing.expectEqual(@as(?u32, 2048), restored.lookup("property-2048"));
+}
+
+test "shape transition fanout is collision-free and logarithmically bounded" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try Shape.createRoot(arena.allocator());
+    var children: [2048]*Shape = undefined;
+    var key_storage: [32]u8 = undefined;
+
+    for (&children, 0..) |*child, index| {
+        const key = std.fmt.bufPrint(&key_storage, "fanout-{d:0>4}", .{index}) catch unreachable;
+        child.* = try root.transition(key);
+    }
+    try std.testing.expectEqual(children.len, root.transitionCount());
+    const height = root.transitionIndexHeightForTesting();
+    try std.testing.expect(height > 0);
+    try std.testing.expect(height <= 16);
+
+    for (children, 0..) |expected, index| {
+        const key = std.fmt.bufPrint(&key_storage, "fanout-{d:0>4}", .{index}) catch unreachable;
+        try std.testing.expectEqual(expected, try root.transition(key));
+        try std.testing.expect(root.transitionComparisonCountForTesting(key) <= height);
+    }
+    try std.testing.expect(root.transitionComparisonCountForTesting("fanout-missing") <= height);
+}
+
+fn exerciseDeepShapeAllocationFailures(backing: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    const root = try Shape.createRoot(arena.allocator());
+    var shape = root;
+    var key_storage: [32]u8 = undefined;
+
+    for (0..96) |index| {
+        const key = std.fmt.bufPrint(&key_storage, "oom-{d:0>3}", .{index}) catch unreachable;
+        const before_transitions = shape.transitionCount();
+        shape = shape.transition(key) catch |err| {
+            // A failed persistent-tree path copy cannot publish either the child
+            // edge or a lookup result backed by the caller's borrowed key.
+            try std.testing.expectEqual(before_transitions, shape.transitionCount());
+            try std.testing.expectEqual(@as(?u32, null), shape.lookup(key));
+            return err;
+        };
+    }
+    for (0..96) |index| {
+        const key = std.fmt.bufPrint(&key_storage, "oom-{d:0>3}", .{index}) catch unreachable;
+        try std.testing.expectEqual(@as(?u32, @intCast(index)), shape.lookup(key));
+    }
+}
+
+test "deep shape indexes roll back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseDeepShapeAllocationFailures,
+        .{},
+    );
 }
