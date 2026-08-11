@@ -24484,6 +24484,11 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     // later Proxy trap or locale-object conversion.
     var locale_index: ?CanonicalLocaleScratchIndex = null;
     defer if (locale_index) |*index| index.deinit();
+    // Retain only the largest element's canonicalization capacity. Resetting
+    // between elements keeps scratch bounded by one tag while avoiding one
+    // backing-allocator setup/release cycle for every locale in the list.
+    var canonical_arena = std.heap.ArenaAllocator.init(scratch);
+    defer canonical_arena.deinit();
     var i: usize = 0;
     while (i < len) : (i += 1) {
         // CanonicalizeLocaleList checks HasProperty (honoring a Proxy `has` trap)
@@ -24502,8 +24507,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
             ev.asObj().getOwn("\x00locale").?.asStr()
         else
             try self.toStringV(ev);
-        var canonical_arena = std.heap.ArenaAllocator.init(scratch);
-        defer canonical_arena.deinit();
+        _ = canonical_arena.reset(.retain_capacity);
         const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
         var duplicate = if (locale_index) |*index|
             index.contains(c)
