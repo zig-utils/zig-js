@@ -431,6 +431,11 @@ fn printTierAttributionRow(
         if (index != 0) try writer.writeByte(',');
         try writer.print("\"{s}\":{d}", .{ name, @field(shape, name) });
     }
+    try writer.writeAll("},\"debug_registry\":{");
+    inline for (comptime std.meta.fieldNames(@TypeOf(snapshot.debug_registry)), 0..) |name, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\":{d}", .{ name, @field(snapshot.debug_registry, name) });
+    }
     try writer.print("}},\"baseline_publications\":{d},\"optimizer_publications\":{d},\"generated_code_bytes\":{d},\"native_code\":{{\"live_artifacts\":{d},\"live_bytes\":{d},\"retired_artifacts\":{d},\"retired_bytes_current\":{d},\"reclaimed_artifacts\":{d},\"reclaimed_bytes_total\":{d},\"shape_invalidation_events\":{d},\"shape_retired_artifacts\":{d},\"shape_survivor_artifacts\":{d},\"shape_retired_bytes\":{d},\"full_invalidation_events\":{d},\"unknown_shape_invalidation_events\":{d},\"shape_fallback_events\":{d}}},\"heap\":{{\"live_bytes\":{d},\"last_full_collection_bytes\":{d},\"collections\":{d},\"full_collections\":{d}}}", .{
         snapshot.baseline_publications,
         snapshot.optimizer_publications,

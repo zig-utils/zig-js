@@ -402,6 +402,35 @@ const DebugLocationCacheEntry = struct {
     location: DebugStatementLocation = undefined,
 };
 
+pub const DebugRegistrySnapshot = struct {
+    location_cache_hits: u64 = 0,
+    location_cache_misses: u64 = 0,
+    lock_acquires: u64 = 0,
+    lock_contentions: u64 = 0,
+    lock_spins: u64 = 0,
+};
+
+/// Realm-owned, opt-in attribution for statement-location lookup. Interpreters
+/// receive a null pointer in ordinary execution, so these atomics are paid only
+/// by explicit benchmark/profile contexts.
+pub const DebugRegistryStats = struct {
+    location_cache_hits: std.atomic.Value(u64) = .init(0),
+    location_cache_misses: std.atomic.Value(u64) = .init(0),
+    lock_acquires: std.atomic.Value(u64) = .init(0),
+    lock_contentions: std.atomic.Value(u64) = .init(0),
+    lock_spins: std.atomic.Value(u64) = .init(0),
+
+    pub fn snapshot(self: *const DebugRegistryStats) DebugRegistrySnapshot {
+        return .{
+            .location_cache_hits = @constCast(self).location_cache_hits.load(.acquire),
+            .location_cache_misses = @constCast(self).location_cache_misses.load(.acquire),
+            .lock_acquires = @constCast(self).lock_acquires.load(.acquire),
+            .lock_contentions = @constCast(self).lock_contentions.load(.acquire),
+            .lock_spins = @constCast(self).lock_spins.load(.acquire),
+        };
+    }
+};
+
 /// Reentrant lock for the Context-owned debugger registry. Inspector callbacks
 /// may synchronously evaluate more source on the runtime thread, so a plain
 /// mutex would deadlock while publishing the nested script. The owner/depth
@@ -413,6 +442,11 @@ pub const DebugRegistryLock = struct {
     depth: usize = 0,
 
     pub fn lock(self: *DebugRegistryLock) void {
+        self.lockProfiled(null);
+    }
+
+    pub fn lockProfiled(self: *DebugRegistryLock, stats: ?*DebugRegistryStats) void {
+        if (stats) |profile| _ = profile.lock_acquires.fetchAdd(1, .monotonic);
         const current: u64 = @intCast(std.Thread.getCurrentId());
         if (self.owner.load(.acquire) == current) {
             self.depth += 1;
@@ -422,6 +456,10 @@ pub const DebugRegistryLock = struct {
         while (!self.mutex.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        if (stats) |profile| if (spins != 0) {
+            _ = profile.lock_contentions.fetchAdd(1, .monotonic);
+            _ = profile.lock_spins.fetchAdd(@intCast(spins), .monotonic);
+        };
         std.debug.assert(self.owner.load(.monotonic) == 0);
         self.depth = 1;
         self.owner.store(current, .release);
@@ -1567,6 +1605,9 @@ pub const Interpreter = struct {
     /// boundaries, so those map operations need a lock independent of object
     /// and GC locks. Single-threaded/GIL contexts keep the null fast path.
     debug_registry_lock: ?*DebugRegistryLock = null,
+    /// Realm-owned attribution sink, installed only when execution-tier
+    /// profiling is explicitly enabled.
+    debug_registry_stats: ?*DebugRegistryStats = null,
     /// Registered locations never change for an AST node. Copy them into this
     /// interpreter-local direct-mapped cache after one synchronized registry
     /// lookup so hot loops in a shared realm do not contend on the registry at
@@ -4145,7 +4186,7 @@ pub const Interpreter = struct {
     }
 
     pub fn lockDebugRegistry(self: *Interpreter) void {
-        if (self.debug_registry_lock) |registry| registry.lock();
+        if (self.debug_registry_lock) |registry| registry.lockProfiled(self.debug_registry_stats);
     }
 
     pub fn unlockDebugRegistry(self: *Interpreter) void {
@@ -4157,10 +4198,12 @@ pub const Interpreter = struct {
         const cached = &self.debug_location_cache[cache_index];
         if (cached.node == node) {
             if (builtin.is_test) self.debug_location_cache_hits += 1;
+            if (self.debug_registry_stats) |stats| _ = stats.location_cache_hits.fetchAdd(1, .monotonic);
             return cached.location;
         }
 
         const locations = self.debug_statement_locations orelse return null;
+        if (self.debug_registry_stats) |stats| _ = stats.location_cache_misses.fetchAdd(1, .monotonic);
         const location = blk: {
             self.lockDebugRegistry();
             defer self.unlockDebugRegistry();
@@ -51412,12 +51455,14 @@ test "interpreter caches immutable debug locations after one registry lookup" {
     try locations.put(std.testing.allocator, &node, expected);
 
     var registry_lock = DebugRegistryLock{};
+    var registry_stats = DebugRegistryStats{};
     var machine = Interpreter{
         .arena = std.testing.allocator,
         .env = undefined,
         .root_shape = undefined,
         .debug_statement_locations = &locations,
         .debug_registry_lock = &registry_lock,
+        .debug_registry_stats = &registry_stats,
     };
     const first = machine.debugStatementLocation(&node).?;
     const second = machine.debugStatementLocation(&node).?;
@@ -51426,4 +51471,10 @@ test "interpreter caches immutable debug locations after one registry lookup" {
     try std.testing.expectEqualStrings(expected.source_url, second.source_url);
     try std.testing.expectEqual(@as(usize, 1), machine.debug_location_cache_misses);
     try std.testing.expectEqual(@as(usize, 1), machine.debug_location_cache_hits);
+    const stats = registry_stats.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), stats.location_cache_misses);
+    try std.testing.expectEqual(@as(u64, 1), stats.location_cache_hits);
+    try std.testing.expectEqual(@as(u64, 1), stats.lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), stats.lock_contentions);
+    try std.testing.expectEqual(@as(u64, 0), stats.lock_spins);
 }

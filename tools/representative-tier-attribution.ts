@@ -32,6 +32,7 @@ export type TierSnapshot = {
   timing: CounterMap;
   admissions: CounterMap;
   synchronization: CounterMap;
+  debug_registry: CounterMap;
   allocation: CounterMap;
   gc_pauses: GcPauseSamples;
   baseline_publications: number;
@@ -52,6 +53,7 @@ export type TierDelta = {
   timing: CounterMap;
   admissions: CounterMap;
   synchronization: CounterMap;
+  debug_registry: CounterMap;
   allocation: CounterMap;
   gc_pauses: GcPauseSamples;
   baseline_publications: number;
@@ -187,6 +189,13 @@ const allocationMetrics = [
   "gc_cell_delegated_allocations",
   "gc_cell_frees",
   "gc_cell_freed_bytes",
+];
+const debugRegistryMetrics = [
+  "location_cache_hits",
+  "location_cache_misses",
+  "lock_acquires",
+  "lock_contentions",
+  "lock_spins",
 ];
 const nativeCodeMetrics = [
   "live_artifacts",
@@ -433,6 +442,9 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
     synchronization: Object.fromEntries(
       synchronizationMetrics.map((name) => [name, 0]),
     ),
+    debug_registry: Object.fromEntries(
+      debugRegistryMetrics.map((name) => [name, 0]),
+    ),
     allocation: Object.fromEntries(allocationMetrics.map((name) => [name, 0])),
     gc_pauses: { minor_ns: [], minor_overflow: 0, full_ns: [], full_overflow: 0 },
     baseline_publications: 0,
@@ -467,6 +479,7 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         timing: subtractTiming(row.timing, before.timing),
         admissions: subtractMap(row.admissions, before.admissions),
         synchronization: subtractSynchronization(row.synchronization, before.synchronization),
+        debug_registry: subtractMap(row.debug_registry, before.debug_registry),
         allocation: subtractAllocation(row.allocation, before.allocation),
         gc_pauses: subtractPauses(row.gc_pauses, before.gc_pauses),
         baseline_publications:
@@ -537,6 +550,7 @@ function validateRows(
           Object.values(row.timing).every(Number.isInteger) &&
           Object.values(row.admissions).every(Number.isInteger) &&
           Object.values(row.synchronization).every(Number.isInteger) &&
+          Object.values(row.debug_registry).every(Number.isInteger) &&
           Object.values(row.allocation).every(Number.isInteger) &&
           row.gc_pauses.minor_ns.every(Number.isInteger) &&
           row.gc_pauses.full_ns.every(Number.isInteger) &&
@@ -574,6 +588,11 @@ function validateRows(
         JSON.stringify(Object.keys(row.synchronization).sort()) ===
           JSON.stringify([...synchronizationMetrics].sort()),
         `synchronization attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        JSON.stringify(Object.keys(row.debug_registry).sort()) ===
+          JSON.stringify([...debugRegistryMetrics].sort()),
+        `debug registry attribution inventory drift for ${workload}`,
       );
       requireValue(
         JSON.stringify(Object.keys(row.allocation).sort()) ===
@@ -1085,6 +1104,9 @@ function syntheticRows(manifest: any): TierSnapshot[] {
             name,
             name === "worker_runs" && entry.mode === "shared" ? index * entry.lanes : 0,
           ]),
+        ),
+        debug_registry: Object.fromEntries(
+          debugRegistryMetrics.map((name) => [name, index]),
         ),
         allocation: Object.fromEntries(allocationMetrics.map((name) => {
           if (name === "backing_allocations" || name === "backing_allocation_bytes" ||

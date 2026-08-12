@@ -3190,6 +3190,9 @@ pub const Context = struct {
     /// disabled and do not add atomics to scored execution paths.
     profile_execution_tiers: bool = false,
     execution_tier_inventory: interp.ExecutionTierInventory = .{},
+    /// Realm-owned statement-location attribution. The interpreter receives
+    /// this sink only for explicit profiling contexts.
+    debug_registry_stats: interp.DebugRegistryStats = .{},
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
     /// Guards the script-id/list and statement-location registry only in a
@@ -4747,6 +4750,7 @@ pub const Context = struct {
             .profile_statement_hook = self.profile_statement_hook,
             .bytecode_admission_inventory = &self.bytecode_admission_inventory,
             .execution_tier_inventory = if (self.profile_execution_tiers) &self.execution_tier_inventory else null,
+            .debug_registry_stats = if (self.profile_execution_tiers) &self.debug_registry_stats else null,
             .bytecode_execution_mode = self.bytecode_execution_mode,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
@@ -4832,7 +4836,7 @@ pub const Context = struct {
     }
 
     pub fn lockDebugRegistry(self: *Context) void {
-        if (self.parallel_js) self.debug_registry_lock.lock();
+        if (self.parallel_js) self.debug_registry_lock.lockProfiled(if (self.profile_execution_tiers) &self.debug_registry_stats else null);
     }
 
     pub fn unlockDebugRegistry(self: *Context) void {
@@ -4857,6 +4861,7 @@ pub const Context = struct {
         optimizer_publications: u64,
         generated_code_bytes: usize,
         native_code: NativeCodeAttributionSnapshot,
+        debug_registry: interp.DebugRegistrySnapshot,
         heap: RuntimeHeapAccounting,
         runtime: RuntimeAttributionProfiler.Snapshot,
     };
@@ -4916,6 +4921,7 @@ pub const Context = struct {
                 .unknown_shape_invalidation_events = code.unknown_shape_invalidation_events,
                 .shape_fallback_events = code.shape_fallback_events,
             },
+            .debug_registry = self.debug_registry_stats.snapshot(),
             .heap = self.runtimeHeapAccounting(),
             .runtime = if (self.runtime_attribution_profiler) |profile|
                 profile.snapshot()
@@ -21734,6 +21740,8 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.host_callbacks));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.wasm_dispatches));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.environment_allocations));
+    inline for (comptime std.meta.fieldNames(interp.DebugRegistrySnapshot)) |name|
+        try std.testing.expectEqual(@as(u64, 0), @field(ordinary_snapshot.debug_registry, name));
     inline for (comptime std.meta.fieldNames(interp.TierTimingSnapshot)) |name|
         try std.testing.expectEqual(@as(u64, 0), @field(ordinary_snapshot.timing, name));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.runtime.allocation.backing_allocations);
@@ -21755,6 +21763,7 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     try std.testing.expect(tree_snapshot.runtime.allocation.backing_allocations > 0);
     try std.testing.expect(tree_snapshot.runtime.allocation.backing_allocation_bytes > 0);
     try std.testing.expect(tree_snapshot.runtime.allocation.gc_cell_allocations > 0);
+    try std.testing.expect(tree_snapshot.debug_registry.location_cache_misses > 0);
     try std.testing.expectEqual(
         tree_snapshot.heap.collections,
         tree_snapshot.runtime.minor_pauses.len + tree_snapshot.runtime.full_pauses.len,
