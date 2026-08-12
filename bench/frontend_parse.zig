@@ -16,6 +16,9 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_strings_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_strings_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_strings_4096")) return 4096;
@@ -40,12 +43,17 @@ fn isTaggedTemplateWorkload(name: []const u8) bool {
     return std.mem.eql(u8, name, "representative_frontend_templates_tagged_4096");
 }
 
-fn strictFunctionSource(allocator: std.mem.Allocator, width: usize) ![]const u8 {
+fn isEscapedIdentifierWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_escaped_identifiers_");
+}
+
+fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
     var source: std.ArrayListUnmanaged(u8) = .empty;
     try source.appendSlice(allocator, "function strictWidth(");
     for (0..width) |index| {
         if (index != 0) try source.append(allocator, ',');
-        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "parameter{d}", .{index}));
+        try source.appendSlice(allocator, if (escaped) "paramet\\u0065r" else "parameter");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
     }
     try source.appendSlice(allocator, "){\"use strict\";return 7;}");
     return source.items;
@@ -106,7 +114,16 @@ fn parseOnce(allocator: std.mem.Allocator, source: []const u8, workload: []const
         return checksum;
     }
     if (declaration.* != .func_decl) return error.InvalidProgram;
-    return declaration.func_decl.params.len + 7;
+    if (!isEscapedIdentifierWorkload(workload)) return declaration.func_decl.params.len + 7;
+    var checksum = declaration.func_decl.params.len + 7;
+    for (declaration.func_decl.params, 0..) |param, index| {
+        if (param.name.len < "parameter".len or !std.mem.eql(u8, param.name[0.."parameter".len], "parameter"))
+            return error.InvalidProgram;
+        if (try std.fmt.parseUnsigned(usize, param.name["parameter".len..], 10) != index)
+            return error.InvalidProgram;
+        checksum += param.name.len;
+    }
+    return checksum;
 }
 
 fn runJobs(allocator: std.mem.Allocator, source: []const u8, jobs: usize, workload: []const u8) !usize {
@@ -140,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
             isTaggedTemplateWorkload(workload),
         )
     else
-        try strictFunctionSource(init.arena.allocator(), width);
+        try strictFunctionSource(init.arena.allocator(), width, isEscapedIdentifierWorkload(workload));
     for (0..warmup_calls) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload);
 
     var stdout_buffer: [4096]u8 = undefined;
