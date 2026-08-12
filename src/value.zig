@@ -2879,7 +2879,7 @@ pub const Object = struct {
             gcBarrier(self, value_);
             self.inline_slots[index] = value_;
         }
-        self.shape = prepared.final_shape;
+        self.publishShapeUnlocked(prepared.final_shape);
         return true;
     }
 
@@ -4535,13 +4535,28 @@ pub const Object = struct {
     };
 
     pub fn namedOwnPropertySnapshot(self: *const Object, name: []const u8) NamedOwnPropertySnapshot {
+        // A null accessor sidecar and a miss in the acquire-published immutable
+        // Shape are a complete absent descriptor. A concurrent insertion may
+        // linearize after either observation; present data/accessor state still
+        // takes `property_lock` before touching mutable storage.
+        var observed_shape: ?*Shape = null;
+        var observed_slot: ?u32 = null;
+        if (self.accessorsMap() == null) {
+            const published = @atomicLoad(?*Shape, &self.shape, .acquire) orelse return .absent;
+            const slot = (@constCast(published)).lookup(name) orelse return .absent;
+            observed_shape = published;
+            observed_slot = slot;
+        }
         self.lockPropertiesFor(.named_snapshot);
         defer self.unlockProperties();
         if (self.getAccessorUnlocked(name)) |accessor| {
             return .{ .accessor = accessor };
         }
         const shape = self.shape orelse return .absent;
-        const slot = (@constCast(shape)).lookup(name) orelse return .absent;
+        const slot = if (shape == observed_shape)
+            observed_slot.?
+        else
+            (@constCast(shape)).lookup(name) orelse return .absent;
         return .{ .data = .{
             .value = self.slotsItems()[slot],
             .shape = shape,
@@ -4569,6 +4584,13 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         return self.shape;
+    }
+
+    /// Publish a fully initialized immutable Shape pointer. The caller owns the
+    /// fresh object exclusively or holds `property_lock`; slot/accessor writes
+    /// that make a descriptor present must precede this release store.
+    pub fn publishShapeUnlocked(self: *Object, shape: ?*Shape) void {
+        @atomicStore(?*Shape, &self.shape, shape, .release);
     }
 
     pub fn getOwnUnlocked(self: *const Object, name: []const u8) ?Value {
@@ -4625,7 +4647,7 @@ pub const Object = struct {
         } else {
             try self.appendSlot(arena, v);
         }
-        self.shape = child;
+        self.publishShapeUnlocked(child);
         if (canonicalIndex(name) != null) {
             self.has_indexed_property.store(true, .monotonic);
             self.indexed_own_seen.store(true, .release);
@@ -4777,7 +4799,7 @@ pub const Object = struct {
 
         gcBarrier(self, v);
         try self.appendSlot(arena, v);
-        self.shape = child;
+        self.publishShapeUnlocked(child);
         if (canonicalIndex(child.name.?) != null) {
             self.has_indexed_property.store(true, .monotonic);
             self.indexed_own_seen.store(true, .release);
@@ -4831,7 +4853,7 @@ pub const Object = struct {
         if (next.count < current.count) {
             if (self.slotsState()) |slots| slots.list.shrinkRetainingCapacity(next.count);
         }
-        self.shape = next;
+        self.publishShapeUnlocked(next);
         self.deleteAttrUnlocked(key);
         if (pending_order_key) |owned| {
             self.keyOrder().?.appendAssumeCapacity(.{ .key = owned, .deleted = true });
@@ -4931,7 +4953,7 @@ pub const Object = struct {
             for (entries.items, 0..) |entry, index| self.inline_slots[index] = entry.value;
             storage.slots.store(null, .release);
         }
-        self.shape = compact_shape;
+        self.publishShapeUnlocked(compact_shape);
         if (old_slots) |state| {
             state.list.deinit(slot_alloc);
             slot_alloc.destroy(state);
@@ -5725,6 +5747,73 @@ test "ordinary named descriptor snapshot is coherent under one property lock" {
     }
     try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
+}
+
+test "absent named descriptor snapshots use immutable shape publication" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{};
+    try object.setOwn(arena, root, "present", Value.num(11));
+
+    object_profile.reset();
+    defer object_profile.disable();
+    try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
+    try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
+
+    switch (object.namedOwnPropertySnapshot("present")) {
+        .data => |own| try std.testing.expectEqual(@as(f64, 11), own.value.asNum()),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+
+    // A populated accessor map remains mutable and therefore keeps the lock,
+    // even when this exact name has never been an accessor.
+    try object.setAccessor(arena, "accessor", Value.num(3), null);
+    object_profile.reset();
+    try std.testing.expect(object.namedOwnPropertySnapshot("still-missing") == .absent);
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+}
+
+test "named descriptor miss publication is race safe" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{};
+    var start = std.atomic.Value(bool).init(false);
+    var done = std.atomic.Value(bool).init(false);
+    const Worker = struct {
+        fn read(target: *Object, start_flag: *std.atomic.Value(bool), done_flag: *std.atomic.Value(bool)) void {
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            while (!done_flag.load(.acquire)) switch (target.namedOwnPropertySnapshot("field")) {
+                .absent => {},
+                .data => |own| std.debug.assert(own.value.isNumber()),
+                .accessor => @panic("unexpected accessor"),
+            };
+        }
+
+        fn mutate(target: *Object, allocator: std.mem.Allocator, root_shape: *Shape, start_flag: *std.atomic.Value(bool), done_flag: *std.atomic.Value(bool)) void {
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..2_000) |index| {
+                _ = target.setOrdinaryOwnData(allocator, root_shape, "field", Value.num(@floatFromInt(index))) catch @panic("set failed");
+                if (!(target.deleteOrdinaryNamedOwn(allocator, root_shape, "field") catch @panic("delete failed")))
+                    @panic("delete declined");
+            }
+            done_flag.store(true, .release);
+        }
+    };
+
+    var readers: [4]std.Thread = undefined;
+    for (&readers) |*thread|
+        thread.* = try std.Thread.spawn(.{}, Worker.read, .{ &object, &start, &done });
+    const writer = try std.Thread.spawn(.{}, Worker.mutate, .{ &object, arena, root, &start, &done });
+    start.store(true, .release);
+    writer.join();
+    for (readers) |thread| thread.join();
+    try std.testing.expect(object.namedOwnPropertySnapshot("field") == .absent);
 }
 
 test "absent descriptor sidecars avoid property locks but populated maps stay serialized" {
