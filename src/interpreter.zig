@@ -395,12 +395,24 @@ pub const DebugScriptRegistration = struct {
     start_line: usize,
 };
 
-const debug_location_cache_size = 64;
+const debug_location_cache_set_count = 16;
+const debug_location_cache_way_count = 4;
+const debug_location_cache_size = debug_location_cache_set_count * debug_location_cache_way_count;
 
 const DebugLocationCacheEntry = struct {
     node: ?*const Node = null,
-    location: DebugStatementLocation = undefined,
+    location: ?DebugStatementLocation = null,
 };
+
+fn debugLocationCacheSetIndex(node: *const Node) usize {
+    // Arena allocation gives adjacent nodes regular low address bits. Fold
+    // higher bits before selecting a power-of-two set so one source construct
+    // cannot evict every other hot statement merely because of its stride.
+    var key = @intFromPtr(node) / @alignOf(Node);
+    key ^= key >> 7;
+    key ^= key >> 13;
+    return key & (debug_location_cache_set_count - 1);
+}
 
 pub const DebugRegistrySnapshot = struct {
     location_cache_hits: u64 = 0,
@@ -1609,10 +1621,14 @@ pub const Interpreter = struct {
     /// profiling is explicitly enabled.
     debug_registry_stats: ?*DebugRegistryStats = null,
     /// Registered locations never change for an AST node. Copy them into this
-    /// interpreter-local direct-mapped cache after one synchronized registry
-    /// lookup so hot loops in a shared realm do not contend on the registry at
-    /// every ordinary statement boundary.
-    debug_location_cache: [debug_location_cache_size]DebugLocationCacheEntry = @splat(.{}),
+    /// interpreter-local four-way cache after one synchronized registry lookup
+    /// so hot loops in a shared realm do not contend on the registry at every
+    /// ordinary statement boundary. Both positive and negative lookups are
+    /// immutable once an AST is published, so non-statement nodes are cached as
+    /// well. Total capacity remains fixed at 64 entries;
+    /// adversarial source can cause bounded misses but cannot grow storage.
+    debug_location_cache: [debug_location_cache_set_count][debug_location_cache_way_count]DebugLocationCacheEntry = @splat(@splat(.{})),
+    debug_location_cache_next: [debug_location_cache_set_count]u8 = @splat(0),
     debug_location_cache_hits: usize = 0,
     debug_location_cache_misses: usize = 0,
     debug_script_ctx: ?*anyopaque = null,
@@ -4194,12 +4210,16 @@ pub const Interpreter = struct {
     }
 
     pub fn debugStatementLocation(self: *Interpreter, node: *const Node) ?DebugStatementLocation {
-        const cache_index = (@intFromPtr(node) / @alignOf(Node)) % debug_location_cache_size;
-        const cached = &self.debug_location_cache[cache_index];
-        if (cached.node == node) {
-            if (builtin.is_test) self.debug_location_cache_hits += 1;
-            if (self.debug_registry_stats) |stats| _ = stats.location_cache_hits.fetchAdd(1, .monotonic);
-            return cached.location;
+        const set_index = debugLocationCacheSetIndex(node);
+        const set = &self.debug_location_cache[set_index];
+        var first_empty: ?usize = null;
+        for (set, 0..) |*cached, way| {
+            if (cached.node == node) {
+                if (builtin.is_test) self.debug_location_cache_hits += 1;
+                if (self.debug_registry_stats) |stats| _ = stats.location_cache_hits.fetchAdd(1, .monotonic);
+                return cached.location;
+            }
+            if (cached.node == null and first_empty == null) first_empty = way;
         }
 
         const locations = self.debug_statement_locations orelse return null;
@@ -4207,9 +4227,11 @@ pub const Interpreter = struct {
         const location = blk: {
             self.lockDebugRegistry();
             defer self.unlockDebugRegistry();
-            break :blk locations.get(node) orelse return null;
+            break :blk locations.get(node);
         };
-        cached.* = .{ .node = node, .location = location };
+        const replacement = first_empty orelse self.debug_location_cache_next[set_index];
+        set[replacement] = .{ .node = node, .location = location };
+        self.debug_location_cache_next[set_index] = @intCast((replacement + 1) % debug_location_cache_way_count);
         if (builtin.is_test) self.debug_location_cache_misses += 1;
         return location;
     }
@@ -51477,4 +51499,90 @@ test "interpreter caches immutable debug locations after one registry lookup" {
     try std.testing.expectEqual(@as(u64, 1), stats.lock_acquires);
     try std.testing.expectEqual(@as(u64, 0), stats.lock_contentions);
     try std.testing.expectEqual(@as(u64, 0), stats.lock_spins);
+}
+
+test "interpreter caches immutable absence of a debug location" {
+    var locations: std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = .empty;
+    defer locations.deinit(std.testing.allocator);
+    var node: Node = undefined;
+    var registry_lock = DebugRegistryLock{};
+    var registry_stats = DebugRegistryStats{};
+    var machine = Interpreter{
+        .arena = std.testing.allocator,
+        .env = undefined,
+        .root_shape = undefined,
+        .debug_statement_locations = &locations,
+        .debug_registry_lock = &registry_lock,
+        .debug_registry_stats = &registry_stats,
+    };
+    try std.testing.expect(machine.debugStatementLocation(&node) == null);
+    try std.testing.expect(machine.debugStatementLocation(&node) == null);
+
+    const stats = registry_stats.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), stats.location_cache_misses);
+    try std.testing.expectEqual(@as(u64, 1), stats.location_cache_hits);
+    try std.testing.expectEqual(@as(u64, 1), stats.lock_acquires);
+}
+
+test "interpreter debug location cache retains four colliding statements with bounded eviction" {
+    var locations: std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = .empty;
+    defer locations.deinit(std.testing.allocator);
+    var nodes: [debug_location_cache_size + debug_location_cache_set_count]Node = undefined;
+    var selected: [debug_location_cache_way_count + 1]*Node = undefined;
+    var selected_len: usize = 0;
+    var selected_set: ?usize = null;
+    for (&nodes) |*node| {
+        const set_index = debugLocationCacheSetIndex(node);
+        if (selected_set == null) selected_set = set_index;
+        if (set_index != selected_set.?) continue;
+        selected[selected_len] = node;
+        selected_len += 1;
+        if (selected_len == selected.len) break;
+    }
+    if (selected_len != selected.len) {
+        // Select the most populated set rather than relying on the first node's
+        // distribution. Pigeonhole guarantees five peers across 80 nodes.
+        var counts: [debug_location_cache_set_count]usize = @splat(0);
+        for (&nodes) |*node| counts[debugLocationCacheSetIndex(node)] += 1;
+        var fullest_set: usize = 0;
+        for (counts[1..], 1..) |count, set_index|
+            if (count > counts[fullest_set]) {
+                fullest_set = set_index;
+            };
+        selected_set = fullest_set;
+        selected_len = 0;
+        for (&nodes) |*node| {
+            if (debugLocationCacheSetIndex(node) != selected_set.?) continue;
+            selected[selected_len] = node;
+            selected_len += 1;
+            if (selected_len == selected.len) break;
+        }
+    }
+    try std.testing.expectEqual(selected.len, selected_len);
+    for (selected, 0..) |node, index| try locations.put(std.testing.allocator, node, .{
+        .script_id = @intCast(index + 1),
+        .location = .{ .byte_offset = index, .line = index + 1, .column = 1 },
+    });
+
+    var registry_lock = DebugRegistryLock{};
+    var registry_stats = DebugRegistryStats{};
+    var machine = Interpreter{
+        .arena = std.testing.allocator,
+        .env = undefined,
+        .root_shape = undefined,
+        .debug_statement_locations = &locations,
+        .debug_registry_lock = &registry_lock,
+        .debug_registry_stats = &registry_stats,
+    };
+    for (selected[0..debug_location_cache_way_count], 0..) |node, index|
+        try std.testing.expectEqual(@as(u64, @intCast(index + 1)), machine.debugStatementLocation(node).?.script_id);
+    for (selected[0..debug_location_cache_way_count], 0..) |node, index|
+        try std.testing.expectEqual(@as(u64, @intCast(index + 1)), machine.debugStatementLocation(node).?.script_id);
+    try std.testing.expectEqual(@as(u64, debug_location_cache_way_count + 1), machine.debugStatementLocation(selected[debug_location_cache_way_count]).?.script_id);
+    try std.testing.expectEqual(@as(u64, 1), machine.debugStatementLocation(selected[0]).?.script_id);
+
+    const stats = registry_stats.snapshot();
+    try std.testing.expectEqual(@as(u64, 4), stats.location_cache_hits);
+    try std.testing.expectEqual(@as(u64, 6), stats.location_cache_misses);
+    try std.testing.expectEqual(@as(u64, 6), stats.lock_acquires);
 }

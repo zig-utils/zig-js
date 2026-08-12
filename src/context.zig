@@ -504,6 +504,7 @@ pub const RuntimeAttributionProfiler = struct {
     };
 
     inner: std.mem.Allocator,
+    debug_registry: interp.DebugRegistryStats = .{},
     backing_allocations: std.atomic.Value(u64) = .init(0),
     backing_allocation_bytes: std.atomic.Value(u64) = .init(0),
     backing_growths: std.atomic.Value(u64) = .init(0),
@@ -3190,9 +3191,6 @@ pub const Context = struct {
     /// disabled and do not add atomics to scored execution paths.
     profile_execution_tiers: bool = false,
     execution_tier_inventory: interp.ExecutionTierInventory = .{},
-    /// Realm-owned statement-location attribution. The interpreter receives
-    /// this sink only for explicit profiling contexts.
-    debug_registry_stats: interp.DebugRegistryStats = .{},
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
     /// Guards the script-id/list and statement-location registry only in a
@@ -4750,7 +4748,7 @@ pub const Context = struct {
             .profile_statement_hook = self.profile_statement_hook,
             .bytecode_admission_inventory = &self.bytecode_admission_inventory,
             .execution_tier_inventory = if (self.profile_execution_tiers) &self.execution_tier_inventory else null,
-            .debug_registry_stats = if (self.profile_execution_tiers) &self.debug_registry_stats else null,
+            .debug_registry_stats = if (self.runtime_attribution_profiler) |profile| &profile.debug_registry else null,
             .bytecode_execution_mode = self.bytecode_execution_mode,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
@@ -4836,7 +4834,7 @@ pub const Context = struct {
     }
 
     pub fn lockDebugRegistry(self: *Context) void {
-        if (self.parallel_js) self.debug_registry_lock.lockProfiled(if (self.profile_execution_tiers) &self.debug_registry_stats else null);
+        if (self.parallel_js) self.debug_registry_lock.lockProfiled(if (self.runtime_attribution_profiler) |profile| &profile.debug_registry else null);
     }
 
     pub fn unlockDebugRegistry(self: *Context) void {
@@ -4921,7 +4919,10 @@ pub const Context = struct {
                 .unknown_shape_invalidation_events = code.unknown_shape_invalidation_events,
                 .shape_fallback_events = code.shape_fallback_events,
             },
-            .debug_registry = self.debug_registry_stats.snapshot(),
+            .debug_registry = if (self.runtime_attribution_profiler) |profile|
+                profile.debug_registry.snapshot()
+            else
+                .{},
             .heap = self.runtimeHeapAccounting(),
             .runtime = if (self.runtime_attribution_profiler) |profile|
                 profile.snapshot()
