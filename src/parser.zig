@@ -3015,16 +3015,23 @@ pub const Parser = struct {
         const raw = try normalizeTemplateRaw(self.arena, raw_in);
         var node: ?*Node = null;
         var lit: std.ArrayListUnmanaged(u8) = .empty;
+        var decoded = false;
+        var raw_start: usize = 0;
         var i: usize = 0;
         while (i < raw.len) {
             const c = raw[i];
             if (c == '\\' and i + 1 < raw.len) {
+                try lit.appendSlice(self.arena, raw[raw_start..i]);
+                decoded = true;
                 try validateTemplateEscape(raw, i + 1);
                 i = try lex.appendEscape(self.arena, &lit, raw, i + 1);
+                raw_start = i;
             } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
                 // Flush the literal run so far, then parse the substitution.
-                node = try self.concatStr(node, lit.items);
+                if (decoded) try lit.appendSlice(self.arena, raw[raw_start..i]);
+                node = try self.concatStr(node, if (decoded) lit.items else raw[raw_start..i]);
                 lit = .empty;
+                decoded = false;
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
                 var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
@@ -3039,12 +3046,13 @@ pub const Parser = struct {
                 sub.eval_private_allowed = self.eval_private_allowed;
                 node = try self.concatExpr(node, try sub.parseExpression());
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
+                raw_start = i;
             } else {
-                try lit.append(self.arena, c);
                 i += 1;
             }
         }
-        return self.concatStr(node, lit.items);
+        if (decoded) try lit.appendSlice(self.arena, raw[raw_start..]);
+        return self.concatStr(node, if (decoded) lit.items else raw[raw_start..]);
     }
 
     /// Split a template's raw inner text into the cooked quasis (escapes
@@ -3061,19 +3069,26 @@ pub const Parser = struct {
         // (tolerated in a tagged template); track that per quasi and flush null.
         var span_invalid = false;
         var raw_start: usize = 0;
+        var cooked_raw_start: usize = 0;
+        var decoded = false;
         var i: usize = 0;
         while (i < raw.len) {
             const c = raw[i];
             if (c == '\\' and i + 1 < raw.len) {
+                try buf.appendSlice(self.arena, raw[cooked_raw_start..i]);
+                decoded = true;
                 validateTemplateEscape(raw, i + 1) catch {
                     span_invalid = true;
                 };
                 i = try lex.appendEscape(self.arena, &buf, raw, i + 1);
+                cooked_raw_start = i;
             } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
-                try cooked.append(self.arena, if (span_invalid) null else try buf.toOwnedSlice(self.arena));
+                if (decoded) try buf.appendSlice(self.arena, raw[cooked_raw_start..i]);
+                try cooked.append(self.arena, if (span_invalid) null else if (decoded) buf.items else raw[cooked_raw_start..i]);
                 try raws.append(self.arena, raw[raw_start..i]);
                 buf = .empty;
                 span_invalid = false;
+                decoded = false;
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
                 var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
@@ -3089,12 +3104,13 @@ pub const Parser = struct {
                 try exprs.append(self.arena, try sub.parseExpression());
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
                 raw_start = i;
+                cooked_raw_start = i;
             } else {
-                try buf.append(self.arena, c);
                 i += 1;
             }
         }
-        try cooked.append(self.arena, if (span_invalid) null else try buf.toOwnedSlice(self.arena));
+        if (decoded) try buf.appendSlice(self.arena, raw[cooked_raw_start..]);
+        try cooked.append(self.arena, if (span_invalid) null else if (decoded) buf.items else raw[cooked_raw_start..]);
         try raws.append(self.arena, raw[raw_start..]);
         return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked.items, .raw = raws.items, .exprs = exprs.items } });
     }
@@ -3140,7 +3156,10 @@ pub const Parser = struct {
     }
 
     fn concatStr(self: *Parser, node: ?*Node, bytes: []const u8) ParseError!*Node {
-        const s = try self.alloc(.{ .string = try self.arena.dupe(u8, bytes) });
+        // Template source and decoded buffers already share the parser arena
+        // lifetime. Retain their exact slice instead of copying every quasi a
+        // second time while building the concatenation AST.
+        const s = try self.alloc(.{ .string = bytes });
         if (node) |n| return self.alloc(.{ .binary = .{ .op = .add, .left = n, .right = s } });
         return s;
     }
@@ -4451,6 +4470,81 @@ test "parser rejects malformed untagged template escapes" {
     defer arena.deinit();
     var ok = try Parser.init(arena.allocator(), "`\\n${1}\\u{41}`");
     _ = try ok.parseProgram();
+}
+
+test "parser borrows plain template quasis and owns decoded storage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const plain_source = "`plain template`";
+    var plain_parser = try Parser.init(arena.allocator(), plain_source);
+    const plain_program = try plain_parser.parseProgram();
+    const plain = plain_program.program[0].expr_stmt;
+    try std.testing.expect(plain.* == .string);
+    try std.testing.expectEqualStrings("plain template", plain.string);
+    try std.testing.expectEqual(@intFromPtr(plain_source.ptr + 1), @intFromPtr(plain.string.ptr));
+
+    const tagged_source = "tag`left${value}right`";
+    var tagged_parser = try Parser.init(arena.allocator(), tagged_source);
+    const tagged_program = try tagged_parser.parseProgram();
+    const tagged = tagged_program.program[0].expr_stmt;
+    try std.testing.expect(tagged.* == .tagged_template);
+    try std.testing.expectEqual(@as(usize, 2), tagged.tagged_template.cooked.len);
+    try std.testing.expectEqual(@as(usize, 2), tagged.tagged_template.raw.len);
+    try std.testing.expectEqual(@as(usize, 1), tagged.tagged_template.exprs.len);
+    const left = tagged.tagged_template.cooked[0] orelse return error.TestUnexpectedResult;
+    const right = tagged.tagged_template.cooked[1] orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("left", left);
+    try std.testing.expectEqualStrings("right", right);
+    try std.testing.expectEqual(@intFromPtr(tagged_source.ptr + 4), @intFromPtr(left.ptr));
+    try std.testing.expectEqual(@intFromPtr(tagged.tagged_template.raw[0].ptr), @intFromPtr(left.ptr));
+    try std.testing.expectEqual(@intFromPtr(tagged_source.ptr + std.mem.indexOf(u8, tagged_source, "right").?), @intFromPtr(right.ptr));
+    try std.testing.expectEqual(@intFromPtr(tagged.tagged_template.raw[1].ptr), @intFromPtr(right.ptr));
+
+    const escaped_source = "tag`raw\\nspan\\u0021tail`";
+    var escaped_parser = try Parser.init(arena.allocator(), escaped_source);
+    const escaped_program = try escaped_parser.parseProgram();
+    const escaped = escaped_program.program[0].expr_stmt.tagged_template;
+    const cooked = escaped.cooked[0] orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("raw\nspan!tail", cooked);
+    try std.testing.expectEqualStrings("raw\\nspan\\u0021tail", escaped.raw[0]);
+    try std.testing.expectEqual(@intFromPtr(escaped_source.ptr + 4), @intFromPtr(escaped.raw[0].ptr));
+    try std.testing.expect(@intFromPtr(cooked.ptr) != @intFromPtr(escaped.raw[0].ptr));
+
+    const normalized_source = "tag`left\r\nright`";
+    var normalized_parser = try Parser.init(arena.allocator(), normalized_source);
+    const normalized_program = try normalized_parser.parseProgram();
+    const normalized = normalized_program.program[0].expr_stmt.tagged_template;
+    const normalized_cooked = normalized.cooked[0] orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("left\nright", normalized_cooked);
+    try std.testing.expectEqualStrings("left\nright", normalized.raw[0]);
+    try std.testing.expect(@intFromPtr(normalized_cooked.ptr) != @intFromPtr(normalized_source.ptr + 4));
+    try std.testing.expectEqual(@intFromPtr(normalized_cooked.ptr), @intFromPtr(normalized.raw[0].ptr));
+}
+
+test "parser propagates template decoding allocation failures" {
+    var saw_out_of_memory = false;
+    var saw_success = false;
+    for (0..64) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        var arena = std.heap.ArenaAllocator.init(failing.allocator());
+        defer arena.deinit();
+
+        var parser = Parser.init(arena.allocator(), "tag`raw\\n${value}span\\u0021tail`") catch |err| {
+            if (err != error.OutOfMemory) return err;
+            saw_out_of_memory = true;
+            continue;
+        };
+        _ = parser.parseProgram() catch |err| {
+            if (err != error.OutOfMemory) return err;
+            saw_out_of_memory = true;
+            continue;
+        };
+        saw_success = true;
+        break;
+    }
+    try std.testing.expect(saw_out_of_memory);
+    try std.testing.expect(saw_success);
 }
 
 test "parser enforces reserved words in identifier positions" {
