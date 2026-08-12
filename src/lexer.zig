@@ -306,17 +306,50 @@ pub const Lexer = struct {
     /// slice, so the common case allocates nothing.
     fn lexIdentName(self: *Lexer) LexError![]const u8 {
         const start = self.i;
-        var needs_decode = false;
         var first = true;
         while (self.i < self.src.len) {
             const c = self.src[self.i];
+            if (c == '\\') return self.lexEscapedIdentName(start, first);
+            if (c < 0x80) {
+                if (!(if (first) isIdentStart(c) else isIdentPart(c))) break;
+                self.i += 1;
+            } else {
+                const len = std.unicode.utf8ByteSequenceLength(c) catch break;
+                if (self.i + len > self.src.len) break;
+                const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
+                if (!(if (first) isIdStartCp(cp) else isIdContinueCp(cp))) break;
+                self.i += len;
+            }
+            first = false;
+        }
+        self.last_identifier_escaped = false;
+        return self.src[start..self.i];
+    }
+
+    /// Continue an IdentifierName scan after its first escape. The ordinary
+    /// path above keeps its source-slice-only loop; only escaped names carry
+    /// decode state and owned storage.
+    fn lexEscapedIdentName(self: *Lexer, start: usize, first_in: bool) LexError![]const u8 {
+        var decoded: std.ArrayListUnmanaged(u8) = .empty;
+        var raw_start = start;
+        var first = first_in;
+        while (self.i < self.src.len) {
+            const c = self.src[self.i];
             if (c == '\\') {
-                needs_decode = true;
+                const escape_start = self.i;
                 self.i += 1;
                 if (self.peek() != 'u') return LexError.UnexpectedCharacter;
                 self.i += 1; // 'u'
                 const cp = try self.scanUnicodeEscapeCp();
                 if (!(if (first) isIdStartCp(cp) else isIdContinueCp(cp))) return LexError.UnexpectedCharacter;
+                var encoded: [4]u8 = undefined;
+                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return LexError.UnexpectedCharacter;
+                // Decode during the validating scan. Ordinary source bytes stay
+                // borrowed until an escape requires owned storage, then move in
+                // contiguous spans rather than one append per byte.
+                try decoded.appendSlice(self.arena, self.src[raw_start..escape_start]);
+                try decoded.appendSlice(self.arena, encoded[0..encoded_len]);
+                raw_start = self.i;
                 first = false;
                 continue;
             }
@@ -332,15 +365,9 @@ pub const Lexer = struct {
             }
             first = false;
         }
-        const raw = self.src[start..self.i];
-        self.last_identifier_escaped = needs_decode;
-        return if (needs_decode) self.decodeIdent(raw) else raw;
-    }
-
-    /// Advance past a `\u` escape's digits (`\u{XXXX}` or exactly four hex
-    /// digits). `self.i` points just past the `u`.
-    fn skipUnicodeEscape(self: *Lexer) LexError!void {
-        _ = try self.scanUnicodeEscapeCp();
+        self.last_identifier_escaped = true;
+        try decoded.appendSlice(self.arena, self.src[raw_start..self.i]);
+        return decoded.toOwnedSlice(self.arena);
     }
 
     /// Decode and advance past a `\u` escape's digits. `self.i` points just
@@ -367,36 +394,6 @@ pub const Lexer = struct {
             }
             return std.fmt.parseInt(u21, self.src[ds..self.i], 16) catch return LexError.UnexpectedCharacter;
         }
-    }
-
-    /// Decode an identifier slice containing `\u` escapes into a fresh UTF-8
-    /// buffer (literal bytes copied through, escapes resolved + re-encoded).
-    fn decodeIdent(self: *Lexer, raw: []const u8) LexError![]const u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        var j: usize = 0;
-        while (j < raw.len) {
-            if (raw[j] != '\\') {
-                try buf.append(self.arena, raw[j]);
-                j += 1;
-                continue;
-            }
-            j += 2; // skip "\u"
-            var cp: u21 = undefined;
-            if (j < raw.len and raw[j] == '{') {
-                j += 1;
-                const s = j;
-                while (j < raw.len and raw[j] != '}') j += 1;
-                cp = std.fmt.parseInt(u21, raw[s..j], 16) catch return LexError.UnexpectedCharacter;
-                j += 1; // '}'
-            } else {
-                cp = std.fmt.parseInt(u21, raw[j .. j + 4], 16) catch return LexError.UnexpectedCharacter;
-                j += 4;
-            }
-            var ub: [4]u8 = undefined;
-            const n = std.unicode.utf8Encode(cp, &ub) catch return LexError.UnexpectedCharacter;
-            try buf.appendSlice(self.arena, ub[0..n]);
-        }
-        return buf.toOwnedSlice(self.arena);
     }
 
     pub fn next(self: *Lexer) LexError!Token {
@@ -1392,6 +1389,38 @@ test "lexer tokenizes arithmetic" {
     try std.testing.expectEqual(TokenKind.star, (try lx.next()).kind);
     try std.testing.expectEqual(@as(f64, 3), (try lx.next()).number);
     try std.testing.expectEqual(TokenKind.eof, (try lx.next()).kind);
+}
+
+test "lexer borrows ordinary identifiers and owns escaped decoding" {
+    const ordinary_source = "ordinary_π";
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    var ordinary = Lexer.init(failing.allocator(), ordinary_source);
+    const borrowed = try ordinary.next();
+    try std.testing.expectEqual(TokenKind.identifier, borrowed.kind);
+    try std.testing.expectEqualStrings(ordinary_source, borrowed.text);
+    try std.testing.expectEqual(@intFromPtr(ordinary_source.ptr), @intFromPtr(borrowed.text.ptr));
+    try std.testing.expect(!borrowed.escaped_identifier);
+
+    var escaped_oom = Lexer.init(failing.allocator(), "paramet\\u0065r");
+    try std.testing.expectError(error.OutOfMemory, escaped_oom.next());
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const escaped_source = "paramet\\u0065r\\u{3c0}";
+    var escaped = Lexer.init(arena.allocator(), escaped_source);
+    const decoded = try escaped.next();
+    try std.testing.expectEqual(TokenKind.identifier, decoded.kind);
+    try std.testing.expectEqualStrings("parameterπ", decoded.text);
+    try std.testing.expect(decoded.escaped_identifier);
+    try std.testing.expectEqual(@as(usize, 0), decoded.pos);
+    try std.testing.expectEqual(escaped_source.len, decoded.end);
+    try std.testing.expect(@intFromPtr(escaped_source.ptr) != @intFromPtr(decoded.text.ptr));
+
+    var private = Lexer.init(arena.allocator(), "#priv\\u0061te");
+    const private_name = try private.next();
+    try std.testing.expectEqual(TokenKind.private_name, private_name.kind);
+    try std.testing.expectEqualStrings("#private", private_name.text);
 }
 
 test "lexer decodes string escapes" {
