@@ -2183,6 +2183,11 @@ pub const Interpreter = struct {
         // invalidates no heap fact. Keep Class-A for an absent key: that path
         // transitions the receiver and remains the compile/link watchpoint
         // boundary until #471's per-artifact transition policy replaces it.
+        const owner = self.jit_owner;
+        if (owner == null or !owner.?.hasPublishedArtifacts()) {
+            try obj.setOwn(self.arena, self.root_shape, key, v);
+            return;
+        }
         if (obj.getOwn(key) == null) self.invalidateJitHeapFactsFor(obj);
         try obj.setOwn(self.arena, self.root_shape, key, v);
     }
@@ -13021,6 +13026,31 @@ pub const Interpreter = struct {
             return false;
         }
         const plain_named_receiver = arrayElementIndex(key) == null and !isLazyFunctionPrototypeSlot(ro, key);
+        // With no published native shape dependency, finish the overwhelmingly
+        // common same-receiver ordinary data write in one receiver lock. The
+        // helper rechecks accessor/attribute/extensibility state after the
+        // prototype walk, so a racing mutation cannot turn the fusion into a
+        // stale descriptor decision. Published JIT artifacts retain the exact
+        // pre-transition invalidation path below.
+        if (plain_named_receiver and ro == o and
+            (self.jit_owner == null or !self.jit_owner.?.hasPublishedArtifacts()))
+        {
+            switch (try ro.setOrdinaryOwnData(self.arena, self.root_shape, key, v)) {
+                .blocked => return false,
+                .created => return true,
+                .updated => {
+                    if (self.global_object != null and ro == self.global_object.?) {
+                        const root = rootEnv(self.env);
+                        const locked = root.lockBindingsForWrite();
+                        defer root.unlockBindingsForWrite(locked);
+                        if (!root.consts.contains(key)) {
+                            if (root.vars.getPtr(key)) |slot| slot.* = v;
+                        }
+                    }
+                    return true;
+                },
+            }
+        }
         const had_receiver_own = if (plain_named_receiver) own: {
             switch (ro.namedOwnPropertySnapshot(key)) {
                 .accessor => return false,
@@ -13127,6 +13157,15 @@ pub const Interpreter = struct {
                 .accepted => |accepted| return accepted,
             }
         };
+        // Without published native shape dependencies, ordinary named deletion
+        // needs no pre-mutation JIT stop. Delete accessor and data state under
+        // one receiver lock; exotic/indexed/lazy-prototype cases keep their
+        // dedicated paths below.
+        if (value.canonicalIndex(key) == null and
+            !(o.is_array and !o.is_arguments and std.mem.eql(u8, key, "length")) and
+            !isLazyFunctionPrototypeSlot(o, key) and
+            (self.jit_owner == null or !self.jit_owner.?.hasPublishedArtifacts()))
+            return o.deleteOrdinaryNamedOwn(self.arena, self.root_shape, key);
         // Deletion rebuilds the named-data shape or changes the accessor
         // representation. Close code guarding the exact pre-delete shape
         // before either mutation; a missing/non-configurable property performs
@@ -50818,6 +50857,44 @@ test "interpreter getters and setters" {
     try std.testing.expect((try evalSource(a,
         \\let f = function inner() { return inner === f; };
         \\f()
+    )).asBool());
+}
+
+test "ordinary property fused set and delete preserve receiver descriptors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\var proto = {};
+        \\Object.defineProperty(proto, "blocked", { value: 1, writable: false });
+        \\var receiver = Object.create(proto);
+        \\receiver.blocked = 2;
+        \\receiver.created = 3;
+        \\receiver.created = 4;
+        \\var getterOnly = {};
+        \\Object.defineProperty(getterOnly, "value", { get() { return 7; }, configurable: true });
+        \\getterOnly.value = 9;
+        \\!Object.prototype.hasOwnProperty.call(receiver, "blocked") &&
+        \\receiver.blocked === 1 && receiver.created === 4 && getterOnly.value === 7
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\var object = { first: 1 };
+        \\Object.defineProperty(object, "accessor", { get() { return 2; }, configurable: true });
+        \\Object.defineProperty(object, "fixed", { value: 3, enumerable: true, configurable: false });
+        \\var removedData = Reflect.deleteProperty(object, "first");
+        \\var removedAccessor = Reflect.deleteProperty(object, "accessor");
+        \\var keptFixed = !Reflect.deleteProperty(object, "fixed");
+        \\object.first = 4;
+        \\removedData && removedAccessor && keptFixed &&
+        \\Object.keys(object).join(",") === "fixed,first" && object.first === 4
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\var array = [1];
+        \\var inner = new Proxy(array, {});
+        \\var outer = new Proxy(inner, { deleteProperty: undefined });
+        \\var keptLength = !Reflect.deleteProperty(outer, "length");
+        \\var removedIndex = Reflect.deleteProperty(outer, "0");
+        \\keptLength && removedIndex && array.length === 1 && !array.hasOwnProperty("0")
     )).asBool());
 }
 

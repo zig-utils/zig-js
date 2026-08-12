@@ -4628,6 +4628,38 @@ pub const Object = struct {
         self.maybeCompactKeyOrderUnlocked(arena);
     }
 
+    pub const OrdinaryOwnDataSetResult = enum {
+        blocked,
+        created,
+        updated,
+    };
+
+    /// Complete the receiver half of OrdinarySet under one property snapshot.
+    /// The caller has already walked the prototype chain and proved that no
+    /// inherited setter or non-writable descriptor intercepts the operation.
+    /// Re-check the receiver because another mutator may have changed it during
+    /// that walk, then validate and publish the data write without reopening the
+    /// lock between [[GetOwnProperty]] and [[DefineOwnProperty]]. Shape-changing
+    /// callers may use this only when no native artifact needs invalidation.
+    pub fn setOrdinaryOwnData(
+        self: *Object,
+        arena: std.mem.Allocator,
+        root: *Shape,
+        name: []const u8,
+        v: Value,
+    ) std.mem.Allocator.Error!OrdinaryOwnDataSetResult {
+        self.lockProperties();
+        defer self.unlockProperties();
+        if (self.getAccessorUnlocked(name) != null) return .blocked;
+        const state = (self.shape orelse root).lookupState(name);
+        const result: OrdinaryOwnDataSetResult = switch (state) {
+            .present => if (self.getAttrUnlocked(name).writable) .updated else return .blocked,
+            .absent, .deleted => if (self.isExtensible()) .created else return .blocked,
+        };
+        try self.setOwnUnlocked(arena, root, name, v);
+        return result;
+    }
+
     /// JSC's `putDirectOffset`: replace an existing shape slot without a
     /// property lookup or transition. The caller supplies a proven offset; an
     /// invalid offset is rejected instead of indexing uninitialized storage.
@@ -4752,6 +4784,10 @@ pub const Object = struct {
     fn deleteNamedDataOwnInternal(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8, preserve_order: bool) std.mem.Allocator.Error!bool {
         self.lockProperties();
         defer self.unlockProperties();
+        return self.deleteNamedDataOwnUnlocked(arena, root, key, preserve_order);
+    }
+
+    fn deleteNamedDataOwnUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8, preserve_order: bool) std.mem.Allocator.Error!bool {
         const current = self.shape orelse return true;
         const slot = switch (current.lookupState(key)) {
             .present => |present_slot| present_slot,
@@ -4792,6 +4828,21 @@ pub const Object = struct {
         self.maybeCompactNamedDataUnlocked(arena, root);
         self.maybeCompactKeyOrderUnlocked(arena);
         return true;
+    }
+
+    /// Delete the accessor and data representations of one ordinary named own
+    /// property in a single transaction. Interpreter callers use this only when
+    /// no published native artifact can depend on the pre-delete shape; the JIT
+    /// path retains its explicit pre-mutation invalidation protocol.
+    pub fn deleteOrdinaryNamedOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8) std.mem.Allocator.Error!bool {
+        self.lockProperties();
+        defer self.unlockProperties();
+        switch (try self.deleteAccessorOwnUnlocked(arena, key, false)) {
+            .blocked => return false,
+            .deleted => return true,
+            .absent, .removed_continue => {},
+        }
+        return self.deleteNamedDataOwnUnlocked(arena, root, key, false);
     }
 
     fn maybeCompactKeyOrderUnlocked(self: *Object, arena: std.mem.Allocator) void {
@@ -5664,6 +5715,48 @@ test "ordinary named descriptor snapshot is coherent under one property lock" {
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
 }
 
+test "ordinary named mutation validates and publishes under one property lock" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{};
+
+    object_profile.reset();
+    defer object_profile.disable();
+    try std.testing.expectEqual(
+        Object.OrdinaryOwnDataSetResult.created,
+        try object.setOrdinaryOwnData(arena, root, "field", Value.num(1)),
+    );
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+
+    try object.setAttr(arena, "field", .{ .writable = false, .enumerable = true, .configurable = true });
+    object_profile.reset();
+    try std.testing.expectEqual(
+        Object.OrdinaryOwnDataSetResult.blocked,
+        try object.setOrdinaryOwnData(arena, root, "field", Value.num(2)),
+    );
+    try std.testing.expectEqual(@as(f64, 1), object.getOwn("field").?.asNum());
+
+    // The accessor representation wins while both representations coexist
+    // during a data-to-accessor conversion; ordinary delete removes both in
+    // one transaction and records one deletion in creation order.
+    try object.setAttr(arena, "field", .{ .writable = true, .enumerable = true, .configurable = true });
+    try object.setAccessor(arena, "field", Value.num(3), null);
+    object_profile.reset();
+    try std.testing.expect(try object.deleteOrdinaryNamedOwn(arena, root, "field"));
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+    try std.testing.expect(object.getAccessor("field") == null);
+    try std.testing.expect(object.getOwn("field") == null);
+
+    object.setExtensible(false);
+    try std.testing.expectEqual(
+        Object.OrdinaryOwnDataSetResult.blocked,
+        try object.setOrdinaryOwnData(arena, root, "missing", Value.num(4)),
+    );
+    try std.testing.expect(object.getOwn("missing") == null);
+}
+
 test "ordinary object keeps four named property values inline before migrating" {
     const root = try Shape.createRoot(std.heap.page_allocator);
     var object = Object{};
@@ -6000,7 +6093,7 @@ test "named deletion OOM leaves shape slots and order exact" {
     object.inline_slots[0] = Value.num(1);
     object.inline_slots[1] = Value.num(2);
 
-    try std.testing.expectError(error.OutOfMemory, object.deleteNamedDataOwn(std.testing.allocator, &root, "alpha"));
+    try std.testing.expectError(error.OutOfMemory, object.deleteOrdinaryNamedOwn(std.testing.allocator, &root, "alpha"));
     try std.testing.expectEqual(&beta, object.shape.?);
     try std.testing.expectEqual(@as(f64, 1), object.getOwn("alpha").?.asNum());
     try std.testing.expectEqual(@as(f64, 2), object.getOwn("beta").?.asNum());
