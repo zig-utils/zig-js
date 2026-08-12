@@ -4876,6 +4876,35 @@ test "parser validates class private name uses" {
     try std.testing.expectEqual(@as(usize, 1), nested_prog.program.len);
 }
 
+test "parser enforces private name declaration collisions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const accepted = [_][]const u8{
+        "class C { get #x() { return 1; } set #x(value) {} }",
+        "class C { static set #x(value) {} static get #x() { return 1; } }",
+        "class C { #field; #method() {} get #value() {} set #value(value) {} }",
+    };
+    for (accepted) |source| {
+        var parser = try Parser.init(arena.allocator(), source);
+        _ = try parser.parseProgram();
+    }
+
+    const rejected = [_][]const u8{
+        "class C { #x; #x; }",
+        "class C { #x; #x() {} }",
+        "class C { get #x() {} get #x() {} }",
+        "class C { set #x(value) {} set #x(value) {} }",
+        "class C { get #x() {} set #x(value) {} get #x() {} }",
+        "class C { static get #x() {} set #x(value) {} }",
+        "class C { #constructor; }",
+    };
+    for (rejected) |source| {
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+}
+
 test "parser rejects new await only when await is active" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
