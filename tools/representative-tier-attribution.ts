@@ -161,6 +161,10 @@ const synchronizationMetrics = [
   "object_property_lock_acquires",
   "object_property_lock_contentions",
   "object_property_lock_spins",
+  "object_property_named_snapshot_acquires",
+  "object_property_receiver_set_acquires",
+  "object_property_named_delete_acquires",
+  "object_property_other_acquires",
   "object_element_lock_acquires",
   "object_element_lock_contentions",
   "object_element_lock_spins",
@@ -655,6 +659,11 @@ function validateRows(
               row.synchronization.env_write_other_lock_acquires &&
           row.synchronization.object_backing_lock_acquires >= row.synchronization.object_backing_lock_contentions &&
           row.synchronization.object_property_lock_acquires >= row.synchronization.object_property_lock_contentions &&
+          row.synchronization.object_property_lock_acquires ===
+            row.synchronization.object_property_named_snapshot_acquires +
+              row.synchronization.object_property_receiver_set_acquires +
+              row.synchronization.object_property_named_delete_acquires +
+              row.synchronization.object_property_other_acquires &&
           row.synchronization.object_element_lock_acquires >= row.synchronization.object_element_lock_contentions,
         `synchronization attribution is incoherent for ${workload}`,
       );

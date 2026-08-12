@@ -10,6 +10,10 @@ pub const ObjectLockStats = struct {
     object_property_lock_acquires: u64 = 0,
     object_property_lock_contentions: u64 = 0,
     object_property_lock_spins: u64 = 0,
+    object_property_named_snapshot_acquires: u64 = 0,
+    object_property_receiver_set_acquires: u64 = 0,
+    object_property_named_delete_acquires: u64 = 0,
+    object_property_other_acquires: u64 = 0,
     object_element_lock_acquires: u64 = 0,
     object_element_lock_contentions: u64 = 0,
     object_element_lock_spins: u64 = 0,
@@ -22,6 +26,10 @@ const ObjectLockCounters = struct {
     object_property_lock_acquires: std.atomic.Value(u64) = .init(0),
     object_property_lock_contentions: std.atomic.Value(u64) = .init(0),
     object_property_lock_spins: std.atomic.Value(u64) = .init(0),
+    object_property_named_snapshot_acquires: std.atomic.Value(u64) = .init(0),
+    object_property_receiver_set_acquires: std.atomic.Value(u64) = .init(0),
+    object_property_named_delete_acquires: std.atomic.Value(u64) = .init(0),
+    object_property_other_acquires: std.atomic.Value(u64) = .init(0),
     object_element_lock_acquires: std.atomic.Value(u64) = .init(0),
     object_element_lock_contentions: std.atomic.Value(u64) = .init(0),
     object_element_lock_spins: std.atomic.Value(u64) = .init(0),
@@ -38,6 +46,10 @@ pub fn reset() void {
     counters.object_property_lock_acquires.store(0, .release);
     counters.object_property_lock_contentions.store(0, .release);
     counters.object_property_lock_spins.store(0, .release);
+    counters.object_property_named_snapshot_acquires.store(0, .release);
+    counters.object_property_receiver_set_acquires.store(0, .release);
+    counters.object_property_named_delete_acquires.store(0, .release);
+    counters.object_property_other_acquires.store(0, .release);
     counters.object_element_lock_acquires.store(0, .release);
     counters.object_element_lock_contentions.store(0, .release);
     counters.object_element_lock_spins.store(0, .release);
@@ -56,6 +68,10 @@ pub fn snapshot() ObjectLockStats {
         .object_property_lock_acquires = counters.object_property_lock_acquires.load(.acquire),
         .object_property_lock_contentions = counters.object_property_lock_contentions.load(.acquire),
         .object_property_lock_spins = counters.object_property_lock_spins.load(.acquire),
+        .object_property_named_snapshot_acquires = counters.object_property_named_snapshot_acquires.load(.acquire),
+        .object_property_receiver_set_acquires = counters.object_property_receiver_set_acquires.load(.acquire),
+        .object_property_named_delete_acquires = counters.object_property_named_delete_acquires.load(.acquire),
+        .object_property_other_acquires = counters.object_property_other_acquires.load(.acquire),
         .object_element_lock_acquires = counters.object_element_lock_acquires.load(.acquire),
         .object_element_lock_contentions = counters.object_element_lock_contentions.load(.acquire),
         .object_element_lock_spins = counters.object_element_lock_spins.load(.acquire),
@@ -80,8 +96,21 @@ pub inline fn recordBackingLockAcquire(spins: usize) void {
     }
 }
 
-pub inline fn recordPropertyLockAcquire(spins: usize) void {
+pub const PropertyLockReason = enum {
+    named_snapshot,
+    receiver_set,
+    named_delete,
+    other,
+};
+
+pub inline fn recordPropertyLockAcquire(spins: usize, reason: PropertyLockReason) void {
     bump("object_property_lock_acquires");
+    switch (reason) {
+        .named_snapshot => bump("object_property_named_snapshot_acquires"),
+        .receiver_set => bump("object_property_receiver_set_acquires"),
+        .named_delete => bump("object_property_named_delete_acquires"),
+        .other => bump("object_property_other_acquires"),
+    }
     if (spins > 0) {
         bump("object_property_lock_contentions");
         add("object_property_lock_spins", @intCast(spins));

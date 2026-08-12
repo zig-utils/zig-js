@@ -143,6 +143,10 @@ pub const ContentionStats = struct {
     object_property_lock_acquires: u64 = 0,
     object_property_lock_contentions: u64 = 0,
     object_property_lock_spins: u64 = 0,
+    object_property_named_snapshot_acquires: u64 = 0,
+    object_property_receiver_set_acquires: u64 = 0,
+    object_property_named_delete_acquires: u64 = 0,
+    object_property_other_acquires: u64 = 0,
     object_element_lock_acquires: u64 = 0,
     object_element_lock_contentions: u64 = 0,
     object_element_lock_spins: u64 = 0,
@@ -359,6 +363,10 @@ pub fn contentionStats() ContentionStats {
         .object_property_lock_acquires = object.object_property_lock_acquires,
         .object_property_lock_contentions = object.object_property_lock_contentions,
         .object_property_lock_spins = object.object_property_lock_spins,
+        .object_property_named_snapshot_acquires = object.object_property_named_snapshot_acquires,
+        .object_property_receiver_set_acquires = object.object_property_receiver_set_acquires,
+        .object_property_named_delete_acquires = object.object_property_named_delete_acquires,
+        .object_property_other_acquires = object.object_property_other_acquires,
         .object_element_lock_acquires = object.object_element_lock_acquires,
         .object_element_lock_contentions = object.object_element_lock_contentions,
         .object_element_lock_spins = object.object_element_lock_spins,
@@ -541,7 +549,7 @@ test "jsthread contention stats reset and snapshot" {
     recordArenaLockAcquire(3);
     recordEnvLockAcquire(5);
     object_profile.recordBackingLockAcquire(7);
-    object_profile.recordPropertyLockAcquire(11);
+    object_profile.recordPropertyLockAcquire(11, .other);
     object_profile.recordElementLockAcquire(13);
     finishContentionWaitTimer("thread_join_wait_ns", 0);
     finishContentionWaitTimer("lock_wait_ns", 0);
@@ -579,6 +587,8 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.object_property_lock_acquires);
     try std.testing.expectEqual(@as(u64, 1), stats.object_property_lock_contentions);
     try std.testing.expectEqual(@as(u64, 11), stats.object_property_lock_spins);
+    try std.testing.expectEqual(@as(u64, 1), stats.object_property_other_acquires);
+    try std.testing.expectEqual(stats.object_property_lock_acquires, stats.object_property_named_snapshot_acquires + stats.object_property_receiver_set_acquires + stats.object_property_named_delete_acquires + stats.object_property_other_acquires);
     try std.testing.expectEqual(@as(u64, 1), stats.object_element_lock_acquires);
     try std.testing.expectEqual(@as(u64, 1), stats.object_element_lock_contentions);
     try std.testing.expectEqual(@as(u64, 13), stats.object_element_lock_spins);

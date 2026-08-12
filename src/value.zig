@@ -3002,6 +3002,10 @@ pub const Object = struct {
     }
 
     pub fn lockProperties(self: *const Object) void {
+        self.lockPropertiesFor(.other);
+    }
+
+    pub fn lockPropertiesFor(self: *const Object, reason: object_profile.PropertyLockReason) void {
         var spins: usize = 0;
         const mutex = &@constCast(self).property_lock;
         while (!mutex.tryLock()) : (spins += 1) {
@@ -3011,7 +3015,7 @@ pub const Object = struct {
                 std.atomic.spinLoopHint();
             }
         }
-        object_profile.recordPropertyLockAcquire(spins);
+        object_profile.recordPropertyLockAcquire(spins, reason);
         gc_runtime.enterTraceSensitiveLock();
     }
 
@@ -4523,7 +4527,7 @@ pub const Object = struct {
     };
 
     pub fn namedOwnPropertySnapshot(self: *const Object, name: []const u8) NamedOwnPropertySnapshot {
-        self.lockProperties();
+        self.lockPropertiesFor(.named_snapshot);
         defer self.unlockProperties();
         if (self.getAccessorUnlocked(name)) |accessor| {
             return .{ .accessor = accessor };
@@ -4648,7 +4652,7 @@ pub const Object = struct {
         name: []const u8,
         v: Value,
     ) std.mem.Allocator.Error!OrdinaryOwnDataSetResult {
-        self.lockProperties();
+        self.lockPropertiesFor(.receiver_set);
         defer self.unlockProperties();
         if (self.getAccessorUnlocked(name) != null) return .blocked;
         const state = (self.shape orelse root).lookupState(name);
@@ -4835,7 +4839,7 @@ pub const Object = struct {
     /// no published native artifact can depend on the pre-delete shape; the JIT
     /// path retains its explicit pre-mutation invalidation protocol.
     pub fn deleteOrdinaryNamedOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, key: []const u8) std.mem.Allocator.Error!bool {
-        self.lockProperties();
+        self.lockPropertiesFor(.named_delete);
         defer self.unlockProperties();
         switch (try self.deleteAccessorOwnUnlocked(arena, key, false)) {
             .blocked => return false,
