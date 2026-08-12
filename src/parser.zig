@@ -3657,21 +3657,53 @@ pub const Parser = struct {
     /// field/anything, or a get+set split across static and instance — is a
     /// SyntaxError.
     fn checkPrivateNames(self: *Parser, members: []const ast.ClassMember) ParseError!void {
-        for (members, 0..) |m, i| {
+        var private_count: usize = 0;
+        for (members) |m| {
             if (m.key_expr != null or m.key.len == 0 or m.key[0] != '#') continue;
             // A private name may not be `#constructor` (in any element form).
             if (std.mem.eql(u8, m.key, "#constructor")) return ParseError.UnexpectedToken;
-            for (members[0..i]) |prev| {
-                if (prev.key_expr != null or !std.mem.eql(u8, prev.key, m.key)) continue;
+            private_count += 1;
+        }
+        if (private_count < 2) return;
+
+        // Sort transient member indexes by exact private-name bytes. This gives
+        // attacker-controlled source a deterministic O(N log N) bound without
+        // relying on predictable hash placement; the class member slice itself
+        // stays in source order. Scratch backing is freeable on every exit.
+        const private = try self.scratch_allocator.alloc(usize, private_count);
+        defer self.scratch_allocator.free(private);
+        var at: usize = 0;
+        for (members, 0..) |m, index| {
+            if (m.key_expr != null or m.key.len == 0 or m.key[0] != '#') continue;
+            private[at] = index;
+            at += 1;
+        }
+        std.mem.sort(usize, private, members, struct {
+            fn lessThan(all: []const ast.ClassMember, left: usize, right: usize) bool {
+                return std.mem.order(u8, all[left].key, all[right].key) == .lt;
+            }
+        }.lessThan);
+
+        var group_start: usize = 0;
+        while (group_start < private.len) {
+            var group_end = group_start + 1;
+            while (group_end < private.len and
+                std.mem.eql(u8, members[private[group_start]].key, members[private[group_end]].key)) : (group_end += 1)
+            {}
+            const group_len = group_end - group_start;
+            if (group_len > 1) {
+                if (group_len != 2) return ParseError.UnexpectedToken;
+                const previous = members[private[group_start]];
+                const current = members[private[group_start + 1]];
                 // A complementary get/set pair at the same placement is the only
                 // allowed repeat.
-                const pair = ((m.accessor == .get and prev.accessor == .set) or
-                    (m.accessor == .set and prev.accessor == .get)) and
-                    m.is_static == prev.is_static and !m.is_field and !prev.is_field;
+                const pair = ((current.accessor == .get and previous.accessor == .set) or
+                    (current.accessor == .set and previous.accessor == .get)) and
+                    current.is_static == previous.is_static and !current.is_field and !previous.is_field;
                 if (!pair) return ParseError.UnexpectedToken;
             }
+            group_start = group_end;
         }
-        _ = self;
     }
 
     /// Whether the (eval) program's top-level declarations bind the name
@@ -4903,6 +4935,16 @@ test "parser enforces private name declaration collisions" {
         var parser = try Parser.init(arena.allocator(), source);
         try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
     }
+}
+
+test "parser reports private name validation scratch exhaustion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var no_memory: [0]u8 = .{};
+    var scratch = std.heap.FixedBufferAllocator.init(&no_memory);
+    var parser = try Parser.initWithScratch(arena.allocator(), scratch.allocator(), "class C { #first; #second; }");
+    try std.testing.expectError(error.OutOfMemory, parser.parseProgram());
 }
 
 test "parser rejects new await only when await is active" {
