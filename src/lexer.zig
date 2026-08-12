@@ -771,20 +771,37 @@ pub const Lexer = struct {
         const start = self.i;
         const quote = self.src[self.i];
         self.i += 1;
+        const content_start = self.i;
         // A LegacyOctalEscapeSequence (`\1`..`\7`, `\0` followed by a digit) or a
         // NonOctalDecimalEscapeSequence (`\8`/`\9`) makes the literal a SyntaxError
         // in strict-mode code; flag it so the parser can reject it (mirrors the
         // numeric legacy-octal flag).
         var legacy = false;
         var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var decoded = false;
+        var raw_start = content_start;
         while (self.i < self.src.len) {
             const ch = self.src[self.i];
             if (ch == quote) {
+                const content_end = self.i;
                 self.i += 1;
+                if (!decoded) return .{
+                    .kind = .string,
+                    .text = self.src[content_start..content_end],
+                    .pos = start,
+                    .legacy_octal = legacy,
+                };
+                try buf.appendSlice(self.arena, self.src[raw_start..content_end]);
                 return .{ .kind = .string, .text = try buf.toOwnedSlice(self.arena), .pos = start, .legacy_octal = legacy };
             }
             if (ch == '\\') {
                 if (self.i + 1 >= self.src.len) return LexError.UnterminatedString;
+                // The source backing outlives every parser/AST consumer. Borrow
+                // an unescaped value directly; only the first escape converts
+                // the token to owned decoded storage. Copy subsequent raw spans
+                // in batches instead of growing the arena list once per byte.
+                try buf.appendSlice(self.arena, self.src[raw_start..self.i]);
+                decoded = true;
                 const e = self.src[self.i + 1];
                 if (e >= '1' and e <= '9') {
                     legacy = true;
@@ -793,10 +810,10 @@ pub const Lexer = struct {
                 }
                 try validateStringEscape(self.src, self.i + 1);
                 self.i = try appendEscape(self.arena, &buf, self.src, self.i + 1);
+                raw_start = self.i;
             } else if (ch == '\n' or ch == '\r') {
                 return LexError.UnterminatedString;
             } else {
-                try buf.append(self.arena, ch);
                 self.i += 1;
             }
         }
@@ -1384,6 +1401,25 @@ test "lexer decodes string escapes" {
     const t = try lx.next();
     try std.testing.expectEqual(TokenKind.string, t.kind);
     try std.testing.expectEqualStrings("a\nb", t.text);
+}
+
+test "lexer borrows unescaped strings and allocates only for decoding" {
+    const source = "'plain source-backed string'";
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    var borrowed = Lexer.init(failing.allocator(), source);
+    const token = try borrowed.next();
+    try std.testing.expectEqualStrings("plain source-backed string", token.text);
+    try std.testing.expectEqual(@intFromPtr(source.ptr + 1), @intFromPtr(token.text.ptr));
+    try std.testing.expectEqual(TokenKind.eof, (try borrowed.next()).kind);
+
+    var escaped = Lexer.init(failing.allocator(), "'plain\\nstring'");
+    try std.testing.expectError(error.OutOfMemory, escaped.next());
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var decoded = Lexer.init(arena.allocator(), "'raw\\nspan\\u0021tail'");
+    try std.testing.expectEqualStrings("raw\nspan!tail", (try decoded.next()).text);
 }
 
 test "lexer rejects raw line terminators in literals" {
