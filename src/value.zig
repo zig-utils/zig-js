@@ -1410,9 +1410,12 @@ pub const ObjectColdState = struct {
     /// atomic RMW. Date is the only rare payload mutated after publication.
     date_ms_bits: std.atomic.Value(u64) = .init(0),
     private_brands: ?*std.StringHashMapUnmanaged(void) = null,
-    /// Accessor properties are rare and always flow through `property_lock`;
-    /// only this nullable map pointer needs atomic off-lock publication.
+    /// Accessor-property writers remain behind `property_lock`; exact read
+    /// snapshots additionally enter `accessor_gate`, which lets
+    /// unrelated-name prototype probes run together while map grow/delete and
+    /// descriptor-cell publication wait for every reader to drain.
     accessors: std.atomic.Value(?*std.StringHashMapUnmanaged(Accessor)) = .init(null),
+    accessor_gate: std.atomic.Value(u32) = .init(0),
     /// `Thread.restrict` is opt-in. Its owner id belongs with the other rare
     /// cross-thread behavior instead of taxing every unrestricted object.
     restricted_to: std.atomic.Value(u64) = .init(0),
@@ -2067,11 +2070,70 @@ pub const Object = struct {
         return cold.key_order.load(.monotonic);
     }
 
-    /// Atomic view of the cold accessor-map pointer. Map contents remain behind
-    /// `property_lock`; null is the data-property-only common case.
+    const accessor_writer_bit: u32 = 1 << 31;
+    const accessor_reader_mask: u32 = accessor_writer_bit - 1;
+
+    /// Atomic view of the cold accessor-map pointer. Writers remain serialized
+    /// by `property_lock`; exact off-lock snapshots additionally enter the
+    /// per-sidecar reader gate before touching map contents.
     pub inline fn accessorsMap(self: *const Object) ?*std.StringHashMapUnmanaged(Accessor) {
         const cold = self.coldState() orelse return null;
-        return cold.accessors.load(.monotonic);
+        return cold.accessors.load(.acquire);
+    }
+
+    fn beginAccessorRead(cold: *ObjectColdState) void {
+        var observed = cold.accessor_gate.load(.acquire);
+        var spins: usize = 0;
+        while (true) : (spins += 1) {
+            if (observed & accessor_writer_bit != 0 or observed & accessor_reader_mask == accessor_reader_mask) {
+                if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+                observed = cold.accessor_gate.load(.acquire);
+                continue;
+            }
+            if (cold.accessor_gate.cmpxchgWeak(observed, observed + 1, .acquire, .acquire)) |changed| {
+                observed = changed;
+                continue;
+            }
+            return;
+        }
+    }
+
+    fn endAccessorRead(cold: *ObjectColdState) void {
+        const previous = cold.accessor_gate.fetchSub(1, .release);
+        std.debug.assert(previous & accessor_reader_mask != 0);
+        // A writer may have raised the high bit after this reader entered; the
+        // decrement leaves that ownership bit intact and lets its drain loop
+        // observe the final reader departure.
+    }
+
+    /// `property_lock` serializes writers; setting the high bit prevents new
+    /// lock-free readers from entering, and the existing reader count drains
+    /// before grow/mutation can invalidate a map probe. One atomic word avoids
+    /// the two-variable missed-observation race of a separate flag and count.
+    fn beginAccessorWrite(cold: *ObjectColdState) void {
+        const previous = cold.accessor_gate.fetchOr(accessor_writer_bit, .acq_rel);
+        std.debug.assert(previous & accessor_writer_bit == 0);
+        var spins: usize = 0;
+        while (cold.accessor_gate.load(.acquire) != accessor_writer_bit) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    fn endAccessorWrite(cold: *ObjectColdState) void {
+        std.debug.assert(cold.accessor_gate.load(.monotonic) == accessor_writer_bit);
+        cold.accessor_gate.store(0, .release);
+    }
+
+    /// Exact accessor snapshot whose linearization point is inside the reader
+    /// gate. Map mutation waits for this copy to finish; a concurrent later
+    /// insert/delete may therefore linearize on either side without exposing a
+    /// reallocating `StringHashMap` to the reader.
+    fn accessorSnapshot(self: *const Object, name: []const u8) ?Accessor {
+        const cold = self.coldState() orelse return null;
+        const accessors = cold.accessors.load(.acquire) orelse return null;
+        beginAccessorRead(cold);
+        defer endAccessorRead(cold);
+        return accessors.get(name);
     }
 
     /// The owning thread id for `Thread.restrict`, or zero for the overwhelmingly
@@ -4324,12 +4386,7 @@ pub const Object = struct {
 
     /// An own accessor (get/set) property, if present.
     pub fn getAccessor(self: *const Object, name: []const u8) ?Accessor {
-        // As with attrsMap, only null is consumed without the lock. Once a map
-        // exists, every lookup remains serialized against grow and mutation.
-        if (self.accessorsMap() == null) return null;
-        self.lockProperties();
-        defer self.unlockProperties();
-        return self.getAccessorUnlocked(name);
+        return self.accessorSnapshot(name);
     }
 
     fn getAccessorUnlocked(self: *const Object, name: []const u8) ?Accessor {
@@ -4349,7 +4406,10 @@ pub const Object = struct {
     ) ?*Object {
         self.lockProperties();
         defer self.unlockProperties();
-        const accessors = self.accessorsMap() orelse return null;
+        const cold = self.coldState() orelse return null;
+        const accessors = cold.accessors.load(.acquire) orelse return null;
+        beginAccessorWrite(cold);
+        defer endAccessorWrite(cold);
         const accessor = accessors.getPtr(name) orelse return null;
         const same_optional = struct {
             fn f(left: ?Value, right: ?Value) bool {
@@ -4412,11 +4472,13 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         const cold = try self.ensureCold(arena);
+        beginAccessorWrite(cold);
+        defer endAccessorWrite(cold);
         const alloc = try self.accessorsAllocator(arena);
         if (self.accessorsMap() == null) {
             const nm = try alloc.create(std.StringHashMapUnmanaged(Accessor));
             nm.* = .{};
-            cold.accessors.store(nm, .monotonic); // publish under lockProperties
+            cold.accessors.store(nm, .release);
         }
         const accessors = self.accessorsMap().?;
         var inserted = false;
@@ -4535,18 +4597,18 @@ pub const Object = struct {
     };
 
     pub fn namedOwnPropertySnapshot(self: *const Object, name: []const u8) NamedOwnPropertySnapshot {
-        // A null accessor sidecar and a miss in the acquire-published immutable
-        // Shape are a complete absent descriptor. A concurrent insertion may
-        // linearize after either observation; present data/accessor state still
-        // takes `property_lock` before touching mutable storage.
+        // An exact accessor-map snapshot and a miss in the acquire-published
+        // immutable Shape are a complete absent descriptor even when this
+        // object has unrelated accessors. A concurrent insertion may linearize
+        // after either observation; present data state still takes
+        // `property_lock` before touching mutable storage.
+        if (self.accessorSnapshot(name)) |accessor| return .{ .accessor = accessor };
         var observed_shape: ?*Shape = null;
         var observed_slot: ?u32 = null;
-        if (self.accessorsMap() == null) {
-            const published = @atomicLoad(?*Shape, &self.shape, .acquire) orelse return .absent;
-            const slot = (@constCast(published)).lookup(name) orelse return .absent;
-            observed_shape = published;
-            observed_slot = slot;
-        }
+        const published = @atomicLoad(?*Shape, &self.shape, .acquire) orelse return .absent;
+        const published_slot = (@constCast(published)).lookup(name) orelse return .absent;
+        observed_shape = published;
+        observed_slot = published_slot;
         self.lockPropertiesFor(.named_snapshot);
         defer self.unlockProperties();
         if (self.getAccessorUnlocked(name)) |accessor| {
@@ -4755,8 +4817,13 @@ pub const Object = struct {
                 if (i < self.elementsItems().len) try self.markHoleUnlocked(arena, i);
             }
         }
-        if (m.fetchRemove(key)) |removed| {
-            if (self.activeBackingAllocator("accessors")) |allocator| allocator.free(removed.key);
+        {
+            const cold = self.coldState().?;
+            beginAccessorWrite(cold);
+            defer endAccessorWrite(cold);
+            if (m.fetchRemove(key)) |removed| {
+                if (self.activeBackingAllocator("accessors")) |allocator| allocator.free(removed.key);
+            }
         }
         if (pending_order_key) |owned| {
             self.keyOrder().?.appendAssumeCapacity(.{ .key = owned, .deleted = true });
@@ -5712,7 +5779,7 @@ test "object named properties serialize concurrent same-name writes" {
     try std.testing.expect(value.isNumber());
 }
 
-test "ordinary named descriptor snapshot is coherent under one property lock" {
+test "ordinary named descriptor snapshots are coherent across representations" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -5745,7 +5812,7 @@ test "ordinary named descriptor snapshot is coherent under one property lock" {
         },
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
 }
 
@@ -5768,12 +5835,12 @@ test "absent named descriptor snapshots use immutable shape publication" {
     }
     try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
 
-    // A populated accessor map remains mutable and therefore keeps the lock,
-    // even when this exact name has never been an accessor.
+    // The accessor reader gate makes an exact unrelated-name miss safe without
+    // serializing on the object's broader property lock.
     try object.setAccessor(arena, "accessor", Value.num(3), null);
     object_profile.reset();
     try std.testing.expect(object.namedOwnPropertySnapshot("still-missing") == .absent);
-    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
 }
 
 test "named descriptor miss publication is race safe" {
@@ -5816,7 +5883,7 @@ test "named descriptor miss publication is race safe" {
     try std.testing.expect(object.namedOwnPropertySnapshot("field") == .absent);
 }
 
-test "absent descriptor sidecars avoid property locks but populated maps stay serialized" {
+test "exact descriptor sidecar snapshots avoid the broad property lock" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -5833,7 +5900,47 @@ test "absent descriptor sidecars avoid property locks but populated maps stay se
     object_profile.reset();
     try std.testing.expect(!object.getAttr("fixed").writable);
     try std.testing.expectEqual(@as(f64, 1), object.getAccessor("accessor").?.get.?.asNum());
-    try std.testing.expectEqual(@as(u64, 2), object_profile.snapshot().object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+}
+
+test "accessor reader gate is race safe across grow update and delete" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    var object = Object{};
+    try object.setAccessor(std.heap.page_allocator, "stable", Value.num(7), null);
+    var start = std.atomic.Value(bool).init(false);
+    var done = std.atomic.Value(bool).init(false);
+    const Worker = struct {
+        fn read(target: *Object, start_flag: *std.atomic.Value(bool), done_flag: *std.atomic.Value(bool)) void {
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            while (!done_flag.load(.acquire)) {
+                const stable = target.getAccessor("stable") orelse @panic("stable accessor disappeared");
+                std.debug.assert(stable.get.?.asNum() == 7);
+                std.debug.assert(target.getAccessor("never-created") == null);
+                std.debug.assert(target.namedOwnPropertySnapshot("never-created") == .absent);
+                if (target.getAccessor("churn")) |accessor|
+                    std.debug.assert(accessor.get.?.isNumber());
+            }
+        }
+
+        fn mutate(target: *Object, start_flag: *std.atomic.Value(bool), done_flag: *std.atomic.Value(bool)) void {
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..2_000) |index| {
+                target.setAccessor(std.heap.page_allocator, "churn", Value.num(@floatFromInt(index)), null) catch @panic("setAccessor failed");
+                _ = target.deleteAccessorOwnPreserveOrder(std.heap.page_allocator, "churn") catch @panic("deleteAccessor failed");
+            }
+            done_flag.store(true, .release);
+        }
+    };
+
+    var readers: [4]std.Thread = undefined;
+    for (&readers) |*thread|
+        thread.* = try std.Thread.spawn(.{}, Worker.read, .{ &object, &start, &done });
+    const writer = try std.Thread.spawn(.{}, Worker.mutate, .{ &object, &start, &done });
+    start.store(true, .release);
+    writer.join();
+    for (readers) |thread| thread.join();
+    try std.testing.expect(object.getAccessor("churn") == null);
+    try std.testing.expectEqual(@as(f64, 7), object.getAccessor("stable").?.get.?.asNum());
 }
 
 test "descriptor sidecar null publication is race safe" {
