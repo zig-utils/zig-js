@@ -19,6 +19,10 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_private_names_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_names_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_private_names_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_private_names_escaped_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_strings_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_strings_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_strings_4096")) return 4096;
@@ -47,6 +51,10 @@ fn isEscapedIdentifierWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_escaped_identifiers_");
 }
 
+fn isPrivateNameWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_private_names_");
+}
+
 fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
     var source: std.ArrayListUnmanaged(u8) = .empty;
     try source.appendSlice(allocator, "function strictWidth(");
@@ -56,6 +64,17 @@ fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: boo
         try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
     }
     try source.appendSlice(allocator, "){\"use strict\";return 7;}");
+    return source.items;
+}
+
+fn privateClassSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "class PrivateWidth {");
+    for (0..width) |index| {
+        try source.appendSlice(allocator, if (escaped) "#fi\\u0065ld" else "#field");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d};", .{index}));
+    }
+    try source.appendSlice(allocator, "}");
     return source.items;
 }
 
@@ -95,6 +114,20 @@ fn parseOnce(allocator: std.mem.Allocator, source: []const u8, workload: []const
     var parser = try js.Parser.init(arena.allocator(), source);
     const program = try parser.parseProgram();
     const declaration = program.program[0];
+    if (isPrivateNameWorkload(workload)) {
+        if (declaration.* != .var_decl) return error.InvalidProgram;
+        const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
+        if (init_expr.* != .class_expr) return error.InvalidProgram;
+        var checksum = init_expr.class_expr.members.len;
+        for (init_expr.class_expr.members, 0..) |member, index| {
+            if (!member.is_field or member.key_expr != null or member.key.len < "#field".len or
+                !std.mem.eql(u8, member.key[0.."#field".len], "#field")) return error.InvalidProgram;
+            if (try std.fmt.parseUnsigned(usize, member.key["#field".len..], 10) != index)
+                return error.InvalidProgram;
+            checksum += member.key.len;
+        }
+        return checksum;
+    }
     if (isStringWorkload(workload) or isTemplateWorkload(workload)) {
         if (declaration.* != .var_decl) return error.InvalidProgram;
         const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
@@ -143,7 +176,14 @@ pub fn main(init: std.process.Init) !void {
     const width = try workloadWidth(workload);
     const string_workload = isStringWorkload(workload);
     const template_workload = isTemplateWorkload(workload);
-    const source = if (string_workload)
+    const private_name_workload = isPrivateNameWorkload(workload);
+    const source = if (private_name_workload)
+        try privateClassSource(
+            init.arena.allocator(),
+            width,
+            std.mem.eql(u8, workload, "representative_frontend_private_names_escaped_4096"),
+        )
+    else if (string_workload)
         try stringLiteralSource(
             init.arena.allocator(),
             width,
