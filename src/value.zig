@@ -4227,6 +4227,11 @@ pub const Object = struct {
 
     /// The attributes of own property `name` (all-true default if no override).
     pub fn getAttr(self: *const Object, name: []const u8) PropAttr {
+        // Null is an atomically published complete state: no name can carry an
+        // override before the map pointer is installed. A racing first
+        // defineProperty may linearize on either side of this read, as allowed
+        // for a JavaScript program race, without exposing mutable map storage.
+        if (self.attrsMap() == null) return .{};
         self.lockProperties();
         defer self.unlockProperties();
         return self.getAttrUnlocked(name);
@@ -4319,6 +4324,9 @@ pub const Object = struct {
 
     /// An own accessor (get/set) property, if present.
     pub fn getAccessor(self: *const Object, name: []const u8) ?Accessor {
+        // As with attrsMap, only null is consumed without the lock. Once a map
+        // exists, every lookup remains serialized against grow and mutation.
+        if (self.accessorsMap() == null) return null;
         self.lockProperties();
         defer self.unlockProperties();
         return self.getAccessorUnlocked(name);
@@ -5717,6 +5725,56 @@ test "ordinary named descriptor snapshot is coherent under one property lock" {
     }
     try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
+}
+
+test "absent descriptor sidecars avoid property locks but populated maps stay serialized" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var object = Object{};
+
+    object_profile.reset();
+    defer object_profile.disable();
+    try std.testing.expectEqual(PropAttr{}, object.getAttr("plain"));
+    try std.testing.expect(object.getAccessor("plain") == null);
+    try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
+
+    try object.setAttr(arena, "fixed", .{ .writable = false, .enumerable = false, .configurable = false });
+    try object.setAccessor(arena, "accessor", Value.num(1), null);
+    object_profile.reset();
+    try std.testing.expect(!object.getAttr("fixed").writable);
+    try std.testing.expectEqual(@as(f64, 1), object.getAccessor("accessor").?.get.?.asNum());
+    try std.testing.expectEqual(@as(u64, 2), object_profile.snapshot().object_property_lock_acquires);
+}
+
+test "descriptor sidecar null publication is race safe" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    var object = Object{};
+    var start = std.atomic.Value(bool).init(false);
+    var done = std.atomic.Value(bool).init(false);
+    const Reader = struct {
+        fn run(target: *Object, start_flag: *std.atomic.Value(bool), done_flag: *std.atomic.Value(bool)) void {
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            while (!done_flag.load(.acquire)) {
+                const attr = target.getAttr("fixed");
+                std.debug.assert((attr.writable and attr.enumerable and attr.configurable) or
+                    (!attr.writable and !attr.enumerable and !attr.configurable));
+                if (target.getAccessor("accessor")) |accessor|
+                    std.debug.assert(accessor.get.?.asNum() == 7);
+            }
+        }
+    };
+    var readers: [4]std.Thread = undefined;
+    for (&readers) |*thread|
+        thread.* = try std.Thread.spawn(.{}, Reader.run, .{ &object, &start, &done });
+    start.store(true, .release);
+    try object.setAttr(std.heap.page_allocator, "fixed", .{ .writable = false, .enumerable = false, .configurable = false });
+    try object.setAccessor(std.heap.page_allocator, "accessor", Value.num(7), null);
+    done.store(true, .release);
+    for (readers) |thread| thread.join();
+
+    try std.testing.expect(!object.getAttr("fixed").writable);
+    try std.testing.expectEqual(@as(f64, 7), object.getAccessor("accessor").?.get.?.asNum());
 }
 
 test "ordinary named mutation validates and publishes under one property lock" {
