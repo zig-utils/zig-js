@@ -475,7 +475,13 @@ pub const Lexer = struct {
             self.i += 1; // '#'
             if (!self.identStartHere()) return LexError.UnexpectedCharacter;
             const name = try self.lexIdentName();
-            return .{ .kind = .private_name, .text = try std.fmt.allocPrint(self.arena, "#{s}", .{name}), .pos = start };
+            // The token's complete unescaped spelling is already stable source.
+            // Escapes still require owned decoded bytes joined to their `#`.
+            const text = if (self.last_identifier_escaped)
+                try std.fmt.allocPrint(self.arena, "#{s}", .{name})
+            else
+                self.src[start..self.i];
+            return .{ .kind = .private_name, .text = text, .pos = start };
         }
         // Strings
         if (c == '"' or c == '\'') return self.lexString();
@@ -1417,10 +1423,26 @@ test "lexer borrows ordinary identifiers and owns escaped decoding" {
     try std.testing.expectEqual(escaped_source.len, decoded.end);
     try std.testing.expect(@intFromPtr(escaped_source.ptr) != @intFromPtr(decoded.text.ptr));
 
-    var private = Lexer.init(arena.allocator(), "#priv\\u0061te");
+    const private_source = "#plain_π";
+    var private_borrowed = Lexer.init(failing.allocator(), private_source);
+    const plain_private_name = try private_borrowed.next();
+    try std.testing.expectEqual(TokenKind.private_name, plain_private_name.kind);
+    try std.testing.expectEqualStrings(private_source, plain_private_name.text);
+    try std.testing.expectEqual(@intFromPtr(private_source.ptr), @intFromPtr(plain_private_name.text.ptr));
+    try std.testing.expectEqual(@as(usize, 0), plain_private_name.pos);
+    try std.testing.expectEqual(private_source.len, plain_private_name.end);
+
+    var private_oom = Lexer.init(failing.allocator(), "#priv\\u0061te");
+    try std.testing.expectError(error.OutOfMemory, private_oom.next());
+
+    const escaped_private_source = "#priv\\u0061te";
+    var private = Lexer.init(arena.allocator(), escaped_private_source);
     const private_name = try private.next();
     try std.testing.expectEqual(TokenKind.private_name, private_name.kind);
     try std.testing.expectEqualStrings("#private", private_name.text);
+    try std.testing.expect(@intFromPtr(escaped_private_source.ptr) != @intFromPtr(private_name.text.ptr));
+    try std.testing.expectEqual(@as(usize, 0), private_name.pos);
+    try std.testing.expectEqual(escaped_private_source.len, private_name.end);
 }
 
 test "lexer decodes string escapes" {
