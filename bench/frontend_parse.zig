@@ -186,6 +186,9 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_bigint_hex_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_bigint_hex_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_bigint_hex_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_modules_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_modules_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_modules_4096")) return 4096;
     return error.InvalidWorkload;
 }
 
@@ -252,6 +255,10 @@ fn isSeparatedDecimalBigIntWorkload(name: []const u8) bool {
 
 fn isRadixBigIntWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_bigint_hex_");
+}
+
+fn isModuleWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_modules_");
 }
 
 fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
@@ -437,6 +444,33 @@ fn radixBigIntSource(allocator: std.mem.Allocator, width: usize) !RadixBigIntInp
     };
 }
 
+fn moduleSource(allocator: std.mem.Allocator, width: usize) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "import {");
+    for (0..width) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        try source.appendSlice(allocator, "value");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        try source.appendSlice(allocator, " as imported");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+    }
+    try source.appendSlice(allocator, "} from './dependency.js'; export {");
+    for (0..width) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        try source.appendSlice(allocator, "imported");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        try source.appendSlice(allocator, " as value");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+    }
+    try source.appendSlice(allocator, "}; export const marker = 1;\n");
+    return source.items;
+}
+
+fn indexedName(name: []const u8, prefix: []const u8, index: usize) !bool {
+    if (!std.mem.startsWith(u8, name, prefix)) return false;
+    return (try std.fmt.parseUnsigned(usize, name[prefix.len..], 10)) == index;
+}
+
 fn validatedRadixBigIntChecksum(text: []const u8, expected: []const u8) !usize {
     if (!std.mem.eql(u8, text, expected)) return error.InvalidProgram;
     var checksum: u32 = 2_166_136_261;
@@ -465,7 +499,46 @@ fn parseOnce(
     };
     const parser_allocator = if (observation != null) measured.allocator() else arena.allocator();
     var parser = try js.Parser.init(parser_allocator, source);
-    const program = try parser.parseProgram();
+    const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (isModuleWorkload(workload)) {
+        const width = try workloadWidth(workload);
+        if (program.program.len != 3 or parser.statement_locations.items.len != 1)
+            return error.InvalidProgram;
+        const import_node = program.program[0];
+        const export_node = program.program[1];
+        const marker_node = program.program[2];
+        if (import_node.* != .import_decl or export_node.* != .export_decl or marker_node.* != .export_decl)
+            return error.InvalidProgram;
+        const import_decl = import_node.import_decl;
+        const export_decl = export_node.export_decl;
+        if (!std.mem.eql(u8, import_decl.specifier, "./dependency.js") or
+            import_decl.entries.len != width or export_decl.entries.len != width or export_decl.from.len != 0)
+            return error.InvalidProgram;
+        var checksum = program.program.len + parser.statement_locations.items.len +
+            import_decl.specifier.len + import_decl.entries.len + export_decl.entries.len;
+        for (0..width) |index| {
+            const imported = import_decl.entries[index];
+            const exported = export_decl.entries[index];
+            if (!try indexedName(imported.imported, "value", index) or
+                !try indexedName(imported.local, "imported", index) or imported.namespace or
+                !try indexedName(exported.local, "imported", index) or
+                !try indexedName(exported.exported, "value", index) or exported.imported.len != 0)
+                return error.InvalidProgram;
+            checksum += imported.imported.len + imported.local.len + exported.local.len + exported.exported.len + index;
+        }
+        const marker = marker_node.export_decl.declaration orelse return error.InvalidProgram;
+        if (marker.* != .var_decl or marker.var_decl.kind != .@"const" or
+            !std.mem.eql(u8, marker.var_decl.name, "marker")) return error.InvalidProgram;
+        const initializer = marker.var_decl.init orelse return error.InvalidProgram;
+        if (initializer.* != .number or initializer.number != 1) return error.InvalidProgram;
+        const location = parser.statement_locations.items[0];
+        if (location.node != marker or location.location.line != 1 or
+            location.location.column <= 1 or location.location.byte_offset == 0)
+            return error.InvalidProgram;
+        checksum += marker.var_decl.name.len + @as(usize, @intFromFloat(initializer.number)) +
+            location.location.byte_offset + location.location.column;
+        return checksum;
+    }
     const declaration = program.program[0];
     if (isRadixBigIntWorkload(workload)) {
         if (declaration.* != .var_decl) return error.InvalidProgram;
@@ -652,8 +725,11 @@ pub fn main(init: std.process.Init) !void {
     const numeric_workload = isNumericWorkload(workload);
     const decimal_bigint_workload = isDecimalBigIntWorkload(workload);
     const radix_bigint_workload = isRadixBigIntWorkload(workload);
+    const module_workload = isModuleWorkload(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (isTaggedSubstitutionWorkload(workload))
+    const source = if (module_workload)
+        try moduleSource(init.arena.allocator(), width)
+    else if (isTaggedSubstitutionWorkload(workload))
         try taggedSubstitutionSource(init.arena.allocator(), width)
     else if (private_name_workload)
         try privateClassSource(
