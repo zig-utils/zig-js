@@ -1215,12 +1215,18 @@ fn separatorsValid(s: []const u8, radix: u8) bool {
 /// slice safe to hand to `parseInt`/`parseFloat`.
 fn stripSeparators(arena: std.mem.Allocator, s: []const u8) LexError![]const u8 {
     if (std.mem.indexOfScalar(u8, s, '_') == null and (s.len == 0 or s[s.len - 1] != 'n')) return s;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    for (s) |c| {
-        if (c == '_' or c == 'n') continue;
-        try buf.append(arena, c);
+    const end = if (s.len != 0 and s[s.len - 1] == 'n') s.len - 1 else s.len;
+    var separator_count: usize = 0;
+    for (s[0..end]) |c| separator_count += @intFromBool(c == '_');
+    const normalized = try arena.alloc(u8, end - separator_count);
+    var out: usize = 0;
+    for (s[0..end]) |c| {
+        if (c == '_') continue;
+        normalized[out] = c;
+        out += 1;
     }
-    return buf.toOwnedSlice(arena);
+    std.debug.assert(out == normalized.len);
+    return normalized;
 }
 
 fn canonicalDecimalDigits(arena: std.mem.Allocator, digits: []const u8) LexError![]const u8 {
@@ -1395,6 +1401,80 @@ test "lexer tokenizes arithmetic" {
     try std.testing.expectEqual(TokenKind.star, (try lx.next()).kind);
     try std.testing.expectEqual(@as(f64, 3), (try lx.next()).number);
     try std.testing.expectEqual(TokenKind.eof, (try lx.next()).kind);
+}
+
+test "lexer normalizes numeric separators in one exact allocation" {
+    const separated = "100_000_000_123";
+    var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const normalized = try stripSeparators(measured.allocator(), separated);
+    defer measured.allocator().free(normalized);
+    try std.testing.expectEqualStrings("100000000123", normalized);
+    try std.testing.expectEqual(@as(usize, 1), measured.alloc_index);
+    try std.testing.expectEqual(normalized.len, measured.allocated_bytes);
+
+    const plain = "100000000123";
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    const borrowed = try stripSeparators(fixed.allocator(), plain);
+    try std.testing.expectEqual(@intFromPtr(plain.ptr), @intFromPtr(borrowed.ptr));
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, stripSeparators(failing.allocator(), separated));
+}
+
+test "lexer preserves numeric separator values forms and source offsets" {
+    const numbers = [_]struct { source: []const u8, expected: f64 }{
+        .{ .source = "1_000_000", .expected = 1_000_000 },
+        .{ .source = "1_2.3_4", .expected = 12.34 },
+        .{ .source = "1_2.5e1_0", .expected = 125_000_000_000 },
+        .{ .source = "0b1010_0101", .expected = 165 },
+        .{ .source = "0o7_7_7", .expected = 511 },
+        .{ .source = "0xFF_FF", .expected = 65_535 },
+    };
+    for (numbers) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), case.source);
+        const token = try lexer.next();
+        try std.testing.expectEqual(TokenKind.number, token.kind);
+        try std.testing.expectEqual(case.expected, token.number);
+        try std.testing.expectEqualStrings(case.source, token.text);
+        try std.testing.expectEqual(@as(usize, 0), token.pos);
+        try std.testing.expectEqual(case.source.len, token.end);
+    }
+
+    var bigint_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer bigint_arena.deinit();
+    var small_bigint = Lexer.init(bigint_arena.allocator(), "123_456n");
+    const small = try small_bigint.next();
+    try std.testing.expect(small.is_bigint);
+    try std.testing.expectEqual(@as(i128, 123_456), small.bigint);
+
+    const large_source = "340_282_366_920_938_463_463_374_607_431_768_211_456n";
+    var large_bigint = Lexer.init(bigint_arena.allocator(), large_source);
+    const large = try large_bigint.next();
+    try std.testing.expect(large.is_bigint);
+    try std.testing.expectEqualStrings("340282366920938463463374607431768211456", large.bigint_text.?);
+    try std.testing.expectEqualStrings(large_source, large.text);
+    try std.testing.expectEqual(large_source.len, large.end);
+
+    const invalid = [_][]const u8{
+        "1__0",
+        "1_",
+        "0x_1",
+        "0b1_",
+        "1_.0",
+        "1._0",
+        "1e_1",
+        "1e1_",
+        "1_n",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), source);
+        try std.testing.expectError(LexError.InvalidNumber, lexer.next());
+    }
 }
 
 test "lexer borrows ordinary identifiers and owns escaped decoding" {
