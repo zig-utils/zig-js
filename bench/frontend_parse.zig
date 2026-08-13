@@ -162,6 +162,8 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_templates_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_templates_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_templates_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_templates_escaped_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_templates_escaped_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_templates_escaped_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_templates_tagged_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_1024")) return 1024;
@@ -192,6 +194,10 @@ fn isTemplateWorkload(name: []const u8) bool {
 
 fn isTaggedTemplateWorkload(name: []const u8) bool {
     return std.mem.eql(u8, name, "representative_frontend_templates_tagged_4096");
+}
+
+fn isEscapedTemplateWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_templates_escaped_");
 }
 
 fn isEscapedIdentifierWorkload(name: []const u8) bool {
@@ -447,10 +453,30 @@ fn parseOnce(
                 if (element.* != .tagged_template) return error.InvalidProgram;
                 if (element.tagged_template.cooked.len != 1 or element.tagged_template.raw.len != 1 or element.tagged_template.exprs.len != 0)
                     return error.InvalidProgram;
-                checksum += (element.tagged_template.cooked[0] orelse return error.InvalidProgram).len;
+                const cooked = element.tagged_template.cooked[0] orelse return error.InvalidProgram;
+                const raw = element.tagged_template.raw[0];
+                const prefix = "literal-";
+                const suffix = "-abcdefghijklmnopqrstuvwxyz0123456789";
+                if (!std.mem.eql(u8, cooked, raw) or cooked.len <= prefix.len + suffix.len or
+                    !std.mem.startsWith(u8, cooked, prefix) or
+                    !std.mem.endsWith(u8, cooked, suffix)) return error.InvalidProgram;
+                const index_text = cooked[prefix.len .. cooked.len - suffix.len];
+                if (try std.fmt.parseUnsigned(usize, index_text, 10) != index)
+                    return error.InvalidProgram;
+                checksum += cooked.len;
             } else {
                 if (element.* != .string) return error.InvalidProgram;
                 if (isStringWorkload(workload)) {
+                    const prefix = "literal-";
+                    const suffix = "-abcdefghijklmnopqrstuvwxyz0123456789";
+                    if (element.string.len <= prefix.len + suffix.len or
+                        !std.mem.startsWith(u8, element.string, prefix) or
+                        !std.mem.endsWith(u8, element.string, suffix)) return error.InvalidProgram;
+                    const index_text = element.string[prefix.len .. element.string.len - suffix.len];
+                    if (try std.fmt.parseUnsigned(usize, index_text, 10) != index)
+                        return error.InvalidProgram;
+                }
+                if (isTemplateWorkload(workload)) {
                     const prefix = "literal-";
                     const suffix = "-abcdefghijklmnopqrstuvwxyz0123456789";
                     if (element.string.len <= prefix.len + suffix.len or
@@ -555,7 +581,7 @@ pub fn main(init: std.process.Init) !void {
         try templateLiteralSource(
             init.arena.allocator(),
             width,
-            std.mem.eql(u8, workload, "representative_frontend_templates_escaped_4096"),
+            isEscapedTemplateWorkload(workload),
             isTaggedTemplateWorkload(workload),
         )
     else if (numeric_workload)
