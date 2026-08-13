@@ -298,11 +298,18 @@ pub const Lexer = struct {
     /// path — a pure-ASCII name with no escape — returns a zero-copy source
     /// slice, so the common case allocates nothing.
     fn lexIdentName(self: *Lexer) LexError![]const u8 {
+        return self.lexIdentNameWithOwnedPrefix("");
+    }
+
+    /// `owned_prefix` participates only when an escape requires owned storage.
+    /// Private names pass `#` so their decoder builds the complete token once;
+    /// the ordinary source-backed path still returns only the identifier span.
+    fn lexIdentNameWithOwnedPrefix(self: *Lexer, owned_prefix: []const u8) LexError![]const u8 {
         const start = self.i;
         var first = true;
         while (self.i < self.src.len) {
             const c = self.src[self.i];
-            if (c == '\\') return self.lexEscapedIdentName(start, first);
+            if (c == '\\') return self.lexEscapedIdentName(start, first, owned_prefix);
             if (c < 0x80) {
                 if (!(if (first) isIdentStart(c) else isIdentPart(c))) break;
                 self.i += 1;
@@ -322,8 +329,9 @@ pub const Lexer = struct {
     /// Continue an IdentifierName scan after its first escape. The ordinary
     /// path above keeps its source-slice-only loop; only escaped names carry
     /// decode state and owned storage.
-    fn lexEscapedIdentName(self: *Lexer, start: usize, first_in: bool) LexError![]const u8 {
+    fn lexEscapedIdentName(self: *Lexer, start: usize, first_in: bool, owned_prefix: []const u8) LexError![]const u8 {
         var decoded: std.ArrayListUnmanaged(u8) = .empty;
+        var prefix_pending = true;
         var raw_start = start;
         var first = first_in;
         while (self.i < self.src.len) {
@@ -340,6 +348,10 @@ pub const Lexer = struct {
                 // Decode during the validating scan. Ordinary source bytes stay
                 // borrowed until an escape requires owned storage, then move in
                 // contiguous spans rather than one append per byte.
+                if (prefix_pending) {
+                    try decoded.appendSlice(self.arena, owned_prefix);
+                    prefix_pending = false;
+                }
                 try decoded.appendSlice(self.arena, self.src[raw_start..escape_start]);
                 try decoded.appendSlice(self.arena, encoded[0..encoded_len]);
                 raw_start = self.i;
@@ -467,13 +479,10 @@ pub const Lexer = struct {
         if (c == '#') {
             self.i += 1; // '#'
             if (!self.identStartHere()) return LexError.UnexpectedCharacter;
-            const name = try self.lexIdentName();
+            const name = try self.lexIdentNameWithOwnedPrefix("#");
             // The token's complete unescaped spelling is already stable source.
-            // Escapes still require owned decoded bytes joined to their `#`.
-            const text = if (self.last_identifier_escaped)
-                try std.fmt.allocPrint(self.arena, "#{s}", .{name})
-            else
-                self.src[start..self.i];
+            // Escapes seed their one owned decoded buffer with `#` directly.
+            const text = if (self.last_identifier_escaped) name else self.src[start..self.i];
             return .{ .kind = .private_name, .text = text, .pos = start };
         }
         // Strings
@@ -1726,6 +1735,33 @@ test "lexer borrows ordinary identifiers and owns escaped decoding" {
     try std.testing.expect(@intFromPtr(escaped_private_source.ptr) != @intFromPtr(private_name.text.ptr));
     try std.testing.expectEqual(@as(usize, 0), private_name.pos);
     try std.testing.expectEqual(escaped_private_source.len, private_name.end);
+
+    var measured_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer measured_arena.deinit();
+    var measured = std.testing.FailingAllocator.init(measured_arena.allocator(), .{});
+    const mixed_private_source = "#\\u0061π\\u{62}";
+    var mixed_private = Lexer.init(measured.allocator(), mixed_private_source);
+    const mixed_private_name = try mixed_private.next();
+    try std.testing.expectEqualStrings("#aπb", mixed_private_name.text);
+    try std.testing.expectEqual(@as(usize, 1), measured.allocations);
+    // `toOwnedSlice` shrinks the same list allocation to the exact token bytes;
+    // no second allocation holds the decoded name without its `#` prefix.
+    try std.testing.expectEqual(@as(usize, 1), measured.resize_index);
+
+    var retry_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer retry_arena.deinit();
+    var allocation_failure = std.testing.FailingAllocator.init(retry_arena.allocator(), .{ .fail_index = 0 });
+    var failed_private = Lexer.init(allocation_failure.allocator(), mixed_private_source);
+    try std.testing.expectError(error.OutOfMemory, failed_private.next());
+    var retried_private = Lexer.init(retry_arena.allocator(), mixed_private_source);
+    try std.testing.expectEqualStrings("#aπb", (try retried_private.next()).text);
+
+    for ([_][]const u8{ "#\\u0030name", "#a\\u2603" }) |invalid_private_source| {
+        var invalid_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer invalid_arena.deinit();
+        var invalid_private = Lexer.init(invalid_arena.allocator(), invalid_private_source);
+        try std.testing.expectError(LexError.UnexpectedCharacter, invalid_private.next());
+    }
 }
 
 test "lexer enforces Unicode 17 identifier start and continue properties" {
