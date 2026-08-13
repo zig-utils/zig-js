@@ -1240,24 +1240,86 @@ fn canonicalDecimalDigits(digits: []const u8) []const u8 {
 }
 
 fn radixDigitsToDecimal(arena: std.mem.Allocator, digits: []const u8, radix: u8) LexError![]const u8 {
-    var dec: std.ArrayListUnmanaged(u8) = .empty; // little-endian decimal digits
-    try dec.append(arena, 0);
-    for (digits) |c| {
-        const d = std.fmt.charToDigit(c, radix) catch return LexError.InvalidNumber;
-        var carry: u16 = d;
-        for (dec.items) |*digit| {
-            const v: u16 = @as(u16, digit.*) * radix + carry;
-            digit.* = @intCast(v % 10);
-            carry = v / 10;
+    var first: usize = 0;
+    while (first < digits.len and digits[first] == '0') first += 1;
+    if (first == digits.len) return "0";
+    const significant = digits[first..];
+
+    const bits_per_digit: usize = switch (radix) {
+        2 => 1,
+        8 => 3,
+        16 => 4,
+        else => return LexError.InvalidNumber,
+    };
+    const chunk_digits: usize = switch (radix) {
+        2 => 29,
+        8 => 9,
+        16 => 7,
+        else => unreachable,
+    };
+    // A base-1e9 limb carries fewer than 30 bits. Dividing the input bit
+    // ceiling by 29 intentionally rounds capacity upward without floats.
+    const bit_count = std.math.mul(usize, significant.len, bits_per_digit) catch return LexError.OutOfMemory;
+    const limb_capacity = std.math.add(usize, bit_count, 28) catch return LexError.OutOfMemory;
+    const limbs = try arena.alloc(u32, @max(@as(usize, 1), limb_capacity / 29));
+    limbs[0] = 0;
+    var used: usize = 1;
+
+    var offset: usize = 0;
+    while (offset < significant.len) {
+        const remaining = significant.len - offset;
+        const take = if (offset == 0 and remaining % chunk_digits != 0) remaining % chunk_digits else @min(chunk_digits, remaining);
+        var chunk: u32 = 0;
+        var multiplier: u32 = 1;
+        for (significant[offset .. offset + take]) |c| {
+            const digit = std.fmt.charToDigit(c, radix) catch return LexError.InvalidNumber;
+            chunk = chunk * radix + digit;
+            multiplier *= radix;
         }
-        while (carry > 0) {
-            try dec.append(arena, @intCast(carry % 10));
-            carry /= 10;
+        var carry: u64 = chunk;
+        for (limbs[0..used]) |*limb| {
+            const value = @as(u64, limb.*) * multiplier + carry;
+            limb.* = @intCast(value % 1_000_000_000);
+            carry = value / 1_000_000_000;
         }
+        while (carry != 0) {
+            std.debug.assert(used < limbs.len);
+            limbs[used] = @intCast(carry % 1_000_000_000);
+            used += 1;
+            carry /= 1_000_000_000;
+        }
+        offset += take;
     }
-    while (dec.items.len > 1 and dec.items[dec.items.len - 1] == 0) dec.items.len -= 1;
-    const out = try arena.alloc(u8, dec.items.len);
-    for (dec.items, 0..) |d, i| out[out.len - 1 - i] = '0' + d;
+
+    const high = limbs[used - 1];
+    var high_digits: usize = 1;
+    var high_tail = high;
+    while (high_tail >= 10) : (high_tail /= 10) high_digits += 1;
+    const tail_digits = std.math.mul(usize, used - 1, 9) catch return LexError.OutOfMemory;
+    const output_len = std.math.add(usize, high_digits, tail_digits) catch return LexError.OutOfMemory;
+    const out = try arena.alloc(u8, output_len);
+
+    var write = high_digits;
+    var high_value = high;
+    while (write != 0) {
+        write -= 1;
+        out[write] = '0' + @as(u8, @intCast(high_value % 10));
+        high_value /= 10;
+    }
+    var limb_index = used - 1;
+    write = high_digits;
+    while (limb_index != 0) {
+        limb_index -= 1;
+        var value = limbs[limb_index];
+        var end = write + 9;
+        while (end != write) {
+            end -= 1;
+            out[end] = '0' + @as(u8, @intCast(value % 10));
+            value /= 10;
+        }
+        write += 9;
+    }
+    std.debug.assert(write == out.len);
     return out;
 }
 
@@ -1502,6 +1564,82 @@ test "lexer borrows canonical oversized decimal BigInt digits" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var failing_lexer = Lexer.init(failing.allocator(), separated);
     try std.testing.expectError(error.OutOfMemory, failing_lexer.next());
+}
+
+test "lexer converts oversized radix BigInts through bounded exact storage" {
+    const expected = "340282366920938463463374607431768211456";
+    const cases = [_][]const u8{
+        "0x100000000000000000000000000000000n",
+        "0X100000000000000000000000000000000n",
+        "0x000100000000000000000000000000000000n",
+        "0x1_0000_0000_0000_0000_0000_0000_0000_0000n",
+        "0o4000000000000000000000000000000000000000000n",
+        "0b100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000n",
+    };
+    for (cases) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), source);
+        const token = try lexer.next();
+        try std.testing.expect(token.is_bigint);
+        try std.testing.expectEqualStrings(expected, token.bigint_text.?);
+        try std.testing.expectEqualStrings(source, token.text);
+        try std.testing.expectEqual(@as(usize, 0), token.pos);
+        try std.testing.expectEqual(source.len, token.end);
+    }
+
+    var small_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer small_arena.deinit();
+    var small_lexer = Lexer.init(small_arena.allocator(), "0xFFn");
+    const small = try small_lexer.next();
+    try std.testing.expectEqual(@as(i128, 255), small.bigint);
+    try std.testing.expectEqual(@as(?[]const u8, null), small.bigint_text);
+
+    const wide = "ffffffffffffffffffffffffffffffff";
+    var measured_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer measured_arena.deinit();
+    var measured = std.testing.FailingAllocator.init(measured_arena.allocator(), .{});
+    const decimal = try radixDigitsToDecimal(measured.allocator(), wide, 16);
+    try std.testing.expectEqualStrings("340282366920938463463374607431768211455", decimal);
+    try std.testing.expectEqual(@as(usize, 2), measured.alloc_index);
+    try std.testing.expectEqual(@as(usize, 0), measured.resize_index);
+    try std.testing.expectEqual(decimal.len + 5 * @sizeOf(u32), measured.allocated_bytes);
+
+    var scratch_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, radixDigitsToDecimal(scratch_failure.allocator(), wide, 16));
+    var failure_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer failure_arena.deinit();
+    var output_failure = std.testing.FailingAllocator.init(failure_arena.allocator(), .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, radixDigitsToDecimal(output_failure.allocator(), wide, 16));
+}
+
+test "radix BigInt decimal conversion matches independent chunk boundaries" {
+    const lengths = [_]usize{ 1, 2, 7, 8, 9, 28, 29, 30, 127, 256 };
+    for ([_]u8{ 2, 8, 16 }) |radix| {
+        for (lengths) |len| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const digits = try arena.allocator().alloc(u8, len);
+            for (digits, 0..) |*digit, index| {
+                const value: u8 = if (index < 2) 0 else @intCast((index *% 11 +% len) % radix);
+                digit.* = if (value < 10)
+                    '0' + value
+                else if (index % 2 == 0)
+                    'a' + value - 10
+                else
+                    'A' + value - 10;
+            }
+
+            var oracle = try std.math.big.int.Managed.init(std.testing.allocator);
+            defer oracle.deinit();
+            try oracle.setString(radix, digits);
+            const expected = try oracle.toString(std.testing.allocator, 10, .lower);
+            defer std.testing.allocator.free(expected);
+
+            const actual = try radixDigitsToDecimal(arena.allocator(), digits, radix);
+            try std.testing.expectEqualStrings(expected, actual);
+        }
+    }
 }
 
 test "lexer borrows ordinary identifiers and owns escaped decoding" {
