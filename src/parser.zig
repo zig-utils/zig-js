@@ -2910,7 +2910,7 @@ pub const Parser = struct {
                 // Tagged template: `tag`...`` — call `tag` with the cooked-string
                 // array (carrying `raw`) and the substitution values.
                 const tmpl = self.advance();
-                e = try self.parseTaggedTemplate(e, tmpl.text);
+                e = try self.parseTaggedTemplate(e, tmpl.text, tmpl.template_substitutions);
             } else break;
         }
         if (has_optional) e = try self.alloc(.{ .optional_chain = e });
@@ -2984,7 +2984,7 @@ pub const Parser = struct {
                 // MemberExpression, so it binds to the `new` operand (the tag call
                 // happens first, then `new` constructs its result).
                 const tmpl = self.advance();
-                callee = try self.parseTaggedTemplate(callee, tmpl.text);
+                callee = try self.parseTaggedTemplate(callee, tmpl.text, tmpl.template_substitutions);
             } else break;
         }
         const args: []*Node = if (self.check(.lparen)) try self.parseArgs() else &.{};
@@ -3144,20 +3144,24 @@ pub const Parser = struct {
     /// decoded), the raw quasis (text verbatim), and the substitution
     /// expressions, then build a `tagged_template` node. There is always one
     /// more quasi than substitution.
-    fn parseTaggedTemplate(self: *Parser, tag: *Node, raw_in: []const u8) ParseError!*Node {
+    fn parseTaggedTemplate(self: *Parser, tag: *Node, raw_in: []const u8, substitution_count: usize) ParseError!*Node {
         const raw = try normalizeTemplateRaw(self.arena, raw_in);
-        if (std.mem.indexOfScalar(u8, raw, '$') == null) {
+        if (substitution_count == 0) {
             const cooked = try self.arena.alloc(?[]const u8, 1);
             cooked[0] = try self.cookTemplateQuasi(raw, true);
             const raws = try self.arena.alloc([]const u8, 1);
             raws[0] = raw;
             return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = &.{} } });
         }
-        var cooked: std.ArrayListUnmanaged(?[]const u8) = .empty;
-        var raws: std.ArrayListUnmanaged([]const u8) = .empty;
-        var exprs: std.ArrayListUnmanaged(*Node) = .empty;
+        // A tagged template has one more quasi than substitution. The lexer
+        // records top-level boundaries during its existing nested scan, letting
+        // us fill final arrays directly with no retained list growth capacity.
+        const cooked = try self.arena.alloc(?[]const u8, substitution_count + 1);
+        const raws = try self.arena.alloc([]const u8, substitution_count + 1);
+        const exprs = try self.arena.alloc(*Node, substitution_count);
         // A quasi that holds an invalid escape has an `undefined` cooked value
         // (tolerated in a tagged template); track that per quasi and flush null.
+        var substitution_index: usize = 0;
         var raw_start: usize = 0;
         var i: usize = 0;
         while (i < raw.len) {
@@ -3165,8 +3169,9 @@ pub const Parser = struct {
             if (c == '\\' and i + 1 < raw.len) {
                 i = lex.decodeEscape(raw, i + 1).next;
             } else if (c == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
-                try cooked.append(self.arena, try self.cookTemplateQuasi(raw[raw_start..i], true));
-                try raws.append(self.arena, raw[raw_start..i]);
+                if (substitution_index >= substitution_count) return ParseError.UnexpectedToken;
+                cooked[substitution_index] = try self.cookTemplateQuasi(raw[raw_start..i], true);
+                raws[substitution_index] = raw[raw_start..i];
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
                 var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
@@ -3179,16 +3184,18 @@ pub const Parser = struct {
                 sub.strict = self.strict;
                 sub.module = self.module;
                 sub.eval_private_allowed = self.eval_private_allowed;
-                try exprs.append(self.arena, try sub.parseExpression());
+                exprs[substitution_index] = try sub.parseExpression();
+                substitution_index += 1;
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
                 raw_start = i;
             } else {
                 i += 1;
             }
         }
-        try cooked.append(self.arena, try self.cookTemplateQuasi(raw[raw_start..], true));
-        try raws.append(self.arena, raw[raw_start..]);
-        return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked.items, .raw = raws.items, .exprs = exprs.items } });
+        if (substitution_index != substitution_count) return ParseError.UnexpectedToken;
+        cooked[substitution_index] = try self.cookTemplateQuasi(raw[raw_start..], true);
+        raws[substitution_index] = raw[raw_start..];
+        return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = exprs } });
     }
 
     fn validateTemplateEscape(raw: []const u8, i: usize) ParseError!void {
@@ -4729,6 +4736,22 @@ test "parser preserves raw and cooked template quasis across substitutions" {
     try std.testing.expectEqual(@as(?[]const u8, null), invalid_template.cooked[0]);
     try std.testing.expectEqualStrings("bad\\u{110000}", invalid_template.raw[0]);
     try std.testing.expectEqualStrings("ok", invalid_template.cooked[1].?);
+}
+
+test "parser fills exact tagged template arrays across nested substitutions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try Parser.init(arena.allocator(), "tag`a${{ nested: { value: 1 } }}b${`inner${2}`}c${/}/.test('}')}d`");
+    const program = try parser.parseProgram();
+    const template = program.program[0].expr_stmt.tagged_template;
+    try std.testing.expectEqual(@as(usize, 4), template.cooked.len);
+    try std.testing.expectEqual(@as(usize, 4), template.raw.len);
+    try std.testing.expectEqual(@as(usize, 3), template.exprs.len);
+    for (template.cooked, template.raw, [_][]const u8{ "a", "b", "c", "d" }) |cooked, raw, expected| {
+        try std.testing.expectEqualStrings(expected, cooked.?);
+        try std.testing.expectEqualStrings(expected, raw);
+        try std.testing.expectEqual(@intFromPtr(cooked.?.ptr), @intFromPtr(raw.ptr));
+    }
 }
 
 test "parser propagates template decoding allocation failures" {

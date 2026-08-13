@@ -93,6 +93,10 @@ pub const Token = struct {
     bigint_text: ?[]const u8 = null,
     /// True when an IdentifierName token contained at least one `\u` escape.
     escaped_identifier: bool = false,
+    /// Number of top-level `${...}` substitutions in a template token. The
+    /// lexer already traverses their exact nested boundaries, so the parser can
+    /// size tagged-template AST arrays without rescanning the complete token.
+    template_substitutions: usize = 0,
 };
 
 pub const LexError = error{ UnexpectedCharacter, UnterminatedString, UnterminatedComment, InvalidNumber, OutOfMemory };
@@ -886,6 +890,7 @@ pub const Lexer = struct {
         self.i += 1; // opening backtick
         const text_start = self.i;
         var depth: usize = 0; // brace depth inside ${ ... }
+        var substitution_count: usize = 0;
         // Last significant byte scanned inside the current `${ }` — drives the
         // regex-vs-division decision for a `/` (see `templateRegexAllowed`).
         var last_sig: u8 = 0;
@@ -895,13 +900,14 @@ pub const Lexer = struct {
                 if (c == '`') {
                     const text = self.src[text_start..self.i];
                     self.i += 1; // closing backtick
-                    return .{ .kind = .template, .text = text, .pos = start };
+                    return .{ .kind = .template, .text = text, .pos = start, .template_substitutions = substitution_count };
                 }
                 if (c == '\\') {
                     self.i += 2; // escaped char (\` \$ \\ ...)
                     continue;
                 }
                 if (c == '$' and self.peek2() == '{') {
+                    substitution_count += 1;
                     depth = 1;
                     last_sig = 0;
                     self.i += 2;
@@ -1832,6 +1838,19 @@ test "lexer enforces Unicode 17 identifier start and continue properties" {
         try std.testing.expectEqualStrings("a", prefix.text);
         try std.testing.expectError(LexError.UnexpectedCharacter, lexer.next());
     }
+}
+
+test "lexer counts only current template substitutions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var plain = Lexer.init(arena.allocator(), "`plain $ text \\${escaped}`");
+    try std.testing.expectEqual(@as(usize, 0), (try plain.next()).template_substitutions);
+
+    var nested = Lexer.init(arena.allocator(), "`a${/}/.test('}') /* } */}b${`nested${1}`}c`");
+    const nested_token = try nested.next();
+    try std.testing.expectEqual(TokenKind.template, nested_token.kind);
+    try std.testing.expectEqual(@as(usize, 2), nested_token.template_substitutions);
 }
 
 test "lexer and RegExp share exact Unicode identifier classification" {
