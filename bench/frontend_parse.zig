@@ -146,6 +146,9 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_unicode_identifiers_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_unicode_identifiers_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_unicode_identifiers_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_4096")) return 4096;
@@ -189,6 +192,10 @@ fn isEscapedIdentifierWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_escaped_identifiers_");
 }
 
+fn isUnicodeIdentifierWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_unicode_identifiers_");
+}
+
 fn isPrivateNameWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_private_names_");
 }
@@ -219,6 +226,28 @@ fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: boo
     for (0..width) |index| {
         if (index != 0) try source.append(allocator, ',');
         try source.appendSlice(allocator, if (escaped) "paramet\\u0065r" else "parameter");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+    }
+    try source.appendSlice(allocator, "){\"use strict\";return 7;}");
+    return source.items;
+}
+
+// Cycle valid Unicode 17 ID_Start values from Greek, CJK, astral Deseret, and
+// Other_ID_Start, followed by a combining ID_Continue mark. Source construction
+// happens once before all warmup and scored parser boundaries.
+const unicode_identifier_prefixes = [_][]const u8{
+    "π\u{0301}parameter",
+    "变量\u{0301}parameter",
+    "\u{10400}\u{0301}parameter",
+    "℘\u{0301}parameter",
+};
+
+fn unicodeIdentifierSource(allocator: std.mem.Allocator, width: usize) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "function unicodeWidth(");
+    for (0..width) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        try source.appendSlice(allocator, unicode_identifier_prefixes[index % unicode_identifier_prefixes.len]);
         try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
     }
     try source.appendSlice(allocator, "){\"use strict\";return 7;}");
@@ -434,12 +463,17 @@ fn parseOnce(
         return checksum;
     }
     if (declaration.* != .func_decl) return error.InvalidProgram;
-    if (!isEscapedIdentifierWorkload(workload)) return declaration.func_decl.params.len + 7;
+    if (!isEscapedIdentifierWorkload(workload) and !isUnicodeIdentifierWorkload(workload))
+        return declaration.func_decl.params.len + 7;
     var checksum = declaration.func_decl.params.len + 7;
     for (declaration.func_decl.params, 0..) |param, index| {
-        if (param.name.len < "parameter".len or !std.mem.eql(u8, param.name[0.."parameter".len], "parameter"))
+        const prefix = if (isUnicodeIdentifierWorkload(workload))
+            unicode_identifier_prefixes[index % unicode_identifier_prefixes.len]
+        else
+            "parameter";
+        if (param.name.len < prefix.len or !std.mem.eql(u8, param.name[0..prefix.len], prefix))
             return error.InvalidProgram;
-        if (try std.fmt.parseUnsigned(usize, param.name["parameter".len..], 10) != index)
+        if (try std.fmt.parseUnsigned(usize, param.name[prefix.len..], 10) != index)
             return error.InvalidProgram;
         checksum += param.name.len;
     }
@@ -524,7 +558,10 @@ pub fn main(init: std.process.Init) !void {
         const prepared = try radixBigIntSource(init.arena.allocator(), width);
         expected_radix_bigint = prepared.expected_decimal;
         break :source prepared.source;
-    } else try strictFunctionSource(init.arena.allocator(), width, isEscapedIdentifierWorkload(workload));
+    } else if (isUnicodeIdentifierWorkload(workload))
+        try unicodeIdentifierSource(init.arena.allocator(), width)
+    else
+        try strictFunctionSource(init.arena.allocator(), width, isEscapedIdentifierWorkload(workload));
     for (0..warmup_calls) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;
