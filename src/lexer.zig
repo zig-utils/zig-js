@@ -1062,7 +1062,7 @@ fn hexVal(c: u8) ?u8 {
     };
 }
 
-const DecodedEscape = struct {
+pub const DecodedEscape = struct {
     bytes: [4]u8 = undefined,
     len: u3,
     next: usize,
@@ -1101,7 +1101,7 @@ fn decodedCodePoint(cp: u21, next: usize) DecodedEscape {
 /// Decode one escape into fixed storage. `src[i]` is the character immediately
 /// after the backslash. Malformed hex/unicode escapes degrade to their literal
 /// leading character for tagged-template cooking; strings validate them first.
-fn decodeEscape(src: []const u8, i: usize) DecodedEscape {
+pub fn decodeEscape(src: []const u8, i: usize) DecodedEscape {
     const e = src[i];
     if (lineTerminatorLen(src, i)) |len| return .{ .len = 0, .next = i + len };
     switch (e) {
