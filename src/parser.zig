@@ -2999,16 +2999,37 @@ pub const Parser = struct {
     /// Normalize template line terminators (the TRV rules): `<CR><LF>` and a
     /// lone `<CR>` both become a single `<LF>`. `<LS>`/`<PS>` are left as-is.
     fn normalizeTemplateRaw(arena: std.mem.Allocator, raw: []const u8) ParseError![]const u8 {
-        if (std.mem.indexOfScalar(u8, raw, '\r') == null) return raw;
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        var i: usize = 0;
-        while (i < raw.len) : (i += 1) {
-            if (raw[i] == '\r') {
-                try out.append(arena, '\n');
-                if (i + 1 < raw.len and raw[i + 1] == '\n') i += 1; // CRLF → one LF
-            } else try out.append(arena, raw[i]);
+        const first_cr = std.mem.indexOfScalar(u8, raw, '\r') orelse return raw;
+
+        // TRV changes CR to LF in place conceptually and removes only the LF
+        // half of CRLF. Count those removals before allocating so the arena
+        // retains exactly the normalized bytes, with no grow-and-transfer path.
+        var normalized_len = raw.len;
+        var cursor = first_cr;
+        while (cursor < raw.len) {
+            if (cursor + 1 < raw.len and raw[cursor + 1] == '\n') normalized_len -= 1;
+            cursor = std.mem.indexOfScalarPos(u8, raw, cursor + 1, '\r') orelse raw.len;
         }
-        return out.items;
+
+        const normalized = try arena.alloc(u8, normalized_len);
+        var source_start: usize = 0;
+        var output_start: usize = 0;
+        cursor = first_cr;
+        while (cursor < raw.len) {
+            const span = raw[source_start..cursor];
+            std.mem.copyForwards(u8, normalized[output_start .. output_start + span.len], span);
+            output_start += span.len;
+            normalized[output_start] = '\n';
+            output_start += 1;
+            source_start = cursor + 1;
+            if (source_start < raw.len and raw[source_start] == '\n') source_start += 1;
+            cursor = std.mem.indexOfScalarPos(u8, raw, source_start, '\r') orelse raw.len;
+        }
+        const suffix = raw[source_start..];
+        std.mem.copyForwards(u8, normalized[output_start .. output_start + suffix.len], suffix);
+        output_start += suffix.len;
+        std.debug.assert(output_start == normalized.len);
+        return normalized;
     }
 
     /// Cook one already-delimited quasi. Validation and sizing complete before
@@ -4607,6 +4628,46 @@ test "parser borrows plain template quasis and owns decoded storage" {
     try std.testing.expectEqualStrings("left\nright", normalized.raw[0]);
     try std.testing.expect(@intFromPtr(normalized_cooked.ptr) != @intFromPtr(normalized_source.ptr + 4));
     try std.testing.expectEqual(@intFromPtr(normalized_cooked.ptr), @intFromPtr(normalized.raw[0].ptr));
+}
+
+test "parser normalizes template raw text with exact failure-atomic storage" {
+    const plain = "plain source-backed raw text";
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    const borrowed = try Parser.normalizeTemplateRaw(fixed.allocator(), plain);
+    try std.testing.expectEqual(@intFromPtr(plain.ptr), @intFromPtr(borrowed.ptr));
+
+    const raw = "\rleading\r\nmid\rlast\r\n\xe2\x80\xa8\xe2\x80\xa9";
+    const expected = "\nleading\nmid\nlast\n\xe2\x80\xa8\xe2\x80\xa9";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var measured = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    const normalized = try Parser.normalizeTemplateRaw(measured.allocator(), raw);
+    try std.testing.expectEqualStrings(expected, normalized);
+    try std.testing.expectEqual(@as(usize, 1), measured.allocations);
+    try std.testing.expectEqual(@as(usize, 0), measured.resize_index);
+    try std.testing.expectEqual(expected.len, measured.allocated_bytes);
+
+    var failure_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer failure_arena.deinit();
+    var allocation_failure = std.testing.FailingAllocator.init(failure_arena.allocator(), .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, Parser.normalizeTemplateRaw(allocation_failure.allocator(), raw));
+    try std.testing.expectEqualStrings(expected, try Parser.normalizeTemplateRaw(failure_arena.allocator(), raw));
+}
+
+test "parser preserves normalized tagged template quasis across substitutions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try Parser.init(arena.allocator(), "tag`\rstart\\\r\n${value}\rmid\xe2\x80\xa8tail\xe2\x80\xa9`");
+    const program = try parser.parseProgram();
+    const template = program.program[0].expr_stmt.tagged_template;
+    try std.testing.expectEqual(@as(usize, 2), template.cooked.len);
+    try std.testing.expectEqual(@as(usize, 2), template.raw.len);
+    try std.testing.expectEqual(@as(usize, 1), template.exprs.len);
+    try std.testing.expectEqualStrings("\nstart", template.cooked[0].?);
+    try std.testing.expectEqualStrings("\nstart\\\n", template.raw[0]);
+    try std.testing.expectEqualStrings("\nmid\xe2\x80\xa8tail\xe2\x80\xa9", template.cooked[1].?);
+    try std.testing.expectEqualStrings("\nmid\xe2\x80\xa8tail\xe2\x80\xa9", template.raw[1]);
 }
 
 test "parser cooks template quasis with exact failure-atomic storage" {
