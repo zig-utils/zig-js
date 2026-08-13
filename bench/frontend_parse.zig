@@ -172,6 +172,9 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_templates_normalized_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_templates_normalized_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_templates_normalized_tagged_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_templates_tagged_substitutions_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_templates_tagged_substitutions_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_templates_tagged_substitutions_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_4096")) return 4096;
@@ -209,6 +212,10 @@ fn isEscapedTemplateWorkload(name: []const u8) bool {
 
 fn isNormalizedTemplateWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_templates_normalized_");
+}
+
+fn isTaggedSubstitutionWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_templates_tagged_substitutions_");
 }
 
 fn isEscapedIdentifierWorkload(name: []const u8) bool {
@@ -334,6 +341,22 @@ fn templateLiteralSource(
             "-abcdefghijklmnopqrstuvwxyz0123456789`");
     }
     try source.appendSlice(allocator, "];\n");
+    return source.items;
+}
+
+fn taggedSubstitutionSource(allocator: std.mem.Allocator, width: usize) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "var templateCorpus = tag`");
+    for (0..width) |index| {
+        try source.appendSlice(allocator, "quasi-");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        try source.appendSlice(allocator, "-abcdefghijklmnopqrstuvwxyz${");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        try source.append(allocator, '}');
+    }
+    try source.appendSlice(allocator, "quasi-");
+    try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{width}));
+    try source.appendSlice(allocator, "-abcdefghijklmnopqrstuvwxyz`;\n");
     return source.items;
 }
 
@@ -473,6 +496,35 @@ fn parseOnce(
         }
         return checksum;
     }
+    if (isTaggedSubstitutionWorkload(workload)) {
+        if (declaration.* != .var_decl) return error.InvalidProgram;
+        const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
+        if (init_expr.* != .tagged_template) return error.InvalidProgram;
+        const template = init_expr.tagged_template;
+        const width = try workloadWidth(workload);
+        if (template.cooked.len != width + 1 or template.raw.len != width + 1 or template.exprs.len != width)
+            return error.InvalidProgram;
+        const prefix = "quasi-";
+        const suffix = "-abcdefghijklmnopqrstuvwxyz";
+        var checksum = template.cooked.len + template.raw.len + template.exprs.len;
+        for (template.cooked, template.raw, 0..) |cooked_optional, raw, index| {
+            const cooked = cooked_optional orelse return error.InvalidProgram;
+            if (!std.mem.eql(u8, cooked, raw) or
+                @intFromPtr(cooked.ptr) != @intFromPtr(raw.ptr) or
+                !std.mem.startsWith(u8, cooked, prefix) or
+                !std.mem.endsWith(u8, cooked, suffix)) return error.InvalidProgram;
+            const index_text = cooked[prefix.len .. cooked.len - suffix.len];
+            if (try std.fmt.parseUnsigned(usize, index_text, 10) != index)
+                return error.InvalidProgram;
+            checksum += cooked.len;
+        }
+        for (template.exprs, 0..) |expression, index| {
+            if (expression.* != .number or expression.number != @as(f64, @floatFromInt(index)))
+                return error.InvalidProgram;
+            checksum += index;
+        }
+        return checksum;
+    }
     if (isStringWorkload(workload) or isTemplateWorkload(workload)) {
         if (declaration.* != .var_decl) return error.InvalidProgram;
         const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
@@ -601,7 +653,9 @@ pub fn main(init: std.process.Init) !void {
     const decimal_bigint_workload = isDecimalBigIntWorkload(workload);
     const radix_bigint_workload = isRadixBigIntWorkload(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (private_name_workload)
+    const source = if (isTaggedSubstitutionWorkload(workload))
+        try taggedSubstitutionSource(init.arena.allocator(), width)
+    else if (private_name_workload)
         try privateClassSource(
             init.arena.allocator(),
             width,
