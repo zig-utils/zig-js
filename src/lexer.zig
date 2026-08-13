@@ -766,53 +766,105 @@ pub const Lexer = struct {
     fn lexString(self: *Lexer) LexError!Token {
         const start = self.i;
         const quote = self.src[self.i];
-        self.i += 1;
-        const content_start = self.i;
+        const content_start = self.i + 1;
         // A LegacyOctalEscapeSequence (`\1`..`\7`, `\0` followed by a digit) or a
         // NonOctalDecimalEscapeSequence (`\8`/`\9`) makes the literal a SyntaxError
         // in strict-mode code; flag it so the parser can reject it (mirrors the
         // numeric legacy-octal flag).
         var legacy = false;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
         var decoded = false;
+        var multiple_escapes = false;
+        var first_escape_start: usize = undefined;
+        var first_escape: DecodedEscape = undefined;
+        var decoded_len: usize = 0;
+        var cursor = content_start;
         var raw_start = content_start;
-        while (self.i < self.src.len) {
-            const ch = self.src[self.i];
+        while (cursor < self.src.len) {
+            const ch = self.src[cursor];
             if (ch == quote) {
-                const content_end = self.i;
-                self.i += 1;
-                if (!decoded) return .{
+                const content_end = cursor;
+                if (!decoded) {
+                    self.i = content_end + 1;
+                    return .{
+                        .kind = .string,
+                        .text = self.src[content_start..content_end],
+                        .pos = start,
+                        .legacy_octal = legacy,
+                    };
+                }
+
+                decoded_len += content_end - raw_start;
+                const text = try self.arena.alloc(u8, decoded_len);
+                var out: usize = 0;
+                if (!multiple_escapes) {
+                    const prefix = self.src[content_start..first_escape_start];
+                    std.mem.copyForwards(u8, text[out .. out + prefix.len], prefix);
+                    out += prefix.len;
+                    const bytes = first_escape.bytes[0..first_escape.len];
+                    std.mem.copyForwards(u8, text[out .. out + bytes.len], bytes);
+                    out += bytes.len;
+                    const suffix = self.src[first_escape.next..content_end];
+                    std.mem.copyForwards(u8, text[out .. out + suffix.len], suffix);
+                    out += suffix.len;
+                } else {
+                    cursor = content_start;
+                    while (cursor < content_end) {
+                        const next_escape = std.mem.indexOfScalarPos(u8, self.src[0..content_end], cursor, '\\') orelse content_end;
+                        const raw = self.src[cursor..next_escape];
+                        std.mem.copyForwards(u8, text[out .. out + raw.len], raw);
+                        out += raw.len;
+                        if (next_escape == content_end) break;
+                        const escape = decodeEscape(self.src, next_escape + 1);
+                        const bytes = escape.bytes[0..escape.len];
+                        std.mem.copyForwards(u8, text[out .. out + bytes.len], bytes);
+                        out += bytes.len;
+                        cursor = escape.next;
+                    }
+                }
+                std.debug.assert(out == text.len);
+                self.i = content_end + 1;
+                return .{
                     .kind = .string,
-                    .text = self.src[content_start..content_end],
+                    .text = text,
                     .pos = start,
                     .legacy_octal = legacy,
                 };
-                try buf.appendSlice(self.arena, self.src[raw_start..content_end]);
-                return .{ .kind = .string, .text = try buf.toOwnedSlice(self.arena), .pos = start, .legacy_octal = legacy };
             }
             if (ch == '\\') {
-                if (self.i + 1 >= self.src.len) return LexError.UnterminatedString;
-                // The source backing outlives every parser/AST consumer. Borrow
-                // an unescaped value directly; only the first escape converts
-                // the token to owned decoded storage. Copy subsequent raw spans
-                // in batches instead of growing the arena list once per byte.
-                try buf.appendSlice(self.arena, self.src[raw_start..self.i]);
-                decoded = true;
-                const e = self.src[self.i + 1];
+                if (cursor + 1 >= self.src.len) {
+                    self.i = cursor;
+                    return LexError.UnterminatedString;
+                }
+                decoded_len += cursor - raw_start;
+                const e = self.src[cursor + 1];
                 if (e >= '1' and e <= '9') {
                     legacy = true;
-                } else if (e == '0' and self.i + 2 < self.src.len and std.ascii.isDigit(self.src[self.i + 2])) {
+                } else if (e == '0' and cursor + 2 < self.src.len and std.ascii.isDigit(self.src[cursor + 2])) {
                     legacy = true;
                 }
-                try validateStringEscape(self.src, self.i + 1);
-                self.i = try appendEscape(self.arena, &buf, self.src, self.i + 1);
-                raw_start = self.i;
+                validateStringEscape(self.src, cursor + 1) catch |err| {
+                    self.i = cursor;
+                    return err;
+                };
+                const escape = decodeEscape(self.src, cursor + 1);
+                if (!decoded) {
+                    first_escape_start = cursor;
+                    first_escape = escape;
+                } else {
+                    multiple_escapes = true;
+                }
+                decoded = true;
+                decoded_len += escape.len;
+                cursor = escape.next;
+                raw_start = cursor;
             } else if (ch == '\n' or ch == '\r') {
+                self.i = cursor;
                 return LexError.UnterminatedString;
             } else {
-                self.i += 1;
+                cursor += 1;
             }
         }
+        self.i = cursor;
         return LexError.UnterminatedString;
     }
 
@@ -1010,9 +1062,22 @@ fn hexVal(c: u8) ?u8 {
     };
 }
 
-/// Append a UTF-8-encoded code point to `buf`. Lone surrogates are emitted as
-/// WTF-8 so JS strings can preserve UTF-16 code units that are not scalar values.
-fn appendCodePoint(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), cp: u21) std.mem.Allocator.Error!void {
+const DecodedEscape = struct {
+    bytes: [4]u8 = undefined,
+    len: u3,
+    next: usize,
+};
+
+fn decodedByte(byte: u8, next: usize) DecodedEscape {
+    var result: DecodedEscape = .{ .len = 1, .next = next };
+    result.bytes[0] = byte;
+    return result;
+}
+
+/// Encode one code point without allocating. Lone surrogates are emitted as
+/// WTF-8 so JavaScript strings preserve unmatched UTF-16 code units.
+fn decodedCodePoint(cp: u21, next: usize) DecodedEscape {
+    var result: DecodedEscape = .{ .len = undefined, .next = next };
     // A codepoint past the Unicode maximum only reaches here from a `\u{…}` escape
     // whose value overflows 0x10FFFF. That is always an invalid escape — a
     // SyntaxError in a string (rejected before this runs) and a discarded
@@ -1020,53 +1085,32 @@ fn appendCodePoint(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), c
     // feed the out-of-range scalar to utf8Encode, which panics. (Fixes a crash on
     // ``\u{110000}`` in a tagged template.)
     if (cp > 0x10FFFF) {
-        try buf.appendSlice(arena, "\u{FFFD}");
-        return;
+        result.bytes[0..3].* = "\u{FFFD}".*;
+        result.len = 3;
+        return result;
     }
-    var tmp: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(cp, &tmp) catch {
-        try buf.append(arena, @intCast(0xE0 | (cp >> 12)));
-        try buf.append(arena, @intCast(0x80 | ((cp >> 6) & 0x3F)));
-        try buf.append(arena, @intCast(0x80 | (cp & 0x3F)));
-        return;
+    result.len = std.unicode.utf8Encode(cp, &result.bytes) catch wtf8: {
+        result.bytes[0] = @intCast(0xE0 | (cp >> 12));
+        result.bytes[1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+        result.bytes[2] = @intCast(0x80 | (cp & 0x3F));
+        break :wtf8 3;
     };
-    try buf.appendSlice(arena, tmp[0..n]);
+    return result;
 }
 
-/// Decode one escape sequence and append its bytes to `buf`. `src[i]` is the
-/// character immediately after the backslash; returns the index just past the
-/// escape. Handles `\n \t \r \b \f \v \0`, `\xHH`, `\uHHHH`, `\u{...}`, line
-/// continuations, and (per spec) any other character as itself. Shared by the
-/// string lexer and the template-literal parser. Malformed hex/unicode escapes
-/// degrade to the literal character rather than erroring.
-pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), src: []const u8, i: usize) std.mem.Allocator.Error!usize {
+/// Decode one escape into fixed storage. `src[i]` is the character immediately
+/// after the backslash. Malformed hex/unicode escapes degrade to their literal
+/// leading character for tagged-template cooking; strings validate them first.
+fn decodeEscape(src: []const u8, i: usize) DecodedEscape {
     const e = src[i];
-    if (lineTerminatorLen(src, i)) |len| return i + len;
+    if (lineTerminatorLen(src, i)) |len| return .{ .len = 0, .next = i + len };
     switch (e) {
-        'n' => {
-            try buf.append(arena, '\n');
-            return i + 1;
-        },
-        't' => {
-            try buf.append(arena, '\t');
-            return i + 1;
-        },
-        'r' => {
-            try buf.append(arena, '\r');
-            return i + 1;
-        },
-        'b' => {
-            try buf.append(arena, 8);
-            return i + 1;
-        },
-        'f' => {
-            try buf.append(arena, 12);
-            return i + 1;
-        },
-        'v' => {
-            try buf.append(arena, 11);
-            return i + 1;
-        },
+        'n' => return decodedByte('\n', i + 1),
+        't' => return decodedByte('\t', i + 1),
+        'r' => return decodedByte('\r', i + 1),
+        'b' => return decodedByte(8, i + 1),
+        'f' => return decodedByte(12, i + 1),
+        'v' => return decodedByte(11, i + 1),
         '0'...'7' => {
             // LegacyOctalEscapeSequence (Annex B.1.2): 1-3 octal digits with
             // value ≤ 0o377 (255). A leading 0-3 admits up to two more octal
@@ -1081,18 +1125,15 @@ pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
                 val = val * 8 + @as(u21, src[j] - '0');
                 j += 1;
             }
-            try appendCodePoint(arena, buf, val);
-            return j;
+            return decodedCodePoint(val, j);
         },
         'x' => {
             if (i + 2 < src.len) {
                 if (hexVal(src[i + 1])) |hi| if (hexVal(src[i + 2])) |lo| {
-                    try appendCodePoint(arena, buf, @as(u21, hi) * 16 + lo);
-                    return i + 3;
+                    return decodedCodePoint(@as(u21, hi) * 16 + lo, i + 3);
                 };
             }
-            try buf.append(arena, 'x');
-            return i + 1;
+            return decodedByte('x', i + 1);
         },
         'u' => {
             if (i + 1 < src.len and src[i + 1] == '{') {
@@ -1106,8 +1147,7 @@ pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
                     any = true;
                 }
                 if (any and j < src.len and src[j] == '}') {
-                    try appendCodePoint(arena, buf, cp);
-                    return j + 1;
+                    return decodedCodePoint(cp, j + 1);
                 }
             } else if (i + 4 < src.len) {
                 // `\uHHHH` — exactly four hex digits.
@@ -1126,24 +1166,29 @@ pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
                             const lo = (@as(u21, e2.?) << 12) | (@as(u21, f2.?) << 8) | (@as(u21, g2.?) << 4) | h2.?;
                             if (lo >= 0xDC00 and lo <= 0xDFFF) {
                                 const full: u21 = 0x10000 + (((cp - 0xD800) << 10) | (lo - 0xDC00));
-                                try appendCodePoint(arena, buf, full);
-                                return i + 11;
+                                return decodedCodePoint(full, i + 11);
                             }
                         }
                     }
-                    try appendCodePoint(arena, buf, cp);
-                    return i + 5;
+                    return decodedCodePoint(cp, i + 5);
                 }
             }
-            try buf.append(arena, 'u');
-            return i + 1;
+            return decodedByte('u', i + 1);
         },
         else => {
             // `\\ \` \$ \" \'` and any NonEscapeCharacter → the character itself.
-            try buf.append(arena, e);
-            return i + 1;
+            return decodedByte(e, i + 1);
         },
     }
+}
+
+/// Decode one escape sequence and append its bytes to `buf`. Shared by the
+/// template-literal parser; string literals use the same fixed decoder for an
+/// exact-length validation pass followed by one allocation and fill pass.
+pub fn appendEscape(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), src: []const u8, i: usize) std.mem.Allocator.Error!usize {
+    const escape = decodeEscape(src, i);
+    try buf.appendSlice(arena, escape.bytes[0..escape.len]);
+    return escape.next;
 }
 
 /// Reject the malformed `\x`/`\u` escape sequences that are an early SyntaxError
@@ -1763,12 +1808,25 @@ test "lexer and RegExp share exact Unicode identifier classification" {
 }
 
 test "lexer decodes string escapes" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var lx = Lexer.init(arena.allocator(), "'a\\nb'");
-    const t = try lx.next();
-    try std.testing.expectEqual(TokenKind.string, t.kind);
-    try std.testing.expectEqualStrings("a\nb", t.text);
+    const cases = [_]struct {
+        source: []const u8,
+        expected: []const u8,
+        legacy: bool = false,
+    }{
+        .{ .source = "'\\n\\t\\r\\b\\f\\v'", .expected = "\n\t\r\x08\x0c\x0b" },
+        .{ .source = "'\\0\\141\\377\\8\\9'", .expected = "\x00a\xc3\xbf89", .legacy = true },
+        .{ .source = "'\\x41\\u0042\\u{43}\\uD83D\\uDE00\\uD800'", .expected = "ABC\xf0\x9f\x98\x80\xed\xa0\x80" },
+        .{ .source = "'\\\\\\\'\\z'", .expected = "\\'z" },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), case.source);
+        const token = try lexer.next();
+        try std.testing.expectEqual(TokenKind.string, token.kind);
+        try std.testing.expectEqualStrings(case.expected, token.text);
+        try std.testing.expectEqual(case.legacy, token.legacy_octal);
+    }
 }
 
 test "lexer borrows unescaped strings and allocates only for decoding" {
@@ -1786,8 +1844,40 @@ test "lexer borrows unescaped strings and allocates only for decoding" {
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var decoded = Lexer.init(arena.allocator(), "'raw\\nspan\\u0021tail'");
-    try std.testing.expectEqualStrings("raw\nspan!tail", (try decoded.next()).text);
+    var measured = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    var decoded = Lexer.init(measured.allocator(), "'raw\\nspan\\u0021tail'");
+    const decoded_token = try decoded.next();
+    try std.testing.expectEqualStrings("raw\nspan!tail", decoded_token.text);
+    try std.testing.expectEqual(@as(usize, 1), measured.allocations);
+    try std.testing.expectEqual(@as(usize, 0), measured.resize_index);
+    try std.testing.expectEqual(decoded_token.text.len, measured.allocated_bytes);
+
+    var failure_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer failure_arena.deinit();
+    var allocation_failure = std.testing.FailingAllocator.init(failure_arena.allocator(), .{ .fail_index = 0 });
+    var retryable = Lexer.init(allocation_failure.allocator(), "'raw\\nspan\\u0021tail'");
+    try std.testing.expectError(error.OutOfMemory, retryable.next());
+    try std.testing.expectEqual(@as(usize, 0), retryable.i);
+    retryable.arena = failure_arena.allocator();
+    try std.testing.expectEqualStrings("raw\nspan!tail", (try retryable.next()).text);
+}
+
+test "lexer reports malformed string escapes at their original offsets" {
+    const strings = [_][]const u8{
+        "'\\x0'",
+        "'\\xGG'",
+        "'\\u123'",
+        "'\\u{}'",
+        "'\\u{110000}'",
+        "'\\u{1_0}'",
+    };
+    for (strings) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), source);
+        try std.testing.expectError(LexError.UnexpectedCharacter, lexer.next());
+        try std.testing.expectEqual(std.mem.indexOfScalar(u8, source, '\\').?, lexer.errorOffset());
+    }
 }
 
 test "lexer rejects raw line terminators in literals" {
