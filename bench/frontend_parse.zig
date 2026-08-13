@@ -152,6 +152,8 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_private_names_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_private_names_escaped_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_private_names_escaped_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_private_names_escaped_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_strings_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_strings_2048")) return 2048;
@@ -219,6 +221,10 @@ fn isUnicodeIdentifierWorkload(name: []const u8) bool {
 
 fn isPrivateNameWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_private_names_");
+}
+
+fn isEscapedPrivateNameWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_private_names_escaped_");
 }
 
 fn isNumericWorkload(name: []const u8) bool {
@@ -599,7 +605,7 @@ pub fn main(init: std.process.Init) !void {
         try privateClassSource(
             init.arena.allocator(),
             width,
-            std.mem.eql(u8, workload, "representative_frontend_private_names_escaped_4096"),
+            isEscapedPrivateNameWorkload(workload),
         )
     else if (string_workload)
         try stringLiteralSource(
