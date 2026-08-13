@@ -268,10 +268,26 @@ fn numericLiteralSource(allocator: std.mem.Allocator, width: usize, separated: b
     return source.items;
 }
 
-fn parseOnce(allocator: std.mem.Allocator, source: []const u8, workload: []const u8) !usize {
+const AllocationObservation = struct {
+    requests: usize = 0,
+    allocated_bytes: usize = 0,
+};
+
+fn parseOnce(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    workload: []const u8,
+    observation: ?*AllocationObservation,
+) !usize {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var parser = try js.Parser.init(arena.allocator(), source);
+    var measured = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    defer if (observation) |value| {
+        value.requests += measured.allocations + measured.resize_index;
+        value.allocated_bytes += measured.allocated_bytes;
+    };
+    const parser_allocator = if (observation != null) measured.allocator() else arena.allocator();
+    var parser = try js.Parser.init(parser_allocator, source);
     const program = try parser.parseProgram();
     const declaration = program.program[0];
     if (isPrivateNameWorkload(workload)) {
@@ -334,7 +350,19 @@ fn parseOnce(allocator: std.mem.Allocator, source: []const u8, workload: []const
 
 fn runJobs(allocator: std.mem.Allocator, source: []const u8, jobs: usize, workload: []const u8) !usize {
     var checksum: usize = 0;
-    for (0..jobs) |_| checksum += try parseOnce(allocator, source, workload);
+    for (0..jobs) |_| checksum += try parseOnce(allocator, source, workload, null);
+    return checksum;
+}
+
+fn observeJobAllocations(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    jobs: usize,
+    workload: []const u8,
+    observation: *AllocationObservation,
+) !usize {
+    var checksum: usize = 0;
+    for (0..jobs) |_| checksum += try parseOnce(allocator, source, workload, observation);
     return checksum;
 }
 
@@ -401,15 +429,15 @@ pub fn main(init: std.process.Init) !void {
 
             // Allocation observation is an untimed replay of identical work so
             // counting overhead cannot contaminate wall or hardware counters.
-            var measured = std.testing.FailingAllocator.init(init.gpa, .{});
-            const allocation_checksum = try runJobs(measured.allocator(), source, jobs, workload);
+            var allocation_observation: AllocationObservation = .{};
+            const allocation_checksum = try observeJobAllocations(init.gpa, source, jobs, workload, &allocation_observation);
             if (allocation_checksum != checksum) return error.InvalidProgram;
             try stdout.print("zig-js-frontend-allocations\tsingle\t{s}\t{d}\t{d}\t{d}\t{d}\n", .{
                 workload,
                 jobs,
                 sample,
-                measured.allocations + measured.resize_index,
-                measured.allocated_bytes,
+                allocation_observation.requests,
+                allocation_observation.allocated_bytes,
             });
         }
     }
