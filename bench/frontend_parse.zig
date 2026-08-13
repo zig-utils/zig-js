@@ -156,6 +156,8 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_strings_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_strings_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_strings_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_strings_escaped_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_strings_escaped_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_strings_escaped_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_templates_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_templates_2048")) return 2048;
@@ -178,6 +180,10 @@ fn workloadWidth(name: []const u8) !usize {
 
 fn isStringWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_strings_");
+}
+
+fn isEscapedStringWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_strings_escaped_");
 }
 
 fn isTemplateWorkload(name: []const u8) bool {
@@ -436,7 +442,7 @@ fn parseOnce(
         const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
         if (init_expr.* != .array_lit) return error.InvalidProgram;
         var checksum = init_expr.array_lit.len;
-        for (init_expr.array_lit) |element| {
+        for (init_expr.array_lit, 0..) |element, index| {
             if (isTaggedTemplateWorkload(workload)) {
                 if (element.* != .tagged_template) return error.InvalidProgram;
                 if (element.tagged_template.cooked.len != 1 or element.tagged_template.raw.len != 1 or element.tagged_template.exprs.len != 0)
@@ -444,6 +450,16 @@ fn parseOnce(
                 checksum += (element.tagged_template.cooked[0] orelse return error.InvalidProgram).len;
             } else {
                 if (element.* != .string) return error.InvalidProgram;
+                if (isStringWorkload(workload)) {
+                    const prefix = "literal-";
+                    const suffix = "-abcdefghijklmnopqrstuvwxyz0123456789";
+                    if (element.string.len <= prefix.len + suffix.len or
+                        !std.mem.startsWith(u8, element.string, prefix) or
+                        !std.mem.endsWith(u8, element.string, suffix)) return error.InvalidProgram;
+                    const index_text = element.string[prefix.len .. element.string.len - suffix.len];
+                    if (try std.fmt.parseUnsigned(usize, index_text, 10) != index)
+                        return error.InvalidProgram;
+                }
                 checksum += element.string.len;
             }
         }
@@ -533,7 +549,7 @@ pub fn main(init: std.process.Init) !void {
         try stringLiteralSource(
             init.arena.allocator(),
             width,
-            std.mem.eql(u8, workload, "representative_frontend_strings_escaped_4096"),
+            isEscapedStringWorkload(workload),
         )
     else if (template_workload)
         try templateLiteralSource(
