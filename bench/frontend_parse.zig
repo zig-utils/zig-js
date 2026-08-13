@@ -32,6 +32,10 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_templates_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_templates_escaped_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_templates_tagged_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_numeric_unseparated_4096")) return 4096;
     return error.InvalidWorkload;
 }
 
@@ -53,6 +57,14 @@ fn isEscapedIdentifierWorkload(name: []const u8) bool {
 
 fn isPrivateNameWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_private_names_");
+}
+
+fn isNumericWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_numeric_");
+}
+
+fn isSeparatedNumericWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_numeric_separators_");
 }
 
 fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
@@ -108,6 +120,27 @@ fn templateLiteralSource(allocator: std.mem.Allocator, width: usize, escaped: bo
     return source.items;
 }
 
+fn numericLiteralSource(allocator: std.mem.Allocator, width: usize, separated: bool) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "var numericCorpus = [");
+    var digits_buffer: [32]u8 = undefined;
+    for (0..width) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{100_000_000_000 + index});
+        if (!separated) {
+            try source.appendSlice(allocator, digits);
+            continue;
+        }
+        for (digits, 0..) |digit, position| {
+            if (position != 0 and (digits.len - position) % 3 == 0)
+                try source.append(allocator, '_');
+            try source.append(allocator, digit);
+        }
+    }
+    try source.appendSlice(allocator, "];\n");
+    return source.items;
+}
+
 fn parseOnce(allocator: std.mem.Allocator, source: []const u8, workload: []const u8) !usize {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -146,6 +179,19 @@ fn parseOnce(allocator: std.mem.Allocator, source: []const u8, workload: []const
         }
         return checksum;
     }
+    if (isNumericWorkload(workload)) {
+        if (declaration.* != .var_decl) return error.InvalidProgram;
+        const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
+        if (init_expr.* != .array_lit or init_expr.array_lit.len == 0) return error.InvalidProgram;
+        var checksum: usize = init_expr.array_lit.len;
+        for (init_expr.array_lit, 0..) |element, index| {
+            if (element.* != .number) return error.InvalidProgram;
+            const expected = 100_000_000_000 + index;
+            if (element.number != @as(f64, @floatFromInt(expected))) return error.InvalidProgram;
+            checksum += @intFromFloat(element.number);
+        }
+        return checksum;
+    }
     if (declaration.* != .func_decl) return error.InvalidProgram;
     if (!isEscapedIdentifierWorkload(workload)) return declaration.func_decl.params.len + 7;
     var checksum = declaration.func_decl.params.len + 7;
@@ -177,6 +223,7 @@ pub fn main(init: std.process.Init) !void {
     const string_workload = isStringWorkload(workload);
     const template_workload = isTemplateWorkload(workload);
     const private_name_workload = isPrivateNameWorkload(workload);
+    const numeric_workload = isNumericWorkload(workload);
     const source = if (private_name_workload)
         try privateClassSource(
             init.arena.allocator(),
@@ -195,6 +242,12 @@ pub fn main(init: std.process.Init) !void {
             width,
             std.mem.eql(u8, workload, "representative_frontend_templates_escaped_4096"),
             isTaggedTemplateWorkload(workload),
+        )
+    else if (numeric_workload)
+        try numericLiteralSource(
+            init.arena.allocator(),
+            width,
+            isSeparatedNumericWorkload(workload),
         )
     else
         try strictFunctionSource(init.arena.allocator(), width, isEscapedIdentifierWorkload(workload));
