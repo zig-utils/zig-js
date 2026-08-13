@@ -1,12 +1,139 @@
 //! Parser-only growth runner for representative frontend complexity witnesses.
 //!
 //! Usage:
-//!   frontend-parse-benchmark single <workload> <jobs> <samples>
+//!   frontend-parse-benchmark single <workload> <jobs> <samples> [--darwin-rusage]
 
 const std = @import("std");
+const builtin = @import("builtin");
 const js = @import("js");
 
 const warmup_calls = 10;
+
+// Darwin's public proc_pid_rusage RUSAGE_INFO_V6 layout. This runner keeps the
+// counters around only the parser boundary; process-wide `/usr/bin/time`
+// counters also include source construction, warmup, and allocation replay.
+const DarwinRusageInfoV6 = extern struct {
+    ri_uuid: [16]u8,
+    ri_user_time: u64,
+    ri_system_time: u64,
+    ri_pkg_idle_wkups: u64,
+    ri_interrupt_wkups: u64,
+    ri_pageins: u64,
+    ri_wired_size: u64,
+    ri_resident_size: u64,
+    ri_phys_footprint: u64,
+    ri_proc_start_abstime: u64,
+    ri_proc_exit_abstime: u64,
+    ri_child_user_time: u64,
+    ri_child_system_time: u64,
+    ri_child_pkg_idle_wkups: u64,
+    ri_child_interrupt_wkups: u64,
+    ri_child_pageins: u64,
+    ri_child_elapsed_abstime: u64,
+    ri_diskio_bytesread: u64,
+    ri_diskio_byteswritten: u64,
+    ri_cpu_time_qos_default: u64,
+    ri_cpu_time_qos_maintenance: u64,
+    ri_cpu_time_qos_background: u64,
+    ri_cpu_time_qos_utility: u64,
+    ri_cpu_time_qos_legacy: u64,
+    ri_cpu_time_qos_user_initiated: u64,
+    ri_cpu_time_qos_user_interactive: u64,
+    ri_billed_system_time: u64,
+    ri_serviced_system_time: u64,
+    ri_logical_writes: u64,
+    ri_lifetime_max_phys_footprint: u64,
+    ri_instructions: u64,
+    ri_cycles: u64,
+    ri_billed_energy: u64,
+    ri_serviced_energy: u64,
+    ri_interval_max_phys_footprint: u64,
+    ri_runnable_time: u64,
+    ri_flags: u64,
+    ri_user_ptime: u64,
+    ri_system_ptime: u64,
+    ri_pinstructions: u64,
+    ri_pcycles: u64,
+    ri_energy_nj: u64,
+    ri_penergy_nj: u64,
+    ri_secure_time_in_system: u64,
+    ri_secure_ptime_in_system: u64,
+    ri_neural_footprint: u64,
+    ri_lifetime_max_neural_footprint: u64,
+    ri_interval_max_neural_footprint: u64,
+    ri_conclave_footprint: u64,
+    ri_page_wait_time_mach: u64,
+    ri_page_cache_hits: u64,
+    ri_reserved: [6]u64,
+};
+comptime {
+    std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_instructions") == 248);
+    std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_energy_nj") == 336);
+    std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_page_cache_hits") == 408);
+    std.debug.assert(@sizeOf(DarwinRusageInfoV6) == 464);
+}
+
+const DarwinCounterSnapshot = struct {
+    instructions: u64,
+    cycles: u64,
+    energy_nj: u64,
+    package_idle_wakeups: u64,
+    interrupt_wakeups: u64,
+    pageins: u64,
+    page_cache_hits: u64,
+};
+
+const rusage_info_v6 = 6;
+extern "c" fn proc_pid_rusage(pid: std.c.pid_t, flavor: c_int, buffer: *anyopaque) c_int;
+extern "c" fn zig_js_benchmark_thermal_state() i32;
+
+fn darwinCounterSnapshot() !DarwinCounterSnapshot {
+    if (builtin.os.tag != .macos) return error.DarwinRusageUnavailable;
+    var info = std.mem.zeroes(DarwinRusageInfoV6);
+    if (proc_pid_rusage(std.c.getpid(), rusage_info_v6, &info) != 0) return error.DarwinRusageUnavailable;
+    return .{
+        .instructions = info.ri_instructions,
+        .cycles = info.ri_cycles,
+        .energy_nj = info.ri_energy_nj,
+        .package_idle_wakeups = info.ri_pkg_idle_wkups,
+        .interrupt_wakeups = info.ri_interrupt_wkups,
+        .pageins = info.ri_pageins,
+        .page_cache_hits = info.ri_page_cache_hits,
+    };
+}
+
+fn darwinThermalState() !i32 {
+    if (builtin.os.tag != .macos) return error.DarwinThermalStateUnavailable;
+    const state = zig_js_benchmark_thermal_state();
+    if (state < 0 or state > 3) return error.DarwinThermalStateUnavailable;
+    return state;
+}
+
+fn printDarwinCounterRow(
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+    sample: usize,
+    before: DarwinCounterSnapshot,
+    after: DarwinCounterSnapshot,
+    thermal_before: i32,
+    thermal_after: i32,
+) !void {
+    try writer.print("zig-js-darwin-rusage\tsingle\t{s}\t{d}\t{d}\tmeasured\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+        workload,
+        jobs,
+        sample,
+        after.instructions -| before.instructions,
+        after.cycles -| before.cycles,
+        after.energy_nj -| before.energy_nj,
+        after.package_idle_wakeups -| before.package_idle_wakeups,
+        after.interrupt_wakeups -| before.interrupt_wakeups,
+        after.pageins -| before.pageins,
+        after.page_cache_hits -| before.page_cache_hits,
+        thermal_before,
+        thermal_after,
+    });
+}
 
 fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
@@ -213,7 +340,9 @@ fn runJobs(allocator: std.mem.Allocator, source: []const u8, jobs: usize, worklo
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 5 or !std.mem.eql(u8, args[1], "single")) return error.InvalidArguments;
+    if ((args.len != 5 and args.len != 6) or !std.mem.eql(u8, args[1], "single")) return error.InvalidArguments;
+    const darwin_rusage = args.len == 6 and std.mem.eql(u8, args[5], "--darwin-rusage");
+    if (args.len == 6 and !darwin_rusage) return error.InvalidArguments;
     const workload = args[2];
     const jobs = try std.fmt.parseUnsigned(usize, args[3], 10);
     const samples = try std.fmt.parseUnsigned(usize, args[4], 10);
@@ -257,12 +386,32 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     for (0..samples) |sample| {
+        const thermal_before = if (darwin_rusage) try darwinThermalState() else undefined;
+        const counters_before = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
         const started = nowNs(init.io);
         const checksum = try runJobs(init.gpa, source, jobs, workload);
         const elapsed: u64 = @intCast(nowNs(init.io) - started);
+        const counters_after = if (darwin_rusage) try darwinCounterSnapshot() else undefined;
+        const thermal_after = if (darwin_rusage) try darwinThermalState() else undefined;
         try stdout.print("zig-js\tsingle\t{s}\t1\t{d}\t{d}\t{d}\t{d}\n", .{
             workload, jobs, sample, elapsed, checksum,
         });
+        if (darwin_rusage) {
+            try printDarwinCounterRow(stdout, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
+
+            // Allocation observation is an untimed replay of identical work so
+            // counting overhead cannot contaminate wall or hardware counters.
+            var measured = std.testing.FailingAllocator.init(init.gpa, .{});
+            const allocation_checksum = try runJobs(measured.allocator(), source, jobs, workload);
+            if (allocation_checksum != checksum) return error.InvalidProgram;
+            try stdout.print("zig-js-frontend-allocations\tsingle\t{s}\t{d}\t{d}\t{d}\t{d}\n", .{
+                workload,
+                jobs,
+                sample,
+                measured.allocations + measured.resize_index,
+                measured.allocated_bytes,
+            });
+        }
     }
     try stdout.flush();
 }

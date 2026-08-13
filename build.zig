@@ -2225,9 +2225,17 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("bench/frontend_parse.zig"),
             .target = target,
             .optimize = .ReleaseFast,
+            .link_libc = target.result.os.tag == .macos,
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
+    if (target.result.os.tag == .macos) {
+        frontend_parse_benchmark.root_module.addCSourceFile(.{
+            .file = b.path("bench/benchmark_thermal_state.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        frontend_parse_benchmark.root_module.linkFramework("Foundation", .{});
+    }
     const install_frontend_parse_benchmark = b.addInstallArtifact(frontend_parse_benchmark, .{});
     const frontend_parse_benchmark_step = b.step("frontend-parse-benchmark-bin", "Build the parser-only frontend growth runner");
     frontend_parse_benchmark_step.dependOn(&install_frontend_parse_benchmark.step);
