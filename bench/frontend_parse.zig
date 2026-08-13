@@ -163,6 +163,10 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_separators_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_numeric_unseparated_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_bigint_decimal_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_bigint_decimal_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_bigint_decimal_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_bigint_decimal_separated_4096")) return 4096;
     return error.InvalidWorkload;
 }
 
@@ -192,6 +196,14 @@ fn isNumericWorkload(name: []const u8) bool {
 
 fn isSeparatedNumericWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_numeric_separators_");
+}
+
+fn isDecimalBigIntWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_bigint_decimal_");
+}
+
+fn isSeparatedDecimalBigIntWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_bigint_decimal_separated_4096");
 }
 
 fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
@@ -268,6 +280,32 @@ fn numericLiteralSource(allocator: std.mem.Allocator, width: usize, separated: b
     return source.items;
 }
 
+fn decimalBigIntDigit(position: usize) u8 {
+    if (position == 0) return '9';
+    return '0' + @as(u8, @intCast((position *% 7 +% 3) % 10));
+}
+
+fn decimalBigIntSource(allocator: std.mem.Allocator, width: usize, separated: bool) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "var decimalBigInt = ");
+    for (0..width) |position| {
+        if (separated and position != 0 and (width - position) % 3 == 0)
+            try source.append(allocator, '_');
+        try source.append(allocator, decimalBigIntDigit(position));
+    }
+    try source.appendSlice(allocator, "n;\n");
+    return source.items;
+}
+
+fn validatedDecimalBigIntChecksum(text: []const u8) !usize {
+    var checksum: u32 = 2_166_136_261;
+    for (text, 0..) |digit, position| {
+        if (digit != decimalBigIntDigit(position)) return error.InvalidProgram;
+        checksum = (checksum ^ digit) *% 16_777_619;
+    }
+    return @as(usize, checksum) + text.len;
+}
+
 const AllocationObservation = struct {
     requests: usize = 0,
     allocated_bytes: usize = 0,
@@ -290,6 +328,14 @@ fn parseOnce(
     var parser = try js.Parser.init(parser_allocator, source);
     const program = try parser.parseProgram();
     const declaration = program.program[0];
+    if (isDecimalBigIntWorkload(workload)) {
+        if (declaration.* != .var_decl) return error.InvalidProgram;
+        const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
+        if (init_expr.* != .bigint_lit) return error.InvalidProgram;
+        const text = init_expr.bigint_lit.text orelse return error.InvalidProgram;
+        if (text.len != try workloadWidth(workload)) return error.InvalidProgram;
+        return validatedDecimalBigIntChecksum(text);
+    }
     if (isPrivateNameWorkload(workload)) {
         if (declaration.* != .var_decl) return error.InvalidProgram;
         const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
@@ -381,6 +427,7 @@ pub fn main(init: std.process.Init) !void {
     const template_workload = isTemplateWorkload(workload);
     const private_name_workload = isPrivateNameWorkload(workload);
     const numeric_workload = isNumericWorkload(workload);
+    const decimal_bigint_workload = isDecimalBigIntWorkload(workload);
     const source = if (private_name_workload)
         try privateClassSource(
             init.arena.allocator(),
@@ -405,6 +452,12 @@ pub fn main(init: std.process.Init) !void {
             init.arena.allocator(),
             width,
             isSeparatedNumericWorkload(workload),
+        )
+    else if (decimal_bigint_workload)
+        try decimalBigIntSource(
+            init.arena.allocator(),
+            width,
+            isSeparatedDecimalBigIntWorkload(workload),
         )
     else
         try strictFunctionSource(init.arena.allocator(), width, isEscapedIdentifierWorkload(workload));
