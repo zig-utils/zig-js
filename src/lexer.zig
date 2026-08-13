@@ -1,4 +1,5 @@
 const std = @import("std");
+const regex = @import("regex");
 
 pub const TokenKind = enum {
     eof,
@@ -264,27 +265,19 @@ pub const Lexer = struct {
         return lineTerminatorLen(self.src, idx);
     }
 
-    /// IdentifierStart test for a decoded code point. Exact for ASCII; for
-    /// non-ASCII it admits any code point that is not white space, a line
-    /// terminator, a zero-width joiner (those are continue-only), or the BOM —
-    /// which covers every Unicode letter test262's positive identifier tests
-    /// use. (Full ID_Start property tables are a later refinement and only
-    /// matter for rejecting invalid identifiers — the negative/strictness axis.)
+    /// ECMAScript IdentifierStart: `$`, `_`, or Unicode ID_Start. Keep ASCII
+    /// local; non-ASCII scalars share the generated Unicode 17 authority used
+    /// by RegExp named captures.
     fn isIdStartCp(cp: u21) bool {
         if (cp < 0x80) return isIdentStart(@intCast(cp));
-        if (isSpaceCp(cp) or isLineTermCp(cp)) return false;
-        if (cp == 0x200C or cp == 0x200D) return false; // ZWNJ/ZWJ: continue-only
-        if (cp == 0x2E2F or cp == 0x180E) return false; // VERTICAL TILDE / MONGOLIAN VOWEL SEP: not ID
-        return true;
+        return regex.unicode.isIdentifierStart(cp);
     }
 
-    /// IdentifierPart test for a decoded code point. Like `isIdStartCp` but also
-    /// admits ZWNJ/ZWJ (U+200C/U+200D), which are valid in IdentifierPart.
+    /// ECMAScript IdentifierPart adds `$`, U+200C, and U+200D to Unicode
+    /// ID_Continue. The dependency API owns those grammar additions too.
     fn isIdContinueCp(cp: u21) bool {
         if (cp < 0x80) return isIdentPart(@intCast(cp));
-        if (isSpaceCp(cp) or isLineTermCp(cp)) return false;
-        if (cp == 0x2E2F or cp == 0x180E) return false; // VERTICAL TILDE / MONGOLIAN VOWEL SEP: not ID
-        return true;
+        return regex.unicode.isIdentifierContinue(cp);
     }
 
     /// True when an IdentifierStart begins at `self.i`: an ASCII ident-start, a
@@ -1688,6 +1681,85 @@ test "lexer borrows ordinary identifiers and owns escaped decoding" {
     try std.testing.expect(@intFromPtr(escaped_private_source.ptr) != @intFromPtr(private_name.text.ptr));
     try std.testing.expectEqual(@as(usize, 0), private_name.pos);
     try std.testing.expectEqual(escaped_private_source.len, private_name.end);
+}
+
+test "lexer enforces Unicode 17 identifier start and continue properties" {
+    const valid = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "π", .expected = "π" },
+        .{ .source = "变量", .expected = "变量" },
+        .{ .source = "\u{10400}", .expected = "\u{10400}" },
+        .{ .source = "℘", .expected = "℘" }, // Other_ID_Start
+        .{ .source = "a\u{0301}", .expected = "a\u{0301}" }, // combining ID_Continue
+        .{ .source = "a\u{0660}", .expected = "a\u{0660}" }, // non-ASCII decimal digit
+        .{ .source = "a‿", .expected = "a‿" }, // connector punctuation
+        .{ .source = "a\u{200c}", .expected = "a\u{200c}" }, // ECMAScript addition
+        .{ .source = "a\u{200d}", .expected = "a\u{200d}" },
+        .{ .source = "\\u2118", .expected = "℘" },
+        .{ .source = "a\\u0301", .expected = "a\u{0301}" },
+        .{ .source = "a\\u200C", .expected = "a\u{200c}" },
+        .{ .source = "\\u{10400}x", .expected = "\u{10400}x" },
+    };
+    for (valid) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), case.source);
+        const token = try lexer.next();
+        try std.testing.expectEqual(TokenKind.identifier, token.kind);
+        try std.testing.expectEqualStrings(case.expected, token.text);
+        try std.testing.expectEqual(@as(usize, 0), token.pos);
+        try std.testing.expectEqual(case.source.len, token.end);
+        try std.testing.expectEqual(TokenKind.eof, (try lexer.next()).kind);
+    }
+
+    const invalid_start = [_][]const u8{
+        "\u{0301}", // continue-only combining mark
+        "\u{0660}", // continue-only decimal digit
+        "‿", // continue-only connector punctuation
+        "\u{200c}",
+        "\u{200d}",
+        "☃", // symbol
+        "¿", // punctuation
+        "😀", // emoji
+        "\u{0378}", // unassigned
+        "\\u0301",
+        "\\u0660",
+        "\\u200C",
+        "\\u200D",
+        "\\u2603",
+        "\\u{1F600}",
+        "\\u{0378}",
+        "\\uD800", // surrogate escape
+        "\\u{110000}", // above the Unicode ceiling
+        "\\u{}",
+        "\\u00G0",
+        "\xff", // malformed UTF-8
+        "\xed\xa0\x80", // WTF-8 surrogate bytes
+    };
+    for (invalid_start) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), source);
+        try std.testing.expectError(LexError.UnexpectedCharacter, lexer.next());
+    }
+
+    const invalid_continue = [_][]const u8{ "a☃", "a¿", "a😀", "a\u{0378}" };
+    for (invalid_continue) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), source);
+        const prefix = try lexer.next();
+        try std.testing.expectEqualStrings("a", prefix.text);
+        try std.testing.expectError(LexError.UnexpectedCharacter, lexer.next());
+    }
+}
+
+test "lexer and RegExp share exact Unicode identifier classification" {
+    for (0..0x110000) |value| {
+        if (value >= 0xD800 and value <= 0xDFFF) continue;
+        const cp: u21 = @intCast(value);
+        try std.testing.expectEqual(regex.unicode.isIdentifierStart(cp), Lexer.isIdStartCp(cp));
+        try std.testing.expectEqual(regex.unicode.isIdentifierContinue(cp), Lexer.isIdContinueCp(cp));
+    }
 }
 
 test "lexer decodes string escapes" {

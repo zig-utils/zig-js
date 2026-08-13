@@ -4604,6 +4604,29 @@ test "parser enforces reserved words in identifier positions" {
     try std.testing.expectEqual(@as(usize, 1), script_prog.program.len);
 }
 
+test "parser enforces Unicode identifier properties in bindings and private names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var raw = try Parser.init(arena.allocator(), "var π\u{0301} = 1; π\u{0301}; class C { #℘\u{0301}; read(){ return this.#℘\u{0301}; } }");
+    const raw_program = try raw.parseProgram();
+    try std.testing.expectEqual(@as(usize, 3), raw_program.program.len);
+
+    var escaped = try Parser.init(arena.allocator(), "var \\u2118\\u0301 = 1; \\u2118\\u0301;");
+    const escaped_program = try escaped.parseProgram();
+    try std.testing.expectEqual(@as(usize, 2), escaped_program.program.len);
+
+    const invalid = [_][]const u8{
+        "var ☃ = 1;",
+        "var a☃ = 1;",
+        "var \\u2603 = 1;",
+        "class C { #☃; }",
+        "class C { #a☃; }",
+    };
+    for (invalid) |source|
+        try std.testing.expectError(lex.LexError.UnexpectedCharacter, Parser.init(arena.allocator(), source));
+}
+
 test "parser accepts ASI line terminators between statements" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
