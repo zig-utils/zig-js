@@ -743,7 +743,7 @@ pub const Lexer = struct {
             if (std.fmt.parseInt(i128, digits, 10)) |bi| {
                 return .{ .kind = .number, .text = self.src[start..self.i], .number = @floatFromInt(bi), .pos = start, .is_bigint = true, .bigint = bi };
             } else |_| {
-                return .{ .kind = .number, .text = self.src[start..self.i], .pos = start, .is_bigint = true, .bigint_text = try canonicalDecimalDigits(self.arena, digits) };
+                return .{ .kind = .number, .text = self.src[start..self.i], .pos = start, .is_bigint = true, .bigint_text = canonicalDecimalDigits(digits) };
             }
         }
         const cleaned = try stripSeparators(self.arena, self.src[start..self.i]);
@@ -1229,11 +1229,14 @@ fn stripSeparators(arena: std.mem.Allocator, s: []const u8) LexError![]const u8 
     return normalized;
 }
 
-fn canonicalDecimalDigits(arena: std.mem.Allocator, digits: []const u8) LexError![]const u8 {
+fn canonicalDecimalDigits(digits: []const u8) []const u8 {
     var i: usize = 0;
     while (i < digits.len and digits[i] == '0') i += 1;
     if (i == digits.len) return "0";
-    return arena.dupe(u8, digits[i..]);
+    // Decimal literal validation already owns the lifetime: plain digits point
+    // into immutable source and separated digits point into the parser arena's
+    // exact normalized allocation. Canonicalization needs only a subslice.
+    return digits[i..];
 }
 
 fn radixDigitsToDecimal(arena: std.mem.Allocator, digits: []const u8, radix: u8) LexError![]const u8 {
@@ -1475,6 +1478,30 @@ test "lexer preserves numeric separator values forms and source offsets" {
         var lexer = Lexer.init(arena.allocator(), source);
         try std.testing.expectError(LexError.InvalidNumber, lexer.next());
     }
+}
+
+test "lexer borrows canonical oversized decimal BigInt digits" {
+    const plain = "340282366920938463463374607431768211456n";
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    var plain_lexer = Lexer.init(fixed.allocator(), plain);
+    const plain_token = try plain_lexer.next();
+    try std.testing.expect(plain_token.is_bigint);
+    try std.testing.expectEqualStrings(plain[0 .. plain.len - 1], plain_token.bigint_text.?);
+    try std.testing.expectEqual(@intFromPtr(plain.ptr), @intFromPtr(plain_token.bigint_text.?.ptr));
+
+    const separated = "340_282_366_920_938_463_463_374_607_431_768_211_456n";
+    var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var separated_lexer = Lexer.init(measured.allocator(), separated);
+    const separated_token = try separated_lexer.next();
+    defer measured.allocator().free(separated_token.bigint_text.?);
+    try std.testing.expectEqualStrings(plain[0 .. plain.len - 1], separated_token.bigint_text.?);
+    try std.testing.expectEqual(@as(usize, 1), measured.alloc_index);
+    try std.testing.expectEqual(separated_token.bigint_text.?.len, measured.allocated_bytes);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failing_lexer = Lexer.init(failing.allocator(), separated);
+    try std.testing.expectError(error.OutOfMemory, failing_lexer.next());
 }
 
 test "lexer borrows ordinary identifiers and owns escaped decoding" {
