@@ -2616,7 +2616,9 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
         self.env = env;
     };
     const a = self.arena;
-    var st = Stringifier{ .self = self };
+    const cycle_allocator = gc_mod.temporaryAllocator(a);
+    var st = Stringifier{ .self = self, .cycle_allocator = cycle_allocator };
+    defer st.active.deinit(a, cycle_allocator);
 
     // arg 1 — replacer: a callable (transform) or an array (property allowlist).
     const replacer = arg(args, 1);
@@ -2704,11 +2706,12 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
 /// and the cycle-detection stack across the recursive serialization.
 const Stringifier = struct {
     self: *Interpreter,
+    cycle_allocator: std.mem.Allocator,
     replacer_fn: ?Value = null,
     allow: ?[]const []const u8 = null,
     gap: []const u8 = "",
     indent: std.ArrayListUnmanaged(u8) = .empty,
-    stack: std.ArrayListUnmanaged(*value.Object) = .empty,
+    active: JsonActiveStack = .{},
 
     /// SerializeJSONProperty: write `holder[key]` (after toJSON + replacer +
     /// wrapper unwrapping) into `buf`. Returns false when the value is omitted.
@@ -2769,10 +2772,14 @@ const Stringifier = struct {
             .object => {
                 const o = v.asObj();
                 if (o.isCallableObject() or o.is_symbol) return false; // functions/symbols omitted
-                for (st.stack.items) |s| if (s == o)
+                // ECMA-262 SerializeJSONObject/SerializeJSONArray steps 1–2
+                // and 11: reject only an object already on the active ancestor
+                // path, then remove it on return. A global visited set would
+                // incorrectly reject legal repeated sibling references.
+                const identity = JsonObjectIdentity.init(o);
+                if (try st.active.enter(a, st.cycle_allocator, identity))
                     return self.throwError("TypeError", "Converting circular structure to JSON");
-                try st.stack.append(a, o);
-                defer _ = st.stack.pop();
+                defer st.active.leave(identity);
                 const shape = try st.jsonShape(o);
                 if (shape.is_array) try st.serializeArray(buf, Value.obj(o), shape) else try st.serializeObject(buf, Value.obj(o), shape);
             },
@@ -2881,6 +2888,81 @@ const Stringifier = struct {
         if (st.gap.len == 0) return;
         try buf.append(st.self.arena, '\n');
         try buf.appendSlice(st.self.arena, ind);
+    }
+};
+
+const JsonObjectIdentity = struct {
+    storage: enum { managed, address },
+    value: u64,
+
+    fn init(object: *value.Object) @This() {
+        if (gc_mod.stableCellIdentity(@ptrCast(object))) |identity|
+            return .{ .storage = .managed, .value = identity };
+        return .{ .storage = .address, .value = @intCast(@intFromPtr(object)) };
+    }
+
+    fn eql(a: @This(), b: @This()) bool {
+        return a.storage == b.storage and a.value == b.value;
+    }
+};
+
+// Keep the common shallow JSON path free of hash-table allocation while
+// bounding its scan cost. Once promoted, every enter/leave updates both the
+// specification-ordered path and an exact relocation-stable identity index.
+const json_cycle_index_threshold = 32;
+
+const JsonActiveStack = struct {
+    items: std.ArrayListUnmanaged(JsonObjectIdentity) = .empty,
+    index: std.AutoHashMapUnmanaged(JsonObjectIdentity, void) = .empty,
+    indexed: bool = false,
+
+    fn deinit(active: *@This(), stack_allocator: std.mem.Allocator, index_allocator: std.mem.Allocator) void {
+        active.items.deinit(stack_allocator);
+        active.index.deinit(index_allocator);
+    }
+
+    /// Return true for a cycle; false means `identity` was appended and must be
+    /// paired with `leave`. Capacity is acquired before either representation
+    /// is mutated, so OOM cannot publish one-sided membership.
+    fn enter(
+        active: *@This(),
+        stack_allocator: std.mem.Allocator,
+        index_allocator: std.mem.Allocator,
+        identity: JsonObjectIdentity,
+    ) error{OutOfMemory}!bool {
+        if (active.indexed) {
+            if (active.index.contains(identity)) return true;
+            try active.index.ensureUnusedCapacity(index_allocator, 1);
+            try active.items.ensureUnusedCapacity(stack_allocator, 1);
+            active.items.appendAssumeCapacity(identity);
+            active.index.putAssumeCapacity(identity, {});
+            return false;
+        }
+
+        for (active.items.items) |ancestor| if (ancestor.eql(identity)) return true;
+        if (active.items.items.len < json_cycle_index_threshold) {
+            try active.items.append(stack_allocator, identity);
+            return false;
+        }
+
+        // Promotion indexes the already-validated active path plus the new
+        // member as one failure-atomic transition. The bounded linear prefix is
+        // intentionally retained in order for exact LIFO removal assertions.
+        try active.index.ensureTotalCapacity(index_allocator, @intCast(active.items.items.len + 1));
+        try active.items.ensureUnusedCapacity(stack_allocator, 1);
+        active.items.appendAssumeCapacity(identity);
+        for (active.items.items) |ancestor| active.index.putAssumeCapacity(ancestor, {});
+        active.indexed = true;
+        return false;
+    }
+
+    fn leave(active: *@This(), identity: JsonObjectIdentity) void {
+        const removed = active.items.pop().?;
+        std.debug.assert(removed.eql(identity));
+        if (active.indexed) {
+            const existed = active.index.remove(identity);
+            std.debug.assert(existed);
+        }
     }
 };
 
@@ -3390,6 +3472,54 @@ test "JSON parser borrows validated unescaped strings without scratch allocation
 
     var control = JsonParser{ .s = "\"a\x01b\"", .i = 0, .interp = &machine };
     try std.testing.expectError(error.Invalid, control.parseString());
+}
+
+test "JSON active cycle index promotes atomically and preserves path semantics" {
+    const shallow_allocator = std.testing.allocator;
+    var unavailable_index: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var shallow: JsonActiveStack = .{};
+    defer shallow.deinit(shallow_allocator, unavailable_index.allocator());
+
+    // The bounded shallow path must not touch the membership allocator.
+    for (0..json_cycle_index_threshold) |i| {
+        const identity = JsonObjectIdentity{ .storage = .managed, .value = @intCast(i + 1) };
+        try std.testing.expect(!try shallow.enter(shallow_allocator, unavailable_index.allocator(), identity));
+    }
+    try std.testing.expectEqual(@as(usize, 0), shallow.index.capacity());
+
+    // Failed promotion leaves the complete ordered path authoritative and does
+    // not publish a partially populated index.
+    const next = JsonObjectIdentity{ .storage = .managed, .value = json_cycle_index_threshold + 1 };
+    try std.testing.expectError(error.OutOfMemory, shallow.enter(shallow_allocator, unavailable_index.allocator(), next));
+    try std.testing.expectEqual(@as(usize, json_cycle_index_threshold), shallow.items.items.len);
+    try std.testing.expect(!shallow.indexed);
+    while (shallow.items.items.len != 0) {
+        const i = shallow.items.items.len;
+        shallow.leave(.{ .storage = .managed, .value = @intCast(i) });
+    }
+
+    var promoted: JsonActiveStack = .{};
+    defer promoted.deinit(std.testing.allocator, std.testing.allocator);
+    for (0..json_cycle_index_threshold + 1) |i| {
+        const identity = JsonObjectIdentity{ .storage = .managed, .value = @intCast(i + 1) };
+        try std.testing.expect(!try promoted.enter(std.testing.allocator, std.testing.allocator, identity));
+    }
+    try std.testing.expect(promoted.indexed);
+    try std.testing.expectEqual(promoted.items.items.len, promoted.index.count());
+
+    // An active ancestor is a cycle. Once removed, the same identity may occur
+    // as a later sibling and must serialize again.
+    const leaf = JsonObjectIdentity{ .storage = .managed, .value = json_cycle_index_threshold + 1 };
+    try std.testing.expect(try promoted.enter(std.testing.allocator, std.testing.allocator, leaf));
+    try std.testing.expectEqual(@as(usize, json_cycle_index_threshold + 1), promoted.items.items.len);
+    promoted.leave(leaf);
+    try std.testing.expect(!try promoted.enter(std.testing.allocator, std.testing.allocator, leaf));
+    promoted.leave(leaf);
+    while (promoted.items.items.len != 0) {
+        const i = promoted.items.items.len;
+        promoted.leave(.{ .storage = .managed, .value = @intCast(i) });
+    }
+    try std.testing.expectEqual(@as(usize, 0), promoted.index.count());
 }
 
 // ===== URI handling (encodeURI / decodeURI / …) ======================

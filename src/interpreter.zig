@@ -50344,6 +50344,28 @@ test "interpreter JSON, Object, Number builtins" {
     try std.testing.expectEqualStrings("{\"a\":1,\"b\":[2,3]}", (try evalSource(a, "JSON.stringify({ a: 1, b: [2, 3] })")).asStr());
     try std.testing.expectEqualStrings("[1,\"x\",true,null]", (try evalSource(a, "JSON.stringify([1, 'x', true, null])")).asStr());
     try std.testing.expect((try evalSource(a,
+        \\let shared = { value: 1 };
+        \\let repeated = JSON.stringify([shared, shared]) === '[{"value":1},{"value":1}]';
+        \\let direct = {}; direct.self = direct;
+        \\let directThrows = false;
+        \\try { JSON.stringify(direct); } catch (error) { directThrows = error instanceof TypeError; }
+        \\let viaToJSON = {}; viaToJSON.child = { toJSON() { return viaToJSON; } };
+        \\let toJSONThrows = false;
+        \\try { JSON.stringify(viaToJSON); } catch (error) { toJSONThrows = error instanceof TypeError; }
+        \\let viaReplacer = { child: {} };
+        \\let replacerThrows = false;
+        \\try {
+        \\  JSON.stringify(viaReplacer, function (key, value) { return key === "child" ? viaReplacer : value; });
+        \\} catch (error) { replacerThrows = error instanceof TypeError; }
+        \\let target = { value: 2 };
+        \\let proxy = new Proxy(target, {});
+        \\let repeatedProxy = JSON.stringify([proxy, proxy]) === '[{"value":2},{"value":2}]';
+        \\target.self = proxy;
+        \\let proxyThrows = false;
+        \\try { JSON.stringify(proxy); } catch (error) { proxyThrows = error instanceof TypeError; }
+        \\repeated && directThrows && toJSONThrows && replacerThrows && repeatedProxy && proxyThrows
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
         \\let coercions = [];
         \\let stringKey = new String("b");
         \\stringKey.toString = function () { coercions.push("string"); return "b"; };
@@ -50657,6 +50679,19 @@ test "interpreter JSON, Object, Number builtins" {
         \\length.enumerable === false && length.configurable === false &&
         \\proto.writable === true && proto.enumerable === false &&
         \\proto.configurable === false
+    )).asBool());
+}
+
+test "JSON stringify promotes deep active paths without rejecting aliases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\let leaf = { marker: 7 };
+        \\let deep = leaf;
+        \\for (let i = 0; i < 256; i++) deep = { next: deep };
+        \\let encoded = JSON.stringify({ deep, aliases: [leaf, leaf] });
+        \\encoded.includes('"marker":7') &&
+        \\  encoded.endsWith('"aliases":[{"marker":7},{"marker":7}]}')
     )).asBool());
 }
 

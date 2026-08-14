@@ -11426,6 +11426,44 @@ test "JSON stringify preserves proxy array shape" {
     try expectEvalStr("[\"a\",\"b\"]", "JSON.stringify(new Proxy(['a', 'b'], {}))");
 }
 
+test "JSON stringify deep cycle membership preserves forced execution tiers" {
+    const source =
+        \\function stringifyTierWitness() {
+        \\  "use strict";
+        \\  var leaf = { marker: 7 };
+        \\  var deep = leaf;
+        \\  for (var i = 0; i < 96; i = i + 1) deep = { next: deep };
+        \\  var encoded = JSON.stringify({ deep: deep, aliases: [leaf, leaf] });
+        \\  return encoded.indexOf('"marker":7') >= 0 &&
+        \\    encoded.indexOf('"aliases":[{"marker":7},{"marker":7}]}') >= 0;
+        \\}
+        \\stringifyTierWitness();
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len]u64 = undefined;
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+
+        results[index] = (try ctx.evaluate(source)).rawBits();
+        const inventory = ctx.bytecodeAdmissionSnapshot();
+        switch (mode) {
+            .tree_walker => try std.testing.expectEqual(@as(u64, 1), inventory.count(.plain_forced_tree_walker)),
+            .required => {
+                try std.testing.expectEqual(@as(u64, 1), inventory.count(.template_plain_compiled));
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            },
+            .automatic => unreachable,
+        }
+    }
+    try std.testing.expectEqual(results[0], results[1]);
+    try std.testing.expect(Value.fromRawBits(results[0]).asBool());
+}
+
 test "RegExp constructor honors IsRegExp and flags rules" {
     try std.testing.expect((try evalIn(
         \\var re = /foo/my;
