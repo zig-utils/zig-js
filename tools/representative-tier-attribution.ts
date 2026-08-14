@@ -34,6 +34,7 @@ export type TierSnapshot = {
   synchronization: CounterMap;
   debug_registry: CounterMap;
   allocation: CounterMap;
+  cell_slab_lock: CounterMap;
   gc_pauses: GcPauseSamples;
   baseline_publications: number;
   optimizer_publications: number;
@@ -55,6 +56,7 @@ export type TierDelta = {
   synchronization: CounterMap;
   debug_registry: CounterMap;
   allocation: CounterMap;
+  cell_slab_lock: CounterMap;
   gc_pauses: GcPauseSamples;
   baseline_publications: number;
   optimizer_publications: number;
@@ -193,6 +195,48 @@ const allocationMetrics = [
   "gc_cell_delegated_allocations",
   "gc_cell_frees",
   "gc_cell_freed_bytes",
+];
+const cellSlabLockMetrics = [
+  "acquires",
+  "contentions",
+  "spins",
+  "single_allocation_acquires",
+  "batch_allocation_acquires",
+  "publication_acquires",
+  "unpublication_acquires",
+  "free_acquires",
+  "ownership_acquires",
+  "relocation_acquires",
+  "maintenance_acquires",
+  "size_64_acquires",
+  "size_64_contentions",
+  "size_64_spins",
+  "size_128_acquires",
+  "size_128_contentions",
+  "size_128_spins",
+  "size_256_acquires",
+  "size_256_contentions",
+  "size_256_spins",
+  "size_512_acquires",
+  "size_512_contentions",
+  "size_512_spins",
+  "size_1024_acquires",
+  "size_1024_contentions",
+  "size_1024_spins",
+  "size_2048_acquires",
+  "size_2048_contentions",
+  "size_2048_spins",
+];
+const cellSlabSizes = [64, 128, 256, 512, 1024, 2048];
+const cellSlabPurposeMetrics = [
+  "single_allocation_acquires",
+  "batch_allocation_acquires",
+  "publication_acquires",
+  "unpublication_acquires",
+  "free_acquires",
+  "ownership_acquires",
+  "relocation_acquires",
+  "maintenance_acquires",
 ];
 const debugRegistryMetrics = [
   "location_cache_hits",
@@ -450,6 +494,7 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
       debugRegistryMetrics.map((name) => [name, 0]),
     ),
     allocation: Object.fromEntries(allocationMetrics.map((name) => [name, 0])),
+    cell_slab_lock: Object.fromEntries(cellSlabLockMetrics.map((name) => [name, 0])),
     gc_pauses: { minor_ns: [], minor_overflow: 0, full_ns: [], full_overflow: 0 },
     baseline_publications: 0,
     optimizer_publications: 0,
@@ -485,6 +530,7 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         synchronization: subtractSynchronization(row.synchronization, before.synchronization),
         debug_registry: subtractMap(row.debug_registry, before.debug_registry),
         allocation: subtractAllocation(row.allocation, before.allocation),
+        cell_slab_lock: subtractMap(row.cell_slab_lock, before.cell_slab_lock),
         gc_pauses: subtractPauses(row.gc_pauses, before.gc_pauses),
         baseline_publications:
           row.baseline_publications - before.baseline_publications,
@@ -604,6 +650,11 @@ function validateRows(
         `allocation attribution inventory drift for ${workload}`,
       );
       requireValue(
+        JSON.stringify(Object.keys(row.cell_slab_lock).sort()) ===
+          JSON.stringify([...cellSlabLockMetrics].sort()),
+        `cell slab lock attribution inventory drift for ${workload}`,
+      );
+      requireValue(
         JSON.stringify(Object.keys(row.heap).sort()) ===
           JSON.stringify([...heapMetrics].sort()),
         `heap attribution inventory drift for ${workload}`,
@@ -631,6 +682,37 @@ function validateRows(
               row.allocation.gc_cell_relocation_allocations + row.allocation.gc_cell_delegated_allocations &&
           row.allocation.gc_cell_bytes >= row.allocation.gc_cell_freed_bytes,
         `allocation attribution is incoherent for ${workload}`,
+      );
+      const sizeAcquires = cellSlabSizes.reduce(
+          (sum, size) => sum + row.cell_slab_lock[`size_${size}_acquires`],
+          0,
+        ),
+        sizeContentions = cellSlabSizes.reduce(
+          (sum, size) => sum + row.cell_slab_lock[`size_${size}_contentions`],
+          0,
+        ),
+        sizeSpins = cellSlabSizes.reduce(
+          (sum, size) => sum + row.cell_slab_lock[`size_${size}_spins`],
+          0,
+        ),
+        purposeAcquires = cellSlabPurposeMetrics.reduce(
+          (sum, name) => sum + row.cell_slab_lock[name],
+          0,
+        );
+      requireValue(
+        row.cell_slab_lock.acquires === sizeAcquires &&
+          row.cell_slab_lock.acquires === purposeAcquires &&
+          row.cell_slab_lock.contentions === sizeContentions &&
+          row.cell_slab_lock.spins === sizeSpins &&
+          row.cell_slab_lock.acquires >= row.cell_slab_lock.contentions &&
+          row.cell_slab_lock.spins >= row.cell_slab_lock.contentions &&
+          cellSlabSizes.every((size) =>
+            row.cell_slab_lock[`size_${size}_acquires`] >=
+              row.cell_slab_lock[`size_${size}_contentions`] &&
+            row.cell_slab_lock[`size_${size}_spins`] >=
+              row.cell_slab_lock[`size_${size}_contentions`]
+          ),
+        `cell slab lock attribution is incoherent for ${workload}`,
       );
       requireValue(
         row.gc_pauses.minor_overflow === 0 && row.gc_pauses.full_overflow === 0 &&
@@ -876,7 +958,8 @@ export function render(
       "object_backing_lock_contentions",
       "object_property_lock_contentions",
       "object_element_lock_contentions",
-    ].reduce((sum, name) => sum + (row.synchronization[name] || 0), 0);
+    ].reduce((sum, name) => sum + (row.synchronization[name] || 0), 0) +
+    row.cell_slab_lock.contentions;
   const waitNs = (row: TierDelta): number =>
     ["thread_join_wait_ns", "lock_wait_ns", "condition_wait_ns", "property_wait_ns"]
       .reduce((sum, name) => sum + (row.synchronization[name] || 0), 0);
@@ -961,6 +1044,48 @@ export function render(
       );
     }
   }
+  const dominantCellSlabSize = (row: TierDelta): string => {
+    let bestSize = 0, bestContentions = 0, bestAcquires = 0;
+    for (const size of cellSlabSizes) {
+      const sizeContentions = row.cell_slab_lock[`size_${size}_contentions`],
+        sizeAcquires = row.cell_slab_lock[`size_${size}_acquires`];
+      if (sizeContentions > bestContentions ||
+          (sizeContentions === bestContentions && sizeAcquires > bestAcquires)) {
+        bestSize = size;
+        bestContentions = sizeContentions;
+        bestAcquires = sizeAcquires;
+      }
+    }
+    return bestAcquires === 0 ? "none" : `${bestSize} B`;
+  };
+  rows.push(
+    "",
+    `${heading}${heading} Shared-realm GC cell-slab locks`,
+    "",
+    "Each invocation row preserves exact lock attempts by purpose and by 64/128/256/512/1024/2048-byte size class. The table exposes totals and the class selected by highest contention, then acquisition count; the raw sidecar retains the full inventory.",
+    "",
+    "| family | lanes | base acquires | variant acquires | base contentions | variant contentions | base spins | variant spins | base dominant class | variant dominant class |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+  );
+  for (const family of manifest.implemented_families) {
+    if (family.shared === false) continue;
+    for (const lanes of manifest.lanes) {
+      const base = sharedByKey[deltaKey(family.base, "shared", lanes)].find((row) => row.phase === "invocation")!,
+        variant = sharedByKey[deltaKey(family.variant, "shared", lanes)].find((row) => row.phase === "invocation")!;
+      rows.push(
+        `| \`${family.family}\` | ${lanes} | ${base.cell_slab_lock.acquires} | ${variant.cell_slab_lock.acquires} | ${base.cell_slab_lock.contentions} | ${variant.cell_slab_lock.contentions} | ${base.cell_slab_lock.spins} | ${variant.cell_slab_lock.spins} | ${dominantCellSlabSize(base)} | ${dominantCellSlabSize(variant)} |`,
+      );
+    }
+  }
+  for (const panel of manifest.additional_panels || []) {
+    if (!(panel.modes || []).includes("shared")) continue;
+    for (const lanes of manifest.lanes) {
+      const row = sharedByKey[deltaKey(panel.workload, "shared", lanes)].find((entry) => entry.phase === "invocation")!;
+      rows.push(
+        `| \`${panel.id}\` | ${lanes} | ${row.cell_slab_lock.acquires} | n/a | ${row.cell_slab_lock.contentions} | n/a | ${row.cell_slab_lock.spins} | n/a | ${dominantCellSlabSize(row)} | n/a |`,
+      );
+    }
+  }
   if (rawPath) {
     const name = rawPath.split("/").pop();
     rows.push("", `Raw attribution: [\`${name}\`](${name})`);
@@ -982,7 +1107,7 @@ export function artifact(
   }],
 ): any {
   return {
-    schema_version: 10,
+    schema_version: 11,
     matrix_id: manifest.matrix_id,
     quick,
     complete,
@@ -1010,7 +1135,7 @@ function validateCheckpoint(
   info: Record<string, string>,
   runner: string,
 ): void {
-  requireValue(raw?.schema_version === 10, "checkpoint schema is not version 10");
+  requireValue(raw?.schema_version === 11, "checkpoint schema is not version 11");
   requireValue(raw.matrix_id === manifest.matrix_id, "checkpoint matrix identity drift");
   requireValue(raw.quick === quick, "checkpoint quick/full mode drift");
   requireValue(typeof raw.complete === "boolean", "checkpoint completion state is missing");
@@ -1124,6 +1249,11 @@ function syntheticRows(manifest: any): TierSnapshot[] {
               name === "gc_cell_fresh_allocations") return [name, index];
           return [name, 0];
         })),
+        cell_slab_lock: Object.fromEntries(cellSlabLockMetrics.map((name) => [
+          name,
+          name === "acquires" || name === "single_allocation_acquires" ||
+              name === "size_64_acquires" ? index : 0,
+        ])),
         gc_pauses: {
           minor_ns: Array.from({ length: index }, (_, sample) => sample + 1),
           minor_overflow: 0,
@@ -1237,6 +1367,18 @@ export function selfTest(): void {
   const incoherentAllocation = JSON.parse(JSON.stringify(rows));
   incoherentAllocation[1].allocation.backing_current_bytes += 1;
   expectFailure(() => validate(incoherentAllocation, manifest, true), "allocation attribution is incoherent");
+  const cellSlabLock = JSON.parse(JSON.stringify(rows));
+  delete cellSlabLock[0].cell_slab_lock.size_256_spins;
+  expectFailure(
+    () => validate(cellSlabLock, manifest, true),
+    "cell slab lock attribution inventory drift",
+  );
+  const incoherentCellSlabLock = JSON.parse(JSON.stringify(rows));
+  incoherentCellSlabLock[1].cell_slab_lock.ownership_acquires += 1;
+  expectFailure(
+    () => validate(incoherentCellSlabLock, manifest, true),
+    "cell slab lock attribution is incoherent",
+  );
   const incompleteGc = JSON.parse(JSON.stringify(rows));
   incompleteGc[1].gc_pauses.minor_ns.pop();
   expectFailure(() => validate(incompleteGc, manifest, true), "GC pause attribution is incomplete");

@@ -463,6 +463,11 @@ fn printTierAttributionRow(
         if (index != 0) try writer.writeByte(',');
         try writer.print("\"{s}\":{d}", .{ name, @field(snapshot.runtime.allocation, name) });
     }
+    try writer.writeAll("},\"cell_slab_lock\":{");
+    inline for (comptime std.meta.fieldNames(@TypeOf(snapshot.runtime.cell_slab_lock)), 0..) |name, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("\"{s}\":{d}", .{ name, @field(snapshot.runtime.cell_slab_lock, name) });
+    }
     try writer.writeAll("},\"gc_pauses\":{\"minor_ns\":[");
     for (snapshot.runtime.minor_pauses.values[0..snapshot.runtime.minor_pauses.len], 0..) |pause_ns, index| {
         if (index != 0) try writer.writeByte(',');

@@ -472,6 +472,17 @@ pub const RuntimeAttributionProfiler = struct {
         delegated,
     };
 
+    pub const CellSlabLockPurpose = enum {
+        single_allocation,
+        batch_allocation,
+        publication,
+        unpublication,
+        free,
+        ownership,
+        relocation,
+        maintenance,
+    };
+
     pub const AllocationSnapshot = struct {
         backing_allocations: u64 = 0,
         backing_allocation_bytes: u64 = 0,
@@ -491,6 +502,38 @@ pub const RuntimeAttributionProfiler = struct {
         gc_cell_freed_bytes: u64 = 0,
     };
 
+    pub const CellSlabLockSnapshot = struct {
+        acquires: u64 = 0,
+        contentions: u64 = 0,
+        spins: u64 = 0,
+        single_allocation_acquires: u64 = 0,
+        batch_allocation_acquires: u64 = 0,
+        publication_acquires: u64 = 0,
+        unpublication_acquires: u64 = 0,
+        free_acquires: u64 = 0,
+        ownership_acquires: u64 = 0,
+        relocation_acquires: u64 = 0,
+        maintenance_acquires: u64 = 0,
+        size_64_acquires: u64 = 0,
+        size_64_contentions: u64 = 0,
+        size_64_spins: u64 = 0,
+        size_128_acquires: u64 = 0,
+        size_128_contentions: u64 = 0,
+        size_128_spins: u64 = 0,
+        size_256_acquires: u64 = 0,
+        size_256_contentions: u64 = 0,
+        size_256_spins: u64 = 0,
+        size_512_acquires: u64 = 0,
+        size_512_contentions: u64 = 0,
+        size_512_spins: u64 = 0,
+        size_1024_acquires: u64 = 0,
+        size_1024_contentions: u64 = 0,
+        size_1024_spins: u64 = 0,
+        size_2048_acquires: u64 = 0,
+        size_2048_contentions: u64 = 0,
+        size_2048_spins: u64 = 0,
+    };
+
     pub const PauseSamples = struct {
         len: usize = 0,
         overflow: u64 = 0,
@@ -499,6 +542,7 @@ pub const RuntimeAttributionProfiler = struct {
 
     pub const Snapshot = struct {
         allocation: AllocationSnapshot = .{},
+        cell_slab_lock: CellSlabLockSnapshot = .{},
         minor_pauses: PauseSamples = .{},
         full_pauses: PauseSamples = .{},
     };
@@ -521,6 +565,21 @@ pub const RuntimeAttributionProfiler = struct {
     gc_cell_delegated_allocations: std.atomic.Value(u64) = .init(0),
     gc_cell_frees: std.atomic.Value(u64) = .init(0),
     gc_cell_freed_bytes: std.atomic.Value(u64) = .init(0),
+    cell_slab_lock_acquires: std.atomic.Value(u64) = .init(0),
+    cell_slab_lock_contentions: std.atomic.Value(u64) = .init(0),
+    cell_slab_lock_spins: std.atomic.Value(u64) = .init(0),
+    cell_slab_lock_purpose_acquires: [8]std.atomic.Value(u64) = .{
+        .init(0), .init(0), .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
+    },
+    cell_slab_lock_size_acquires: [6]std.atomic.Value(u64) = .{
+        .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
+    },
+    cell_slab_lock_size_contentions: [6]std.atomic.Value(u64) = .{
+        .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
+    },
+    cell_slab_lock_size_spins: [6]std.atomic.Value(u64) = .{
+        .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
+    },
     gc_cycle_started_ns: std.atomic.Value(u64) = .init(0),
     pause_lock: std.atomic.Mutex = .unlocked,
     minor_pause_len: usize = 0,
@@ -577,6 +636,64 @@ pub const RuntimeAttributionProfiler = struct {
         _ = self.gc_cell_freed_bytes.fetchAdd(@intCast(bytes), .monotonic);
     }
 
+    fn recordCellSlabLockAttempt(
+        self: *RuntimeAttributionProfiler,
+        bucket_idx: usize,
+        purpose: CellSlabLockPurpose,
+    ) void {
+        std.debug.assert(bucket_idx < self.cell_slab_lock_size_acquires.len);
+        _ = self.cell_slab_lock_acquires.fetchAdd(1, .monotonic);
+        _ = self.cell_slab_lock_purpose_acquires[@backingInt(purpose)].fetchAdd(1, .monotonic);
+        _ = self.cell_slab_lock_size_acquires[bucket_idx].fetchAdd(1, .monotonic);
+    }
+
+    fn recordCellSlabLockContention(self: *RuntimeAttributionProfiler, bucket_idx: usize, spins: u64) void {
+        std.debug.assert(bucket_idx < self.cell_slab_lock_size_contentions.len);
+        std.debug.assert(spins != 0);
+        _ = self.cell_slab_lock_contentions.fetchAdd(1, .monotonic);
+        _ = self.cell_slab_lock_size_contentions[bucket_idx].fetchAdd(1, .monotonic);
+        _ = self.cell_slab_lock_spins.fetchAdd(spins, .monotonic);
+        _ = self.cell_slab_lock_size_spins[bucket_idx].fetchAdd(spins, .monotonic);
+    }
+
+    fn cellSlabLockSnapshot(self: *RuntimeAttributionProfiler) CellSlabLockSnapshot {
+        const purpose = &self.cell_slab_lock_purpose_acquires;
+        const acquires = &self.cell_slab_lock_size_acquires;
+        const contentions = &self.cell_slab_lock_size_contentions;
+        const spins = &self.cell_slab_lock_size_spins;
+        return .{
+            .acquires = self.cell_slab_lock_acquires.load(.acquire),
+            .contentions = self.cell_slab_lock_contentions.load(.acquire),
+            .spins = self.cell_slab_lock_spins.load(.acquire),
+            .single_allocation_acquires = purpose[@backingInt(CellSlabLockPurpose.single_allocation)].load(.acquire),
+            .batch_allocation_acquires = purpose[@backingInt(CellSlabLockPurpose.batch_allocation)].load(.acquire),
+            .publication_acquires = purpose[@backingInt(CellSlabLockPurpose.publication)].load(.acquire),
+            .unpublication_acquires = purpose[@backingInt(CellSlabLockPurpose.unpublication)].load(.acquire),
+            .free_acquires = purpose[@backingInt(CellSlabLockPurpose.free)].load(.acquire),
+            .ownership_acquires = purpose[@backingInt(CellSlabLockPurpose.ownership)].load(.acquire),
+            .relocation_acquires = purpose[@backingInt(CellSlabLockPurpose.relocation)].load(.acquire),
+            .maintenance_acquires = purpose[@backingInt(CellSlabLockPurpose.maintenance)].load(.acquire),
+            .size_64_acquires = acquires[0].load(.acquire),
+            .size_64_contentions = contentions[0].load(.acquire),
+            .size_64_spins = spins[0].load(.acquire),
+            .size_128_acquires = acquires[1].load(.acquire),
+            .size_128_contentions = contentions[1].load(.acquire),
+            .size_128_spins = spins[1].load(.acquire),
+            .size_256_acquires = acquires[2].load(.acquire),
+            .size_256_contentions = contentions[2].load(.acquire),
+            .size_256_spins = spins[2].load(.acquire),
+            .size_512_acquires = acquires[3].load(.acquire),
+            .size_512_contentions = contentions[3].load(.acquire),
+            .size_512_spins = spins[3].load(.acquire),
+            .size_1024_acquires = acquires[4].load(.acquire),
+            .size_1024_contentions = contentions[4].load(.acquire),
+            .size_1024_spins = spins[4].load(.acquire),
+            .size_2048_acquires = acquires[5].load(.acquire),
+            .size_2048_contentions = contentions[5].load(.acquire),
+            .size_2048_spins = spins[5].load(.acquire),
+        };
+    }
+
     fn lockPauses(self: *RuntimeAttributionProfiler) void {
         var spins: usize = 0;
         while (!self.pause_lock.tryLock()) : (spins += 1) {
@@ -612,24 +729,27 @@ pub const RuntimeAttributionProfiler = struct {
     }
 
     pub fn snapshot(self: *RuntimeAttributionProfiler) Snapshot {
-        var out = Snapshot{ .allocation = .{
-            .backing_allocations = self.backing_allocations.load(.acquire),
-            .backing_allocation_bytes = self.backing_allocation_bytes.load(.acquire),
-            .backing_growths = self.backing_growths.load(.acquire),
-            .backing_growth_bytes = self.backing_growth_bytes.load(.acquire),
-            .backing_releases = self.backing_releases.load(.acquire),
-            .backing_released_bytes = self.backing_released_bytes.load(.acquire),
-            .backing_current_bytes = self.backing_current_bytes.load(.acquire),
-            .backing_peak_bytes = self.backing_peak_bytes.load(.acquire),
-            .gc_cell_allocations = self.gc_cell_allocations.load(.acquire),
-            .gc_cell_bytes = self.gc_cell_bytes.load(.acquire),
-            .gc_cell_fresh_allocations = self.gc_cell_fresh_allocations.load(.acquire),
-            .gc_cell_reused_allocations = self.gc_cell_reused_allocations.load(.acquire),
-            .gc_cell_relocation_allocations = self.gc_cell_relocation_allocations.load(.acquire),
-            .gc_cell_delegated_allocations = self.gc_cell_delegated_allocations.load(.acquire),
-            .gc_cell_frees = self.gc_cell_frees.load(.acquire),
-            .gc_cell_freed_bytes = self.gc_cell_freed_bytes.load(.acquire),
-        } };
+        var out = Snapshot{
+            .allocation = .{
+                .backing_allocations = self.backing_allocations.load(.acquire),
+                .backing_allocation_bytes = self.backing_allocation_bytes.load(.acquire),
+                .backing_growths = self.backing_growths.load(.acquire),
+                .backing_growth_bytes = self.backing_growth_bytes.load(.acquire),
+                .backing_releases = self.backing_releases.load(.acquire),
+                .backing_released_bytes = self.backing_released_bytes.load(.acquire),
+                .backing_current_bytes = self.backing_current_bytes.load(.acquire),
+                .backing_peak_bytes = self.backing_peak_bytes.load(.acquire),
+                .gc_cell_allocations = self.gc_cell_allocations.load(.acquire),
+                .gc_cell_bytes = self.gc_cell_bytes.load(.acquire),
+                .gc_cell_fresh_allocations = self.gc_cell_fresh_allocations.load(.acquire),
+                .gc_cell_reused_allocations = self.gc_cell_reused_allocations.load(.acquire),
+                .gc_cell_relocation_allocations = self.gc_cell_relocation_allocations.load(.acquire),
+                .gc_cell_delegated_allocations = self.gc_cell_delegated_allocations.load(.acquire),
+                .gc_cell_frees = self.gc_cell_frees.load(.acquire),
+                .gc_cell_freed_bytes = self.gc_cell_freed_bytes.load(.acquire),
+            },
+            .cell_slab_lock = self.cellSlabLockSnapshot(),
+        };
         self.lockPauses();
         defer self.pause_lock.unlock();
         out.minor_pauses.len = self.minor_pause_len;
@@ -695,6 +815,9 @@ test "RuntimeAttributionProfiler records exact backing, cell, and pause samples"
     profile.recordCellAllocation(128, .relocation);
     profile.recordCellAllocation(144, .delegated);
     profile.recordCellFree(96);
+    profile.recordCellSlabLockAttempt(2, .single_allocation);
+    profile.recordCellSlabLockContention(2, 3);
+    profile.recordCellSlabLockAttempt(0, .free);
     profile.beginGcCycle(100);
     profile.finishGcCycle(false, 175);
     profile.beginGcCycle(200);
@@ -706,6 +829,13 @@ test "RuntimeAttributionProfiler records exact backing, cell, and pause samples"
     try std.testing.expectEqual(@as(u64, 48), before_free.allocation.backing_current_bytes);
     try std.testing.expectEqual(@as(u64, 4), before_free.allocation.gc_cell_allocations);
     try std.testing.expectEqual(@as(u64, 480), before_free.allocation.gc_cell_bytes);
+    try std.testing.expectEqual(@as(u64, 2), before_free.cell_slab_lock.acquires);
+    try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.contentions);
+    try std.testing.expectEqual(@as(u64, 3), before_free.cell_slab_lock.spins);
+    try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.single_allocation_acquires);
+    try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.free_acquires);
+    try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.size_64_acquires);
+    try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.size_256_contentions);
     try std.testing.expectEqual(@as(usize, 1), before_free.minor_pauses.len);
     try std.testing.expectEqual(@as(u64, 75), before_free.minor_pauses.values[0]);
     try std.testing.expectEqual(@as(usize, 1), before_free.full_pauses.len);
@@ -884,6 +1014,7 @@ pub const GcCellBacking = struct {
     pub const owner_realm: RealmId = 1;
     const bucket_count = 6;
     const bucket_sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
+    const CellSlabLockPurpose = RuntimeAttributionProfiler.CellSlabLockPurpose;
     const chunk_bytes: usize = 64 * 1024;
     const chunk_metadata_reserve_granularity: usize = 8;
     /// Larger cells use wider chunks so create/destroy-heavy workloads free
@@ -1079,15 +1210,37 @@ pub const GcCellBacking = struct {
     },
     bucket_addr_max: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
 
+    const LockAcquireStats = struct {
+        contended: bool = false,
+        spins: u64 = 0,
+    };
+
     inline fn acquireLock(self: *GcCellBacking, lock: *std.atomic.Value(u32)) void {
         if (!self.parallel) return;
         while (lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     }
+
+    inline fn acquireLockProfiled(self: *GcCellBacking, lock: *std.atomic.Value(u32)) LockAcquireStats {
+        if (!self.parallel) return .{};
+        var result = LockAcquireStats{};
+        while (lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            result.contended = true;
+            result.spins += 1;
+            std.atomic.spinLoopHint();
+        }
+        return result;
+    }
     inline fn unlockLock(self: *GcCellBacking, lock: *std.atomic.Value(u32)) void {
         if (self.parallel) lock.store(0, .release);
     }
-    inline fn acquireBucket(self: *GcCellBacking, idx: usize) void {
-        self.acquireLock(&self.bucket_locks[idx]);
+    inline fn acquireBucket(self: *GcCellBacking, idx: usize, purpose: CellSlabLockPurpose) void {
+        if (self.runtime_attribution_profiler) |profile| {
+            profile.recordCellSlabLockAttempt(idx, purpose);
+            const result = self.acquireLockProfiled(&self.bucket_locks[idx]);
+            if (result.contended) profile.recordCellSlabLockContention(idx, result.spins);
+        } else {
+            self.acquireLock(&self.bucket_locks[idx]);
+        }
         if (builtin.is_test) self.bucket_lock_acquisitions_for_testing[idx] += 1;
     }
     inline fn unlockBucket(self: *GcCellBacking, idx: usize) void {
@@ -1106,7 +1259,7 @@ pub const GcCellBacking = struct {
         self.unlockLock(&self.inner_lock);
     }
     fn acquireAllBuckets(self: *GcCellBacking) void {
-        for (0..bucket_count) |idx| self.acquireBucket(idx);
+        for (0..bucket_count) |idx| self.acquireBucket(idx, .maintenance);
     }
     fn unlockAllBuckets(self: *GcCellBacking) void {
         var idx: usize = bucket_count;
@@ -1313,14 +1466,14 @@ pub const GcCellBacking = struct {
         const hint = self.owned_bucket_hint.load(.monotonic);
         const hint_idx: usize = @intCast(hint);
         if (hint_idx < bucket_count) {
-            self.acquireBucket(hint_idx);
+            self.acquireBucket(hint_idx, .ownership);
             const owned = self.publishedSlotLocked(hint_idx, ptr);
             self.unlockBucket(hint_idx);
             if (owned) return true;
         }
         for (0..bucket_count) |idx| {
             if (idx == hint_idx) continue;
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .ownership);
             const owned = self.publishedSlotLocked(idx, ptr);
             self.unlockBucket(idx);
             if (owned) {
@@ -1339,7 +1492,7 @@ pub const GcCellBacking = struct {
         const ptr: [*]u8 = @ptrCast(allocation);
         const hint_idx: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
         if (hint_idx < bucket_count) {
-            self.acquireBucket(hint_idx);
+            self.acquireBucket(hint_idx, .ownership);
             const chunk_idx = self.ownedChunkIndexLocked(hint_idx, ptr);
             const published = chunk_idx != null and self.publishedSlotLocked(hint_idx, ptr);
             const range = if (published) blk: {
@@ -1355,7 +1508,7 @@ pub const GcCellBacking = struct {
         }
         for (0..bucket_count) |idx| {
             if (idx == hint_idx) continue;
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .ownership);
             const chunk_idx = self.ownedChunkIndexLocked(idx, ptr);
             const published = chunk_idx != null and self.publishedSlotLocked(idx, ptr);
             const range = if (published) blk: {
@@ -1394,14 +1547,14 @@ pub const GcCellBacking = struct {
     pub fn classifyConservativeInterior(self: *GcCellBacking, address: usize) @import("gc").InteriorOwnership {
         const hint: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
         if (hint < bucket_count) {
-            self.acquireBucket(hint);
+            self.acquireBucket(hint, .ownership);
             const result = self.classifyInteriorInBucketLocked(hint, address);
             self.unlockBucket(hint);
             if (result) |owned| return owned;
         }
         for (0..bucket_count) |idx| {
             if (idx == hint) continue;
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .ownership);
             const result = self.classifyInteriorInBucketLocked(idx, address);
             self.unlockBucket(idx);
             if (result) |owned| {
@@ -1492,7 +1645,7 @@ pub const GcCellBacking = struct {
 
     fn setCellPublished(self: *GcCellBacking, total: usize, allocation: *anyopaque, published: bool, realm_id: RealmId) void {
         const idx = bucketIndex(total, .@"16") orelse unreachable;
-        self.acquireBucket(idx);
+        self.acquireBucket(idx, if (published) .publication else .unpublication);
         defer self.unlockBucket(idx);
         self.setCellPublishedLocked(idx, allocation, published, realm_id);
     }
@@ -1511,7 +1664,7 @@ pub const GcCellBacking = struct {
 
     pub fn publishCellAllocationBatchForRealm(self: *GcCellBacking, payloads: []*anyopaque, total: usize, payload_offset: usize, realm_id: RealmId) void {
         const idx = bucketIndex(total, .@"16") orelse unreachable;
-        self.acquireBucket(idx);
+        self.acquireBucket(idx, .publication);
         defer self.unlockBucket(idx);
         for (payloads) |payload| {
             const allocation: *anyopaque = @ptrFromInt(@intFromPtr(payload) - payload_offset);
@@ -1553,14 +1706,14 @@ pub const GcCellBacking = struct {
     pub fn realmIdForCellAddress(self: *GcCellBacking, address: usize) RealmId {
         const hint: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
         if (hint < bucket_count) {
-            self.acquireBucket(hint);
+            self.acquireBucket(hint, .ownership);
             const realm_id = self.realmIdForAddressInBucketLocked(hint, address);
             self.unlockBucket(hint);
             if (realm_id != no_realm) return realm_id;
         }
         for (0..bucket_count) |idx| {
             if (idx == hint) continue;
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .ownership);
             const realm_id = self.realmIdForAddressInBucketLocked(idx, address);
             self.unlockBucket(idx);
             if (realm_id != no_realm) {
@@ -1574,7 +1727,7 @@ pub const GcCellBacking = struct {
     pub fn hasRealmCells(self: *GcCellBacking, realm_id: RealmId) bool {
         if (realm_id == no_realm) return false;
         inline for (0..bucket_count) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .ownership);
             for (self.bucket_realm_ids[idx].items) |realm_ids| {
                 for (realm_ids) |owner| {
                     if (owner != realm_id) continue;
@@ -1624,7 +1777,7 @@ pub const GcCellBacking = struct {
     pub fn allocateCellBatch(self: *GcCellBacking, len: usize, out: []*anyopaque) usize {
         if (out.len == 0) return 0;
         const idx = bucketIndex(len, .@"16") orelse return 0;
-        self.acquireBucket(idx);
+        self.acquireBucket(idx, .batch_allocation);
         defer self.unlockBucket(idx);
         if (self.bulk_teardown) return 0;
 
@@ -1669,7 +1822,7 @@ pub const GcCellBacking = struct {
         if (!self.relocation_planning) return false;
         const address = @intFromPtr(payload);
         for (0..bucket_count) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .relocation);
             const entry = self.findChunkAddrLocked(idx, address) orelse {
                 self.unlockBucket(idx);
                 continue;
@@ -1693,7 +1846,7 @@ pub const GcCellBacking = struct {
     /// includes the reservation until rollback or old→new commit.
     pub fn reserveRelocationCell(self: *GcCellBacking, len: usize) ?*anyopaque {
         const idx = bucketIndex(len, .@"16") orelse return null;
-        self.acquireBucket(idx);
+        self.acquireBucket(idx, .relocation);
         defer self.unlockBucket(idx);
         if (self.bulk_teardown) return null;
         if (self.relocation_planning) {
@@ -1720,7 +1873,7 @@ pub const GcCellBacking = struct {
 
     pub fn releaseRelocationReservation(self: *GcCellBacking, allocation: *anyopaque, len: usize) void {
         const idx = bucketIndex(len, .@"16") orelse unreachable;
-        self.acquireBucket(idx);
+        self.acquireBucket(idx, .relocation);
         defer self.unlockBucket(idx);
         const ptr: [*]u8 = @ptrCast(allocation);
         std.debug.assert(self.freeOwnedSlotLocked(idx, ptr));
@@ -1732,7 +1885,7 @@ pub const GcCellBacking = struct {
     /// old slot contributes -1.
     pub fn commitRelocationCell(self: *GcCellBacking, old: *anyopaque, new: *anyopaque, len: usize) void {
         const idx = bucketIndex(len, .@"16") orelse unreachable;
-        self.acquireBucket(idx);
+        self.acquireBucket(idx, .relocation);
         defer self.unlockBucket(idx);
         const old_ptr: [*]u8 = @ptrCast(old);
         const new_ptr: [*]u8 = @ptrCast(new);
@@ -1755,7 +1908,7 @@ pub const GcCellBacking = struct {
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(len, alignment)) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .single_allocation);
             defer self.unlockBucket(idx);
             if (self.bulk_teardown) return null;
             var kind: RuntimeAttributionProfiler.CellAllocationKind = .reused;
@@ -1826,7 +1979,7 @@ pub const GcCellBacking = struct {
     pub fn freeCellStorageBatch(self: *GcCellBacking, len: usize, allocations: []*anyopaque) void {
         if (allocations.len == 0) return;
         const idx = bucketIndex(len, .@"16") orelse unreachable;
-        self.acquireBucket(idx);
+        self.acquireBucket(idx, .free);
         defer self.unlockBucket(idx);
         for (allocations) |allocation| {
             const ptr: [*]u8 = @ptrCast(allocation);
@@ -1837,7 +1990,7 @@ pub const GcCellBacking = struct {
     fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .ownership);
             const owned = self.ownsPtrLocked(idx, mem.ptr);
             self.unlockBucket(idx);
             if (owned) return new_len <= bucket_sizes[idx];
@@ -1850,7 +2003,7 @@ pub const GcCellBacking = struct {
     fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .ownership);
             const owned = self.ownsPtrLocked(idx, mem.ptr);
             self.unlockBucket(idx);
             if (owned) {
@@ -1866,7 +2019,7 @@ pub const GcCellBacking = struct {
     fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .free);
             if (self.freeOwnedSlotLocked(idx, mem.ptr)) {
                 self.unlockBucket(idx);
                 return;
@@ -1894,7 +2047,7 @@ pub const GcCellBacking = struct {
     pub fn stats(self: *GcCellBacking) Stats {
         var out = Stats{};
         inline for (0..bucket_count) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .maintenance);
             out.chunks += self.bucket_chunk_counts[idx];
             out.capacity_bytes += self.bucket_capacity_bytes[idx];
             out.capacity_slots += self.bucket_capacity_slots[idx];
@@ -1913,7 +2066,7 @@ pub const GcCellBacking = struct {
     pub fn compactionPressure(self: *GcCellBacking) CompactionPressure {
         var out = CompactionPressure{};
         inline for (0..bucket_count) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .maintenance);
             const chunks = self.bucket_chunks[idx].items;
             const live_counts = self.bucket_live_counts[idx].items;
             var total_live: usize = 0;
@@ -1944,7 +2097,7 @@ pub const GcCellBacking = struct {
     pub fn bucketStats(self: *GcCellBacking) [bucket_count]BucketStats {
         var out: [bucket_count]BucketStats = undefined;
         inline for (0..bucket_count) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .maintenance);
             const free_slots = self.bucket_capacity_slots[idx] - self.bucket_issued_slots[idx] + self.bucket_free_counts[idx];
             out[idx] = .{
                 .slot_size = bucket_sizes[idx],
@@ -2091,7 +2244,7 @@ pub const GcCellBacking = struct {
         if (self.bulk_teardown) return 0;
         var trimmed: usize = 0;
         inline for (0..bucket_count) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .maintenance);
             trimmed += self.trimEmptyTailChunksLocked(idx, reusable_tail_chunks);
             self.unlockBucket(idx);
         }
@@ -2102,7 +2255,7 @@ pub const GcCellBacking = struct {
         if (self.bulk_teardown) return 0;
         var trimmed: usize = 0;
         inline for (0..bucket_count) |idx| {
-            self.acquireBucket(idx);
+            self.acquireBucket(idx, .maintenance);
             trimmed += self.trimEmptyTailChunksLocked(idx, 0);
             self.unlockBucket(idx);
         }
@@ -2184,7 +2337,8 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     try std.testing.expect(@intFromPtr(side.ptr) != @intFromPtr(first_ptr));
     a.free(side);
 
-    const allocation = profile.snapshot().allocation;
+    const snapshot = profile.snapshot();
+    const allocation = snapshot.allocation;
     const expected_cell_bytes =
         2 * GcCellBacking.bucket_sizes[GcCellBacking.bucketIndex(200, .@"16").?] +
         2 * GcCellBacking.bucket_sizes[GcCellBacking.bucketIndex(48, .@"16").?] +
@@ -2196,6 +2350,13 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     try std.testing.expectEqual(@as(u64, 1), allocation.gc_cell_delegated_allocations);
     try std.testing.expectEqual(@as(u64, @intCast(expected_cell_bytes)), allocation.gc_cell_bytes);
     try std.testing.expectEqual(allocation.gc_cell_bytes, allocation.gc_cell_freed_bytes);
+    try std.testing.expectEqual(@as(u64, 12), snapshot.cell_slab_lock.acquires);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.cell_slab_lock.contentions);
+    try std.testing.expectEqual(@as(u64, 6), snapshot.cell_slab_lock.single_allocation_acquires);
+    try std.testing.expectEqual(@as(u64, 6), snapshot.cell_slab_lock.free_acquires);
+    try std.testing.expectEqual(@as(u64, 4), snapshot.cell_slab_lock.size_64_acquires);
+    try std.testing.expectEqual(@as(u64, 4), snapshot.cell_slab_lock.size_256_acquires);
+    try std.testing.expectEqual(@as(u64, 4), snapshot.cell_slab_lock.size_2048_acquires);
 }
 
 test "GC cell backing lazily bumps fresh chunk slots before using reuse bitmaps" {
@@ -2509,7 +2670,7 @@ test "GC cell backing rejects pointers outside bucket address spans before scann
     const foreign = try std.testing.allocator.alignedAlloc(u8, .@"16", 200);
     defer std.testing.allocator.free(foreign);
 
-    backing.acquireBucket(idx);
+    backing.acquireBucket(idx, .maintenance);
     defer backing.unlockBucket(idx);
     try std.testing.expect(backing.ownsPtrLocked(idx, cell.ptr));
     try std.testing.expect(!backing.ownsPtrLocked(idx, foreign.ptr));
@@ -2576,7 +2737,7 @@ test "GC cell backing ownership hint avoids repeated bucket chunk scans" {
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_bump_start[idx]);
 
-    backing.acquireBucket(idx);
+    backing.acquireBucket(idx, .maintenance);
     defer backing.unlockBucket(idx);
     backing.bucket_owns_hint[idx] = null;
     try std.testing.expect(backing.ownsPtrLocked(idx, cells[0].ptr));
@@ -2620,7 +2781,7 @@ test "GC cell backing ownership fallback uses sorted chunk address index" {
         prev_end = entry.end;
     }
 
-    backing.acquireBucket(idx);
+    backing.acquireBucket(idx, .maintenance);
     defer backing.unlockBucket(idx);
     backing.bucket_owns_hint[idx] = null;
     try std.testing.expect(backing.ownsPtrLocked(idx, cells[cells.len - 1].ptr));
@@ -3054,7 +3215,7 @@ test "GC cell backing shards parallel allocation locks by size class" {
     const object_idx = GcCellBacking.bucketIndex(200, .@"16").?;
     try std.testing.expect(small_idx != object_idx);
 
-    backing.acquireBucket(small_idx);
+    backing.acquireBucket(small_idx, .maintenance);
     defer backing.unlockBucket(small_idx);
     try std.testing.expect(backing.tryAcquireBucket(object_idx));
     backing.unlockBucket(object_idx);

@@ -204,6 +204,17 @@ simultaneous current-resident gauge. V15 preserves the valid peak/current
 ordering by measuring both in one documented Mach accounting domain rather
 than dropping the coherence gate.
 
+Schema-version-11 sidecars retain the V15 workload, resource, and durable
+checkpoint contract and add exact GC cell-slab lock attribution. Every lock
+attempt is classified once as single allocation, batch allocation, publication,
+unpublication, free, ownership, relocation, or maintenance, and once by its
+64/128/256/512/1024/2048-byte size class. The raw inventory preserves
+acquisitions, contended acquisitions, and failed-CAS spins per class; validation
+requires the purpose and size-class sums to reproduce the totals exactly.
+These opt-in counters diagnose lock traffic and coherence pressure outside the
+scored timing rows. Ordinary contexts retain the nullable profiler sink and do
+not increment the counters.
+
 The full-work schema-2 evidence is the
 [`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)
 report and its
