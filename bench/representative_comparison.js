@@ -352,6 +352,96 @@ function representativeJsonStringifyShallow(jobs, lane) {
   return total;
 }
 
+// String inputs are constructed and their exact probes are frozen before the
+// ten runner warmups. The scored job includes one real JSON.stringify plus
+// fixed-size output validation, without hashing or rescanning the full result.
+var representativeJsonStringifyStringInput = "";
+var representativeJsonStringifyStringKind = "";
+var representativeJsonStringifyStringExpectedLength = 0;
+var representativeJsonStringifyStringProbe0 = "";
+var representativeJsonStringifyStringProbe1 = "";
+var representativeJsonStringifyStringProbe2 = "";
+var representativeJsonStringifyStringProbe0Offset = 0;
+var representativeJsonStringifyStringProbe1Offset = 0;
+var representativeJsonStringifyStringProbe2Offset = 0;
+
+function representativeJsonStringifyPattern(pattern, repetitions) {
+  var result = "";
+  var chunk = pattern;
+  var count = repetitions;
+  while (count > 0) {
+    if ((count & 1) !== 0) result = result + chunk;
+    count = Math.floor(count / 2);
+    if (count !== 0) chunk = chunk + chunk;
+  }
+  return result;
+}
+
+function selectRepresentativeJsonStringifyString(kind, extent) {
+  var input;
+  if (kind === "plain") {
+    input = representativeJsonStringifyPattern("a", extent);
+  } else if (kind === "unicode") {
+    // Valid 2-, 3-, and 4-byte UTF-8 sequences separated by ASCII.
+    input = representativeJsonStringifyPattern("Aé水😀", extent);
+  } else if (kind === "sparse") {
+    var ordinary = representativeJsonStringifyPattern("p", extent);
+    var mixed = "\"\\\n\t\r\b\f\u0000\u0007\u000b\u001f";
+    var chunks = [];
+    for (var index = 0; index < 16; index = index + 1)
+      chunks.push(ordinary + mixed);
+    input = chunks.join("");
+  } else if (kind === "surrogate") {
+    // Separators keep both code units lone so WTF-8 must emit two lowercase
+    // JSON \u escapes rather than combine them into a scalar value.
+    input = representativeJsonStringifyPattern("\ud800x\udc00y", extent);
+  } else {
+    input = "short-safe-ASCII-19";
+  }
+
+  var expected = JSON.stringify(input);
+  var probeWidth = 12;
+  representativeJsonStringifyStringInput = input;
+  representativeJsonStringifyStringKind = kind;
+  representativeJsonStringifyStringExpectedLength = expected.length;
+  representativeJsonStringifyStringProbe0Offset = 0;
+  representativeJsonStringifyStringProbe1Offset = Math.floor(expected.length / 2);
+  representativeJsonStringifyStringProbe2Offset = Math.max(0, expected.length - probeWidth);
+  representativeJsonStringifyStringProbe0 = expected.slice(0, probeWidth);
+  representativeJsonStringifyStringProbe1 = expected.slice(
+    representativeJsonStringifyStringProbe1Offset,
+    representativeJsonStringifyStringProbe1Offset + probeWidth
+  );
+  representativeJsonStringifyStringProbe2 = expected.slice(
+    representativeJsonStringifyStringProbe2Offset,
+    representativeJsonStringifyStringProbe2Offset + probeWidth
+  );
+  return representativeJsonStringifyString;
+}
+
+function representativeJsonStringifyString(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var encoded = JSON.stringify(representativeJsonStringifyStringInput);
+    if (encoded.length !== representativeJsonStringifyStringExpectedLength ||
+        encoded.slice(representativeJsonStringifyStringProbe0Offset,
+          representativeJsonStringifyStringProbe0Offset + representativeJsonStringifyStringProbe0.length) !== representativeJsonStringifyStringProbe0 ||
+        encoded.slice(representativeJsonStringifyStringProbe1Offset,
+          representativeJsonStringifyStringProbe1Offset + representativeJsonStringifyStringProbe1.length) !== representativeJsonStringifyStringProbe1 ||
+        encoded.slice(representativeJsonStringifyStringProbe2Offset,
+          representativeJsonStringifyStringProbe2Offset + representativeJsonStringifyStringProbe2.length) !== representativeJsonStringifyStringProbe2)
+      throw new Error("JSON.stringify string witness drift: " + representativeJsonStringifyStringKind);
+    total = total + encoded.length +
+      representativeJsonStringifyStringProbe0Offset +
+      representativeJsonStringifyStringProbe1Offset +
+      representativeJsonStringifyStringProbe2Offset +
+      encoded.charCodeAt(representativeJsonStringifyStringProbe0Offset) +
+      encoded.charCodeAt(representativeJsonStringifyStringProbe1Offset) +
+      encoded.charCodeAt(representativeJsonStringifyStringProbe2Offset) + lane;
+  }
+  return total;
+}
+
 function representativeCollections(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -985,6 +1075,13 @@ function benchmarkFunction(name) {
   if (name === "representative_json_stringify_depth_4096") return selectRepresentativeJsonStringifyDepth(4096, false);
   if (name === "representative_json_stringify_cycle_4096") return selectRepresentativeJsonStringifyDepth(4096, true);
   if (name === "representative_json_stringify_shallow_4096") return selectRepresentativeJsonStringifyShallow(4096);
+  if (name === "representative_json_stringify_plain_4096") return selectRepresentativeJsonStringifyString("plain", 4096);
+  if (name === "representative_json_stringify_plain_16384") return selectRepresentativeJsonStringifyString("plain", 16384);
+  if (name === "representative_json_stringify_plain_65536") return selectRepresentativeJsonStringifyString("plain", 65536);
+  if (name === "representative_json_stringify_unicode_4096") return selectRepresentativeJsonStringifyString("unicode", 4096);
+  if (name === "representative_json_stringify_sparse_escapes_65536") return selectRepresentativeJsonStringifyString("sparse", 4096);
+  if (name === "representative_json_stringify_lone_surrogates_4096") return selectRepresentativeJsonStringifyString("surrogate", 1024);
+  if (name === "representative_json_stringify_short_control") return selectRepresentativeJsonStringifyString("short", 0);
   if (name === "representative_collections") return function (jobs, lane) { return representativeCollections(jobs, lane, 0); };
   if (name === "representative_collections_variant") return function (jobs, lane) { return representativeCollections(jobs, lane, 1); };
   if (name === "representative_strong_identity_collections") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 0); };
