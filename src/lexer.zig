@@ -121,9 +121,11 @@ pub const Lexer = struct {
     last_rbrace_object: bool = false,
     pending_function_expr: bool = false,
     /// Annex B B.1.3 HTML-like comments (`<!--` … and line-leading `-->` …).
-    /// Allowed in Script source, forbidden in Module source — `parseModule`
-    /// re-tokenizes with this off so a module rejects them as a SyntaxError.
+    /// Allowed in Script source, forbidden in Module source. The lexer records
+    /// the first accepted comment so a Module parser can reject the same token
+    /// stream without a second scan.
     html_comments: bool = true,
+    first_html_comment_offset: ?usize = null,
     /// Whether only trivia (and possibly a line terminator) has been seen since
     /// the previous significant token — true at the start of input. A line-
     /// leading `-->` is an HTML close comment only in this state.
@@ -139,6 +141,10 @@ pub const Lexer = struct {
 
     pub fn errorOffset(self: *const Lexer) usize {
         return self.last_error_offset orelse @min(self.i, self.src.len);
+    }
+
+    pub fn htmlCommentOffset(self: *const Lexer) ?usize {
+        return self.first_html_comment_offset;
     }
 
     fn peek(self: *Lexer) u8 {
@@ -170,6 +176,7 @@ pub const Lexer = struct {
                 self.i + 3 < self.src.len and self.src[self.i + 2] == '-' and self.src[self.i + 3] == '-')
             {
                 // SingleLineHTMLOpenComment `<!--` — always a line comment.
+                if (self.first_html_comment_offset == null) self.first_html_comment_offset = self.i;
                 self.i += 4;
                 self.skipSingleLineCommentBody();
             } else if (self.html_comments and self.at_line_start and c == '-' and self.peek2() == '-' and
@@ -177,6 +184,7 @@ pub const Lexer = struct {
             {
                 // SingleLineHTMLCloseComment `-->` — a line comment only when it
                 // is the first non-trivia content of a line (or of the input).
+                if (self.first_html_comment_offset == null) self.first_html_comment_offset = self.i;
                 self.i += 3;
                 self.skipSingleLineCommentBody();
             } else if (c >= 0x80) {
@@ -2004,6 +2012,19 @@ test "lexer handles multi-char operators and comments" {
     try std.testing.expectEqual(TokenKind.identifier, (try lx.next()).kind);
     try std.testing.expectEqual(TokenKind.neq_strict, (try lx.next()).kind);
     try std.testing.expectEqual(TokenKind.identifier, (try lx.next()).kind);
+}
+
+test "lexer records the first accepted Annex B HTML-like comment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "var before = 1;\n  --> hidden\n<!-- second\nvar after = 2;";
+    var lexer = Lexer.init(arena.allocator(), source);
+    while ((try lexer.next()).kind != .eof) {}
+    try std.testing.expectEqual(std.mem.indexOf(u8, source, "-->").?, lexer.htmlCommentOffset().?);
+
+    var ordinary = Lexer.init(arena.allocator(), "var before = 1; // ordinary\nvar after = 2;");
+    while ((try ordinary.next()).kind != .eof) {}
+    try std.testing.expectEqual(@as(?usize, null), ordinary.htmlCommentOffset());
 }
 
 test "lexer hashbang comments stop at all line terminators" {

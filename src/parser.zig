@@ -60,6 +60,10 @@ pub const Parser = struct {
     /// The original source text, so function definitions can capture their exact
     /// source span for `Function.prototype.toString`.
     source: []const u8 = "",
+    /// First Annex B HTML-like comment accepted under Script lexical rules.
+    /// Modules reject this exact offset before parsing, so one token stream can
+    /// serve both public parse entry points without lexical-goal ambiguity.
+    html_comment_offset: ?usize = null,
     /// True while parsing a generator body, so `yield` is recognized as a yield
     /// expression rather than an identifier. Saved/restored around each function.
     in_generator: bool = false,
@@ -209,7 +213,13 @@ pub const Parser = struct {
             try list.append(arena, t);
             if (t.kind == .eof) break;
         }
-        return .{ .tokens = list.items, .arena = arena, .scratch_allocator = scratch_allocator, .source = source };
+        return .{
+            .tokens = list.items,
+            .arena = arena,
+            .scratch_allocator = scratch_allocator,
+            .source = source,
+            .html_comment_offset = lx.htmlCommentOffset(),
+        };
     }
 
     /// Source slice from the start position of the token at `start_pos` through
@@ -970,9 +980,13 @@ pub const Parser = struct {
         self.module = true;
         self.strict = true;
         // HTML-like comments (Annex B B.1.3) are Script-only; a Module must reject
-        // `<!--` / `-->`. `init` tokenized with them enabled (the Script default),
-        // so re-tokenize the source with them disabled before parsing the module.
-        try self.retokenizeWithoutHtmlComments();
+        // `<!--` / `-->`. The Script-goal lexer records their first exact offset;
+        // rejecting that observation preserves the Module lexical goal without
+        // discarding and rebuilding an attacker-proportional token stream.
+        if (self.html_comment_offset) |offset| {
+            self.last_error_offset = offset;
+            return ParseError.UnexpectedToken;
+        }
         // A Module is an async context for `await` at the top level (top-level
         // await). Nested non-async functions reset this via `parseFnBody`.
         self.in_async = true;
@@ -985,23 +999,6 @@ pub const Parser = struct {
         try self.checkModuleEarlyErrors(stmts.items);
         if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return self.fail(ParseError.UnexpectedToken);
         return self.alloc(.{ .program = stmts.items });
-    }
-
-    /// Re-tokenize `self.source` with HTML-like comments disabled (Module goal)
-    /// and reset the cursor. Safe to call before any token has been consumed.
-    fn retokenizeWithoutHtmlComments(self: *Parser) ParseError!void {
-        var lx = lex.Lexer.initOptions(self.arena, self.source, false);
-        var list: std.ArrayListUnmanaged(Token) = .empty;
-        while (true) {
-            const t = lx.next() catch |err| {
-                self.last_error_offset = lx.errorOffset();
-                return err;
-            };
-            try list.append(self.arena, t);
-            if (t.kind == .eof) break;
-        }
-        self.tokens = list.items;
-        self.pos = 0;
     }
 
     /// A ModuleItem: an `import`/`export` declaration or an ordinary statement.
@@ -5191,4 +5188,25 @@ test "parser does not propagate module await into function parameters" {
 
     var expr_param = try Parser.init(arena.allocator(), "0, function (x = await 1) {};");
     try std.testing.expectError(ParseError.UnexpectedToken, expr_param.parseModule());
+}
+
+test "module parsing reuses one token stream and rejects Script HTML comments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var module = try Parser.init(arena.allocator(), "import { value } from './dependency.js'; export { value };");
+    const token_pointer = module.tokens.ptr;
+    const token_count = module.tokens.len;
+    const program = try module.parseModule();
+    try std.testing.expectEqual(@as(usize, 2), program.program.len);
+    try std.testing.expectEqual(token_pointer, module.tokens.ptr);
+    try std.testing.expectEqual(token_count, module.tokens.len);
+
+    const source = "var before = 1;\n  --> hidden\nvar after = 2;";
+    var script = try Parser.init(arena.allocator(), source);
+    try std.testing.expectEqual(@as(usize, 2), (try script.parseProgram()).program.len);
+
+    var rejected = try Parser.init(arena.allocator(), source);
+    try std.testing.expectError(ParseError.UnexpectedToken, rejected.parseModule());
+    try std.testing.expectEqual(std.mem.indexOf(u8, source, "-->").?, rejected.errorLocation().byte_offset);
 }
