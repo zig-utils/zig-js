@@ -32896,7 +32896,10 @@ test "private VM creation rolls back bootstrap allocation failures" {
     // A precise VM installs thousands of intrinsic cells. Recreating the full
     // VM once per allocation index turns this unit test into hours of duplicate
     // work, so exhaust the structurally distinct bootstrap prefix and sample
-    // deterministic depths across the remaining construction transaction.
+    // depths across the remaining construction transaction. Secure randomized
+    // Shape skip-list levels make the exact tail allocation count differ across
+    // otherwise equivalent VM creations; a sampled index beyond a shorter run
+    // is not an induced failure and therefore has no rollback claim to check.
     var successful = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     try privateVmAllocationFailureProbe(successful.allocator());
     const needed = successful.alloc_index;
@@ -32922,12 +32925,20 @@ test "private VM creation rolls back bootstrap allocation failures" {
         sampled_len += 1;
     }
 
+    var deep_induced: usize = 0;
     for (sampled[0..sampled_len]) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
-        try std.testing.expectError(error.OutOfMemory, privateVmAllocationFailureProbe(failing.allocator()));
-        try std.testing.expect(failing.has_induced_failure);
+        const outcome = privateVmAllocationFailureProbe(failing.allocator());
+        if (!failing.has_induced_failure) {
+            try std.testing.expect(fail_index >= 64);
+            try outcome;
+            continue;
+        }
+        if (fail_index >= 64) deep_induced += 1;
+        try std.testing.expectError(error.OutOfMemory, outcome);
         try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
+    try std.testing.expect(deep_induced >= 5);
 }
 
 test "private heap snapshot serializers return no partial output on allocation failure" {
