@@ -12,10 +12,22 @@ const StringCell = strcell.StringCell;
 /// static, arena, and interned strings explicitly remain outside the heap.
 inline fn gcBarrier(owner: *Object, v: Value) void {
     if (v.isObject()) {
-        gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(v.asObj()));
+        // With a managed heap active, every Object participating in a Value
+        // store was allocated through gc.allocObj/allocObject. The tag also
+        // proves the child is an exact Object payload; arena mode has no strict
+        // hook and retains the tolerant no-op fallback.
+        const owner_cell: *anyopaque = @ptrCast(owner);
+        const child_cell: *anyopaque = @ptrCast(v.asObj());
+        if (!gc_runtime.barrierFromManaged(owner_cell, child_cell))
+            gc_runtime.barrierFrom(owner_cell, child_cell);
     } else if (v.isString()) {
         const cell = v.asStringCell();
-        if (cell.isGcManaged()) gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(@constCast(cell)));
+        if (cell.isGcManaged()) {
+            const owner_cell: *anyopaque = @ptrCast(owner);
+            const child_cell: *anyopaque = @ptrCast(@constCast(cell));
+            if (!gc_runtime.barrierFromManaged(owner_cell, child_cell))
+                gc_runtime.barrierFrom(owner_cell, child_cell);
+        }
     }
 }
 

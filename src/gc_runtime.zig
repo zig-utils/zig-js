@@ -66,15 +66,19 @@ pub inline fn allocationRecoveryBlocked() bool {
 // shim rather than `gc.zig` (which would be a circular import through
 // `value.zig`). So `gc.zig` installs a type-erased thunk + heap pointer here at
 // `setActiveHeap` time, and store sites call `barrierFrom(owner, cell)` (or the
-// conservative child-only `barrier(cell)`). The same hook maintains the nursery
+// conservative child-only `barrier(cell)`). Stores whose static types prove
+// both endpoints are exact live payload starts may use `barrierFromManaged` to
+// skip the tolerant ownership lookup. Both hooks maintain the nursery
 // remembered set and the incremental/full tri-color invariant.
 // ---------------------------------------------------------------------------
 
 threadlocal var barrier_heap: ?*anyopaque = null;
 const BarrierFn = *const fn (*anyopaque, ?*anyopaque, ?*anyopaque) void;
 const WeakBarrierFn = *const fn (*anyopaque, ?*anyopaque) void;
+const ManagedBarrierFn = *const fn (*anyopaque, *anyopaque, *anyopaque) void;
 threadlocal var barrier_fn: ?BarrierFn = null;
 threadlocal var weak_barrier_fn: ?WeakBarrierFn = null;
+threadlocal var managed_barrier_fn: ?ManagedBarrierFn = null;
 const StableIdentityFn = *const fn (*anyopaque, ?*anyopaque, u64) ?u64;
 const StableIdentityEpochFn = *const fn (*anyopaque) u64;
 threadlocal var stable_identity_context: ?*anyopaque = null;
@@ -85,13 +89,14 @@ threadlocal var stable_identity_cached_cell: ?*anyopaque = null;
 threadlocal var stable_identity_cached_epoch: u64 = 0;
 threadlocal var stable_identity_cached_value: u64 = 0;
 
-/// Install (or clear) the active heap's write-barrier thunk for this thread.
-/// Returns the previous (heap, fn) so nested entry points can restore it.
-pub fn setBarrier(heap: ?*anyopaque, f: ?BarrierFn, weak_f: ?WeakBarrierFn) struct { ?*anyopaque, ?BarrierFn, ?WeakBarrierFn } {
-    const prev = .{ barrier_heap, barrier_fn, weak_barrier_fn };
+/// Install (or clear) the active heap's write-barrier thunks for this thread.
+/// Returns the previous hook set so nested entry points can restore it.
+pub fn setBarrier(heap: ?*anyopaque, f: ?BarrierFn, weak_f: ?WeakBarrierFn, managed_f: ?ManagedBarrierFn) struct { ?*anyopaque, ?BarrierFn, ?WeakBarrierFn, ?ManagedBarrierFn } {
+    const prev = .{ barrier_heap, barrier_fn, weak_barrier_fn, managed_barrier_fn };
     barrier_heap = heap;
     barrier_fn = f;
     weak_barrier_fn = weak_f;
+    managed_barrier_fn = managed_f;
     return prev;
 }
 
@@ -178,10 +183,52 @@ pub inline fn barrierFrom(owner: ?*anyopaque, cell: ?*anyopaque) void {
     }
 }
 
+/// Barrier an edge whose endpoints are proven exact live payload starts from
+/// the active heap. Returns false when no managed heap is installed so callers
+/// can preserve a tolerant or arena-mode fallback.
+pub inline fn barrierFromManaged(owner: *anyopaque, cell: *anyopaque) bool {
+    const f = managed_barrier_fn orelse return false;
+    const h = barrier_heap orelse return false;
+    f(h, owner, cell);
+    return true;
+}
+
 /// Record that an owner's weak/ephemeron storage changed without making the
 /// target strong. Minor GC will revisit an old owner and apply normal weak rules.
 pub inline fn barrierWeak(owner: ?*anyopaque) void {
     if (weak_barrier_fn) |f| {
         if (barrier_heap) |h| f(h, owner);
     }
+}
+
+test "exact managed barrier is opt-in and retains the tolerant fallback" {
+    const Provider = struct {
+        managed_calls: usize = 0,
+        tolerant_calls: usize = 0,
+
+        fn tolerant(raw: *anyopaque, _: ?*anyopaque, _: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.tolerant_calls += 1;
+        }
+
+        fn managed(raw: *anyopaque, _: *anyopaque, _: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.managed_calls += 1;
+        }
+    };
+
+    var provider = Provider{};
+    var owner: u8 = 0;
+    var child: u8 = 0;
+    const prev = setBarrier(&provider, Provider.tolerant, null, Provider.managed);
+    defer _ = setBarrier(prev[0], prev[1], prev[2], prev[3]);
+
+    try std.testing.expect(barrierFromManaged(&owner, &child));
+    try std.testing.expectEqual(@as(usize, 1), provider.managed_calls);
+    try std.testing.expectEqual(@as(usize, 0), provider.tolerant_calls);
+
+    _ = setBarrier(&provider, Provider.tolerant, null, null);
+    try std.testing.expect(!barrierFromManaged(&owner, &child));
+    barrierFrom(&owner, &child);
+    try std.testing.expectEqual(@as(usize, 1), provider.tolerant_calls);
 }

@@ -4163,14 +4163,14 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
             .create = allocManagedString,
             .create_owned = allocManagedStringOwned,
         });
-        _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk);
+        _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk, managedBarrierThunk);
         _ = gc_runtime.setStableIdentity(raw, stableIdentityThunk, stableIdentityEpochThunk);
     } else {
         active_realm_context = null;
         active_realm_id = ContextMod.GcCellBacking.no_realm;
         _ = strcell.setActiveManagedFactory(null);
         _ = gc_runtime.setActive(.{});
-        _ = gc_runtime.setBarrier(null, null, null);
+        _ = gc_runtime.setBarrier(null, null, null, null);
         _ = gc_runtime.setStableIdentity(null, null, null);
     }
     return prev;
@@ -4338,6 +4338,11 @@ fn barrierThunk(raw_heap: *anyopaque, owner: ?*anyopaque, cell: ?*anyopaque) voi
 fn weakBarrierThunk(raw_heap: *anyopaque, owner: ?*anyopaque) void {
     const heap: *Heap = @ptrCast(@alignCast(raw_heap));
     heap.writeBarrierWeak(owner);
+}
+
+fn managedBarrierThunk(raw_heap: *anyopaque, owner: *anyopaque, cell: *anyopaque) void {
+    const heap: *Heap = @ptrCast(@alignCast(raw_heap));
+    heap.writeBarrierFromManaged(owner, cell);
 }
 
 /// Insertion write barrier for a stored `Value`. Objects and heap-managed
