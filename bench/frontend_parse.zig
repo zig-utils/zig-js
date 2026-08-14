@@ -189,6 +189,12 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_modules_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_modules_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_modules_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_statement_locations_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_statement_locations_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_statement_locations_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_statement_locations_mixed_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_statement_locations_nested_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_statement_location_single_4096")) return 4096;
     return error.InvalidWorkload;
 }
 
@@ -259,6 +265,22 @@ fn isRadixBigIntWorkload(name: []const u8) bool {
 
 fn isModuleWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_modules_");
+}
+
+fn isStatementLocationWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_statement_location");
+}
+
+fn isMixedStatementLocationWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_statement_locations_mixed_4096");
+}
+
+fn isSingleStatementLocationWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_statement_location_single_4096");
+}
+
+fn isNestedStatementLocationWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_statement_locations_nested_1024");
 }
 
 fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
@@ -466,6 +488,48 @@ fn moduleSource(allocator: std.mem.Allocator, width: usize) ![]const u8 {
     return source.items;
 }
 
+const statement_location_prefix = "/*location*/ ";
+
+fn statementLocationTerminator(index: usize, mixed: bool) []const u8 {
+    if (!mixed) return "\n";
+    return switch (index % 5) {
+        0 => "\n",
+        1 => "\r\n",
+        2 => "\r",
+        3 => "\xe2\x80\xa8",
+        else => "\xe2\x80\xa9",
+    };
+}
+
+fn statementLocationSource(allocator: std.mem.Allocator, width: usize, mixed: bool, nested: bool, single: bool) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    if (single) {
+        try source.appendSlice(allocator, "var locationCorpus = [");
+        for (0..width) |index| {
+            if (index != 0) try source.append(allocator, ',');
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        }
+        try source.appendSlice(allocator, "];\n");
+        return source.items;
+    }
+    if (nested) {
+        for (0..width) |index| {
+            try source.appendSlice(allocator, "if (true) {\n  statement");
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+            try source.appendSlice(allocator, ";\n}\n");
+        }
+        return source.items;
+    }
+    for (0..width) |index| {
+        if (mixed and index % 2 == 1) try source.appendSlice(allocator, statement_location_prefix);
+        try source.appendSlice(allocator, "statement");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        try source.append(allocator, ';');
+        try source.appendSlice(allocator, statementLocationTerminator(index, mixed));
+    }
+    return source.items;
+}
+
 fn indexedName(name: []const u8, prefix: []const u8, index: usize) !bool {
     if (!std.mem.startsWith(u8, name, prefix)) return false;
     return (try std.fmt.parseUnsigned(usize, name[prefix.len..], 10)) == index;
@@ -500,6 +564,92 @@ fn parseOnce(
     const parser_allocator = if (observation != null) measured.allocator() else arena.allocator();
     var parser = try js.Parser.init(parser_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (isStatementLocationWorkload(workload)) {
+        const width = try workloadWidth(workload);
+        if (isSingleStatementLocationWorkload(workload)) {
+            if (program.program.len != 1 or parser.statement_locations.items.len != 1)
+                return error.InvalidProgram;
+            const declaration = program.program[0];
+            if (declaration.* != .var_decl) return error.InvalidProgram;
+            const initializer = declaration.var_decl.init orelse return error.InvalidProgram;
+            if (initializer.* != .array_lit or initializer.array_lit.len != width)
+                return error.InvalidProgram;
+            var checksum = width + parser.statement_locations.items.len;
+            for (initializer.array_lit, 0..) |element, index| {
+                if (element.* != .number or element.number != @as(f64, @floatFromInt(index)))
+                    return error.InvalidProgram;
+                checksum += index;
+            }
+            const location = parser.statement_locations.items[0];
+            if (location.node != declaration or location.location.byte_offset != 0 or
+                location.location.line != 1 or location.location.column != 1)
+                return error.InvalidProgram;
+            return checksum;
+        }
+
+        if (isNestedStatementLocationWorkload(workload)) {
+            if (program.program.len != width or parser.statement_locations.items.len != width * 3)
+                return error.InvalidProgram;
+            const inner_prefix = "if (true) {\n  ";
+            const block_offset = "if (true) ".len;
+            var checksum = program.program.len + parser.statement_locations.items.len;
+            var expected_offset: usize = 0;
+            for (program.program, 0..) |statement, index| {
+                if (statement.* != .if_stmt or statement.if_stmt.consequent.* != .block or
+                    statement.if_stmt.consequent.block.len != 1)
+                    return error.InvalidProgram;
+                const inner = statement.if_stmt.consequent.block[0];
+                if (inner.* != .expr_stmt) return error.InvalidProgram;
+                const identifier = switch (inner.expr_stmt.*) {
+                    .identifier => |name| name,
+                    else => return error.InvalidProgram,
+                };
+                if (!try indexedName(identifier, "statement", index)) return error.InvalidProgram;
+                const inner_location = parser.statement_locations.items[index * 3];
+                const block_location = parser.statement_locations.items[index * 3 + 1];
+                const outer_location = parser.statement_locations.items[index * 3 + 2];
+                if (inner_location.node != inner or block_location.node != statement.if_stmt.consequent or
+                    outer_location.node != statement or
+                    inner_location.location.byte_offset != expected_offset + inner_prefix.len or
+                    inner_location.location.line != index * 3 + 2 or inner_location.location.column != 3 or
+                    block_location.location.byte_offset != expected_offset + block_offset or
+                    block_location.location.line != index * 3 + 1 or block_location.location.column != block_offset + 1 or
+                    outer_location.location.byte_offset != expected_offset or
+                    outer_location.location.line != index * 3 + 1 or outer_location.location.column != 1)
+                    return error.InvalidProgram;
+                checksum += identifier.len + inner_location.location.byte_offset + inner_location.location.line +
+                    block_location.location.byte_offset + block_location.location.column +
+                    outer_location.location.byte_offset + outer_location.location.line + index;
+                expected_offset += inner_prefix.len + "statement".len + std.fmt.count("{d}", .{index}) + ";\n}\n".len;
+            }
+            if (expected_offset != source.len) return error.InvalidProgram;
+            return checksum;
+        }
+
+        const mixed = isMixedStatementLocationWorkload(workload);
+        if (program.program.len != width or parser.statement_locations.items.len != width)
+            return error.InvalidProgram;
+        var checksum = program.program.len + parser.statement_locations.items.len;
+        var expected_offset: usize = 0;
+        for (program.program, parser.statement_locations.items, 0..) |statement, location, index| {
+            const prefix_len = if (mixed and index % 2 == 1) statement_location_prefix.len else 0;
+            if (statement.* != .expr_stmt) return error.InvalidProgram;
+            const identifier = switch (statement.expr_stmt.*) {
+                .identifier => |name| name,
+                else => return error.InvalidProgram,
+            };
+            if (!try indexedName(identifier, "statement", index) or location.node != statement or
+                location.location.byte_offset != expected_offset + prefix_len or
+                location.location.line != index + 1 or location.location.column != prefix_len + 1)
+                return error.InvalidProgram;
+            checksum += identifier.len + location.location.byte_offset + location.location.line +
+                location.location.column + index;
+            expected_offset += prefix_len + "statement".len + std.fmt.count("{d}", .{index}) + 1 +
+                statementLocationTerminator(index, mixed).len;
+        }
+        if (expected_offset != source.len) return error.InvalidProgram;
+        return checksum;
+    }
     if (isModuleWorkload(workload)) {
         const width = try workloadWidth(workload);
         if (program.program.len != 3 or parser.statement_locations.items.len != 1)
@@ -726,8 +876,17 @@ pub fn main(init: std.process.Init) !void {
     const decimal_bigint_workload = isDecimalBigIntWorkload(workload);
     const radix_bigint_workload = isRadixBigIntWorkload(workload);
     const module_workload = isModuleWorkload(workload);
+    const statement_location_workload = isStatementLocationWorkload(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (module_workload)
+    const source = if (statement_location_workload)
+        try statementLocationSource(
+            init.arena.allocator(),
+            width,
+            isMixedStatementLocationWorkload(workload),
+            isNestedStatementLocationWorkload(workload),
+            isSingleStatementLocationWorkload(workload),
+        )
+    else if (module_workload)
         try moduleSource(init.arena.allocator(), width)
     else if (isTaggedSubstitutionWorkload(workload))
         try taggedSubstitutionSource(init.arena.allocator(), width)
