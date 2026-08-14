@@ -3022,6 +3022,20 @@ fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []
     try buf.append(a, '"');
     var i: usize = 0;
     while (i < s.len) {
+        // QuoteJSONString only changes lone surrogates, quotes, reverse
+        // solidus, and U+0000..U+001F. Append each maximal ordinary run with
+        // one capacity/length update instead of repeating that bookkeeping for
+        // every byte. A valid scalar whose UTF-8 lead byte is 0xED remains in
+        // the run unless the continuation bytes identify WTF-8 surrogate data.
+        const run_start = i;
+        while (i < s.len) : (i += 1) {
+            const c = s[i];
+            if (c <= 31 or c == '"' or c == '\\' or
+                (c == 0xED and wtf8SurrogateAt(s, i) != null)) break;
+        }
+        if (i != run_start) try buf.appendSlice(a, s[run_start..i]);
+        if (i == s.len) break;
+
         if (wtf8SurrogateAt(s, i)) |sur| {
             try appendJsonHex4(a, buf, sur);
             i += 3;

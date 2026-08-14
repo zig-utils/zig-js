@@ -50423,6 +50423,32 @@ test "interpreter JSON, Object, Number builtins" {
         \\Object.getOwnPropertyNames(o).includes(alphaNulKey) &&
         \\Reflect.ownKeys(o).includes(alphaNulKey)
     )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let slash = String.fromCharCode(92);
+        \\let high = String.fromCharCode(0xd800);
+        \\let low = String.fromCharCode(0xdc00);
+        \\let escapeValue = '"' + slash + String.fromCharCode(8, 12, 10, 13, 9, 0, 1, 7, 11, 31) +
+        \\  "Aé水😀" + high + "x" + low;
+        \\let expectedValue = '"' + slash + '"' + slash + slash +
+        \\  slash + "b" + slash + "f" + slash + "n" + slash + "r" + slash + "t" +
+        \\  slash + "u0000" + slash + "u0001" + slash + "u0007" + slash + "u000b" + slash + "u001f" +
+        \\  "Aé水😀" + slash + "ud800x" + slash + "udc00" + '"';
+        \\let escapeKey = "k" + '"' + slash + String.fromCharCode(0) + "é" + high + "x";
+        \\let expectedKey = '"k' + slash + '"' + slash + slash + slash + "u0000é" + slash + "ud800x" + '"';
+        \\let escapeObject = {};
+        \\escapeObject[escapeKey] = escapeValue;
+        \\JSON.stringify(escapeValue) === expectedValue &&
+        \\  JSON.stringify(escapeObject) === "{" + expectedKey + ":" + expectedValue + "}"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let wideRun = "A";
+        \\for (let i = 0; i < 16; i++) wideRun += wideRun;
+        \\let wideKey = wideRun.slice(0, 4096);
+        \\let wideObject = {};
+        \\wideObject[wideKey] = wideRun;
+        \\JSON.stringify(wideRun) === '"' + wideRun + '"' &&
+        \\  JSON.stringify(wideObject) === '{"' + wideKey + '":"' + wideRun + '"}'
+    )).asBool());
     try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let o = JSON.parse('{\"n\": 3}'); o.n")).asNum());
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let v = JSON.parse('[1,2,3]'); v[0] + v[1] + v[2]")).asNum());
     try std.testing.expectEqual(@as(f64, 1), (try evalSource(a,

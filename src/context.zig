@@ -11473,13 +11473,16 @@ test "enable_gc: JSON stringify active index survives a callback collection requ
         \\let gcLeaf = { marker: 7 };
         \\let gcDeep = gcLeaf;
         \\for (let i = 0; i < 96; i++) gcDeep = { next: gcDeep };
+        \\let gcWide = "safe";
+        \\for (let i = 0; i < 12; i++) gcWide += gcWide;
         \\let gcCalls = 0;
-        \\globalThis.gcJsonResult = JSON.stringify({ deep: gcDeep, aliases: [gcLeaf, gcLeaf] }, function (key, value) {
+        \\globalThis.gcJsonResult = JSON.stringify({ deep: gcDeep, aliases: [gcLeaf, gcLeaf], wide: gcWide }, function (key, value) {
         \\  if (++gcCalls === 64) gc();
         \\  return value;
         \\});
         \\gcJsonResult.indexOf('"marker":7') >= 0 &&
-        \\  gcJsonResult.indexOf('"aliases":[{"marker":7},{"marker":7}]}') >= 0;
+        \\  gcJsonResult.indexOf('"aliases":[{"marker":7},{"marker":7}]') >= 0 &&
+        \\  gcJsonResult.indexOf('"wide":"safesafe') >= 0;
     );
     try std.testing.expect(result.asBool());
     try std.testing.expect(ctx.gc.?.collections > collections_before);
@@ -11491,7 +11494,8 @@ test "enable_gc: JSON stringify active index survives a callback collection requ
     try std.testing.expect(compacted.status == .compacted or compacted.status == .no_candidates);
     try std.testing.expect((try ctx.evaluate(
         \\gcJsonResult.indexOf('"marker":7') >= 0 &&
-        \\  gcJsonResult.indexOf('"aliases":[{"marker":7},{"marker":7}]}') >= 0
+        \\  gcJsonResult.indexOf('"aliases":[{"marker":7},{"marker":7}]') >= 0 &&
+        \\  gcJsonResult.indexOf('"wide":"safesafe') >= 0
     )).asBool());
 }
 
@@ -11520,6 +11524,36 @@ test "heap_limit_bytes: JSON stringify direct object output fails atomically" {
         \\  jsonCaught = error.name === "OutOfMemoryError";
         \\}
         \\jsonCaught && jsonCallbacks > 1 && jsonPublished === "sentinel";
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
+test "heap_limit_bytes: JSON stringify bulk string runs fail atomically" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\let bulkChunk = "a";
+        \\for (let i = 0; i < 20; i++) bulkChunk += bulkChunk;
+        \\let bulkSource = {};
+        \\for (let i = 0; i < 12; i++) bulkSource["field" + i] = bulkChunk;
+        \\let bulkCallbacks = 0;
+        \\globalThis.bulkPublished = "sentinel";
+        \\let bulkCaught = false;
+        \\try {
+        \\  bulkPublished = JSON.stringify(bulkSource, function (key, value) {
+        \\    bulkCallbacks++;
+        \\    return value;
+        \\  });
+        \\} catch (error) {
+        \\  bulkCaught = error.name === "OutOfMemoryError";
+        \\}
+        \\bulkCaught && bulkCallbacks > 1 && bulkPublished === "sentinel";
     );
     try std.testing.expect(result.asBool());
     const stats = ctx.heapBudgetStats().?;
