@@ -20600,6 +20600,44 @@ test "forced tree-walker and required bytecode preserve exact observable state" 
     try std.testing.expectEqual(@as(u64, 0), bytecode.count(.template_plain_fallback));
 }
 
+test "parser-derived arguments use preserves forced execution tiers" {
+    const source =
+        \\function scopeOwner(box) {
+        \\  "use strict";
+        \\  /* arguments eval */
+        \\  var evaluation = box.value;
+        \\  return evaluation;
+        \\}
+        \\scopeOwner({ value: 7 });
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len]u64 = undefined;
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+
+        results[index] = (try ctx.evaluate(source)).rawBits();
+        const inventory = ctx.bytecodeAdmissionSnapshot();
+        switch (mode) {
+            .tree_walker => {
+                try std.testing.expectEqual(@as(u64, 1), inventory.count(.plain_forced_tree_walker));
+            },
+            .required => {
+                try std.testing.expectEqual(@as(u64, 1), inventory.count(.template_plain_compiled));
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_policy_arguments));
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            },
+            .automatic => unreachable,
+        }
+    }
+
+    try std.testing.expectEqual(results[0], results[1]);
+}
+
 test "required bytecode rejects an uncompiled function instead of counting fallback coverage" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,

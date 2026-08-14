@@ -98,6 +98,11 @@ pub const Parser = struct {
     fn_depth: u32 = 0,
     iter_depth: u32 = 0,
     switch_depth: u32 = 0,
+    /// Stack-local flag owned by the ordinary function/method currently being
+    /// parsed. Nested ordinary functions replace it; arrows deliberately share
+    /// it because they inherit `arguments`. The pointer never escapes parsing,
+    /// so tracking adds no attacker-proportional allocation or cleanup path.
+    current_arguments_use: ?*bool = null,
     /// Depth of syntax contexts where `new.target` is allowed. Ordinary
     /// functions/methods introduce one; arrows only inherit an outer one.
     new_target_depth: u32 = 0,
@@ -2151,6 +2156,12 @@ pub const Parser = struct {
         return std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments");
     }
 
+    fn recordArgumentsUse(self: *Parser, name: []const u8) void {
+        if (self.current_arguments_use) |uses_arguments| {
+            if (isEvalOrArguments(name)) uses_arguments.* = true;
+        }
+    }
+
     fn isAnnexBCallAssignmentTarget(node: *const Node) bool {
         return node.* == .call;
     }
@@ -2240,6 +2251,10 @@ pub const Parser = struct {
         const name_tok = self.advance();
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
         if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
+        var uses_arguments = false;
+        const saved_arguments_use = self.current_arguments_use;
+        self.current_arguments_use = &uses_arguments;
+        defer self.current_arguments_use = saved_arguments_use;
         const params = try self.parseFunctionParamList(is_gen, is_async);
         const own_use_strict = self.peekUseStrict();
         // This function's strictness: inherited OR its own "use strict" prologue.
@@ -2259,7 +2274,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = ast.sourceMayUseArguments(self.sourceFrom(start)) };
+        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments };
         return self.alloc(.{ .func_decl = fnode });
     }
 
@@ -2288,6 +2303,10 @@ pub const Parser = struct {
                 name = self.advance().text;
             }
         }
+        var uses_arguments = false;
+        const saved_arguments_use = self.current_arguments_use;
+        self.current_arguments_use = &uses_arguments;
+        defer self.current_arguments_use = saved_arguments_use;
         const params = try self.parseFunctionParamList(is_gen, is_async);
         const own_use_strict = self.peekUseStrict();
         const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
@@ -2304,7 +2323,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = ast.sourceMayUseArguments(self.sourceFrom(start)) };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -3436,6 +3455,7 @@ pub const Parser = struct {
                 // an async function/module/static block.
                 if (self.in_generator and std.mem.eql(u8, key, "yield")) return ParseError.UnexpectedToken;
                 if ((self.in_async or self.module) and std.mem.eql(u8, key, "await")) return ParseError.UnexpectedToken;
+                self.recordArgumentsUse(key);
                 const ident = try self.alloc(.{ .identifier = key });
                 // Shorthand `{ a }`, or `{ a = default }` (a destructuring
                 // default surfaced via the cover grammar).
@@ -4264,6 +4284,10 @@ pub const Parser = struct {
     /// Parse `(params) { body }` after a method name, returning a function node.
     /// `is_gen` marks a generator method (`*m() {}`).
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
+        var uses_arguments = false;
+        const saved_arguments_use = self.current_arguments_use;
+        self.current_arguments_use = &uses_arguments;
+        defer self.current_arguments_use = saved_arguments_use;
         const params = try self.parseFunctionParamList(is_gen, is_async);
         try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const own_use_strict = self.peekUseStrict();
@@ -4273,7 +4297,7 @@ pub const Parser = struct {
         if (fn_strict) try self.validateStrictParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true, .uses_arguments = ast.sourceMayUseArguments(self.sourceFrom(start)) };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true, .uses_arguments = uses_arguments };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -4376,6 +4400,7 @@ pub const Parser = struct {
                 // fine. (Outside those contexts they are ordinary identifiers.)
                 if (self.in_generator and std.mem.eql(u8, t.text, "yield")) return ParseError.UnexpectedToken;
                 if ((self.in_async or self.module) and std.mem.eql(u8, t.text, "await")) return ParseError.UnexpectedToken;
+                self.recordArgumentsUse(t.text);
                 return self.alloc(.{ .identifier = t.text });
             },
             else => return ParseError.UnexpectedToken,
@@ -4554,6 +4579,60 @@ test "parser statement location index propagates allocation failures" {
     }
     try std.testing.expect(saw_out_of_memory);
     try std.testing.expect(saw_success);
+}
+
+test "parser derives arguments use in the active ordinary function scope" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source =
+        \\function clean() {
+        \\  "arguments eval retrieval";
+        \\  var evaluation = 0;
+        \\  function inner() { return arguments.length; }
+        \\  function innerEval() { eval; }
+        \\  return object.eval;
+        \\}
+        \\function arrowOwner() { return () => arguments.length; }
+        \\async function asyncUsed() { return arguments.length; }
+        \\function* generatorClean() { "arguments eval"; yield 1; }
+        \\function defaulted(value = (() => arguments[0])()) { return value; }
+        \\var methods = {
+        \\  clean() { "arguments eval"; return this.eval; },
+        \\  used() { return { arguments }; },
+        \\  get accessor() { return arguments; },
+        \\  async asyncClean() { "arguments eval"; return 1; },
+        \\  *generatorUsed() { return arguments; }
+        \\};
+        \\var expression = function named() { return arguments; };
+    ;
+    var parser = try Parser.init(arena.allocator(), source);
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 7), program.program.len);
+
+    const clean = program.program[0].func_decl;
+    try std.testing.expect(!clean.uses_arguments);
+    try std.testing.expect(std.mem.startsWith(u8, clean.source, "function clean()"));
+    try std.testing.expectEqual(@intFromPtr(source.ptr), @intFromPtr(clean.source.ptr));
+    try std.testing.expectEqual(@as(usize, 5), clean.body.block.len);
+    try std.testing.expect(clean.body.block[2].func_decl.uses_arguments);
+    try std.testing.expect(clean.body.block[3].func_decl.uses_arguments);
+
+    try std.testing.expect(program.program[1].func_decl.uses_arguments);
+    try std.testing.expect(program.program[2].func_decl.uses_arguments);
+    try std.testing.expect(!program.program[3].func_decl.uses_arguments);
+    try std.testing.expect(program.program[4].func_decl.uses_arguments);
+
+    const methods_decl = program.program[5].var_decl.init orelse return error.TestUnexpectedResult;
+    if (methods_decl.* != .object_lit or methods_decl.object_lit.len != 5)
+        return error.TestUnexpectedResult;
+    const expected_method_use = [_]bool{ false, true, true, false, true };
+    for (methods_decl.object_lit, expected_method_use) |property, expected| {
+        const method = property.value.function;
+        try std.testing.expectEqual(expected, method.uses_arguments);
+    }
+
+    const expression_decl = program.program[6].var_decl.init orelse return error.TestUnexpectedResult;
+    try std.testing.expect(expression_decl.* == .function and expression_decl.function.uses_arguments);
 }
 
 test "parser records current token source location for expected-token failures" {
