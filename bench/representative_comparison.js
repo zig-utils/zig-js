@@ -274,6 +274,84 @@ function representativeJsonStringifyReplacerMembership(jobs, lane) {
   return total;
 }
 
+// JSON.stringify's cycle rule is active-ancestor membership, not global graph
+// visitation. Selection constructs the graph once before all ten warmups and
+// the scored invocation; every job performs and validates a real stringify.
+var representativeJsonStringifyGraph = null;
+var representativeJsonStringifyDepth = 0;
+var representativeJsonStringifyExpectedLength = 0;
+var representativeJsonStringifyExpectedLeafOffset = 0;
+function selectRepresentativeJsonStringifyDepth(depth, circular) {
+  var leaf = { leaf: 1 };
+  var root = leaf;
+  for (var level = 1; level < depth; level = level + 1)
+    root = { next: root };
+  if (circular) leaf.next = root;
+  representativeJsonStringifyGraph = root;
+  representativeJsonStringifyDepth = depth;
+  representativeJsonStringifyExpectedLength = depth * 9 + 1;
+  representativeJsonStringifyExpectedLeafOffset = (depth - 1) * 8 + 1;
+  return circular ? representativeJsonStringifyCycle : representativeJsonStringifyAcyclic;
+}
+
+function representativeJsonStringifyAcyclic(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var encoded = JSON.stringify(representativeJsonStringifyGraph);
+    var leafOffset = encoded.indexOf("\"leaf\":1");
+    if (encoded.length !== representativeJsonStringifyExpectedLength ||
+        leafOffset !== representativeJsonStringifyExpectedLeafOffset ||
+        encoded.charCodeAt(0) !== 123 || encoded.charCodeAt(encoded.length - 1) !== 125)
+      throw new Error("JSON.stringify depth witness drift");
+    total = total + encoded.length + leafOffset +
+      encoded.charCodeAt(0) + encoded.charCodeAt(encoded.length - 1) + lane;
+  }
+  return total;
+}
+
+function representativeJsonStringifyCycle(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var threw = false;
+    try {
+      JSON.stringify(representativeJsonStringifyGraph);
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      threw = true;
+    }
+    if (!threw) throw new Error("JSON.stringify accepted an ancestor cycle");
+    total = total + 1000000 + representativeJsonStringifyDepth + lane;
+  }
+  return total;
+}
+
+function selectRepresentativeJsonStringifyShallow(width) {
+  var siblings = [];
+  var shared = { leaf: 1 };
+  for (var index = 0; index < width; index = index + 1)
+    siblings.push(shared);
+  representativeJsonStringifyGraph = siblings;
+  representativeJsonStringifyDepth = width;
+  representativeJsonStringifyExpectedLength = width * 11 + 1;
+  representativeJsonStringifyExpectedLeafOffset = 2;
+  return representativeJsonStringifyShallow;
+}
+
+function representativeJsonStringifyShallow(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var encoded = JSON.stringify(representativeJsonStringifyGraph);
+    var leafOffset = encoded.indexOf("\"leaf\":1");
+    if (encoded.length !== representativeJsonStringifyExpectedLength ||
+        leafOffset !== representativeJsonStringifyExpectedLeafOffset ||
+        encoded.charCodeAt(0) !== 91 || encoded.charCodeAt(encoded.length - 1) !== 93)
+      throw new Error("JSON.stringify shallow witness drift");
+    total = total + encoded.length + leafOffset +
+      encoded.charCodeAt(0) + encoded.charCodeAt(encoded.length - 1) + lane;
+  }
+  return total;
+}
+
 function representativeCollections(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -901,6 +979,12 @@ function benchmarkFunction(name) {
   if (name === "representative_json_escaped_strings") return representativeJsonEscapedStrings;
   if (name === "representative_json_stringify_replacer") return representativeJsonStringifyReplacer;
   if (name === "representative_json_stringify_replacer_membership") return representativeJsonStringifyReplacerMembership;
+  if (name === "representative_json_stringify_depth_512") return selectRepresentativeJsonStringifyDepth(512, false);
+  if (name === "representative_json_stringify_depth_1024") return selectRepresentativeJsonStringifyDepth(1024, false);
+  if (name === "representative_json_stringify_depth_2048") return selectRepresentativeJsonStringifyDepth(2048, false);
+  if (name === "representative_json_stringify_depth_4096") return selectRepresentativeJsonStringifyDepth(4096, false);
+  if (name === "representative_json_stringify_cycle_4096") return selectRepresentativeJsonStringifyDepth(4096, true);
+  if (name === "representative_json_stringify_shallow_4096") return selectRepresentativeJsonStringifyShallow(4096);
   if (name === "representative_collections") return function (jobs, lane) { return representativeCollections(jobs, lane, 0); };
   if (name === "representative_collections_variant") return function (jobs, lane) { return representativeCollections(jobs, lane, 1); };
   if (name === "representative_strong_identity_collections") return function (jobs, lane) { return representativeStrongIdentityCollections(jobs, lane, 0); };
