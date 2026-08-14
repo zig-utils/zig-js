@@ -2616,9 +2616,13 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
         self.env = env;
     };
     const a = self.arena;
-    const cycle_allocator = gc_mod.temporaryAllocator(a);
-    var st = Stringifier{ .self = self, .cycle_allocator = cycle_allocator };
-    defer st.active.deinit(a, cycle_allocator);
+    const temporary_allocator = gc_mod.temporaryAllocator(a);
+    var st = Stringifier{
+        .self = self,
+        .cycle_allocator = temporary_allocator,
+        .output_allocator = temporary_allocator,
+    };
+    defer st.active.deinit(a, temporary_allocator);
 
     // arg 1 — replacer: a callable (transform) or an array (property allowlist).
     const replacer = arg(args, 1);
@@ -2698,8 +2702,11 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
     const holder = (try self.newObject()).asObj();
     try holder.setOwn(self.arena, self.root_shape, "", arg(args, 0));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(temporary_allocator);
     if (!try st.serialize(&buf, Value.obj(holder), "")) return Value.undef();
-    return try Value.strOwned(a, try buf.toOwnedSlice(a));
+    if (temporary_allocator.ptr == a.ptr and temporary_allocator.vtable == a.vtable)
+        return try Value.strOwned(a, try buf.toOwnedSlice(a));
+    return try Value.strAlloc(a, buf.items);
 }
 
 /// Carries the `JSON.stringify` options (replacer / allowlist / indent gap)
@@ -2707,6 +2714,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
 const Stringifier = struct {
     self: *Interpreter,
     cycle_allocator: std.mem.Allocator,
+    output_allocator: std.mem.Allocator,
     replacer_fn: ?Value = null,
     allow: ?[]const []const u8 = null,
     gap: []const u8 = "",
@@ -2725,6 +2733,7 @@ const Stringifier = struct {
         defer self.depth -= 1;
         try self.stackGuard();
         const a = self.arena;
+        const output_allocator = st.output_allocator;
         var v = try self.getProperty(holder, key);
         if (v.isObject() and !v.asObj().is_symbol) {
             const tj = try self.getProperty(v, "toJSON");
@@ -2736,7 +2745,7 @@ const Stringifier = struct {
         // A JSON.rawJSON object emits its validated text verbatim.
         if (v.isObject() and v.asObj().behavior.is_raw_json) {
             const raw = (v.asObj().getOwn("rawJSON") orelse Value.str("")).asStr();
-            try buf.appendSlice(a, raw);
+            try buf.appendSlice(output_allocator, raw);
             return true;
         }
         // SerializeJSONProperty: a [[NumberData]] wrapper → ToNumber, a
@@ -2762,13 +2771,13 @@ const Stringifier = struct {
             return self.throwError("TypeError", "Do not know how to serialize a BigInt");
         switch (v.kind()) {
             .undefined => return false,
-            .null => try buf.appendSlice(a, "null"),
-            .boolean => try buf.appendSlice(a, if (v.asBool()) "true" else "false"),
+            .null => try buf.appendSlice(output_allocator, "null"),
+            .boolean => try buf.appendSlice(output_allocator, if (v.asBool()) "true" else "false"),
             .number => {
                 const n = v.asNum();
-                try buf.appendSlice(a, if (std.math.isNan(n) or std.math.isInf(n)) "null" else try value.numberToString(a, n));
+                try buf.appendSlice(output_allocator, if (std.math.isNan(n) or std.math.isInf(n)) "null" else try value.numberToString(a, n));
             },
-            .string => try writeJsonString(a, buf, try v.asWtf8(a)),
+            .string => try writeJsonString(output_allocator, buf, try v.asWtf8(a)),
             .object => {
                 const o = v.asObj();
                 if (o.isCallableObject() or o.is_symbol) return false; // functions/symbols omitted
@@ -2800,6 +2809,7 @@ const Stringifier = struct {
 
     fn serializeArray(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), holder: Value, shape: *value.Object) HostError!void {
         const a = st.self.arena;
+        const output_allocator = st.output_allocator;
         // SerializeJSONArray reads the length via LengthOfArrayLike (Get) — for a
         // Proxy that runs the "length" trap (and propagates an abrupt completion).
         const len: usize = if (holder.isObject() and (holder.asObj().proxyHandler() != null or holder.asObj().proxy_revoked))
@@ -2807,27 +2817,28 @@ const Stringifier = struct {
         else
             shape.arrayLength();
         if (len == 0) {
-            try buf.appendSlice(a, "[]");
+            try buf.appendSlice(output_allocator, "[]");
             return;
         }
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
-        try buf.append(a, '[');
+        try buf.append(output_allocator, '[');
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            if (i != 0) try buf.append(a, ',');
+            if (i != 0) try buf.append(output_allocator, ',');
             try st.newlineIndent(buf);
             const key = try std.fmt.allocPrint(a, "{d}", .{i});
-            if (!try st.serialize(buf, holder, key)) try buf.appendSlice(a, "null");
+            if (!try st.serialize(buf, holder, key)) try buf.appendSlice(output_allocator, "null");
         }
         st.indent.shrinkRetainingCapacity(outer);
         try st.newlineIndent(buf);
-        try buf.append(a, ']');
+        try buf.append(output_allocator, ']');
     }
 
     fn serializeObject(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), v: Value, shape: *value.Object) HostError!void {
         const self = st.self;
         const a = self.arena;
+        const output_allocator = st.output_allocator;
         const keys = if (st.allow) |al| al else try st.jsonObjectKeys(v.asObj(), shape);
         // A Proxy's enumerability comes from [[GetOwnProperty]] (the
         // getOwnPropertyDescriptor trap), which EnumerableOwnPropertyNames runs
@@ -2836,8 +2847,8 @@ const Stringifier = struct {
         const is_proxy = v.asObj().proxyHandler() != null or v.asObj().proxy_revoked;
         const outer = st.indent.items.len;
         try st.indent.appendSlice(a, st.gap);
-        var tmp: std.ArrayListUnmanaged(u8) = .empty;
         var count: usize = 0;
+        try buf.append(output_allocator, '{');
         for (keys) |k| {
             if (jsonHiddenKey(k)) continue;
             if (st.allow == null) {
@@ -2847,25 +2858,28 @@ const Stringifier = struct {
                 } else shape.getAttr(k).enumerable;
                 if (!enumerable) continue;
             }
-            var member: std.ArrayListUnmanaged(u8) = .empty;
-            if (!try st.serialize(&member, v, k)) continue; // omitted property
-            if (count != 0) try tmp.append(a, ',');
-            try st.newlineIndentTo(&tmp, st.indent.items);
-            try writeJsonString(a, &tmp, value.decodeStringKey(k));
-            try tmp.append(a, ':');
-            if (st.gap.len != 0) try tmp.append(a, ' ');
-            try tmp.appendSlice(a, member.items);
+            // Serialize directly into the authoritative output. A temporary
+            // member buffer recopies a successful descendant suffix at every
+            // ancestor, making a depth-n chain quadratic in output bytes. The
+            // mark retains exact omission semantics without publishing a comma
+            // or key when SerializeJSONProperty returns undefined.
+            const mark = buf.items.len;
+            if (count != 0) try buf.append(output_allocator, ',');
+            try st.newlineIndent(buf);
+            try writeJsonString(output_allocator, buf, value.decodeStringKey(k));
+            try buf.append(output_allocator, ':');
+            if (st.gap.len != 0) try buf.append(output_allocator, ' ');
+            if (!try st.serialize(buf, v, k)) {
+                buf.shrinkRetainingCapacity(mark);
+                continue;
+            }
             count += 1;
         }
         st.indent.shrinkRetainingCapacity(outer);
-        if (count == 0) {
-            try buf.appendSlice(a, "{}");
-            return;
+        if (count != 0) {
+            try st.newlineIndent(buf);
         }
-        try buf.append(a, '{');
-        try buf.appendSlice(a, tmp.items);
-        try st.newlineIndent(buf);
-        try buf.append(a, '}');
+        try buf.append(output_allocator, '}');
     }
 
     fn jsonObjectKeys(st: *Stringifier, object: *value.Object, shape: *value.Object) HostError![]const []const u8 {
@@ -2886,8 +2900,8 @@ const Stringifier = struct {
     }
     fn newlineIndentTo(st: *Stringifier, buf: *std.ArrayListUnmanaged(u8), ind: []const u8) HostError!void {
         if (st.gap.len == 0) return;
-        try buf.append(st.self.arena, '\n');
-        try buf.appendSlice(st.self.arena, ind);
+        try buf.append(st.output_allocator, '\n');
+        try buf.appendSlice(st.output_allocator, ind);
     }
 };
 

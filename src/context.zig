@@ -11495,6 +11495,37 @@ test "enable_gc: JSON stringify active index survives a callback collection requ
     )).asBool());
 }
 
+test "heap_limit_bytes: JSON stringify direct object output fails atomically" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 8 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\let jsonChunk = "\u0000";
+        \\for (let i = 0; i < 18; i++) jsonChunk += jsonChunk;
+        \\let jsonSource = { omittedFirst: undefined };
+        \\for (let i = 0; i < 8; i++) jsonSource["field" + i] = jsonChunk;
+        \\jsonSource.omittedLast = function () {};
+        \\let jsonCallbacks = 0;
+        \\globalThis.jsonPublished = "sentinel";
+        \\let jsonCaught = false;
+        \\try {
+        \\  jsonPublished = JSON.stringify(jsonSource, function (key, value) {
+        \\    jsonCallbacks++;
+        \\    return value;
+        \\  });
+        \\} catch (error) {
+        \\  jsonCaught = error.name === "OutOfMemoryError";
+        \\}
+        \\jsonCaught && jsonCallbacks > 1 && jsonPublished === "sentinel";
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
 test "RegExp constructor honors IsRegExp and flags rules" {
     try std.testing.expect((try evalIn(
         \\var re = /foo/my;

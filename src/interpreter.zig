@@ -50343,6 +50343,29 @@ test "interpreter JSON, Object, Number builtins" {
     const a = arena.allocator();
     try std.testing.expectEqualStrings("{\"a\":1,\"b\":[2,3]}", (try evalSource(a, "JSON.stringify({ a: 1, b: [2, 3] })")).asStr());
     try std.testing.expectEqualStrings("[1,\"x\",true,null]", (try evalSource(a, "JSON.stringify([1, 'x', true, null])")).asStr());
+    try std.testing.expectEqualStrings("{\"a\":1,\"b\":2}", (try evalSource(a,
+        \\JSON.stringify({ first: undefined, a: 1, middle: function () {}, b: 2, last: Symbol("last") })
+    )).asStr());
+    try std.testing.expectEqualStrings(
+        "{\n  \"a\": {\n    \"b\": 1\n  },\n  \"c\": [\n    2\n  ]\n}",
+        (try evalSource(a, "JSON.stringify({ a: { b: 1 }, c: [2] }, null, 2)")).asStr(),
+    );
+    try std.testing.expect((try evalSource(a,
+        \\let stringifyTrace = [];
+        \\let stringifyObserved = {
+        \\  get a() {
+        \\    stringifyTrace.push("get-a");
+        \\    return { toJSON() { stringifyTrace.push("toJSON-a"); return 1; } };
+        \\  },
+        \\  get b() { stringifyTrace.push("get-b"); return 2; }
+        \\};
+        \\let stringifyOutput = JSON.stringify(stringifyObserved, function (key, current) {
+        \\  stringifyTrace.push("replacer-" + key);
+        \\  return key === "b" ? undefined : current;
+        \\});
+        \\stringifyOutput === '{"a":1}' &&
+        \\  stringifyTrace.join(",") === "replacer-,get-a,toJSON-a,replacer-a,get-b,replacer-b"
+    )).asBool());
     try std.testing.expect((try evalSource(a,
         \\let shared = { value: 1 };
         \\let repeated = JSON.stringify([shared, shared]) === '[{"value":1},{"value":1}]';
