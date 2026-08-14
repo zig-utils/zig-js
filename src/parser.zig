@@ -64,6 +64,12 @@ pub const Parser = struct {
     /// Modules reject this exact offset before parsing, so one token stream can
     /// serve both public parse entry points without lexical-goal ambiguity.
     html_comment_offset: ?usize = null,
+    /// Statement locations are often requested in completion order rather than
+    /// source order (inner statement, block, outer statement). Keep the first
+    /// two one-shot lookups allocation-free, then build one exact line-start
+    /// table so attacker-controlled statement counts cannot rescan every prefix.
+    statement_location_queries: u8 = 0,
+    line_starts: ?[]usize = null,
     /// True while parsing a generator body, so `yield` is recognized as a yield
     /// expression rather than an identifier. Saved/restored around each function.
     in_generator: bool = false,
@@ -263,6 +269,67 @@ pub const Parser = struct {
     pub fn errorLocation(self: *const Parser) SourceLocation {
         const offset = self.last_error_offset orelse if (self.pos < self.tokens.len) self.tokens[self.pos].pos else self.source.len;
         return sourceLocationAt(self.source, offset);
+    }
+
+    fn statementLocationAt(self: *Parser, raw_offset: usize) std.mem.Allocator.Error!SourceLocation {
+        const offset = @min(raw_offset, self.source.len);
+        if (self.line_starts) |starts| return indexedSourceLocation(starts, offset);
+        if (self.statement_location_queries < 2) {
+            self.statement_location_queries += 1;
+            return sourceLocationAt(self.source, offset);
+        }
+
+        const starts = try self.buildLineStarts();
+        self.line_starts = starts;
+        return indexedSourceLocation(starts, offset);
+    }
+
+    fn buildLineStarts(self: *Parser) std.mem.Allocator.Error![]usize {
+        var count: usize = 1;
+        var cursor: usize = 0;
+        while (cursor < self.source.len) {
+            if (lex.lineTerminatorLen(self.source, cursor)) |len| {
+                count = std.math.add(usize, count, 1) catch return error.OutOfMemory;
+                cursor += len;
+            } else {
+                cursor += 1;
+            }
+        }
+
+        const starts = try self.arena.alloc(usize, count);
+        starts[0] = 0;
+        var index: usize = 1;
+        cursor = 0;
+        while (cursor < self.source.len) {
+            if (lex.lineTerminatorLen(self.source, cursor)) |len| {
+                cursor += len;
+                starts[index] = cursor;
+                index += 1;
+            } else {
+                cursor += 1;
+            }
+        }
+        std.debug.assert(index == starts.len);
+        return starts;
+    }
+
+    fn indexedSourceLocation(starts: []const usize, offset: usize) SourceLocation {
+        std.debug.assert(starts.len > 0 and starts[0] == 0);
+        var low: usize = 0;
+        var high: usize = starts.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (starts[middle] <= offset)
+                low = middle + 1
+            else
+                high = middle;
+        }
+        const line_index = low - 1;
+        return .{
+            .byte_offset = offset,
+            .line = line_index + 1,
+            .column = offset - starts[line_index] + 1,
+        };
     }
 
     /// Whether no line terminator separates the token `ahead` positions away from
@@ -1213,7 +1280,7 @@ pub const Parser = struct {
         const node = try self.parseStatementInner();
         try self.statement_locations.append(self.arena, .{
             .node = node,
-            .location = sourceLocationAt(self.source, token.pos),
+            .location = try self.statementLocationAt(token.pos),
             .debugger_statement = is_debugger,
         });
         return node;
@@ -4444,6 +4511,49 @@ test "parser source locations map byte offsets to one-based line columns" {
     try std.testing.expectEqual(SourceLocation{ .byte_offset = 7, .line = 2, .column = 1 }, sourceLocationAt(src, 7));
     try std.testing.expectEqual(SourceLocation{ .byte_offset = 14, .line = 3, .column = 1 }, sourceLocationAt(src, 14));
     try std.testing.expectEqual(SourceLocation{ .byte_offset = src.len, .line = 3, .column = 6 }, sourceLocationAt(src, src.len + 99));
+}
+
+test "parser indexes repeated statement locations across every line terminator" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "first;\r\n/*x*/ second;\rthird;\xe2\x80\xa8fourth;\xe2\x80\xa9fifth;";
+    var parser = try Parser.init(arena.allocator(), source);
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 5), program.program.len);
+    try std.testing.expectEqual(@as(usize, 5), parser.statement_locations.items.len);
+    try std.testing.expectEqual(@as(usize, 5), parser.line_starts.?.len);
+    for ([_][]const u8{ "first", "second", "third", "fourth", "fifth" }, parser.statement_locations.items) |name, location| {
+        const offset = std.mem.indexOf(u8, source, name) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(sourceLocationAt(source, offset), location.location);
+    }
+
+    var single = try Parser.init(arena.allocator(), "var one = [1, 2, 3];");
+    _ = try single.parseProgram();
+    try std.testing.expect(single.line_starts == null);
+}
+
+test "parser statement location index propagates allocation failures" {
+    var saw_out_of_memory = false;
+    var saw_success = false;
+    for (0..64) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        var arena = std.heap.ArenaAllocator.init(failing.allocator());
+        defer arena.deinit();
+        var parser = Parser.init(arena.allocator(), "first;\nsecond;\nthird;\nfourth;") catch |err| {
+            if (err != error.OutOfMemory) return err;
+            saw_out_of_memory = true;
+            continue;
+        };
+        _ = parser.parseProgram() catch |err| {
+            if (err != error.OutOfMemory) return err;
+            saw_out_of_memory = true;
+            continue;
+        };
+        saw_success = true;
+        break;
+    }
+    try std.testing.expect(saw_out_of_memory);
+    try std.testing.expect(saw_success);
 }
 
 test "parser records current token source location for expected-token failures" {
