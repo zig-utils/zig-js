@@ -11464,6 +11464,37 @@ test "JSON stringify deep cycle membership preserves forced execution tiers" {
     try std.testing.expect(Value.fromRawBits(results[0]).asBool());
 }
 
+test "enable_gc: JSON stringify active index survives a callback collection request" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const collections_before = ctx.gc.?.collections;
+
+    const result = try ctx.evaluate(
+        \\let gcLeaf = { marker: 7 };
+        \\let gcDeep = gcLeaf;
+        \\for (let i = 0; i < 96; i++) gcDeep = { next: gcDeep };
+        \\let gcCalls = 0;
+        \\globalThis.gcJsonResult = JSON.stringify({ deep: gcDeep, aliases: [gcLeaf, gcLeaf] }, function (key, value) {
+        \\  if (++gcCalls === 64) gc();
+        \\  return value;
+        \\});
+        \\gcJsonResult.indexOf('"marker":7') >= 0 &&
+        \\  gcJsonResult.indexOf('"aliases":[{"marker":7},{"marker":7}]}') >= 0;
+    );
+    try std.testing.expect(result.asBool());
+    try std.testing.expect(ctx.gc.?.collections > collections_before);
+
+    // The callback's request is serviced at the evaluate-tail quiescent point.
+    // A subsequent moving collection must retain the published output through
+    // the Context root after the invocation-local identity index is released.
+    const compacted = ctx.compactGarbage();
+    try std.testing.expect(compacted.status == .compacted or compacted.status == .no_candidates);
+    try std.testing.expect((try ctx.evaluate(
+        \\gcJsonResult.indexOf('"marker":7') >= 0 &&
+        \\  gcJsonResult.indexOf('"aliases":[{"marker":7},{"marker":7}]}') >= 0
+    )).asBool());
+}
+
 test "RegExp constructor honors IsRegExp and flags rules" {
     try std.testing.expect((try evalIn(
         \\var re = /foo/my;
