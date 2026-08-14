@@ -215,6 +215,15 @@ These opt-in counters diagnose lock traffic and coherence pressure outside the
 scored timing rows. Ordinary contexts retain the nullable profiler sink and do
 not increment the counters.
 
+Schema-version-12 sidecars retain schema 11's contract and split every
+ownership acquisition into exact-allocation validation, stable-identity lookup,
+conservative interior classification, realm lookup, realm scan, allocator
+resize, or allocator remap. Validation requires those seven subpaths to sum
+exactly to the ownership total. This distinction prevents a tolerant write
+barrier, conservative stack scan, and allocator callback from being treated as
+the same optimization target merely because they acquire the same size-class
+lock.
+
 The full-work schema-2 evidence is the
 [`representative-tier-attribution-v8-schema-v2-2026-08-04.md`](.data/representative-tier-attribution-v8-schema-v2-2026-08-04.md)
 report and its

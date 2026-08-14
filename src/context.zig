@@ -483,6 +483,16 @@ pub const RuntimeAttributionProfiler = struct {
         maintenance,
     };
 
+    pub const CellSlabOwnershipPurpose = enum {
+        exact_allocation,
+        stable_identity,
+        conservative_interior,
+        realm_lookup,
+        realm_scan,
+        allocator_resize,
+        allocator_remap,
+    };
+
     pub const AllocationSnapshot = struct {
         backing_allocations: u64 = 0,
         backing_allocation_bytes: u64 = 0,
@@ -514,6 +524,13 @@ pub const RuntimeAttributionProfiler = struct {
         ownership_acquires: u64 = 0,
         relocation_acquires: u64 = 0,
         maintenance_acquires: u64 = 0,
+        ownership_exact_allocation_acquires: u64 = 0,
+        ownership_stable_identity_acquires: u64 = 0,
+        ownership_conservative_interior_acquires: u64 = 0,
+        ownership_realm_lookup_acquires: u64 = 0,
+        ownership_realm_scan_acquires: u64 = 0,
+        ownership_allocator_resize_acquires: u64 = 0,
+        ownership_allocator_remap_acquires: u64 = 0,
         size_64_acquires: u64 = 0,
         size_64_contentions: u64 = 0,
         size_64_spins: u64 = 0,
@@ -570,6 +587,9 @@ pub const RuntimeAttributionProfiler = struct {
     cell_slab_lock_spins: std.atomic.Value(u64) = .init(0),
     cell_slab_lock_purpose_acquires: [8]std.atomic.Value(u64) = .{
         .init(0), .init(0), .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
+    },
+    cell_slab_ownership_purpose_acquires: [7]std.atomic.Value(u64) = .{
+        .init(0), .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
     },
     cell_slab_lock_size_acquires: [6]std.atomic.Value(u64) = .{
         .init(0), .init(0), .init(0), .init(0), .init(0), .init(0),
@@ -656,8 +676,13 @@ pub const RuntimeAttributionProfiler = struct {
         _ = self.cell_slab_lock_size_spins[bucket_idx].fetchAdd(spins, .monotonic);
     }
 
+    fn recordCellSlabOwnershipAttempt(self: *RuntimeAttributionProfiler, purpose: CellSlabOwnershipPurpose) void {
+        _ = self.cell_slab_ownership_purpose_acquires[@backingInt(purpose)].fetchAdd(1, .monotonic);
+    }
+
     fn cellSlabLockSnapshot(self: *RuntimeAttributionProfiler) CellSlabLockSnapshot {
         const purpose = &self.cell_slab_lock_purpose_acquires;
+        const ownership = &self.cell_slab_ownership_purpose_acquires;
         const acquires = &self.cell_slab_lock_size_acquires;
         const contentions = &self.cell_slab_lock_size_contentions;
         const spins = &self.cell_slab_lock_size_spins;
@@ -673,6 +698,13 @@ pub const RuntimeAttributionProfiler = struct {
             .ownership_acquires = purpose[@backingInt(CellSlabLockPurpose.ownership)].load(.acquire),
             .relocation_acquires = purpose[@backingInt(CellSlabLockPurpose.relocation)].load(.acquire),
             .maintenance_acquires = purpose[@backingInt(CellSlabLockPurpose.maintenance)].load(.acquire),
+            .ownership_exact_allocation_acquires = ownership[@backingInt(CellSlabOwnershipPurpose.exact_allocation)].load(.acquire),
+            .ownership_stable_identity_acquires = ownership[@backingInt(CellSlabOwnershipPurpose.stable_identity)].load(.acquire),
+            .ownership_conservative_interior_acquires = ownership[@backingInt(CellSlabOwnershipPurpose.conservative_interior)].load(.acquire),
+            .ownership_realm_lookup_acquires = ownership[@backingInt(CellSlabOwnershipPurpose.realm_lookup)].load(.acquire),
+            .ownership_realm_scan_acquires = ownership[@backingInt(CellSlabOwnershipPurpose.realm_scan)].load(.acquire),
+            .ownership_allocator_resize_acquires = ownership[@backingInt(CellSlabOwnershipPurpose.allocator_resize)].load(.acquire),
+            .ownership_allocator_remap_acquires = ownership[@backingInt(CellSlabOwnershipPurpose.allocator_remap)].load(.acquire),
             .size_64_acquires = acquires[0].load(.acquire),
             .size_64_contentions = contentions[0].load(.acquire),
             .size_64_spins = spins[0].load(.acquire),
@@ -818,6 +850,8 @@ test "RuntimeAttributionProfiler records exact backing, cell, and pause samples"
     profile.recordCellSlabLockAttempt(2, .single_allocation);
     profile.recordCellSlabLockContention(2, 3);
     profile.recordCellSlabLockAttempt(0, .free);
+    profile.recordCellSlabOwnershipAttempt(.exact_allocation);
+    profile.recordCellSlabLockAttempt(1, .ownership);
     profile.beginGcCycle(100);
     profile.finishGcCycle(false, 175);
     profile.beginGcCycle(200);
@@ -829,12 +863,15 @@ test "RuntimeAttributionProfiler records exact backing, cell, and pause samples"
     try std.testing.expectEqual(@as(u64, 48), before_free.allocation.backing_current_bytes);
     try std.testing.expectEqual(@as(u64, 4), before_free.allocation.gc_cell_allocations);
     try std.testing.expectEqual(@as(u64, 480), before_free.allocation.gc_cell_bytes);
-    try std.testing.expectEqual(@as(u64, 2), before_free.cell_slab_lock.acquires);
+    try std.testing.expectEqual(@as(u64, 3), before_free.cell_slab_lock.acquires);
     try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.contentions);
     try std.testing.expectEqual(@as(u64, 3), before_free.cell_slab_lock.spins);
     try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.single_allocation_acquires);
     try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.free_acquires);
+    try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.ownership_acquires);
+    try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.ownership_exact_allocation_acquires);
     try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.size_64_acquires);
+    try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.size_128_acquires);
     try std.testing.expectEqual(@as(u64, 1), before_free.cell_slab_lock.size_256_contentions);
     try std.testing.expectEqual(@as(usize, 1), before_free.minor_pauses.len);
     try std.testing.expectEqual(@as(u64, 75), before_free.minor_pauses.values[0]);
@@ -1243,6 +1280,10 @@ pub const GcCellBacking = struct {
         }
         if (builtin.is_test) self.bucket_lock_acquisitions_for_testing[idx] += 1;
     }
+    inline fn acquireOwnershipBucket(self: *GcCellBacking, idx: usize, purpose: RuntimeAttributionProfiler.CellSlabOwnershipPurpose) void {
+        if (self.runtime_attribution_profiler) |profile| profile.recordCellSlabOwnershipAttempt(purpose);
+        self.acquireBucket(idx, .ownership);
+    }
     inline fn unlockBucket(self: *GcCellBacking, idx: usize) void {
         self.unlockLock(&self.bucket_locks[idx]);
     }
@@ -1466,14 +1507,14 @@ pub const GcCellBacking = struct {
         const hint = self.owned_bucket_hint.load(.monotonic);
         const hint_idx: usize = @intCast(hint);
         if (hint_idx < bucket_count) {
-            self.acquireBucket(hint_idx, .ownership);
+            self.acquireOwnershipBucket(hint_idx, .exact_allocation);
             const owned = self.publishedSlotLocked(hint_idx, ptr);
             self.unlockBucket(hint_idx);
             if (owned) return true;
         }
         for (0..bucket_count) |idx| {
             if (idx == hint_idx) continue;
-            self.acquireBucket(idx, .ownership);
+            self.acquireOwnershipBucket(idx, .exact_allocation);
             const owned = self.publishedSlotLocked(idx, ptr);
             self.unlockBucket(idx);
             if (owned) {
@@ -1492,7 +1533,7 @@ pub const GcCellBacking = struct {
         const ptr: [*]u8 = @ptrCast(allocation);
         const hint_idx: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
         if (hint_idx < bucket_count) {
-            self.acquireBucket(hint_idx, .ownership);
+            self.acquireOwnershipBucket(hint_idx, .stable_identity);
             const chunk_idx = self.ownedChunkIndexLocked(hint_idx, ptr);
             const published = chunk_idx != null and self.publishedSlotLocked(hint_idx, ptr);
             const range = if (published) blk: {
@@ -1508,7 +1549,7 @@ pub const GcCellBacking = struct {
         }
         for (0..bucket_count) |idx| {
             if (idx == hint_idx) continue;
-            self.acquireBucket(idx, .ownership);
+            self.acquireOwnershipBucket(idx, .stable_identity);
             const chunk_idx = self.ownedChunkIndexLocked(idx, ptr);
             const published = chunk_idx != null and self.publishedSlotLocked(idx, ptr);
             const range = if (published) blk: {
@@ -1547,14 +1588,14 @@ pub const GcCellBacking = struct {
     pub fn classifyConservativeInterior(self: *GcCellBacking, address: usize) @import("gc").InteriorOwnership {
         const hint: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
         if (hint < bucket_count) {
-            self.acquireBucket(hint, .ownership);
+            self.acquireOwnershipBucket(hint, .conservative_interior);
             const result = self.classifyInteriorInBucketLocked(hint, address);
             self.unlockBucket(hint);
             if (result) |owned| return owned;
         }
         for (0..bucket_count) |idx| {
             if (idx == hint) continue;
-            self.acquireBucket(idx, .ownership);
+            self.acquireOwnershipBucket(idx, .conservative_interior);
             const result = self.classifyInteriorInBucketLocked(idx, address);
             self.unlockBucket(idx);
             if (result) |owned| {
@@ -1706,14 +1747,14 @@ pub const GcCellBacking = struct {
     pub fn realmIdForCellAddress(self: *GcCellBacking, address: usize) RealmId {
         const hint: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
         if (hint < bucket_count) {
-            self.acquireBucket(hint, .ownership);
+            self.acquireOwnershipBucket(hint, .realm_lookup);
             const realm_id = self.realmIdForAddressInBucketLocked(hint, address);
             self.unlockBucket(hint);
             if (realm_id != no_realm) return realm_id;
         }
         for (0..bucket_count) |idx| {
             if (idx == hint) continue;
-            self.acquireBucket(idx, .ownership);
+            self.acquireOwnershipBucket(idx, .realm_lookup);
             const realm_id = self.realmIdForAddressInBucketLocked(idx, address);
             self.unlockBucket(idx);
             if (realm_id != no_realm) {
@@ -1727,7 +1768,7 @@ pub const GcCellBacking = struct {
     pub fn hasRealmCells(self: *GcCellBacking, realm_id: RealmId) bool {
         if (realm_id == no_realm) return false;
         inline for (0..bucket_count) |idx| {
-            self.acquireBucket(idx, .ownership);
+            self.acquireOwnershipBucket(idx, .realm_scan);
             for (self.bucket_realm_ids[idx].items) |realm_ids| {
                 for (realm_ids) |owner| {
                     if (owner != realm_id) continue;
@@ -1990,7 +2031,7 @@ pub const GcCellBacking = struct {
     fn resizeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            self.acquireBucket(idx, .ownership);
+            self.acquireOwnershipBucket(idx, .allocator_resize);
             const owned = self.ownsPtrLocked(idx, mem.ptr);
             self.unlockBucket(idx);
             if (owned) return new_len <= bucket_sizes[idx];
@@ -2003,7 +2044,7 @@ pub const GcCellBacking = struct {
     fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(mem.len, alignment)) |idx| {
-            self.acquireBucket(idx, .ownership);
+            self.acquireOwnershipBucket(idx, .allocator_remap);
             const owned = self.ownsPtrLocked(idx, mem.ptr);
             self.unlockBucket(idx);
             if (owned) {

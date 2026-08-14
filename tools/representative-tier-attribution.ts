@@ -208,6 +208,13 @@ const cellSlabLockMetrics = [
   "ownership_acquires",
   "relocation_acquires",
   "maintenance_acquires",
+  "ownership_exact_allocation_acquires",
+  "ownership_stable_identity_acquires",
+  "ownership_conservative_interior_acquires",
+  "ownership_realm_lookup_acquires",
+  "ownership_realm_scan_acquires",
+  "ownership_allocator_resize_acquires",
+  "ownership_allocator_remap_acquires",
   "size_64_acquires",
   "size_64_contentions",
   "size_64_spins",
@@ -237,6 +244,15 @@ const cellSlabPurposeMetrics = [
   "ownership_acquires",
   "relocation_acquires",
   "maintenance_acquires",
+];
+const cellSlabOwnershipPurposeMetrics = [
+  "ownership_exact_allocation_acquires",
+  "ownership_stable_identity_acquires",
+  "ownership_conservative_interior_acquires",
+  "ownership_realm_lookup_acquires",
+  "ownership_realm_scan_acquires",
+  "ownership_allocator_resize_acquires",
+  "ownership_allocator_remap_acquires",
 ];
 const debugRegistryMetrics = [
   "location_cache_hits",
@@ -698,10 +714,15 @@ function validateRows(
         purposeAcquires = cellSlabPurposeMetrics.reduce(
           (sum, name) => sum + row.cell_slab_lock[name],
           0,
+        ),
+        ownershipAcquires = cellSlabOwnershipPurposeMetrics.reduce(
+          (sum, name) => sum + row.cell_slab_lock[name],
+          0,
         );
       requireValue(
         row.cell_slab_lock.acquires === sizeAcquires &&
           row.cell_slab_lock.acquires === purposeAcquires &&
+          row.cell_slab_lock.ownership_acquires === ownershipAcquires &&
           row.cell_slab_lock.contentions === sizeContentions &&
           row.cell_slab_lock.spins === sizeSpins &&
           row.cell_slab_lock.acquires >= row.cell_slab_lock.contentions &&
@@ -1058,14 +1079,25 @@ export function render(
     }
     return bestAcquires === 0 ? "none" : `${bestSize} B`;
   };
+  const dominantCellSlabOwnership = (row: TierDelta): string => {
+    let best = "none", bestAcquires = 0;
+    for (const name of cellSlabOwnershipPurposeMetrics) {
+      const acquires = row.cell_slab_lock[name];
+      if (acquires > bestAcquires) {
+        best = name.replace(/^ownership_/, "").replace(/_acquires$/, "");
+        bestAcquires = acquires;
+      }
+    }
+    return bestAcquires === 0 ? "none" : best;
+  };
   rows.push(
     "",
     `${heading}${heading} Shared-realm GC cell-slab locks`,
     "",
-    "Each invocation row preserves exact lock attempts by purpose and by 64/128/256/512/1024/2048-byte size class. The table exposes totals and the class selected by highest contention, then acquisition count; the raw sidecar retains the full inventory.",
+    "Each invocation row preserves exact lock attempts by purpose and by 64/128/256/512/1024/2048-byte size class. Ownership attempts are further classified as exact-allocation validation, stable identity, conservative interior classification, realm lookup/scan, or allocator resize/remap. The table exposes totals, the size class selected by highest contention then acquisition count, and the dominant ownership subpath; the raw sidecar retains the full inventory.",
     "",
-    "| family | lanes | base acquires | variant acquires | base contentions | variant contentions | base spins | variant spins | base dominant class | variant dominant class |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+    "| family | lanes | base acquires | variant acquires | base contentions | variant contentions | base spins | variant spins | base dominant class | variant dominant class | base ownership path | variant ownership path |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
   );
   for (const family of manifest.implemented_families) {
     if (family.shared === false) continue;
@@ -1073,7 +1105,7 @@ export function render(
       const base = sharedByKey[deltaKey(family.base, "shared", lanes)].find((row) => row.phase === "invocation")!,
         variant = sharedByKey[deltaKey(family.variant, "shared", lanes)].find((row) => row.phase === "invocation")!;
       rows.push(
-        `| \`${family.family}\` | ${lanes} | ${base.cell_slab_lock.acquires} | ${variant.cell_slab_lock.acquires} | ${base.cell_slab_lock.contentions} | ${variant.cell_slab_lock.contentions} | ${base.cell_slab_lock.spins} | ${variant.cell_slab_lock.spins} | ${dominantCellSlabSize(base)} | ${dominantCellSlabSize(variant)} |`,
+        `| \`${family.family}\` | ${lanes} | ${base.cell_slab_lock.acquires} | ${variant.cell_slab_lock.acquires} | ${base.cell_slab_lock.contentions} | ${variant.cell_slab_lock.contentions} | ${base.cell_slab_lock.spins} | ${variant.cell_slab_lock.spins} | ${dominantCellSlabSize(base)} | ${dominantCellSlabSize(variant)} | \`${dominantCellSlabOwnership(base)}\` | \`${dominantCellSlabOwnership(variant)}\` |`,
       );
     }
   }
@@ -1082,7 +1114,7 @@ export function render(
     for (const lanes of manifest.lanes) {
       const row = sharedByKey[deltaKey(panel.workload, "shared", lanes)].find((entry) => entry.phase === "invocation")!;
       rows.push(
-        `| \`${panel.id}\` | ${lanes} | ${row.cell_slab_lock.acquires} | n/a | ${row.cell_slab_lock.contentions} | n/a | ${row.cell_slab_lock.spins} | n/a | ${dominantCellSlabSize(row)} | n/a |`,
+        `| \`${panel.id}\` | ${lanes} | ${row.cell_slab_lock.acquires} | n/a | ${row.cell_slab_lock.contentions} | n/a | ${row.cell_slab_lock.spins} | n/a | ${dominantCellSlabSize(row)} | n/a | \`${dominantCellSlabOwnership(row)}\` | n/a |`,
       );
     }
   }
@@ -1107,7 +1139,7 @@ export function artifact(
   }],
 ): any {
   return {
-    schema_version: 11,
+    schema_version: 12,
     matrix_id: manifest.matrix_id,
     quick,
     complete,
@@ -1135,7 +1167,7 @@ function validateCheckpoint(
   info: Record<string, string>,
   runner: string,
 ): void {
-  requireValue(raw?.schema_version === 11, "checkpoint schema is not version 11");
+  requireValue(raw?.schema_version === 12, "checkpoint schema is not version 12");
   requireValue(raw.matrix_id === manifest.matrix_id, "checkpoint matrix identity drift");
   requireValue(raw.quick === quick, "checkpoint quick/full mode drift");
   requireValue(typeof raw.complete === "boolean", "checkpoint completion state is missing");
