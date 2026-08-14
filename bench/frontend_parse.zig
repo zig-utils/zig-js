@@ -195,6 +195,12 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_statement_locations_mixed_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_statement_locations_nested_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_statement_location_single_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_nested_functions_256")) return 256;
+    if (std.mem.eql(u8, name, "representative_frontend_nested_functions_512")) return 512;
+    if (std.mem.eql(u8, name, "representative_frontend_nested_functions_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_nested_functions_decoys_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_nested_functions_arguments_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_nested_arrows_arguments_1024")) return 1024;
     return error.InvalidWorkload;
 }
 
@@ -281,6 +287,22 @@ fn isSingleStatementLocationWorkload(name: []const u8) bool {
 
 fn isNestedStatementLocationWorkload(name: []const u8) bool {
     return std.mem.eql(u8, name, "representative_frontend_statement_locations_nested_1024");
+}
+
+fn isNestedFunctionWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_nested_functions_");
+}
+
+fn isNestedFunctionDecoyWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_nested_functions_decoys_1024");
+}
+
+fn isNestedFunctionArgumentsWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_nested_functions_arguments_1024");
+}
+
+fn isNestedArrowArgumentsWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_nested_arrows_arguments_1024");
 }
 
 fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
@@ -530,6 +552,44 @@ fn statementLocationSource(allocator: std.mem.Allocator, width: usize, mixed: bo
     return source.items;
 }
 
+fn nestedFunctionSource(
+    allocator: std.mem.Allocator,
+    depth: usize,
+    decoys: bool,
+    innermost_arguments: bool,
+) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..depth) |index| {
+        try source.appendSlice(allocator, "function level");
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        try source.appendSlice(allocator, "(){");
+    }
+    try source.appendSlice(allocator, if (innermost_arguments) "return arguments.length;" else "return 7;");
+    var remaining = depth;
+    while (remaining > 0) {
+        remaining -= 1;
+        if (remaining + 1 < depth) {
+            try source.appendSlice(allocator, "return level");
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d};", .{remaining + 1}));
+        }
+        // Put lexical decoys after the nested definition and return. The parent
+        // must scan through its full child range before finding this text; it is
+        // still ordinary parsed source and remains inside every scored boundary.
+        if (decoys) try source.appendSlice(allocator, "var evaluation=0;\"arguments eval retrieval\";/* arguments eval */");
+        try source.append(allocator, '}');
+    }
+    try source.appendSlice(allocator, "level0;\n");
+    return source.items;
+}
+
+fn nestedArrowArgumentsSource(allocator: std.mem.Allocator, depth: usize) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "function arrowOwner(){return ");
+    for (0..depth) |_| try source.appendSlice(allocator, "()=>");
+    try source.appendSlice(allocator, "arguments.length;}arrowOwner;\n");
+    return source.items;
+}
+
 fn indexedName(name: []const u8, prefix: []const u8, index: usize) !bool {
     if (!std.mem.startsWith(u8, name, prefix)) return false;
     return (try std.fmt.parseUnsigned(usize, name[prefix.len..], 10)) == index;
@@ -540,6 +600,114 @@ fn validatedRadixBigIntChecksum(text: []const u8, expected: []const u8) !usize {
     var checksum: u32 = 2_166_136_261;
     for (text) |digit| checksum = (checksum ^ digit) *% 16_777_619;
     return @as(usize, checksum) + text.len;
+}
+
+fn validateNestedFunctionProgram(program: anytype, source: []const u8, workload: []const u8, depth: usize) !usize {
+    if (program.program.len != 2) return error.InvalidProgram;
+    const declaration = program.program[0];
+    if (declaration.* != .func_decl) return error.InvalidProgram;
+    const marker = program.program[1];
+    if (marker.* != .expr_stmt or marker.expr_stmt.* != .identifier or
+        !std.mem.eql(u8, marker.expr_stmt.identifier, "level0"))
+        return error.InvalidProgram;
+
+    const decoys = isNestedFunctionDecoyWorkload(workload);
+    const innermost_arguments = isNestedFunctionArgumentsWorkload(workload);
+    var function = declaration.func_decl;
+    var expected_start: usize = 0;
+    var previous_source_len = source.len + 1;
+    var checksum = program.program.len + depth + marker.expr_stmt.identifier.len;
+    for (0..depth) |index| {
+        var name_buffer: [64]u8 = undefined;
+        const expected_name = try std.fmt.bufPrint(&name_buffer, "level{d}", .{index});
+        var prefix_buffer: [96]u8 = undefined;
+        const expected_prefix = try std.fmt.bufPrint(&prefix_buffer, "function {s}(){{", .{expected_name});
+        if (!std.mem.startsWith(u8, source[expected_start..], expected_prefix) or
+            @intFromPtr(function.source.ptr) != @intFromPtr(source.ptr) + expected_start or
+            !std.mem.eql(u8, function.name, expected_name) or function.params.len != 0 or
+            function.body.* != .block or function.source.len >= previous_source_len or
+            function.source.len == 0 or function.source[function.source.len - 1] != '}')
+            return error.InvalidProgram;
+        const current_source_len = function.source.len;
+        // The no-keyword growth rows must keep the internal proof exact on both
+        // sides of the A/B. Decoy and innermost-use rows intentionally allow the
+        // conservative parent and exact candidate to differ in outer metadata;
+        // their observable AST/source checksum remains identical.
+        if (!decoys and !innermost_arguments and function.uses_arguments)
+            return error.InvalidProgram;
+
+        const body = function.body.block;
+        const leaf = index + 1 == depth;
+        const expected_body_len = @as(usize, if (leaf) 1 else 2) + 2 * @as(usize, @intFromBool(decoys));
+        if (body.len != expected_body_len) return error.InvalidProgram;
+        const returned = switch (body[if (leaf) 0 else 1].*) {
+            .return_stmt => |value| value orelse return error.InvalidProgram,
+            else => return error.InvalidProgram,
+        };
+        if (leaf) {
+            if (innermost_arguments) {
+                if (!function.uses_arguments or returned.* != .member or
+                    returned.member.object.* != .identifier or
+                    !std.mem.eql(u8, returned.member.object.identifier, "arguments") or
+                    !std.mem.eql(u8, returned.member.property, "length"))
+                    return error.InvalidProgram;
+            } else if (returned.* != .number or returned.number != 7) {
+                return error.InvalidProgram;
+            }
+        } else {
+            if (body[0].* != .func_decl or returned.* != .identifier) return error.InvalidProgram;
+            var next_name_buffer: [64]u8 = undefined;
+            const next_name = try std.fmt.bufPrint(&next_name_buffer, "level{d}", .{index + 1});
+            if (!std.mem.eql(u8, returned.identifier, next_name)) return error.InvalidProgram;
+            function = body[0].func_decl;
+        }
+        if (decoys) {
+            const binding = body[body.len - 2];
+            if (binding.* != .var_decl or !std.mem.eql(u8, binding.var_decl.name, "evaluation") or
+                binding.var_decl.init == null or binding.var_decl.init.?.* != .number or
+                binding.var_decl.init.?.number != 0)
+                return error.InvalidProgram;
+            const decoy = body[body.len - 1];
+            if (decoy.* != .expr_stmt or decoy.expr_stmt.* != .string or
+                !std.mem.eql(u8, decoy.expr_stmt.string, "arguments eval retrieval"))
+                return error.InvalidProgram;
+        }
+        checksum += expected_start + expected_name.len + current_source_len + body.len + index;
+        expected_start += expected_prefix.len;
+        previous_source_len = current_source_len;
+    }
+    return checksum + source.len;
+}
+
+fn validateNestedArrowArgumentsProgram(program: anytype, source: []const u8, depth: usize) !usize {
+    if (program.program.len != 2) return error.InvalidProgram;
+    const declaration = program.program[0];
+    if (declaration.* != .func_decl or !std.mem.eql(u8, declaration.func_decl.name, "arrowOwner") or
+        !declaration.func_decl.uses_arguments or declaration.func_decl.body.* != .block or
+        declaration.func_decl.body.block.len != 1 or
+        @intFromPtr(declaration.func_decl.source.ptr) != @intFromPtr(source.ptr))
+        return error.InvalidProgram;
+    const marker = program.program[1];
+    if (marker.* != .expr_stmt or marker.expr_stmt.* != .identifier or
+        !std.mem.eql(u8, marker.expr_stmt.identifier, "arrowOwner"))
+        return error.InvalidProgram;
+    var expression = switch (declaration.func_decl.body.block[0].*) {
+        .return_stmt => |value| value orelse return error.InvalidProgram,
+        else => return error.InvalidProgram,
+    };
+    var checksum = source.len + declaration.func_decl.source.len + marker.expr_stmt.identifier.len;
+    for (0..depth) |index| {
+        if (expression.* != .function or !expression.function.is_arrow or
+            expression.function.params.len != 0 or !expression.function.is_expr_body)
+            return error.InvalidProgram;
+        checksum += expression.function.source.len + index;
+        expression = expression.function.body;
+    }
+    if (expression.* != .member or expression.member.object.* != .identifier or
+        !std.mem.eql(u8, expression.member.object.identifier, "arguments") or
+        !std.mem.eql(u8, expression.member.property, "length"))
+        return error.InvalidProgram;
+    return checksum;
 }
 
 const AllocationObservation = struct {
@@ -564,6 +732,10 @@ fn parseOnce(
     const parser_allocator = if (observation != null) measured.allocator() else arena.allocator();
     var parser = try js.Parser.init(parser_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (isNestedArrowArgumentsWorkload(workload))
+        return validateNestedArrowArgumentsProgram(program, source, try workloadWidth(workload));
+    if (isNestedFunctionWorkload(workload))
+        return validateNestedFunctionProgram(program, source, workload, try workloadWidth(workload));
     if (isStatementLocationWorkload(workload)) {
         const width = try workloadWidth(workload);
         if (isSingleStatementLocationWorkload(workload)) {
@@ -877,8 +1049,19 @@ pub fn main(init: std.process.Init) !void {
     const radix_bigint_workload = isRadixBigIntWorkload(workload);
     const module_workload = isModuleWorkload(workload);
     const statement_location_workload = isStatementLocationWorkload(workload);
+    const nested_function_workload = isNestedFunctionWorkload(workload);
+    const nested_arrow_workload = isNestedArrowArgumentsWorkload(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (statement_location_workload)
+    const source = if (nested_arrow_workload)
+        try nestedArrowArgumentsSource(init.arena.allocator(), width)
+    else if (nested_function_workload)
+        try nestedFunctionSource(
+            init.arena.allocator(),
+            width,
+            isNestedFunctionDecoyWorkload(workload),
+            isNestedFunctionArgumentsWorkload(workload),
+        )
+    else if (statement_location_workload)
         try statementLocationSource(
             init.arena.allocator(),
             width,
