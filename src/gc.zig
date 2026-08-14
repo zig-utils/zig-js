@@ -4366,6 +4366,22 @@ pub inline fn barrierValueFrom(owner: ?*anyopaque, v: Value) void {
     }
 }
 
+/// Barrier a Value edge whose owner is a proven exact live payload from the
+/// active heap. Object tags and managed-string metadata prove exact children;
+/// arena mode falls back to the tolerant hook.
+pub inline fn barrierValueFromManaged(owner: *anyopaque, v: Value) void {
+    if (v.isObject()) {
+        const child: *anyopaque = @ptrCast(v.asObj());
+        if (!barrierExactManagedCellFrom(owner, child)) gc_runtime.barrierFrom(owner, child);
+    } else if (v.isString()) {
+        const cell = v.asStringCell();
+        if (cell.isGcManaged()) {
+            const child: *anyopaque = @ptrCast(@constCast(cell));
+            if (!barrierExactManagedCellFrom(owner, child)) gc_runtime.barrierFrom(owner, child);
+        }
+    }
+}
+
 /// Insertion write barrier for a stored cell pointer (Object/Environment/…).
 pub inline fn barrierCell(cell: ?*anyopaque) void {
     gc_runtime.barrier(cell);

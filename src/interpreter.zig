@@ -748,9 +748,16 @@ pub const Environment = struct {
         self.unlockBindings();
     }
 
+    inline fn barrierStoredValue(self: *Environment, v: Value) void {
+        if (self.gc_managed)
+            gc_mod.barrierValueFromManaged(self, v)
+        else
+            gc_mod.barrierValueFrom(self, v);
+    }
+
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
-        gc_mod.barrierValueFrom(self, v); // binding stored into this GC-cell environment
+        self.barrierStoredValue(v);
         const a = self.bindingAllocator();
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
@@ -890,7 +897,7 @@ pub const Environment = struct {
             // uses the marker handshake until capture revokes that proof.
             const locked = e.lockBindingsForWrite();
             if (e.vars.getPtr(name)) |ptr| {
-                gc_mod.barrierValueFrom(e, v); // reassigned binding in a GC-cell env
+                e.barrierStoredValue(v);
                 ptr.* = v;
                 e.unlockBindingsForWrite(locked);
                 return;
@@ -979,7 +986,7 @@ pub const Environment = struct {
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
         if (self.vars.getPtr(name)) |ptr| {
-            gc_mod.barrierValueFrom(self, v);
+            self.barrierStoredValue(v);
             ptr.* = v;
             return true;
         }
@@ -2901,8 +2908,8 @@ pub const Interpreter = struct {
             method = try self.getProperty(val, k);
         }
         if (!method.isCallable()) return self.throwError("TypeError", "a 'using' declaration value must have a [Symbol.dispose] method");
-        gc_mod.barrierValueFrom(self.env, val);
-        gc_mod.barrierValueFrom(self.env, method);
+        self.env.barrierStoredValue(val);
+        self.env.barrierStoredValue(method);
         const locked = self.env.lockBindingsForWrite(); // traceEnv reads disposables; serialize the append
         defer self.env.unlockBindingsForWrite(locked);
         try self.env.disposables.append(self.env.bindingAllocator(), .{ .value = val, .method = method, .is_async = is_async, .await_result = await_result });
