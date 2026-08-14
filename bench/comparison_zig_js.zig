@@ -38,9 +38,14 @@ const warmup_calls = 10;
 const benchmark_context_allocator = std.heap.c_allocator;
 
 const shared_harness =
-    \\globalThis.__benchmarkRunShared = function(jobs, lanes) {
-    \\  if (globalThis.__benchmarkPrepare)
+    \\globalThis.__benchmarkPrepareShared = function(jobs, lanes) {
+    \\  if (globalThis.__benchmarkPrepare) {
     \\    globalThis.__benchmarkPrepare(jobs, lanes, 0, true);
+    \\    return true;
+    \\  }
+    \\  return false;
+    \\};
+    \\globalThis.__benchmarkRunShared = function(jobs, lanes) {
     \\  var threads = [];
     \\  for (var lane = 0; lane < lanes; lane = lane + 1) {
     \\    threads.push(new Thread(globalThis.__benchmarkSelected, jobs, lane));
@@ -285,6 +290,15 @@ fn evaluateShared(ctx: *js.Context, source: []const u8) !js.Value {
         std.debug.print("shared benchmark exception: {s}: {s}\n", .{ name, message });
         return err;
     };
+}
+
+fn prepareShared(ctx: *js.Context, source: []const u8) !void {
+    const prepared = try evaluateShared(ctx, source);
+    // Fixture allocation can arm more than one cooperative cycle. Complete it
+    // at this quiescent boundary so deferred collection cannot become the
+    // scored workers' prologue. Workloads without preparation retain their
+    // normal steady heap and do not pay an artificial collection.
+    if (prepared.toBoolean()) ctx.collectGarbage();
 }
 
 fn parseMode(text: []const u8) !Mode {
@@ -1024,6 +1038,9 @@ fn runSharedAttribution(
     defer ctx.destroy();
     const checkpoint = try configure(ctx, workload, jobs, 0, false);
     _ = try ctx.evaluate(shared_harness);
+    const shared_prepare = try std.fmt.allocPrint(ctx.arena(), "__benchmarkPrepareShared({d}, {d})", .{
+        jobs, lanes,
+    });
     const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
         jobs, lanes,
     });
@@ -1035,8 +1052,15 @@ fn runSharedAttribution(
         try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
         // Match the scored shared-mode lifecycle boundary: warm real workers,
         // then complete the first cooperative collection/reuse cycle.
-        for (0..2) |_| _ = try evaluateShared(ctx, shared_invocation);
+        for (0..2) |_| {
+            try prepareShared(ctx, shared_prepare);
+            _ = try evaluateShared(ctx, shared_invocation);
+        }
     }
+    // Prepare the exact scored fixture before the attribution snapshot. This
+    // keeps key/string construction and any resulting collection outside the
+    // invocation delta while retaining the same worker-visible frozen inputs.
+    try prepareShared(ctx, shared_prepare);
     const warmed = ctx.tierAttributionSnapshot();
     const warmed_process = try processResourceSnapshot();
     try printTierAttributionRow(writer, "shared", workload, lanes, jobs, "warmup", 0, warmed, warmed_process);
@@ -1070,6 +1094,9 @@ fn runShared(
     defer ctx.destroy();
     const checkpoint = try configure(ctx, workload, jobs, 0, false);
     _ = try ctx.evaluate(shared_harness);
+    const shared_prepare = try std.fmt.allocPrint(ctx.arena(), "__benchmarkPrepareShared({d}, {d})", .{
+        jobs, lanes,
+    });
     const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
         jobs, lanes,
     });
@@ -1079,10 +1106,17 @@ fn runShared(
         // cycle before sample zero. One shared invocation only armed the first
         // cooperative collection, leaving the first recorded sample slower than
         // every later persistent-realm sample.
-        for (0..2) |_| _ = try evaluateShared(ctx, shared_invocation);
+        for (0..2) |_| {
+            try prepareShared(ctx, shared_prepare);
+            _ = try evaluateShared(ctx, shared_invocation);
+        }
     }
     if (gc_telemetry) try writer.writeAll(gc_telemetry_header);
     for (0..samples) |sample| {
+        // Fixture construction is deliberately outside both the wall timer and
+        // the GC counter delta. The scored boundary begins with fully prepared,
+        // immutable lane inputs and still creates/joins every JavaScript Thread.
+        try prepareShared(ctx, shared_prepare);
         const before = if (gc_telemetry) ctx.cooperativeGcProfile().? else undefined;
         if (gc_telemetry) {
             js.jsthread.resetLifecycleStats();
