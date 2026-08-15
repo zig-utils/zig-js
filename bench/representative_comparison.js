@@ -1011,6 +1011,50 @@ function representativeIntlNumberFormatConstruct(jobs, lane, kind) {
   return total;
 }
 
+var representativeIntlStructureFormatters = [
+  new Intl.NumberFormat("en-US"),
+  new Intl.NumberFormat("en-US", { useGrouping: false, minimumFractionDigits: 4, signDisplay: "always" }),
+  new Intl.NumberFormat("hi-IN-u-nu-deva", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencySign: "accounting" }),
+  new Intl.NumberFormat("de-DE", { style: "unit", unit: "kilometer-per-hour", unitDisplay: "long" }),
+  new Intl.NumberFormat("en-US", { notation: "scientific", maximumSignificantDigits: 5 }),
+  new Intl.NumberFormat("en-US", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+];
+var representativeIntlStructureValues = [
+  123456.75, -0, -1234.5, NaN, Infinity, 12345678901234567890n, 0.00425, 987654321
+];
+
+function representativeIntlNumberFormatConsumer(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var index = (job + i + lane) & 7;
+      var formatter = representativeIntlStructureFormatters[index];
+      var value = representativeIntlStructureValues[index];
+      if (kind === "text") {
+        var output = formatter.format(value);
+        total = total + output.length + output.charCodeAt(0) + output.charCodeAt(output.length - 1);
+      } else if (kind === "parts") {
+        var parts = formatter.formatToParts(value);
+        total = total + parts.length;
+        for (var part = 0; part < parts.length; part = part + 1)
+          total = total + parts[part].type.length + parts[part].value.length + parts[part].value.charCodeAt(0);
+      } else if (kind === "range") {
+        var range = formatter.formatRange((job + 1) * 1000 + i, (job + 1) * 1000 + i + 500.25);
+        total = total + range.length + range.charCodeAt(0) + range.charCodeAt(range.length - 1);
+      } else {
+        var rangeParts = formatter.formatRangeToParts((job + 1) * 1000 + i, (job + 1) * 1000 + i + 500.25);
+        total = total + rangeParts.length;
+        for (var rangePart = 0; rangePart < rangeParts.length; rangePart = rangePart + 1)
+          total = total + rangeParts[rangePart].type.length + rangeParts[rangePart].value.length +
+            rangeParts[rangePart].source.length + rangeParts[rangePart].value.charCodeAt(0);
+      }
+    }
+  }
+  return total;
+}
+
 function representativeLongLivedGraph(jobs, lane, variant) {
   var nodes = [];
   var total = 0;
@@ -1267,6 +1311,10 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_construct_fraction") return function (jobs, lane) { return representativeIntlNumberFormatConstruct(jobs, lane, "fraction"); };
   if (name === "representative_intl_number_format_construct_locale") return function (jobs, lane) { return representativeIntlNumberFormatConstruct(jobs, lane, "locale"); };
   if (name === "representative_intl_number_format_construct_uncommon") return function (jobs, lane) { return representativeIntlNumberFormatConstruct(jobs, lane, "uncommon"); };
+  if (name === "representative_intl_number_format_consumer_text") return function (jobs, lane) { return representativeIntlNumberFormatConsumer(jobs, lane, "text"); };
+  if (name === "representative_intl_number_format_consumer_parts") return function (jobs, lane) { return representativeIntlNumberFormatConsumer(jobs, lane, "parts"); };
+  if (name === "representative_intl_number_format_consumer_range") return function (jobs, lane) { return representativeIntlNumberFormatConsumer(jobs, lane, "range"); };
+  if (name === "representative_intl_number_format_consumer_range_parts") return function (jobs, lane) { return representativeIntlNumberFormatConsumer(jobs, lane, "rangeParts"); };
   if (name === "representative_long_lived_graph") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 0); };
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
