@@ -28075,74 +28075,97 @@ fn nfIndicGrouping(locale: []const u8) bool {
     return false;
 }
 
-const NfCompactPattern = struct { exponent: i32 = 0, suffix: []const u8 = "", sep: []const u8 = "" };
+const NfCompactPattern = cldr_numbers.CompactPattern;
 
-fn nfCompactPattern(locale: []const u8, compact_display: []const u8, e: i32) NfCompactPattern {
-    const t = parseTriple(locale);
-    const long = std.mem.eql(u8, compact_display, "long");
-    const lang = t.l;
-    if (std.ascii.eqlIgnoreCase(lang, "de")) {
-        if (long) {
-            const exp: i32 = if (e >= 3) @min(@divFloor(e, 3) * 3, 12) else 0;
-            return .{ .exponent = exp, .suffix = switch (exp) {
-                3 => "Tausend",
-                6 => "Millionen",
-                9 => "Milliarden",
-                12 => "Billionen",
-                else => "",
-            }, .sep = if (exp > 0) " " else "" };
-        }
-        const exp: i32 = if (e >= 6) @min(@divFloor(e, 3) * 3, 12) else 0;
-        return .{ .exponent = exp, .suffix = switch (exp) {
-            6 => "Mio.",
-            9 => "Mrd.",
-            12 => "Bio.",
-            else => "",
-        }, .sep = if (exp > 0) "\u{00a0}" else "" };
-    }
-    if (std.ascii.eqlIgnoreCase(lang, "ja") or std.ascii.eqlIgnoreCase(lang, "zh")) {
-        const exp: i32 = if (e >= 4) @min(@divFloor(e, 4) * 4, 12) else 0;
-        if (std.ascii.eqlIgnoreCase(lang, "ja")) return .{ .exponent = exp, .suffix = switch (exp) {
-            4 => "\u{4e07}",
-            8 => "\u{5104}",
-            12 => "\u{5146}",
-            else => "",
-        } };
-        return .{ .exponent = exp, .suffix = switch (exp) {
-            4 => "\u{842c}",
-            8 => "\u{5104}",
-            12 => "\u{5146}",
-            else => "",
-        } };
-    }
-    if (std.ascii.eqlIgnoreCase(lang, "ko")) {
-        const exp: i32 = if (e >= 8) @min(@divFloor(e, 4) * 4, 12) else if (e >= 4) 4 else if (e >= 3) 3 else 0;
-        return .{ .exponent = exp, .suffix = switch (exp) {
-            3 => "\u{cc9c}",
-            4 => "\u{b9cc}",
-            8 => "\u{c5b5}",
-            12 => "\u{c870}",
-            else => "",
-        } };
-    }
-    if (std.ascii.eqlIgnoreCase(t.r, "IN") and std.ascii.eqlIgnoreCase(lang, "en") and !long) {
-        const exp: i32 = if (e >= 7) 7 else if (e >= 5) 5 else if (e >= 3) @divFloor(e, 3) * 3 else 0;
-        return .{ .exponent = exp, .suffix = switch (exp) {
-            3 => "K",
-            5 => "L",
-            7 => "Cr",
-            else => "",
-        } };
-    }
+fn nfCompactPattern(locale: []const u8, compact_display: []const u8, magnitude: usize, category: []const u8, exact_one: bool) NfCompactPattern {
+    return cldr_numbers.compact(locale, std.mem.eql(u8, compact_display, "long"), magnitude, category, exact_one);
+}
 
-    const exp: i32 = if (e >= 3) @min(@divFloor(e, 3) * 3, 12) else 0;
-    return .{ .exponent = exp, .suffix = switch (exp) {
-        3 => if (long) "thousand" else "K",
-        6 => if (long) "million" else "M",
-        9 => if (long) "billion" else "B",
-        12 => if (long) "trillion" else "T",
+const NfExactPluralOperand = struct { value: f64, integral: bool };
+
+fn nfCompactPluralOperand(code: u8, integer: []const u8, fraction: []const u8, trimmed: []const u8, exponent: u8, modulus: ?u64) NfExactPluralOperand {
+    const digits: []const u8 = switch (code) {
+        'i' => integer,
+        'f' => fraction,
+        't' => trimmed,
         else => "",
-    }, .sep = if (long and exp > 0) " " else "" };
+    };
+    if (digits.len > 0) {
+        if (modulus) |m| return .{ .value = @floatFromInt(nfDecimalMod(digits, m)), .integral = true };
+        return .{ .value = std.fmt.parseFloat(f64, digits) catch std.math.inf(f64), .integral = true };
+    }
+    const integer_fraction = !nfDigitsNonzero(fraction);
+    if (code == 'n') {
+        const base = if (modulus) |m| @as(f64, @floatFromInt(nfDecimalMod(integer, m))) else std.fmt.parseFloat(f64, integer) catch std.math.inf(f64);
+        return .{ .value = base, .integral = integer_fraction };
+    }
+    const scalar: u64 = switch (code) {
+        'v' => fraction.len,
+        'w' => trimmed.len,
+        'e', 'c' => exponent,
+        else => 0,
+    };
+    return .{ .value = @floatFromInt(if (modulus) |m| scalar % m else scalar), .integral = true };
+}
+
+fn nfCompactPluralRangeMatch(list: []const u8, operand: NfExactPluralOperand) bool {
+    if (!operand.integral) return false;
+    var items = std.mem.splitScalar(u8, list, ',');
+    while (items.next()) |item| {
+        if (std.mem.indexOf(u8, item, "..")) |dots| {
+            const low = std.fmt.parseFloat(f64, item[0..dots]) catch continue;
+            const high = std.fmt.parseFloat(f64, item[dots + 2 ..]) catch continue;
+            if (operand.value >= low and operand.value <= high) return true;
+        } else {
+            const expected = std.fmt.parseFloat(f64, item) catch continue;
+            if (operand.value == expected) return true;
+        }
+    }
+    return false;
+}
+
+fn nfCompactPluralRelation(relation: []const u8, integer: []const u8, fraction: []const u8, trimmed: []const u8, exponent: u8) bool {
+    var tokens = std.mem.tokenizeScalar(u8, relation, ' ');
+    const name = tokens.next() orelse return false;
+    var next = tokens.next() orelse return false;
+    var modulus: ?u64 = null;
+    if (std.mem.eql(u8, next, "%")) {
+        modulus = std.fmt.parseInt(u64, tokens.next() orelse return false, 10) catch return false;
+        if (modulus.? == 0) return false;
+        next = tokens.next() orelse return false;
+    }
+    const list = tokens.next() orelse return false;
+    const matches = nfCompactPluralRangeMatch(list, nfCompactPluralOperand(name[0], integer, fraction, trimmed, exponent, modulus));
+    return if (std.mem.eql(u8, next, "!=")) !matches else matches;
+}
+
+fn nfCompactPluralCondition(condition: []const u8, integer: []const u8, fraction: []const u8, trimmed: []const u8, exponent: u8) bool {
+    var disjunction = std.mem.splitSequence(u8, condition, " or ");
+    while (disjunction.next()) |term| {
+        var all = true;
+        var conjunction = std.mem.splitSequence(u8, term, " and ");
+        while (conjunction.next()) |relation| if (!nfCompactPluralRelation(relation, integer, fraction, trimmed, exponent)) {
+            all = false;
+            break;
+        };
+        if (all) return true;
+    }
+    return false;
+}
+
+fn nfCompactPluralCategory(locale: []const u8, integer: []const u8, fraction: []const u8, exponent: u8) []const u8 {
+    var w = fraction.len;
+    while (w > 0 and fraction[w - 1] == '0') w -= 1;
+    const rules = cldr_plurals.cardinal(localeLanguage(locale)) orelse (cldr_plurals.cardinal("en") orelse &.{});
+    for (rules) |rule| if (rule.cond.len > 0 and nfCompactPluralCondition(rule.cond, integer, fraction, fraction[0..w], exponent)) return rule.cat;
+    return "other";
+}
+
+fn nfResolvedCompactPattern(locale: []const u8, compact_display: []const u8, magnitude: usize, fallback: NfCompactPattern, integer: []const u8, fraction: []const u8) NfCompactPattern {
+    if (!fallback.plural_sensitive) return fallback;
+    const exact_one = std.mem.eql(u8, integer, "1") and fraction.len == 0;
+    const category = nfCompactPluralCategory(locale, integer, fraction, fallback.exponent);
+    return nfCompactPattern(locale, compact_display, magnitude, category, exact_one);
 }
 
 /// Resolve the numbering system for an Intl formatter: the `numberingSystem`
@@ -28259,8 +28282,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
     var cur_code: []const u8 = ""; // the ISO currency code (for locale-dependent symbol selection)
     var unit_prefix: []const u8 = ""; // prefix unit pattern, e.g. ja "時速 <n> キロメートル"
     var unit_suffix: []const u8 = ""; // " <unit name>" appended for style:unit
-    var compact_suffix: []const u8 = ""; // compact scale suffix ("K"/" million"…)
-    var compact_sep: []const u8 = "";
+    var compact_pattern: NfCompactPattern = .{};
     var unit_space = true; // narrow unitDisplay drops the space
     const sign_display = data.sign_display;
     const accounting = std.mem.eql(u8, data.currency_sign, "accounting");
@@ -28356,8 +28378,8 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
             is_zero = r.is_zero;
         } else if (std.mem.eql(u8, notation, "compact") and nfDigitsNonzero(big_digits)) {
             const order = base_decimal_pos - 1;
-            const pattern_order: i32 = @intCast(@min(order, @as(usize, 12)));
-            var compact = nfCompactPattern(locale, compact_display, pattern_order);
+            var compact_magnitude = order;
+            var compact = nfCompactPattern(locale, compact_display, compact_magnitude, "other", false);
             var scaled_pos = base_decimal_pos - @as(usize, @intCast(compact.exponent));
             const explicit_precision = min_sig != null or max_sig != null or frac_set or !std.mem.eql(u8, rounding_priority, "auto");
             const exact_min_sig: ?usize = if (explicit_precision) min_sig else 1;
@@ -28366,9 +28388,10 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
             var r = try nfRoundExact(self, big_digits, scaled_pos, neg, min_int, min_frac, max_frac, exact_min_sig, exact_max_sig, exact_frac_set, rounding_priority, rounding_increment, rounding_mode);
             if (order <= 12) if (nfRoundedMagnitude(r)) |rounded_order| {
                 if (rounded_order != @as(i32, @intCast(scaled_pos - 1))) {
-                    const next = nfCompactPattern(locale, compact_display, @intCast(order + 1));
+                    const next = nfCompactPattern(locale, compact_display, order + 1, "other", false);
                     if (next.exponent != compact.exponent) {
                         compact = next;
+                        compact_magnitude = order + 1;
                         scaled_pos = base_decimal_pos - @as(usize, @intCast(compact.exponent));
                         const next_max_sig: ?usize = if (explicit_precision) max_sig else @max(2, scaled_pos);
                         r = try nfRoundExact(self, big_digits, scaled_pos, neg, min_int, min_frac, max_frac, exact_min_sig, next_max_sig, exact_frac_set, rounding_priority, rounding_increment, rounding_mode);
@@ -28378,8 +28401,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
             digits = r.int_str;
             frac_str = r.frac_str;
             is_zero = r.is_zero;
-            compact_suffix = compact.suffix;
-            compact_sep = compact.sep;
+            compact_pattern = nfResolvedCompactPattern(locale, compact_display, compact_magnitude, compact, digits, frac_str);
         } else {
             const r = try nfRoundExact(self, big_digits, base_decimal_pos, neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
             digits = r.int_str;
@@ -28426,15 +28448,18 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         // default; explicit digit options use their ordinary rounding type.
         const mag = @abs(n);
         const e = orderOfMagnitude(mag);
-        var compact = nfCompactPattern(locale, compact_display, e);
-        var scaled = if (compact.exponent > 0) mag / powi10(compact.exponent) else mag;
+        const magnitude: usize = @intCast(@max(e, 0));
+        var compact_magnitude = magnitude;
+        var compact = nfCompactPattern(locale, compact_display, compact_magnitude, "other", false);
+        var scaled = if (compact.exponent > 0) mag / powi10(@intCast(compact.exponent)) else mag;
         var r = nfRoundCompact(&decimal_scratch, scaled, orderOfMagnitude(scaled), neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
         if (nfRoundedMagnitude(r)) |rounded_order| {
-            if (rounded_order != e - compact.exponent) {
-                const next = nfCompactPattern(locale, compact_display, e + 1);
+            if (rounded_order != e - @as(i32, compact.exponent)) {
+                const next = nfCompactPattern(locale, compact_display, magnitude + 1, "other", false);
                 if (next.exponent != compact.exponent) {
                     compact = next;
-                    scaled = if (compact.exponent > 0) mag / powi10(compact.exponent) else mag;
+                    compact_magnitude = magnitude + 1;
+                    scaled = if (compact.exponent > 0) mag / powi10(@intCast(compact.exponent)) else mag;
                     r = nfRoundCompact(&decimal_scratch, scaled, orderOfMagnitude(scaled), neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
                 }
             }
@@ -28442,8 +28467,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         digits = r.int_str;
         frac_str = r.frac_str;
         is_zero = r.is_zero;
-        compact_suffix = compact.suffix;
-        compact_sep = compact.sep;
+        compact_pattern = nfResolvedCompactPattern(locale, compact_display, compact_magnitude, compact, digits, frac_str);
     } else if (finite) {
         const mag = @abs(n);
         if (mag >= 9.0e18 and max_sig == null) {
@@ -28508,33 +28532,35 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
     if (!finite) {
         try output.push(self, if (is_nan) "nan" else "infinity", if (is_nan) syms.nan else syms.infinity);
     } else {
-        // Integer digits, split into "integer" runs separated by "group" parts
-        // (scientific/engineering notation never groups the mantissa).
-        // "min2" suppresses grouping until the integer part reaches 5 digits
-        // (minimumGroupingDigits = 2, group size 3); "off" never groups.
-        const group_ok = !sci and (if (data.grouping == .off)
-            false
-        else if (data.grouping == .min2)
-            digits.len >= 5
-        else
-            true);
-        // South-Asian locales group as 3 then 2,2,… ("#,##,##0"); others as 3,3,….
-        const indic = nfIndicGrouping(locale);
-        const n_dig = digits.len;
-        var run_start: usize = 0;
-        for (digits, 0..) |_, i| {
-            const rem = n_dig - i; // digits at and to the right of position i
-            const at_boundary = if (indic)
-                (rem == 3 or (rem > 3 and (rem - 3) % 2 == 0))
+        if (compact_pattern.prefix.len > 0) try output.push(self, "compact", compact_pattern.prefix);
+        if (compact_pattern.prefix_literal.len > 0) try output.push(self, "literal", compact_pattern.prefix_literal);
+        if (compact_pattern.show_number) {
+            // Integer digits, split into "integer" runs separated by "group"
+            // parts (scientific/engineering never groups the mantissa).
+            const group_ok = !sci and (if (data.grouping == .off)
+                false
+            else if (data.grouping == .min2)
+                digits.len >= 5
             else
-                (rem % 3 == 0);
-            if (group_ok and i != 0 and at_boundary) {
-                try output.push(self, "integer", digits[run_start..i]);
-                try output.push(self, "group", syms.group);
-                run_start = i;
+                true);
+            // South-Asian locales group as 3 then 2,2,… ("#,##,##0").
+            const indic = nfIndicGrouping(locale);
+            const n_dig = digits.len;
+            var run_start: usize = 0;
+            for (digits, 0..) |_, i| {
+                const rem = n_dig - i;
+                const at_boundary = if (indic)
+                    (rem == 3 or (rem > 3 and (rem - 3) % 2 == 0))
+                else
+                    (rem % 3 == 0);
+                if (group_ok and i != 0 and at_boundary) {
+                    try output.push(self, "integer", digits[run_start..i]);
+                    try output.push(self, "group", syms.group);
+                    run_start = i;
+                }
             }
+            try output.push(self, "integer", digits[run_start..]);
         }
-        try output.push(self, "integer", digits[run_start..]);
     }
     // Fraction digits (already rounded/trimmed by nfRound).
     // trailingZeroDisplay:"stripIfInteger" drops an all-zero fraction so an
@@ -28547,7 +28573,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         };
         if (all_zero) frac_str = "";
     }
-    if (finite and frac_str.len > 0) {
+    if (finite and compact_pattern.show_number and frac_str.len > 0) {
         try output.push(self, "decimal", syms.decimal);
         try output.push(self, "fraction", frac_str);
     }
@@ -28560,10 +28586,8 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         const exponent_digits = if (output.mode == .parts) try self.arena.dupe(u8, scratch_exponent) else scratch_exponent;
         try output.push(self, "exponentInteger", exponent_digits);
     }
-    if (compact_suffix.len > 0) {
-        if (compact_sep.len > 0) try output.push(self, "literal", compact_sep);
-        try output.push(self, "compact", compact_suffix);
-    }
+    if (compact_pattern.suffix_literal.len > 0) try output.push(self, "literal", compact_pattern.suffix_literal);
+    if (compact_pattern.suffix.len > 0) try output.push(self, "compact", compact_pattern.suffix);
     if (is_percent) {
         const lang = parseTriple(locale).l;
         if (std.ascii.eqlIgnoreCase(lang, "de")) try output.push(self, "literal", "\u{00a0}");
@@ -28752,7 +28776,10 @@ fn nfSharedSuffixLen(xp: []const NfPart, yp: []const NfPart) usize {
             std.mem.eql(u8, x.typ, "infinity")) break;
         if (!std.mem.eql(u8, x.typ, y.typ) or !std.mem.eql(u8, x.value, y.value)) break;
     }
-    return count;
+    // A suffix is shareable only when both endpoints retain a numeric/core
+    // field. Exact compact patterns such as French "mille" consist entirely of
+    // an affix and must therefore be repeated as a complete endpoint.
+    return if (count == xp.len or count == yp.len) 0 else count;
 }
 
 fn nfFormatRangePartsText(self: *Interpreter, locale: []const u8, xp: []const NfPart, yp: []const NfPart) EvalError![]const u8 {
@@ -50836,6 +50863,53 @@ test "Intl.NumberFormat compact precision and carry follow resolved rounding" {
         \\exact && resolved.minimumFractionDigits === 0 && resolved.maximumFractionDigits === 3 &&
         \\  resolved.minimumSignificantDigits === 1 && resolved.maximumSignificantDigits === 21 &&
         \\  incrementThrows && increment.format(1234) === "1.25K"
+    )).asBool());
+}
+
+test "Intl.NumberFormat compact patterns follow generated CLDR data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var cases = [
+        \\  ["en-US", { notation: "compact" }, 1234567, "1.2M", "integer,decimal,fraction,compact"],
+        \\  ["en-US", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 4 }, 1234567, "1.235 million", "integer,decimal,fraction,literal,compact"],
+        \\  ["en-IN", { notation: "compact" }, 100000, "1L", "integer,compact"],
+        \\  ["de-DE", { notation: "compact" }, 1234567, "1,2 Mio.", "integer,decimal,fraction,literal,compact"],
+        \\  ["de-DE", { notation: "compact", compactDisplay: "long" }, 1000000, "1 Million", "integer,literal,compact"],
+        \\  ["de-DE", { notation: "compact", compactDisplay: "long" }, 2000000, "2 Millionen", "integer,literal,compact"],
+        \\  ["fr-FR", { notation: "compact", compactDisplay: "long" }, 1000, "mille", "compact"],
+        \\  ["fr-FR", { notation: "compact", compactDisplay: "long" }, 2000000, "2 millions", "integer,literal,compact"],
+        \\  ["hi-IN-u-nu-deva", { notation: "compact", compactDisplay: "long" }, 1234567, "१२ लाख", "integer,literal,compact"],
+        \\  ["hi-IN-u-nu-deva", { notation: "compact", maximumSignificantDigits: 3 }, 1234567, "१२.३ लाख", "integer,decimal,fraction,literal,compact"],
+        \\  ["ja-JP", { notation: "compact", maximumSignificantDigits: 4 }, 12345678, "1235万", "integer,compact"],
+        \\  ["zh-CN", { notation: "compact", maximumSignificantDigits: 4 }, 12345678, "1235万", "integer,compact"],
+        \\  ["ko-KR", { notation: "compact", maximumSignificantDigits: 4 }, 12345678, "1235만", "integer,compact"],
+        \\  ["he-IL", { notation: "compact", compactDisplay: "long" }, 1200, "‏1.2 אלף", "literal,integer,decimal,fraction,literal,compact"],
+        \\  ["ru-RU", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 }, 22000, "22 тысячи", "integer,literal,compact"],
+        \\  ["ar", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 }, 3000, "3 آلاف", "integer,literal,compact"],
+        \\  ["en-US", { notation: "compact" }, 999500, "1M", "integer,compact"]
+        \\];
+        \\var exact = true;
+        \\for (var i = 0; i < cases.length; i++) {
+        \\  var formatter = new Intl.NumberFormat(cases[i][0], cases[i][1]);
+        \\  var parts = formatter.formatToParts(cases[i][2]);
+        \\  exact = exact && formatter.format(cases[i][2]) === cases[i][3] &&
+        \\    parts.map(function (part) { return part.value; }).join("") === cases[i][3] &&
+        \\    parts.map(function (part) { return part.type; }).join(",") === cases[i][4];
+        \\}
+        \\var range = new Intl.NumberFormat("hi-IN-u-nu-deva", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 });
+        \\var rangeText = range.formatRange(1234567, 2345678);
+        \\var rangeParts = range.formatRangeToParts(1234567, 2345678);
+        \\var russian = new Intl.NumberFormat("ru-RU", { notation: "compact", compactDisplay: "long" });
+        \\var hugePlural = ["21", "22", "25"].map(function (tail) {
+        \\  var value = BigInt("1" + "0".repeat(310) + tail + "0".repeat(12));
+        \\  var parts = russian.formatToParts(value);
+        \\  return parts[parts.length - 1].value;
+        \\}).join("|");
+        \\exact && rangeText === "१२.३–२३.५ लाख" &&
+        \\  rangeParts.map(function (part) { return part.value; }).join("") === rangeText &&
+        \\  rangeParts[rangeParts.length - 2].source === "shared" && rangeParts[rangeParts.length - 1].source === "shared" &&
+        \\  hugePlural === "триллион|триллиона|триллионов"
     )).asBool());
 }
 
