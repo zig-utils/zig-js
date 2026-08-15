@@ -12901,6 +12901,109 @@ test "parallel_js: Intl.NumberFormat resolved state is read-only after publicati
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl structural part results are reclaimed under a bounded precise heap" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var boundedListFormat = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
+        \\var boundedRelativeTimeFormat = new Intl.RelativeTimeFormat("en", { numeric: "always" });
+        \\var boundedDurationFormat = new Intl.DurationFormat("en", { style: "long" });
+        \\var structuralPartsChecksum = 0;
+        \\for (var round = 0; round < 64; round++) {
+        \\  for (var i = 0; i < 8; i++) {
+        \\    var listParts = boundedListFormat.formatToParts(["alpha", "beta", "gamma", String(round * 8 + i)]);
+        \\    var relativeParts = boundedRelativeTimeFormat.formatToParts(-(round * 8 + i + 1000), "day");
+        \\    var durationParts = boundedDurationFormat.formatToParts({ hours: round + 1, minutes: i + 1, seconds: 3 });
+        \\    structuralPartsChecksum += listParts.length + relativeParts.length + durationParts.length;
+        \\  }
+        \\  gc();
+        \\}
+        \\gc();
+        \\structuralPartsChecksum > 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "moving nursery preserves Intl structural part results" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.__movingListFormat = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
+        \\globalThis.__movingRelativeTimeFormat = new Intl.RelativeTimeFormat("en", { numeric: "always" });
+        \\globalThis.__movingDurationFormat = new Intl.DurationFormat("en", { style: "long" });
+        \\globalThis.__movingStructuralParts = [
+        \\  __movingListFormat.formatToParts(["alpha", "beta", "gamma"]),
+        \\  __movingRelativeTimeFormat.formatToParts(-1234, "day"),
+        \\  __movingDurationFormat.formatToParts({ hours: 1, minutes: 2, seconds: 3 })
+        \\];
+        \\globalThis.__movingStructuralPartsBefore = JSON.stringify(__movingStructuralParts);
+    );
+    const before = ctx.global_object.getOwn("__movingStructuralParts").?.asObj();
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("__movingStructuralParts").?.asObj();
+    try std.testing.expect(before != after);
+    try std.testing.expect((try ctx.evaluate(
+        \\JSON.stringify(__movingStructuralParts) === __movingStructuralPartsBefore &&
+        \\JSON.stringify([
+        \\  __movingListFormat.formatToParts(["alpha", "beta", "gamma"]),
+        \\  __movingRelativeTimeFormat.formatToParts(-1234, "day"),
+        \\  __movingDurationFormat.formatToParts({ hours: 1, minutes: 2, seconds: 3 })
+        \\]) === __movingStructuralPartsBefore
+    )).asBool());
+}
+
+test "parallel_js: Intl structural part metadata is immutable after publication" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var sharedListFormat = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
+        \\var sharedRelativeTimeFormat = new Intl.RelativeTimeFormat("en", { numeric: "always" });
+        \\var sharedDurationFormat = new Intl.DurationFormat("en", { style: "long" });
+        \\function structuralPartsLane(lane) {
+        \\  for (var i = 0; i < 64; i++) {
+        \\    var listInput = ["alpha", "beta", String(lane * 64 + i)];
+        \\    var listParts = sharedListFormat.formatToParts(listInput);
+        \\    if (listParts.map(function (part) { return part.type; }).join(",") !== "element,literal,element,literal,element" ||
+        \\        listParts.map(function (part) { return part.value; }).join("") !== sharedListFormat.format(listInput)) return -1;
+        \\    var relativeParts = sharedRelativeTimeFormat.formatToParts(1234, "day");
+        \\    if (relativeParts.map(function (part) { return part.type; }).join(",") !== "literal,integer,group,integer,literal" ||
+        \\        relativeParts.map(function (part) { return part.value; }).join("") !== sharedRelativeTimeFormat.format(1234, "day")) return -2;
+        \\    var duration = { hours: lane + 1, minutes: i % 59 + 1, seconds: 3 };
+        \\    var durationParts = sharedDurationFormat.formatToParts(duration);
+        \\    if (durationParts.map(function (part) { return part.type; }).join(",") !== "integer,literal,unit,literal,integer,literal,unit,literal,integer,literal,unit" ||
+        \\        durationParts.map(function (part) { return part.value; }).join("") !== sharedDurationFormat.format(duration)) return -3;
+        \\  }
+        \\  return 1;
+        \\}
+        \\var structuralPartsThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) structuralPartsThreads.push(new Thread(structuralPartsLane, lane));
+        \\var structuralPartsTotal = 0;
+        \\for (var index = 0; index < structuralPartsThreads.length; index++) structuralPartsTotal += structuralPartsThreads[index].join();
+        \\structuralPartsTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "Intl.DateTimeFormat resolved state is reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

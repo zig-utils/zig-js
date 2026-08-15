@@ -29516,7 +29516,7 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
     return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
-const DurPart = struct { typ: []const u8, value: []const u8, unit: ?[]const u8 };
+const DurPart = struct { typ: NfPartType, value: []const u8, unit: ?[]const u8 };
 
 fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -29559,7 +29559,7 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             var grp: *std.ArrayListUnmanaged(DurPart) = undefined;
             if (need_sep and groups.items.len > 0) {
                 grp = &groups.items[groups.items.len - 1];
-                try grp.append(self.arena, .{ .typ = "literal", .value = ":", .unit = null });
+                try grp.append(self.arena, .{ .typ = .literal, .value = ":", .unit = null });
             } else {
                 try groups.append(self.arena, .empty);
                 grp = &groups.items[groups.items.len - 1];
@@ -29571,19 +29571,19 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
                 const min_int: usize = if (std.mem.eql(u8, style, "2-digit")) 2 else 1;
                 var s = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
                 if (s.len > 0 and s[0] == '-') {
-                    try grp.append(self.arena, .{ .typ = "minusSign", .value = "-", .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .minus_sign, .value = "-", .unit = sing });
                     s = s[1..];
                 }
                 if (std.mem.indexOfScalar(u8, s, '.')) |dot| {
-                    try grp.append(self.arena, .{ .typ = "integer", .value = s[0..dot], .unit = sing });
-                    try grp.append(self.arena, .{ .typ = "decimal", .value = ".", .unit = sing });
-                    try grp.append(self.arena, .{ .typ = "fraction", .value = s[dot + 1 ..], .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .integer, .value = s[0..dot], .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .decimal, .value = ".", .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .fraction, .value = s[dot + 1 ..], .unit = sing });
                 } else {
-                    try grp.append(self.arena, .{ .typ = "integer", .value = s, .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .integer, .value = s, .unit = sing });
                 }
             } else {
                 const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, style, sing, sign_never), &.{Value.num(fnum)});
-                for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ.value().asStr(), .value = p.value, .unit = sing });
+                for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
             }
         }
         if (combine and shown) break;
@@ -29602,7 +29602,7 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
         }
         for (grp.items) |p| {
             const o = (try self.newObject()).asObj();
-            try self.setProp(o, "type", try Value.strAlloc(self.arena, p.typ));
+            try self.setProp(o, "type", p.typ.value());
             try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
             if (p.unit) |un| try self.setProp(o, "unit", try Value.strAlloc(self.arena, un));
             try arr.appendElement(self.arena, Value.obj(o));
@@ -29836,7 +29836,18 @@ fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 
 /// One element of a ListFormat result: an "element" (a list item) or a
 /// "literal" (the connector text between items).
-const LfPart = struct { typ: []const u8, value: []const u8 };
+const LfPartType = enum {
+    element,
+    literal,
+
+    fn value(self: LfPartType) Value {
+        return switch (self) {
+            .element => Value.str("element"),
+            .literal => Value.str("literal"),
+        };
+    }
+};
+const LfPart = struct { typ: LfPartType, value: []const u8 };
 
 /// type:"unit" list connectors (pair / middle / final) by language + style —
 /// shared by Intl.ListFormat and DurationFormat's unit joining: narrow joins
@@ -29911,9 +29922,9 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     for (list, 0..) |item, i| {
         if (i != 0) {
             const sep = if (i == list.len - 1) (if (list.len == 2) pair else final) else middle;
-            try parts.append(self.arena, .{ .typ = "literal", .value = sep });
+            try parts.append(self.arena, .{ .typ = .literal, .value = sep });
         }
-        try parts.append(self.arena, .{ .typ = "element", .value = item });
+        try parts.append(self.arena, .{ .typ = .element, .value = item });
     }
     return parts;
 }
@@ -30469,7 +30480,7 @@ fn intlListFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const arr = (try self.newArray()).asObj();
     for (parts.items) |p| {
         const o = (try self.newObject()).asObj();
-        try self.setProp(o, "type", try Value.strAlloc(self.arena, p.typ));
+        try self.setProp(o, "type", p.typ.value());
         try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
         try arr.appendElement(self.arena, Value.obj(o));
     }
@@ -30712,36 +30723,36 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
     const r = try rtfCompute(self, this, args);
     const arr = (try self.newArray()).asObj();
     const addPart = struct {
-        fn p(s: *Interpreter, a: *value.Object, typ: []const u8, v: []const u8, unit: ?[]const u8) EvalError!void {
+        fn p(s: *Interpreter, a: *value.Object, typ: NfPartType, v: []const u8, unit: ?[]const u8) EvalError!void {
             const o = (try s.newObject()).asObj();
-            try s.setProp(o, "type", try Value.strAlloc(s.arena, typ));
+            try s.setProp(o, "type", typ.value());
             try s.setProp(o, "value", try Value.strAlloc(s.arena, v));
             if (unit) |u| try s.setProp(o, "unit", try Value.strOwned(s.arena, try std.fmt.allocPrint(s.arena, "{s}", .{u})));
             try a.appendElement(s.arena, Value.obj(o));
         }
     }.p;
     if (r.term) |t| {
-        try addPart(self, arr, "literal", t, null);
+        try addPart(self, arr, .literal, t, null);
         return Value.obj(arr);
     }
-    if (r.prefix.len > 0) try addPart(self, arr, "literal", r.prefix, null);
+    if (r.prefix.len > 0) try addPart(self, arr, .literal, r.prefix, null);
     // Number, split into integer/group parts, each tagged with the unit.
     const first_group = r.int_str.len % 3;
     var run: std.ArrayListUnmanaged(u8) = .empty;
     for (r.int_str, 0..) |c, i| {
         if (r.int_str.len >= r.min_group_digits and i != 0 and (i % 3) == first_group) {
-            try addPart(self, arr, "integer", try rtfTranslateNumber(self, try run.toOwnedSlice(self.arena), r.numbering), r.unit);
-            try addPart(self, arr, "group", r.group, r.unit);
+            try addPart(self, arr, .integer, try rtfTranslateNumber(self, try run.toOwnedSlice(self.arena), r.numbering), r.unit);
+            try addPart(self, arr, .group, r.group, r.unit);
             run = .empty;
         }
         try run.append(self.arena, c);
     }
-    try addPart(self, arr, "integer", try rtfTranslateNumber(self, try run.toOwnedSlice(self.arena), r.numbering), r.unit);
+    try addPart(self, arr, .integer, try rtfTranslateNumber(self, try run.toOwnedSlice(self.arena), r.numbering), r.unit);
     if (r.frac_str.len > 0) {
-        try addPart(self, arr, "decimal", r.decimal, r.unit);
-        try addPart(self, arr, "fraction", try rtfTranslateNumber(self, r.frac_str, r.numbering), r.unit);
+        try addPart(self, arr, .decimal, r.decimal, r.unit);
+        try addPart(self, arr, .fraction, try rtfTranslateNumber(self, r.frac_str, r.numbering), r.unit);
     }
-    if (r.suffix.len > 0) try addPart(self, arr, "literal", r.suffix, null);
+    if (r.suffix.len > 0) try addPart(self, arr, .literal, r.suffix, null);
     return Value.obj(arr);
 }
 
@@ -51374,6 +51385,37 @@ test "Intl.NumberFormat sink emission is OOM-safe" {
     const previous_heap = gc_mod.setActiveHeap(null);
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl structural services preserve part metadata and result ownership" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var list = new Intl.ListFormat("en-US", { style: "long", type: "conjunction" });
+        \\var listInput = ["alpha", "beta", "gamma"];
+        \\var listParts = list.formatToParts(listInput);
+        \\var relative = new Intl.RelativeTimeFormat("en-US", { numeric: "always", style: "long" });
+        \\var relativeParts = relative.formatToParts(1250, "year");
+        \\var duration = new Intl.DurationFormat("en-US", { style: "long" });
+        \\var durationInput = { hours: 1, minutes: 2, seconds: 3 };
+        \\var durationParts = duration.formatToParts(durationInput);
+        \\var listTypes = listParts.map(function (part) { return part.type; }).join(",");
+        \\var relativeTypes = relativeParts.map(function (part) { return part.type; }).join(",");
+        \\var durationTypes = durationParts.map(function (part) { return part.type; }).join(",");
+        \\var exact = listTypes === "element,literal,element,literal,element" &&
+        \\  relativeTypes === "literal,integer,group,integer,literal" &&
+        \\  durationTypes === "integer,literal,unit,literal,integer,literal,unit,literal,integer,literal,unit" &&
+        \\  listParts.map(function (part) { return part.value; }).join("") === list.format(listInput) &&
+        \\  relativeParts.map(function (part) { return part.value; }).join("") === relative.format(1250, "year") &&
+        \\  durationParts.map(function (part) { return part.value; }).join("") === duration.format(durationInput) &&
+        \\  relativeParts[1].unit === "year" && durationParts[0].unit === "hour";
+        \\listParts[0].type = "changed";
+        \\relativeParts[1].unit = "changed";
+        \\durationParts[0].value = "changed";
+        \\exact && list.formatToParts(listInput)[0].type === "element" &&
+        \\  relative.formatToParts(1250, "year")[1].unit === "year" &&
+        \\  duration.formatToParts(durationInput)[0].value === "1"
+    )).asBool());
 }
 
 test "Intl remaining conformance edge cases" {
