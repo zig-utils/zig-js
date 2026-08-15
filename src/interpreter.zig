@@ -19947,32 +19947,25 @@ fn bigIntGroupedDecimal(self: *Interpreter, digits: []const u8, locale: []const 
     return out.toOwnedSlice(self.arena);
 }
 
-fn bigIntFormatWithOptions(self: *Interpreter, big: *value.Object, loc: []const u8, ro: *value.Object) value.HostError![]const u8 {
+fn bigIntFormatWithResolved(self: *Interpreter, big: *value.Object, data: *const value.IntlNumberFormatData) value.HostError![]const u8 {
     var s = try value.bigIntToString(big, self.arena);
     const neg = s.len > 0 and s[0] == '-';
     if (neg) s = s[1..];
-    if (ro.getOwn("style")) |sv| if (sv.isString() and std.mem.eql(u8, sv.asStr(), "percent")) {
-        s = try std.fmt.allocPrint(self.arena, "{s}00", .{s});
-    };
-    if (ro.getOwn("maximumSignificantDigits")) |msv| if (msv.isNumber()) {
-        s = try bigIntRoundSignificant(self, s, @intFromFloat(msv.asNum()));
-    };
-    const syms = localeNumberSymbols(loc);
-    const grouped = try bigIntGroupedDecimal(self, s, loc, syms.group);
+    if (std.mem.eql(u8, data.style, "percent")) s = try std.fmt.allocPrint(self.arena, "{s}00", .{s});
+    if (data.maximum_significant_digits) |digits| s = try bigIntRoundSignificant(self, s, digits);
+    const syms = localeNumberSymbols(data.locale);
+    const grouped = try bigIntGroupedDecimal(self, s, data.locale, syms.group);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     if (neg) try buf.appendSlice(self.arena, syms.minus);
     try buf.appendSlice(self.arena, grouped);
-    if (ro.getOwn("minimumFractionDigits")) |mfv| if (mfv.isNumber()) {
-        const n: usize = @intFromFloat(mfv.asNum());
-        if (n > 0) {
-            try buf.appendSlice(self.arena, syms.decimal);
-            for (0..n) |_| try buf.append(self.arena, '0');
-        }
-    };
-    if (ro.getOwn("style")) |sv| if (sv.isString() and std.mem.eql(u8, sv.asStr(), "percent")) {
-        if (loc.len >= 2 and loc[0] == 'd' and loc[1] == 'e') try buf.appendSlice(self.arena, "\xc2\xa0");
+    if (data.minimum_fraction_digits > 0) {
+        try buf.appendSlice(self.arena, syms.decimal);
+        for (0..data.minimum_fraction_digits) |_| try buf.append(self.arena, '0');
+    }
+    if (std.mem.eql(u8, data.style, "percent")) {
+        if (data.locale.len >= 2 and data.locale[0] == 'd' and data.locale[1] == 'e') try buf.appendSlice(self.arena, "\xc2\xa0");
         try buf.appendSlice(self.arena, syms.percent);
-    };
+    }
     return buf.toOwnedSlice(self.arena);
 }
 
@@ -19982,7 +19975,8 @@ fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
     const loc = localeListFirstOr(locs, "en");
     const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
-    return try Value.strAlloc(self.arena, try bigIntFormatWithOptions(self, big, loc, ro));
+    const data = try nfResolvedData(self, loc, ro);
+    return try Value.strAlloc(self.arena, try bigIntFormatWithResolved(self, big, &data));
 }
 
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
@@ -26071,6 +26065,151 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     return ro;
 }
 
+fn nfStaticOptionName(name: []const u8) []const u8 {
+    inline for (.{
+        "decimal",        "percent",    "currency",      "unit",
+        "code",           "symbol",     "narrowSymbol",  "name",
+        "standard",       "accounting", "short",         "long",
+        "narrow",         "scientific", "engineering",   "compact",
+        "auto",           "never",      "always",        "exceptZero",
+        "negative",       "ceil",       "floor",         "expand",
+        "trunc",          "halfCeil",   "halfFloor",     "halfExpand",
+        "halfTrunc",      "halfEven",   "morePrecision", "lessPrecision",
+        "stripIfInteger",
+    }) |candidate| if (std.mem.eql(u8, name, candidate)) return candidate;
+    unreachable;
+}
+
+fn nfResolvedData(self: *Interpreter, locale: []const u8, ro: *value.Object) EvalError!value.IntlNumberFormatData {
+    const str = struct {
+        fn get(opts: *value.Object, key: []const u8, fallback: []const u8) []const u8 {
+            const v = opts.getOwn(key) orelse return fallback;
+            return if (v.isString()) v.asStr() else fallback;
+        }
+    }.get;
+    const num = struct {
+        fn get(opts: *value.Object, key: []const u8) ?f64 {
+            const v = opts.getOwn(key) orelse return null;
+            return if (v.isNumber()) v.asNum() else null;
+        }
+    }.get;
+
+    var data = value.IntlNumberFormatData{
+        .locale = locale,
+        .style = nfStaticOptionName(str(ro, "style", "decimal")),
+        .currency_display = nfStaticOptionName(str(ro, "currencyDisplay", "symbol")),
+        .currency_sign = nfStaticOptionName(str(ro, "currencySign", "standard")),
+        .unit_display = nfStaticOptionName(str(ro, "unitDisplay", "short")),
+        .notation = nfStaticOptionName(str(ro, "notation", "standard")),
+        .compact_display = nfStaticOptionName(str(ro, "compactDisplay", "short")),
+        .sign_display = nfStaticOptionName(str(ro, "signDisplay", "auto")),
+        .rounding_mode = nfStaticOptionName(str(ro, "roundingMode", "halfExpand")),
+        .rounding_priority = nfStaticOptionName(str(ro, "roundingPriority", "auto")),
+        .trailing_zero_display = nfStaticOptionName(str(ro, "trailingZeroDisplay", "auto")),
+    };
+    if (ro.getOwn("currency")) |v| {
+        if (v.isString()) data.currency = v.asStr();
+    }
+    if (ro.getOwn("unit")) |v| {
+        if (v.isString()) data.unit = v.asStr();
+    }
+
+    if (std.mem.eql(u8, data.style, "percent")) {
+        data.maximum_fraction_digits = 0;
+    } else if (std.mem.eql(u8, data.style, "currency")) {
+        const info = currencyInfo(data.currency orelse "USD");
+        if (std.mem.eql(u8, data.notation, "standard")) {
+            data.minimum_fraction_digits = @intCast(info.digits);
+            data.maximum_fraction_digits = @intCast(info.digits);
+        } else {
+            data.maximum_fraction_digits = if (std.mem.eql(u8, data.notation, "compact")) 0 else 3;
+        }
+    }
+    if (num(ro, "minimumIntegerDigits")) |n| data.minimum_integer_digits = @intFromFloat(n);
+    if (num(ro, "minimumFractionDigits")) |n| {
+        data.minimum_fraction_digits = @intFromFloat(n);
+        if (data.maximum_fraction_digits < data.minimum_fraction_digits) data.maximum_fraction_digits = data.minimum_fraction_digits;
+        data.fraction_digits_explicit = true;
+    }
+    if (num(ro, "maximumFractionDigits")) |n| {
+        data.maximum_fraction_digits = @intFromFloat(n);
+        if (data.maximum_fraction_digits < data.minimum_fraction_digits) data.minimum_fraction_digits = data.maximum_fraction_digits;
+        data.fraction_digits_explicit = true;
+    }
+    if (num(ro, "minimumSignificantDigits")) |n| data.minimum_significant_digits = @intFromFloat(n);
+    if (num(ro, "maximumSignificantDigits")) |n| {
+        const maximum: u8 = @intFromFloat(n);
+        data.maximum_significant_digits = @max(maximum, data.minimum_significant_digits orelse 1);
+    }
+    if (data.minimum_significant_digits != null and data.maximum_significant_digits == null) data.maximum_significant_digits = 21;
+    if (num(ro, "roundingIncrement")) |n| data.rounding_increment = @intFromFloat(n);
+
+    data.grouping = if (std.mem.eql(u8, data.notation, "compact")) .min2 else .auto;
+    if (ro.getOwn("useGrouping")) |grouping| {
+        if (grouping.isBoolean()) {
+            data.grouping = if (grouping.asBool()) .always else .off;
+        } else if (grouping.isString()) {
+            const name = grouping.asStr();
+            data.grouping = if (std.mem.eql(u8, name, "min2"))
+                .min2
+            else if (std.mem.eql(u8, name, "always"))
+                .always
+            else
+                .auto;
+        }
+    }
+
+    const option_ns: ?[]const u8 = if (ro.getOwn("numberingSystem")) |v| (if (v.isString()) v.asStr() else null) else null;
+    const extension_ns = localeUValue(locale, "nu");
+    const extension_supported = if (extension_ns) |name| numbering_systems.digits(name) != null else false;
+    const option_supported = if (option_ns) |name| numbering_systems.digits(name) != null else false;
+    data.numbering_system = if (option_supported) option_ns.? else if (extension_supported) extension_ns.? else "latn";
+    const keep_extension = extension_supported and std.mem.eql(u8, extension_ns.?, data.numbering_system);
+    const base = if (std.mem.indexOf(u8, locale, "-u-")) |index| locale[0..index] else locale;
+    data.resolved_locale = if (keep_extension)
+        try std.fmt.allocPrint(self.arena, "{s}-u-nu-{s}", .{ base, data.numbering_system })
+    else
+        base;
+    return data;
+}
+
+fn installNumberFormatData(self: *Interpreter, formatter: *value.Object, locale: []const u8, ro: *value.Object) EvalError!void {
+    const resolved = try nfResolvedData(self, locale, ro);
+    const allocator = try formatter.intlNumberFormatAllocator(self.arena);
+    const data = try allocator.create(value.IntlNumberFormatData);
+    var installed = false;
+    errdefer if (!installed) formatter.destroyUninstalledIntlNumberFormat(self.arena, data);
+    data.* = resolved;
+    data.owned_strings[0] = try allocator.dupe(u8, resolved.locale);
+    data.locale = data.owned_strings[0].?;
+    if (std.mem.eql(u8, resolved.resolved_locale, resolved.locale)) {
+        data.resolved_locale = data.locale;
+    } else {
+        data.owned_strings[1] = try allocator.dupe(u8, resolved.resolved_locale);
+        data.resolved_locale = data.owned_strings[1].?;
+    }
+    data.owned_strings[2] = try allocator.dupe(u8, resolved.numbering_system);
+    data.numbering_system = data.owned_strings[2].?;
+    if (resolved.currency) |currency| {
+        data.owned_strings[3] = try allocator.dupe(u8, currency);
+        data.currency = data.owned_strings[3].?;
+    }
+    if (resolved.unit) |unit| {
+        data.owned_strings[4] = try allocator.dupe(u8, unit);
+        data.unit = data.owned_strings[4].?;
+    }
+    try formatter.setIntlNumberFormatData(self.arena, data);
+    installed = true;
+}
+
+fn numberFormatDataFor(self: *Interpreter, formatter: *value.Object) EvalError!*value.IntlNumberFormatData {
+    if (formatter.intlNumberFormatData()) |data| return data;
+    const locale = if (formatter.getOwn("\x00locale")) |v| (if (v.isString()) v.asStr() else "en") else "en";
+    const ro = if (formatter.getOwn("\x00opts")) |v| (if (v.isObject()) v.asObj() else (try self.newObject()).asObj()) else (try self.newObject()).asObj();
+    try installNumberFormatData(self, formatter, locale, ro);
+    return formatter.intlNumberFormatData().?;
+}
+
 /// InitializePluralRules option reading, in spec order (localeMatcher, type,
 /// notation, compactDisplay, then SetNumberFormatDigitOptions). Validates and
 /// stores the normalized values; throwing getters propagate because every option
@@ -26207,8 +26346,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "NumberFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const ro = try nfProcessOptions(self, raw);
-                try self.setProp(o, "\x00opts", Value.obj(ro));
-                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+                try installNumberFormatData(self, o, resolved, ro);
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
                 // Validate style/numeric and store a normalized options bag.
                 const raw_arg = if (args.len > 1) args[1] else Value.undef();
@@ -27795,6 +27933,7 @@ fn nfCompactPattern(locale: []const u8, compact_display: []const u8, e: i32) NfC
 /// option wins, else the locale's `-u-nu-` extension, else "latn" — but only a
 /// system we have digit data for (unknown ones fall back to "latn").
 fn resolveNumberingSystem(this: Value) []const u8 {
+    if (this.asObj().intlNumberFormatData()) |data| return data.numbering_system;
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.asObj().getOwn("numberingSystem")) |ns| if (ns.isString()) {
         if (numbering_systems.digits(ns.asStr()) != null) return ns.asStr();
     };
@@ -27850,23 +27989,18 @@ fn nfParseExactDecimalString(s: []const u8) ?NfExactDecimal {
 /// CLDR symbols). Shared by `format` (joins the values) and `formatToParts`.
 fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(NfPart) {
     const input = if (args.len > 0) args[0] else Value.undef();
+    const data = try numberFormatDataFor(self, this.asObj());
     if (input.isObject() and input.asObj().is_bigint) {
-        const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
-        const ro = if (this.asObj().getOwn("\x00opts")) |ov| (if (ov.isObject()) ov.asObj() else (try self.newObject()).asObj()) else (try self.newObject()).asObj();
         var parts: std.ArrayListUnmanaged(NfPart) = .empty;
-        try parts.append(self.arena, .{ .typ = "literal", .value = try bigIntFormatWithOptions(self, input.asObj(), locale, ro) });
+        try parts.append(self.arena, .{ .typ = "literal", .value = try bigIntFormatWithResolved(self, input.asObj(), data) });
         return parts;
     }
     var n = try self.toNumberV(input);
 
-    // Resolve the fraction/integer-digit and style options (en-style algorithm,
-    // no CLDR): minimumIntegerDigits (1), minimumFractionDigits (0),
-    // maximumFractionDigits (3 decimal / 0 percent), style decimal|percent.
-    var min_int: usize = 1;
-    var min_frac: usize = 0;
-    var max_frac: usize = 3;
-    var is_percent = false;
-    var group_mode: []const u8 = "auto"; // off | min2 | auto | always
+    const min_int: usize = data.minimum_integer_digits;
+    const min_frac: usize = data.minimum_fraction_digits;
+    const max_frac: usize = data.maximum_fraction_digits;
+    const is_percent = std.mem.eql(u8, data.style, "percent");
     var cur_prefix: []const u8 = ""; // currency symbol/code prefix (en places before)
     var cur_suffix: []const u8 = "";
     var cur_name_code: []const u8 = ""; // ISO code for currencyDisplay:"name" (resolved to a plural long name after the fraction is known)
@@ -27877,130 +28011,66 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     var compact_suffix: []const u8 = ""; // compact scale suffix ("K"/" million"…)
     var compact_sep: []const u8 = "";
     var unit_space = true; // narrow unitDisplay drops the space
-    var sign_display: []const u8 = "auto";
-    var accounting = false;
-    var min_sig: ?usize = null;
-    var max_sig: ?usize = null;
-    var frac_set = false;
-    var rounding_mode: []const u8 = "halfExpand";
-    var rounding_priority: []const u8 = "auto";
-    var rounding_increment: u64 = 1;
-    var notation: []const u8 = "standard";
-    var compact_display: []const u8 = "short";
-    var strip_if_integer = false;
-    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        const o = ov;
-        const tzv = try self.getProperty(o, "trailingZeroDisplay");
-        if (tzv.isString() and std.mem.eql(u8, tzv.asStr(), "stripIfInteger")) strip_if_integer = true;
-        const nv = try self.getProperty(o, "notation");
-        if (nv.isString()) notation = nv.asStr();
-        const cdv = try self.getProperty(o, "compactDisplay");
-        if (cdv.isString()) compact_display = cdv.asStr();
-        const sd = try self.getProperty(o, "signDisplay");
-        if (sd.isString()) sign_display = sd.asStr();
-        const rmv = try self.getProperty(o, "roundingMode");
-        if (rmv.isString()) rounding_mode = rmv.asStr();
-        const rpv = try self.getProperty(o, "roundingPriority");
-        if (rpv.isString()) rounding_priority = rpv.asStr();
-        const riv = try self.getProperty(o, "roundingIncrement");
-        if (!riv.isUndefined()) rounding_increment = @intFromFloat(@trunc(try self.toNumberV(riv)));
-        const msd = try self.getProperty(o, "minimumSignificantDigits");
-        if (!msd.isUndefined()) min_sig = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(msd)))));
-        const xsd = try self.getProperty(o, "maximumSignificantDigits");
-        if (!xsd.isUndefined()) {
-            const xs: usize = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(xsd)))));
-            max_sig = @max(xs, min_sig orelse 1);
+    const sign_display = data.sign_display;
+    const accounting = std.mem.eql(u8, data.currency_sign, "accounting");
+    const min_sig: ?usize = if (data.minimum_significant_digits) |digits| digits else null;
+    const max_sig: ?usize = if (data.maximum_significant_digits) |digits| digits else null;
+    const frac_set = data.fraction_digits_explicit;
+    const rounding_mode = data.rounding_mode;
+    const rounding_priority = data.rounding_priority;
+    const rounding_increment: u64 = data.rounding_increment;
+    const notation = data.notation;
+    const compact_display = data.compact_display;
+    const strip_if_integer = std.mem.eql(u8, data.trailing_zero_display, "stripIfInteger");
+    const locale = data.locale;
+    if (std.mem.eql(u8, data.style, "currency")) {
+        const code = data.currency orelse "USD";
+        const info = currencyInfo(code);
+        const ds = data.currency_display;
+        if (std.mem.eql(u8, ds, "code")) {
+            // "USD 1.00"
+            cur_prefix = try std.fmt.allocPrint(self.arena, "{s}\u{00a0}", .{code});
+        } else if (std.mem.eql(u8, ds, "name")) {
+            // Resolved to a plural long name ("US dollar"/"US dollars") once
+            // the fraction count (hence the plural category) is known.
+            cur_name_code = code;
+        } else {
+            // symbol display: placement (before/after the number) and the
+            // exact symbol are decided once we know the locale (see below).
+            cur_symbol = info.symbol;
+            cur_code = code;
         }
-        if (min_sig != null and max_sig == null) max_sig = 21;
-        const csgn = try self.getProperty(o, "currencySign");
-        if (csgn.isString() and std.mem.eql(u8, csgn.asStr(), "accounting")) accounting = true;
-        const sv = try self.getProperty(o, "style");
-        if (sv.isString() and std.mem.eql(u8, sv.asStr(), "percent")) {
-            is_percent = true;
-            max_frac = 0;
-        } else if (sv.isString() and std.mem.eql(u8, sv.asStr(), "currency")) {
-            const cv = try self.getProperty(o, "currency");
-            const code = if (cv.isString()) try std.ascii.allocUpperString(self.arena, cv.asStr()) else "USD";
-            const info = currencyInfo(code);
-            if (std.mem.eql(u8, notation, "standard")) {
-                min_frac = info.digits;
-                max_frac = info.digits;
-            } else {
-                min_frac = 0;
-                max_frac = if (std.mem.eql(u8, notation, "compact")) 0 else 3;
-            }
-            const disp = try self.getProperty(o, "currencyDisplay");
-            const ds: []const u8 = if (disp.isString()) disp.asStr() else "symbol";
-            if (std.mem.eql(u8, ds, "code")) {
-                // "USD 1.00"
-                cur_prefix = try std.fmt.allocPrint(self.arena, "{s}\u{00a0}", .{code});
-            } else if (std.mem.eql(u8, ds, "name")) {
-                // Resolved to a plural long name ("US dollar"/"US dollars") once
-                // the fraction count (hence the plural category) is known.
-                cur_name_code = code;
-            } else {
-                // symbol display: placement (before/after the number) and the
-                // exact symbol are decided once we know the locale (see below).
-                cur_symbol = info.symbol;
-                cur_code = code;
-            }
-        } else if (sv.isString() and std.mem.eql(u8, sv.asStr(), "unit")) {
-            const uv = try self.getProperty(o, "unit");
-            const unit = if (uv.isString()) uv.asStr() else "";
-            const udv = try self.getProperty(o, "unitDisplay");
-            const ud: []const u8 = if (udv.isString()) udv.asStr() else "short";
-            const unit_locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
-            const unit_lang = parseTriple(unit_locale).l;
-            const unit_long = std.mem.eql(u8, ud, "long");
-            if (std.mem.eql(u8, unit, "kilometer-per-hour") and unit_long) {
-                if (std.ascii.eqlIgnoreCase(unit_lang, "ja")) unit_prefix = "\u{6642}\u{901f}";
-                if (std.ascii.eqlIgnoreCase(unit_lang, "ko")) unit_prefix = "\u{c2dc}\u{c18d}";
-                if (std.ascii.eqlIgnoreCase(unit_lang, "zh")) unit_prefix = "\u{6bcf}\u{5c0f}\u{6642}";
-            }
-            // en cardinal plural: singular only for an exact magnitude of 1.
-            const plural = !(@abs(n) == 1.0);
-            if (std.ascii.eqlIgnoreCase(unit_lang, "en") and unit_prefix.len == 0) {
-                if (try numberFormatUnitNameEn(self, unit, ud, plural)) |suf| {
-                    unit_suffix = suf; // spacing is baked into the CLDR pattern
-                    unit_space = false;
-                }
-            }
-            if (unit_suffix.len == 0) {
-                unit_space = !std.mem.eql(u8, unit, "percent") and
-                    if (std.ascii.eqlIgnoreCase(unit_lang, "ko"))
-                        false
-                    else if (std.ascii.eqlIgnoreCase(unit_lang, "de"))
-                        true
-                    else
-                        !std.mem.eql(u8, ud, "narrow");
-                unit_suffix = try numberFormatUnitName(self, unit_locale, unit, ud, plural);
+    } else if (std.mem.eql(u8, data.style, "unit")) {
+        const unit = data.unit orelse "";
+        const ud = data.unit_display;
+        const unit_locale = data.locale;
+        const unit_lang = parseTriple(unit_locale).l;
+        const unit_long = std.mem.eql(u8, ud, "long");
+        if (std.mem.eql(u8, unit, "kilometer-per-hour") and unit_long) {
+            if (std.ascii.eqlIgnoreCase(unit_lang, "ja")) unit_prefix = "\u{6642}\u{901f}";
+            if (std.ascii.eqlIgnoreCase(unit_lang, "ko")) unit_prefix = "\u{c2dc}\u{c18d}";
+            if (std.ascii.eqlIgnoreCase(unit_lang, "zh")) unit_prefix = "\u{6bcf}\u{5c0f}\u{6642}";
+        }
+        // en cardinal plural: singular only for an exact magnitude of 1.
+        const plural = !(@abs(n) == 1.0);
+        if (std.ascii.eqlIgnoreCase(unit_lang, "en") and unit_prefix.len == 0) {
+            if (try numberFormatUnitNameEn(self, unit, ud, plural)) |suf| {
+                unit_suffix = suf; // spacing is baked into the CLDR pattern
+                unit_space = false;
             }
         }
-        const mi = try self.getProperty(o, "minimumIntegerDigits");
-        if (!mi.isUndefined()) min_int = @intFromFloat(@max(1, @min(21, @trunc(try self.toNumberV(mi)))));
-        const mnf = try self.getProperty(o, "minimumFractionDigits");
-        const mxf = try self.getProperty(o, "maximumFractionDigits");
-        if (!mnf.isUndefined()) {
-            min_frac = @intFromFloat(@max(0, @min(100, @trunc(try self.toNumberV(mnf)))));
-            if (max_frac < min_frac) max_frac = min_frac;
-            frac_set = true;
+        if (unit_suffix.len == 0) {
+            unit_space = !std.mem.eql(u8, unit, "percent") and
+                if (std.ascii.eqlIgnoreCase(unit_lang, "ko"))
+                    false
+                else if (std.ascii.eqlIgnoreCase(unit_lang, "de"))
+                    true
+                else
+                    !std.mem.eql(u8, ud, "narrow");
+            unit_suffix = try numberFormatUnitName(self, unit_locale, unit, ud, plural);
         }
-        if (!mxf.isUndefined()) {
-            max_frac = @intFromFloat(@max(0, @min(100, @trunc(try self.toNumberV(mxf)))));
-            if (max_frac < min_frac) min_frac = max_frac;
-            frac_set = true;
-        }
-        // useGrouping default is "min2" for compact notation, else "auto".
-        if (std.mem.eql(u8, notation, "compact")) group_mode = "min2";
-        const ug = try self.getProperty(o, "useGrouping");
-        if (ug.isBoolean()) {
-            group_mode = if (ug.asBool()) "always" else "off";
-        } else if (ug.isString()) {
-            group_mode = if (std.mem.eql(u8, ug.asStr(), "false")) "off" else ug.asStr();
-        }
-    };
+    }
 
-    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     const exact_decimal = if (input.isString() and rounding_increment == 1 and !is_percent and unit_suffix.len == 0 and cur_prefix.len == 0 and cur_suffix.len == 0 and cur_name_code.len == 0 and cur_symbol.len == 0 and std.mem.eql(u8, notation, "standard") and min_sig == null and max_sig == null)
         nfParseExactDecimalString(input.asStr())
     else
@@ -28142,9 +28212,9 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         // (scientific/engineering notation never groups the mantissa).
         // "min2" suppresses grouping until the integer part reaches 5 digits
         // (minimumGroupingDigits = 2, group size 3); "off" never groups.
-        const group_ok = !sci and (if (std.mem.eql(u8, group_mode, "off"))
+        const group_ok = !sci and (if (data.grouping == .off)
             false
-        else if (std.mem.eql(u8, group_mode, "min2"))
+        else if (data.grouping == .min2)
             digits.len >= 5
         else
             true);
@@ -28225,7 +28295,7 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     if (acct and show_neg) try push(self, &parts, "literal", ")");
     // Translate the numeric parts to the resolved numbering system (latn = ASCII,
     // no change).
-    const nu = resolveNumberingSystem(this);
+    const nu = data.numbering_system;
     if (!std.mem.eql(u8, nu, "latn")) {
         if (numbering_systems.digits(nu)) |ds| {
             for (parts.items) |*p| {
@@ -30070,128 +30140,49 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             // service. `numberingSystem` belongs to the number/date/plural
             // services, not Collator/ListFormat.
             if (comptime std.mem.eql(u8, service, "NumberFormat")) {
-                // Reflect the explicitly-provided options over the spec defaults
-                // (en-style; the basic/default case keeps the defaults).
-                var style: []const u8 = "decimal";
-                var min_int: f64 = 1;
-                var min_frac: f64 = 0;
-                var max_frac: f64 = 3;
-                var grouping: Value = Value.str("auto");
-                var sign_display: []const u8 = "auto";
-                var currency: ?[]const u8 = null;
-                var currency_display: []const u8 = "symbol";
-                var notation: []const u8 = "standard";
-                var compact_display: []const u8 = "short";
-                var rounding_mode: []const u8 = "halfExpand";
-                var rounding_priority: []const u8 = "auto";
-                var trailing_zero: []const u8 = "auto";
-                var rounding_increment: f64 = 1;
-                // Reflect the resolved numbering system (option/-u-nu-/latn,
-                // limited to systems we actually support).
-                const numbering_system: []const u8 = resolveNumberingSystem(this);
-                if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                    const nv = try self.getProperty(ov, "notation");
-                    if (nv.isString()) notation = nv.asStr();
-                    const cdv = try self.getProperty(ov, "compactDisplay");
-                    if (cdv.isString()) compact_display = cdv.asStr();
-                    const rmv = try self.getProperty(ov, "roundingMode");
-                    if (rmv.isString()) rounding_mode = rmv.asStr();
-                    const rpv = try self.getProperty(ov, "roundingPriority");
-                    if (rpv.isString()) rounding_priority = rpv.asStr();
-                    const tzv = try self.getProperty(ov, "trailingZeroDisplay");
-                    if (tzv.isString()) trailing_zero = tzv.asStr();
-                    const riv = try self.getProperty(ov, "roundingIncrement");
-                    if (!riv.isUndefined()) rounding_increment = @trunc(try self.toNumberV(riv));
-                    const sv = try self.getProperty(ov, "style");
-                    if (sv.isString()) {
-                        style = sv.asStr();
-                        if (std.mem.eql(u8, style, "percent")) max_frac = 0;
-                        if (std.mem.eql(u8, style, "currency")) {
-                            const cv = try self.getProperty(ov, "currency");
-                            currency = if (cv.isString()) try std.ascii.allocUpperString(self.arena, cv.asStr()) else "USD";
-                            const cd = try self.getProperty(ov, "currencyDisplay");
-                            if (cd.isString()) currency_display = cd.asStr();
-                            if (std.mem.eql(u8, notation, "standard")) {
-                                const dig: f64 = @floatFromInt(currencyInfo(currency.?).digits);
-                                min_frac = dig;
-                                max_frac = dig;
-                            } else {
-                                min_frac = 0;
-                                max_frac = if (std.mem.eql(u8, notation, "compact")) 0 else 3;
-                            }
-                        }
-                    }
-                    const mi = try self.getProperty(ov, "minimumIntegerDigits");
-                    if (!mi.isUndefined()) min_int = @max(1, @min(21, @trunc(try self.toNumberV(mi))));
-                    const mnf = try self.getProperty(ov, "minimumFractionDigits");
-                    if (!mnf.isUndefined()) {
-                        min_frac = @max(0, @min(100, @trunc(try self.toNumberV(mnf))));
-                        if (max_frac < min_frac) max_frac = min_frac;
-                    }
-                    const mxf = try self.getProperty(ov, "maximumFractionDigits");
-                    if (!mxf.isUndefined()) {
-                        max_frac = @max(0, @min(100, @trunc(try self.toNumberV(mxf))));
-                        if (max_frac < min_frac) min_frac = max_frac;
-                    }
-                    const ug = try self.getProperty(ov, "useGrouping");
-                    if (ug.isBoolean()) {
-                        grouping = Value.boolVal(ug.asBool());
-                    } else if (ug.isString()) {
-                        grouping = try Value.strAlloc(self.arena, try ug.asWtf8(self.arena));
-                    } else if (std.mem.eql(u8, notation, "compact")) {
-                        grouping = Value.str("min2"); // compact default
-                    }
-                    const sd = try self.getProperty(ov, "signDisplay");
-                    if (sd.isString()) sign_display = sd.asStr();
-                };
-                _ = numbering_system;
-                // Resolve locale + numberingSystem from option and -u-nu- (the
-                // reported values; formatting output stays option-only above).
-                const nf_ns: ?[]const u8 = if (this.asObj().getOwn("\x00opts")) |ov| (if (ov.isObject()) (if (ov.asObj().getOwn("numberingSystem")) |n| (if (n.isString()) n.asStr() else null) else null) else null) else null;
-                try intlResolveNumbering(self, o, loc.asStr(), nf_ns);
-                try self.setProp(o, "style", try Value.strAlloc(self.arena, style));
-                if (currency) |c| {
+                const data = try numberFormatDataFor(self, this.asObj());
+                try self.setProp(o, "locale", try Value.strAlloc(self.arena, data.resolved_locale));
+                try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
+                try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style));
+                if (data.currency) |c| {
                     try self.setProp(o, "currency", try Value.strAlloc(self.arena, c));
-                    try self.setProp(o, "currencyDisplay", try Value.strAlloc(self.arena, currency_display));
-                    try self.setProp(o, "currencySign", Value.str("standard"));
+                    try self.setProp(o, "currencyDisplay", try Value.strAlloc(self.arena, data.currency_display));
+                    try self.setProp(o, "currencySign", try Value.strAlloc(self.arena, data.currency_sign));
                 }
-                if (std.mem.eql(u8, style, "unit")) {
-                    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                        if (ov.asObj().getOwn("unit")) |u| try self.setProp(o, "unit", u);
-                        try self.setProp(o, "unitDisplay", ov.asObj().getOwn("unitDisplay") orelse Value.str("short"));
-                    };
+                if (data.unit) |unit| {
+                    try self.setProp(o, "unit", try Value.strAlloc(self.arena, unit));
+                    try self.setProp(o, "unitDisplay", try Value.strAlloc(self.arena, data.unit_display));
                 }
-                try self.setProp(o, "minimumIntegerDigits", Value.num(min_int));
+                try self.setProp(o, "minimumIntegerDigits", Value.num(@floatFromInt(data.minimum_integer_digits)));
                 // Significant-digits resolution: with the default ("auto") rounding
                 // priority a set of significant digits replaces the fraction
                 // digits; morePrecision/lessPrecision reports both.
-                const nfopts = this.asObj().getOwn("\x00opts");
-                const sig_get = struct {
-                    fn s(src: ?Value, k: []const u8) ?f64 {
-                        if (src) |v| if (v.isObject()) if (v.asObj().getOwn(k)) |x| if (x.isNumber()) return x.asNum();
-                        return null;
-                    }
-                }.s;
-                const min_sig = sig_get(nfopts, "minimumSignificantDigits");
-                const max_sig = sig_get(nfopts, "maximumSignificantDigits");
+                const min_sig = data.minimum_significant_digits;
+                const max_sig = data.maximum_significant_digits;
                 const has_sig = min_sig != null or max_sig != null;
-                const both = !std.mem.eql(u8, rounding_priority, "auto");
+                const both = !std.mem.eql(u8, data.rounding_priority, "auto");
                 if (!has_sig or both) {
-                    try self.setProp(o, "minimumFractionDigits", Value.num(min_frac));
-                    try self.setProp(o, "maximumFractionDigits", Value.num(max_frac));
+                    try self.setProp(o, "minimumFractionDigits", Value.num(@floatFromInt(data.minimum_fraction_digits)));
+                    try self.setProp(o, "maximumFractionDigits", Value.num(@floatFromInt(data.maximum_fraction_digits)));
                 }
                 if (has_sig) {
-                    try self.setProp(o, "minimumSignificantDigits", Value.num(min_sig orelse 1));
-                    try self.setProp(o, "maximumSignificantDigits", Value.num(max_sig orelse 21));
+                    try self.setProp(o, "minimumSignificantDigits", Value.num(@floatFromInt(min_sig orelse 1)));
+                    try self.setProp(o, "maximumSignificantDigits", Value.num(@floatFromInt(max_sig orelse 21)));
                 }
+                const grouping = switch (data.grouping) {
+                    .off => Value.boolVal(false),
+                    .min2 => Value.str("min2"),
+                    .auto => Value.str("auto"),
+                    .always => Value.str("always"),
+                };
                 try self.setProp(o, "useGrouping", grouping);
-                try self.setProp(o, "notation", try Value.strAlloc(self.arena, notation));
-                if (std.mem.eql(u8, notation, "compact")) try self.setProp(o, "compactDisplay", try Value.strAlloc(self.arena, compact_display));
-                try self.setProp(o, "signDisplay", try Value.strAlloc(self.arena, sign_display));
-                try self.setProp(o, "roundingIncrement", Value.num(rounding_increment));
-                try self.setProp(o, "roundingMode", try Value.strAlloc(self.arena, rounding_mode));
-                try self.setProp(o, "roundingPriority", try Value.strAlloc(self.arena, rounding_priority));
-                try self.setProp(o, "trailingZeroDisplay", try Value.strAlloc(self.arena, trailing_zero));
+                try self.setProp(o, "notation", try Value.strAlloc(self.arena, data.notation));
+                if (std.mem.eql(u8, data.notation, "compact")) try self.setProp(o, "compactDisplay", try Value.strAlloc(self.arena, data.compact_display));
+                try self.setProp(o, "signDisplay", try Value.strAlloc(self.arena, data.sign_display));
+                try self.setProp(o, "roundingIncrement", Value.num(@floatFromInt(data.rounding_increment)));
+                try self.setProp(o, "roundingMode", try Value.strAlloc(self.arena, data.rounding_mode));
+                try self.setProp(o, "roundingPriority", try Value.strAlloc(self.arena, data.rounding_priority));
+                try self.setProp(o, "trailingZeroDisplay", try Value.strAlloc(self.arena, data.trailing_zero_display));
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 // Reflect the normalized options over the spec defaults, in the
                 // resolvedOptions field order.
@@ -50311,6 +50302,61 @@ test "Intl locale-list canonicalization and index publication are OOM-safe" {
     const previous_heap = gc_mod.setActiveHeap(null);
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.NumberFormat resolved-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{
+                .arena = allocator,
+                .env = undefined,
+                .root_shape = root_shape,
+            };
+            var formatter = value.Object{};
+            var options = value.Object{};
+            try options.setOwn(allocator, root_shape, "style", Value.str("currency"));
+            try options.setOwn(allocator, root_shape, "currency", Value.str("INR"));
+            try options.setOwn(allocator, root_shape, "notation", Value.str("compact"));
+            try options.setOwn(allocator, root_shape, "minimumSignificantDigits", Value.num(3));
+            try options.setOwn(allocator, root_shape, "maximumSignificantDigits", Value.num(5));
+            try options.setOwn(allocator, root_shape, "numberingSystem", Value.str("deva"));
+
+            try installNumberFormatData(&machine, &formatter, "hi-IN-u-nu-deva", &options);
+            const data = formatter.intlNumberFormatData().?;
+            try std.testing.expectEqualStrings("hi-IN-u-nu-deva", data.resolved_locale);
+            try std.testing.expectEqualStrings("deva", data.numbering_system);
+            try std.testing.expectEqual(@as(?u8, 3), data.minimum_significant_digits);
+            try std.testing.expectEqual(@as(?u8, 5), data.maximum_significant_digits);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.NumberFormat and BigInt locale formatting share resolved state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var cases = [
+        \\  { style: "currency", currency: "EUR", currencyDisplay: "symbol" },
+        \\  { style: "percent", minimumFractionDigits: 2 },
+        \\  { maximumSignificantDigits: 3 },
+        \\  { minimumFractionDigits: 4, useGrouping: false }
+        \\];
+        \\var values = [0n, 1234n, -987654n];
+        \\var same = true;
+        \\for (var i = 0; i < cases.length; i++) {
+        \\  var formatter = new Intl.NumberFormat("de-DE", cases[i]);
+        \\  for (var j = 0; j < values.length; j++)
+        \\    same = same && values[j].toLocaleString("de-DE", cases[i]) === formatter.format(values[j]);
+        \\}
+        \\same
+    )).asBool());
 }
 
 test "Intl remaining conformance edge cases" {

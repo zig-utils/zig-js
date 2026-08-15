@@ -178,6 +178,7 @@ inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
         flags.typed_array or
         flags.data_view or
         flags.temporal or
+        flags.intl_number_format or
         flags.arg_map_names or
         flags.arg_map_severed;
 }
@@ -382,6 +383,7 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
         .date,
         .weak_ref,
         .host_callback,
+        .intl_number_format,
         .temporal,
         .sparse_array,
         .regex,
@@ -882,6 +884,7 @@ pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
         .async_context_frame,
         .proxy,
         .buffer_view,
+        .intl_number_format,
         .temporal,
         .promise,
         .constructor,
@@ -1355,6 +1358,14 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         if (o.temporalData()) |t| {
             a.destroy(t);
             o.clearTemporalData();
+        }
+        released += 1;
+    }
+    if (flags.intl_number_format) {
+        if (o.intlNumberFormatData()) |data| {
+            data.deinit(a);
+            a.destroy(data);
+            o.clearIntlNumberFormatData();
         }
         released += 1;
     }

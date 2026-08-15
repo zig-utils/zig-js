@@ -1056,6 +1056,43 @@ pub const TemporalData = struct {
     calendar: []const u8 = "iso8601",
 };
 
+/// Fully resolved, immutable Intl.NumberFormat state. User option getters and
+/// coercions run before this record is published; steady formatting can then
+/// read native fields without re-entering ordinary JavaScript property lookup.
+pub const IntlNumberFormatData = struct {
+    pub const Grouping = enum(u8) { off, min2, auto, always };
+
+    locale: []const u8 = "en",
+    resolved_locale: []const u8 = "en",
+    numbering_system: []const u8 = "latn",
+    style: []const u8 = "decimal",
+    currency: ?[]const u8 = null,
+    currency_display: []const u8 = "symbol",
+    currency_sign: []const u8 = "standard",
+    unit: ?[]const u8 = null,
+    unit_display: []const u8 = "short",
+    notation: []const u8 = "standard",
+    compact_display: []const u8 = "short",
+    sign_display: []const u8 = "auto",
+    rounding_mode: []const u8 = "halfExpand",
+    rounding_priority: []const u8 = "auto",
+    trailing_zero_display: []const u8 = "auto",
+    minimum_integer_digits: u8 = 1,
+    minimum_fraction_digits: u8 = 0,
+    maximum_fraction_digits: u8 = 3,
+    minimum_significant_digits: ?u8 = null,
+    maximum_significant_digits: ?u8 = null,
+    rounding_increment: u16 = 1,
+    grouping: Grouping = .auto,
+    fraction_digits_explicit: bool = false,
+    owned_strings: [5]?[]u8 = .{ null, null, null, null, null },
+
+    pub fn deinit(self: *IntlNumberFormatData, allocator: std.mem.Allocator) void {
+        for (self.owned_strings) |bytes| if (bytes) |owned| allocator.free(owned);
+        self.owned_strings = .{ null, null, null, null, null };
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1189,6 +1226,7 @@ pub const ObjectRareTag = enum(u8) {
     async_context_frame,
     proxy,
     buffer_view,
+    intl_number_format,
     temporal,
     promise,
     constructor,
@@ -1286,6 +1324,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         typed_array: ?*TypedArrayData = null,
         data_view: ?*DataViewData = null,
     },
+    intl_number_format: struct { ptr: ?*IntlNumberFormatData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -1522,6 +1561,7 @@ pub const ObjectBackingFlags = packed struct {
     typed_array: bool = false,
     data_view: bool = false,
     temporal: bool = false,
+    intl_number_format: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -2738,6 +2778,22 @@ pub const Object = struct {
         return cold.rare.temporal.ptr;
     }
 
+    pub inline fn intlNumberFormatData(self: *const Object) ?*IntlNumberFormatData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_number_format)) return null;
+        return cold.rare.intl_number_format.ptr;
+    }
+
+    pub fn setIntlNumberFormatData(self: *Object, fallback: std.mem.Allocator, data: *IntlNumberFormatData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_number_format, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlNumberFormatData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_number_format)) cold.rare.intl_number_format.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3059,6 +3115,17 @@ pub const Object = struct {
 
     pub fn temporalAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
         return self.ensureBackingFor(fallback, "temporal");
+    }
+
+    pub fn intlNumberFormatAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_number_format");
+    }
+
+    pub fn destroyUninstalledIntlNumberFormat(self: *Object, fallback: std.mem.Allocator, data: *IntlNumberFormatData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_number_format");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {

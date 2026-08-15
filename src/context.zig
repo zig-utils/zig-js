@@ -12793,6 +12793,100 @@ test "parallel_js: Intl locale-list indexes stay invocation local" {
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl.NumberFormat resolved state is reclaimed under a bounded precise heap" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var numberFormatChecksum = 0;
+        \\for (var round = 0; round < 64; round++) {
+        \\  for (var i = 0; i < 8; i++) {
+        \\    var formatter = new Intl.NumberFormat("hi-IN-u-nu-deva", {
+        \\      style: "currency", currency: "INR", currencyDisplay: "name",
+        \\      notation: "compact", minimumSignificantDigits: 3,
+        \\      maximumSignificantDigits: 5, useGrouping: "min2", signDisplay: "exceptZero"
+        \\    });
+        \\    var options = formatter.resolvedOptions();
+        \\    numberFormatChecksum += formatter.format(round * 8 + i).length +
+        \\      options.locale.length + options.numberingSystem.length;
+        \\  }
+        \\  gc();
+        \\}
+        \\gc();
+        \\numberFormatChecksum > 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "moving nursery preserves Intl.NumberFormat native resolved state" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.__movingNumberFormat = new Intl.NumberFormat("hi-IN-u-nu-deva", {
+        \\  style: "currency", currency: "INR", currencyDisplay: "name",
+        \\  notation: "compact", compactDisplay: "long",
+        \\  minimumSignificantDigits: 3, maximumSignificantDigits: 5,
+        \\  useGrouping: "min2", signDisplay: "exceptZero"
+        \\});
+        \\globalThis.__movingNumberFormatBefore = __movingNumberFormat.format(123456.75);
+        \\globalThis.__movingNumberOptionsBefore = JSON.stringify(__movingNumberFormat.resolvedOptions());
+    );
+    const before = ctx.global_object.getOwn("__movingNumberFormat").?.asObj();
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("__movingNumberFormat").?.asObj();
+    try std.testing.expect(before != after);
+    try std.testing.expect((try ctx.evaluate(
+        \\__movingNumberFormat.format(123456.75) === __movingNumberFormatBefore &&
+        \\JSON.stringify(__movingNumberFormat.resolvedOptions()) === __movingNumberOptionsBefore &&
+        \\__movingNumberFormat.resolvedOptions().numberingSystem === "deva"
+    )).asBool());
+}
+
+test "parallel_js: Intl.NumberFormat resolved state is read-only after publication" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var sharedNumberFormat = new Intl.NumberFormat("de-DE", {
+        \\  minimumFractionDigits: 2, maximumFractionDigits: 2
+        \\});
+        \\function numberFormatLane(lane) {
+        \\  var checksum = 0;
+        \\  for (var i = 0; i < 512; i++) {
+        \\    var output = sharedNumberFormat.format(1000 + i + lane / 10);
+        \\    checksum += output.length + output.charCodeAt(0);
+        \\  }
+        \\  var options = sharedNumberFormat.resolvedOptions();
+        \\  return checksum > 0 && options.locale === "de-DE" &&
+        \\    options.minimumFractionDigits === 2 && options.maximumFractionDigits === 2 ? 1 : 0;
+        \\}
+        \\var numberFormatThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) numberFormatThreads.push(new Thread(numberFormatLane, lane));
+        \\var numberFormatTotal = 0;
+        \\for (var index = 0; index < numberFormatThreads.length; index++) numberFormatTotal += numberFormatThreads[index].join();
+        \\numberFormatTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "Function constructor builds callable functions from source" {
     // Params + body, called and constructed.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).asNum());
