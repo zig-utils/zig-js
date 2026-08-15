@@ -769,12 +769,15 @@ fn parseOnce(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var measured = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    var scratch_measured = std.testing.FailingAllocator.init(allocator, .{});
     defer if (observation) |value| {
-        value.requests += measured.allocations + measured.resize_index;
-        value.allocated_bytes += measured.allocated_bytes;
+        value.requests += measured.allocations + measured.resize_index +
+            scratch_measured.allocations + scratch_measured.resize_index;
+        value.allocated_bytes += measured.allocated_bytes + scratch_measured.allocated_bytes;
     };
     const parser_allocator = if (observation != null) measured.allocator() else arena.allocator();
-    var parser = try js.Parser.init(parser_allocator, source);
+    const scratch_allocator = if (observation != null) scratch_measured.allocator() else allocator;
+    var parser = try js.Parser.initWithScratch(parser_allocator, scratch_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
     if (isNestedArrowArgumentsWorkload(workload))
         return validateNestedArrowArgumentsProgram(program, source, try workloadWidth(workload));
