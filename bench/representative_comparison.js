@@ -1351,6 +1351,62 @@ function representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, kind) {
   return total;
 }
 
+var representativeIntlNumberingSystemCldrFormatters = [
+  new Intl.NumberFormat("ar"),
+  new Intl.NumberFormat("ar-EG"),
+  new Intl.NumberFormat("ar-TN"),
+  new Intl.NumberFormat("fa-IR"),
+  new Intl.NumberFormat("hi-IN"),
+  new Intl.NumberFormat("th-TH"),
+  new Intl.NumberFormat("en-US-u-nu-arab"),
+  new Intl.NumberFormat("en-US-u-nu-deva"),
+  new Intl.NumberFormat("ar-EG-u-nu-latn"),
+  new Intl.NumberFormat("fa-IR-u-nu-latn"),
+  new Intl.NumberFormat("hi-IN-u-nu-deva"),
+  new Intl.NumberFormat("th-TH-u-nu-thai"),
+  new Intl.NumberFormat("ar-EG-u-nu-arab", { numberingSystem: "latn" }),
+  new Intl.NumberFormat("en-US-u-nu-latn", { numberingSystem: "arab" }),
+  new Intl.NumberFormat("fa-IR-u-nu-arabext", { numberingSystem: "latn" }),
+  new Intl.NumberFormat("hi-IN-u-nu-latn", { numberingSystem: "deva" })
+];
+var representativeIntlNumberingSystemCldrValues = [
+  1234.5, 1234.5, 1234.5, 1234.5, 1234.5, 1234.5, 1234.5, 1234.5,
+  12345678901234567890n, 12345678901234567890n, 12345678901234567890n, 12345678901234567890n,
+  -1234.5, -1234.5, -1234.5, -1234.5
+];
+var representativeIntlNumberingSystemCldrEnds = [
+  2345.6, 2345.6, 2345.6, 2345.6, 2345.6, 2345.6, 2345.6, 2345.6,
+  22345678901234567890n, 22345678901234567890n, 22345678901234567890n, 22345678901234567890n,
+  1234.5, 1234.5, 1234.5, 1234.5
+];
+
+function representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var index = (job + i + lane) & 15;
+      var formatter = representativeIntlNumberingSystemCldrFormatters[index];
+      if (kind === "text") {
+        var output = formatter.format(representativeIntlNumberingSystemCldrValues[index]);
+        total = total + output.length + output.charCodeAt(0) + output.charCodeAt(output.length - 1);
+      } else if (kind === "parts") {
+        var parts = formatter.formatToParts(representativeIntlNumberingSystemCldrValues[index]);
+        total = total + parts.length;
+        for (var part = 0; part < parts.length; part = part + 1)
+          total = total + parts[part].type.length + parts[part].value.length + parts[part].value.charCodeAt(0);
+      } else if (kind === "range") {
+        var range = formatter.formatRange(representativeIntlNumberingSystemCldrValues[index], representativeIntlNumberingSystemCldrEnds[index]);
+        total = total + range.length + range.charCodeAt(0) + range.charCodeAt(range.length - 1);
+      } else {
+        var options = formatter.resolvedOptions();
+        total = total + options.locale.length + options.numberingSystem.length +
+          options.numberingSystem.charCodeAt(0) + options.numberingSystem.charCodeAt(options.numberingSystem.length - 1);
+      }
+    }
+  }
+  return total;
+}
+
 function representativeLongLivedGraph(jobs, lane, variant) {
   var nodes = [];
   var total = 0;
@@ -1627,6 +1683,10 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_currency_name_cldr_parts") return function (jobs, lane) { return representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, "parts"); };
   if (name === "representative_intl_number_format_currency_name_cldr_range") return function (jobs, lane) { return representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, "range"); };
   if (name === "representative_intl_number_format_currency_name_cldr_range_parts") return function (jobs, lane) { return representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, "rangeParts"); };
+  if (name === "representative_intl_number_format_numbering_system_cldr_text") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "text"); };
+  if (name === "representative_intl_number_format_numbering_system_cldr_parts") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "parts"); };
+  if (name === "representative_intl_number_format_numbering_system_cldr_range") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "range"); };
+  if (name === "representative_intl_number_format_numbering_system_cldr_resolved") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "resolved"); };
   if (name === "representative_long_lived_graph") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 0); };
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
