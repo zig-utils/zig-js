@@ -19905,70 +19905,6 @@ fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     return self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), true);
 }
 
-fn bigIntRoundSignificant(self: *Interpreter, digits_in: []const u8, max_sig: usize) EvalError![]const u8 {
-    if (max_sig == 0 or digits_in.len <= max_sig) return digits_in;
-    var kept = try self.arena.dupe(u8, digits_in[0..max_sig]);
-    if (digits_in[max_sig] >= '5') {
-        var i = kept.len;
-        while (i > 0) {
-            i -= 1;
-            if (kept[i] < '9') {
-                kept[i] += 1;
-                break;
-            }
-            kept[i] = '0';
-        } else {
-            var carry: std.ArrayListUnmanaged(u8) = .empty;
-            try carry.append(self.arena, '1');
-            try carry.appendSlice(self.arena, kept);
-            kept = try carry.toOwnedSlice(self.arena);
-        }
-    }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    try out.appendSlice(self.arena, kept);
-    var z = digits_in.len - max_sig;
-    while (z > 0) : (z -= 1) try out.append(self.arena, '0');
-    return out.toOwnedSlice(self.arena);
-}
-
-fn bigIntGroupedDecimal(self: *Interpreter, digits: []const u8, locale: []const u8, group: []const u8) EvalError![]const u8 {
-    const indic = nfIndicGrouping(locale);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    const n = digits.len;
-    for (digits, 0..) |c, i| {
-        const rem = n - i;
-        const at_boundary = if (indic)
-            (rem == 3 or (rem > 3 and (rem - 3) % 2 == 0))
-        else
-            (rem % 3 == 0);
-        if (i != 0 and at_boundary) try out.appendSlice(self.arena, group);
-        try out.append(self.arena, c);
-    }
-    return out.toOwnedSlice(self.arena);
-}
-
-fn bigIntFormatWithResolved(self: *Interpreter, big: *value.Object, data: *const value.IntlNumberFormatData) value.HostError![]const u8 {
-    var s = try value.bigIntToString(big, self.arena);
-    const neg = s.len > 0 and s[0] == '-';
-    if (neg) s = s[1..];
-    if (std.mem.eql(u8, data.style, "percent")) s = try std.fmt.allocPrint(self.arena, "{s}00", .{s});
-    if (data.maximum_significant_digits) |digits| s = try bigIntRoundSignificant(self, s, digits);
-    const syms = localeNumberSymbols(data.locale);
-    const grouped = try bigIntGroupedDecimal(self, s, data.locale, syms.group);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    if (neg) try buf.appendSlice(self.arena, syms.minus);
-    try buf.appendSlice(self.arena, grouped);
-    if (data.minimum_fraction_digits > 0) {
-        try buf.appendSlice(self.arena, syms.decimal);
-        for (0..data.minimum_fraction_digits) |_| try buf.append(self.arena, '0');
-    }
-    if (std.mem.eql(u8, data.style, "percent")) {
-        if (data.locale.len >= 2 and data.locale[0] == 'd' and data.locale[1] == 'e') try buf.appendSlice(self.arena, "\xc2\xa0");
-        try buf.appendSlice(self.arena, syms.percent);
-    }
-    return buf.toOwnedSlice(self.arena);
-}
-
 fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) this.asObj().boxedPrimitive().?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
@@ -19976,7 +19912,9 @@ fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const loc = localeListFirstOr(locs, "en");
     const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
     const data = try nfResolvedData(self, loc, ro);
-    return try Value.strAlloc(self.arena, try bigIntFormatWithResolved(self, big, &data));
+    var output = NfOutput{ .mode = .text };
+    try nfBuildOutputResolved(self, Value.obj(big), &data, &output);
+    return try Value.strOwned(self.arena, try output.text.toOwnedSlice(self.arena));
 }
 
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
@@ -27420,7 +27358,7 @@ const NfDecimalScratch = struct {
     integer: [309]u8 = undefined,
     fraction: [345]u8 = undefined,
     digits: [309]u8 = undefined,
-    exponent: [10]u8 = undefined,
+    exponent: [24]u8 = undefined,
 
     fn unsignedDigits(self: *NfDecimalScratch, n: u64) []const u8 {
         return std.fmt.bufPrint(&self.digits, "{d}", .{n}) catch unreachable;
@@ -27612,6 +27550,207 @@ fn nfRoundCompact(scratch: *NfDecimalScratch, scaled: f64, scaled_order: i32, ne
     // retaining max(2, integer digit count) significant digits.
     const significant_digits: usize = @intCast(@max(2, scaled_order + 1));
     return nfRound(scratch, scaled, neg, min_int, 0, 0, 1, significant_digits, false, "auto", 1, mode);
+}
+
+fn nfDigitsNonzero(digits: []const u8) bool {
+    for (digits) |digit| if (digit != '0') return true;
+    return false;
+}
+
+/// Compare an exact decimal fraction encoded as digits with one half. Trailing
+/// digits matter for ties: "5001" is above one half, while "5000" is equal.
+fn nfExactHalfCmp(digits: []const u8) std.math.Order {
+    if (digits.len == 0) return .lt;
+    if (digits[0] < '5') return .lt;
+    if (digits[0] > '5') return .gt;
+    return if (nfDigitsNonzero(digits[1..])) .gt else .eq;
+}
+
+fn nfExactRoundUp(neg: bool, mode: []const u8, remainder_nonzero: bool, half_cmp: std.math.Order, lower_odd: bool) bool {
+    if (!remainder_nonzero) return false;
+    if (std.mem.eql(u8, mode, "ceil")) return !neg;
+    if (std.mem.eql(u8, mode, "floor")) return neg;
+    if (std.mem.eql(u8, mode, "expand")) return true;
+    if (std.mem.eql(u8, mode, "trunc")) return false;
+    if (half_cmp == .lt) return false;
+    if (half_cmp == .gt) return true;
+    if (std.mem.eql(u8, mode, "halfCeil")) return !neg;
+    if (std.mem.eql(u8, mode, "halfFloor")) return neg;
+    if (std.mem.eql(u8, mode, "halfTrunc")) return false;
+    if (std.mem.eql(u8, mode, "halfEven")) return lower_odd;
+    return true; // halfExpand
+}
+
+fn nfDecimalMod(digits: []const u8, modulus: u64) u64 {
+    if (modulus == 1) return 0;
+    var result: u64 = 0;
+    for (digits) |digit| result = (result * 10 + digit - '0') % modulus;
+    return result;
+}
+
+/// Add a small signed delta to a non-negative decimal integer. Work is linear in
+/// the changed suffix (not the increment), so even a maximum-width BigInt with
+/// roundingIncrement:5000 cannot amplify CPU use through repeated adjustment.
+fn nfDecimalAdjust(self: *Interpreter, digits_in: []const u8, delta: i64) EvalError![]const u8 {
+    var digits = try self.arena.dupe(u8, digits_in);
+    if (delta > 0) {
+        var carry: u64 = @intCast(delta);
+        var index = digits.len;
+        while (index > 0 and carry > 0) {
+            index -= 1;
+            const sum = @as(u64, digits[index] - '0') + carry % 10;
+            carry /= 10;
+            digits[index] = @intCast('0' + sum % 10);
+            carry += sum / 10;
+        }
+        if (carry > 0) {
+            const prefix = try std.fmt.allocPrint(self.arena, "{d}", .{carry});
+            var carried: std.ArrayListUnmanaged(u8) = .empty;
+            try carried.appendSlice(self.arena, prefix);
+            try carried.appendSlice(self.arena, digits);
+            digits = try carried.toOwnedSlice(self.arena);
+        }
+    } else if (delta < 0) {
+        var remaining: u64 = @intCast(-delta);
+        var borrow: u64 = 0;
+        var index = digits.len;
+        while (index > 0 and (remaining > 0 or borrow > 0)) {
+            index -= 1;
+            const subtrahend = remaining % 10 + borrow;
+            remaining /= 10;
+            const digit = @as(u64, digits[index] - '0');
+            if (digit < subtrahend) {
+                digits[index] = @intCast('0' + digit + 10 - subtrahend);
+                borrow = 1;
+            } else {
+                digits[index] = @intCast('0' + digit - subtrahend);
+                borrow = 0;
+            }
+        }
+    }
+    var first: usize = 0;
+    while (first + 1 < digits.len and digits[first] == '0') first += 1;
+    return digits[first..];
+}
+
+fn nfExactFromCoefficient(self: *Interpreter, coefficient: []const u8, scale: isize, min_int: usize, min_frac: usize) EvalError!NfRound {
+    const decimal_pos = @as(isize, @intCast(coefficient.len)) + scale;
+    const natural_int_len: usize = if (decimal_pos > 0) @intCast(decimal_pos) else 1;
+    const int_len = @max(natural_int_len, min_int);
+    var int_str = try self.arena.alloc(u8, int_len);
+    @memset(int_str, '0');
+    if (decimal_pos <= 0) {
+        int_str[int_len - 1] = '0';
+    } else {
+        const point: usize = @intCast(decimal_pos);
+        const copied = @min(point, coefficient.len);
+        const start = int_len - point;
+        @memcpy(int_str[start .. start + copied], coefficient[0..copied]);
+    }
+
+    const natural_frac_len: usize = if (decimal_pos < @as(isize, @intCast(coefficient.len)))
+        @intCast(@as(isize, @intCast(coefficient.len)) - decimal_pos)
+    else
+        0;
+    const frac_capacity = @max(natural_frac_len, min_frac);
+    var frac_str = try self.arena.alloc(u8, frac_capacity);
+    @memset(frac_str, '0');
+    if (natural_frac_len > 0) {
+        if (decimal_pos <= 0) {
+            const leading: usize = @intCast(-decimal_pos);
+            @memcpy(frac_str[leading .. leading + coefficient.len], coefficient);
+        } else {
+            const point: usize = @intCast(decimal_pos);
+            @memcpy(frac_str[0 .. coefficient.len - point], coefficient[point..]);
+        }
+    }
+    var frac_len = frac_capacity;
+    while (frac_len > min_frac and frac_str[frac_len - 1] == '0') frac_len -= 1;
+    frac_str = frac_str[0..frac_len];
+    return .{ .int_str = int_str, .frac_str = frac_str, .is_zero = !nfDigitsNonzero(coefficient) };
+}
+
+/// Format an exact positive decimal coefficient whose decimal point is after
+/// `decimal_pos` digits. This is the arbitrary-precision counterpart of
+/// `nfRound`; it never converts the source mathematical value through f64.
+fn nfRoundExact(self: *Interpreter, coefficient: []const u8, decimal_pos: usize, neg: bool, min_int: usize, min_frac: usize, max_frac: usize, min_sig: ?usize, max_sig: ?usize, frac_set: bool, priority: []const u8, rinc: u64, mode: []const u8) EvalError!NfRound {
+    const zero = !nfDigitsNonzero(coefficient);
+    const order: isize = if (zero) 0 else @as(isize, @intCast(decimal_pos)) - 1;
+    const use_sig = blk: {
+        if (max_sig == null) break :blk false;
+        if (std.mem.eql(u8, priority, "auto") or !frac_set) break :blk true;
+        const sig_round_mag = order - @as(isize, @intCast(max_sig.?)) + 1;
+        const frac_round_mag = -@as(isize, @intCast(max_frac));
+        break :blk if (std.mem.eql(u8, priority, "morePrecision"))
+            sig_round_mag < frac_round_mag
+        else
+            sig_round_mag > frac_round_mag;
+    };
+
+    if (use_sig) {
+        const hi = max_sig.?;
+        const lo = min_sig orelse 1;
+        if (zero) return nfExactFromCoefficient(self, "0", 0, min_int, lo - 1);
+        const kept_len = @min(coefficient.len, hi);
+        var kept = coefficient[0..kept_len];
+        const scale = @as(isize, @intCast(decimal_pos)) - @as(isize, @intCast(kept_len));
+        if (coefficient.len > kept_len) {
+            const tail = coefficient[kept_len..];
+            const lower_odd = ((kept[kept.len - 1] - '0') & 1) != 0;
+            if (nfExactRoundUp(neg, mode, nfDigitsNonzero(tail), nfExactHalfCmp(tail), lower_odd)) {
+                kept = try nfDecimalAdjust(self, kept, 1);
+            }
+        }
+        var result = try nfExactFromCoefficient(self, kept, scale, min_int, 0);
+        var first_nonzero: usize = 0;
+        while (first_nonzero < result.int_str.len and result.int_str[first_nonzero] == '0') first_nonzero += 1;
+        const integer_significant = if (first_nonzero < result.int_str.len) result.int_str.len - first_nonzero else 1;
+        const required_frac = if (integer_significant < lo) lo - integer_significant else 0;
+        if (result.frac_str.len < required_frac) {
+            var padded = try self.arena.alloc(u8, required_frac);
+            @memcpy(padded[0..result.frac_str.len], result.frac_str);
+            @memset(padded[result.frac_str.len..], '0');
+            result.frac_str = padded;
+        }
+        return result;
+    }
+
+    const cut = decimal_pos + max_frac;
+    if (rinc == 1 and cut >= coefficient.len) {
+        return nfExactFromCoefficient(
+            self,
+            coefficient,
+            @as(isize, @intCast(decimal_pos)) - @as(isize, @intCast(coefficient.len)),
+            min_int,
+            min_frac,
+        );
+    }
+    var quantized_buf = try self.arena.alloc(u8, @max(cut, 1));
+    @memset(quantized_buf, '0');
+    const copied = @min(cut, coefficient.len);
+    if (copied > 0) @memcpy(quantized_buf[0..copied], coefficient[0..copied]);
+    var quantized: []const u8 = quantized_buf;
+    const tail = if (cut < coefficient.len) coefficient[cut..] else "";
+    const remainder = nfDecimalMod(quantized, rinc);
+    const remainder_nonzero = remainder != 0 or nfDigitsNonzero(tail);
+    const twice = remainder * 2;
+    const half_cmp: std.math.Order = if (twice > rinc)
+        .gt
+    else if (twice == rinc)
+        if (nfDigitsNonzero(tail)) .gt else .eq
+    else if (rinc - twice == 1)
+        nfExactHalfCmp(tail)
+    else
+        .lt;
+    const modulo_twice = nfDecimalMod(quantized, rinc * 2);
+    const lower_odd = modulo_twice >= rinc;
+    const round_up = nfExactRoundUp(neg, mode, remainder_nonzero, half_cmp, lower_odd);
+    const delta: i64 = if (round_up)
+        @intCast(rinc - remainder)
+    else
+        -@as(i64, @intCast(remainder));
+    if (delta != 0) quantized = try nfDecimalAdjust(self, quantized, delta);
+    return nfExactFromCoefficient(self, quantized, -@as(isize, @intCast(max_frac)), min_int, min_frac);
 }
 
 /// ResolveLocale numbering for resolvedOptions: a supported `numberingSystem`
@@ -28095,15 +28234,18 @@ fn nfParseExactDecimalString(s: []const u8) ?NfExactDecimal {
 /// Run the Intl.NumberFormat emission algorithm once. The text sink appends
 /// directly to the final string buffer; the structural sink retains exact part
 /// boundaries for formatToParts and range formatting.
-fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *NfOutput) value.HostError!void {
-    const input = if (args.len > 0) args[0] else Value.undef();
-    const data = try numberFormatDataFor(self, this.asObj());
+fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.IntlNumberFormatData, output: *NfOutput) value.HostError!void {
     output.numbering_system = data.numbering_system;
-    if (input.isObject() and input.asObj().is_bigint) {
-        try output.push(self, "literal", try bigIntFormatWithResolved(self, input.asObj(), data));
-        return;
+    const big = if (input.isObject() and input.asObj().is_bigint) input.asObj() else null;
+    var big_digits: []const u8 = "";
+    var big_neg = false;
+    if (big) |object| {
+        var source = try value.bigIntToString(object, self.arena);
+        big_neg = source.len > 0 and source[0] == '-';
+        if (big_neg) source = source[1..];
+        big_digits = source;
     }
-    var n = try self.toNumberV(input);
+    var n: f64 = if (big == null) try self.toNumberV(input) else 0;
     var decimal_scratch: NfDecimalScratch = .{};
 
     const min_int: usize = data.minimum_integer_digits;
@@ -28161,7 +28303,7 @@ fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *
             if (std.ascii.eqlIgnoreCase(unit_lang, "zh")) unit_prefix = "\u{6bcf}\u{5c0f}\u{6642}";
         }
         // en cardinal plural: singular only for an exact magnitude of 1.
-        const plural = !(@abs(n) == 1.0);
+        const plural = if (big != null) !std.mem.eql(u8, big_digits, "1") else !(@abs(n) == 1.0);
         if (std.ascii.eqlIgnoreCase(unit_lang, "en") and unit_prefix.len == 0) {
             if (try numberFormatUnitNameEn(self, unit, ud, plural)) |suf| {
                 unit_suffix = suf; // spacing is baked into the CLDR pattern
@@ -28184,22 +28326,66 @@ fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *
         nfParseExactDecimalString(input.asStr())
     else
         null;
-    const is_nan = std.math.isNan(n);
-    const is_inf = std.math.isInf(n);
+    const is_nan = big == null and std.math.isNan(n);
+    const is_inf = big == null and std.math.isInf(n);
     const finite = !is_nan and !is_inf;
-    const neg = if (exact_decimal) |ex| ex.neg else !is_nan and std.math.signbit(n);
-    if (is_percent and finite) n *= 100;
+    const neg = if (big != null) big_neg else if (exact_decimal) |ex| ex.neg else !is_nan and std.math.signbit(n);
+    if (is_percent and finite and big == null) n *= 100;
     // Build the unsigned magnitude. NaN and Infinity have fixed glyphs (and still
     // take a signDisplay indicator); finite values split into integer and fraction
     // parts with exact integer arithmetic (extracting fraction digits from the
     // float directly loses precision, e.g. 1234567.89).
     const sci = std.mem.eql(u8, notation, "scientific") or std.mem.eql(u8, notation, "engineering");
-    var exponent: i32 = 0; // scientific/engineering exponent, appended as "E<exp>"
+    var exponent: isize = 0; // scientific/engineering exponent, appended as "E<exp>"
     var digits: []const u8 = "";
     var frac_str: []const u8 = "";
     var is_zero = false;
     if (is_nan) {
         is_zero = true; // NaN suppresses the exceptZero/negative sign (but not "always")
+    } else if (big != null) {
+        // ECMA-402's mathematical-value path: retain the complete BigInt
+        // coefficient and move only its decimal point for percent/notation.
+        const base_decimal_pos = big_digits.len + @as(usize, if (is_percent) 2 else 0);
+        if (sci) {
+            const order = base_decimal_pos - 1;
+            const mantissa_pos: usize = if (std.mem.eql(u8, notation, "engineering")) order % 3 + 1 else 1;
+            exponent = @as(isize, @intCast(order)) - @as(isize, @intCast(mantissa_pos - 1));
+            const r = try nfRoundExact(self, big_digits, mantissa_pos, neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
+            digits = r.int_str;
+            frac_str = r.frac_str;
+            is_zero = r.is_zero;
+        } else if (std.mem.eql(u8, notation, "compact") and nfDigitsNonzero(big_digits)) {
+            const order = base_decimal_pos - 1;
+            const pattern_order: i32 = @intCast(@min(order, @as(usize, 12)));
+            var compact = nfCompactPattern(locale, compact_display, pattern_order);
+            var scaled_pos = base_decimal_pos - @as(usize, @intCast(compact.exponent));
+            const explicit_precision = min_sig != null or max_sig != null or frac_set or !std.mem.eql(u8, rounding_priority, "auto");
+            const exact_min_sig: ?usize = if (explicit_precision) min_sig else 1;
+            const exact_max_sig: ?usize = if (explicit_precision) max_sig else @max(2, scaled_pos);
+            const exact_frac_set = if (explicit_precision) (frac_set or !std.mem.eql(u8, rounding_priority, "auto")) else false;
+            var r = try nfRoundExact(self, big_digits, scaled_pos, neg, min_int, min_frac, max_frac, exact_min_sig, exact_max_sig, exact_frac_set, rounding_priority, rounding_increment, rounding_mode);
+            if (order <= 12) if (nfRoundedMagnitude(r)) |rounded_order| {
+                if (rounded_order != @as(i32, @intCast(scaled_pos - 1))) {
+                    const next = nfCompactPattern(locale, compact_display, @intCast(order + 1));
+                    if (next.exponent != compact.exponent) {
+                        compact = next;
+                        scaled_pos = base_decimal_pos - @as(usize, @intCast(compact.exponent));
+                        const next_max_sig: ?usize = if (explicit_precision) max_sig else @max(2, scaled_pos);
+                        r = try nfRoundExact(self, big_digits, scaled_pos, neg, min_int, min_frac, max_frac, exact_min_sig, next_max_sig, exact_frac_set, rounding_priority, rounding_increment, rounding_mode);
+                    }
+                }
+            };
+            digits = r.int_str;
+            frac_str = r.frac_str;
+            is_zero = r.is_zero;
+            compact_suffix = compact.suffix;
+            compact_sep = compact.sep;
+        } else {
+            const r = try nfRoundExact(self, big_digits, base_decimal_pos, neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
+            digits = r.int_str;
+            frac_str = r.frac_str;
+            is_zero = r.is_zero;
+        }
     } else if (finite and exact_decimal != null and exact_decimal.?.frac_str.len <= max_frac) {
         const ex = exact_decimal.?;
         digits = if (ex.int_str.len < min_int)
@@ -28224,8 +28410,9 @@ fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *
         var mant = @abs(n);
         if (mant != 0) {
             const e = orderOfMagnitude(mant);
-            exponent = if (std.mem.eql(u8, notation, "engineering")) @divFloor(e, 3) * 3 else e;
-            mant = mant / powi10(exponent);
+            const exp32 = if (std.mem.eql(u8, notation, "engineering")) @divFloor(e, 3) * 3 else e;
+            exponent = exp32;
+            mant = mant / powi10(exp32);
         }
         const r = nfRound(&decimal_scratch, mant, neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
         digits = r.int_str;
@@ -28377,14 +28564,18 @@ fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *
         if (compact_sep.len > 0) try output.push(self, "literal", compact_sep);
         try output.push(self, "compact", compact_suffix);
     }
-    if (is_percent) try output.push(self, "percentSign", syms.percent);
+    if (is_percent) {
+        const lang = parseTriple(locale).l;
+        if (std.ascii.eqlIgnoreCase(lang, "de")) try output.push(self, "literal", "\u{00a0}");
+        try output.push(self, "percentSign", syms.percent);
+    }
     if (cur_suffix.len > 0) {
         try output.push(self, "literal", "\u{00a0}");
         try output.push(self, "currency", cur_suffix);
     }
     if (cur_name_code.len > 0) {
         // en cardinal plural: "one" only for an exact integer 1 (i==1, v==0).
-        const one = @abs(n) == 1.0 and frac_str.len == 0;
+        const one = (if (big != null) std.mem.eql(u8, big_digits, "1") else @abs(n) == 1.0) and frac_str.len == 0;
         const en_loc = std.mem.eql(u8, locale, "en") or std.mem.startsWith(u8, locale, "en-");
         const nm: []const u8 = if (en_loc)
             (dnLookup(if (one) &dn_data.currency_names_one else &dn_data.currency_names_other, cur_name_code) orelse cur_name_code)
@@ -28407,6 +28598,11 @@ fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *
         try output.push(self, "unit", us);
     }
     if (acct and show_neg) try output.push(self, "literal", ")");
+}
+
+fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *NfOutput) value.HostError!void {
+    const data = try numberFormatDataFor(self, this.asObj());
+    return nfBuildOutputResolved(self, if (args.len > 0) args[0] else Value.undef(), data, output);
 }
 
 fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(NfPart) {
@@ -28516,7 +28712,10 @@ fn nfPartValuesEqual(x: []const NfPart, y: []const NfPart) bool {
 
 fn nfSharedAffixLen(xp: []const NfPart, yp: []const NfPart) usize {
     if (xp.len == 0 or yp.len == 0) return 0;
-    if (!std.mem.eql(u8, xp[0].typ, "plusSign") and !std.mem.eql(u8, xp[0].typ, "minusSign"))
+    // CLDR can share a stable sign/wrapper prefix through the first integer.
+    // A bare currency symbol remains endpoint-specific ("$3 – $5").
+    if (!std.mem.eql(u8, xp[0].typ, "plusSign") and !std.mem.eql(u8, xp[0].typ, "minusSign") and
+        !std.mem.eql(u8, xp[0].typ, "literal") and !std.mem.eql(u8, xp[0].typ, "unit"))
         return 0;
     const n = @min(xp.len, yp.len);
     var i: usize = 0;
@@ -28542,23 +28741,28 @@ fn nfPtRangeSeparator(locale: []const u8) bool {
     return std.ascii.eqlIgnoreCase(t.l, "pt") and std.ascii.eqlIgnoreCase(t.r, "PT");
 }
 
-fn nfSharedCurrencySuffixLen(xp: []const NfPart, yp: []const NfPart) usize {
-    if (xp.len < 2 or yp.len < 2) return 0;
-    const xl = xp[xp.len - 2 ..];
-    const yl = yp[yp.len - 2 ..];
-    if (!std.mem.eql(u8, xl[0].typ, "literal") or !std.mem.eql(u8, xl[1].typ, "currency")) return 0;
-    if (!std.mem.eql(u8, xl[0].typ, yl[0].typ) or !std.mem.eql(u8, xl[1].typ, yl[1].typ)) return 0;
-    if (!std.mem.eql(u8, xl[0].value, yl[0].value) or !std.mem.eql(u8, xl[1].value, yl[1].value)) return 0;
-    return 2;
+fn nfSharedSuffixLen(xp: []const NfPart, yp: []const NfPart) usize {
+    const n = @min(xp.len, yp.len);
+    var count: usize = 0;
+    while (count < n) : (count += 1) {
+        const x = xp[xp.len - count - 1];
+        const y = yp[yp.len - count - 1];
+        if (std.mem.eql(u8, x.typ, "integer") or std.mem.eql(u8, x.typ, "fraction") or
+            std.mem.eql(u8, x.typ, "exponentInteger") or std.mem.eql(u8, x.typ, "nan") or
+            std.mem.eql(u8, x.typ, "infinity")) break;
+        if (!std.mem.eql(u8, x.typ, y.typ) or !std.mem.eql(u8, x.value, y.value)) break;
+    }
+    return count;
 }
 
 fn nfFormatRangePartsText(self: *Interpreter, locale: []const u8, xp: []const NfPart, yp: []const NfPart) EvalError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const shared_prefix = nfSharedAffixLen(xp, yp);
-    const shared_suffix = nfSharedCurrencySuffixLen(xp, yp);
+    const shared_suffix = nfSharedSuffixLen(xp, yp);
     const x_end = xp.len - shared_suffix;
     const y_end = yp.len - shared_suffix;
-    try nfAppendPartValues(self, &buf, xp[0..x_end]);
+    if (shared_prefix > 0) try nfAppendPartValues(self, &buf, xp[0..shared_prefix]);
+    try nfAppendPartValues(self, &buf, xp[shared_prefix..x_end]);
     try buf.appendSlice(self.arena, if (nfPtRangeSeparator(locale)) " - " else nfRangeSeparator(xp, yp, shared_prefix));
     try nfAppendPartValues(self, &buf, yp[shared_prefix..y_end]);
     if (shared_suffix > 0) try nfAppendPartValues(self, &buf, xp[x_end..]);
@@ -28567,24 +28771,27 @@ fn nfFormatRangePartsText(self: *Interpreter, locale: []const u8, xp: []const Nf
 
 /// `Intl.NumberFormat.prototype.formatRange(start, end)` — en. Equal formatted
 /// values collapse to "~<x>"; signed ranges share their stable prefix.
-/// Coerce a formatRange argument: a BigInt becomes its numeric value; other
-/// values pass through (nfFormatOne handles numbers and numeric strings).
-fn nfNumericArg(v: Value) Value {
-    if (v.isObject() and v.asObj().is_bigint) return Value.num(@floatFromInt(v.asObj().bigIntValue()));
-    return v;
+/// ToIntlMathematicalValue for NumberFormat range arguments. BigInt is already
+/// exact; all other inputs are coerced once here so both range consumers retain
+/// the specified observable conversion order.
+fn nfMathematicalArg(self: *Interpreter, v: Value) value.HostError!Value {
+    if (v.isObject() and v.asObj().is_bigint) return v;
+    const number = try self.toNumberV(v);
+    // Decimal strings carry an exact mathematical value into NumberFormat;
+    // retain their digits after validating them instead of replacing them with
+    // the nearest binary64 value. Objects are still coerced exactly once.
+    if (v.isString() and !std.math.isNan(number)) return v;
+    return Value.num(number);
 }
 
 fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatRange on incompatible receiver");
     if (args.len < 2 or args[0].isUndefined() or args[1].isUndefined()) return self.throwError("TypeError", "formatRange requires two defined arguments");
-    // formatRange takes Intl mathematical values: a BigInt is accepted (coerced
-    // to its numeric value), and start > end no longer throws.
-    const xv = nfNumericArg(args[0]);
-    const yv = nfNumericArg(args[1]);
-    const x = try self.toNumberV(xv);
-    const y = try self.toNumberV(yv);
-    if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRange arguments must not be NaN");
+    const xv = try nfMathematicalArg(self, args[0]);
+    const yv = try nfMathematicalArg(self, args[1]);
+    if ((xv.isNumber() and std.math.isNan(xv.asNum())) or (yv.isNumber() and std.math.isNan(yv.asNum())))
+        return self.throwError("RangeError", "formatRange arguments must not be NaN");
     const xp = try nfBuildParts(self, this, &.{xv});
     const yp = try nfBuildParts(self, this, &.{yv});
     if (nfPartValuesEqual(xp.items, yp.items)) {
@@ -28601,11 +28808,10 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatRangeToParts on incompatible receiver");
     if (args.len < 2 or args[0].isUndefined() or args[1].isUndefined()) return self.throwError("TypeError", "formatRangeToParts requires two defined arguments");
-    const xv = nfNumericArg(args[0]);
-    const yv = nfNumericArg(args[1]);
-    const x = try self.toNumberV(xv);
-    const y = try self.toNumberV(yv);
-    if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRangeToParts arguments must not be NaN");
+    const xv = try nfMathematicalArg(self, args[0]);
+    const yv = try nfMathematicalArg(self, args[1]);
+    if ((xv.isNumber() and std.math.isNan(xv.asNum())) or (yv.isNumber() and std.math.isNan(yv.asNum())))
+        return self.throwError("RangeError", "formatRangeToParts arguments must not be NaN");
     const arr = (try self.newArray()).asObj();
     const Emit = struct {
         fn part(s: *Interpreter, a: *value.Object, typ: []const u8, part_value: []const u8, src: []const u8) value.HostError!void {
@@ -28627,13 +28833,18 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
         return Value.obj(arr);
     }
     const shared_prefix = nfSharedAffixLen(xp.items, yp.items);
-    try Emit.one(self, arr, xp.items, "startRange");
+    const shared_suffix = nfSharedSuffixLen(xp.items, yp.items);
+    const x_end = xp.items.len - shared_suffix;
+    const y_end = yp.items.len - shared_suffix;
+    if (shared_prefix > 0) try Emit.one(self, arr, xp.items[0..shared_prefix], "shared");
+    try Emit.one(self, arr, xp.items[shared_prefix..x_end], "startRange");
     const lo = (try self.newObject()).asObj();
     try self.setProp(lo, "type", Value.str("literal"));
     try self.setProp(lo, "value", try Value.strAlloc(self.arena, nfRangeSeparator(xp.items, yp.items, shared_prefix)));
     try self.setProp(lo, "source", Value.str("shared"));
     try arr.appendElement(self.arena, Value.obj(lo));
-    try Emit.one(self, arr, yp.items[shared_prefix..], "endRange");
+    try Emit.one(self, arr, yp.items[shared_prefix..y_end], "endRange");
+    if (shared_suffix > 0) try Emit.one(self, arr, xp.items[x_end..], "shared");
     return Value.obj(arr);
 }
 
@@ -50489,6 +50700,63 @@ test "Intl.NumberFormat and BigInt locale formatting share resolved state" {
     )).asBool());
 }
 
+test "Intl.NumberFormat emits exact BigInt structure and ranges" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var huge = 1234567890123456789012345678901234567890n;
+        \\var cases = [
+        \\  [new Intl.NumberFormat("en-US"), 12345678901234567890n,
+        \\    "12,345,678,901,234,567,890", "integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer"],
+        \\  [new Intl.NumberFormat("en-US"), -12345678901234567890n,
+        \\    "-12,345,678,901,234,567,890", "minusSign,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer"],
+        \\  [new Intl.NumberFormat("hi-IN-u-nu-deva"), huge,
+        \\    "१,२३,४५,६७,८९,०१,२३,४५,६७,८९,०१,२३,४५,६७,८९,०१,२३,४५,६७,८९०", "integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer"],
+        \\  [new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencySign: "accounting" }), -12345678901234567890n,
+        \\    "($12,345,678,901,234,567,890.00)", "literal,currency,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,decimal,fraction,literal"],
+        \\  [new Intl.NumberFormat("de-DE", { style: "percent", minimumFractionDigits: 2 }), 12345678901234567890n,
+        \\    "1.234.567.890.123.456.789.000,00 %", "integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,decimal,fraction,literal,percentSign"],
+        \\  [new Intl.NumberFormat("en-US", { style: "unit", unit: "meter-per-second", unitDisplay: "long" }), 2n,
+        \\    "2 meters per second", "integer,literal,unit"],
+        \\  [new Intl.NumberFormat("en-US", { notation: "compact", compactDisplay: "long" }), huge,
+        \\    "1,234,567,890,123,456,789,012,345,679 trillion", "integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,literal,compact"],
+        \\  [new Intl.NumberFormat("en-US", { notation: "scientific", maximumFractionDigits: 3 }), huge,
+        \\    "1.235E39", "integer,decimal,fraction,exponentSeparator,exponentInteger"],
+        \\  [new Intl.NumberFormat("en-US", { notation: "engineering", maximumSignificantDigits: 5 }), huge,
+        \\    "1.2346E39", "integer,decimal,fraction,exponentSeparator,exponentInteger"],
+        \\  [new Intl.NumberFormat("en-US", { maximumSignificantDigits: 5 }), huge,
+        \\    "1,234,600,000,000,000,000,000,000,000,000,000,000,000", "integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer,group,integer"]
+        \\];
+        \\var exact = true;
+        \\for (var i = 0; i < cases.length; i++) {
+        \\  var parts = cases[i][0].formatToParts(cases[i][1]);
+        \\  exact = exact && cases[i][0].format(cases[i][1]) === cases[i][2] &&
+        \\    parts.map(function (part) { return part.value; }).join("") === cases[i][2] &&
+        \\    parts.map(function (part) { return part.type; }).join(",") === cases[i][3];
+        \\}
+        \\var rangeFormatter = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencySign: "accounting" });
+        \\var start = 12345678901234567890n;
+        \\var end = 12345678901234567999n;
+        \\var rangeParts = rangeFormatter.formatRangeToParts(start, end);
+        \\var accountingParts = rangeFormatter.formatRangeToParts(-20n, -10n);
+        \\var percentParts = new Intl.NumberFormat("de-DE", { style: "percent" }).formatRangeToParts(2n, 3n);
+        \\var unitParts = new Intl.NumberFormat("en-US", { style: "unit", unit: "meter-per-second", unitDisplay: "long" }).formatRangeToParts(2n, 3n);
+        \\exact && rangeFormatter.formatRange(start, end) === "$12,345,678,901,234,567,890.00 – $12,345,678,901,234,567,999.00" &&
+        \\  rangeParts.map(function (part) { return part.value; }).join("") === rangeFormatter.formatRange(start, end) &&
+        \\  rangeParts[0].source === "startRange" && rangeParts[rangeParts.length - 1].source === "endRange" &&
+        \\  accountingParts[0].source === "shared" && accountingParts[1].source === "shared" && accountingParts[2].source === "startRange" && accountingParts[accountingParts.length - 1].source === "shared" &&
+        \\  percentParts[percentParts.length - 2].source === "shared" && percentParts[percentParts.length - 1].source === "shared" &&
+        \\  unitParts[unitParts.length - 2].source === "shared" && unitParts[unitParts.length - 1].source === "shared" &&
+        \\  new Intl.NumberFormat("en-US", { maximumSignificantDigits: 3 }).formatRange(start, end) === "~12,300,000,000,000,000,000" &&
+        \\  new Intl.NumberFormat("en-US").formatRange(1n, 2) === "1–2" &&
+        \\  new Intl.NumberFormat("en-US", { maximumSignificantDigits: 3, roundingMode: "halfEven" }).format(9985n) === "9,980" &&
+        \\  new Intl.NumberFormat("en-US", { maximumSignificantDigits: 3, roundingMode: "floor" }).format(-1239n) === "-1,240" &&
+        \\  new Intl.NumberFormat("en-US", { notation: "compact" }).format(999500n) === "1M" &&
+        \\  new Intl.NumberFormat("en-US", { notation: "scientific", minimumFractionDigits: 2, maximumFractionDigits: 2,
+        \\    roundingIncrement: 5, roundingMode: "halfEven" }).format(12250n) === "1.20E4"
+    )).asBool());
+}
+
 test "Intl.NumberFormat text and structural sinks remain equivalent" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -50591,6 +50859,10 @@ test "Intl.NumberFormat sink emission is OOM-safe" {
             var joined: std.ArrayListUnmanaged(u8) = .empty;
             try nfAppendPartValues(&machine, &joined, parts.parts.items);
             try std.testing.expectEqualStrings(text.text.items, joined.items);
+
+            const exact = try nfRoundExact(&machine, "1234567890123456789012345678901234567890", 1, false, 1, 0, 3, null, null, true, "auto", 1, "halfExpand");
+            try std.testing.expectEqualStrings("1", exact.int_str);
+            try std.testing.expectEqualStrings("235", exact.frac_str);
         }
     }.check;
     const previous_heap = gc_mod.setActiveHeap(null);
