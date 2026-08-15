@@ -1407,6 +1407,71 @@ function representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, kind) {
   return total;
 }
 
+// Structural Intl services keep formatter and input construction outside the
+// timed boundary. Each row consumes every type/value/unit byte so metadata
+// ownership changes remain attributable without weakening the output oracle.
+var representativeIntlListFormatter = new Intl.ListFormat("en-US", {
+  style: "long", type: "conjunction"
+});
+var representativeIntlListInputs = [
+  ["alpha", "beta", "gamma"], ["red", "green", "blue", "gold"],
+  ["north", "south"], ["one", "two", "three", "four", "five"],
+  ["small", "medium", "large"], ["spring", "summer", "autumn", "winter"],
+  ["left", "center", "right"], ["read", "write", "execute"]
+];
+var representativeIntlRelativeFormatter = new Intl.RelativeTimeFormat("en-US", {
+  numeric: "always", style: "long"
+});
+var representativeIntlRelativeValues = [-12, -3, -1, 0, 1, 3, 12, 1250];
+var representativeIntlRelativeUnits = [
+  "day", "hour", "minute", "second", "week", "month", "quarter", "year"
+];
+var representativeIntlDurationFormatter = new Intl.DurationFormat("en-US", {
+  style: "long"
+});
+var representativeIntlDurationInputs = [
+  { hours: 1, minutes: 2, seconds: 3 },
+  { days: 2, hours: 4, minutes: 8 },
+  { years: 1, months: 6, days: 12 },
+  { minutes: 15, seconds: 30, milliseconds: 250 },
+  { weeks: 3, days: 2, hours: 1 },
+  { seconds: 45, milliseconds: 125, microseconds: 500 },
+  { hours: 12, minutes: 34, seconds: 56 },
+  { months: 9, weeks: 2, days: 5 }
+];
+
+function representativeIntlStructuralChecksum(parts) {
+  var total = parts.length;
+  for (var part = 0; part < parts.length; part = part + 1) {
+    total = (total + representativeIntlDateTimeChecksum(parts[part].type) +
+      representativeIntlDateTimeChecksum(parts[part].value)) % 1000000007;
+    if (parts[part].unit !== undefined)
+      total = (total + representativeIntlDateTimeChecksum(parts[part].unit)) % 1000000007;
+  }
+  return total;
+}
+
+function representativeIntlStructuralService(jobs, lane, service) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var index = (job + i + lane) & 7;
+      var parts;
+      if (service === "list") {
+        parts = representativeIntlListFormatter.formatToParts(representativeIntlListInputs[index]);
+      } else if (service === "relative") {
+        parts = representativeIntlRelativeFormatter.formatToParts(
+          representativeIntlRelativeValues[index], representativeIntlRelativeUnits[index]
+        );
+      } else {
+        parts = representativeIntlDurationFormatter.formatToParts(representativeIntlDurationInputs[index]);
+      }
+      total = (total + representativeIntlStructuralChecksum(parts)) % 1000000007;
+    }
+  }
+  return total;
+}
+
 // DateTimeFormat controls separate constructor resolution from steady
 // consumers. Keep the fixed UTC inputs and formatter construction outside the
 // timed steady boundary so changes to resolved-state ownership are attributable
@@ -1794,6 +1859,9 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_numbering_system_cldr_parts") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "parts"); };
   if (name === "representative_intl_number_format_numbering_system_cldr_range") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "range"); };
   if (name === "representative_intl_number_format_numbering_system_cldr_resolved") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "resolved"); };
+  if (name === "representative_intl_list_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "list"); };
+  if (name === "representative_intl_relative_time_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "relative"); };
+  if (name === "representative_intl_duration_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "duration"); };
   if (name === "representative_intl_date_time_format_consumer_text") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "text"); };
   if (name === "representative_intl_date_time_format_consumer_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "parts"); };
   if (name === "representative_intl_date_time_format_consumer_range") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "range"); };
