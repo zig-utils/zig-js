@@ -1093,6 +1093,108 @@ pub const IntlNumberFormatData = struct {
     }
 };
 
+/// Fully resolved, immutable Intl.DateTimeFormat state. Constructor option
+/// observation completes before publication; every slice which can originate
+/// in movable JavaScript or arena storage is copied into object-owned backing.
+pub const IntlDateTimeFormatData = struct {
+    pub const Field = enum(u8) {
+        none,
+        numeric,
+        two_digit,
+        long,
+        short,
+        narrow,
+        full,
+        medium,
+        short_offset,
+        long_offset,
+        short_generic,
+        long_generic,
+
+        pub fn fromString(bytes: []const u8) Field {
+            const pairs = [_]struct { []const u8, Field }{
+                .{ "numeric", .numeric },
+                .{ "2-digit", .two_digit },
+                .{ "long", .long },
+                .{ "short", .short },
+                .{ "narrow", .narrow },
+                .{ "full", .full },
+                .{ "medium", .medium },
+                .{ "shortOffset", .short_offset },
+                .{ "longOffset", .long_offset },
+                .{ "shortGeneric", .short_generic },
+                .{ "longGeneric", .long_generic },
+            };
+            for (pairs) |pair| if (std.mem.eql(u8, bytes, pair[0])) return pair[1];
+            return .none;
+        }
+
+        pub fn string(self: Field) []const u8 {
+            return switch (self) {
+                .none => "",
+                .numeric => "numeric",
+                .two_digit => "2-digit",
+                .long => "long",
+                .short => "short",
+                .narrow => "narrow",
+                .full => "full",
+                .medium => "medium",
+                .short_offset => "shortOffset",
+                .long_offset => "longOffset",
+                .short_generic => "shortGeneric",
+                .long_generic => "longGeneric",
+            };
+        }
+    };
+
+    locale: []const u8 = "en",
+    resolved_locale: []const u8 = "en",
+    calendar: []const u8 = "gregory",
+    numbering_system: []const u8 = "latn",
+    hour_cycle: []const u8 = "",
+    time_zone: []const u8 = "UTC",
+
+    // Effective fields consumed by format/formatToParts. Date/time styles are
+    // expanded once when this record is installed.
+    weekday: Field = .none,
+    era: Field = .none,
+    year: Field = .none,
+    month: Field = .none,
+    day: Field = .none,
+    day_period: Field = .none,
+    hour: Field = .none,
+    minute: Field = .none,
+    second: Field = .none,
+    time_zone_name: Field = .none,
+    fractional_second_digits: u8 = 0,
+
+    // Original resolved fields reflected by resolvedOptions. Style expansion
+    // must not make its synthetic components observable.
+    resolved_weekday: Field = .none,
+    resolved_era: Field = .none,
+    resolved_year: Field = .none,
+    resolved_month: Field = .none,
+    resolved_day: Field = .none,
+    resolved_day_period: Field = .none,
+    resolved_hour: Field = .none,
+    resolved_minute: Field = .none,
+    resolved_second: Field = .none,
+    resolved_time_zone_name: Field = .none,
+    resolved_fractional_second_digits: u8 = 0,
+    date_style: Field = .none,
+    time_style: Field = .none,
+
+    hour12: bool = true,
+    has_hour_cycle: bool = false,
+    defaults_applied: bool = false,
+    owned_bytes: ?[]u8 = null,
+
+    pub fn deinit(self: *IntlDateTimeFormatData, allocator: std.mem.Allocator) void {
+        if (self.owned_bytes) |owned| allocator.free(owned);
+        self.owned_bytes = null;
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1227,6 +1329,7 @@ pub const ObjectRareTag = enum(u8) {
     proxy,
     buffer_view,
     intl_number_format,
+    intl_date_time_format,
     temporal,
     promise,
     constructor,
@@ -1325,6 +1428,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         data_view: ?*DataViewData = null,
     },
     intl_number_format: struct { ptr: ?*IntlNumberFormatData = null },
+    intl_date_time_format: struct { ptr: ?*IntlDateTimeFormatData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -1562,6 +1666,7 @@ pub const ObjectBackingFlags = packed struct {
     data_view: bool = false,
     temporal: bool = false,
     intl_number_format: bool = false,
+    intl_date_time_format: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -2794,6 +2899,22 @@ pub const Object = struct {
         if (cold.hasRare(.intl_number_format)) cold.rare.intl_number_format.ptr = null;
     }
 
+    pub inline fn intlDateTimeFormatData(self: *const Object) ?*IntlDateTimeFormatData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_date_time_format)) return null;
+        return cold.rare.intl_date_time_format.ptr;
+    }
+
+    pub fn setIntlDateTimeFormatData(self: *Object, fallback: std.mem.Allocator, data: *IntlDateTimeFormatData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_date_time_format, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlDateTimeFormatData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_date_time_format)) cold.rare.intl_date_time_format.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3126,6 +3247,17 @@ pub const Object = struct {
         data.deinit(a);
         a.destroy(data);
         self.deactivateBacking("intl_number_format");
+    }
+
+    pub fn intlDateTimeFormatAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_date_time_format");
+    }
+
+    pub fn destroyUninstalledIntlDateTimeFormat(self: *Object, fallback: std.mem.Allocator, data: *IntlDateTimeFormatData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_date_time_format");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {

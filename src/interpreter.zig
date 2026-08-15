@@ -25752,8 +25752,9 @@ fn dtfResolveLocaleExt(
     return .{ .loc = try buf.toOwnedSlice(self.arena), .calendar = ca_val, .numbering_system = nu_val };
 }
 
-/// Build the normalized options object that the instance stores under
-/// `\x00opts` (read by both `format` and `resolvedOptions`).
+/// Resolve and publish the immutable native DateTimeFormat record. The user
+/// options bag has already been observed in specification order; no ordinary
+/// internal record is needed after this point.
 fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalError!void {
     var r = r_in;
     const tag = if (o.getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
@@ -25773,37 +25774,81 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalE
         r.hour_cycle = "";
         r.hour12 = null;
     }
-    const ro = (try self.newObject()).asObj();
-    try self.setProp(ro, "\x00rloc", try Value.strAlloc(self.arena, ext.loc));
-    const S = struct {
-        fn put(s: *Interpreter, obj: *value.Object, k: []const u8, v: []const u8) EvalError!void {
-            if (v.len > 0) try s.setProp(obj, k, try Value.strAlloc(s.arena, v));
-        }
+    var resolved: value.IntlDateTimeFormatData = .{
+        .locale = tag,
+        .resolved_locale = ext.loc,
+        .calendar = r.calendar,
+        .numbering_system = r.numbering_system,
+        .hour_cycle = r.hour_cycle,
+        .time_zone = r.time_zone,
+        .weekday = value.IntlDateTimeFormatData.Field.fromString(r.weekday),
+        .era = value.IntlDateTimeFormatData.Field.fromString(r.era),
+        .year = value.IntlDateTimeFormatData.Field.fromString(r.year),
+        .month = value.IntlDateTimeFormatData.Field.fromString(r.month),
+        .day = value.IntlDateTimeFormatData.Field.fromString(r.day),
+        .day_period = value.IntlDateTimeFormatData.Field.fromString(r.day_period),
+        .hour = value.IntlDateTimeFormatData.Field.fromString(r.hour),
+        .minute = value.IntlDateTimeFormatData.Field.fromString(r.minute),
+        .second = value.IntlDateTimeFormatData.Field.fromString(r.second),
+        .time_zone_name = value.IntlDateTimeFormatData.Field.fromString(r.time_zone_name),
+        .fractional_second_digits = r.frac_sec orelse 0,
+        .resolved_weekday = value.IntlDateTimeFormatData.Field.fromString(r.weekday),
+        .resolved_era = value.IntlDateTimeFormatData.Field.fromString(r.era),
+        .resolved_year = value.IntlDateTimeFormatData.Field.fromString(r.year),
+        .resolved_month = value.IntlDateTimeFormatData.Field.fromString(r.month),
+        .resolved_day = value.IntlDateTimeFormatData.Field.fromString(r.day),
+        .resolved_day_period = value.IntlDateTimeFormatData.Field.fromString(r.day_period),
+        .resolved_hour = value.IntlDateTimeFormatData.Field.fromString(r.hour),
+        .resolved_minute = value.IntlDateTimeFormatData.Field.fromString(r.minute),
+        .resolved_second = value.IntlDateTimeFormatData.Field.fromString(r.second),
+        .resolved_time_zone_name = value.IntlDateTimeFormatData.Field.fromString(r.time_zone_name),
+        .resolved_fractional_second_digits = r.frac_sec orelse 0,
+        .date_style = value.IntlDateTimeFormatData.Field.fromString(r.date_style),
+        .time_style = value.IntlDateTimeFormatData.Field.fromString(r.time_style),
+        .hour12 = r.hour12 orelse true,
+        .has_hour_cycle = r.hour_cycle.len > 0,
+        .defaults_applied = r.defaults_applied,
     };
-    try S.put(self, ro, "weekday", r.weekday);
-    try S.put(self, ro, "era", r.era);
-    try S.put(self, ro, "year", r.year);
-    try S.put(self, ro, "month", r.month);
-    try S.put(self, ro, "day", r.day);
-    try S.put(self, ro, "dayPeriod", r.day_period);
-    try S.put(self, ro, "hour", r.hour);
-    try S.put(self, ro, "minute", r.minute);
-    try S.put(self, ro, "second", r.second);
-    if (r.frac_sec) |f| try self.setProp(ro, "fractionalSecondDigits", Value.num(@floatFromInt(f)));
-    try S.put(self, ro, "timeZoneName", r.time_zone_name);
-    try S.put(self, ro, "dateStyle", r.date_style);
-    try S.put(self, ro, "timeStyle", r.time_style);
-    try S.put(self, ro, "calendar", r.calendar);
-    try S.put(self, ro, "numberingSystem", r.numbering_system);
-    try S.put(self, ro, "hourCycle", r.hour_cycle);
-    try S.put(self, ro, "timeZone", r.time_zone);
-    if (r.hour12) |h| try self.setProp(ro, "hour12", Value.boolVal(h));
-    if (r.defaults_applied) {
-        try self.setProp(ro, "\x00defaultsApplied", Value.boolVal(true));
-        try ro.setAttr(self.arena, "\x00defaultsApplied", .{ .writable = false, .enumerable = false, .configurable = false });
+    // BasicFormatMatcher/BestFitMatcher selected these style patterns during
+    // construction. Expand them once, while retaining the original reflected
+    // fields above so resolvedOptions never exposes synthetic components.
+    if (r.date_style.len > 0) {
+        resolved.weekday = if (eq(r.date_style, "full")) .long else .none;
+        resolved.month = if (eq(r.date_style, "short")) .numeric else if (eq(r.date_style, "medium")) .short else .long;
+        resolved.day = .numeric;
+        resolved.year = if (eq(r.date_style, "short")) .two_digit else .numeric;
     }
-    try self.setProp(o, "\x00opts", Value.obj(ro));
-    try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+    if (r.time_style.len > 0) {
+        resolved.hour = .numeric;
+        resolved.minute = .two_digit;
+        resolved.second = if (eq(r.time_style, "short")) .none else .two_digit;
+        resolved.time_zone_name = if (eq(r.time_style, "full")) .long else if (eq(r.time_style, "long")) .short else .none;
+    }
+
+    const allocator = try o.intlDateTimeFormatAllocator(self.arena);
+    const data = try allocator.create(value.IntlDateTimeFormatData);
+    var installed = false;
+    errdefer if (!installed) o.destroyUninstalledIntlDateTimeFormat(self.arena, data);
+    data.* = resolved;
+    const sources = [_][]const u8{ resolved.locale, resolved.resolved_locale, resolved.calendar, resolved.numbering_system, resolved.hour_cycle, resolved.time_zone };
+    var total: usize = 0;
+    for (sources) |source| total = std.math.add(usize, total, source.len) catch return error.OutOfMemory;
+    data.owned_bytes = try allocator.alloc(u8, total);
+    var offset: usize = 0;
+    var owned: [sources.len][]const u8 = undefined;
+    for (sources, 0..) |source, index| {
+        @memcpy(data.owned_bytes.?[offset..][0..source.len], source);
+        owned[index] = data.owned_bytes.?[offset..][0..source.len];
+        offset += source.len;
+    }
+    data.locale = owned[0];
+    data.resolved_locale = owned[1];
+    data.calendar = owned[2];
+    data.numbering_system = owned[3];
+    data.hour_cycle = owned[4];
+    data.time_zone = owned[5];
+    try o.setIntlDateTimeFormatData(self.arena, data);
+    installed = true;
 }
 
 /// The single units sanctioned for use in ECMAScript (ECMA-402). A unit
@@ -26472,11 +26517,8 @@ const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
 const DtfPart = struct { typ: []const u8, value: []const u8 };
 
 fn dtfTimeZoneOffsetMs(this: Value, epoch_ms: f64) i64 {
-    const ov = this.asObj().getOwn("\x00opts") orelse return 0;
-    if (!ov.isObject()) return 0;
-    const tv = ov.asObj().getOwn("timeZone") orelse return 0;
-    if (!tv.isString()) return 0;
-    const s = tv.asStr();
+    const data = this.asObj().intlDateTimeFormatData() orelse return 0;
+    const s = data.time_zone;
     if (std.mem.startsWith(u8, s, "Etc/GMT+") or std.mem.startsWith(u8, s, "Etc/GMT-")) {
         const sign_ch = s["Etc/GMT".len];
         const hours = std.fmt.parseInt(i64, s["Etc/GMT+".len..], 10) catch return 0;
@@ -26670,85 +26712,27 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
     }
     const wday = isoDayOfWeek(civ.y, civ.m, civ.d) % 7; // 0=Sun..6=Sat
 
-    // Read the component options (or the default: numeric year/month/day).
-    var o_weekday: []const u8 = "";
-    var o_era: []const u8 = "";
-    var o_year: []const u8 = "";
-    var o_month: []const u8 = "";
-    var o_day: []const u8 = "";
-    var o_hour: []const u8 = "";
-    var o_minute: []const u8 = "";
-    var o_second: []const u8 = "";
-    var o_frac: usize = 0; // fractionalSecondDigits (1-3) or 0
-    var o_day_period: []const u8 = ""; // flexible dayPeriod width (long/short/narrow)
-    var o_tzname: []const u8 = ""; // timeZoneName width (long/short/...)
-    var o_calendar: []const u8 = "gregory";
-    var hour12 = true;
-    var hour_cycle: []const u8 = "";
-    var any_comp = false;
-    var defaults_applied = false;
-    var explicit_hour_setting = false;
-    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        const get = struct {
-            fn s(slf: *Interpreter, obj: Value, k: []const u8) EvalError![]const u8 {
-                const v = try slf.getProperty(obj, k);
-                return if (v.isString()) v.asStr() else "";
-            }
-        }.s;
-        o_weekday = try get(self, ov, "weekday");
-        o_era = try get(self, ov, "era");
-        o_year = try get(self, ov, "year");
-        o_month = try get(self, ov, "month");
-        o_day = try get(self, ov, "day");
-        o_hour = try get(self, ov, "hour");
-        o_minute = try get(self, ov, "minute");
-        o_second = try get(self, ov, "second");
-        o_day_period = try get(self, ov, "dayPeriod");
-        o_tzname = try get(self, ov, "timeZoneName");
-        o_calendar = try get(self, ov, "calendar");
-        if (o_calendar.len == 0) o_calendar = "gregory";
-        if (ov.asObj().getOwn("fractionalSecondDigits")) |f| if (f.isNumber()) {
-            o_frac = @intFromFloat(f.asNum());
-        };
-        if (ov.asObj().getOwn("\x00defaultsApplied")) |d| defaults_applied = d.toBoolean();
-        any_comp = o_weekday.len + o_era.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
-        const hc = try get(self, ov, "hourCycle");
-        hour_cycle = hc;
-        const h12 = try self.getProperty(ov, "hour12");
-        if (h12.isBoolean()) {
-            hour12 = h12.asBool();
-            explicit_hour_setting = true;
-        } else if (hc.len > 0) {
-            hour12 = std.mem.eql(u8, hc, "h11") or std.mem.eql(u8, hc, "h12");
-            explicit_hour_setting = true;
-        } else if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
-            // No explicit hour12/hourCycle: honor the locale's -u-hc keyword.
-            if (localeUValue(lv.asStr(), "hc")) |lhc| hour12 = std.mem.eql(u8, lhc, "h11") or std.mem.eql(u8, lhc, "h12");
-        };
-        if (ov.asObj().getOwn("\x00temporalDefaultHour12")) |tdh| {
-            if (tdh.toBoolean()) hour12 = true;
-        }
-        // dateStyle/timeStyle expand to a representative set of components (an
-        // en approximation; the localized patterns/time-zone parts are not
-        // modeled). Both can't combine with explicit components (enforced at
-        // construction), so it's safe to overwrite here.
-        const ds = try get(self, ov, "dateStyle");
-        const tstyle = try get(self, ov, "timeStyle");
-        if (ds.len > 0) {
-            any_comp = true;
-            o_weekday = if (eq(ds, "full")) "long" else "";
-            o_month = if (eq(ds, "short")) "numeric" else if (eq(ds, "medium")) "short" else "long";
-            o_day = "numeric";
-            o_year = if (eq(ds, "short")) "2-digit" else "numeric";
-        }
-        if (tstyle.len > 0) {
-            any_comp = true;
-            o_hour = "numeric";
-            o_minute = "2-digit";
-            o_second = if (eq(tstyle, "short")) "" else "2-digit";
-            o_tzname = if (eq(tstyle, "full")) "long" else if (eq(tstyle, "long")) "short" else "";
-        }
-    };
+    // Constructor resolution publishes immutable native state. No user or
+    // internal ordinary property lookup occurs on a steady consumer call.
+    const data = this.asObj().intlDateTimeFormatData() orelse
+        return self.throwError("TypeError", "Intl.DateTimeFormat has no resolved state");
+    var o_weekday = data.weekday.string();
+    var o_era = data.era.string();
+    var o_year = data.year.string();
+    var o_month = data.month.string();
+    var o_day = data.day.string();
+    var o_hour = data.hour.string();
+    var o_minute = data.minute.string();
+    var o_second = data.second.string();
+    var o_frac: usize = data.fractional_second_digits;
+    var o_day_period = data.day_period.string();
+    var o_tzname = data.time_zone_name.string();
+    const o_calendar = data.calendar;
+    var hour12 = data.hour12;
+    var hour_cycle = data.hour_cycle;
+    var any_comp = o_weekday.len + o_era.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
+    const defaults_applied = data.defaults_applied;
+    const explicit_hour_setting = data.has_hour_cycle;
     if (!any_comp) {
         o_year = "numeric";
         o_month = "numeric";
@@ -26814,8 +26798,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         any_comp = true;
     };
     if (temporal_kind != null and !explicit_hour_setting and o_hour.len > 0) {
-        const loc = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
-        hour_cycle = try dtfResolveHourCycle(self, loc, hour_cycle, null);
+        hour_cycle = try dtfResolveHourCycle(self, data.locale, hour_cycle, null);
         hour12 = std.mem.eql(u8, hour_cycle, "h11") or std.mem.eql(u8, hour_cycle, "h12");
     }
     if (temporal_kind == null or temporal_kind.? == .instant) {
@@ -26858,8 +26841,8 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         if (req and !kept) return self.throwError("TypeError", "Intl.DateTimeFormat: options do not overlap the Temporal value's fields");
     }
 
-    const numbering_system = resolveNumberingSystem(this);
-    const dtf_locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
+    const numbering_system = data.numbering_system;
+    const dtf_locale = data.locale;
 
     var parts: std.ArrayListUnmanaged(DtfPart) = .empty;
     const P = struct {
@@ -28167,6 +28150,7 @@ fn nfResolvedCompactPattern(locale: []const u8, compact_display: []const u8, mag
 /// but only a system we have digit data for.
 fn resolveNumberingSystem(this: Value) []const u8 {
     if (this.asObj().intlNumberFormatData()) |data| return data.numbering_system;
+    if (this.asObj().intlDateTimeFormatData()) |data| return data.numbering_system;
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.asObj().getOwn("numberingSystem")) |ns| if (ns.isString()) {
         if (numbering_systems.digits(ns.asStr()) != null) return ns.asStr();
     };
@@ -30729,39 +30713,35 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "roundingPriority", pg(ro, "roundingPriority") orelse Value.str("auto"));
                 try self.setProp(o, "trailingZeroDisplay", pg(ro, "trailingZeroDisplay") orelse Value.str("auto"));
             } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
-                // Reflect the normalized options (stored under \x00opts at
-                // construction) in the spec's resolvedOptions property order.
-                const ro: ?Value = this.asObj().getOwn("\x00opts");
-                const get = struct {
-                    fn s(slf: *Interpreter, src: ?Value, k: []const u8) ?Value {
-                        _ = slf;
-                        if (src) |sv| if (sv.isObject()) if (sv.asObj().getOwn(k)) |v| return v;
-                        return null;
-                    }
-                }.s;
-                // The resolved locale (with surviving ca/hc/nu extensions) was
-                // computed at construction.
-                if (get(self, ro, "\x00rloc")) |rl| try self.setProp(o, "locale", rl);
-                const cal = get(self, ro, "calendar");
-                try self.setProp(o, "calendar", if (cal) |c| try Value.strAlloc(self.arena, try c.asWtf8(self.arena)) else Value.str("gregory"));
-                const ns = get(self, ro, "numberingSystem");
-                try self.setProp(o, "numberingSystem", if (ns) |c| try Value.strAlloc(self.arena, try c.asWtf8(self.arena)) else Value.str("latn"));
-                const tz = get(self, ro, "timeZone");
-                try self.setProp(o, "timeZone", if (tz) |c| try Value.strAlloc(self.arena, try c.asWtf8(self.arena)) else Value.str("UTC"));
-                // Component / style fields are reflected only when set, in order.
-                const has_style = get(self, ro, "dateStyle") != null or get(self, ro, "timeStyle") != null;
-                const has_time = get(self, ro, "hour") != null or has_style;
-                if (has_time) {
-                    if (get(self, ro, "hourCycle")) |hc| {
-                        try self.setProp(o, "hourCycle", hc);
-                        try self.setProp(o, "hour12", Value.boolVal(std.mem.eql(u8, hc.asStr(), "h11") or std.mem.eql(u8, hc.asStr(), "h12")));
-                    } else if (get(self, ro, "hour12")) |h| {
-                        try self.setProp(o, "hour12", h);
-                    }
+                const data = this.asObj().intlDateTimeFormatData() orelse
+                    return self.throwError("TypeError", "Intl.DateTimeFormat has no resolved state");
+                try self.setProp(o, "locale", try Value.strAlloc(self.arena, data.resolved_locale));
+                try self.setProp(o, "calendar", try Value.strAlloc(self.arena, data.calendar));
+                try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
+                try self.setProp(o, "timeZone", try Value.strAlloc(self.arena, data.time_zone));
+                if (data.has_hour_cycle) {
+                    try self.setProp(o, "hourCycle", try Value.strAlloc(self.arena, data.hour_cycle));
+                    try self.setProp(o, "hour12", Value.boolVal(data.hour12));
                 }
-                inline for (.{ "weekday", "era", "year", "month", "day", "dayPeriod", "hour", "minute", "second", "fractionalSecondDigits", "timeZoneName", "dateStyle", "timeStyle" }) |k| {
-                    if (get(self, ro, k)) |v| try self.setProp(o, k, v);
-                }
+                const put = struct {
+                    fn string(s: *Interpreter, target: *value.Object, name: []const u8, bytes: []const u8) EvalError!void {
+                        if (bytes.len > 0) try s.setProp(target, name, try Value.strAlloc(s.arena, bytes));
+                    }
+                }.string;
+                try put(self, o, "weekday", data.resolved_weekday.string());
+                try put(self, o, "era", data.resolved_era.string());
+                try put(self, o, "year", data.resolved_year.string());
+                try put(self, o, "month", data.resolved_month.string());
+                try put(self, o, "day", data.resolved_day.string());
+                try put(self, o, "dayPeriod", data.resolved_day_period.string());
+                try put(self, o, "hour", data.resolved_hour.string());
+                try put(self, o, "minute", data.resolved_minute.string());
+                try put(self, o, "second", data.resolved_second.string());
+                if (data.resolved_fractional_second_digits > 0)
+                    try self.setProp(o, "fractionalSecondDigits", Value.num(@floatFromInt(data.resolved_fractional_second_digits)));
+                try put(self, o, "timeZoneName", data.resolved_time_zone_name.string());
+                try put(self, o, "dateStyle", data.date_style.string());
+                try put(self, o, "timeStyle", data.time_style.string());
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
                 var style: []const u8 = "long";
                 var numeric: []const u8 = "always";
@@ -40668,18 +40648,11 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
             r.hour12 = true;
             r.hour_cycle = "h12";
         }
-        try dtfStoreOptions(self, dtf, r);
         if (t.kind == .zoned_date_time and explicit_hour12_false and !explicit_hour_cycle_option) {
-            if (dtf.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                try self.setProp(ov.asObj(), "hourCycle", Value.str("h23"));
-                try self.setProp(ov.asObj(), "hour12", Value.boolVal(false));
-            };
+            r.hour_cycle = "h23";
+            r.hour12 = false;
         }
-        if (temporal_default_time) if (dtf.getOwn("\x00opts")) |ov| if (ov.isObject()) {
-            try self.setProp(ov.asObj(), "hour12", Value.boolVal(true));
-            try self.setProp(ov.asObj(), "hourCycle", Value.str("h12"));
-            try self.setProp(ov.asObj(), "\x00temporalDefaultHour12", Value.boolVal(true));
-        };
+        try dtfStoreOptions(self, dtf, r);
         return try intlDateTimeFormatFn(@ptrCast(self), Value.obj(dtf), &.{this});
     }
     const df = try makeDurationFormatForLocaleString(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef());
@@ -50809,6 +50782,45 @@ test "Intl.NumberFormat resolved-state publication is OOM-safe" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
 }
 
+test "Intl.DateTimeFormat resolved-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{
+                .arena = allocator,
+                .env = undefined,
+                .root_shape = root_shape,
+            };
+            var formatter = value.Object{};
+            try formatter.setOwn(allocator, root_shape, "\x00locale", Value.str("de-DE-u-nu-latn"));
+            try dtfStoreOptions(&machine, &formatter, .{
+                .weekday = "short",
+                .year = "numeric",
+                .month = "long",
+                .day = "2-digit",
+                .hour = "2-digit",
+                .minute = "2-digit",
+                .calendar = "gregory",
+                .numbering_system = "latn",
+                .hour_cycle = "h23",
+                .time_zone = "UTC",
+            });
+            const data = formatter.intlDateTimeFormatData().?;
+            try std.testing.expectEqualStrings("de-DE-u-nu-latn", data.resolved_locale);
+            try std.testing.expectEqualStrings("gregory", data.calendar);
+            try std.testing.expectEqualStrings("latn", data.numbering_system);
+            try std.testing.expectEqualStrings("h23", data.hour_cycle);
+            try std.testing.expectEqualStrings("long", data.month.string());
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
 test "Intl.NumberFormat and BigInt locale formatting share resolved state" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -51285,6 +51297,7 @@ test "Intl.DateTimeFormat German numeric date pattern" {
     const dtf = (try interp.newObject()).asObj();
     try interp.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
     try interp.setProp(dtf, "\x00locale", Value.str("de"));
+    try dtfStoreOptions(&interp, dtf, try dtfProcessOptions(&interp, Value.undef()));
     const out = try intlDateTimeFormatFn(@ptrCast(&interp), Value.obj(dtf), &.{Value.num(24 * 60 * 60 * 1000)});
     try std.testing.expectEqualStrings("2.1.1970", out.asStr());
 }

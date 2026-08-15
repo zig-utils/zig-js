@@ -12901,6 +12901,110 @@ test "parallel_js: Intl.NumberFormat resolved state is read-only after publicati
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl.DateTimeFormat resolved state is reclaimed under a bounded precise heap" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var dateTimeFormatChecksum = 0;
+        \\for (var round = 0; round < 64; round++) {
+        \\  for (var i = 0; i < 8; i++) {
+        \\    var formatter = new Intl.DateTimeFormat("de-DE-u-nu-latn", {
+        \\      timeZone: "UTC", calendar: "gregory", weekday: "short",
+        \\      year: "numeric", month: "long", day: "2-digit",
+        \\      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+        \\    });
+        \\    var options = formatter.resolvedOptions();
+        \\    dateTimeFormatChecksum += formatter.format(1704067200000 + (round * 8 + i) * 86400000).length +
+        \\      options.locale.length + options.calendar.length + options.numberingSystem.length;
+        \\  }
+        \\  gc();
+        \\}
+        \\gc();
+        \\dateTimeFormatChecksum > 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "moving nursery preserves Intl.DateTimeFormat native resolved state" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.__movingDateTimeFormat = new Intl.DateTimeFormat("de-DE-u-nu-latn", {
+        \\  timeZone: "UTC", calendar: "gregory", weekday: "short",
+        \\  year: "numeric", month: "long", day: "2-digit",
+        \\  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+        \\});
+        \\globalThis.__movingDateTimeBefore = __movingDateTimeFormat.format(1704067200000);
+        \\globalThis.__movingDateTimeRangeBefore = __movingDateTimeFormat.formatRange(1704067200000, 1704067200000);
+        \\globalThis.__movingDateTimePartsBefore = JSON.stringify(__movingDateTimeFormat.formatRangeToParts(1704067200000, 1704067200000));
+        \\globalThis.__movingDateTimeOptionsBefore = JSON.stringify(__movingDateTimeFormat.resolvedOptions());
+    );
+    const before = ctx.global_object.getOwn("__movingDateTimeFormat").?.asObj();
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("__movingDateTimeFormat").?.asObj();
+    try std.testing.expect(before != after);
+    try std.testing.expect((try ctx.evaluate(
+        \\__movingDateTimeFormat.format(1704067200000) === __movingDateTimeBefore &&
+        \\__movingDateTimeFormat.formatRange(1704067200000, 1704067200000) === __movingDateTimeRangeBefore &&
+        \\JSON.stringify(__movingDateTimeFormat.formatRangeToParts(1704067200000, 1704067200000)) === __movingDateTimePartsBefore &&
+        \\JSON.stringify(__movingDateTimeFormat.resolvedOptions()) === __movingDateTimeOptionsBefore &&
+        \\__movingDateTimeFormat.resolvedOptions().calendar === "gregory"
+    )).asBool());
+}
+
+test "parallel_js: Intl.DateTimeFormat resolved state is read-only after publication" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var sharedDateTimeFormat = new Intl.DateTimeFormat("en-US", {
+        \\  timeZone: "UTC", dateStyle: "long", timeStyle: "short"
+        \\});
+        \\function dateTimeFormatLane(lane) {
+        \\  var checksum = 0;
+        \\  for (var i = 0; i < 512; i++) {
+        \\    var timestamp = 1704067200000 + (i + lane) * 60000;
+        \\    var output = sharedDateTimeFormat.format(timestamp);
+        \\    checksum += output.length + output.charCodeAt(0);
+        \\    if ((i & 31) === 0) {
+        \\      var range = sharedDateTimeFormat.formatRange(timestamp, timestamp);
+        \\      var parts = sharedDateTimeFormat.formatRangeToParts(timestamp, timestamp);
+        \\      if (parts.map(function (part) { return part.value; }).join("") !== range) return 0;
+        \\      checksum += parts.length;
+        \\    }
+        \\  }
+        \\  var options = sharedDateTimeFormat.resolvedOptions();
+        \\  return checksum > 0 && options.locale === "en-US" &&
+        \\    options.dateStyle === "long" && options.timeStyle === "short" ? 1 : 0;
+        \\}
+        \\var dateTimeFormatThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) dateTimeFormatThreads.push(new Thread(dateTimeFormatLane, lane));
+        \\var dateTimeFormatTotal = 0;
+        \\for (var index = 0; index < dateTimeFormatThreads.length; index++) dateTimeFormatTotal += dateTimeFormatThreads[index].join();
+        \\dateTimeFormatTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "Function constructor builds callable functions from source" {
     // Params + body, called and constructed.
     try std.testing.expectEqual(@as(f64, 7), (try evalIn("Function('a', 'b', 'return a + b')(3, 4)")).asNum());
