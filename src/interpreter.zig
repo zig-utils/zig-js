@@ -27956,6 +27956,36 @@ fn translateDigits(self: *Interpreter, s: []const u8, ds: []const u8) EvalError!
 
 /// One element of a NumberFormat formatToParts result.
 const NfPart = struct { typ: []const u8, value: []const u8 };
+const NfOutput = struct {
+    mode: enum { text, parts },
+    text: std.ArrayListUnmanaged(u8) = .empty,
+    parts: std.ArrayListUnmanaged(NfPart) = .empty,
+    numbering_system: []const u8 = "latn",
+
+    fn push(self: *NfOutput, interpreter: *Interpreter, typ: []const u8, bytes: []const u8) EvalError!void {
+        const numeric = eq(typ, "integer") or eq(typ, "fraction") or eq(typ, "exponentInteger");
+        const digit_set = if (numeric and !std.mem.eql(u8, self.numbering_system, "latn"))
+            numbering_systems.digits(self.numbering_system)
+        else
+            null;
+        switch (self.mode) {
+            .text => if (digit_set) |digits| {
+                for (bytes) |byte| {
+                    if (byte >= '0' and byte <= '9')
+                        try self.text.appendSlice(interpreter.arena, numbering_systems.nth(digits, byte - '0'))
+                    else
+                        try self.text.append(interpreter.arena, byte);
+                }
+            } else {
+                try self.text.appendSlice(interpreter.arena, bytes);
+            },
+            .parts => try self.parts.append(interpreter.arena, .{
+                .typ = typ,
+                .value = if (digit_set) |digits| try translateDigits(interpreter, bytes, digits) else bytes,
+            }),
+        }
+    }
+};
 const NfExactDecimal = struct { neg: bool, int_str: []const u8, frac_str: []const u8 };
 
 fn nfParseExactDecimalString(s: []const u8) ?NfExactDecimal {
@@ -27985,15 +28015,16 @@ fn nfParseExactDecimalString(s: []const u8) ?NfExactDecimal {
     return .{ .neg = neg, .int_str = s[first_nonzero..int_end], .frac_str = frac };
 }
 
-/// Build the formatted parts for an Intl.NumberFormat value (en-style algorithm,
-/// CLDR symbols). Shared by `format` (joins the values) and `formatToParts`.
-fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(NfPart) {
+/// Run the Intl.NumberFormat emission algorithm once. The text sink appends
+/// directly to the final string buffer; the structural sink retains exact part
+/// boundaries for formatToParts and range formatting.
+fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *NfOutput) value.HostError!void {
     const input = if (args.len > 0) args[0] else Value.undef();
     const data = try numberFormatDataFor(self, this.asObj());
+    output.numbering_system = data.numbering_system;
     if (input.isObject() and input.asObj().is_bigint) {
-        var parts: std.ArrayListUnmanaged(NfPart) = .empty;
-        try parts.append(self.arena, .{ .typ = "literal", .value = try bigIntFormatWithResolved(self, input.asObj(), data) });
-        return parts;
+        try output.push(self, "literal", try bigIntFormatWithResolved(self, input.asObj(), data));
+        return;
     }
     var n = try self.toNumberV(input);
 
@@ -28191,22 +28222,16 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     // pattern does (en "($1.00)"); others (de) just use the minus sign.
     const acct = accounting and syms.accounting_parens and (cur_prefix.len > 0 or cur_suffix.len > 0);
 
-    var parts: std.ArrayListUnmanaged(NfPart) = .empty;
-    const push = struct {
-        fn p(s: *Interpreter, list: *std.ArrayListUnmanaged(NfPart), typ: []const u8, v: []const u8) EvalError!void {
-            try list.append(s.arena, .{ .typ = typ, .value = v });
-        }
-    }.p;
     if (unit_prefix.len > 0) {
-        try push(self, &parts, "unit", unit_prefix);
-        try push(self, &parts, "literal", " ");
+        try output.push(self, "unit", unit_prefix);
+        try output.push(self, "literal", " ");
     }
     // Sign/accounting wrap, then the currency prefix (en places the symbol before
     // the number; standard sign before the symbol: "-$1.00", accounting "($1.00)").
-    if (acct and show_neg) try push(self, &parts, "literal", "(") else if (show_neg) try push(self, &parts, "minusSign", syms.minus) else if (show_pos) try push(self, &parts, "plusSign", "+");
-    if (cur_prefix.len > 0) try push(self, &parts, "currency", cur_prefix);
+    if (acct and show_neg) try output.push(self, "literal", "(") else if (show_neg) try output.push(self, "minusSign", syms.minus) else if (show_pos) try output.push(self, "plusSign", "+");
+    if (cur_prefix.len > 0) try output.push(self, "currency", cur_prefix);
     if (!finite) {
-        try push(self, &parts, if (is_nan) "nan" else "infinity", if (is_nan) syms.nan else syms.infinity);
+        try output.push(self, if (is_nan) "nan" else "infinity", if (is_nan) syms.nan else syms.infinity);
     } else {
         // Integer digits, split into "integer" runs separated by "group" parts
         // (scientific/engineering notation never groups the mantissa).
@@ -28221,21 +28246,20 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         // South-Asian locales group as 3 then 2,2,… ("#,##,##0"); others as 3,3,….
         const indic = nfIndicGrouping(locale);
         const n_dig = digits.len;
-        var run: std.ArrayListUnmanaged(u8) = .empty;
-        for (digits, 0..) |c, i| {
+        var run_start: usize = 0;
+        for (digits, 0..) |_, i| {
             const rem = n_dig - i; // digits at and to the right of position i
             const at_boundary = if (indic)
                 (rem == 3 or (rem > 3 and (rem - 3) % 2 == 0))
             else
                 (rem % 3 == 0);
             if (group_ok and i != 0 and at_boundary) {
-                try push(self, &parts, "integer", try run.toOwnedSlice(self.arena));
-                try push(self, &parts, "group", syms.group);
-                run = .empty;
+                try output.push(self, "integer", digits[run_start..i]);
+                try output.push(self, "group", syms.group);
+                run_start = i;
             }
-            try run.append(self.arena, c);
         }
-        try push(self, &parts, "integer", try run.toOwnedSlice(self.arena));
+        try output.push(self, "integer", digits[run_start..]);
     }
     // Fraction digits (already rounded/trimmed by nfRound).
     // trailingZeroDisplay:"stripIfInteger" drops an all-zero fraction so an
@@ -28249,24 +28273,24 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         if (all_zero) frac_str = "";
     }
     if (finite and frac_str.len > 0) {
-        try push(self, &parts, "decimal", syms.decimal);
-        try push(self, &parts, "fraction", frac_str);
+        try output.push(self, "decimal", syms.decimal);
+        try output.push(self, "fraction", frac_str);
     }
     // Scientific/engineering exponent: "E" <minus?> <digits>.
     if (finite and sci) {
-        try push(self, &parts, "exponentSeparator", "E");
-        if (exponent < 0) try push(self, &parts, "exponentMinusSign", "-");
+        try output.push(self, "exponentSeparator", "E");
+        if (exponent < 0) try output.push(self, "exponentMinusSign", "-");
         const eabs: u64 = @intCast(@abs(exponent));
-        try push(self, &parts, "exponentInteger", try std.fmt.allocPrint(self.arena, "{d}", .{eabs}));
+        try output.push(self, "exponentInteger", try std.fmt.allocPrint(self.arena, "{d}", .{eabs}));
     }
     if (compact_suffix.len > 0) {
-        if (compact_sep.len > 0) try push(self, &parts, "literal", compact_sep);
-        try push(self, &parts, "compact", compact_suffix);
+        if (compact_sep.len > 0) try output.push(self, "literal", compact_sep);
+        try output.push(self, "compact", compact_suffix);
     }
-    if (is_percent) try push(self, &parts, "percentSign", syms.percent);
+    if (is_percent) try output.push(self, "percentSign", syms.percent);
     if (cur_suffix.len > 0) {
-        try push(self, &parts, "literal", "\u{00a0}");
-        try push(self, &parts, "currency", cur_suffix);
+        try output.push(self, "literal", "\u{00a0}");
+        try output.push(self, "currency", cur_suffix);
     }
     if (cur_name_code.len > 0) {
         // en cardinal plural: "one" only for an exact integer 1 (i==1, v==0).
@@ -28276,36 +28300,35 @@ fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             (dnLookup(if (one) &dn_data.currency_names_one else &dn_data.currency_names_other, cur_name_code) orelse cur_name_code)
         else
             cur_name_code;
-        try push(self, &parts, "literal", " ");
-        try push(self, &parts, "currency", nm);
+        try output.push(self, "literal", " ");
+        try output.push(self, "currency", nm);
     }
     if (unit_suffix.len > 0) {
-        if (unit_space) try push(self, &parts, "literal", " ");
+        if (unit_space) try output.push(self, "literal", " ");
         // The CLDR pattern bakes any number/unit gap into the suffix; expose it as
         // a separate "literal" part (as ICU/Node do) so formatToParts matches.
         var us = unit_suffix;
         if (!unit_space and us[0] == ' ') {
             var i: usize = 0;
             while (i < us.len and us[i] == ' ') i += 1;
-            try push(self, &parts, "literal", us[0..i]);
+            try output.push(self, "literal", us[0..i]);
             us = us[i..];
         }
-        try push(self, &parts, "unit", us);
+        try output.push(self, "unit", us);
     }
-    if (acct and show_neg) try push(self, &parts, "literal", ")");
-    // Translate the numeric parts to the resolved numbering system (latn = ASCII,
-    // no change).
-    const nu = data.numbering_system;
-    if (!std.mem.eql(u8, nu, "latn")) {
-        if (numbering_systems.digits(nu)) |ds| {
-            for (parts.items) |*p| {
-                if (eq(p.typ, "integer") or eq(p.typ, "fraction") or eq(p.typ, "exponentInteger")) {
-                    p.value = try translateDigits(self, p.value, ds);
-                }
-            }
-        }
-    }
-    return parts;
+    if (acct and show_neg) try output.push(self, "literal", ")");
+}
+
+fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(NfPart) {
+    var output = NfOutput{ .mode = .parts };
+    try nfBuildOutput(self, this, args, &output);
+    return output.parts;
+}
+
+fn nfBuildText(self: *Interpreter, this: Value, args: []const Value) value.HostError![]u8 {
+    var output = NfOutput{ .mode = .text };
+    try nfBuildOutput(self, this, args, &output);
+    return output.text.toOwnedSlice(self.arena);
 }
 
 /// en unit display name for NumberFormat style:unit. The handful of units the
@@ -28373,22 +28396,32 @@ fn numberFormatUnitName(self: *Interpreter, locale: []const u8, unit: []const u8
 fn intlNumberFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.format on incompatible receiver");
-    const parts = try nfBuildParts(self, this, args);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
-    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try nfBuildText(self, this, args));
 }
 
-/// Format one value to a string via the shared parts builder.
+/// Format one value directly through the text sink.
 fn nfFormatOne(self: *Interpreter, this: Value, v: Value) value.HostError![]const u8 {
-    const parts = try nfBuildParts(self, this, &.{v});
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
-    return buf.toOwnedSlice(self.arena);
+    return nfBuildText(self, this, &.{v});
 }
 
 fn nfAppendPartValues(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), parts: []const NfPart) EvalError!void {
     for (parts) |p| try buf.appendSlice(self.arena, p.value);
+}
+
+fn nfPartValuesEqual(x: []const NfPart, y: []const NfPart) bool {
+    var xi: usize = 0;
+    var yi: usize = 0;
+    var xo: usize = 0;
+    var yo: usize = 0;
+    while (true) {
+        while (xi < x.len and xo == x[xi].value.len) : (xi += 1) xo = 0;
+        while (yi < y.len and yo == y[yi].value.len) : (yi += 1) yo = 0;
+        if (xi == x.len or yi == y.len) return xi == x.len and yi == y.len;
+        const count = @min(x[xi].value.len - xo, y[yi].value.len - yo);
+        if (!std.mem.eql(u8, x[xi].value[xo .. xo + count], y[yi].value[yo .. yo + count])) return false;
+        xo += count;
+        yo += count;
+    }
 }
 
 fn nfSharedAffixLen(xp: []const NfPart, yp: []const NfPart) usize {
@@ -28464,9 +28497,12 @@ fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (std.math.isNan(x) or std.math.isNan(y)) return self.throwError("RangeError", "formatRange arguments must not be NaN");
     const xp = try nfBuildParts(self, this, &.{xv});
     const yp = try nfBuildParts(self, this, &.{yv});
-    const xs = try nfFormatOne(self, this, xv);
-    const ys = try nfFormatOne(self, this, yv);
-    if (std.mem.eql(u8, xs, ys)) return try Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "~{s}", .{xs}));
+    if (nfPartValuesEqual(xp.items, yp.items)) {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        try buf.append(self.arena, '~');
+        try nfAppendPartValues(self, &buf, xp.items);
+        return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
+    }
     const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     return try Value.strAlloc(self.arena, try nfFormatRangePartsText(self, locale, xp.items, yp.items));
 }
@@ -28495,9 +28531,7 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     };
     const xp = try nfBuildParts(self, this, &.{xv});
     const yp = try nfBuildParts(self, this, &.{yv});
-    const xs = try nfFormatOne(self, this, xv);
-    const ys = try nfFormatOne(self, this, yv);
-    if (std.mem.eql(u8, xs, ys)) {
+    if (nfPartValuesEqual(xp.items, yp.items)) {
         try Emit.part(self, arr, "approximatelySign", "~", "shared");
         try Emit.one(self, arr, xp.items, "shared");
         return Value.obj(arr);
@@ -50357,6 +50391,60 @@ test "Intl.NumberFormat and BigInt locale formatting share resolved state" {
         \\}
         \\same
     )).asBool());
+}
+
+test "Intl.NumberFormat text and structural sinks remain equivalent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var formatters = [
+        \\  new Intl.NumberFormat("en-US"),
+        \\  new Intl.NumberFormat("en-US", { useGrouping: false, minimumFractionDigits: 4, signDisplay: "always" }),
+        \\  new Intl.NumberFormat("hi-IN-u-nu-deva", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        \\  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencySign: "accounting" }),
+        \\  new Intl.NumberFormat("de-DE", { style: "unit", unit: "kilometer-per-hour", unitDisplay: "long" }),
+        \\  new Intl.NumberFormat("en-US", { notation: "scientific", maximumSignificantDigits: 5 }),
+        \\  new Intl.NumberFormat("en-US", { notation: "compact", compactDisplay: "long" })
+        \\];
+        \\var values = [123456.75, -0, -1234.5, NaN, Infinity, 12345678901234567890n, 0.00425];
+        \\var same = true;
+        \\for (var i = 0; i < formatters.length; i++) {
+        \\  same = same && formatters[i].format(values[i]) ===
+        \\    formatters[i].formatToParts(values[i]).map(function (part) { return part.value; }).join("");
+        \\  var start = 1000 + i;
+        \\  var end = i & 1 ? start : start + 500.25;
+        \\  same = same && formatters[i].formatRange(start, end) ===
+        \\    formatters[i].formatRangeToParts(start, end).map(function (part) { return part.value; }).join("");
+        \\}
+        \\same
+    )).asBool());
+}
+
+test "Intl.NumberFormat sink emission is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            var machine = Interpreter{ .arena = arena.allocator(), .env = undefined, .root_shape = undefined };
+            var text = NfOutput{ .mode = .text, .numbering_system = "deva" };
+            try text.push(&machine, "integer", "1234567");
+            try text.push(&machine, "decimal", ".");
+            try text.push(&machine, "fraction", "89");
+            try std.testing.expectEqualStrings("१२३४५६७.८९", text.text.items);
+
+            var parts = NfOutput{ .mode = .parts, .numbering_system = "deva" };
+            try parts.push(&machine, "integer", "1234567");
+            try parts.push(&machine, "decimal", ".");
+            try parts.push(&machine, "fraction", "89");
+            try std.testing.expectEqual(@as(usize, 3), parts.parts.items.len);
+            var joined: std.ArrayListUnmanaged(u8) = .empty;
+            try nfAppendPartValues(&machine, &joined, parts.parts.items);
+            try std.testing.expectEqualStrings(text.text.items, joined.items);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
 }
 
 test "Intl remaining conformance edge cases" {
