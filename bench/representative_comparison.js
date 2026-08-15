@@ -1297,6 +1297,60 @@ function representativeIntlNumberFormatCompactCldr(jobs, lane, kind) {
   return total;
 }
 
+var representativeIntlCurrencyNameCldrFormatters = [
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencyDisplay: "name" }),
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" }),
+  new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR", currencyDisplay: "name" }),
+  new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR", currencyDisplay: "name" }),
+  new Intl.NumberFormat("es-ES", { style: "currency", currency: "USD", currencyDisplay: "name" }),
+  new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR", currencyDisplay: "name" }),
+  new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", currencyDisplay: "name" }),
+  new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" }),
+  new Intl.NumberFormat("pl-PL", { style: "currency", currency: "PLN", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" }),
+  new Intl.NumberFormat("ar-EG", { style: "currency", currency: "EGP", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" }),
+  new Intl.NumberFormat("hi-IN-u-nu-deva", { style: "currency", currency: "INR", currencyDisplay: "name" }),
+  new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", currencyDisplay: "name" }),
+  new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", currencyDisplay: "name" }),
+  new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW", currencyDisplay: "name" }),
+  new Intl.NumberFormat("he-IL", { style: "currency", currency: "ILS", currencyDisplay: "name" }),
+  new Intl.NumberFormat("cy-GB", { style: "currency", currency: "GBP", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" })
+];
+var representativeIntlCurrencyNameCldrValues = [
+  1, 1n, 2n, 2, 2n, 2, 2n, 21n, 22n, 3n, 2n, 2n, 2, 2n, 2, 3n
+];
+var representativeIntlCurrencyNameCldrEnds = [
+  2, 2n, 3n, 3, 3n, 3, 3n, 25n, 25n, 11n, 3n, 3n, 3, 3n, 3, 6n
+];
+
+function representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var index = (job + i + lane) & 15;
+      var formatter = representativeIntlCurrencyNameCldrFormatters[index];
+      if (kind === "text") {
+        var output = formatter.format(representativeIntlCurrencyNameCldrValues[index]);
+        total = total + output.length + output.charCodeAt(0) + output.charCodeAt(output.length - 1);
+      } else if (kind === "parts") {
+        var parts = formatter.formatToParts(representativeIntlCurrencyNameCldrValues[index]);
+        total = total + parts.length;
+        for (var part = 0; part < parts.length; part = part + 1)
+          total = total + parts[part].type.length + parts[part].value.length + parts[part].value.charCodeAt(0);
+      } else if (kind === "range") {
+        var range = formatter.formatRange(representativeIntlCurrencyNameCldrValues[index], representativeIntlCurrencyNameCldrEnds[index]);
+        total = total + range.length + range.charCodeAt(0) + range.charCodeAt(range.length - 1);
+      } else {
+        var rangeParts = formatter.formatRangeToParts(representativeIntlCurrencyNameCldrValues[index], representativeIntlCurrencyNameCldrEnds[index]);
+        total = total + rangeParts.length;
+        for (var rangePart = 0; rangePart < rangeParts.length; rangePart = rangePart + 1)
+          total = total + rangeParts[rangePart].type.length + rangeParts[rangePart].value.length +
+            rangeParts[rangePart].source.length + rangeParts[rangePart].value.charCodeAt(0);
+      }
+    }
+  }
+  return total;
+}
+
 function representativeLongLivedGraph(jobs, lane, variant) {
   var nodes = [];
   var total = 0;
@@ -1569,6 +1623,10 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_compact_cldr_parts") return function (jobs, lane) { return representativeIntlNumberFormatCompactCldr(jobs, lane, "parts"); };
   if (name === "representative_intl_number_format_compact_cldr_range") return function (jobs, lane) { return representativeIntlNumberFormatCompactCldr(jobs, lane, "range"); };
   if (name === "representative_intl_number_format_compact_cldr_range_parts") return function (jobs, lane) { return representativeIntlNumberFormatCompactCldr(jobs, lane, "rangeParts"); };
+  if (name === "representative_intl_number_format_currency_name_cldr_text") return function (jobs, lane) { return representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, "text"); };
+  if (name === "representative_intl_number_format_currency_name_cldr_parts") return function (jobs, lane) { return representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, "parts"); };
+  if (name === "representative_intl_number_format_currency_name_cldr_range") return function (jobs, lane) { return representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, "range"); };
+  if (name === "representative_intl_number_format_currency_name_cldr_range_parts") return function (jobs, lane) { return representativeIntlNumberFormatCurrencyNameCldr(jobs, lane, "rangeParts"); };
   if (name === "representative_long_lived_graph") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 0); };
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
