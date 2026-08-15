@@ -1407,6 +1407,113 @@ function representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, kind) {
   return total;
 }
 
+// DateTimeFormat controls separate constructor resolution from steady
+// consumers. Keep the fixed UTC inputs and formatter construction outside the
+// timed steady boundary so changes to resolved-state ownership are attributable
+// without conflating locale-data or clock access.
+var representativeIntlDateTimeFormatters = [
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC" }),
+  new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC", weekday: "short", year: "numeric", month: "long", day: "numeric"
+  }),
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC", dateStyle: "full" }),
+  new Intl.DateTimeFormat("de-DE", {
+    timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit"
+  }),
+  new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit",
+    fractionalSecondDigits: 3, hourCycle: "h23"
+  }),
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC", dateStyle: "long", timeStyle: "short" }),
+  new Intl.DateTimeFormat("en-US-u-nu-latn", {
+    timeZone: "UTC", calendar: "gregory", year: "2-digit", month: "2-digit", day: "2-digit"
+  }),
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC", year: "numeric", month: "long", day: "numeric" })
+];
+var representativeIntlDateTimeValues = [
+  1704067200000, 1704153600000, 1718409600000, 1735689600000,
+  1704112496789, 1718461800000, 1735603200000, 1718409600000
+];
+// Equal endpoints isolate the two-build/collapse range consumer without
+// folding the distinct locale interval-pattern work into resolved-state cost.
+var representativeIntlDateTimeEnds = [
+  1704067200000, 1704153600000, 1718409600000, 1735689600000,
+  1704112496789, 1718461800000, 1735603200000, 1718409600000
+];
+
+function representativeIntlDateTimeChecksum(text) {
+  var total = text.length;
+  for (var index = 0; index < text.length; index = index + 1)
+    total = (total * 131 + text.charCodeAt(index)) % 1000000007;
+  return total;
+}
+
+function representativeIntlDateTimeFormatConsumer(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var index = (job + i + lane) & 7;
+      var formatter = representativeIntlDateTimeFormatters[index];
+      if (kind === "text") {
+        total = (total + representativeIntlDateTimeChecksum(formatter.format(representativeIntlDateTimeValues[index]))) % 1000000007;
+      } else if (kind === "parts") {
+        var parts = formatter.formatToParts(representativeIntlDateTimeValues[index]);
+        for (var part = 0; part < parts.length; part = part + 1) {
+          total = (total + representativeIntlDateTimeChecksum(parts[part].type) +
+            representativeIntlDateTimeChecksum(parts[part].value)) % 1000000007;
+        }
+      } else if (kind === "range") {
+        total = (total + representativeIntlDateTimeChecksum(formatter.formatRange(
+          representativeIntlDateTimeValues[index], representativeIntlDateTimeEnds[index]
+        ))) % 1000000007;
+      } else {
+        var rangeParts = formatter.formatRangeToParts(
+          representativeIntlDateTimeValues[index], representativeIntlDateTimeEnds[index]
+        );
+        for (var rangePart = 0; rangePart < rangeParts.length; rangePart = rangePart + 1) {
+          total = (total + representativeIntlDateTimeChecksum(rangeParts[rangePart].type) +
+            representativeIntlDateTimeChecksum(rangeParts[rangePart].value) +
+            representativeIntlDateTimeChecksum(rangeParts[rangePart].source)) % 1000000007;
+        }
+      }
+    }
+  }
+  return total;
+}
+
+function representativeIntlDateTimeFormatConstruct(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 32; i = i + 1) {
+      var formatter;
+      if (kind === "default") {
+        formatter = new Intl.DateTimeFormat("en-US", { timeZone: "UTC" });
+      } else if (kind === "components") {
+        formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "UTC", fractionalSecondDigits: 3, second: "2-digit", minute: "2-digit",
+          hour: "2-digit", day: "numeric", month: "long", year: "numeric", weekday: "short",
+          hourCycle: "h23"
+        });
+      } else if (kind === "style") {
+        formatter = new Intl.DateTimeFormat("en-US", {
+          timeZone: "UTC", timeStyle: "long", dateStyle: "full"
+        });
+      } else {
+        formatter = new Intl.DateTimeFormat("de-DE-u-nu-latn", {
+          timeZone: "UTC", hour12: false, calendar: "gregory", numberingSystem: "latn",
+          year: "2-digit", month: "2-digit", day: "2-digit"
+        });
+      }
+      var options = formatter.resolvedOptions();
+      total = (total + representativeIntlDateTimeChecksum(options.locale) +
+        representativeIntlDateTimeChecksum(options.calendar) +
+        representativeIntlDateTimeChecksum(options.numberingSystem) +
+        representativeIntlDateTimeChecksum(options.timeZone) + lane + (job & 3)) % 1000000007;
+    }
+  }
+  return total;
+}
+
 function representativeLongLivedGraph(jobs, lane, variant) {
   var nodes = [];
   var total = 0;
@@ -1687,6 +1794,14 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_numbering_system_cldr_parts") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "parts"); };
   if (name === "representative_intl_number_format_numbering_system_cldr_range") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "range"); };
   if (name === "representative_intl_number_format_numbering_system_cldr_resolved") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "resolved"); };
+  if (name === "representative_intl_date_time_format_consumer_text") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "text"); };
+  if (name === "representative_intl_date_time_format_consumer_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "parts"); };
+  if (name === "representative_intl_date_time_format_consumer_range") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "range"); };
+  if (name === "representative_intl_date_time_format_consumer_range_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "rangeParts"); };
+  if (name === "representative_intl_date_time_format_construct_default") return function (jobs, lane) { return representativeIntlDateTimeFormatConstruct(jobs, lane, "default"); };
+  if (name === "representative_intl_date_time_format_construct_components") return function (jobs, lane) { return representativeIntlDateTimeFormatConstruct(jobs, lane, "components"); };
+  if (name === "representative_intl_date_time_format_construct_style") return function (jobs, lane) { return representativeIntlDateTimeFormatConstruct(jobs, lane, "style"); };
+  if (name === "representative_intl_date_time_format_construct_locale") return function (jobs, lane) { return representativeIntlDateTimeFormatConstruct(jobs, lane, "locale"); };
   if (name === "representative_long_lived_graph") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 0); };
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
