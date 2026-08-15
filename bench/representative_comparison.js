@@ -200,6 +200,34 @@ function representativeRegExpSearchInput(jobs, lane, kind) {
   return total + input.length;
 }
 
+var representativeTextEncoderAscii = "";
+var representativeTextEncoderUnicode = "";
+var representativeTextEncoderLone = "";
+var representativeTextEncoderPair = "";
+for (var representativeTextEncoderIndex = 0; representativeTextEncoderIndex < 256; representativeTextEncoderIndex = representativeTextEncoderIndex + 1) {
+  var representativeTextEncoderSuffix = "-row-" + (representativeTextEncoderIndex % 10) + ";";
+  representativeTextEncoderAscii = representativeTextEncoderAscii + "plain" + representativeTextEncoderSuffix;
+  representativeTextEncoderUnicode = representativeTextEncoderUnicode + "café水😀" + representativeTextEncoderSuffix;
+  representativeTextEncoderLone = representativeTextEncoderLone + "lone\ud800x" + representativeTextEncoderSuffix;
+  representativeTextEncoderPair = representativeTextEncoderPair + "pair\ud83d\ude00" + representativeTextEncoderSuffix;
+}
+
+function representativeTextEncoderBoundary(jobs, lane, kind) {
+  var input = kind === "unicode" ? representativeTextEncoderUnicode :
+    (kind === "lone" ? representativeTextEncoderLone :
+      (kind === "pair" ? representativeTextEncoderPair : representativeTextEncoderAscii));
+  var encoder = new TextEncoder();
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var round = 0; round < 64; round = round + 1) {
+      var bytes = encoder.encode(input);
+      total = total + bytes.length + bytes[0] + bytes[Math.floor(bytes.length / 2)] +
+        bytes[bytes.length - 1] + lane + (job & 3);
+    }
+  }
+  return total + input.length;
+}
+
 function representativeJson(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -1096,6 +1124,10 @@ function benchmarkFunction(name) {
   if (name === "representative_regexp_search_bmp") return function (jobs, lane) { return representativeRegExpSearchInput(jobs, lane, "bmp"); };
   if (name === "representative_regexp_search_astral") return function (jobs, lane) { return representativeRegExpSearchInput(jobs, lane, "astral"); };
   if (name === "representative_regexp_search_lone_surrogate") return function (jobs, lane) { return representativeRegExpSearchInput(jobs, lane, "lone"); };
+  if (name === "representative_text_encoder_ascii") return function (jobs, lane) { return representativeTextEncoderBoundary(jobs, lane, "ascii"); };
+  if (name === "representative_text_encoder_unicode") return function (jobs, lane) { return representativeTextEncoderBoundary(jobs, lane, "unicode"); };
+  if (name === "representative_text_encoder_lone_surrogate") return function (jobs, lane) { return representativeTextEncoderBoundary(jobs, lane, "lone"); };
+  if (name === "representative_text_encoder_paired_surrogates") return function (jobs, lane) { return representativeTextEncoderBoundary(jobs, lane, "pair"); };
   if (name === "representative_json") return function (jobs, lane) { return representativeJson(jobs, lane, 0); };
   if (name === "representative_json_variant") return function (jobs, lane) { return representativeJson(jobs, lane, 1); };
   if (name === "representative_json_reviver_source") return representativeJsonReviverSource;
