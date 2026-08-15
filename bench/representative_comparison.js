@@ -1055,6 +1055,64 @@ function representativeIntlNumberFormatConsumer(jobs, lane, kind) {
   return total;
 }
 
+var representativeIntlRoundingFormatters = [
+  new Intl.NumberFormat("en-US"),
+  new Intl.NumberFormat("en-US", { useGrouping: false, minimumFractionDigits: 4, maximumFractionDigits: 4, signDisplay: "always" }),
+  new Intl.NumberFormat("en-US", { minimumSignificantDigits: 3, maximumSignificantDigits: 5 }),
+  new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2, roundingIncrement: 5, roundingMode: "halfEven" }),
+  new Intl.NumberFormat("en-US", { notation: "scientific", maximumSignificantDigits: 6 }),
+  new Intl.NumberFormat("en-US", { notation: "engineering", minimumSignificantDigits: 4, maximumSignificantDigits: 6 }),
+  new Intl.NumberFormat("en-US", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("en-US", { useGrouping: false, maximumFractionDigits: 0 }),
+  new Intl.NumberFormat("en-US", { useGrouping: false, minimumFractionDigits: 2, maximumFractionDigits: 4 }),
+  new Intl.NumberFormat("hi-IN-u-nu-deva", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencySign: "accounting", maximumFractionDigits: 2 }),
+  new Intl.NumberFormat("de-DE", { maximumFractionDigits: 3 }),
+  new Intl.NumberFormat("en-US", { useGrouping: false }),
+  new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4, minimumSignificantDigits: 3, maximumSignificantDigits: 5, roundingPriority: "morePrecision" }),
+  new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, trailingZeroDisplay: "stripIfInteger" }),
+  new Intl.NumberFormat("en-US", { useGrouping: false, minimumIntegerDigits: 21 })
+];
+var representativeIntlRoundingValues = [
+  123456.75,
+  -0,
+  98765.4321,
+  1.025,
+  123456789.125,
+  0.000123456,
+  1234567,
+  1.7976931348623157e308,
+  "000000000000123.4500",
+  -1234.5,
+  -42.125,
+  NaN,
+  -Infinity,
+  0.004321,
+  42,
+  7
+];
+
+function representativeIntlNumberFormatRounding(jobs, lane, partsMode) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var index = (job + i + lane) & 15;
+      var formatter = representativeIntlRoundingFormatters[index];
+      var value = representativeIntlRoundingValues[index];
+      if (partsMode) {
+        var parts = formatter.formatToParts(value);
+        total = total + parts.length;
+        for (var part = 0; part < parts.length; part = part + 1)
+          total = total + parts[part].type.length + parts[part].value.length + parts[part].value.charCodeAt(0);
+      } else {
+        var output = formatter.format(value);
+        total = total + output.length + output.charCodeAt(0) + output.charCodeAt(output.length - 1);
+      }
+    }
+  }
+  return total;
+}
+
 function representativeLongLivedGraph(jobs, lane, variant) {
   var nodes = [];
   var total = 0;
@@ -1315,6 +1373,8 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_consumer_parts") return function (jobs, lane) { return representativeIntlNumberFormatConsumer(jobs, lane, "parts"); };
   if (name === "representative_intl_number_format_consumer_range") return function (jobs, lane) { return representativeIntlNumberFormatConsumer(jobs, lane, "range"); };
   if (name === "representative_intl_number_format_consumer_range_parts") return function (jobs, lane) { return representativeIntlNumberFormatConsumer(jobs, lane, "rangeParts"); };
+  if (name === "representative_intl_number_format_rounding_text") return function (jobs, lane) { return representativeIntlNumberFormatRounding(jobs, lane, false); };
+  if (name === "representative_intl_number_format_rounding_parts") return function (jobs, lane) { return representativeIntlNumberFormatRounding(jobs, lane, true); };
   if (name === "representative_long_lived_graph") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 0); };
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
