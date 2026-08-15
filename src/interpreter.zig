@@ -19913,7 +19913,7 @@ fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) val
     const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
     const data = try nfResolvedData(self, loc, ro);
     var output = NfOutput{ .mode = .text };
-    try nfBuildOutputResolved(self, Value.obj(big), &data, &output);
+    try nfBuildOutputResolved(self, Value.obj(big), &data, &output, null);
     return try Value.strOwned(self.arena, try output.text.toOwnedSlice(self.arena));
 }
 
@@ -28153,7 +28153,7 @@ fn nfCompactPluralCondition(condition: []const u8, integer: []const u8, fraction
     return false;
 }
 
-fn nfCompactPluralCategory(locale: []const u8, integer: []const u8, fraction: []const u8, exponent: u8) []const u8 {
+fn nfPluralCategoryExact(locale: []const u8, integer: []const u8, fraction: []const u8, exponent: u8) []const u8 {
     var w = fraction.len;
     while (w > 0 and fraction[w - 1] == '0') w -= 1;
     const rules = cldr_plurals.cardinal(localeLanguage(locale)) orelse (cldr_plurals.cardinal("en") orelse &.{});
@@ -28164,7 +28164,7 @@ fn nfCompactPluralCategory(locale: []const u8, integer: []const u8, fraction: []
 fn nfResolvedCompactPattern(locale: []const u8, compact_display: []const u8, magnitude: usize, fallback: NfCompactPattern, integer: []const u8, fraction: []const u8) NfCompactPattern {
     if (!fallback.plural_sensitive) return fallback;
     const exact_one = std.mem.eql(u8, integer, "1") and fraction.len == 0;
-    const category = nfCompactPluralCategory(locale, integer, fraction, fallback.exponent);
+    const category = nfPluralCategoryExact(locale, integer, fraction, fallback.exponent);
     return nfCompactPattern(locale, compact_display, magnitude, category, exact_one);
 }
 
@@ -28200,6 +28200,8 @@ const NfOutput = struct {
     text: std.ArrayListUnmanaged(u8) = .empty,
     parts: std.ArrayListUnmanaged(NfPart) = .empty,
     numbering_system: []const u8 = "latn",
+    currency_plural_category: []const u8 = "other",
+    currency_display: ?cldr_numbers.CurrencyDisplay = null,
 
     fn push(self: *NfOutput, interpreter: *Interpreter, typ: []const u8, bytes: []const u8) EvalError!void {
         const numeric = eq(typ, "integer") or eq(typ, "fraction") or eq(typ, "exponentInteger");
@@ -28257,7 +28259,7 @@ fn nfParseExactDecimalString(s: []const u8) ?NfExactDecimal {
 /// Run the Intl.NumberFormat emission algorithm once. The text sink appends
 /// directly to the final string buffer; the structural sink retains exact part
 /// boundaries for formatToParts and range formatting.
-fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.IntlNumberFormatData, output: *NfOutput) value.HostError!void {
+fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.IntlNumberFormatData, output: *NfOutput, currency_plural_override: ?[]const u8) value.HostError!void {
     output.numbering_system = data.numbering_system;
     const big = if (input.isObject() and input.asObj().is_bigint) input.asObj() else null;
     var big_digits: []const u8 = "";
@@ -28521,9 +28523,40 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
     // pattern does (en "($1.00)"); others (de) just use the minus sign.
     const acct = accounting and syms.accounting_parens and (cur_prefix.len > 0 or cur_suffix.len > 0);
 
+    // trailingZeroDisplay changes both the emitted fraction and the CLDR plural
+    // operands used by long currency names ("1 US dollar" versus "1.00 US
+    // dollars"), so resolve it before selecting the currency unit pattern.
+    if (strip_if_integer and finite and frac_str.len > 0) {
+        var all_zero = true;
+        for (frac_str) |c| if (c != '0') {
+            all_zero = false;
+            break;
+        };
+        if (all_zero) frac_str = "";
+    }
+    const currency_display: ?cldr_numbers.CurrencyDisplay = if (cur_name_code.len > 0) blk: {
+        var category = currency_plural_override orelse "other";
+        var display = cldr_numbers.currency(locale, cur_name_code, category);
+        if (currency_plural_override == null and finite and display.plural_sensitive) {
+            category = nfPluralCategoryExact(locale, digits, frac_str, 0);
+            if (!std.mem.eql(u8, category, "other")) display = cldr_numbers.currency(locale, cur_name_code, category);
+        }
+        output.currency_plural_category = category;
+        display.name = try nfCurrencyDisplayName(self, display);
+        output.currency_display = display;
+        break :blk display;
+    } else null;
+
     if (unit_prefix.len > 0) {
         try output.push(self, "unit", unit_prefix);
         try output.push(self, "literal", " ");
+    }
+    if (currency_display) |display| {
+        if (display.leading_literal.len > 0) try output.push(self, "literal", display.leading_literal);
+        if (!display.number_first) {
+            try output.push(self, "currency", display.name);
+            if (display.between_literal.len > 0) try output.push(self, "literal", display.between_literal);
+        }
     }
     // Sign/accounting wrap, then the currency prefix (en places the symbol before
     // the number; standard sign before the symbol: "-$1.00", accounting "($1.00)").
@@ -28563,16 +28596,6 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         }
     }
     // Fraction digits (already rounded/trimmed by nfRound).
-    // trailingZeroDisplay:"stripIfInteger" drops an all-zero fraction so an
-    // integer magnitude renders with no decimal part.
-    if (strip_if_integer and finite and frac_str.len > 0) {
-        var all_zero = true;
-        for (frac_str) |c| if (c != '0') {
-            all_zero = false;
-            break;
-        };
-        if (all_zero) frac_str = "";
-    }
     if (finite and compact_pattern.show_number and frac_str.len > 0) {
         try output.push(self, "decimal", syms.decimal);
         try output.push(self, "fraction", frac_str);
@@ -28597,16 +28620,12 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         try output.push(self, "literal", "\u{00a0}");
         try output.push(self, "currency", cur_suffix);
     }
-    if (cur_name_code.len > 0) {
-        // en cardinal plural: "one" only for an exact integer 1 (i==1, v==0).
-        const one = (if (big != null) std.mem.eql(u8, big_digits, "1") else @abs(n) == 1.0) and frac_str.len == 0;
-        const en_loc = std.mem.eql(u8, locale, "en") or std.mem.startsWith(u8, locale, "en-");
-        const nm: []const u8 = if (en_loc)
-            (dnLookup(if (one) &dn_data.currency_names_one else &dn_data.currency_names_other, cur_name_code) orelse cur_name_code)
-        else
-            cur_name_code;
-        try output.push(self, "literal", " ");
-        try output.push(self, "currency", nm);
+    if (currency_display) |display| {
+        if (display.number_first) {
+            if (display.between_literal.len > 0) try output.push(self, "literal", display.between_literal);
+            try output.push(self, "currency", display.name);
+        }
+        if (display.trailing_literal.len > 0) try output.push(self, "literal", display.trailing_literal);
     }
     if (unit_suffix.len > 0) {
         if (unit_space) try output.push(self, "literal", " ");
@@ -28626,12 +28645,18 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
 
 fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *NfOutput) value.HostError!void {
     const data = try numberFormatDataFor(self, this.asObj());
-    return nfBuildOutputResolved(self, if (args.len > 0) args[0] else Value.undef(), data, output);
+    return nfBuildOutputResolved(self, if (args.len > 0) args[0] else Value.undef(), data, output, null);
+}
+
+fn nfBuildPartsMeta(self: *Interpreter, this: Value, input: Value, currency_plural_override: ?[]const u8) value.HostError!NfOutput {
+    var output = NfOutput{ .mode = .parts };
+    const data = try numberFormatDataFor(self, this.asObj());
+    try nfBuildOutputResolved(self, input, data, &output, currency_plural_override);
+    return output;
 }
 
 fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(NfPart) {
-    var output = NfOutput{ .mode = .parts };
-    try nfBuildOutput(self, this, args, &output);
+    const output = try nfBuildPartsMeta(self, this, if (args.len > 0) args[0] else Value.undef(), null);
     return output.parts;
 }
 
@@ -28811,6 +28836,63 @@ fn nfMathematicalArg(self: *Interpreter, v: Value) value.HostError!Value {
     return Value.num(number);
 }
 
+fn nfCurrencyPatternEqual(x: cldr_numbers.CurrencyDisplay, y: cldr_numbers.CurrencyDisplay) bool {
+    return x.number_first == y.number_first and
+        std.mem.eql(u8, x.leading_literal, y.leading_literal) and
+        std.mem.eql(u8, x.between_literal, y.between_literal) and
+        std.mem.eql(u8, x.trailing_literal, y.trailing_literal) and
+        std.mem.eql(u8, x.name_prefix, y.name_prefix) and
+        std.mem.eql(u8, x.name_suffix, y.name_suffix);
+}
+
+fn nfCurrencyDisplayName(self: *Interpreter, display: cldr_numbers.CurrencyDisplay) value.HostError![]const u8 {
+    if (display.name_prefix.len == 0 and display.name_suffix.len == 0) return display.name;
+    return std.fmt.allocPrint(self.arena, "{s}{s}{s}", .{ display.name_prefix, display.name, display.name_suffix });
+}
+
+fn nfReplaceCurrencyName(parts: []NfPart, name: []const u8) void {
+    for (parts) |*part| {
+        if (std.mem.eql(u8, part.typ, "currency")) part.value = name;
+    }
+}
+
+const NfRangeOutputs = struct { start: NfOutput, end: NfOutput };
+
+/// Currency display names use CLDR's plural-range category, not the two
+/// endpoint categories independently. Reuse the already-built numeric parts
+/// when the range category keeps the same unit pattern; only the rare locale
+/// whose plural unit pattern changes order/literals needs a structural rebuild.
+fn nfBuildRangeOutputs(self: *Interpreter, this: Value, start: Value, end: Value) value.HostError!NfRangeOutputs {
+    const data = try numberFormatDataFor(self, this.asObj());
+    var result = NfRangeOutputs{ .start = .{ .mode = .parts }, .end = .{ .mode = .parts } };
+    try nfBuildOutputResolved(self, start, data, &result.start, null);
+    try nfBuildOutputResolved(self, end, data, &result.end, null);
+    if (nfPartValuesEqual(result.start.parts.items, result.end.parts.items)) return result;
+    if (!std.mem.eql(u8, data.style, "currency") or !std.mem.eql(u8, data.currency_display, "name")) return result;
+
+    const category = cldr_plurals.range(localeLanguage(data.locale), result.start.currency_plural_category, result.end.currency_plural_category);
+    if (std.mem.eql(u8, category, result.start.currency_plural_category) and std.mem.eql(u8, category, result.end.currency_plural_category)) return result;
+    var display = cldr_numbers.currency(data.locale, data.currency orelse "USD", category);
+    display.name = try nfCurrencyDisplayName(self, display);
+    if (result.start.currency_display != null and result.end.currency_display != null and
+        nfCurrencyPatternEqual(result.start.currency_display.?, display) and nfCurrencyPatternEqual(result.end.currency_display.?, display))
+    {
+        nfReplaceCurrencyName(result.start.parts.items, display.name);
+        nfReplaceCurrencyName(result.end.parts.items, display.name);
+        result.start.currency_plural_category = category;
+        result.end.currency_plural_category = category;
+        result.start.currency_display = display;
+        result.end.currency_display = display;
+        return result;
+    }
+
+    result.start = .{ .mode = .parts };
+    result.end = .{ .mode = .parts };
+    try nfBuildOutputResolved(self, start, data, &result.start, category);
+    try nfBuildOutputResolved(self, end, data, &result.end, category);
+    return result;
+}
+
 fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatRange on incompatible receiver");
@@ -28819,8 +28901,9 @@ fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const yv = try nfMathematicalArg(self, args[1]);
     if ((xv.isNumber() and std.math.isNan(xv.asNum())) or (yv.isNumber() and std.math.isNan(yv.asNum())))
         return self.throwError("RangeError", "formatRange arguments must not be NaN");
-    const xp = try nfBuildParts(self, this, &.{xv});
-    const yp = try nfBuildParts(self, this, &.{yv});
+    const outputs = try nfBuildRangeOutputs(self, this, xv, yv);
+    const xp = outputs.start.parts;
+    const yp = outputs.end.parts;
     if (nfPartValuesEqual(xp.items, yp.items)) {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         try buf.append(self.arena, '~');
@@ -28852,8 +28935,9 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
             for (prts) |p| try part(s, a, p.typ, p.value, src);
         }
     };
-    const xp = try nfBuildParts(self, this, &.{xv});
-    const yp = try nfBuildParts(self, this, &.{yv});
+    const outputs = try nfBuildRangeOutputs(self, this, xv, yv);
+    const xp = outputs.start.parts;
+    const yp = outputs.end.parts;
     if (nfPartValuesEqual(xp.items, yp.items)) {
         try Emit.part(self, arr, "approximatelySign", "~", "shared");
         try Emit.one(self, arr, xp.items, "shared");
@@ -50913,6 +50997,57 @@ test "Intl.NumberFormat compact patterns follow generated CLDR data" {
     )).asBool());
 }
 
+test "Intl.NumberFormat currency display names follow generated CLDR data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var cases = [
+        \\  ["en-US", "USD", false, 1, "1.00 US dollars", "integer,decimal,fraction,literal,currency"],
+        \\  ["en-US", "USD", true, 1n, "1 US dollar", "integer,literal,currency"],
+        \\  ["de-DE", "EUR", false, 2n, "2,00 Euro", "integer,decimal,fraction,literal,currency"],
+        \\  ["fr-FR", "EUR", false, 2, "2,00 euros", "integer,decimal,fraction,literal,currency"],
+        \\  ["es-ES", "USD", false, 2n, "2,00 dólares estadounidenses", "integer,decimal,fraction,literal,currency"],
+        \\  ["it-IT", "EUR", false, 2, "2,00 euro", "integer,decimal,fraction,literal,currency"],
+        \\  ["pt-BR", "BRL", false, 2n, "2,00 Reais brasileiros", "integer,decimal,fraction,literal,currency"],
+        \\  ["ru-RU", "RUB", true, 21n, "21 российский рубль", "integer,literal,currency"],
+        \\  ["pl-PL", "PLN", true, 22n, "22 złote polskie", "integer,literal,currency"],
+        \\  ["ar-EG-u-nu-arab", "EGP", true, 3n, "٣ جنيهات مصرية", "integer,literal,currency"],
+        \\  ["hi-IN-u-nu-deva", "INR", false, 2n, "२.०० भारतीय रुपए", "integer,decimal,fraction,literal,currency"],
+        \\  ["ja-JP", "JPY", false, 2n, "2円", "integer,currency"],
+        \\  ["zh-CN", "CNY", false, 2, "2.00人民币", "integer,decimal,fraction,currency"],
+        \\  ["ko-KR", "KRW", false, 2n, "2 대한민국 원", "integer,literal,currency"],
+        \\  ["he-IL", "ILS", false, 2, "2.00 שקלים חדשים", "integer,decimal,fraction,literal,currency"],
+        \\  ["cy-GB", "GBP", true, 3n, "3 punt Prydain", "integer,literal,currency"],
+        \\  ["ro-RO", "RON", true, 20n, "20 de lei românești", "integer,literal,currency"]
+        \\];
+        \\var exact = true;
+        \\for (var i = 0; i < cases.length; i++) {
+        \\  var options = { style: "currency", currency: cases[i][1], currencyDisplay: "name" };
+        \\  if (cases[i][2]) options.trailingZeroDisplay = "stripIfInteger";
+        \\  var formatter = new Intl.NumberFormat(cases[i][0], options);
+        \\  var parts = formatter.formatToParts(cases[i][3]);
+        \\  exact = exact && formatter.format(cases[i][3]) === cases[i][4] &&
+        \\    parts.map(function (part) { return part.value; }).join("") === cases[i][4] &&
+        \\    parts.map(function (part) { return part.type; }).join(",") === cases[i][5];
+        \\}
+        \\var en = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" });
+        \\var enRange = en.formatRangeToParts(1n, 2n);
+        \\var ru = new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" });
+        \\var ruRange = ru.formatRangeToParts(21n, 25n);
+        \\var ro = new Intl.NumberFormat("ro-RO", { style: "currency", currency: "RON", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" });
+        \\var roRange = ro.formatRangeToParts(1n, 20n);
+        \\var huge = BigInt("1" + "0".repeat(310) + "21");
+        \\var hugeParts = ru.formatToParts(huge);
+        \\exact && en.formatRange(1n, 1n) === "~1 US dollar" && en.formatRange(1n, 2n) === "1–2 US dollars" &&
+        \\  enRange[enRange.length - 1].value === "US dollars" && enRange[enRange.length - 1].source === "shared" &&
+        \\  ru.formatRange(21n, 25n) === "21–25 российских рублей" &&
+        \\  ruRange[ruRange.length - 1].value === "российских рублей" && ruRange[ruRange.length - 1].source === "shared" &&
+        \\  ro.formatRange(1n, 20n) === "1–20 de lei românești" &&
+        \\  roRange[roRange.length - 1].value === "de lei românești" && roRange[roRange.length - 1].source === "shared" &&
+        \\  hugeParts[hugeParts.length - 1].value === "российский рубль"
+    )).asBool());
+}
+
 test "Intl.NumberFormat sink emission is OOM-safe" {
     const run = struct {
         fn check(backing: std.mem.Allocator) !void {
@@ -50937,6 +51072,8 @@ test "Intl.NumberFormat sink emission is OOM-safe" {
             const exact = try nfRoundExact(&machine, "1234567890123456789012345678901234567890", 1, false, 1, 0, 3, null, null, true, "auto", 1, "halfExpand");
             try std.testing.expectEqualStrings("1", exact.int_str);
             try std.testing.expectEqualStrings("235", exact.frac_str);
+            const currency = cldr_numbers.currency("ro", "RON", "other");
+            try std.testing.expectEqualStrings("de lei românești", try nfCurrencyDisplayName(&machine, currency));
         }
     }.check;
     const previous_heap = gc_mod.setActiveHeap(null);
