@@ -29671,6 +29671,41 @@ fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     return Value.num(try collatorCompareStrings(self, x, y, opts));
 }
 
+/// ECMA-402 plural categories are a closed vocabulary. Keep them native while
+/// evaluating CLDR rules, then expose process-lifetime immutable string cells
+/// instead of allocating structural result strings for every selection.
+const PluralCategory = enum {
+    zero,
+    one,
+    two,
+    few,
+    many,
+    other,
+
+    fn fromString(name: []const u8) ?PluralCategory {
+        if (std.mem.eql(u8, name, "zero")) return .zero;
+        if (std.mem.eql(u8, name, "one")) return .one;
+        if (std.mem.eql(u8, name, "two")) return .two;
+        if (std.mem.eql(u8, name, "few")) return .few;
+        if (std.mem.eql(u8, name, "many")) return .many;
+        if (std.mem.eql(u8, name, "other")) return .other;
+        return null;
+    }
+
+    fn value(self: PluralCategory) Value {
+        return switch (self) {
+            .zero => Value.str("zero"),
+            .one => Value.str("one"),
+            .two => Value.str("two"),
+            .few => Value.str("few"),
+            .many => Value.str("many"),
+            .other => Value.str("other"),
+        };
+    }
+};
+
+const plural_category_order = [_]PluralCategory{ .zero, .one, .two, .few, .many, .other };
+
 /// LDML plural-rule operands derived from a number formatted with the given
 /// fraction-digit bounds: n (value), i (integer part), v/f (fraction digits with
 /// trailing zeros — count/value), w/t (without trailing zeros), e (exponent).
@@ -29772,11 +29807,11 @@ fn pluralEvalCond(cond: []const u8, ops: PluralOperands) bool {
 }
 
 /// PluralRuleSelect: the first category whose rule matches, else "other".
-fn pluralCategory(rules: []const cldr_plurals.Rule, ops: PluralOperands) []const u8 {
+fn pluralCategory(rules: []const cldr_plurals.Rule, ops: PluralOperands) PluralCategory {
     for (rules) |r| {
-        if (r.cond.len > 0 and pluralEvalCond(r.cond, ops)) return r.cat;
+        if (r.cond.len > 0 and pluralEvalCond(r.cond, ops)) return PluralCategory.fromString(r.cat) orelse .other;
     }
-    return "other";
+    return .other;
 }
 
 /// The language subtag (lowercased) of a stored locale tag.
@@ -29833,7 +29868,7 @@ fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         else
             @as(i32, 0));
     }
-    return try Value.strAlloc(self.arena, pluralCategory(pluralRulesFor(this), ops));
+    return pluralCategory(pluralRulesFor(this), ops).value();
 }
 
 /// One element of a ListFormat result: an "element" (a list item) or a
@@ -30944,11 +30979,10 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // pluralCategories: the categories the locale's rules define,
                 // in CLDR order (zero, one, two, few, many, other).
                 const cats = (try self.newArray()).asObj();
-                const order = [_][]const u8{ "zero", "one", "two", "few", "many", "other" };
                 const prules = pluralRulesFor(this);
-                for (order) |cat| {
-                    for (prules) |r| if (std.mem.eql(u8, r.cat, cat)) {
-                        try cats.appendElement(self.arena, try Value.strAlloc(self.arena, cat));
+                for (plural_category_order) |cat| {
+                    for (prules) |r| if (PluralCategory.fromString(r.cat) == cat) {
+                        try cats.appendElement(self.arena, cat.value());
                         break;
                     };
                 }
@@ -50919,6 +50953,52 @@ test "Intl.PluralRules validates localeMatcher option" {
         \\let valid = new Intl.PluralRules("en", { localeMatcher: "lookup" }).select(1) === "one";
         \\invalid && nul && valid
     )).asBool());
+}
+
+test "Intl.PluralRules preserves closed categories, coercion, and result freshness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var englishCardinal = new Intl.PluralRules("en");
+        \\var arabicCardinal = new Intl.PluralRules("ar");
+        \\var russianCardinal = new Intl.PluralRules("ru");
+        \\var englishOrdinal = new Intl.PluralRules("en", { type: "ordinal" });
+        \\var exact = englishCardinal.resolvedOptions().pluralCategories.join(",") === "one,other" &&
+        \\  arabicCardinal.resolvedOptions().pluralCategories.join(",") === "zero,one,two,few,many,other" &&
+        \\  russianCardinal.resolvedOptions().pluralCategories.join(",") === "one,few,many,other" &&
+        \\  englishOrdinal.resolvedOptions().pluralCategories.join(",") === "one,two,few,other" &&
+        \\  [arabicCardinal.select(0), arabicCardinal.select(1), arabicCardinal.select(2),
+        \\   arabicCardinal.select(3), arabicCardinal.select(11), arabicCardinal.select(100)].join(",") ===
+        \\    "zero,one,two,few,many,other" &&
+        \\  [englishOrdinal.select(1), englishOrdinal.select(2), englishOrdinal.select(3), englishOrdinal.select(4)].join(",") ===
+        \\    "one,two,few,other";
+        \\var coercions = 0;
+        \\var coercible = { valueOf: function () { coercions++; return 1; } };
+        \\exact = exact && englishCardinal.select(coercible) === "one" && coercions === 1;
+        \\var abrupt = false;
+        \\try { englishCardinal.select({ valueOf: function () { throw new Error("stop"); } }); }
+        \\catch (error) { abrupt = error.message === "stop"; }
+        \\var first = arabicCardinal.resolvedOptions();
+        \\var second = arabicCardinal.resolvedOptions();
+        \\first.pluralCategories[0] = "changed";
+        \\first.pluralCategories.push("extra");
+        \\exact && abrupt && second.pluralCategories.join(",") === "zero,one,two,few,many,other" &&
+        \\  first !== second && first.pluralCategories !== second.pluralCategories
+    )).asBool());
+}
+
+test "Intl.PluralRules closed category emission is allocation-failure safe" {
+    const run = struct {
+        fn check(a: std.mem.Allocator) anyerror!void {
+            _ = a;
+            inline for (plural_category_order) |category| {
+                const category_value = category.value();
+                try std.testing.expect(category_value.isString());
+                try std.testing.expect(!category_value.asStringCell().isGcManaged());
+            }
+        }
+    }.check;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
 }
 
 test "Intl locale-list indexing preserves first occurrence and Proxy order" {

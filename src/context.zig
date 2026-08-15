@@ -12901,6 +12901,108 @@ test "parallel_js: Intl.NumberFormat resolved state is read-only after publicati
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl.PluralRules category results stay bounded under repeated reflection" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var boundedPluralRules = [
+        \\  new Intl.PluralRules("en"), new Intl.PluralRules("ar"),
+        \\  new Intl.PluralRules("ru"), new Intl.PluralRules("en", { type: "ordinal" })
+        \\];
+        \\var boundedPluralValues = [0, 1, 2, 3, 4, 5, 11, 21, 1.2, -1, Infinity, NaN];
+        \\var boundedPluralChecksum = 0;
+        \\for (var round = 0; round < 64; round++) {
+        \\  for (var index = 0; index < 128; index++) {
+        \\    var formatter = boundedPluralRules[(round + index) & 3];
+        \\    var category = formatter.select(boundedPluralValues[(round + index) % boundedPluralValues.length]);
+        \\    boundedPluralChecksum += category.length + category.charCodeAt(0);
+        \\    if ((index & 15) === 0) {
+        \\      var categories = formatter.resolvedOptions().pluralCategories;
+        \\      boundedPluralChecksum += categories.length + categories.join("").length;
+        \\    }
+        \\  }
+        \\  gc();
+        \\}
+        \\gc();
+        \\boundedPluralChecksum > 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "moving nursery preserves static Intl.PluralRules categories in fresh results" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.__movingPluralRules = new Intl.PluralRules("ar");
+        \\globalThis.__movingPluralSelections = [0, 1, 2, 3, 11, 100].map(function (value) {
+        \\  return __movingPluralRules.select(value);
+        \\});
+        \\globalThis.__movingPluralOptions = __movingPluralRules.resolvedOptions();
+        \\globalThis.__movingPluralBefore = JSON.stringify([__movingPluralSelections, __movingPluralOptions.pluralCategories]);
+    );
+    const before = ctx.global_object.getOwn("__movingPluralOptions").?.asObj();
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("__movingPluralOptions").?.asObj();
+    try std.testing.expect(before != after);
+    try std.testing.expect((try ctx.evaluate(
+        \\JSON.stringify([__movingPluralSelections, __movingPluralOptions.pluralCategories]) === __movingPluralBefore &&
+        \\  [0, 1, 2, 3, 11, 100].map(function (value) { return __movingPluralRules.select(value); }).join(",") ===
+        \\    "zero,one,two,few,many,other" &&
+        \\  __movingPluralRules.resolvedOptions().pluralCategories.join(",") === "zero,one,two,few,many,other"
+    )).asBool());
+}
+
+test "parallel_js: Intl.PluralRules category metadata is immutable" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var sharedPluralCardinal = new Intl.PluralRules("ar");
+        \\var sharedPluralOrdinal = new Intl.PluralRules("en", { type: "ordinal" });
+        \\var sharedPluralValues = [0, 1, 2, 3, 4, 5, 11, 21, 1.2, -1, Infinity, NaN];
+        \\function pluralRulesLane(lane) {
+        \\  var checksum = 0;
+        \\  for (var index = 0; index < 256; index++) {
+        \\    var formatter = ((index + lane) & 1) === 0 ? sharedPluralCardinal : sharedPluralOrdinal;
+        \\    var category = formatter.select(sharedPluralValues[(index + lane) % sharedPluralValues.length]);
+        \\    if (["zero", "one", "two", "few", "many", "other"].indexOf(category) < 0) return 0;
+        \\    checksum += category.length;
+        \\    if ((index & 31) === 0) {
+        \\      var categories = formatter.resolvedOptions().pluralCategories;
+        \\      categories[0] = "local mutation";
+        \\      if (formatter === sharedPluralCardinal && formatter.resolvedOptions().pluralCategories.join(",") !== "zero,one,two,few,many,other") return 0;
+        \\    }
+        \\  }
+        \\  return checksum > 0 ? 1 : 0;
+        \\}
+        \\var pluralRulesThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) pluralRulesThreads.push(new Thread(pluralRulesLane, lane));
+        \\var pluralRulesTotal = 0;
+        \\for (var thread = 0; thread < pluralRulesThreads.length; thread++) pluralRulesTotal += pluralRulesThreads[thread].join();
+        \\pluralRulesTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "Intl structural part results are reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
