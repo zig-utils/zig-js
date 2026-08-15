@@ -940,6 +940,77 @@ function representativeIntl(jobs, lane, variant) {
   return total;
 }
 
+var representativeIntlDefaultFormatter = new Intl.NumberFormat("en-US");
+var representativeIntlFractionFormatter = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+var representativeIntlLocaleFormatter = new Intl.NumberFormat("de-DE", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+var representativeIntlUncommonFormatter = new Intl.NumberFormat("hi-IN-u-nu-deva", {
+  style: "currency",
+  currency: "INR",
+  currencyDisplay: "name",
+  notation: "compact",
+  compactDisplay: "long",
+  minimumSignificantDigits: 3,
+  maximumSignificantDigits: 5,
+  useGrouping: "min2",
+  signDisplay: "exceptZero"
+});
+
+function representativeIntlNumberFormatSteady(jobs, lane, kind) {
+  var formatter = kind === "default" ? representativeIntlDefaultFormatter :
+    (kind === "fraction" ? representativeIntlFractionFormatter :
+      (kind === "locale" ? representativeIntlLocaleFormatter : representativeIntlUncommonFormatter));
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 256; i = i + 1) {
+      var output = formatter.format((job + 1) * 1000 + i + lane / 10);
+      total = total + output.length + output.charCodeAt(0) + output.charCodeAt(output.length - 1);
+    }
+  }
+  return total;
+}
+
+function representativeIntlNumberFormatConstruct(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 32; i = i + 1) {
+      var formatter;
+      if (kind === "default") {
+        formatter = new Intl.NumberFormat("en-US");
+      } else if (kind === "fraction") {
+        formatter = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      } else if (kind === "locale") {
+        formatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+      } else {
+        formatter = new Intl.NumberFormat("hi-IN-u-nu-deva", {
+          signDisplay: "exceptZero",
+          useGrouping: "min2",
+          maximumSignificantDigits: 5,
+          minimumSignificantDigits: 3,
+          compactDisplay: "long",
+          notation: "compact",
+          currencyDisplay: "name",
+          currency: "INR",
+          style: "currency"
+        });
+      }
+      var options = formatter.resolvedOptions();
+      var minFraction = options.minimumFractionDigits === undefined ? 0 : options.minimumFractionDigits;
+      var maxFraction = options.maximumFractionDigits === undefined ? 0 : options.maximumFractionDigits;
+      var minSignificant = options.minimumSignificantDigits === undefined ? 0 : options.minimumSignificantDigits;
+      var maxSignificant = options.maximumSignificantDigits === undefined ? 0 : options.maximumSignificantDigits;
+      total = total + options.locale.length + options.style.length + options.minimumIntegerDigits +
+        minFraction + maxFraction + minSignificant + maxSignificant + lane + (job & 3);
+    }
+  }
+  return total;
+}
+
 function representativeLongLivedGraph(jobs, lane, variant) {
   var nodes = [];
   var total = 0;
@@ -1188,6 +1259,14 @@ function benchmarkFunction(name) {
   if (name === "representative_proxy_accessors_variant") return function (jobs, lane) { return representativeProxyAccessors(jobs, lane, 1); };
   if (name === "representative_intl") return function (jobs, lane) { return representativeIntl(jobs, lane, 0); };
   if (name === "representative_intl_variant") return function (jobs, lane) { return representativeIntl(jobs, lane, 1); };
+  if (name === "representative_intl_number_format_steady_default") return function (jobs, lane) { return representativeIntlNumberFormatSteady(jobs, lane, "default"); };
+  if (name === "representative_intl_number_format_steady_fraction") return function (jobs, lane) { return representativeIntlNumberFormatSteady(jobs, lane, "fraction"); };
+  if (name === "representative_intl_number_format_steady_locale") return function (jobs, lane) { return representativeIntlNumberFormatSteady(jobs, lane, "locale"); };
+  if (name === "representative_intl_number_format_steady_uncommon") return function (jobs, lane) { return representativeIntlNumberFormatSteady(jobs, lane, "uncommon"); };
+  if (name === "representative_intl_number_format_construct_default") return function (jobs, lane) { return representativeIntlNumberFormatConstruct(jobs, lane, "default"); };
+  if (name === "representative_intl_number_format_construct_fraction") return function (jobs, lane) { return representativeIntlNumberFormatConstruct(jobs, lane, "fraction"); };
+  if (name === "representative_intl_number_format_construct_locale") return function (jobs, lane) { return representativeIntlNumberFormatConstruct(jobs, lane, "locale"); };
+  if (name === "representative_intl_number_format_construct_uncommon") return function (jobs, lane) { return representativeIntlNumberFormatConstruct(jobs, lane, "uncommon"); };
   if (name === "representative_long_lived_graph") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 0); };
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
