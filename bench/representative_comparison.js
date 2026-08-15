@@ -171,6 +171,35 @@ function representativeRegExp(jobs, lane, variant) {
   return total;
 }
 
+var representativeRegExpSearchAscii = "";
+var representativeRegExpSearchBmp = "";
+var representativeRegExpSearchAstral = "";
+var representativeRegExpSearchLone = "";
+for (var representativeRegExpSearchIndex = 0; representativeRegExpSearchIndex < 64; representativeRegExpSearchIndex = representativeRegExpSearchIndex + 1) {
+  var representativeRegExpSearchSuffix = "row-" + (representativeRegExpSearchIndex % 10) + ";";
+  representativeRegExpSearchAscii = representativeRegExpSearchAscii + "plain-" + representativeRegExpSearchSuffix;
+  representativeRegExpSearchBmp = representativeRegExpSearchBmp + "café水-" + representativeRegExpSearchSuffix;
+  representativeRegExpSearchAstral = representativeRegExpSearchAstral + "emoji😀-" + representativeRegExpSearchSuffix;
+  representativeRegExpSearchLone = representativeRegExpSearchLone + "lone\ud800x-" + representativeRegExpSearchSuffix;
+}
+
+function representativeRegExpSearchInput(jobs, lane, kind) {
+  var input = kind === "bmp" ? representativeRegExpSearchBmp :
+    (kind === "astral" ? representativeRegExpSearchAstral :
+      (kind === "lone" ? representativeRegExpSearchLone : representativeRegExpSearchAscii));
+  var expression = /row-(\d+);/g;
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var round = 0; round < 12; round = round + 1) {
+      expression.lastIndex = 0;
+      var match;
+      while ((match = expression.exec(input)) !== null)
+        total = total + match.index + Number(match[1]) + lane + (job & 3);
+    }
+  }
+  return total + input.length;
+}
+
 function representativeJson(jobs, lane, variant) {
   var total = 0;
   for (var job = 0; job < jobs; job = job + 1) {
@@ -1063,6 +1092,10 @@ function benchmarkFunction(name) {
   if (name === "representative_strings_variant") return function (jobs, lane) { return representativeStrings(jobs, lane, 1); };
   if (name === "representative_regexp") return function (jobs, lane) { return representativeRegExp(jobs, lane, 0); };
   if (name === "representative_regexp_variant") return function (jobs, lane) { return representativeRegExp(jobs, lane, 1); };
+  if (name === "representative_regexp_search_ascii") return function (jobs, lane) { return representativeRegExpSearchInput(jobs, lane, "ascii"); };
+  if (name === "representative_regexp_search_bmp") return function (jobs, lane) { return representativeRegExpSearchInput(jobs, lane, "bmp"); };
+  if (name === "representative_regexp_search_astral") return function (jobs, lane) { return representativeRegExpSearchInput(jobs, lane, "astral"); };
+  if (name === "representative_regexp_search_lone_surrogate") return function (jobs, lane) { return representativeRegExpSearchInput(jobs, lane, "lone"); };
   if (name === "representative_json") return function (jobs, lane) { return representativeJson(jobs, lane, 0); };
   if (name === "representative_json_variant") return function (jobs, lane) { return representativeJson(jobs, lane, 1); };
   if (name === "representative_json_reviver_source") return representativeJsonReviverSource;
