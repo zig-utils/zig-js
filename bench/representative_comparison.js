@@ -1307,7 +1307,7 @@ var representativeIntlCurrencyNameCldrFormatters = [
   new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", currencyDisplay: "name" }),
   new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" }),
   new Intl.NumberFormat("pl-PL", { style: "currency", currency: "PLN", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" }),
-  new Intl.NumberFormat("ar-EG", { style: "currency", currency: "EGP", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" }),
+  new Intl.NumberFormat("ar-EG-u-nu-arab", { style: "currency", currency: "EGP", currencyDisplay: "name", trailingZeroDisplay: "stripIfInteger" }),
   new Intl.NumberFormat("hi-IN-u-nu-deva", { style: "currency", currency: "INR", currencyDisplay: "name" }),
   new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", currencyDisplay: "name" }),
   new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", currencyDisplay: "name" }),
