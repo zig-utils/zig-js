@@ -1171,6 +1171,76 @@ function representativeIntlNumberFormatCompact(jobs, lane, partsMode) {
   return total;
 }
 
+var representativeIntlBigIntFormatters = [
+  new Intl.NumberFormat("en-US"),
+  new Intl.NumberFormat("en-US", { useGrouping: false, minimumFractionDigits: 4, signDisplay: "always" }),
+  new Intl.NumberFormat("hi-IN-u-nu-deva", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencySign: "accounting" }),
+  new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR", currencyDisplay: "name" }),
+  new Intl.NumberFormat("de-DE", { style: "percent", minimumFractionDigits: 2 }),
+  new Intl.NumberFormat("en-US", { style: "unit", unit: "meter-per-second", unitDisplay: "long" }),
+  new Intl.NumberFormat("en-US", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("en-US", { notation: "scientific", maximumFractionDigits: 3 }),
+  new Intl.NumberFormat("en-US", { notation: "engineering", maximumSignificantDigits: 5 }),
+  new Intl.NumberFormat("en-US", { maximumSignificantDigits: 5 }),
+  new Intl.NumberFormat("en-US", { maximumSignificantDigits: 3 }),
+  new Intl.NumberFormat("en-US", { signDisplay: "always" }),
+  new Intl.NumberFormat("en-US", { signDisplay: "exceptZero" }),
+  new Intl.NumberFormat("en-US", { minimumIntegerDigits: 21, useGrouping: false }),
+  new Intl.NumberFormat("en-US", { maximumSignificantDigits: 5, roundingMode: "floor" })
+];
+var representativeIntlBigIntValues = [
+  0n,
+  12345678901234567890n,
+  1234567890123456789012345678901234567890n,
+  -12345678901234567890n,
+  2n,
+  12345678901234567890n,
+  2n,
+  1234567890123456789012345678901234567890n,
+  1234567890123456789012345678901234567890n,
+  1234567890123456789012345678901234567890n,
+  1234567890123456789012345678901234567890n,
+  12345678901234567890n,
+  42n,
+  0n,
+  7n,
+  -19999n
+];
+
+function representativeIntlNumberFormatBigInt(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var index = (job + i + lane) & 15;
+      var formatter = representativeIntlBigIntFormatters[index];
+      var value = representativeIntlBigIntValues[index];
+      if (kind === "text") {
+        var output = formatter.format(value);
+        total = total + output.length + output.charCodeAt(0) + output.charCodeAt(output.length - 1);
+      } else if (kind === "parts") {
+        var parts = formatter.formatToParts(value);
+        total = total + parts.length;
+        for (var part = 0; part < parts.length; part = part + 1)
+          total = total + parts[part].type.length + parts[part].value.length + parts[part].value.charCodeAt(0);
+      } else {
+        var end = value + BigInt(109 + ((job + i) & 31));
+        if (kind === "range") {
+          var range = formatter.formatRange(value, end);
+          total = total + range.length + range.charCodeAt(0) + range.charCodeAt(range.length - 1);
+        } else {
+          var rangeParts = formatter.formatRangeToParts(value, end);
+          total = total + rangeParts.length;
+          for (var rangePart = 0; rangePart < rangeParts.length; rangePart = rangePart + 1)
+            total = total + rangeParts[rangePart].type.length + rangeParts[rangePart].value.length +
+              rangeParts[rangePart].source.length + rangeParts[rangePart].value.charCodeAt(0);
+        }
+      }
+    }
+  }
+  return total;
+}
+
 function representativeLongLivedGraph(jobs, lane, variant) {
   var nodes = [];
   var total = 0;
@@ -1435,6 +1505,10 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_rounding_parts") return function (jobs, lane) { return representativeIntlNumberFormatRounding(jobs, lane, true); };
   if (name === "representative_intl_number_format_compact_text") return function (jobs, lane) { return representativeIntlNumberFormatCompact(jobs, lane, false); };
   if (name === "representative_intl_number_format_compact_parts") return function (jobs, lane) { return representativeIntlNumberFormatCompact(jobs, lane, true); };
+  if (name === "representative_intl_number_format_bigint_text") return function (jobs, lane) { return representativeIntlNumberFormatBigInt(jobs, lane, "text"); };
+  if (name === "representative_intl_number_format_bigint_parts") return function (jobs, lane) { return representativeIntlNumberFormatBigInt(jobs, lane, "parts"); };
+  if (name === "representative_intl_number_format_bigint_range") return function (jobs, lane) { return representativeIntlNumberFormatBigInt(jobs, lane, "range"); };
+  if (name === "representative_intl_number_format_bigint_range_parts") return function (jobs, lane) { return representativeIntlNumberFormatBigInt(jobs, lane, "rangeParts"); };
   if (name === "representative_long_lived_graph") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 0); };
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
