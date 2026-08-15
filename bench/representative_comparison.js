@@ -1472,6 +1472,52 @@ function representativeIntlStructuralService(jobs, lane, service) {
   return total;
 }
 
+// Segmenter consumers keep only the immutable formatter and source fixtures
+// outside the timed boundary. Each scored Segments object performs its own
+// segment() coercion, then consumes every observable record field.
+var representativeIntlSegmenter = new Intl.Segmenter("en-US", { granularity: "word" });
+var representativeIntlSegmenterInputs = [
+  "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+  "north south east west spring summer autumn winter morning evening",
+  "mercury venus earth mars jupiter saturn uranus neptune ceres pluto",
+  "red orange yellow green blue indigo violet silver gold copper bronze",
+  "read write execute create update remove inspect validate publish",
+  "zero one two three four five six seven eight nine ten eleven twelve",
+  "map set weak collection date time locale calendar number duration",
+  "secure bounded precise moving shared immutable ordered deterministic"
+];
+
+function representativeIntlSegmentRecordChecksum(record) {
+  var total = record.index + (record.isWordLike ? 97 : 13);
+  total = (total + representativeIntlDateTimeChecksum(record.segment)) % 1000000007;
+  total = (total + representativeIntlDateTimeChecksum(record.input)) % 1000000007;
+  return total;
+}
+
+function representativeIntlSegmenterConsumer(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 16; i = i + 1) {
+      var input = representativeIntlSegmenterInputs[(job + i + lane) & 7];
+      var segments = representativeIntlSegmenter.segment(input);
+      if (kind === "iterate") {
+        var iterator = segments[Symbol.iterator]();
+        for (;;) {
+          var step = iterator.next();
+          if (step.done) break;
+          total = (total + representativeIntlSegmentRecordChecksum(step.value)) % 1000000007;
+        }
+      } else {
+        for (var probe = 0; probe < 8; probe = probe + 1) {
+          var at = (job + i * 7 + probe * 11 + lane) % input.length;
+          total = (total + representativeIntlSegmentRecordChecksum(segments.containing(at))) % 1000000007;
+        }
+      }
+    }
+  }
+  return total;
+}
+
 // DateTimeFormat controls separate constructor resolution from steady
 // consumers. Keep the fixed UTC inputs and formatter construction outside the
 // timed steady boundary so changes to resolved-state ownership are attributable
@@ -1862,6 +1908,8 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_list_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "list"); };
   if (name === "representative_intl_relative_time_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "relative"); };
   if (name === "representative_intl_duration_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "duration"); };
+  if (name === "representative_intl_segmenter_iterate_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "iterate"); };
+  if (name === "representative_intl_segmenter_containing_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "containing"); };
   if (name === "representative_intl_date_time_format_consumer_text") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "text"); };
   if (name === "representative_intl_date_time_format_consumer_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "parts"); };
   if (name === "representative_intl_date_time_format_consumer_range") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "range"); };
