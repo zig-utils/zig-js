@@ -1241,6 +1241,62 @@ function representativeIntlNumberFormatBigInt(jobs, lane, kind) {
   return total;
 }
 
+var representativeIntlCompactCldrFormatters = [
+  new Intl.NumberFormat("en-US", { notation: "compact" }),
+  new Intl.NumberFormat("en-US", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 4 }),
+  new Intl.NumberFormat("de-DE", { notation: "compact" }),
+  new Intl.NumberFormat("de-DE", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("fr-FR", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("hi-IN-u-nu-deva", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("hi-IN-u-nu-deva", { notation: "compact", maximumSignificantDigits: 3 }),
+  new Intl.NumberFormat("ja-JP", { notation: "compact", maximumSignificantDigits: 4 }),
+  new Intl.NumberFormat("zh-CN", { notation: "compact", maximumSignificantDigits: 4 }),
+  new Intl.NumberFormat("ko-KR", { notation: "compact", maximumSignificantDigits: 4 }),
+  new Intl.NumberFormat("he-IL", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("ru-RU", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 }),
+  new Intl.NumberFormat("ar", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 }),
+  new Intl.NumberFormat("fr-FR", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("de-DE", { notation: "compact", compactDisplay: "long" }),
+  new Intl.NumberFormat("en-US", { notation: "compact" })
+];
+var representativeIntlCompactCldrValues = [
+  1234567, 1234567, 1234567, 1000000, 1000, 1234567, 1234567, 12345678,
+  12345678, 12345678, 1200, 22000, 3000, 2000000, 2000000, 999500
+];
+var representativeIntlCompactCldrEnds = [
+  2345678, 2345678, 2345678, 2000000, 2000, 2345678, 2345678, 23456789,
+  23456789, 23456789, 2200, 25000, 5000, 3000000, 3000000, 1000500
+];
+
+function representativeIntlNumberFormatCompactCldr(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var index = (job + i + lane) & 15;
+      var formatter = representativeIntlCompactCldrFormatters[index];
+      if (kind === "text") {
+        var output = formatter.format(representativeIntlCompactCldrValues[index]);
+        total = total + output.length + output.charCodeAt(0) + output.charCodeAt(output.length - 1);
+      } else if (kind === "parts") {
+        var parts = formatter.formatToParts(representativeIntlCompactCldrValues[index]);
+        total = total + parts.length;
+        for (var part = 0; part < parts.length; part = part + 1)
+          total = total + parts[part].type.length + parts[part].value.length + parts[part].value.charCodeAt(0);
+      } else if (kind === "range") {
+        var range = formatter.formatRange(representativeIntlCompactCldrValues[index], representativeIntlCompactCldrEnds[index]);
+        total = total + range.length + range.charCodeAt(0) + range.charCodeAt(range.length - 1);
+      } else {
+        var rangeParts = formatter.formatRangeToParts(representativeIntlCompactCldrValues[index], representativeIntlCompactCldrEnds[index]);
+        total = total + rangeParts.length;
+        for (var rangePart = 0; rangePart < rangeParts.length; rangePart = rangePart + 1)
+          total = total + rangeParts[rangePart].type.length + rangeParts[rangePart].value.length +
+            rangeParts[rangePart].source.length + rangeParts[rangePart].value.charCodeAt(0);
+      }
+    }
+  }
+  return total;
+}
+
 function representativeLongLivedGraph(jobs, lane, variant) {
   var nodes = [];
   var total = 0;
@@ -1509,6 +1565,10 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_bigint_parts") return function (jobs, lane) { return representativeIntlNumberFormatBigInt(jobs, lane, "parts"); };
   if (name === "representative_intl_number_format_bigint_range") return function (jobs, lane) { return representativeIntlNumberFormatBigInt(jobs, lane, "range"); };
   if (name === "representative_intl_number_format_bigint_range_parts") return function (jobs, lane) { return representativeIntlNumberFormatBigInt(jobs, lane, "rangeParts"); };
+  if (name === "representative_intl_number_format_compact_cldr_text") return function (jobs, lane) { return representativeIntlNumberFormatCompactCldr(jobs, lane, "text"); };
+  if (name === "representative_intl_number_format_compact_cldr_parts") return function (jobs, lane) { return representativeIntlNumberFormatCompactCldr(jobs, lane, "parts"); };
+  if (name === "representative_intl_number_format_compact_cldr_range") return function (jobs, lane) { return representativeIntlNumberFormatCompactCldr(jobs, lane, "range"); };
+  if (name === "representative_intl_number_format_compact_cldr_range_parts") return function (jobs, lane) { return representativeIntlNumberFormatCompactCldr(jobs, lane, "rangeParts"); };
   if (name === "representative_long_lived_graph") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 0); };
   if (name === "representative_long_lived_graph_variant") return function (jobs, lane) { return representativeLongLivedGraph(jobs, lane, 1); };
   if (name === "representative_application_mix") return function (jobs, lane) { return representativeApplicationMix(jobs, lane, 0); };
