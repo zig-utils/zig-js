@@ -1559,6 +1559,69 @@ function representativeIntlPluralRulesConsumer(jobs, lane, kind) {
   return total;
 }
 
+// Collator steady consumers retain only constructed formatters, their cached
+// bound compare functions, and fixed strings outside the timed boundary.
+// Direct results are normalized to sign (the ECMA-402 contract); sort hashes
+// every output string after executing the public stable Array sort.
+var representativeIntlCollators = [
+  new Intl.Collator("en-US"),
+  new Intl.Collator("en-US", { numeric: true }),
+  new Intl.Collator("de-DE-u-co-phonebk"),
+  new Intl.Collator("de-DE", { usage: "search", sensitivity: "base" }),
+  new Intl.Collator("en-US", { caseFirst: "upper" }),
+  new Intl.Collator("en-US", { sensitivity: "base" }),
+  new Intl.Collator("th", { ignorePunctuation: true }),
+  new Intl.Collator("en-US-u-kn-true-kf-lower")
+];
+var representativeIntlCollatorComparators = representativeIntlCollators.map(function (collator) {
+  return collator.compare;
+});
+var representativeIntlCollatorSortInputs = [
+  ["file2", "file10", "Alpha", "alpha", "resume", "résumé", "a-b", "ab", "Äpfel", "Apfel", "Öl", "Oel", "ångström", "zebra", "東京", "大阪"],
+  ["file10", "file2", "item20", "item3", "Alpha", "alpha", "résumé", "resume", "a-b", "ab", "Äpfel", "Apfel", "ångström", "zebra", "東京", "大阪"],
+  ["Äpfel", "Apfel", "über", "ueber", "Alpha", "alpha", "resume", "résumé", "a-b", "ab", "file2", "file10", "ångström", "zebra", "東京", "大阪"],
+  ["Alpha", "alpha", "resume", "résumé", "Äpfel", "Apfel", "Öl", "Oel", "file2", "file10", "a-b", "ab", "ångström", "zebra", "東京", "大阪"],
+  ["alpha", "Alpha", "resume", "résumé", "a-b", "ab", "Äpfel", "Apfel", "Öl", "Oel", "file2", "file10", "ångström", "zebra", "東京", "大阪"],
+  ["resume", "résumé", "Alpha", "alpha", "Äpfel", "Apfel", "Öl", "Oel", "file2", "file10", "a-b", "ab", "ångström", "zebra", "東京", "大阪"],
+  ["a-b", "ab", "x y", "xy", "Öl", "Oel", "ångström", "zebra", "東京", "大阪"],
+  ["file10", "file2", "item20", "item3", "alpha", "Alpha", "resume", "résumé", "a-b", "ab", "Äpfel", "Apfel", "ångström", "zebra", "東京", "大阪"]
+];
+var representativeIntlCollatorLeft = [
+  "file2", "file10", "Alpha", "alpha", "resume", "résumé", "a-b", "ab",
+  "Äpfel", "Apfel", "Öl", "Oel", "ångström", "zebra", "東京", "大阪"
+];
+var representativeIntlCollatorRight = [
+  "file10", "file2", "alpha", "Alpha", "résumé", "resume", "ab", "a-b",
+  "Apfel", "Äpfel", "Oel", "Öl", "zebra", "ångström", "大阪", "東京"
+];
+var representativeIntlCollatorPairByComparator = [0, 0, 8, 2, 2, 4, 6, 0];
+
+function representativeIntlCollatorConsumer(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    if (kind === "compare") {
+      for (var comparison = 0; comparison < 4096; comparison = comparison + 1) {
+        var comparatorIndex = (job + comparison + lane) & 7;
+        var pairIndex = representativeIntlCollatorPairByComparator[comparatorIndex];
+        var result = representativeIntlCollatorComparators[comparatorIndex](
+          representativeIntlCollatorLeft[pairIndex], representativeIntlCollatorRight[pairIndex]
+        );
+        var sign = result < 0 ? -1 : (result > 0 ? 1 : 0);
+        total = (total + (sign + 2) * 131 + comparison + lane) % 1000000007;
+      }
+    } else {
+      for (var sortIndex = 0; sortIndex < 96; sortIndex = sortIndex + 1) {
+        var index = (job + sortIndex + lane) & 7;
+        var values = representativeIntlCollatorSortInputs[index].slice();
+        values.sort(representativeIntlCollatorComparators[index]);
+        for (var valueIndex = 0; valueIndex < values.length; valueIndex = valueIndex + 1)
+          total = (total * 131 + representativeIntlDateTimeChecksum(values[valueIndex]) + valueIndex + sortIndex + lane) % 1000000007;
+      }
+    }
+  }
+  return total;
+}
+
 // DateTimeFormat controls separate constructor resolution from steady
 // consumers. Keep the fixed UTC inputs and formatter construction outside the
 // timed steady boundary so changes to resolved-state ownership are attributable
@@ -1953,6 +2016,8 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_segmenter_containing_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "containing"); };
   if (name === "representative_intl_plural_rules_select") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "select"); };
   if (name === "representative_intl_plural_rules_resolved_categories") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "resolved"); };
+  if (name === "representative_intl_collator_compare") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "compare"); };
+  if (name === "representative_intl_collator_sort") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "sort"); };
   if (name === "representative_intl_date_time_format_consumer_text") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "text"); };
   if (name === "representative_intl_date_time_format_consumer_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "parts"); };
   if (name === "representative_intl_date_time_format_consumer_range") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "range"); };
