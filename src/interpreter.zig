@@ -26023,18 +26023,21 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
         // significant digits or a non-auto roundingPriority is a TypeError, and the
         // resolved min/max fraction digits must be equal (RangeError otherwise).
         if (n != 1) {
-            const has_sd = !(try self.getProperty(raw, "minimumSignificantDigits")).isUndefined() or
-                !(try self.getProperty(raw, "maximumSignificantDigits")).isUndefined();
+            const has_sd = ro.getOwn("minimumSignificantDigits") != null or ro.getOwn("maximumSignificantDigits") != null;
             if (has_sd) return self.throwError("TypeError", "roundingIncrement is incompatible with significant-digits options");
+            const has_fd = ro.getOwn("minimumFractionDigits") != null or ro.getOwn("maximumFractionDigits") != null;
             const rp = try self.getProperty(raw, "roundingPriority");
             if (!rp.isUndefined()) {
                 const rps = try self.toStringWtf8(rp);
                 if (std.mem.eql(u8, rps, "morePrecision") or std.mem.eql(u8, rps, "lessPrecision"))
                     return self.throwError("TypeError", "roundingIncrement is incompatible with roundingPriority");
             }
-            const mnf = try self.getProperty(raw, "minimumFractionDigits");
-            const mxf = try self.getProperty(raw, "maximumFractionDigits");
-            if (!mnf.isUndefined() and !mxf.isUndefined() and try self.toNumberV(mnf) != try self.toNumberV(mxf))
+            const resolved_notation = ro.getOwn("notation") orelse Value.str("standard");
+            if (!has_fd and resolved_notation.isString() and std.mem.eql(u8, resolved_notation.asStr(), "compact"))
+                return self.throwError("TypeError", "roundingIncrement is incompatible with compact default precision");
+            const mnf = ro.getOwn("minimumFractionDigits");
+            const mxf = ro.getOwn("maximumFractionDigits");
+            if (mnf != null and mxf != null and mnf.?.asNum() != mxf.?.asNum())
                 return self.throwError("RangeError", "roundingIncrement requires equal min/max fraction digits");
         }
         try self.setProp(ro, "roundingIncrement", Value.num(n));
@@ -26142,6 +26145,12 @@ fn nfResolvedData(self: *Interpreter, locale: []const u8, ro: *value.Object) Eva
         data.maximum_significant_digits = @max(maximum, data.minimum_significant_digits orelse 1);
     }
     if (data.minimum_significant_digits != null and data.maximum_significant_digits == null) data.maximum_significant_digits = 21;
+    // SetNumberFormatDigitOptions steps 21-26: non-auto priority compares both
+    // precision families, supplying 1..21 significant defaults when absent.
+    if (!std.mem.eql(u8, data.rounding_priority, "auto") and data.maximum_significant_digits == null) {
+        data.minimum_significant_digits = 1;
+        data.maximum_significant_digits = 21;
+    }
     if (num(ro, "roundingIncrement")) |n| data.rounding_increment = @intFromFloat(n);
 
     data.grouping = if (std.mem.eql(u8, data.notation, "compact")) .min2 else .auto;
@@ -27536,8 +27545,13 @@ fn nfRound(scratch: *NfDecimalScratch, mag: f64, neg: bool, min_int: usize, min_
         // same scale_exp, so fromScaled handles the extra integer digit.
         // Significant mode shows at least lsig digits: lo_frac forces trailing zeros.
         const lo_frac: usize = blk: {
-            // significant digits already in the integer part:
-            const int_sig: i32 = e + 1;
+            // Rounding can add an integer digit (0.9995 -> 1.0). Minimum
+            // precision is based on that rounded magnitude, not the input e.
+            var rounded_digits: i32 = 1;
+            var remaining = r;
+            while (remaining >= 10) : (rounded_digits += 1) remaining /= 10;
+            const rounded_order = rounded_digits - 1 - scale_exp;
+            const int_sig: i32 = rounded_order + 1;
             const need: i32 = @as(i32, @intCast(lsig)) - int_sig;
             break :blk if (need > 0) @intCast(need) else 0;
         };
@@ -27573,6 +27587,31 @@ fn nfRound(scratch: *NfDecimalScratch, mag: f64, neg: bool, min_int: usize, min_
         break :blk scratch.fractionFromDigits(leading_zeros, frac_digits, max_frac - eff, min_frac, max_frac);
     } else "";
     return .{ .int_str = int_str, .frac_str = frac_str, .is_zero = (int_part == 0 and frac_part == 0) };
+}
+
+fn nfRoundedMagnitude(rounded: NfRound) ?i32 {
+    for (rounded.int_str, 0..) |digit, index| {
+        if (digit != '0') return @as(i32, @intCast(rounded.int_str.len - index)) - 1;
+    }
+    for (rounded.frac_str, 0..) |digit, index| {
+        if (digit != '0') return -@as(i32, @intCast(index)) - 1;
+    }
+    return null;
+}
+
+fn nfRoundCompact(scratch: *NfDecimalScratch, scaled: f64, scaled_order: i32, neg: bool, min_int: usize, min_frac: usize, max_frac: usize, min_sig: ?usize, max_sig: ?usize, frac_set: bool, priority: []const u8, rinc: u64, mode: []const u8) NfRound {
+    const explicit_precision = min_sig != null or max_sig != null or frac_set or !std.mem.eql(u8, priority, "auto");
+    if (explicit_precision) {
+        // Non-auto priority makes both precision families participate even if
+        // the caller omitted explicit fraction settings (ECMA-402 16.1.2).
+        const compare_fraction = frac_set or !std.mem.eql(u8, priority, "auto");
+        return nfRound(scratch, scaled, neg, min_int, min_frac, max_frac, min_sig, max_sig, compare_fraction, priority, rinc, mode);
+    }
+    // Compact's option-free default is morePrecision between fraction 0 and
+    // significant 1..2. For the already-scaled value that is equivalent to
+    // retaining max(2, integer digit count) significant digits.
+    const significant_digits: usize = @intCast(@max(2, scaled_order + 1));
+    return nfRound(scratch, scaled, neg, min_int, 0, 0, 1, significant_digits, false, "auto", 1, mode);
 }
 
 /// ResolveLocale numbering for resolvedOptions: a supported `numberingSystem`
@@ -28193,16 +28232,26 @@ fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *
         frac_str = r.frac_str;
         is_zero = (@abs(n) == 0);
     } else if (finite and std.mem.eql(u8, notation, "compact") and @abs(n) != 0) {
-        // Compact notation: scale by the locale's compact pattern, then round
-        // to max(2, integer-digits-of-scaled) significant digits (CLDR's
-        // "morePrecision" of 2 significant vs 0 fraction digits).
+        // ECMA-402 ComputeExponent: select the locale pattern, round the scaled
+        // value with the resolved precision, then select once more at the next
+        // magnitude if rounding crossed a compact threshold (for example 999.5K
+        // to 1M). The option-free path retains compact's special morePrecision
+        // default; explicit digit options use their ordinary rounding type.
         const mag = @abs(n);
         const e = orderOfMagnitude(mag);
-        const compact = nfCompactPattern(locale, compact_display, e);
-        const cexp = compact.exponent;
-        const scaled = if (cexp > 0) mag / powi10(cexp) else mag;
-        const sig: usize = @intCast(@max(2, (e - cexp) + 1));
-        const r = nfRound(&decimal_scratch, scaled, neg, min_int, 0, 0, 1, sig, false, "auto", 1, rounding_mode);
+        var compact = nfCompactPattern(locale, compact_display, e);
+        var scaled = if (compact.exponent > 0) mag / powi10(compact.exponent) else mag;
+        var r = nfRoundCompact(&decimal_scratch, scaled, orderOfMagnitude(scaled), neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
+        if (nfRoundedMagnitude(r)) |rounded_order| {
+            if (rounded_order != e - compact.exponent) {
+                const next = nfCompactPattern(locale, compact_display, e + 1);
+                if (next.exponent != compact.exponent) {
+                    compact = next;
+                    scaled = if (compact.exponent > 0) mag / powi10(compact.exponent) else mag;
+                    r = nfRoundCompact(&decimal_scratch, scaled, orderOfMagnitude(scaled), neg, min_int, min_frac, max_frac, min_sig, max_sig, frac_set, rounding_priority, rounding_increment, rounding_mode);
+                }
+            }
+        }
         digits = r.int_str;
         frac_str = r.frac_str;
         is_zero = r.is_zero;
@@ -50479,6 +50528,46 @@ test "Intl.NumberFormat text and structural sinks remain equivalent" {
         \\  same = same && bounds[b][0].format(bounds[b][1]) ===
         \\    bounds[b][0].formatToParts(bounds[b][1]).map(function (part) { return part.value; }).join("");
         \\same
+    )).asBool());
+}
+
+test "Intl.NumberFormat compact precision and carry follow resolved rounding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var cases = [
+        \\  ["en-US", { notation: "compact" }, 1234567, "1.2M", "integer,decimal,fraction,compact"],
+        \\  ["en-US", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 4 }, 1234567, "1.235 million", "integer,decimal,fraction,literal,compact"],
+        \\  ["en-US", { notation: "compact", maximumFractionDigits: 2 }, 1234567, "1.23M", "integer,decimal,fraction,compact"],
+        \\  ["en-US", { notation: "compact", minimumFractionDigits: 2, maximumFractionDigits: 2 }, 1234567, "1.23M", "integer,decimal,fraction,compact"],
+        \\  ["en-US", { notation: "compact", minimumSignificantDigits: 4, maximumSignificantDigits: 4 }, 1234567, "1.235M", "integer,decimal,fraction,compact"],
+        \\  ["en-US", { notation: "compact", maximumFractionDigits: 2, maximumSignificantDigits: 4, roundingPriority: "morePrecision" }, 1234567, "1.235M", "integer,decimal,fraction,compact"],
+        \\  ["en-US", { notation: "compact", maximumFractionDigits: 2, maximumSignificantDigits: 4, roundingPriority: "lessPrecision" }, 1234567, "1.23M", "integer,decimal,fraction,compact"],
+        \\  ["en-US", { notation: "compact" }, 999500, "1M", "integer,compact"],
+        \\  ["en-US", { notation: "compact" }, 999499, "999K", "integer,compact"],
+        \\  ["en-US-u-nu-deva", { notation: "compact", maximumSignificantDigits: 3 }, 1234567, "१.२३M", "integer,decimal,fraction,compact"],
+        \\  ["de-DE", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 }, 1234567, "1,23 Millionen", "integer,decimal,fraction,literal,compact"],
+        \\  ["ja-JP", { notation: "compact", maximumSignificantDigits: 4 }, 12345678, "1235万", "integer,compact"],
+        \\  ["en-US", { notation: "compact", maximumSignificantDigits: 3, roundingMode: "floor" }, 1999, "1.99K", "integer,decimal,fraction,compact"],
+        \\  ["en-US", { notation: "compact", maximumSignificantDigits: 3, roundingMode: "ceil" }, 1001, "1.01K", "integer,decimal,fraction,compact"]
+        \\];
+        \\var exact = true;
+        \\for (var i = 0; i < cases.length; i++) {
+        \\  var formatter = new Intl.NumberFormat(cases[i][0], cases[i][1]);
+        \\  var parts = formatter.formatToParts(cases[i][2]);
+        \\  exact = exact && formatter.format(cases[i][2]) === cases[i][3] &&
+        \\    parts.map(function (part) { return part.value; }).join("") === cases[i][3] &&
+        \\    parts.map(function (part) { return part.type; }).join(",") === cases[i][4];
+        \\}
+        \\var resolved = new Intl.NumberFormat("en-US", { notation: "compact", roundingPriority: "morePrecision" }).resolvedOptions();
+        \\var incrementThrows = false;
+        \\try { new Intl.NumberFormat("en-US", { notation: "compact", roundingIncrement: 5 }); }
+        \\catch (error) { incrementThrows = error instanceof TypeError; }
+        \\var increment = new Intl.NumberFormat("en-US", { notation: "compact", roundingIncrement: 5,
+        \\  minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        \\exact && resolved.minimumFractionDigits === 0 && resolved.maximumFractionDigits === 3 &&
+        \\  resolved.minimumSignificantDigits === 1 && resolved.maximumSignificantDigits === 21 &&
+        \\  incrementThrows && increment.format(1234) === "1.25K"
     )).asBool());
 }
 
