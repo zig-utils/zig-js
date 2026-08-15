@@ -43,6 +43,7 @@ const cldr_timedata = @import("cldr_timedata.zig");
 const cldr_tzalias = @import("cldr_tzalias.zig");
 const wasm_api = @import("wasm/api.zig");
 const fetch_headers = @import("fetch_headers.zig");
+const strcell = @import("strcell.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -26389,7 +26390,8 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const ro = (try self.newObject()).asObj();
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetStr(self, raw, "granularity", &.{ "grapheme", "word", "sentence" }, null)) |g| try self.setProp(ro, "granularity", try Value.strAlloc(self.arena, g));
+                    if (try dtfGetStr(self, raw, "granularity", &.{ "grapheme", "word", "sentence" }, null)) |g|
+                        try self.setProp(ro, "granularity", SegmenterGranularity.fromString(g).value());
                 }
                 try self.setProp(o, "\x00opts", Value.obj(ro));
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
@@ -29931,16 +29933,84 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
 
 // ---- Intl.Segmenter segmentation (byte-offset, code-point aware) -----------
 
-fn segScalarLen(str: []const u8, pos: usize) usize {
-    if (wtf8SurrogateAt(str, pos) != null) return 3;
-    return utf8SeqLen(str, pos);
+const SegmenterGranularity = enum {
+    grapheme,
+    word,
+    sentence,
+
+    fn fromString(name: []const u8) SegmenterGranularity {
+        if (std.mem.eql(u8, name, "word")) return .word;
+        if (std.mem.eql(u8, name, "sentence")) return .sentence;
+        return .grapheme;
+    }
+
+    fn value(self: SegmenterGranularity) Value {
+        return switch (self) {
+            .grapheme => Value.str("grapheme"),
+            .word => Value.str("word"),
+            .sentence => Value.str("sentence"),
+        };
+    }
+};
+
+/// One immutable Segmenter input. The retained Value is the observable `input`
+/// field and roots the bytes; representation-aware reads avoid rebuilding the
+/// complete string when flat-Latin1 storage is enabled.
+const SegmenterInput = struct {
+    value: Value,
+    bytes: []const u8,
+    flat_latin1: bool,
+
+    fn fromValue(self: *Interpreter, input: Value) EvalError!SegmenterInput {
+        std.debug.assert(input.isString());
+        const flat = input.strIsFlatLatin1();
+        return .{
+            .value = input,
+            .bytes = if (flat) input.asStr() else try input.asWtf8(self.arena),
+            .flat_latin1 = flat,
+        };
+    }
+
+    fn utf16Index(self: SegmenterInput, byte_offset: usize) usize {
+        return if (self.flat_latin1) byte_offset else Interpreter.utf16IndexForByteOffset(self.bytes, byte_offset);
+    }
+
+    fn utf16Len(self: SegmenterInput) usize {
+        return if (self.flat_latin1) self.bytes.len else Interpreter.utf16LenOfString(self.bytes);
+    }
+
+    fn segmentValue(self: SegmenterInput, allocator: std.mem.Allocator, start: usize, end: usize) std.mem.Allocator.Error!Value {
+        if (self.flat_latin1) {
+            return try Value.strOwned(allocator, try strcell.latin1FlatToWtf8(allocator, self.bytes[start..end]));
+        }
+        return try Value.strOwned(allocator, try allocator.dupe(u8, self.bytes[start..end]));
+    }
+};
+
+/// ECMA-262 ToString, preserving an existing immutable string Value so every
+/// segment-data record can reference the single coercion result.
+fn segmenterToStringValue(self: *Interpreter, input: Value) EvalError!Value {
+    if (input.isObject() and input.asObj().is_symbol)
+        return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+    const primitive = if (input.isObject()) try self.toPrimitive(input, .string) else input;
+    if (primitive.isObject() and primitive.asObj().is_symbol)
+        return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+    if (primitive.isString()) return primitive;
+    return try Value.strAlloc(self.arena, try primitive.toString(self.arena));
 }
 
-fn segCodePoint(str: []const u8, pos: usize) u21 {
-    if (wtf8SurrogateAt(str, pos)) |cp| return cp;
-    const n = utf8SeqLen(str, pos);
-    if (n == 1) return str[pos];
-    return std.unicode.utf8Decode(str[pos .. pos + n]) catch str[pos];
+fn segScalarLen(input: SegmenterInput, pos: usize) usize {
+    if (input.flat_latin1) return 1;
+    if (wtf8SurrogateAt(input.bytes, pos) != null) return 3;
+    return utf8SeqLen(input.bytes, pos);
+}
+
+fn segCodePoint(input: SegmenterInput, pos: usize) u21 {
+    if (input.flat_latin1) return input.bytes[pos];
+    if (wtf8SurrogateAt(input.bytes, pos)) |cp| return cp;
+    const n = utf8SeqLen(input.bytes, pos);
+    if (n == 1) return input.bytes[pos];
+    return std.unicode.utf8Decode(input.bytes[pos .. pos + n]) catch input.bytes[pos];
 }
 
 fn gbClassOf(cp: u21) gbd.Class {
@@ -29975,22 +30045,22 @@ fn gbIncbOf(cp: u21) ?gbd.Incb {
 }
 /// Decode one scalar at `pos`, combining a UTF-16 surrogate pair (for strings
 /// stored with the paired-surrogate encoding) into the astral code point.
-fn segScalar(str: []const u8, pos: usize) struct { cp: u21, len: usize } {
-    const cp0 = segCodePoint(str, pos);
-    const l0 = segScalarLen(str, pos);
-    if (isHighSurrogate(cp0) and pos + l0 < str.len) {
-        const cp1 = segCodePoint(str, pos + l0);
+fn segScalar(input: SegmenterInput, pos: usize) struct { cp: u21, len: usize } {
+    const cp0 = segCodePoint(input, pos);
+    const l0 = segScalarLen(input, pos);
+    if (isHighSurrogate(cp0) and pos + l0 < input.bytes.len) {
+        const cp1 = segCodePoint(input, pos + l0);
         if (isLowSurrogate(cp1)) {
             const astral: u21 = 0x10000 + ((@as(u21, cp0) - 0xD800) << 10) + (@as(u21, cp1) - 0xDC00);
-            return .{ .cp = astral, .len = l0 + segScalarLen(str, pos + l0) };
+            return .{ .cp = astral, .len = l0 + segScalarLen(input, pos + l0) };
         }
     }
     return .{ .cp = cp0, .len = l0 };
 }
 /// Advance one UAX #29 extended grapheme cluster from byte `pos`.
-fn segNextGrapheme(str: []const u8, pos: usize) usize {
-    const len = str.len;
-    var s = segScalar(str, pos);
+fn segNextGrapheme(input: SegmenterInput, pos: usize) usize {
+    const len = input.bytes.len;
+    var s = segScalar(input, pos);
     var end = pos + s.len;
     if (end >= len) return end;
     var pcls = gbClassOf(s.cp);
@@ -30001,7 +30071,7 @@ fn segNextGrapheme(str: []const u8, pos: usize) usize {
     // GB12/13 (regional indicators): consecutive RI count.
     var ri: usize = if (pcls == .ri) 1 else 0;
     while (end < len) {
-        const n = segScalar(str, end);
+        const n = segScalar(input, end);
         const cls = gbClassOf(n.cp);
         const iv = gbIncbOf(n.cp);
         var brk = true;
@@ -30061,8 +30131,8 @@ fn segNextGrapheme(str: []const u8, pos: usize) usize {
 /// Whether the code point starting at `str[pos]` is "word-like" (letters/digits).
 /// ASCII is classified exactly; any non-ASCII byte is treated as a letter (the
 /// structural Segmenter tests don't require precise UAX#29 categories).
-fn segWordCat(str: []const u8, pos: usize) bool {
-    const b = str[pos];
+fn segWordCat(input: SegmenterInput, pos: usize) bool {
+    const b = input.bytes[pos];
     if (b < 0x80) return std.ascii.isAlphanumeric(b);
     return true;
 }
@@ -30092,12 +30162,13 @@ fn segScriptCat(cp: u21) SegScript {
 
 /// Advance one segment from byte `pos`; returns the end byte offset and (for the
 /// "word" granularity) whether the segment is word-like.
-fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, word_like: bool } {
+fn segNext(input: SegmenterInput, pos: usize, gran: SegmenterGranularity) struct { end: usize, word_like: bool } {
+    const str = input.bytes;
     const len = str.len;
-    if (std.mem.eql(u8, gran, "grapheme")) {
-        return .{ .end = @min(len, segNextGrapheme(str, pos)), .word_like = false };
+    if (gran == .grapheme) {
+        return .{ .end = @min(len, segNextGrapheme(input, pos)), .word_like = false };
     }
-    if (std.mem.eql(u8, gran, "sentence")) {
+    if (gran == .sentence) {
         var end = pos;
         while (end < len) {
             const c = str[end];
@@ -30112,7 +30183,7 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
                 break;
             }
             if (c == '.' or c == '!' or c == '?') {
-                const t_end = end + segScalarLen(str, end);
+                const t_end = end + segScalarLen(input, end);
                 const nxt: u8 = if (t_end < len) str[t_end] else 0;
                 // A terminator only ends a sentence when followed by whitespace, a
                 // paragraph separator, or end of text ("One.Two"/"3.5" do not break).
@@ -30138,30 +30209,30 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
                 end = t_end;
                 continue;
             }
-            end += segScalarLen(str, end);
+            end += segScalarLen(input, end);
         }
         return .{ .end = end, .word_like = false };
     }
     // word: a maximal run of one category (word-like vs not). A "." or ","
     // between two digits stays inside the numeric word (UAX#29 WB11/WB12), so
     // "1.23" is one segment rather than "1", ".", "23".
-    const first_cp = segCodePoint(str, pos);
+    const first_cp = segCodePoint(input, pos);
     if (isHighSurrogate(first_cp) or isLowSurrogate(first_cp)) {
-        var end = pos + segScalarLen(str, pos);
-        if (isHighSurrogate(first_cp) and end < len and isLowSurrogate(segCodePoint(str, end))) end += segScalarLen(str, end);
+        var end = pos + segScalarLen(input, pos);
+        if (isHighSurrogate(first_cp) and end < len and isLowSurrogate(segCodePoint(input, end))) end += segScalarLen(input, end);
         return .{ .end = end, .word_like = false };
     }
-    const cat = segWordCat(str, pos);
+    const cat = segWordCat(input, pos);
     var end = pos;
     if (cat) {
         var run_script = segScriptCat(first_cp);
         while (end < len) {
-            if (segWordCat(str, end)) {
-                const sc = segScriptCat(segCodePoint(str, end));
+            if (segWordCat(input, end)) {
+                const sc = segScriptCat(segCodePoint(input, end));
                 // Break at an alphabetic↔CJK script boundary.
                 if ((run_script == .alpha and sc == .cjk) or (run_script == .cjk and sc == .alpha)) break;
                 if (sc != .neutral) run_script = sc;
-                end += segScalarLen(str, end);
+                end += segScalarLen(input, end);
                 continue;
             }
             const c = str[end];
@@ -30172,10 +30243,10 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
             // WB6/WB7: an apostrophe (' or U+2019) between two letters stays in the
             // word ("don't"), as do a MidLetter dot/colon ("a.b") and an
             // ExtendNumLet underscore ("under_score", WB13a).
-            const cp = segCodePoint(str, end);
-            if ((c == '\'' or cp == 0x2019 or c == '.' or c == ':' or c == '_') and end > pos and segWordCat(str, end - 1)) {
-                const after = end + segScalarLen(str, end);
-                if (after < len and segWordCat(str, after)) {
+            const cp = segCodePoint(input, end);
+            if ((c == '\'' or cp == 0x2019 or c == '.' or c == ':' or c == '_') and end > pos and segWordCat(input, end - 1)) {
+                const after = end + segScalarLen(input, end);
+                if (after < len and segWordCat(input, after)) {
                     end = after;
                     continue;
                 }
@@ -30193,7 +30264,7 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
         if (isSpace(str[pos])) {
             while (end < len and isSpace(str[end])) end += 1;
         } else {
-            end += segScalarLen(str, pos);
+            end += segScalarLen(input, pos);
         }
     }
     return .{ .end = end, .word_like = cat };
@@ -30201,38 +30272,38 @@ fn segNext(str: []const u8, pos: usize, gran: []const u8) struct { end: usize, w
 
 /// Build a segment-data object `{ segment, index, input[, isWordLike] }` (own
 /// properties in that order; isWordLike only for the "word" granularity).
-fn segDataObj(self: *Interpreter, str: []const u8, start: usize, end: usize, gran: []const u8, word_like: bool) EvalError!Value {
+fn segDataObj(self: *Interpreter, input: SegmenterInput, start: usize, end: usize, gran: SegmenterGranularity, word_like: bool) EvalError!Value {
     const o = (try self.newObject()).asObj();
-    try self.setProp(o, "segment", try Value.strOwned(self.arena, try self.arena.dupe(u8, str[start..end])));
-    try self.setProp(o, "index", Value.num(@floatFromInt(Interpreter.utf16IndexForByteOffset(str, start))));
-    try self.setProp(o, "input", try Value.strAlloc(self.arena, str));
-    if (std.mem.eql(u8, gran, "word")) try self.setProp(o, "isWordLike", Value.boolVal(word_like));
+    try self.setProp(o, "segment", try input.segmentValue(self.arena, start, end));
+    try self.setProp(o, "index", Value.num(@floatFromInt(input.utf16Index(start))));
+    try self.setProp(o, "input", input.value);
+    if (gran == .word) try self.setProp(o, "isWordLike", Value.boolVal(word_like));
     return Value.obj(o);
 }
 
-fn segmenterGranularity(seg_obj: *value.Object) []const u8 {
-    if (seg_obj.getOwn("\x00gran")) |g| if (g.isString()) return g.asStr();
-    return "grapheme";
+fn segmenterGranularity(seg_obj: *value.Object) SegmenterGranularity {
+    if (seg_obj.getOwn("\x00gran")) |g| if (g.isString()) return SegmenterGranularity.fromString(g.asStr());
+    return .grapheme;
 }
 
 /// `Intl.Segmenter.prototype.segment(string)` → a %Segments% object.
 fn intlSegmenterSegmentFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "Segmenter")) return self.throwError("TypeError", "Intl.Segmenter.prototype.segment on incompatible receiver");
-    const str = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
-    var gran: []const u8 = "grapheme";
+    const input_value = try segmenterToStringValue(self, if (args.len > 0) args[0] else Value.undef());
+    var gran: SegmenterGranularity = .grapheme;
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         if (ov.asObj().getOwn("granularity")) |g| if (g.isString()) {
-            gran = g.asStr();
+            gran = SegmenterGranularity.fromString(g.asStr());
         };
     };
     const o = (try self.newObject()).asObj();
     if (self.env.get("\x00SegmentsProto")) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
     };
-    try self.setProp(o, "\x00segstr", try Value.strAlloc(self.arena, str));
+    try self.setProp(o, "\x00segstr", input_value);
     try o.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
-    try self.setProp(o, "\x00gran", try Value.strAlloc(self.arena, gran));
+    try self.setProp(o, "\x00gran", gran.value());
     try o.setAttr(self.arena, "\x00gran", .{ .writable = false, .enumerable = false, .configurable = false });
     return Value.obj(o);
 }
@@ -30245,18 +30316,18 @@ fn segmentsBrandOk(this: Value) bool {
 fn intlSegmentsContainingFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!segmentsBrandOk(this)) return self.throwError("TypeError", "Segments.prototype.containing on incompatible receiver");
-    const str = try this.asObj().getOwn("\x00segstr").?.asWtf8(self.arena);
+    const input = try SegmenterInput.fromValue(self, this.asObj().getOwn("\x00segstr").?);
     const gran = segmenterGranularity(this.asObj());
     const nf = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
     const n: f64 = if (std.math.isNan(nf)) 0 else @trunc(nf);
-    if (n < 0 or n >= @as(f64, @floatFromInt(Interpreter.utf16LenOfString(str)))) return Value.undef();
+    if (n < 0 or n >= @as(f64, @floatFromInt(input.utf16Len()))) return Value.undef();
     const target_units: usize = @intFromFloat(n);
     var pos: usize = 0;
-    while (pos < str.len) {
-        const nx = segNext(str, pos, gran);
-        const start_units = Interpreter.utf16IndexForByteOffset(str, pos);
-        const end_units = Interpreter.utf16IndexForByteOffset(str, nx.end);
-        if (target_units >= start_units and target_units < end_units) return try segDataObj(self, str, pos, nx.end, gran, nx.word_like);
+    while (pos < input.bytes.len) {
+        const nx = segNext(input, pos, gran);
+        const start_units = input.utf16Index(pos);
+        const end_units = input.utf16Index(nx.end);
+        if (target_units >= start_units and target_units < end_units) return try segDataObj(self, input, pos, nx.end, gran, nx.word_like);
         pos = nx.end;
     }
     return Value.undef();
@@ -30273,7 +30344,7 @@ fn intlSegmentsIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) val
     };
     try self.setProp(it, "\x00segstr", this.asObj().getOwn("\x00segstr").?);
     try it.setAttr(self.arena, "\x00segstr", .{ .writable = false, .enumerable = false, .configurable = false });
-    try self.setProp(it, "\x00gran", try Value.strAlloc(self.arena, segmenterGranularity(this.asObj())));
+    try self.setProp(it, "\x00gran", segmenterGranularity(this.asObj()).value());
     try it.setAttr(self.arena, "\x00gran", .{ .writable = false, .enumerable = false, .configurable = false });
     try self.setProp(it, "\x00pos", Value.num(0));
     try it.setAttr(self.arena, "\x00pos", .{ .writable = true, .enumerable = false, .configurable = false });
@@ -30285,13 +30356,13 @@ fn intlSegmentIterNextFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().getOwn("\x00pos") == null) return self.throwError("TypeError", "Segment Iterator next on incompatible receiver");
-    const str = try this.asObj().getOwn("\x00segstr").?.asWtf8(self.arena);
+    const input = try SegmenterInput.fromValue(self, this.asObj().getOwn("\x00segstr").?);
     const gran = segmenterGranularity(this.asObj());
     const pos: usize = @intFromFloat(this.asObj().getOwn("\x00pos").?.asNum());
-    if (pos >= str.len) return self.iterResultObj(Value.undef(), true);
-    const nx = segNext(str, pos, gran);
+    if (pos >= input.bytes.len) return self.iterResultObj(Value.undef(), true);
+    const nx = segNext(input, pos, gran);
     try self.setProp(this.asObj(), "\x00pos", Value.num(@floatFromInt(nx.end)));
-    return self.iterResultObj(try segDataObj(self, str, pos, nx.end, gran, nx.word_like), false);
+    return self.iterResultObj(try segDataObj(self, input, pos, nx.end, gran, nx.word_like), false);
 }
 
 /// `Intl.PluralRules.prototype.selectRange(start, end)` — both must be
@@ -30953,11 +31024,11 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     }
                 };
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
-                var granularity: []const u8 = "grapheme";
+                var granularity: SegmenterGranularity = .grapheme;
                 if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                    if (ov.asObj().getOwn("granularity")) |g| granularity = g.asStr();
+                    if (ov.asObj().getOwn("granularity")) |g| granularity = SegmenterGranularity.fromString(g.asStr());
                 };
-                try self.setProp(o, "granularity", try Value.strAlloc(self.arena, granularity));
+                try self.setProp(o, "granularity", granularity.value());
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const ro: ?Value = this.asObj().getOwn("\x00opts");
                 const dget = struct {
@@ -51416,6 +51487,62 @@ test "Intl structural services preserve part metadata and result ownership" {
         \\  relative.formatToParts(1250, "year")[1].unit === "year" &&
         \\  duration.formatToParts(durationInput)[0].value === "1"
     )).asBool());
+}
+
+test "Intl.Segmenter input is coerced once and shared immutably" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var segmenterCoercions = 0;
+        \\var segmenterSource = { toString: function () { segmenterCoercions++; return "alpha beta gamma"; } };
+        \\var segmenter = new Intl.Segmenter("en", { granularity: "word" });
+        \\var segments = segmenter.segment(segmenterSource);
+        \\var iterator = segments[Symbol.iterator]();
+        \\var records = [];
+        \\for (;;) {
+        \\  var step = iterator.next();
+        \\  if (step.done) break;
+        \\  records.push(step.value);
+        \\}
+        \\var contained = segments.containing(7);
+        \\var exact = segmenterCoercions === 1 &&
+        \\  records.map(function (record) { return record.segment; }).join("|") === "alpha| |beta| |gamma" &&
+        \\  records.map(function (record) { return record.input; }).join("|") ===
+        \\    "alpha beta gamma|alpha beta gamma|alpha beta gamma|alpha beta gamma|alpha beta gamma" &&
+        \\  records.map(function (record) { return record.index; }).join(",") === "0,5,6,10,11" &&
+        \\  contained.segment === "beta" && contained.index === 6 && contained.input === "alpha beta gamma" &&
+        \\  Object.keys(contained).join(",") === "segment,index,input,isWordLike" &&
+        \\  segmenter.resolvedOptions().granularity === "word";
+        \\records[0].segment = "changed";
+        \\records[0].input = "changed";
+        \\contained.input = "changed";
+        \\var fresh = segments.containing(0);
+        \\exact && fresh.segment === "alpha" && fresh.input === "alpha beta gamma" && segmenterCoercions === 1
+    )).asBool());
+}
+
+test "Intl.Segmenter input slice ownership is OOM-safe" {
+    const run = struct {
+        fn check(a: std.mem.Allocator) !void {
+            const source = Value.str("alpha beta");
+            const input = SegmenterInput{
+                .value = source,
+                .bytes = source.asStr(),
+                .flat_latin1 = false,
+            };
+            const segment = try input.segmentValue(a, 6, 10);
+            const cell = segment.asStringCell();
+            defer {
+                a.free(@constCast(cell.bytes));
+                a.destroy(@constCast(cell));
+            }
+            try std.testing.expectEqualStrings("beta", segment.asStr());
+            try std.testing.expectEqualStrings("alpha beta", input.value.asStr());
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
 }
 
 test "Intl remaining conformance edge cases" {

@@ -13004,6 +13004,105 @@ test "parallel_js: Intl structural part metadata is immutable after publication"
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl.Segmenter input sharing stays bounded under adversarial segmentation" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var boundedSegmentInput = "";
+        \\for (var word = 0; word < 384; word++) boundedSegmentInput += "alpha ";
+        \\var boundedSegmenter = new Intl.Segmenter("en", { granularity: "word" });
+        \\var boundedSegmentChecksum = 0;
+        \\for (var round = 0; round < 16; round++) {
+        \\  var boundedSegments = boundedSegmenter.segment(boundedSegmentInput);
+        \\  var boundedIterator = boundedSegments[Symbol.iterator]();
+        \\  for (;;) {
+        \\    var boundedStep = boundedIterator.next();
+        \\    if (boundedStep.done) break;
+        \\    boundedSegmentChecksum += boundedStep.value.segment.length + boundedStep.value.input.length;
+        \\  }
+        \\  gc();
+        \\}
+        \\gc();
+        \\boundedSegmentChecksum > 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "moving nursery preserves shared Intl.Segmenter input and iterator progress" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.__movingSegmentInput = "alpha beta gamma";
+        \\globalThis.__movingSegmenter = new Intl.Segmenter("en", { granularity: "word" });
+        \\globalThis.__movingSegments = __movingSegmenter.segment(__movingSegmentInput);
+        \\globalThis.__movingSegmentIterator = __movingSegments[Symbol.iterator]();
+        \\globalThis.__movingSegmentFirst = __movingSegmentIterator.next().value;
+    );
+    const before = ctx.global_object.getOwn("__movingSegments").?.asObj();
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("__movingSegments").?.asObj();
+    try std.testing.expect(before != after);
+    try std.testing.expect((try ctx.evaluate(
+        \\__movingSegmentFirst.segment === "alpha" &&
+        \\__movingSegmentFirst.input === __movingSegmentInput &&
+        \\__movingSegments.containing(7).segment === "beta" &&
+        \\__movingSegments.containing(7).input === __movingSegmentInput &&
+        \\__movingSegmentIterator.next().value.segment === " " &&
+        \\__movingSegmentIterator.next().value.segment === "beta"
+    )).asBool());
+}
+
+test "parallel_js: Intl.Segmenter shares immutable input without engine races" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var sharedSegmenter = new Intl.Segmenter("en", { granularity: "word" });
+        \\var sharedSegmentInput = "secure bounded precise moving shared immutable input";
+        \\function segmenterLane(lane) {
+        \\  var checksum = 0;
+        \\  for (var round = 0; round < 64; round++) {
+        \\    var segments = sharedSegmenter.segment(sharedSegmentInput);
+        \\    var contained = segments.containing((lane * 7 + round) % sharedSegmentInput.length);
+        \\    if (contained.input !== sharedSegmentInput) return 0;
+        \\    checksum += contained.segment.length + contained.index;
+        \\    var iterator = segments[Symbol.iterator]();
+        \\    for (var stepIndex = 0; stepIndex < 8; stepIndex++) {
+        \\      var step = iterator.next();
+        \\      if (step.done || step.value.input !== sharedSegmentInput) return 0;
+        \\      checksum += step.value.segment.length;
+        \\    }
+        \\  }
+        \\  return checksum > 0 && sharedSegmenter.resolvedOptions().granularity === "word" ? 1 : 0;
+        \\}
+        \\var segmenterThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) segmenterThreads.push(new Thread(segmenterLane, lane));
+        \\var segmenterTotal = 0;
+        \\for (var index = 0; index < segmenterThreads.length; index++) segmenterTotal += segmenterThreads[index].join();
+        \\segmenterTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "Intl.DateTimeFormat resolved state is reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
