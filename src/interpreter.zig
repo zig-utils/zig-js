@@ -9286,7 +9286,13 @@ pub const Interpreter = struct {
         const raw_src = o.regexSource();
         const flags = o.regexFlags();
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
-        const compat_src = if (unicode) raw_src else try regexp_compat.normalizeAnnexBClassRanges(self.arena, raw_src);
+        const scratch = self.scratch_allocator orelse self.arena;
+        const normalized = if (unicode)
+            regexp_compat.NormalizedPattern.borrowed(raw_src)
+        else
+            try regexp_compat.normalizeAnnexBClassRanges(scratch, raw_src);
+        defer normalized.deinit(scratch);
+        const compat_src = normalized.bytes;
         const src = if (unicode) compat_src else try self.regexpSearchInput(compat_src, false);
         const cf = regex.common.CompileFlags{
             .case_insensitive = std.mem.indexOfScalar(u8, flags, 'i') != null,

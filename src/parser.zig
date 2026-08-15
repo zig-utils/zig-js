@@ -57,6 +57,10 @@ pub const Parser = struct {
     /// Freeable backing for invocation-local indexes. AST nodes, tokens, and
     /// source-derived names remain arena-owned; scratch tables never own keys.
     scratch_allocator: std.mem.Allocator,
+    /// Parse entry points install one resettable arena here so every RegExp
+    /// literal reuses the largest validation footprint seen by that parse. The
+    /// pointer is stack-local to parsing and never escapes or enters the AST.
+    regex_validation_arena: ?*std.heap.ArenaAllocator = null,
     /// The original source text, so function definitions can capture their exact
     /// source span for `Function.prototype.toString`.
     source: []const u8 = "",
@@ -231,6 +235,18 @@ pub const Parser = struct {
             .source = source,
             .html_comment_offset = lx.htmlCommentOffset(),
         };
+    }
+
+    fn validateRegexLiteral(self: *Parser, pattern: []const u8, flags: []const u8) ParseError!void {
+        if (self.regex_validation_arena) |validation_arena|
+            return validateRegexLiteralWithArena(validation_arena, pattern, flags);
+
+        // `parseExpression` is also a public entry point. When it is used
+        // directly, keep the same bounded validation lifetime without requiring
+        // the caller to establish the Program/Module parse scope first.
+        var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
+        defer validation_arena.deinit();
+        return validateRegexLiteralWithArena(&validation_arena, pattern, flags);
     }
 
     /// Source slice from the start position of the token at `start_pos` through
@@ -574,6 +590,15 @@ pub const Parser = struct {
     // ----- program / statements -------------------------------------------
 
     pub fn parseProgram(self: *Parser) ParseError!*Node {
+        if (self.regex_validation_arena != null) return self.parseProgramInner();
+        var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
+        defer validation_arena.deinit();
+        self.regex_validation_arena = &validation_arena;
+        defer self.regex_validation_arena = null;
+        return self.parseProgramInner();
+    }
+
+    fn parseProgramInner(self: *Parser) ParseError!*Node {
         // A top-level `"use strict"` directive prologue makes the whole program
         // (and every function in it, by inheritance) strict.
         var i: usize = self.pos;
@@ -1049,6 +1074,15 @@ pub const Parser = struct {
     /// Parse the token stream as a Module: a Module is always strict, and its
     /// top level additionally permits `import`/`export` declarations.
     pub fn parseModule(self: *Parser) ParseError!*Node {
+        if (self.regex_validation_arena != null) return self.parseModuleInner();
+        var validation_arena = std.heap.ArenaAllocator.init(self.scratch_allocator);
+        defer validation_arena.deinit();
+        self.regex_validation_arena = &validation_arena;
+        defer self.regex_validation_arena = null;
+        return self.parseModuleInner();
+    }
+
+    fn parseModuleInner(self: *Parser) ParseError!*Node {
         self.module = true;
         self.strict = true;
         // HTML-like comments (Annex B B.1.3) are Script-only; a Module must reject
@@ -2440,7 +2474,7 @@ pub const Parser = struct {
                 var end = i + 1;
                 while (end < self.source.len and isIdentifierPartByte(self.source[end])) : (end += 1) {}
                 const flags = self.source[i + 1 .. end];
-                try validateRegexLiteral(self.arena, pattern, flags);
+                try self.validateRegexLiteral(pattern, flags);
                 while (self.pos < self.tokens.len and self.tokens[self.pos].pos < end) self.pos += 1;
                 return self.alloc(.{ .regex_literal = .{ .pattern = pattern, .flags = flags } });
             }
@@ -3213,6 +3247,7 @@ pub const Parser = struct {
                 sub.strict = self.strict;
                 sub.module = self.module;
                 sub.eval_private_allowed = self.eval_private_allowed;
+                sub.regex_validation_arena = self.regex_validation_arena;
                 node = try self.concatExpr(node, try sub.parseExpression());
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
                 raw_start = i;
@@ -3267,6 +3302,7 @@ pub const Parser = struct {
                 sub.strict = self.strict;
                 sub.module = self.module;
                 sub.eval_private_allowed = self.eval_private_allowed;
+                sub.regex_validation_arena = self.regex_validation_arena;
                 exprs[substitution_index] = try sub.parseExpression();
                 substitution_index += 1;
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
@@ -4371,7 +4407,7 @@ pub const Parser = struct {
                 // them at parse time so an invalid literal fails the parse (the
                 // `phase: parse` negative tests rely on this), matching the same
                 // compile the interpreter runs eagerly at evaluation.
-                try validateRegexLiteral(self.arena, t.text, t.flags);
+                try self.validateRegexLiteral(t.text, t.flags);
                 return self.alloc(.{ .regex_literal = .{ .pattern = t.text, .flags = t.flags } });
             },
             .lparen => {
@@ -4416,7 +4452,13 @@ pub const Parser = struct {
 /// Validate a regex literal's flags and pattern, returning a parse error for an
 /// invalid one. Mirrors the interpreter's eager compile so the result is the
 /// same whether the literal is rejected at parse or at evaluation.
-fn validateRegexLiteral(arena: std.mem.Allocator, pattern: []const u8, flags: []const u8) ParseError!void {
+fn validateRegexLiteralWithArena(validation_arena: *std.heap.ArenaAllocator, pattern: []const u8, flags: []const u8) ParseError!void {
+    _ = validation_arena.reset(.retain_capacity);
+    defer _ = validation_arena.reset(.retain_capacity);
+    _ = try compileRegexLiteralForValidation(validation_arena.allocator(), pattern, flags);
+}
+
+fn compileRegexLiteralForValidation(scratch_allocator: std.mem.Allocator, pattern: []const u8, flags: []const u8) ParseError!regex.Regex {
     var seen = std.mem.zeroes([128]bool);
     for (flags) |f| {
         if (f >= 128 or std.mem.indexOfScalar(u8, "dgimsuvy", f) == null or seen[f]) return ParseError.UnexpectedToken;
@@ -4431,8 +4473,15 @@ fn validateRegexLiteral(arena: std.mem.Allocator, pattern: []const u8, flags: []
         .unicode_sets = seen['v'],
         .ecmascript = true,
     };
-    const src = if (cf.unicode) pattern else regexp_compat.normalizeAnnexBClassRanges(arena, pattern) catch return ParseError.UnexpectedToken;
-    _ = regex.Regex.compileWithFlags(arena, src, cf) catch return ParseError.UnexpectedToken;
+    const normalized = if (cf.unicode)
+        regexp_compat.NormalizedPattern.borrowed(pattern)
+    else
+        try regexp_compat.normalizeAnnexBClassRanges(scratch_allocator, pattern);
+    defer normalized.deinit(scratch_allocator);
+    return regex.Regex.compileWithFlags(scratch_allocator, normalized.bytes, cf) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return ParseError.UnexpectedToken,
+    };
 }
 
 fn substRegexAllowed(last: u8) bool {
@@ -5398,4 +5447,49 @@ test "module parsing reuses one token stream and rejects Script HTML comments" {
     var rejected = try Parser.init(arena.allocator(), source);
     try std.testing.expectError(ParseError.UnexpectedToken, rejected.parseModule());
     try std.testing.expectEqual(std.mem.indexOf(u8, source, "-->").?, rejected.errorLocation().byte_offset);
+}
+
+fn exerciseRegexValidationScratch(allocator: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source = "var patterns = [/(?<word>[a-z]+)(?=\\d)/gi, /[\\d-a]+/, /unicode-[a-z]+/u];";
+    var parser = try Parser.initWithScratch(arena.allocator(), allocator, source);
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 1), program.program.len);
+    const initializer = program.program[0].var_decl.init.?;
+    try std.testing.expectEqual(@as(usize, 3), initializer.array_lit.len);
+    try std.testing.expectEqualStrings("(?<word>[a-z]+)(?=\\d)", initializer.array_lit[0].regex_literal.pattern);
+    try std.testing.expectEqualStrings("gi", initializer.array_lit[0].regex_literal.flags);
+    try std.testing.expectEqualStrings("[\\d-a]+", initializer.array_lit[1].regex_literal.pattern);
+    try std.testing.expectEqualStrings("u", initializer.array_lit[2].regex_literal.flags);
+}
+
+fn exerciseRegexCompilerAllocationFailures(allocator: std.mem.Allocator) !void {
+    for ([_]struct { pattern: []const u8, flags: []const u8 }{
+        .{ .pattern = "(?<word>[a-z]+)(?=\\d)", .flags = "gi" },
+        .{ .pattern = "[\\d-a]+", .flags = "" },
+        .{ .pattern = "unicode-[a-z]+", .flags = "u" },
+    }) |spec| {
+        var compiled = try compileRegexLiteralForValidation(allocator, spec.pattern, spec.flags);
+        defer compiled.deinit();
+    }
+}
+
+test "parser RegExp validation releases every scratch allocation and preserves AST source" {
+    try exerciseRegexValidationScratch(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseRegexCompilerAllocationFailures,
+        .{},
+    );
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var invalid = try Parser.initWithScratch(arena.allocator(), std.testing.allocator, "var invalid = /(/;");
+    try std.testing.expectError(ParseError.UnexpectedToken, invalid.parseProgram());
+
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    var exhausted = try Parser.initWithScratch(arena.allocator(), fixed.allocator(), "var pattern = /a+/;");
+    try std.testing.expectError(error.OutOfMemory, exhausted.parseProgram());
 }
