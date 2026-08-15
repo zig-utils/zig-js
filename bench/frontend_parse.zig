@@ -201,6 +201,11 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_nested_functions_decoys_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_nested_functions_arguments_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_nested_arrows_arguments_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_regex_literals_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_regex_literals_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_regex_literals_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_regex_literals_unicode_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_regex_literals_annex_b_4096")) return 4096;
     return error.InvalidWorkload;
 }
 
@@ -303,6 +308,18 @@ fn isNestedFunctionArgumentsWorkload(name: []const u8) bool {
 
 fn isNestedArrowArgumentsWorkload(name: []const u8) bool {
     return std.mem.eql(u8, name, "representative_frontend_nested_arrows_arguments_1024");
+}
+
+fn isRegexLiteralWorkload(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "representative_frontend_regex_literals_");
+}
+
+fn isUnicodeRegexLiteralWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_regex_literals_unicode_4096");
+}
+
+fn isAnnexBRegexLiteralWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_regex_literals_annex_b_4096");
 }
 
 fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
@@ -590,6 +607,33 @@ fn nestedArrowArgumentsSource(allocator: std.mem.Allocator, depth: usize) ![]con
     return source.items;
 }
 
+fn regexLiteralSource(allocator: std.mem.Allocator, width: usize, unicode: bool, annex_b: bool) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "var regexCorpus = [");
+    for (0..width) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        if (annex_b) {
+            // Annex B treats the class-escape range endpoint as a union with a
+            // literal hyphen. This control must take the compatibility rewrite.
+            try source.appendSlice(allocator, "/annex-");
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+            try source.appendSlice(allocator, "-[\\d-a]+/");
+        } else if (unicode) {
+            // Equal literal count and comparable pattern shape, but `u` makes
+            // Annex B normalization inapplicable.
+            try source.appendSlice(allocator, "/unicode-");
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+            try source.appendSlice(allocator, "-[a-z]+/u");
+        } else {
+            try source.appendSlice(allocator, "/literal-");
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+            try source.appendSlice(allocator, "-(?:[a-z]+|\\d{2,4})/gi");
+        }
+    }
+    try source.appendSlice(allocator, "];\n");
+    return source.items;
+}
+
 fn indexedName(name: []const u8, prefix: []const u8, index: usize) !bool {
     if (!std.mem.startsWith(u8, name, prefix)) return false;
     return (try std.fmt.parseUnsigned(usize, name[prefix.len..], 10)) == index;
@@ -862,6 +906,30 @@ fn parseOnce(
         return checksum;
     }
     const declaration = program.program[0];
+    if (isRegexLiteralWorkload(workload)) {
+        if (program.program.len != 1 or declaration.* != .var_decl) return error.InvalidProgram;
+        const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
+        if (init_expr.* != .array_lit or init_expr.array_lit.len != try workloadWidth(workload))
+            return error.InvalidProgram;
+        const unicode = isUnicodeRegexLiteralWorkload(workload);
+        const annex_b = isAnnexBRegexLiteralWorkload(workload);
+        const prefix = if (annex_b) "annex-" else if (unicode) "unicode-" else "literal-";
+        const suffix = if (annex_b) "-[\\d-a]+" else if (unicode) "-[a-z]+" else "-(?:[a-z]+|\\d{2,4})";
+        const flags = if (unicode) "u" else if (annex_b) "" else "gi";
+        var checksum = init_expr.array_lit.len;
+        for (init_expr.array_lit, 0..) |element, index| {
+            if (element.* != .regex_literal or
+                !std.mem.startsWith(u8, element.regex_literal.pattern, prefix) or
+                !std.mem.endsWith(u8, element.regex_literal.pattern, suffix) or
+                !std.mem.eql(u8, element.regex_literal.flags, flags))
+                return error.InvalidProgram;
+            const index_text = element.regex_literal.pattern[prefix.len .. element.regex_literal.pattern.len - suffix.len];
+            if (try std.fmt.parseUnsigned(usize, index_text, 10) != index)
+                return error.InvalidProgram;
+            checksum += element.regex_literal.pattern.len + element.regex_literal.flags.len + index;
+        }
+        return checksum;
+    }
     if (isRadixBigIntWorkload(workload)) {
         if (declaration.* != .var_decl) return error.InvalidProgram;
         const init_expr = declaration.var_decl.init orelse return error.InvalidProgram;
@@ -1051,8 +1119,16 @@ pub fn main(init: std.process.Init) !void {
     const statement_location_workload = isStatementLocationWorkload(workload);
     const nested_function_workload = isNestedFunctionWorkload(workload);
     const nested_arrow_workload = isNestedArrowArgumentsWorkload(workload);
+    const regex_literal_workload = isRegexLiteralWorkload(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (nested_arrow_workload)
+    const source = if (regex_literal_workload)
+        try regexLiteralSource(
+            init.arena.allocator(),
+            width,
+            isUnicodeRegexLiteralWorkload(workload),
+            isAnnexBRegexLiteralWorkload(workload),
+        )
+    else if (nested_arrow_workload)
         try nestedArrowArgumentsSource(init.arena.allocator(), width)
     else if (nested_function_workload)
         try nestedFunctionSource(
