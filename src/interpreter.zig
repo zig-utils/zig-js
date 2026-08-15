@@ -9889,27 +9889,7 @@ pub const Interpreter = struct {
     }
 
     fn regexpSearchInput(self: *Interpreter, input: []const u8, unicode: bool) ![]const u8 {
-        if (unicode) return input;
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        var changed = false;
-        var i: usize = 0;
-        while (i < input.len) {
-            const seq_len = utf8SeqLen(input, i);
-            if (seq_len == 4) {
-                const cp = std.unicode.utf8Decode(input[i .. i + seq_len]) catch 0;
-                if (cp > 0xFFFF) {
-                    const u = cp - 0x10000;
-                    try appendWtf8CodeUnit(&out, self.arena, @intCast(0xD800 + (u >> 10)));
-                    try appendWtf8CodeUnit(&out, self.arena, @intCast(0xDC00 + (u & 0x3FF)));
-                    changed = true;
-                    i += seq_len;
-                    continue;
-                }
-            }
-            try out.appendSlice(self.arena, input[i .. i + seq_len]);
-            i += seq_len;
-        }
-        return if (changed) out.items else input;
+        return regexpSearchInputAlloc(self.arena, input, unicode);
     }
 
     fn stringSliceFromSearchSpan(self: *Interpreter, input: []const u8, search_input: []const u8, start: usize, end: usize) EvalError![]const u8 {
@@ -32462,6 +32442,96 @@ fn utf8SeqLen(s: []const u8, i: usize) usize {
     const n = std.unicode.utf8ByteSequenceLength(s[i]) catch return 1;
     if (i + n > s.len) return 1;
     return if (std.unicode.utf8ValidateSlice(s[i .. i + n])) n else 1;
+}
+
+fn writeWtf8CodeUnit(out: []u8, cu: u16) void {
+    std.debug.assert(out.len >= 3);
+    out[0] = @intCast(0xE0 | (cu >> 12));
+    out[1] = @intCast(0x80 | ((cu >> 6) & 0x3F));
+    out[2] = @intCast(0x80 | (cu & 0x3F));
+}
+
+/// Non-Unicode RegExp matching observes UTF-16 code units. Convert each astral
+/// UTF-8 scalar into its two WTF-8 surrogate encodings, but keep BMP, ASCII,
+/// lone-surrogate, and `/u`/`v` input borrowed byte-for-byte. The changed result
+/// may be a subslice of one bounded allocation, so this private helper requires
+/// the arena-style lifetime used by every caller.
+fn regexpSearchInputAlloc(allocator: std.mem.Allocator, input: []const u8, unicode: bool) ![]const u8 {
+    if (unicode) return input;
+
+    var first_astral: ?usize = null;
+    var i: usize = 0;
+    while (i < input.len) {
+        const seq_len = utf8SeqLen(input, i);
+        if (seq_len == 4) {
+            const cp = std.unicode.utf8Decode(input[i .. i + seq_len]) catch unreachable;
+            if (cp > 0xFFFF) {
+                first_astral = i;
+                break;
+            }
+        }
+        i += seq_len;
+    }
+    const first = first_astral orelse return input;
+
+    // Every expansion consumes four input bytes and produces six. Starting at
+    // the first confirmed astral scalar, this is a safe one-allocation upper
+    // bound (<= 1.5x input) even when every remaining byte belongs to one.
+    const max_astral = (input.len - first) / 4;
+    const extra = std.math.mul(usize, max_astral, 2) catch return error.OutOfMemory;
+    const capacity = std.math.add(usize, input.len, extra) catch return error.OutOfMemory;
+    const out = try allocator.alloc(u8, capacity);
+    @memcpy(out[0..first], input[0..first]);
+    var written = first;
+    i = first;
+    while (i < input.len) {
+        const seq_len = utf8SeqLen(input, i);
+        if (seq_len == 4) {
+            const cp = std.unicode.utf8Decode(input[i .. i + seq_len]) catch unreachable;
+            if (cp > 0xFFFF) {
+                const scalar = cp - 0x10000;
+                writeWtf8CodeUnit(out[written..], @intCast(0xD800 + (scalar >> 10)));
+                writeWtf8CodeUnit(out[written + 3 ..], @intCast(0xDC00 + (scalar & 0x3FF)));
+                written += 6;
+                i += seq_len;
+                continue;
+            }
+        }
+        @memcpy(out[written .. written + seq_len], input[i .. i + seq_len]);
+        written += seq_len;
+        i += seq_len;
+    }
+    std.debug.assert(written <= out.len);
+    return out[0..written];
+}
+
+test "RegExp search input borrows no-op encodings and owns one bounded astral expansion" {
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    for ([_][]const u8{
+        "plain ASCII",
+        "BMP: é水",
+        "lone surrogate: \xED\xA0\x80",
+    }) |input| {
+        const borrowed = try regexpSearchInputAlloc(fixed.allocator(), input, false);
+        try std.testing.expectEqual(@intFromPtr(input.ptr), @intFromPtr(borrowed.ptr));
+        try std.testing.expectEqualStrings(input, borrowed);
+    }
+    const unicode_input = "unicode 😀";
+    const unicode_borrowed = try regexpSearchInputAlloc(fixed.allocator(), unicode_input, true);
+    try std.testing.expectEqual(@intFromPtr(unicode_input.ptr), @intFromPtr(unicode_borrowed.ptr));
+
+    var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var measured_arena = std.heap.ArenaAllocator.init(measured.allocator());
+    defer measured_arena.deinit();
+    const expanded = try regexpSearchInputAlloc(measured_arena.allocator(), "A😀B𐐷C", false);
+    try std.testing.expectEqualStrings("A\xED\xA0\xBD\xED\xB8\x80B\xED\xA0\x81\xED\xB0\xB7C", expanded);
+    try std.testing.expectEqual(@as(usize, 1), measured.allocations);
+    try std.testing.expect(measured.allocated_bytes >= expanded.len);
+
+    var exhausted_memory: [0]u8 = .{};
+    var exhausted = std.heap.FixedBufferAllocator.init(&exhausted_memory);
+    try std.testing.expectError(error.OutOfMemory, regexpSearchInputAlloc(exhausted.allocator(), "😀", false));
 }
 
 fn isHighSurrogate(cp: u21) bool {
