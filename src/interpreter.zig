@@ -25294,7 +25294,7 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
                     try arr.appendElement(self.arena, try Value.strAlloc(self.arena, hc));
                 },
                 .collations => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, localeUValue(tag, "co") orelse "default")),
-                .numbering_systems => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, localeUValue(tag, "nu") orelse "latn")),
+                .numbering_systems => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, localeUValue(tag, "nu") orelse localeDefaultNumberingSystem(tag))),
                 .time_zones => {}, // requires region-to-zone data
             }
             return Value.obj(arr);
@@ -25685,10 +25685,7 @@ fn dtfResolveHourCycle(self: *Interpreter, locale: []const u8, opt_hc: []const u
 }
 
 fn localeDefaultNumberingSystem(locale: []const u8) []const u8 {
-    const t = parseTriple(locale);
-    if (std.mem.eql(u8, t.l, "ar")) return "arab";
-    if (std.mem.eql(u8, t.l, "fa")) return "arabext";
-    return "latn";
+    return cldr_numbers.defaultNumberingSystem(locale);
 }
 
 /// ResolveLocale for DateTimeFormat's relevant extension keys (ca, hc, nu): an
@@ -26110,7 +26107,7 @@ fn nfResolvedData(self: *Interpreter, locale: []const u8, ro: *value.Object) Eva
     const extension_ns = localeUValue(locale, "nu");
     const extension_supported = if (extension_ns) |name| numbering_systems.digits(name) != null else false;
     const option_supported = if (option_ns) |name| numbering_systems.digits(name) != null else false;
-    data.numbering_system = if (option_supported) option_ns.? else if (extension_supported) extension_ns.? else "latn";
+    data.numbering_system = if (option_supported) option_ns.? else if (extension_supported) extension_ns.? else localeDefaultNumberingSystem(locale);
     const keep_extension = extension_supported and std.mem.eql(u8, extension_ns.?, data.numbering_system);
     const base = if (std.mem.indexOf(u8, locale, "-u-")) |index| locale[0..index] else locale;
     data.resolved_locale = if (keep_extension)
@@ -27276,15 +27273,12 @@ fn appendNum(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), first: *bool,
     if (two_digit) try tfmt(self, buf, "{d:0>2}", .{v}) else try tfmt(self, buf, "{d}", .{v});
 }
 
-/// Per-locale decimal/grouping separators (a compact CLDR subset keyed by the
-/// language subtag). Most locales group with "," and decimal with "." (the en
-/// default); the table lists the common exceptions used by the test corpus.
-/// Per-locale number symbols + currency-symbol placement, from CLDR (generated
-/// table in cldr_numbers.zig; ~50 locales, language-subtag fallback).
-fn localeNumberSymbols(locale: []const u8) cldr_numbers.NumSym {
-    var syms = cldr_numbers.lookup(locale);
+/// Per-locale/system number symbols from the complete pinned CLDR number-data
+/// inventory, combined with the compact locale table's currency placement.
+fn localeNumberSymbols(locale: []const u8, numbering_system: []const u8) cldr_numbers.NumSym {
+    var syms = cldr_numbers.lookupFor(locale, numbering_system);
     const t = parseTriple(locale);
-    if (std.ascii.eqlIgnoreCase(t.l, "pt") and std.ascii.eqlIgnoreCase(t.r, "PT")) {
+    if (std.mem.eql(u8, numbering_system, "latn") and std.ascii.eqlIgnoreCase(t.l, "pt") and std.ascii.eqlIgnoreCase(t.r, "PT")) {
         syms.group = "\u{00a0}";
         syms.symbol_before = false;
     }
@@ -27762,7 +27756,7 @@ fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8,
     const ext_ns = localeUValue(tag, "nu");
     const ext_ok = if (ext_ns) |e| numbering_systems.digits(e) != null else false;
     const opt_ok = if (opt_ns) |p| numbering_systems.digits(p) != null else false;
-    const ns: []const u8 = if (opt_ok) opt_ns.? else if (ext_ok) ext_ns.? else "latn";
+    const ns: []const u8 = if (opt_ok) opt_ns.? else if (ext_ok) ext_ns.? else localeDefaultNumberingSystem(tag);
     const keep_ext = ext_ok and std.mem.eql(u8, ext_ns.?, ns);
     const lang_base = if (std.mem.indexOf(u8, tag, "-u-")) |u| tag[0..u] else tag;
     const rloc: []const u8 = if (keep_ext)
@@ -28169,8 +28163,8 @@ fn nfResolvedCompactPattern(locale: []const u8, compact_display: []const u8, mag
 }
 
 /// Resolve the numbering system for an Intl formatter: the `numberingSystem`
-/// option wins, else the locale's `-u-nu-` extension, else "latn" — but only a
-/// system we have digit data for (unknown ones fall back to "latn").
+/// option wins, else the locale's `-u-nu-` extension, else its CLDR default —
+/// but only a system we have digit data for.
 fn resolveNumberingSystem(this: Value) []const u8 {
     if (this.asObj().intlNumberFormatData()) |data| return data.numbering_system;
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.asObj().getOwn("numberingSystem")) |ns| if (ns.isString()) {
@@ -28180,6 +28174,7 @@ fn resolveNumberingSystem(this: Value) []const u8 {
         if (localeUValue(lv.asStr(), "nu")) |ns| {
             if (numbering_systems.digits(ns) != null) return ns;
         }
+        return localeDefaultNumberingSystem(lv.asStr());
     };
     return "latn";
 }
@@ -28227,6 +28222,13 @@ const NfOutput = struct {
         }
     }
 };
+
+fn nfPushSymbol(self: *Interpreter, output: *NfOutput, typ: []const u8, prefix: []const u8, symbol: []const u8, suffix: []const u8) EvalError!void {
+    if (prefix.len > 0) try output.push(self, "literal", prefix);
+    try output.push(self, typ, symbol);
+    if (suffix.len > 0) try output.push(self, "literal", suffix);
+}
+
 const NfExactDecimal = struct { neg: bool, int_str: []const u8, frac_str: []const u8 };
 
 fn nfParseExactDecimalString(s: []const u8) ?NfExactDecimal {
@@ -28508,7 +28510,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         show_neg = neg and !is_zero;
         show_pos = false;
     }
-    const syms = localeNumberSymbols(locale);
+    const syms = localeNumberSymbols(locale, data.numbering_system);
     if (std.mem.eql(u8, cur_code, "USD")) {
         const lang = parseTriple(locale).l;
         if (!std.ascii.eqlIgnoreCase(lang, "en") and !std.ascii.eqlIgnoreCase(lang, "de") and !std.ascii.eqlIgnoreCase(lang, "ja"))
@@ -28560,7 +28562,12 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
     }
     // Sign/accounting wrap, then the currency prefix (en places the symbol before
     // the number; standard sign before the symbol: "-$1.00", accounting "($1.00)").
-    if (acct and show_neg) try output.push(self, "literal", "(") else if (show_neg) try output.push(self, "minusSign", syms.minus) else if (show_pos) try output.push(self, "plusSign", "+");
+    if (acct and show_neg)
+        try output.push(self, "literal", "(")
+    else if (show_neg)
+        try nfPushSymbol(self, output, "minusSign", syms.minus_prefix, syms.minus, syms.minus_suffix)
+    else if (show_pos)
+        try nfPushSymbol(self, output, "plusSign", syms.plus_prefix, syms.plus, syms.plus_suffix);
     if (cur_prefix.len > 0) try output.push(self, "currency", cur_prefix);
     if (!finite) {
         try output.push(self, if (is_nan) "nan" else "infinity", if (is_nan) syms.nan else syms.infinity);
@@ -28614,7 +28621,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
     if (is_percent) {
         const lang = parseTriple(locale).l;
         if (std.ascii.eqlIgnoreCase(lang, "de")) try output.push(self, "literal", "\u{00a0}");
-        try output.push(self, "percentSign", syms.percent);
+        try nfPushSymbol(self, output, "percentSign", syms.percent_prefix, syms.percent, syms.percent_suffix);
     }
     if (cur_suffix.len > 0) {
         try output.push(self, "literal", "\u{00a0}");
@@ -30473,7 +30480,8 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
     };
     const plural = mag != 1;
     const locale = if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) lv.asStr() else "en" else "en";
-    const syms = localeNumberSymbols(locale);
+    const numbering = resolveNumberingSystem(this);
+    const syms = localeNumberSymbols(locale, numbering);
     const lang = localeLanguage(locale);
     const is_narrow = std.mem.eql(u8, style, "narrow");
     const unit_name = if (std.mem.eql(u8, lang, "pl"))
@@ -30502,7 +30510,7 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
             (if (neg) try std.fmt.allocPrint(self.arena, "{s}{s} ago", .{ sep, unit_name }) else try std.fmt.allocPrint(self.arena, "{s}{s}", .{ sep, unit_name })),
         .group = syms.group,
         .decimal = syms.decimal,
-        .numbering = resolveNumberingSystem(this),
+        .numbering = numbering,
         .min_group_digits = if (std.mem.eql(u8, lang, "pl")) 5 else 4,
     };
 }
@@ -50808,6 +50816,49 @@ test "Intl.NumberFormat and BigInt locale formatting share resolved state" {
         \\    same = same && values[j].toLocaleString("de-DE", cases[i]) === formatter.format(values[j]);
         \\}
         \\same
+    )).asBool());
+}
+
+test "Intl.NumberFormat numbering systems follow generated CLDR defaults and symbols" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var cases = [
+        \\  ["ar", {}, 1234.5, "ar", "latn", "1,234.5", "integer:1|group:,|integer:234|decimal:.|fraction:5"],
+        \\  ["ar-EG", {}, 1234.5, "ar-EG", "arab", "١٬٢٣٤٫٥", "integer:١|group:٬|integer:٢٣٤|decimal:٫|fraction:٥"],
+        \\  ["ar-TN", {}, 1234.5, "ar-TN", "latn", "1.234,5", "integer:1|group:.|integer:234|decimal:,|fraction:5"],
+        \\  ["fa-IR", {}, 1234.5, "fa-IR", "arabext", "۱٬۲۳۴٫۵", "integer:۱|group:٬|integer:۲۳۴|decimal:٫|fraction:۵"],
+        \\  ["hi-IN", {}, 1234.5, "hi-IN", "latn", "1,234.5", "integer:1|group:,|integer:234|decimal:.|fraction:5"],
+        \\  ["th-TH", {}, 1234.5, "th-TH", "latn", "1,234.5", "integer:1|group:,|integer:234|decimal:.|fraction:5"],
+        \\  ["en-US-u-nu-arab", {}, 1234.5, "en-US-u-nu-arab", "arab", "١٬٢٣٤٫٥", "integer:١|group:٬|integer:٢٣٤|decimal:٫|fraction:٥"],
+        \\  ["en-US-u-nu-deva", {}, 1234.5, "en-US-u-nu-deva", "deva", "१,२३४.५", "integer:१|group:,|integer:२३४|decimal:.|fraction:५"],
+        \\  ["ar-EG-u-nu-latn", {}, 1234.5, "ar-EG-u-nu-latn", "latn", "1,234.5", "integer:1|group:,|integer:234|decimal:.|fraction:5"],
+        \\  ["fa-IR-u-nu-latn", {}, 1234.5, "fa-IR-u-nu-latn", "latn", "1,234.5", "integer:1|group:,|integer:234|decimal:.|fraction:5"],
+        \\  ["hi-IN-u-nu-deva", {}, 1234.5, "hi-IN-u-nu-deva", "deva", "१,२३४.५", "integer:१|group:,|integer:२३४|decimal:.|fraction:५"],
+        \\  ["th-TH-u-nu-thai", {}, 1234.5, "th-TH-u-nu-thai", "thai", "๑,๒๓๔.๕", "integer:๑|group:,|integer:๒๓๔|decimal:.|fraction:๕"],
+        \\  ["ar-EG-u-nu-arab", { numberingSystem: "latn" }, -1234.5, "ar-EG", "latn", "‎-1,234.5", "literal:‎|minusSign:-|integer:1|group:,|integer:234|decimal:.|fraction:5"],
+        \\  ["en-US-u-nu-latn", { numberingSystem: "arab" }, -1234.5, "en-US", "arab", "؜-١٬٢٣٤٫٥", "literal:؜|minusSign:-|integer:١|group:٬|integer:٢٣٤|decimal:٫|fraction:٥"],
+        \\  ["fa-IR-u-nu-arabext", { numberingSystem: "latn" }, -1234.5, "fa-IR", "latn", "‎−1,234.5", "literal:‎|minusSign:−|integer:1|group:,|integer:234|decimal:.|fraction:5"],
+        \\  ["hi-IN-u-nu-latn", { numberingSystem: "deva" }, -1234.5, "hi-IN", "deva", "-१,२३४.५", "minusSign:-|integer:१|group:,|integer:२३४|decimal:.|fraction:५"],
+        \\  ["zh-TW", {}, NaN, "zh-TW", "latn", "非數值", "nan:非數值"]
+        \\];
+        \\var exact = true;
+        \\for (var i = 0; i < cases.length; i++) {
+        \\  var formatter = new Intl.NumberFormat(cases[i][0], cases[i][1]);
+        \\  var resolved = formatter.resolvedOptions();
+        \\  var parts = formatter.formatToParts(cases[i][2]);
+        \\  exact = exact && resolved.locale === cases[i][3] && resolved.numberingSystem === cases[i][4] &&
+        \\    formatter.format(cases[i][2]) === cases[i][5] &&
+        \\    parts.map(function (part) { return part.type + ":" + part.value; }).join("|") === cases[i][6];
+        \\}
+        \\var range = new Intl.NumberFormat("ar-EG");
+        \\var rangeText = range.formatRange(1234.5, 2345.6);
+        \\var rangeParts = range.formatRangeToParts(1234.5, 2345.6);
+        \\exact && rangeText === rangeParts.map(function (part) { return part.value; }).join("") &&
+        \\  rangeText.includes("١٬٢٣٤٫٥") && rangeText.includes("٢٬٣٤٥٫٦") &&
+        \\  new Intl.Locale("ar-EG").getNumberingSystems().join() === "arab" &&
+        \\  new Intl.Locale("fa-IR").getNumberingSystems().join() === "arabext" &&
+        \\  new Intl.Locale("th-TH").getNumberingSystems().join() === "latn"
     )).asBool());
 }
 

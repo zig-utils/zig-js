@@ -71,6 +71,21 @@ function splitSuffix(suffix) {
   return { literal: suffix.slice(0, boundary), affix: suffix.slice(boundary) };
 }
 
+function symbolParts(symbol) {
+  let start = 0, end = symbol.length;
+  for (const character of symbol) {
+    if (!boundaryCharacter(character)) break;
+    start += character.length;
+  }
+  while (end > start) {
+    const previous = Array.from(symbol.slice(start, end)).pop();
+    if (!boundaryCharacter(previous)) break;
+    end -= previous.length;
+  }
+  if (start === end) throw new Error(`number symbol has no semantic character: ${JSON.stringify(symbol)}`);
+  return { prefix: symbol.slice(0, start), value: symbol.slice(start, end), suffix: symbol.slice(end) };
+}
+
 function compactRows(nums, sys) {
   const formats = nums[`decimalFormats-numberSystem-${sys}`] || nums["decimalFormats-numberSystem-latn"] || {};
   const result = [];
@@ -183,6 +198,60 @@ function currencyRows(currencies, nums, sys) {
   return { names, patterns: distinctPatterns };
 }
 
+const numberFilesResult = run(["git", "-C", CLDR_ROOT, "ls-files", "cldr-json/cldr-numbers-full/main/*/numbers.json"]);
+if (numberFilesResult.exitCode !== 0) throw new Error(`cannot inventory CLDR number data: ${numberFilesResult.stderr.trim()}`);
+const numberFiles = numberFilesResult.stdout.trim().split("\n").filter(Boolean);
+if (!numberFiles.length) throw new Error("CLDR number-data inventory is empty");
+
+const defaultSystemRows = [];
+const symbolRows = [];
+for (const relativePath of numberFiles) {
+  const loc = relativePath.split("/").slice(-2, -1)[0];
+  const j = JSON.parse(readText(`${CLDR_ROOT.replace(/\/$/, "")}/${relativePath}`));
+  const nums = j.main[loc].numbers;
+  defaultSystemRows.push({ loc, system: nums.defaultNumberingSystem || "latn" });
+  const latn = nums["symbols-numberSystem-latn"];
+  for (const [key, sym] of Object.entries(nums)) {
+    if (!key.startsWith("symbols-numberSystem-")) continue;
+    const system = key.slice("symbols-numberSystem-".length);
+    symbolRows.push({
+      loc,
+      system,
+      decimal: sym.decimal || ".",
+      group: sym.group || ",",
+      percent: symbolParts(sym.percentSign || "%"),
+      plus: symbolParts(sym.plusSign || "+"),
+      minus: symbolParts(sym.minusSign || "-"),
+      nan: sym.nan || "NaN",
+      infinity: sym.infinity || "∞",
+      differsFromLatn: latn != null && (sym.decimal !== latn.decimal || sym.group !== latn.group),
+    });
+  }
+}
+const byteOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+defaultSystemRows.sort((a, b) => byteOrder(a.loc, b.loc));
+symbolRows.sort((a, b) => byteOrder(a.loc, b.loc) || byteOrder(a.system, b.system));
+
+// CLDR carries locale-independent punctuation for Arabic digit systems in many
+// locales, while the other alternate systems inherit their locale's punctuation.
+// Derive that distinction from the pinned data: a portable row needs multiple
+// witnesses and must differ from the same locale's latn symbols in every one.
+const portableSystemRows = [];
+for (const system of Array.from(new Set(symbolRows.map((row) => row.system))).sort(byteOrder)) {
+  if (system === "latn") continue;
+  const candidates = symbolRows.filter((row) => row.system === system);
+  if (candidates.length < 2 || !candidates.every((row) => row.differsFromLatn)) continue;
+  const counts = new Map();
+  for (const row of candidates) {
+    const key = JSON.stringify([row.decimal, row.group, row.percent, row.plus, row.minus]);
+    const found = counts.get(key);
+    if (found) found.count++;
+    else counts.set(key, { count: 1, row });
+  }
+  const selected = Array.from(counts.values()).sort((a, b) => b.count - a.count || byteOrder(JSON.stringify(a.row), JSON.stringify(b.row)))[0].row;
+  portableSystemRows.push(selected);
+}
+
 const rows = [];
 for (const loc of LOCALES) {
   const path = `${BASE}/${loc}/numbers.json`;
@@ -210,7 +279,10 @@ for (const loc of LOCALES) {
   if (!currency.names.length) throw new Error(`${loc}: missing currency display names`);
   rows.push({
     loc,
-    decimal: sym.decimal, group: sym.group, percent: sym.percentSign, minus: sym.minusSign,
+    decimal: sym.decimal, group: sym.group,
+    percent: symbolParts(sym.percentSign || "%"),
+    plus: symbolParts(sym.plusSign || "+"),
+    minus: symbolParts(sym.minusSign || "-"),
     nan: sym.nan || "NaN", infinity: sym.infinity || "∞",
     symBefore, acctParens, compact, currency,
   });
@@ -243,8 +315,15 @@ const std = @import("std");
 pub const NumSym = struct {
     decimal: []const u8,
     group: []const u8,
+    percent_prefix: []const u8,
     percent: []const u8,
+    percent_suffix: []const u8,
+    plus_prefix: []const u8,
+    plus: []const u8,
+    plus_suffix: []const u8,
+    minus_prefix: []const u8,
     minus: []const u8,
+    minus_suffix: []const u8,
     nan: []const u8,
     infinity: []const u8,
     symbol_before: bool,
@@ -296,7 +375,7 @@ const Row = struct { loc: []const u8, sym: NumSym };
 const table = [_]Row{
 `];
 for (const r of rows) {
-  out.push(`    .{ .loc = ${zstr(r.loc)}, .sym = .{ .decimal = ${zstr(r.decimal)}, .group = ${zstr(r.group)}, .percent = ${zstr(r.percent)}, .minus = ${zstr(r.minus)}, .nan = ${zstr(r.nan)}, .infinity = ${zstr(r.infinity)}, .symbol_before = ${r.symBefore}, .accounting_parens = ${r.acctParens} } },\n`);
+  out.push(`    .{ .loc = ${zstr(r.loc)}, .sym = .{ .decimal = ${zstr(r.decimal)}, .group = ${zstr(r.group)}, .percent_prefix = ${zstr(r.percent.prefix)}, .percent = ${zstr(r.percent.value)}, .percent_suffix = ${zstr(r.percent.suffix)}, .plus_prefix = ${zstr(r.plus.prefix)}, .plus = ${zstr(r.plus.value)}, .plus_suffix = ${zstr(r.plus.suffix)}, .minus_prefix = ${zstr(r.minus.prefix)}, .minus = ${zstr(r.minus.value)}, .minus_suffix = ${zstr(r.minus.suffix)}, .nan = ${zstr(r.nan)}, .infinity = ${zstr(r.infinity)}, .symbol_before = ${r.symBefore}, .accounting_parens = ${r.acctParens} } },\n`);
 }
 out.push(`};
 
@@ -342,19 +421,163 @@ for (const row of rows) {
 }
 out.push(`};
 
-const default_sym = NumSym{ .decimal = ".", .group = ",", .percent = "%", .minus = "-", .nan = "NaN", .infinity = "\xe2\x88\x9e", .symbol_before = true, .accounting_parens = true };
+const DefaultSystemRow = struct { loc: []const u8, system: []const u8 };
+const default_system_table = [_]DefaultSystemRow{
+`);
+for (const row of defaultSystemRows) out.push(`    .{ .loc = ${zstr(row.loc)}, .system = ${zstr(row.system)} },\n`);
+out.push(`};
+
+const SymbolData = struct {
+    decimal: []const u8,
+    group: []const u8,
+    percent_prefix: []const u8,
+    percent: []const u8,
+    percent_suffix: []const u8,
+    plus_prefix: []const u8,
+    plus: []const u8,
+    plus_suffix: []const u8,
+    minus_prefix: []const u8,
+    minus: []const u8,
+    minus_suffix: []const u8,
+    nan: []const u8,
+    infinity: []const u8,
+};
+const NumberSymbolRow = struct { loc: []const u8, system: []const u8, symbols: SymbolData };
+const number_symbol_table = [_]NumberSymbolRow{
+`);
+for (const row of symbolRows) {
+  out.push(`    .{ .loc = ${zstr(row.loc)}, .system = ${zstr(row.system)}, .symbols = .{ .decimal = ${zstr(row.decimal)}, .group = ${zstr(row.group)}, .percent_prefix = ${zstr(row.percent.prefix)}, .percent = ${zstr(row.percent.value)}, .percent_suffix = ${zstr(row.percent.suffix)}, .plus_prefix = ${zstr(row.plus.prefix)}, .plus = ${zstr(row.plus.value)}, .plus_suffix = ${zstr(row.plus.suffix)}, .minus_prefix = ${zstr(row.minus.prefix)}, .minus = ${zstr(row.minus.value)}, .minus_suffix = ${zstr(row.minus.suffix)}, .nan = ${zstr(row.nan)}, .infinity = ${zstr(row.infinity)} } },\n`);
+}
+out.push(`};
+
+const PortableSystemRow = struct { system: []const u8, symbols: SymbolData };
+const portable_system_table = [_]PortableSystemRow{
+`);
+for (const row of portableSystemRows) {
+  out.push(`    .{ .system = ${zstr(row.system)}, .symbols = .{ .decimal = ${zstr(row.decimal)}, .group = ${zstr(row.group)}, .percent_prefix = ${zstr(row.percent.prefix)}, .percent = ${zstr(row.percent.value)}, .percent_suffix = ${zstr(row.percent.suffix)}, .plus_prefix = ${zstr(row.plus.prefix)}, .plus = ${zstr(row.plus.value)}, .plus_suffix = ${zstr(row.plus.suffix)}, .minus_prefix = ${zstr(row.minus.prefix)}, .minus = ${zstr(row.minus.value)}, .minus_suffix = ${zstr(row.minus.suffix)}, .nan = ${zstr(row.nan)}, .infinity = ${zstr(row.infinity)} } },\n`);
+}
+out.push(`};
+
+const default_sym = NumSym{ .decimal = ".", .group = ",", .percent_prefix = "", .percent = "%", .percent_suffix = "", .plus_prefix = "", .plus = "+", .plus_suffix = "", .minus_prefix = "", .minus = "-", .minus_suffix = "", .nan = "NaN", .infinity = ${zstr("∞")}, .symbol_before = true, .accounting_parens = true };
+
+fn localeSymbols(locale: []const u8) ?NumSym {
+    var lo: usize = 0;
+    var hi: usize = table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        switch (std.mem.order(u8, table[mid].loc, locale)) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return table[mid].sym,
+        }
+    }
+    return null;
+}
+
+fn baseLocale(locale: []const u8) []const u8 {
+    return if (std.mem.indexOf(u8, locale, "-u-")) |index| locale[0..index] else locale;
+}
 
 /// Look up a locale's number symbols, falling back from "xx-YY" to "xx", then
 /// to the en-style default.
 pub fn lookup(locale: []const u8) NumSym {
-    var probe = locale;
+    var probe = baseLocale(locale);
     while (true) {
-        for (table) |row| if (std.mem.eql(u8, row.loc, probe)) return row.sym;
+        if (localeSymbols(probe)) |symbols| return symbols;
         if (std.mem.lastIndexOfScalar(u8, probe, '-')) |i| {
             probe = probe[0..i];
         } else break;
     }
     return default_sym;
+}
+
+fn defaultSystemExact(locale: []const u8) ?[]const u8 {
+    var lo: usize = 0;
+    var hi: usize = default_system_table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        switch (std.mem.order(u8, default_system_table[mid].loc, locale)) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return default_system_table[mid].system,
+        }
+    }
+    return null;
+}
+
+/// Resolve CLDR's default numbering system with locale-parent fallback.
+pub fn defaultNumberingSystem(locale: []const u8) []const u8 {
+    var probe = baseLocale(locale);
+    while (true) {
+        if (defaultSystemExact(probe)) |system| return system;
+        if (std.mem.lastIndexOfScalar(u8, probe, '-')) |i| probe = probe[0..i] else break;
+    }
+    return "latn";
+}
+
+fn numberSymbolsExact(locale: []const u8, system: []const u8) ?SymbolData {
+    var lo: usize = 0;
+    var hi: usize = number_symbol_table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const locale_order = std.mem.order(u8, number_symbol_table[mid].loc, locale);
+        const order = if (locale_order == .eq) std.mem.order(u8, number_symbol_table[mid].system, system) else locale_order;
+        switch (order) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return number_symbol_table[mid].symbols,
+        }
+    }
+    return null;
+}
+
+fn portableSymbols(system: []const u8) ?SymbolData {
+    var lo: usize = 0;
+    var hi: usize = portable_system_table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        switch (std.mem.order(u8, portable_system_table[mid].system, system)) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return portable_system_table[mid].symbols,
+        }
+    }
+    return null;
+}
+
+fn applySymbols(base: NumSym, symbols: SymbolData, preserve_words: bool) NumSym {
+    var result = base;
+    result.decimal = symbols.decimal;
+    result.group = symbols.group;
+    result.percent_prefix = symbols.percent_prefix;
+    result.percent = symbols.percent;
+    result.percent_suffix = symbols.percent_suffix;
+    result.plus_prefix = symbols.plus_prefix;
+    result.plus = symbols.plus;
+    result.plus_suffix = symbols.plus_suffix;
+    result.minus_prefix = symbols.minus_prefix;
+    result.minus = symbols.minus;
+    result.minus_suffix = symbols.minus_suffix;
+    if (!preserve_words) {
+        result.nan = symbols.nan;
+        result.infinity = symbols.infinity;
+    }
+    return result;
+}
+
+/// Pair a locale with its resolved numbering system. Exact locale/system CLDR
+/// rows win; Arabic systems then use their generated cross-locale punctuation,
+/// while other systems retain the locale's punctuation and change only digits.
+pub fn lookupFor(locale: []const u8, system: []const u8) NumSym {
+    const base = lookup(locale);
+    const exact_locale = baseLocale(locale);
+    var probe = exact_locale;
+    while (true) {
+        if (numberSymbolsExact(probe, system)) |symbols| return applySymbols(base, symbols, !std.mem.eql(u8, probe, exact_locale));
+        if (std.mem.lastIndexOfScalar(u8, probe, '-')) |i| probe = probe[0..i] else break;
+    }
+    if (portableSymbols(system)) |symbols| return applySymbols(base, symbols, true);
+    return base;
 }
 
 fn compactLocale(locale: []const u8) ?CompactLocale {
