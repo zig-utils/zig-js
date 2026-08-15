@@ -27126,6 +27126,15 @@ fn dtfToDateTimeFormattable(self: *Interpreter, v: Value) value.HostError!Value 
     return Value.num(try self.toNumberV(v));
 }
 
+/// An identical canonical formattable needs only one FormatDateTime call. Both
+/// user arguments have already been converted in order before this check. A
+/// distinct Temporal object deliberately stays on the structural comparison
+/// path even when its fields happen to be equal.
+fn dtfFormattableSame(a: Value, b: Value) bool {
+    if (a.isNumber() and b.isNumber()) return a.asNum() == b.asNum();
+    return a.isObject() and b.isObject() and a.asObj() == b.asObj() and dtfArgKind(a) != null;
+}
+
 fn dtfAppendPartValues(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), parts: []const DtfPart) EvalError!void {
     for (parts) |p| try buf.appendSlice(self.arena, p.value);
 }
@@ -27214,6 +27223,8 @@ fn intlDateTimeFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) 
     const start = try dtfToDateTimeFormattable(self, args[0]);
     const end = try dtfToDateTimeFormattable(self, args[1]);
     try dtfRangeCheckKinds(self, start, end);
+    if (dtfFormattableSame(start, end))
+        return try Value.strOwned(self.arena, try dtfBuildText(self, this, &.{start}));
     const xp = try dtfBuildParts(self, this, &.{start}); // dtfBuildParts TimeClips (RangeError on bad value)
     const yp = try dtfBuildParts(self, this, &.{end});
     return try Value.strAlloc(self.arena, try dtfFormatRangePartsText(self, xp.items, yp.items));
@@ -27227,7 +27238,7 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     const end = try dtfToDateTimeFormattable(self, args[1]);
     try dtfRangeCheckKinds(self, start, end);
     const xp = try dtfBuildParts(self, this, &.{start});
-    const yp = try dtfBuildParts(self, this, &.{end});
+    const yp = if (dtfFormattableSame(start, end)) xp else try dtfBuildParts(self, this, &.{end});
     const arr = (try self.newArray()).asObj();
     const emit = struct {
         fn part(s: *Interpreter, a: *value.Object, p: DtfPart, src: []const u8) value.HostError!void {
@@ -51374,6 +51385,41 @@ test "Intl.DateTimeFormat text sink preserves structural emission" {
         \\  if (i === 3) exact = exact && text.indexOf("+24") === -1;
         \\}
         \\exact
+    )).asBool());
+}
+
+test "Intl.DateTimeFormat identical range endpoints preserve conversion and source" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var formatter = new Intl.DateTimeFormat("en-US", {
+        \\  timeZone: "UTC", year: "numeric", month: "long", day: "numeric",
+        \\  hour: "2-digit", minute: "2-digit", second: "2-digit"
+        \\});
+        \\var timestamp = 1704112496789;
+        \\var order = "";
+        \\var start = { valueOf: function () { order = order + "a"; return timestamp; } };
+        \\var end = { valueOf: function () { order = order + "b"; return timestamp; } };
+        \\var text = formatter.formatRange(start, end);
+        \\var parts = formatter.formatRangeToParts(start, end);
+        \\var joined = "";
+        \\var shared = true;
+        \\for (var i = 0; i < parts.length; i = i + 1) {
+        \\  joined = joined + parts[i].value;
+        \\  shared = shared && parts[i].source === "shared";
+        \\}
+        \\var invalidOrder = "";
+        \\var invalid = false;
+        \\try {
+        \\  formatter.formatRange(
+        \\    { valueOf: function () { invalidOrder = invalidOrder + "a"; return Infinity; } },
+        \\    { valueOf: function () { invalidOrder = invalidOrder + "b"; return Infinity; } }
+        \\  );
+        \\} catch (error) {
+        \\  invalid = error instanceof RangeError;
+        \\}
+        \\order === "abab" && text === formatter.format(timestamp) && joined === text &&
+        \\  shared && invalid && invalidOrder === "ab"
     )).asBool());
 }
 
