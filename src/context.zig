@@ -13977,6 +13977,26 @@ test "URI encode/decode handles surrogate pairs" {
     try std.testing.expectError(error.Throw, evalIn("encodeURIComponent(String.fromCharCode(0xDC00))"));
 }
 
+test "TextEncoder emits valid UTF-8 for scalar, paired, and lone-surrogate input" {
+    try std.testing.expect((try evalIn(
+        \\var bytes = new TextEncoder().encode('Aé水😀');
+        \\bytes.length === 10 && bytes[0] === 65 && bytes[1] === 195 && bytes[2] === 169 &&
+        \\bytes[3] === 230 && bytes[4] === 176 && bytes[5] === 180 &&
+        \\bytes[6] === 240 && bytes[7] === 159 && bytes[8] === 152 && bytes[9] === 128
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var bytes = new TextEncoder().encode(String.fromCharCode(0xD83D, 0xDE00));
+        \\bytes.length === 4 && bytes[0] === 240 && bytes[1] === 159 && bytes[2] === 152 && bytes[3] === 128
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\var high = new TextEncoder().encode(String.fromCharCode(0xD800));
+        \\var low = new TextEncoder().encode(String.fromCharCode(0xDC00));
+        \\high.length === 3 && low.length === 3 &&
+        \\high[0] === 239 && high[1] === 191 && high[2] === 189 &&
+        \\low[0] === 239 && low[1] === 191 && low[2] === 189
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;

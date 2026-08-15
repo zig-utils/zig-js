@@ -42932,29 +42932,74 @@ fn installDOMException(env: *Environment, rs: *Shape, object_proto: *value.Objec
 /// Convert a WTF-8 JS string to valid UTF-8 bytes: combine a surrogate pair into
 /// its scalar, and replace every LONE surrogate with U+FFFD.
 fn wtf8ToUtf8Bytes(arena: std.mem.Allocator, s: []const u8) EvalError![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var first_surrogate: ?usize = null;
     var i: usize = 0;
+    while (i < s.len) {
+        if (wtf8SurrogateAt(s, i) != null) {
+            first_surrogate = i;
+            break;
+        }
+        i += utf8SeqLen(s, i);
+    }
+    const first_changed = first_surrogate orelse return s;
+
+    // Pair combination shortens six WTF-8 bytes to four valid UTF-8 bytes;
+    // lone-surrogate replacement stays three bytes. One input-sized arena
+    // allocation is therefore a complete upper bound, and the returned result
+    // may be its shorter subslice.
+    const out = try arena.alloc(u8, s.len);
+    @memcpy(out[0..first_changed], s[0..first_changed]);
+    var written = first_changed;
+    i = first_changed;
     while (i < s.len) {
         if (wtf8SurrogateAt(s, i)) |first| {
             if (isHighSurrogate(first)) {
                 if (wtf8SurrogateAt(s, i + 3)) |second| if (isLowSurrogate(second)) {
                     const cp: u21 = 0x10000 + ((@as(u21, first - 0xD800) << 10) | (second - 0xDC00));
-                    var b: [4]u8 = undefined;
-                    const n = std.unicode.utf8Encode(cp, &b) catch unreachable;
-                    try buf.appendSlice(arena, b[0..n]);
+                    const n = std.unicode.utf8Encode(cp, out[written..][0..4]) catch unreachable;
+                    std.debug.assert(n == 4);
+                    written += n;
                     i += 6;
                     continue;
                 };
             }
-            try buf.appendSlice(arena, "\u{FFFD}");
+            @memcpy(out[written .. written + 3], "\u{FFFD}");
+            written += 3;
             i += 3;
         } else {
             const n = utf8SeqLen(s, i);
-            try buf.appendSlice(arena, s[i .. i + n]);
+            @memcpy(out[written .. written + n], s[i .. i + n]);
+            written += n;
             i += n;
         }
     }
-    return buf.items;
+    std.debug.assert(written <= out.len);
+    return out[0..written];
+}
+
+test "UTF-8 egress borrows valid input and transforms WTF-8 with one bounded allocation" {
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    for ([_][]const u8{ "plain ASCII", "BMP é水 and astral 😀" }) |input| {
+        const borrowed = try wtf8ToUtf8Bytes(fixed.allocator(), input);
+        try std.testing.expectEqual(@intFromPtr(input.ptr), @intFromPtr(borrowed.ptr));
+        try std.testing.expectEqualStrings(input, borrowed);
+    }
+
+    var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var measured_arena = std.heap.ArenaAllocator.init(measured.allocator());
+    defer measured_arena.deinit();
+    const transformed = try wtf8ToUtf8Bytes(
+        measured_arena.allocator(),
+        "A\xED\xA0\xBD\xED\xB8\x80B\xED\xA0\x80C\xED\xB0\x80",
+    );
+    try std.testing.expectEqualStrings("A😀B\u{FFFD}C\u{FFFD}", transformed);
+    try std.testing.expectEqual(@as(usize, 1), measured.allocations);
+    try std.testing.expect(measured.allocated_bytes >= transformed.len);
+
+    var exhausted_memory: [0]u8 = .{};
+    var exhausted = std.heap.FixedBufferAllocator.init(&exhausted_memory);
+    try std.testing.expectError(error.OutOfMemory, wtf8ToUtf8Bytes(exhausted.allocator(), "\xED\xA0\x80"));
 }
 
 fn textEncoderConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
