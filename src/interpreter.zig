@@ -26512,9 +26512,55 @@ const en_days_long = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", 
 const en_days_short = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
 
-/// One element of a DateTimeFormat formatToParts result: a field `type`
-/// ("weekday"/"year"/…/"literal") and its formatted `value`.
-const DtfPart = struct { typ: []const u8, value: []const u8 };
+/// Closed metadata set for DateTimeFormat structural output. Keeping the native
+/// representation typed makes it impossible to borrow dynamic storage for a
+/// result's `type`; the exposed strings are process-lifetime immutable cells.
+const DtfPartType = enum {
+    weekday,
+    era,
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    fractional_second,
+    day_period,
+    time_zone_name,
+    related_year,
+    year_name,
+    literal,
+
+    fn isNumeric(self: DtfPartType) bool {
+        return switch (self) {
+            .year, .month, .day, .hour, .minute, .second, .fractional_second => true,
+            else => false,
+        };
+    }
+
+    fn value(self: DtfPartType) Value {
+        return switch (self) {
+            .weekday => Value.str("weekday"),
+            .era => Value.str("era"),
+            .year => Value.str("year"),
+            .month => Value.str("month"),
+            .day => Value.str("day"),
+            .hour => Value.str("hour"),
+            .minute => Value.str("minute"),
+            .second => Value.str("second"),
+            .fractional_second => Value.str("fractionalSecond"),
+            .day_period => Value.str("dayPeriod"),
+            .time_zone_name => Value.str("timeZoneName"),
+            .related_year => Value.str("relatedYear"),
+            .year_name => Value.str("yearName"),
+            .literal => Value.str("literal"),
+        };
+    }
+};
+
+/// One element of a DateTimeFormat formatToParts result: an immutable field
+/// `type` and its formatter-owned `value` bytes.
+const DtfPart = struct { typ: DtfPartType, value: []const u8 };
 
 const DtfOutput = struct {
     mode: enum { text, parts },
@@ -26523,14 +26569,8 @@ const DtfOutput = struct {
     numbering_system: []const u8 = "latn",
     part_count: usize = 0,
 
-    fn isNumeric(typ: []const u8) bool {
-        return eq(typ, "year") or eq(typ, "month") or eq(typ, "day") or
-            eq(typ, "hour") or eq(typ, "minute") or eq(typ, "second") or
-            eq(typ, "fractionalSecond");
-    }
-
-    fn push(self: *DtfOutput, interpreter: *Interpreter, typ: []const u8, bytes: []const u8) EvalError!void {
-        const digit_set = if (isNumeric(typ) and !std.mem.eql(u8, self.numbering_system, "latn"))
+    fn push(self: *DtfOutput, interpreter: *Interpreter, typ: DtfPartType, bytes: []const u8) EvalError!void {
+        const digit_set = if (typ.isNumeric() and !std.mem.eql(u8, self.numbering_system, "latn"))
             numbering_systems.digits(self.numbering_system)
         else
             null;
@@ -26555,15 +26595,15 @@ const DtfOutput = struct {
 
     /// `bytes` may point into a caller-owned stack buffer. The text sink consumes
     /// it immediately; the structural sink gives the part arena-backed storage.
-    fn pushCopied(self: *DtfOutput, interpreter: *Interpreter, typ: []const u8, bytes: []const u8) EvalError!void {
-        const translates = isNumeric(typ) and !std.mem.eql(u8, self.numbering_system, "latn") and
+    fn pushCopied(self: *DtfOutput, interpreter: *Interpreter, typ: DtfPartType, bytes: []const u8) EvalError!void {
+        const translates = typ.isNumeric() and !std.mem.eql(u8, self.numbering_system, "latn") and
             numbering_systems.digits(self.numbering_system) != null;
         if (self.mode == .parts and !translates)
             return self.push(interpreter, typ, try interpreter.arena.dupe(u8, bytes));
         return self.push(interpreter, typ, bytes);
     }
 
-    fn pushInt(self: *DtfOutput, interpreter: *Interpreter, typ: []const u8, v: anytype, two: bool) EvalError!void {
+    fn pushInt(self: *DtfOutput, interpreter: *Interpreter, typ: DtfPartType, v: anytype, two: bool) EvalError!void {
         var scratch: [32]u8 = undefined;
         const bytes = if (two)
             std.fmt.bufPrint(&scratch, "{d:0>2}", .{v}) catch unreachable
@@ -26657,40 +26697,40 @@ fn dtfAppendYearPart(self: *Interpreter, output: *DtfOutput, cal: []const u8, di
     const two = std.mem.eql(u8, fmt, "2-digit");
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         if (two)
-            try output.pushInt(self, "relatedYear", @as(u8, @intCast(@mod(display_year, 100))), true)
+            try output.pushInt(self, .related_year, @as(u8, @intCast(@mod(display_year, 100))), true)
         else
-            try output.pushInt(self, "relatedYear", display_year, false);
-        try output.push(self, "yearName", try dtfChineseYearName(self, display_year));
-        try output.push(self, "literal", "\u{5e74}");
+            try output.pushInt(self, .related_year, display_year, false);
+        try output.push(self, .year_name, try dtfChineseYearName(self, display_year));
+        try output.push(self, .literal, "\u{5e74}");
         return;
     }
     if (two)
-        try output.pushInt(self, "year", @as(u8, @intCast(@mod(display_year, 100))), true)
+        try output.pushInt(self, .year, @as(u8, @intCast(@mod(display_year, 100))), true)
     else
-        try output.pushInt(self, "year", display_year, false);
+        try output.pushInt(self, .year, display_year, false);
 }
 
 fn dtfAppendMonthPart(self: *Interpreter, output: *DtfOutput, cal: []const u8, year: i64, month: u8, fmt: []const u8) EvalError!void {
     if (std.mem.eql(u8, cal, "hebrew")) {
         const names = if (calInLeapYear(cal, year)) &en_hebrew_leap_months else &en_hebrew_common_months;
         if (month >= 1 and month <= names.len) {
-            try output.push(self, "month", names[month - 1]);
+            try output.push(self, .month, names[month - 1]);
             return;
         }
     }
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         const info = calMonthCodeInfo(cal, year, month);
         const two = eq(fmt, "2-digit");
-        if (!info.leap) return output.pushInt(self, "month", info.month, two);
+        if (!info.leap) return output.pushInt(self, .month, info.month, two);
         var scratch: [32]u8 = undefined;
         const s = if (two)
             std.fmt.bufPrint(&scratch, "{d:0>2}bis", .{info.month}) catch unreachable
         else
             std.fmt.bufPrint(&scratch, "{d}bis", .{info.month}) catch unreachable;
-        try output.pushCopied(self, "month", s);
+        try output.pushCopied(self, .month, s);
         return;
     }
-    try output.pushInt(self, "month", month, eq(fmt, "2-digit"));
+    try output.pushInt(self, .month, month, eq(fmt, "2-digit"));
 }
 
 /// Run the DateTimeFormat emission algorithm once. The text sink appends into
@@ -26907,9 +26947,9 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
 
     const P = struct {
         fn lit(s: *Interpreter, out: *DtfOutput, v: []const u8) EvalError!void {
-            try out.push(s, "literal", v);
+            try out.push(s, .literal, v);
         }
-        fn num(s: *Interpreter, out: *DtfOutput, typ: []const u8, v: u64, two: bool) EvalError!void {
+        fn num(s: *Interpreter, out: *DtfOutput, typ: DtfPartType, v: u64, two: bool) EvalError!void {
             try out.pushInt(s, typ, v, two);
         }
     };
@@ -26917,7 +26957,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
     // Weekday prefix.
     if (o_weekday.len > 0) {
         const name = if (eq(o_weekday, "narrow")) en_days_narrow[wday] else if (eq(o_weekday, "short")) en_days_short[wday] else en_days_long[wday];
-        try output.push(self, "weekday", name);
+        try output.push(self, .weekday, name);
     }
     // Date part. Numeric month → "M/D/YYYY"; long/short month → "Month D, YYYY".
     const have_date = o_year.len > 0 or o_month.len > 0 or o_day.len > 0;
@@ -26931,12 +26971,12 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
         if (month_textual) {
             const mn = dtfMonthName(part_calendar, civ.m, o_month);
             if (mn) |name|
-                try output.push(self, "month", name)
+                try output.push(self, .month, name)
             else
-                try output.pushInt(self, "month", civ.m, false);
+                try output.pushInt(self, .month, civ.m, false);
             if (o_day.len > 0) {
                 try P.lit(self, output, " ");
-                try P.num(self, output, "day", civ.d, false);
+                try P.num(self, output, .day, civ.d, false);
             }
             if (o_year.len > 0) {
                 // "Month Day, Year" but "Month Year" when there is no day.
@@ -26948,7 +26988,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
             // formatting must not observe user changes to String.prototype.split.
             var first = true;
             if (o_day.len > 0) {
-                try P.num(self, output, "day", civ.d, eq(o_day, "2-digit"));
+                try P.num(self, output, .day, civ.d, eq(o_day, "2-digit"));
                 first = false;
             }
             if (o_month.len > 0) {
@@ -26971,7 +27011,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
             if (o_day.len > 0) {
                 if (!first) try P.lit(self, output, "/");
                 first = false;
-                try P.num(self, output, "day", civ.d, eq(o_day, "2-digit"));
+                try P.num(self, output, .day, civ.d, eq(o_day, "2-digit"));
             }
             if (o_year.len > 0) {
                 if (!first) try P.lit(self, output, "/");
@@ -26981,7 +27021,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
         }
         if (o_era.len > 0) if (era_info.era) |raw_era| {
             try P.lit(self, output, " ");
-            try output.push(self, "era", dtfEraName(part_calendar, raw_era, o_era));
+            try output.push(self, .era, dtfEraName(part_calendar, raw_era, o_era));
         };
     }
     // Time part: "h:mm:ss AM/PM" (or 24-hour).
@@ -27012,14 +27052,14 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
             h = 24;
         }
         const two_hour = eq(o_hour, "2-digit") or (!hour12 and std.mem.eql(u8, hour_cycle, "h23") and h < 10);
-        if (o_hour.len > 0) try P.num(self, output, "hour", h, two_hour);
+        if (o_hour.len > 0) try P.num(self, output, .hour, h, two_hour);
         if (o_minute.len > 0) {
             if (o_hour.len > 0) try P.lit(self, output, ":");
-            try P.num(self, output, "minute", minute, true);
+            try P.num(self, output, .minute, minute, true);
         }
         if (o_second.len > 0) {
             if (o_hour.len > 0 or o_minute.len > 0) try P.lit(self, output, ":");
-            try P.num(self, output, "second", second, true);
+            try P.num(self, output, .second, second, true);
         }
         // fractionalSecondDigits: the first N digits of the millisecond (the
         // sub-second is truncated, not rounded), after the seconds.
@@ -27028,11 +27068,11 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
             _ = std.fmt.bufPrint(&mbuf, "{d:0>3}", .{frac_ms}) catch {};
             const frac_sep = if (std.mem.eql(u8, numbering_system, "arab") or std.mem.eql(u8, numbering_system, "arabext")) "\xd9\xab" else ".";
             try P.lit(self, output, frac_sep);
-            try output.pushCopied(self, "fractionalSecond", mbuf[0..o_frac]);
+            try output.pushCopied(self, .fractional_second, mbuf[0..o_frac]);
         }
         if (ap.len > 0) {
             if (have_clock) try P.lit(self, output, " ");
-            try output.push(self, "dayPeriod", ap);
+            try output.push(self, .day_period, ap);
         }
         if (o_tzname.len > 0) {
             const tzn: []const u8 = if (temporal_kind != null and temporal_kind.? == .zoned_date_time)
@@ -27046,7 +27086,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
             else
                 "UTC"; // "short", "shortGeneric"
             if (have_clock or ap.len > 0) try P.lit(self, output, " ");
-            try output.push(self, "timeZoneName", tzn);
+            try output.push(self, .time_zone_name, tzn);
         }
     }
 }
@@ -27087,7 +27127,7 @@ fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
     const arr = (try self.newArray()).asObj();
     for (parts.items) |p| {
         const o = (try self.newObject()).asObj();
-        try self.setProp(o, "type", try Value.strAlloc(self.arena, p.typ));
+        try self.setProp(o, "type", p.typ.value());
         try self.setProp(o, "value", try Value.strAlloc(self.arena, p.value));
         try arr.appendElement(self.arena, Value.obj(o));
     }
@@ -27098,6 +27138,22 @@ fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
 /// CLDR uses a thin space (U+2009) on both sides of the en dash (U+2013) across
 /// locales (en/de/fr/… all agree), matching ICU/Node.
 const dtf_range_sep = "\u{2009}\u{2013}\u{2009}";
+
+/// Like part types, range sources are specification-owned immutable metadata.
+/// The enum keeps dynamic formatted bytes out of the static string-cell path.
+const DtfRangeSource = enum {
+    shared,
+    start_range,
+    end_range,
+
+    fn value(self: DtfRangeSource) Value {
+        return switch (self) {
+            .shared => Value.str("shared"),
+            .start_range => Value.str("startRange"),
+            .end_range => Value.str("endRange"),
+        };
+    }
+};
 
 /// The "kind" of a formatRange argument: a Temporal kind, or null for a legacy
 /// time value (number/Date). The two arguments of formatRange must agree.
@@ -27153,19 +27209,19 @@ fn dtfSharedDateTimePrefixLen(xp: []const DtfPart, yp: []const DtfPart) usize {
     while (i < n) : (i += 1) {
         const a = xp[i];
         const b = yp[i];
-        if (!std.mem.eql(u8, a.typ, b.typ) or !std.mem.eql(u8, a.value, b.value)) break;
-        if (std.mem.eql(u8, a.typ, "literal") and std.mem.eql(u8, a.value, ", ")) return i + 1;
+        if (a.typ != b.typ or !std.mem.eql(u8, a.value, b.value)) break;
+        if (a.typ == .literal and std.mem.eql(u8, a.value, ", ")) return i + 1;
     }
     return 0;
 }
 
 fn dtfIsTextualDateOnly(parts: []const DtfPart) bool {
     return parts.len == 5 and
-        std.mem.eql(u8, parts[0].typ, "month") and
-        std.mem.eql(u8, parts[1].typ, "literal") and std.mem.eql(u8, parts[1].value, " ") and
-        std.mem.eql(u8, parts[2].typ, "day") and
-        std.mem.eql(u8, parts[3].typ, "literal") and std.mem.eql(u8, parts[3].value, ", ") and
-        std.mem.eql(u8, parts[4].typ, "year");
+        parts[0].typ == .month and
+        parts[1].typ == .literal and std.mem.eql(u8, parts[1].value, " ") and
+        parts[2].typ == .day and
+        parts[3].typ == .literal and std.mem.eql(u8, parts[3].value, ", ") and
+        parts[4].typ == .year;
 }
 
 fn dtfAppendTextualDateRangeText(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), xp: []const DtfPart, yp: []const DtfPart) EvalError!bool {
@@ -27241,73 +27297,73 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     const yp = if (dtfFormattableSame(start, end)) xp else try dtfBuildParts(self, this, &.{end});
     const arr = (try self.newArray()).asObj();
     const emit = struct {
-        fn part(s: *Interpreter, a: *value.Object, p: DtfPart, src: []const u8) value.HostError!void {
+        fn part(s: *Interpreter, a: *value.Object, p: DtfPart, src: DtfRangeSource) value.HostError!void {
             const o = (try s.newObject()).asObj();
-            try s.setProp(o, "type", try Value.strAlloc(s.arena, p.typ));
+            try s.setProp(o, "type", p.typ.value());
             try s.setProp(o, "value", try Value.strAlloc(s.arena, p.value));
-            try s.setProp(o, "source", try Value.strAlloc(s.arena, src));
+            try s.setProp(o, "source", src.value());
             try a.appendElement(s.arena, Value.obj(o));
         }
-        fn one(s: *Interpreter, a: *value.Object, prts: []const DtfPart, src: []const u8) value.HostError!void {
+        fn one(s: *Interpreter, a: *value.Object, prts: []const DtfPart, src: DtfRangeSource) value.HostError!void {
             for (prts) |p| try part(s, a, p, src);
         }
     }.one;
     if (dtfPartsSameValues(xp.items, yp.items)) {
-        try emit(self, arr, xp.items, "shared");
+        try emit(self, arr, xp.items, .shared);
         return Value.obj(arr);
     }
     if (dtfIsTextualDateOnly(xp.items) and dtfIsTextualDateOnly(yp.items) and std.mem.eql(u8, xp.items[4].value, yp.items[4].value)) {
         if (std.mem.eql(u8, xp.items[0].value, yp.items[0].value)) {
-            try emit(self, arr, xp.items[0..2], "shared");
-            try emit(self, arr, xp.items[2..3], "startRange");
+            try emit(self, arr, xp.items[0..2], .shared);
+            try emit(self, arr, xp.items[2..3], .start_range);
             const lo = (try self.newObject()).asObj();
             try self.setProp(lo, "type", Value.str("literal"));
             try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
             try self.setProp(lo, "source", Value.str("shared"));
             try arr.appendElement(self.arena, Value.obj(lo));
-            try emit(self, arr, yp.items[2..3], "endRange");
-            try emit(self, arr, xp.items[3..5], "shared");
+            try emit(self, arr, yp.items[2..3], .end_range);
+            try emit(self, arr, xp.items[3..5], .shared);
         } else {
-            try emit(self, arr, xp.items[0..3], "startRange");
+            try emit(self, arr, xp.items[0..3], .start_range);
             const lo = (try self.newObject()).asObj();
             try self.setProp(lo, "type", Value.str("literal"));
             try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
             try self.setProp(lo, "source", Value.str("shared"));
             try arr.appendElement(self.arena, Value.obj(lo));
-            try emit(self, arr, yp.items[0..3], "endRange");
-            try emit(self, arr, xp.items[3..5], "shared");
+            try emit(self, arr, yp.items[0..3], .end_range);
+            try emit(self, arr, xp.items[3..5], .shared);
         }
         return Value.obj(arr);
     }
     if (dtfIsTextualDateOnly(xp.items) and dtfIsTextualDateOnly(yp.items)) {
-        try emit(self, arr, xp.items, "startRange");
+        try emit(self, arr, xp.items, .start_range);
         const lo = (try self.newObject()).asObj();
         try self.setProp(lo, "type", Value.str("literal"));
         try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
         try self.setProp(lo, "source", Value.str("shared"));
         try arr.appendElement(self.arena, Value.obj(lo));
-        try emit(self, arr, yp.items, "endRange");
+        try emit(self, arr, yp.items, .end_range);
         return Value.obj(arr);
     }
     const shared_prefix = dtfSharedDateTimePrefixLen(xp.items, yp.items);
     if (shared_prefix > 0) {
-        try emit(self, arr, xp.items[0..shared_prefix], "shared");
-        try emit(self, arr, xp.items[shared_prefix..], "startRange");
+        try emit(self, arr, xp.items[0..shared_prefix], .shared);
+        try emit(self, arr, xp.items[shared_prefix..], .start_range);
         const lo = (try self.newObject()).asObj();
         try self.setProp(lo, "type", Value.str("literal"));
         try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
         try self.setProp(lo, "source", Value.str("shared"));
         try arr.appendElement(self.arena, Value.obj(lo));
-        try emit(self, arr, yp.items[shared_prefix..], "endRange");
+        try emit(self, arr, yp.items[shared_prefix..], .end_range);
         return Value.obj(arr);
     }
-    try emit(self, arr, xp.items, "startRange");
+    try emit(self, arr, xp.items, .start_range);
     const lo = (try self.newObject()).asObj();
     try self.setProp(lo, "type", Value.str("literal"));
     try self.setProp(lo, "value", try Value.strAlloc(self.arena, dtf_range_sep));
     try self.setProp(lo, "source", Value.str("shared"));
     try arr.appendElement(self.arena, Value.obj(lo));
-    try emit(self, arr, yp.items, "endRange");
+    try emit(self, arr, yp.items, .end_range);
     return Value.obj(arr);
 }
 
