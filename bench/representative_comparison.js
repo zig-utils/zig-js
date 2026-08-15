@@ -1518,6 +1518,47 @@ function representativeIntlSegmenterConsumer(jobs, lane, kind) {
   return total;
 }
 
+// PluralRules consumers keep formatter construction and fixed numeric inputs
+// outside the timed boundary. The select row hashes every returned category;
+// the resolved row consumes every category in each fresh reflected array.
+var representativeIntlPluralRules = [
+  new Intl.PluralRules("en-US"),
+  new Intl.PluralRules("ar"),
+  new Intl.PluralRules("ru"),
+  new Intl.PluralRules("cy"),
+  new Intl.PluralRules("en-US", { type: "ordinal" }),
+  new Intl.PluralRules("fr", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+  new Intl.PluralRules("pl", { maximumFractionDigits: 1 }),
+  new Intl.PluralRules("en-US", { notation: "scientific" })
+];
+var representativeIntlPluralValues = [
+  0, 1, 2, 3, 4, 5, 6, 10,
+  11, 12, 20, 21, 22, 23, 24, 25,
+  100, 101, 102, 111, 1000, 1000000, -1, -2,
+  0.1, 1.1, 1.2, 2.1, 2.2, 5.5, Infinity, NaN
+];
+
+function representativeIntlPluralRulesConsumer(jobs, lane, kind) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    var iterations = kind === "select" ? 1024 : 512;
+    for (var i = 0; i < iterations; i = i + 1) {
+      var formatter = representativeIntlPluralRules[(job + i + lane) & 7];
+      if (kind === "select") {
+        var category = formatter.select(representativeIntlPluralValues[(job * 3 + i + lane) & 31]);
+        total = (total + representativeIntlDateTimeChecksum(category) + i + lane) % 1000000007;
+      } else {
+        var options = formatter.resolvedOptions();
+        total = (total + representativeIntlDateTimeChecksum(options.type) +
+          representativeIntlDateTimeChecksum(options.notation) + options.pluralCategories.length + i + lane) % 1000000007;
+        for (var categoryIndex = 0; categoryIndex < options.pluralCategories.length; categoryIndex = categoryIndex + 1)
+          total = (total + representativeIntlDateTimeChecksum(options.pluralCategories[categoryIndex]) + categoryIndex) % 1000000007;
+      }
+    }
+  }
+  return total;
+}
+
 // DateTimeFormat controls separate constructor resolution from steady
 // consumers. Keep the fixed UTC inputs and formatter construction outside the
 // timed steady boundary so changes to resolved-state ownership are attributable
@@ -1910,6 +1951,8 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_duration_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "duration"); };
   if (name === "representative_intl_segmenter_iterate_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "iterate"); };
   if (name === "representative_intl_segmenter_containing_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "containing"); };
+  if (name === "representative_intl_plural_rules_select") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "select"); };
+  if (name === "representative_intl_plural_rules_resolved_categories") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "resolved"); };
   if (name === "representative_intl_date_time_format_consumer_text") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "text"); };
   if (name === "representative_intl_date_time_format_consumer_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "parts"); };
   if (name === "representative_intl_date_time_format_consumer_range") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "range"); };
