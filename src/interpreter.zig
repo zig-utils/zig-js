@@ -26516,6 +26516,63 @@ const en_days_narrow = [_][]const u8{ "S", "M", "T", "W", "T", "F", "S" };
 /// ("weekday"/"year"/…/"literal") and its formatted `value`.
 const DtfPart = struct { typ: []const u8, value: []const u8 };
 
+const DtfOutput = struct {
+    mode: enum { text, parts },
+    text: std.ArrayListUnmanaged(u8) = .empty,
+    parts: std.ArrayListUnmanaged(DtfPart) = .empty,
+    numbering_system: []const u8 = "latn",
+    part_count: usize = 0,
+
+    fn isNumeric(typ: []const u8) bool {
+        return eq(typ, "year") or eq(typ, "month") or eq(typ, "day") or
+            eq(typ, "hour") or eq(typ, "minute") or eq(typ, "second") or
+            eq(typ, "fractionalSecond");
+    }
+
+    fn push(self: *DtfOutput, interpreter: *Interpreter, typ: []const u8, bytes: []const u8) EvalError!void {
+        const digit_set = if (isNumeric(typ) and !std.mem.eql(u8, self.numbering_system, "latn"))
+            numbering_systems.digits(self.numbering_system)
+        else
+            null;
+        switch (self.mode) {
+            .text => if (digit_set) |digits| {
+                for (bytes) |byte| {
+                    if (byte >= '0' and byte <= '9')
+                        try self.text.appendSlice(interpreter.arena, numbering_systems.nth(digits, byte - '0'))
+                    else
+                        try self.text.append(interpreter.arena, byte);
+                }
+            } else {
+                try self.text.appendSlice(interpreter.arena, bytes);
+            },
+            .parts => try self.parts.append(interpreter.arena, .{
+                .typ = typ,
+                .value = if (digit_set) |digits| try translateDigits(interpreter, bytes, digits) else bytes,
+            }),
+        }
+        self.part_count += 1;
+    }
+
+    /// `bytes` may point into a caller-owned stack buffer. The text sink consumes
+    /// it immediately; the structural sink gives the part arena-backed storage.
+    fn pushCopied(self: *DtfOutput, interpreter: *Interpreter, typ: []const u8, bytes: []const u8) EvalError!void {
+        const translates = isNumeric(typ) and !std.mem.eql(u8, self.numbering_system, "latn") and
+            numbering_systems.digits(self.numbering_system) != null;
+        if (self.mode == .parts and !translates)
+            return self.push(interpreter, typ, try interpreter.arena.dupe(u8, bytes));
+        return self.push(interpreter, typ, bytes);
+    }
+
+    fn pushInt(self: *DtfOutput, interpreter: *Interpreter, typ: []const u8, v: anytype, two: bool) EvalError!void {
+        var scratch: [32]u8 = undefined;
+        const bytes = if (two)
+            std.fmt.bufPrint(&scratch, "{d:0>2}", .{v}) catch unreachable
+        else
+            std.fmt.bufPrint(&scratch, "{d}", .{v}) catch unreachable;
+        try self.pushCopied(interpreter, typ, bytes);
+    }
+};
+
 fn dtfTimeZoneOffsetMs(this: Value, epoch_ms: f64) i64 {
     const data = this.asObj().intlDateTimeFormatData() orelse return 0;
     const s = data.time_zone;
@@ -26596,47 +26653,50 @@ fn dtfChineseYearName(self: *Interpreter, year: i64) EvalError![]const u8 {
     return std.fmt.allocPrint(self.arena, "{s}{s}", .{ stems[@intCast(@mod(offset, 10))], branches[@intCast(@mod(offset, 12))] });
 }
 
-fn dtfAppendYearPart(self: *Interpreter, parts: *std.ArrayListUnmanaged(DtfPart), cal: []const u8, display_year: i64, fmt: []const u8) EvalError!void {
+fn dtfAppendYearPart(self: *Interpreter, output: *DtfOutput, cal: []const u8, display_year: i64, fmt: []const u8) EvalError!void {
+    const two = std.mem.eql(u8, fmt, "2-digit");
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
-        try parts.append(self.arena, .{ .typ = "relatedYear", .value = try fmtYear(self, display_year, fmt) });
-        try parts.append(self.arena, .{ .typ = "yearName", .value = try dtfChineseYearName(self, display_year) });
-        try parts.append(self.arena, .{ .typ = "literal", .value = "\u{5e74}" });
+        if (two)
+            try output.pushInt(self, "relatedYear", @as(u8, @intCast(@mod(display_year, 100))), true)
+        else
+            try output.pushInt(self, "relatedYear", display_year, false);
+        try output.push(self, "yearName", try dtfChineseYearName(self, display_year));
+        try output.push(self, "literal", "\u{5e74}");
         return;
     }
-    try parts.append(self.arena, .{ .typ = "year", .value = try fmtYear(self, display_year, fmt) });
+    if (two)
+        try output.pushInt(self, "year", @as(u8, @intCast(@mod(display_year, 100))), true)
+    else
+        try output.pushInt(self, "year", display_year, false);
 }
 
-fn dtfAppendMonthPart(self: *Interpreter, parts: *std.ArrayListUnmanaged(DtfPart), cal: []const u8, year: i64, month: u8, fmt: []const u8) EvalError!void {
+fn dtfAppendMonthPart(self: *Interpreter, output: *DtfOutput, cal: []const u8, year: i64, month: u8, fmt: []const u8) EvalError!void {
     if (std.mem.eql(u8, cal, "hebrew")) {
         const names = if (calInLeapYear(cal, year)) &en_hebrew_leap_months else &en_hebrew_common_months;
         if (month >= 1 and month <= names.len) {
-            try parts.append(self.arena, .{ .typ = "month", .value = names[month - 1] });
+            try output.push(self, "month", names[month - 1]);
             return;
         }
     }
     if (std.mem.eql(u8, cal, "chinese") or std.mem.eql(u8, cal, "dangi")) {
         const info = calMonthCodeInfo(cal, year, month);
         const two = eq(fmt, "2-digit");
-        const s = if (info.leap) blk: {
-            if (two) break :blk try std.fmt.allocPrint(self.arena, "{d:0>2}bis", .{info.month});
-            break :blk try std.fmt.allocPrint(self.arena, "{d}bis", .{info.month});
-        } else if (two)
-            try std.fmt.allocPrint(self.arena, "{d:0>2}", .{info.month})
+        if (!info.leap) return output.pushInt(self, "month", info.month, two);
+        var scratch: [32]u8 = undefined;
+        const s = if (two)
+            std.fmt.bufPrint(&scratch, "{d:0>2}bis", .{info.month}) catch unreachable
         else
-            try std.fmt.allocPrint(self.arena, "{d}", .{info.month});
-        try parts.append(self.arena, .{ .typ = "month", .value = s });
+            std.fmt.bufPrint(&scratch, "{d}bis", .{info.month}) catch unreachable;
+        try output.pushCopied(self, "month", s);
         return;
     }
-    const two = eq(fmt, "2-digit");
-    const str = if (two) try std.fmt.allocPrint(self.arena, "{d:0>2}", .{month}) else try std.fmt.allocPrint(self.arena, "{d}", .{month});
-    try parts.append(self.arena, .{ .typ = "month", .value = str });
+    try output.pushInt(self, "month", month, eq(fmt, "2-digit"));
 }
 
-/// Build the formatted parts for an Intl.DateTimeFormat (en locale, UTC, ISO
-/// calendar). Shared by `format` (joins the values) and `formatToParts`. Covers
-/// the common component options; locale-specific extras (era, timeZoneName,
-/// non-en patterns) are not modeled.
-fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(DtfPart) {
+/// Run the DateTimeFormat emission algorithm once. The text sink appends into
+/// the returned string without materializing structural parts; the parts sink
+/// preserves exact boundaries for formatToParts and range formatting.
+fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *DtfOutput) value.HostError!void {
     // The value to format. A Temporal PlainDate/Time/DateTime/YearMonth/MonthDay
     // supplies its ISO fields directly (no TimeClip — its range exceeds Date's);
     // an Instant uses its epoch nanoseconds; everything else is a TimeClip'd time
@@ -26843,22 +26903,21 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
 
     const numbering_system = data.numbering_system;
     const dtf_locale = data.locale;
+    output.numbering_system = numbering_system;
 
-    var parts: std.ArrayListUnmanaged(DtfPart) = .empty;
     const P = struct {
-        fn lit(s: *Interpreter, p: *std.ArrayListUnmanaged(DtfPart), v: []const u8) EvalError!void {
-            try p.append(s.arena, .{ .typ = "literal", .value = v });
+        fn lit(s: *Interpreter, out: *DtfOutput, v: []const u8) EvalError!void {
+            try out.push(s, "literal", v);
         }
-        fn num(s: *Interpreter, p: *std.ArrayListUnmanaged(DtfPart), typ: []const u8, v: u64, two: bool) EvalError!void {
-            const str = if (two) try std.fmt.allocPrint(s.arena, "{d:0>2}", .{v}) else try std.fmt.allocPrint(s.arena, "{d}", .{v});
-            try p.append(s.arena, .{ .typ = typ, .value = str });
+        fn num(s: *Interpreter, out: *DtfOutput, typ: []const u8, v: u64, two: bool) EvalError!void {
+            try out.pushInt(s, typ, v, two);
         }
     };
 
     // Weekday prefix.
     if (o_weekday.len > 0) {
         const name = if (eq(o_weekday, "narrow")) en_days_narrow[wday] else if (eq(o_weekday, "short")) en_days_short[wday] else en_days_long[wday];
-        try parts.append(self.arena, .{ .typ = "weekday", .value = name });
+        try output.push(self, "weekday", name);
     }
     // Date part. Numeric month → "M/D/YYYY"; long/short month → "Month D, YYYY".
     const have_date = o_year.len > 0 or o_month.len > 0 or o_day.len > 0;
@@ -26866,60 +26925,63 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
         const era_info = calEraOf(o_calendar, civ.y, civ.m, civ.d);
         const use_era_year = era_info.era != null and (o_era.len > 0 or std.mem.eql(u8, o_calendar, "japanese"));
         const display_year = if (use_era_year) era_info.era_year else civ.y;
-        if (parts.items.len > 0) try P.lit(self, &parts, ", ");
+        if (output.part_count > 0) try P.lit(self, output, ", ");
         const month_textual = o_month.len > 0 and !eq(o_month, "numeric") and !eq(o_month, "2-digit");
         const part_calendar = if (std.mem.eql(u8, temporal_calendar, "iso8601")) o_calendar else temporal_calendar;
         if (month_textual) {
             const mn = dtfMonthName(part_calendar, civ.m, o_month);
-            try parts.append(self.arena, .{ .typ = "month", .value = mn orelse try std.fmt.allocPrint(self.arena, "{d}", .{civ.m}) });
+            if (mn) |name|
+                try output.push(self, "month", name)
+            else
+                try output.pushInt(self, "month", civ.m, false);
             if (o_day.len > 0) {
-                try P.lit(self, &parts, " ");
-                try P.num(self, &parts, "day", civ.d, false);
+                try P.lit(self, output, " ");
+                try P.num(self, output, "day", civ.d, false);
             }
             if (o_year.len > 0) {
                 // "Month Day, Year" but "Month Year" when there is no day.
-                try P.lit(self, &parts, if (o_day.len > 0) ", " else " ");
-                try dtfAppendYearPart(self, &parts, part_calendar, display_year, o_year);
+                try P.lit(self, output, if (o_day.len > 0) ", " else " ");
+                try dtfAppendYearPart(self, output, part_calendar, display_year, o_year);
             }
         } else if (std.mem.eql(u8, parseTriple(dtf_locale).l, "de")) {
             // German numeric dates are day.month.year, and ECMA-402 internal
             // formatting must not observe user changes to String.prototype.split.
             var first = true;
             if (o_day.len > 0) {
-                try P.num(self, &parts, "day", civ.d, eq(o_day, "2-digit"));
+                try P.num(self, output, "day", civ.d, eq(o_day, "2-digit"));
                 first = false;
             }
             if (o_month.len > 0) {
-                if (!first) try P.lit(self, &parts, ".");
+                if (!first) try P.lit(self, output, ".");
                 first = false;
-                try dtfAppendMonthPart(self, &parts, part_calendar, civ.y, civ.m, o_month);
+                try dtfAppendMonthPart(self, output, part_calendar, civ.y, civ.m, o_month);
             }
             if (o_year.len > 0) {
-                if (!first) try P.lit(self, &parts, ".");
+                if (!first) try P.lit(self, output, ".");
                 first = false;
-                try dtfAppendYearPart(self, &parts, part_calendar, display_year, o_year);
+                try dtfAppendYearPart(self, output, part_calendar, display_year, o_year);
             }
         } else {
             // All-numeric "M/D/Y" (only the requested parts, slash-separated).
             var first = true;
             if (o_month.len > 0) {
-                try dtfAppendMonthPart(self, &parts, part_calendar, civ.y, civ.m, o_month);
+                try dtfAppendMonthPart(self, output, part_calendar, civ.y, civ.m, o_month);
                 first = false;
             }
             if (o_day.len > 0) {
-                if (!first) try P.lit(self, &parts, "/");
+                if (!first) try P.lit(self, output, "/");
                 first = false;
-                try P.num(self, &parts, "day", civ.d, eq(o_day, "2-digit"));
+                try P.num(self, output, "day", civ.d, eq(o_day, "2-digit"));
             }
             if (o_year.len > 0) {
-                if (!first) try P.lit(self, &parts, "/");
+                if (!first) try P.lit(self, output, "/");
                 first = false;
-                try dtfAppendYearPart(self, &parts, part_calendar, display_year, o_year);
+                try dtfAppendYearPart(self, output, part_calendar, display_year, o_year);
             }
         }
         if (o_era.len > 0) if (era_info.era) |raw_era| {
-            try P.lit(self, &parts, " ");
-            try parts.append(self.arena, .{ .typ = "era", .value = dtfEraName(part_calendar, raw_era, o_era) });
+            try P.lit(self, output, " ");
+            try output.push(self, "era", dtfEraName(part_calendar, raw_era, o_era));
         };
     }
     // Time part: "h:mm:ss AM/PM" (or 24-hour).
@@ -26934,7 +26996,7 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             " "
         else
             ", ";
-        if (parts.items.len > 0) try P.lit(self, &parts, dtsep);
+        if (output.part_count > 0) try P.lit(self, output, dtsep);
         var h = hour24;
         var ap: []const u8 = "";
         if (o_day_period.len > 0) {
@@ -26950,14 +27012,14 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             h = 24;
         }
         const two_hour = eq(o_hour, "2-digit") or (!hour12 and std.mem.eql(u8, hour_cycle, "h23") and h < 10);
-        if (o_hour.len > 0) try P.num(self, &parts, "hour", h, two_hour);
+        if (o_hour.len > 0) try P.num(self, output, "hour", h, two_hour);
         if (o_minute.len > 0) {
-            if (o_hour.len > 0) try P.lit(self, &parts, ":");
-            try P.num(self, &parts, "minute", minute, true);
+            if (o_hour.len > 0) try P.lit(self, output, ":");
+            try P.num(self, output, "minute", minute, true);
         }
         if (o_second.len > 0) {
-            if (o_hour.len > 0 or o_minute.len > 0) try P.lit(self, &parts, ":");
-            try P.num(self, &parts, "second", second, true);
+            if (o_hour.len > 0 or o_minute.len > 0) try P.lit(self, output, ":");
+            try P.num(self, output, "second", second, true);
         }
         // fractionalSecondDigits: the first N digits of the millisecond (the
         // sub-second is truncated, not rounded), after the seconds.
@@ -26965,12 +27027,12 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
             var mbuf: [3]u8 = .{ '0', '0', '0' };
             _ = std.fmt.bufPrint(&mbuf, "{d:0>3}", .{frac_ms}) catch {};
             const frac_sep = if (std.mem.eql(u8, numbering_system, "arab") or std.mem.eql(u8, numbering_system, "arabext")) "\xd9\xab" else ".";
-            try P.lit(self, &parts, frac_sep);
-            try parts.append(self.arena, .{ .typ = "fractionalSecond", .value = try self.arena.dupe(u8, mbuf[0..o_frac]) });
+            try P.lit(self, output, frac_sep);
+            try output.pushCopied(self, "fractionalSecond", mbuf[0..o_frac]);
         }
         if (ap.len > 0) {
-            if (have_clock) try P.lit(self, &parts, " ");
-            try parts.append(self.arena, .{ .typ = "dayPeriod", .value = ap });
+            if (have_clock) try P.lit(self, output, " ");
+            try output.push(self, "dayPeriod", ap);
         }
         if (o_tzname.len > 0) {
             const tzn: []const u8 = if (temporal_kind != null and temporal_kind.? == .zoned_date_time)
@@ -26983,23 +27045,22 @@ fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Hos
                 "Coordinated Universal Time"
             else
                 "UTC"; // "short", "shortGeneric"
-            if (have_clock or ap.len > 0) try P.lit(self, &parts, " ");
-            try parts.append(self.arena, .{ .typ = "timeZoneName", .value = tzn });
+            if (have_clock or ap.len > 0) try P.lit(self, output, " ");
+            try output.push(self, "timeZoneName", tzn);
         }
     }
-    if (!std.mem.eql(u8, numbering_system, "latn")) {
-        if (numbering_systems.digits(numbering_system)) |ds| {
-            for (parts.items) |*p| {
-                if (eq(p.typ, "year") or eq(p.typ, "month") or eq(p.typ, "day") or
-                    eq(p.typ, "hour") or eq(p.typ, "minute") or eq(p.typ, "second") or
-                    eq(p.typ, "fractionalSecond"))
-                {
-                    p.value = try translateDigits(self, p.value, ds);
-                }
-            }
-        }
-    }
-    return parts;
+}
+
+fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(DtfPart) {
+    var output = DtfOutput{ .mode = .parts };
+    try dtfBuildOutput(self, this, args, &output);
+    return output.parts;
+}
+
+fn dtfBuildText(self: *Interpreter, this: Value, args: []const Value) value.HostError![]u8 {
+    var output = DtfOutput{ .mode = .text };
+    try dtfBuildOutput(self, this, args, &output);
+    return output.text.toOwnedSlice(self.arena);
 }
 
 /// en flexible day period for an hour. Per CLDR's *format* dayPeriodRules:
@@ -27016,10 +27077,7 @@ fn enDayPeriod(h: u8, width: []const u8) []const u8 {
 fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.format on incompatible receiver");
-    const parts = try dtfBuildParts(self, this, args);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
-    return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
+    return try Value.strOwned(self.arena, try dtfBuildText(self, this, args));
 }
 
 fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -27240,14 +27298,6 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     try arr.appendElement(self.arena, Value.obj(lo));
     try emit(self, arr, yp.items, "endRange");
     return Value.obj(arr);
-}
-
-fn fmtYear(self: *Interpreter, y: i64, fmt: []const u8) EvalError![]const u8 {
-    if (std.mem.eql(u8, fmt, "2-digit")) {
-        const yy: u8 = @intCast(@mod(y, 100));
-        return std.fmt.allocPrint(self.arena, "{d:0>2}", .{yy});
-    }
-    return std.fmt.allocPrint(self.arena, "{d}", .{y});
 }
 
 fn appendNum(self: *Interpreter, buf: *std.ArrayListUnmanaged(u8), first: *bool, sep: u8, v: anytype, two_digit: bool) EvalError!void {
@@ -51300,6 +51350,31 @@ test "Intl.DateTimeFormat German numeric date pattern" {
     try dtfStoreOptions(&interp, dtf, try dtfProcessOptions(&interp, Value.undef()));
     const out = try intlDateTimeFormatFn(@ptrCast(&interp), Value.obj(dtf), &.{Value.num(24 * 60 * 60 * 1000)});
     try std.testing.expectEqualStrings("2.1.1970", out.asStr());
+}
+
+test "Intl.DateTimeFormat text sink preserves structural emission" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var cases = [
+        \\  ["en-US", { timeZone: "UTC", weekday: "short", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3 }, 1704112496789],
+        \\  ["de-DE", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" }, 1735689600000],
+        \\  ["ar-EG", { timeZone: "UTC", year: "numeric", month: "numeric", day: "numeric" }, 0],
+        \\  ["en-US", { timeZone: "UTC", year: "2-digit", month: "2-digit", day: "2-digit" }, 1735603200000]
+        \\];
+        \\var exact = true;
+        \\for (var i = 0; i < cases.length; i = i + 1) {
+        \\  var formatter = new Intl.DateTimeFormat(cases[i][0], cases[i][1]);
+        \\  var text = formatter.format(cases[i][2]);
+        \\  var parts = formatter.formatToParts(cases[i][2]);
+        \\  var joined = "";
+        \\  for (var p = 0; p < parts.length; p = p + 1) joined = joined + parts[p].value;
+        \\  exact = exact && text === joined;
+        \\  if (i === 2) exact = exact && text.indexOf("١") !== -1;
+        \\  if (i === 3) exact = exact && text.indexOf("+24") === -1;
+        \\}
+        \\exact
+    )).asBool());
 }
 
 test "legacy function caller and arguments access" {
