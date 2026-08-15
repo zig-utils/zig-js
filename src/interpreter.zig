@@ -28782,21 +28782,6 @@ fn nfSharedAffixLen(xp: []const NfPart, yp: []const NfPart) usize {
     return i;
 }
 
-fn nfHasCurrencyPrefix(parts: []const NfPart) bool {
-    return parts.len > 0 and std.mem.eql(u8, parts[0].typ, "currency");
-}
-
-fn nfRangeSeparator(xp: []const NfPart, yp: []const NfPart, shared_prefix: usize) []const u8 {
-    if (shared_prefix > 0) return "\u{2013}";
-    if (nfHasCurrencyPrefix(xp) and nfHasCurrencyPrefix(yp)) return " \u{2013} ";
-    return "\u{2013}";
-}
-
-fn nfPtRangeSeparator(locale: []const u8) bool {
-    const t = parseTriple(locale);
-    return std.ascii.eqlIgnoreCase(t.l, "pt") and std.ascii.eqlIgnoreCase(t.r, "PT");
-}
-
 fn nfSharedSuffixLen(xp: []const NfPart, yp: []const NfPart) usize {
     const n = @min(xp.len, yp.len);
     var count: usize = 0;
@@ -28811,20 +28796,39 @@ fn nfSharedSuffixLen(xp: []const NfPart, yp: []const NfPart) usize {
     // A suffix is shareable only when both endpoints retain a numeric/core
     // field. Exact compact patterns such as French "mille" consist entirely of
     // an affix and must therefore be repeated as a complete endpoint.
-    return if (count == xp.len or count == yp.len) 0 else count;
+    if (count == xp.len or count == yp.len) return 0;
+    // ICU's automatic range collapse keeps a lone compact-notation affix on
+    // both endpoints ("1.2M – 2.3M"). A compact affix preceded/followed by a
+    // literal boundary remains a multi-part unit and collapses ("1–2 million").
+    if (count == 1 and std.mem.eql(u8, xp[xp.len - 1].typ, "compact")) return 0;
+    return count;
 }
 
-fn nfFormatRangePartsText(self: *Interpreter, locale: []const u8, xp: []const NfPart, yp: []const NfPart) EvalError![]const u8 {
+fn nfRangeRepeatsAffix(parts: []const NfPart) bool {
+    for (parts) |part| {
+        if (std.mem.eql(u8, part.typ, "compact") or std.mem.eql(u8, part.typ, "currency") or std.mem.eql(u8, part.typ, "unit") or
+            std.mem.eql(u8, part.typ, "minusSign") or std.mem.eql(u8, part.typ, "plusSign")) return true;
+    }
+    return false;
+}
+
+fn nfRangeBetween(pattern: cldr_numbers.RangePattern, xp: []const NfPart, yp: []const NfPart) []const u8 {
+    return if (nfRangeRepeatsAffix(xp) or nfRangeRepeatsAffix(yp)) pattern.padded_between else pattern.between;
+}
+
+fn nfFormatRangePartsText(self: *Interpreter, pattern: cldr_numbers.RangePattern, xp: []const NfPart, yp: []const NfPart) EvalError![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     const shared_prefix = nfSharedAffixLen(xp, yp);
     const shared_suffix = nfSharedSuffixLen(xp, yp);
     const x_end = xp.len - shared_suffix;
     const y_end = yp.len - shared_suffix;
+    if (pattern.leading.len > 0) try buf.appendSlice(self.arena, pattern.leading);
     if (shared_prefix > 0) try nfAppendPartValues(self, &buf, xp[0..shared_prefix]);
     try nfAppendPartValues(self, &buf, xp[shared_prefix..x_end]);
-    try buf.appendSlice(self.arena, if (nfPtRangeSeparator(locale)) " - " else nfRangeSeparator(xp, yp, shared_prefix));
+    try buf.appendSlice(self.arena, nfRangeBetween(pattern, xp[shared_prefix..x_end], yp[shared_prefix..y_end]));
     try nfAppendPartValues(self, &buf, yp[shared_prefix..y_end]);
     if (shared_suffix > 0) try nfAppendPartValues(self, &buf, xp[x_end..]);
+    if (pattern.trailing.len > 0) try buf.appendSlice(self.arena, pattern.trailing);
     return buf.toOwnedSlice(self.arena);
 }
 
@@ -28863,7 +28867,7 @@ fn nfReplaceCurrencyName(parts: []NfPart, name: []const u8) void {
     }
 }
 
-const NfRangeOutputs = struct { start: NfOutput, end: NfOutput };
+const NfRangeOutputs = struct { start: NfOutput, end: NfOutput, data: *const value.IntlNumberFormatData };
 
 /// Currency display names use CLDR's plural-range category, not the two
 /// endpoint categories independently. Reuse the already-built numeric parts
@@ -28871,7 +28875,7 @@ const NfRangeOutputs = struct { start: NfOutput, end: NfOutput };
 /// whose plural unit pattern changes order/literals needs a structural rebuild.
 fn nfBuildRangeOutputs(self: *Interpreter, this: Value, start: Value, end: Value) value.HostError!NfRangeOutputs {
     const data = try numberFormatDataFor(self, this.asObj());
-    var result = NfRangeOutputs{ .start = .{ .mode = .parts }, .end = .{ .mode = .parts } };
+    var result = NfRangeOutputs{ .start = .{ .mode = .parts }, .end = .{ .mode = .parts }, .data = data };
     try nfBuildOutputResolved(self, start, data, &result.start, null);
     try nfBuildOutputResolved(self, end, data, &result.end, null);
     if (nfPartValuesEqual(result.start.parts.items, result.end.parts.items)) return result;
@@ -28911,14 +28915,16 @@ fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const outputs = try nfBuildRangeOutputs(self, this, xv, yv);
     const xp = outputs.start.parts;
     const yp = outputs.end.parts;
+    const pattern = cldr_numbers.numberRange(outputs.data.locale, outputs.data.numbering_system);
     if (nfPartValuesEqual(xp.items, yp.items)) {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
-        try buf.append(self.arena, '~');
+        try buf.appendSlice(self.arena, pattern.approximately_prefix_literal);
+        try buf.appendSlice(self.arena, pattern.approximately);
+        try buf.appendSlice(self.arena, pattern.approximately_suffix_literal);
         try nfAppendPartValues(self, &buf, xp.items);
         return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
     }
-    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
-    return try Value.strAlloc(self.arena, try nfFormatRangePartsText(self, locale, xp.items, yp.items));
+    return try Value.strOwned(self.arena, try nfFormatRangePartsText(self, pattern, xp.items, yp.items));
 }
 
 fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -28945,8 +28951,11 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     const outputs = try nfBuildRangeOutputs(self, this, xv, yv);
     const xp = outputs.start.parts;
     const yp = outputs.end.parts;
+    const pattern = cldr_numbers.numberRange(outputs.data.locale, outputs.data.numbering_system);
     if (nfPartValuesEqual(xp.items, yp.items)) {
-        try Emit.part(self, arr, "approximatelySign", "~", "shared");
+        if (pattern.approximately_prefix_literal.len > 0) try Emit.part(self, arr, "literal", pattern.approximately_prefix_literal, "shared");
+        try Emit.part(self, arr, "approximatelySign", pattern.approximately, "shared");
+        if (pattern.approximately_suffix_literal.len > 0) try Emit.part(self, arr, "literal", pattern.approximately_suffix_literal, "shared");
         try Emit.one(self, arr, xp.items, "shared");
         return Value.obj(arr);
     }
@@ -28954,15 +28963,17 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
     const shared_suffix = nfSharedSuffixLen(xp.items, yp.items);
     const x_end = xp.items.len - shared_suffix;
     const y_end = yp.items.len - shared_suffix;
+    if (pattern.leading.len > 0) try Emit.part(self, arr, "literal", pattern.leading, "shared");
     if (shared_prefix > 0) try Emit.one(self, arr, xp.items[0..shared_prefix], "shared");
     try Emit.one(self, arr, xp.items[shared_prefix..x_end], "startRange");
     const lo = (try self.newObject()).asObj();
     try self.setProp(lo, "type", Value.str("literal"));
-    try self.setProp(lo, "value", try Value.strAlloc(self.arena, nfRangeSeparator(xp.items, yp.items, shared_prefix)));
+    try self.setProp(lo, "value", try Value.strAlloc(self.arena, nfRangeBetween(pattern, xp.items[shared_prefix..x_end], yp.items[shared_prefix..y_end])));
     try self.setProp(lo, "source", Value.str("shared"));
     try arr.appendElement(self.arena, Value.obj(lo));
     try Emit.one(self, arr, yp.items[shared_prefix..y_end], "endRange");
     if (shared_suffix > 0) try Emit.one(self, arr, xp.items[x_end..], "shared");
+    if (pattern.trailing.len > 0) try Emit.part(self, arr, "literal", pattern.trailing, "shared");
     return Value.obj(arr);
 }
 
@@ -51048,6 +51059,59 @@ test "Intl.NumberFormat compact patterns follow generated CLDR data" {
     )).asBool());
 }
 
+test "Intl.NumberFormat ranges follow generated CLDR interval patterns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var cases = [
+        \\  ["en-US", { notation: "compact" }, 1234567, 2345678, "1.2M – 2.3M", "integer:S,decimal:S,fraction:S,compact:S,literal:H,integer:E,decimal:E,fraction:E,compact:E"],
+        \\  ["en-US", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 4 }, 1234567, 2345678, "1.235–2.346 million", "integer:S,decimal:S,fraction:S,literal:H,integer:E,decimal:E,fraction:E,literal:H,compact:H"],
+        \\  ["de-DE", { notation: "compact" }, 1234567, 2345678, "1,2–2,3 Mio.", "integer:S,decimal:S,fraction:S,literal:H,integer:E,decimal:E,fraction:E,literal:H,compact:H"],
+        \\  ["de-DE", { notation: "compact", compactDisplay: "long" }, 1000000, 2000000, "1 Million – 2 Millionen", "integer:S,literal:S,compact:S,literal:H,integer:E,literal:E,compact:E"],
+        \\  ["fr-FR", { notation: "compact", compactDisplay: "long" }, 1000, 2000, "mille – 2 mille", "compact:S,literal:H,integer:E,literal:E,compact:E"],
+        \\  ["hi-IN-u-nu-deva", { notation: "compact", compactDisplay: "long" }, 1234567, 2345678, "१२–२३ लाख", "integer:S,literal:H,integer:E,literal:H,compact:H"],
+        \\  ["hi-IN-u-nu-deva", { notation: "compact", maximumSignificantDigits: 3 }, 1234567, 2345678, "१२.३–२३.५ लाख", "integer:S,decimal:S,fraction:S,literal:H,integer:E,decimal:E,fraction:E,literal:H,compact:H"],
+        \\  ["ja-JP", { notation: "compact", maximumSignificantDigits: 4 }, 12345678, 23456789, "1235万 ～ 2346万", "integer:S,compact:S,literal:H,integer:E,compact:E"],
+        \\  ["zh-CN", { notation: "compact", maximumSignificantDigits: 4 }, 12345678, 23456789, "1235万 - 2346万", "integer:S,compact:S,literal:H,integer:E,compact:E"],
+        \\  ["ko-KR", { notation: "compact", maximumSignificantDigits: 4 }, 12345678, 23456789, "1235만 ~ 2346만", "integer:S,compact:S,literal:H,integer:E,compact:E"],
+        \\  ["he-IL", { notation: "compact", compactDisplay: "long" }, 1200, 2200, "‏1.2–2.2 אלף", "literal:H,integer:S,decimal:S,fraction:S,literal:H,integer:E,decimal:E,fraction:E,literal:H,compact:H"],
+        \\  ["ru-RU", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 }, 22000, 25000, "22 тысячи – 25 тысяч", "integer:S,literal:S,compact:S,literal:H,integer:E,literal:E,compact:E"],
+        \\  ["ar", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 }, 3000, 5000, "3–5 آلاف", "integer:S,literal:H,integer:E,literal:H,compact:H"],
+        \\  ["fr-FR", { notation: "compact", compactDisplay: "long" }, 2000000, 3000000, "2–3 millions", "integer:S,literal:H,integer:E,literal:H,compact:H"],
+        \\  ["de-DE", { notation: "compact", compactDisplay: "long" }, 2000000, 3000000, "2–3 Millionen", "integer:S,literal:H,integer:E,literal:H,compact:H"],
+        \\  ["en-US", { notation: "compact" }, 999500, 1000500, "~1M", "approximatelySign:H,integer:H,compact:H"],
+        \\  ["en-US", {}, -1234.5, 1234.5, "-1,234.5 – 1,234.5", "minusSign:S,integer:S,group:S,integer:S,decimal:S,fraction:S,literal:H,integer:E,group:E,integer:E,decimal:E,fraction:E"],
+        \\  ["th-TH-u-nu-thai", {}, 1234.5, 2345.6, "๑,๒๓๔.๕-๒,๓๔๕.๖", "integer:S,group:S,integer:S,decimal:S,fraction:S,literal:H,integer:E,group:E,integer:E,decimal:E,fraction:E"],
+        \\  ["en-US-u-nu-arab", {}, -1234.5, 1234.5, "؜-١٬٢٣٤٫٥ – ١٬٢٣٤٫٥", "literal:S,minusSign:S,integer:S,group:S,integer:S,decimal:S,fraction:S,literal:H,integer:E,group:E,integer:E,decimal:E,fraction:E"]
+        \\];
+        \\function signature(parts) {
+        \\  return parts.map(function (part) {
+        \\    var source = part.source === "startRange" ? "S" : part.source === "endRange" ? "E" : "H";
+        \\    return part.type + ":" + source;
+        \\  }).join(",");
+        \\}
+        \\var exact = true;
+        \\for (var i = 0; i < cases.length; i++) {
+        \\  var formatter = new Intl.NumberFormat(cases[i][0], cases[i][1]);
+        \\  var parts = formatter.formatRangeToParts(cases[i][2], cases[i][3]);
+        \\  exact = exact && formatter.formatRange(cases[i][2], cases[i][3]) === cases[i][4] &&
+        \\    parts.map(function (part) { return part.value; }).join("") === cases[i][4] && signature(parts) === cases[i][5];
+        \\}
+        \\var approximations = [
+        \\  ["de-DE", "≈1.234,5"], ["fr-FR", "≃1 234,5"], ["ja-JP", "約1,234.5"],
+        \\  ["ru-RU", "≈1 234,5"], ["hi-IN-u-nu-deva", "~१,२३४.५"]
+        \\];
+        \\for (var j = 0; j < approximations.length; j++) {
+        \\  var equal = new Intl.NumberFormat(approximations[j][0]);
+        \\  var equalParts = equal.formatRangeToParts(1234.5, 1234.5);
+        \\  exact = exact && equal.formatRange(1234.5, 1234.5) === approximations[j][1] &&
+        \\    equalParts.map(function (part) { return part.value; }).join("") === approximations[j][1] &&
+        \\    equalParts[0].type === "approximatelySign" && equalParts[0].source === "shared";
+        \\}
+        \\exact
+    )).asBool());
+}
+
 test "Intl.NumberFormat currency display names follow generated CLDR data" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -51093,7 +51157,7 @@ test "Intl.NumberFormat currency display names follow generated CLDR data" {
         \\  enRange[enRange.length - 1].value === "US dollars" && enRange[enRange.length - 1].source === "shared" &&
         \\  ru.formatRange(21n, 25n) === "21–25 российских рублей" &&
         \\  ruRange[ruRange.length - 1].value === "российских рублей" && ruRange[ruRange.length - 1].source === "shared" &&
-        \\  ro.formatRange(1n, 20n) === "1–20 de lei românești" &&
+        \\  ro.formatRange(1n, 20n) === "1 - 20 de lei românești" &&
         \\  roRange[roRange.length - 1].value === "de lei românești" && roRange[roRange.length - 1].source === "shared" &&
         \\  hugeParts[hugeParts.length - 1].value === "российский рубль"
     )).asBool());
@@ -51125,6 +51189,11 @@ test "Intl.NumberFormat sink emission is OOM-safe" {
             try std.testing.expectEqualStrings("235", exact.frac_str);
             const currency = cldr_numbers.currency("ro", "RON", "other");
             try std.testing.expectEqualStrings("de lei românești", try nfCurrencyDisplayName(&machine, currency));
+
+            const interval = cldr_numbers.numberRange("ja-JP", "latn");
+            const start = [_]NfPart{ .{ .typ = "integer", .value = "1235" }, .{ .typ = "compact", .value = "万" } };
+            const end = [_]NfPart{ .{ .typ = "integer", .value = "2346" }, .{ .typ = "compact", .value = "万" } };
+            try std.testing.expectEqualStrings("1235万 ～ 2346万", try nfFormatRangePartsText(&machine, interval, &start, &end));
         }
     }.check;
     const previous_heap = gc_mod.setActiveHeap(null);

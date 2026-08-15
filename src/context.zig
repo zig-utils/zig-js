@@ -12840,6 +12840,8 @@ test "moving nursery preserves Intl.NumberFormat native resolved state" {
         \\  useGrouping: "min2", signDisplay: "exceptZero"
         \\});
         \\globalThis.__movingNumberFormatBefore = __movingNumberFormat.format(123456.75);
+        \\globalThis.__movingNumberRangeBefore = __movingNumberFormat.formatRange(1234567, 2345678);
+        \\globalThis.__movingNumberRangePartsBefore = JSON.stringify(__movingNumberFormat.formatRangeToParts(1234567, 2345678));
         \\globalThis.__movingNumberOptionsBefore = JSON.stringify(__movingNumberFormat.resolvedOptions());
     );
     const before = ctx.global_object.getOwn("__movingNumberFormat").?.asObj();
@@ -12849,6 +12851,8 @@ test "moving nursery preserves Intl.NumberFormat native resolved state" {
     try std.testing.expect(before != after);
     try std.testing.expect((try ctx.evaluate(
         \\__movingNumberFormat.format(123456.75) === __movingNumberFormatBefore &&
+        \\__movingNumberFormat.formatRange(1234567, 2345678) === __movingNumberRangeBefore &&
+        \\JSON.stringify(__movingNumberFormat.formatRangeToParts(1234567, 2345678)) === __movingNumberRangePartsBefore &&
         \\JSON.stringify(__movingNumberFormat.resolvedOptions()) === __movingNumberOptionsBefore &&
         \\__movingNumberFormat.resolvedOptions().numberingSystem === "deva"
     )).asBool());
@@ -12868,11 +12872,21 @@ test "parallel_js: Intl.NumberFormat resolved state is read-only after publicati
         \\var sharedNumberFormat = new Intl.NumberFormat("de-DE", {
         \\  minimumFractionDigits: 2, maximumFractionDigits: 2
         \\});
+        \\var sharedNumberRange = new Intl.NumberFormat("ja-JP", {
+        \\  notation: "compact", maximumSignificantDigits: 4
+        \\});
         \\function numberFormatLane(lane) {
         \\  var checksum = 0;
         \\  for (var i = 0; i < 512; i++) {
         \\    var output = sharedNumberFormat.format(1000 + i + lane / 10);
         \\    checksum += output.length + output.charCodeAt(0);
+        \\    if ((i & 31) === 0) {
+        \\      var range = sharedNumberRange.formatRange(12345678, 23456789);
+        \\      var parts = sharedNumberRange.formatRangeToParts(12345678, 23456789);
+        \\      if (range !== "1235万 ～ 2346万" || parts.map(function (part) { return part.value; }).join("") !== range)
+        \\        return 0;
+        \\      checksum += parts.length;
+        \\    }
         \\  }
         \\  var options = sharedNumberFormat.resolvedOptions();
         \\  return checksum > 0 && options.locale === "de-DE" &&

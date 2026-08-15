@@ -86,6 +86,19 @@ function symbolParts(symbol) {
   return { prefix: symbol.slice(0, start), value: symbol.slice(start, end), suffix: symbol.slice(end) };
 }
 
+function rangePattern(sourcePattern) {
+  const pattern = unquotePattern(sourcePattern);
+  const startAt = pattern.indexOf("{0}");
+  const endAt = pattern.indexOf("{1}");
+  if (startAt < 0 || endAt < startAt || pattern.indexOf("{0}", startAt + 3) >= 0 || pattern.indexOf("{1}", endAt + 3) >= 0) {
+    throw new Error(`range pattern must contain ordered {0} and {1}: ${sourcePattern}`);
+  }
+  const between = pattern.slice(startAt + 3, endAt);
+  const characters = Array.from(between);
+  const padded = `${characters.length > 0 && boundaryCharacter(characters[0]) ? "" : " "}${between}${characters.length > 0 && boundaryCharacter(characters[characters.length - 1]) ? "" : " "}`;
+  return { leading: pattern.slice(0, startAt), between, padded, trailing: pattern.slice(endAt + 3) };
+}
+
 function compactRows(nums, sys) {
   const formats = nums[`decimalFormats-numberSystem-${sys}`] || nums["decimalFormats-numberSystem-latn"] || {};
   const result = [];
@@ -205,6 +218,7 @@ if (!numberFiles.length) throw new Error("CLDR number-data inventory is empty");
 
 const defaultSystemRows = [];
 const symbolRows = [];
+const rangeRows = [];
 for (const relativePath of numberFiles) {
   const loc = relativePath.split("/").slice(-2, -1)[0];
   const j = JSON.parse(readText(`${CLDR_ROOT.replace(/\/$/, "")}/${relativePath}`));
@@ -227,10 +241,22 @@ for (const relativePath of numberFiles) {
       differsFromLatn: latn != null && (sym.decimal !== latn.decimal || sym.group !== latn.group),
     });
   }
+  for (const [key, patterns] of Object.entries(nums)) {
+    if (!key.startsWith("miscPatterns-numberSystem-")) continue;
+    const system = key.slice("miscPatterns-numberSystem-".length);
+    const symbols = nums[`symbols-numberSystem-${system}`] || latn || {};
+    rangeRows.push({
+      loc,
+      system,
+      range: rangePattern(patterns.range || "{0}–{1}"),
+      approximately: symbolParts(symbols.approximatelySign || "~"),
+    });
+  }
 }
 const byteOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 defaultSystemRows.sort((a, b) => byteOrder(a.loc, b.loc));
 symbolRows.sort((a, b) => byteOrder(a.loc, b.loc) || byteOrder(a.system, b.system));
+rangeRows.sort((a, b) => byteOrder(a.loc, b.loc) || byteOrder(a.system, b.system));
 
 // CLDR carries locale-independent punctuation for Arabic digit systems in many
 // locales, while the other alternate systems inherit their locale's punctuation.
@@ -330,6 +356,16 @@ pub const NumSym = struct {
     /// Whether the locale's accounting currency format wraps negatives in
     /// parentheses ("(¤#,##0.00)") rather than using a minus sign.
     accounting_parens: bool,
+};
+
+pub const RangePattern = struct {
+    leading: []const u8,
+    between: []const u8,
+    padded_between: []const u8,
+    trailing: []const u8,
+    approximately_prefix_literal: []const u8,
+    approximately: []const u8,
+    approximately_suffix_literal: []const u8,
 };
 
 pub const CompactPattern = struct {
@@ -458,7 +494,16 @@ for (const row of portableSystemRows) {
 }
 out.push(`};
 
+const RangeRow = struct { loc: []const u8, system: []const u8, pattern: RangePattern };
+const range_table = [_]RangeRow{
+`);
+for (const row of rangeRows) {
+  out.push(`    .{ .loc = ${zstr(row.loc)}, .system = ${zstr(row.system)}, .pattern = .{ .leading = ${zstr(row.range.leading)}, .between = ${zstr(row.range.between)}, .padded_between = ${zstr(row.range.padded)}, .trailing = ${zstr(row.range.trailing)}, .approximately_prefix_literal = ${zstr(row.approximately.prefix)}, .approximately = ${zstr(row.approximately.value)}, .approximately_suffix_literal = ${zstr(row.approximately.suffix)} } },\n`);
+}
+out.push(`};
+
 const default_sym = NumSym{ .decimal = ".", .group = ",", .percent_prefix = "", .percent = "%", .percent_suffix = "", .plus_prefix = "", .plus = "+", .plus_suffix = "", .minus_prefix = "", .minus = "-", .minus_suffix = "", .nan = "NaN", .infinity = ${zstr("∞")}, .symbol_before = true, .accounting_parens = true };
+const default_range = RangePattern{ .leading = "", .between = ${zstr("–")}, .padded_between = ${zstr(" – ")}, .trailing = "", .approximately_prefix_literal = "", .approximately = "~", .approximately_suffix_literal = "" };
 
 fn localeSymbols(locale: []const u8) ?NumSym {
     var lo: usize = 0;
@@ -531,6 +576,22 @@ fn numberSymbolsExact(locale: []const u8, system: []const u8) ?SymbolData {
     return null;
 }
 
+fn rangeExact(locale: []const u8, system: []const u8) ?RangePattern {
+    var lo: usize = 0;
+    var hi: usize = range_table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const locale_order = std.mem.order(u8, range_table[mid].loc, locale);
+        const order = if (locale_order == .eq) std.mem.order(u8, range_table[mid].system, system) else locale_order;
+        switch (order) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return range_table[mid].pattern,
+        }
+    }
+    return null;
+}
+
 fn portableSymbols(system: []const u8) ?SymbolData {
     var lo: usize = 0;
     var hi: usize = portable_system_table.len;
@@ -578,6 +639,21 @@ pub fn lookupFor(locale: []const u8, system: []const u8) NumSym {
     }
     if (portableSymbols(system)) |symbols| return applySymbols(base, symbols, true);
     return base;
+}
+
+/// Resolve the locale/system interval and approximation patterns. A requested
+/// system without dedicated misc patterns inherits the locale's default/latn
+/// pattern rather than borrowing interval syntax from another language.
+pub fn numberRange(locale: []const u8, system: []const u8) RangePattern {
+    var probe = baseLocale(locale);
+    while (true) {
+        if (rangeExact(probe, system)) |pattern| return pattern;
+        const default_system = defaultSystemExact(probe) orelse "latn";
+        if (!std.mem.eql(u8, default_system, system)) if (rangeExact(probe, default_system)) |pattern| return pattern;
+        if (!std.mem.eql(u8, system, "latn") and !std.mem.eql(u8, default_system, "latn")) if (rangeExact(probe, "latn")) |pattern| return pattern;
+        if (std.mem.lastIndexOfScalar(u8, probe, '-')) |i| probe = probe[0..i] else break;
+    }
+    return default_range;
 }
 
 fn compactLocale(locale: []const u8) ?CompactLocale {
