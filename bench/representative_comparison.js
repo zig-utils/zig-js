@@ -1123,7 +1123,7 @@ var representativeIntlCompactFormatters = [
   new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2, maximumSignificantDigits: 4, roundingPriority: "lessPrecision" }),
   new Intl.NumberFormat("en-US", { notation: "compact" }),
   new Intl.NumberFormat("en-US", { notation: "compact" }),
-  new Intl.NumberFormat("hi-IN-u-nu-deva", { notation: "compact", maximumSignificantDigits: 3 }),
+  new Intl.NumberFormat("en-US-u-nu-deva", { notation: "compact", maximumSignificantDigits: 3 }),
   new Intl.NumberFormat("de-DE", { notation: "compact", compactDisplay: "long", maximumSignificantDigits: 3 }),
   new Intl.NumberFormat("ja-JP", { notation: "compact", maximumSignificantDigits: 4 }),
   new Intl.NumberFormat("en-US", { notation: "compact", signDisplay: "always" }),
