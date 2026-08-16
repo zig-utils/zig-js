@@ -42,6 +42,7 @@
 const std = @import("std");
 const js = @import("js");
 const build_options = @import("build_options");
+const cli = @import("test262_cli.zig");
 
 const worker_timeout: std.Io.Timeout = .{ .duration = .{
     .raw = .fromSeconds(30),
@@ -1152,46 +1153,22 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const root = build_options.root;
-
-    var args = std.process.Args.Iterator.init(init.minimal.args);
-    _ = args.next(); // argv[0]
-    if (args.next()) |mode| {
-        if (std.mem.eql(u8, mode, "--worker")) {
-            const sub = args.next() orelse return;
-            const start = std.fmt.parseInt(usize, args.next() orelse "0", 10) catch 0;
-            const limit = std.fmt.parseInt(usize, args.next() orelse "0", 10) catch 0;
-            return runWorker(gpa, io, root, sub, start, limit);
-        }
-        if (std.mem.eql(u8, mode, "--drive-subtree")) {
-            const sub = args.next() orelse return;
-            return runSubtreeDriver(gpa, io, root, sub);
-        }
-        if (std.mem.eql(u8, mode, "--diag")) {
-            const sub = args.next() orelse return;
-            const filter = args.next();
-            return runDiag(gpa, io, root, sub, filter);
-        }
-        if (std.mem.eql(u8, mode, "--eval")) {
-            const path = args.next() orelse return;
-            return runEval(gpa, io, path);
-        }
-        if (std.mem.eql(u8, mode, "--vm-witness")) {
-            var count: usize = 0;
-            while (args.next()) |path| {
-                try runVmWitness(gpa, io, root, path);
-                count += 1;
-            }
-            if (count == 0) return error.Test262Failures;
-            return;
-        }
-        if (std.mem.eql(u8, mode, "--list-skips")) {
-            return runListSkips(gpa, io, root);
-        }
-        if (std.mem.eql(u8, mode, "--list-excluded")) {
-            return runListExcluded(gpa, io, root);
-        }
-    }
-    return runParent(gpa, io, root);
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const command = cli.parse(argv[1..]) catch |err| {
+        std.debug.print("test262: invalid arguments; use --help for usage.\n", .{});
+        return err;
+    };
+    return switch (command) {
+        .parent => runParent(gpa, io, root),
+        .help => std.Io.File.stdout().writeStreamingAll(io, cli.usage),
+        .worker => |worker| runWorker(gpa, io, root, worker.subtree, worker.start, worker.limit),
+        .drive_subtree => |subtree| runSubtreeDriver(gpa, io, root, subtree),
+        .diag => |diagnostic| runDiag(gpa, io, root, diagnostic.subtree, diagnostic.filter),
+        .eval => |path| runEval(gpa, io, path),
+        .vm_witness => |paths| for (paths) |path| try runVmWitness(gpa, io, root, path),
+        .list_skips => runListSkips(gpa, io, root),
+        .list_excluded => runListExcluded(gpa, io, root),
+    };
 }
 
 fn emitStats(out: std.Io.File, io: std.Io, stats: Stats) void {

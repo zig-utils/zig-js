@@ -1835,10 +1835,24 @@ pub fn build(b: *std.Build) void {
     const test262_step = b.step("test262", "Run the real test262 corpus and report pass rate");
     test262_step.dependOn(&run_test262.step);
 
+    const test262_cli_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/test262_cli.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_test262_cli_tests = b.addRunArtifact(test262_cli_tests);
+    const test262_cli_test_step = b.step("test262-cli-test", "Validate fail-closed test262 command-line dispatch");
+    test262_cli_test_step.dependOn(&run_test262_cli_tests.step);
+    test262_step.dependOn(&run_test262_cli_tests.step);
+
     // Compile-only: build the test262 runner exe without running the corpus, so
     // the `--worker`/`--diag` binary can be rebuilt fast during development.
+    // Its small argument-contract test runs first but never opens the corpus.
     const test262_install = b.addInstallArtifact(test262, .{});
-    const test262_bin_step = b.step("test262-bin", "Build the test262 runner exe only (no run)");
+    const test262_bin_step = b.step("test262-bin", "Build the test262 runner and validate its CLI (no corpus run)");
+    test262_bin_step.dependOn(&run_test262_cli_tests.step);
     test262_bin_step.dependOn(&test262_install.step);
 
     const displaynames_jsc_diff_cmd = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/intl-displaynames-jsc-diff.ts" });
