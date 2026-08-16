@@ -31345,11 +31345,11 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // Reflect the immutable normalized record in Table-6 order.
                 const data = this.asObj().intlDisplayNamesData() orelse
                     return self.throwError("TypeError", "Intl.DisplayNames has no resolved state");
-                try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style.string()));
-                try self.setProp(o, "type", try Value.strAlloc(self.arena, data.kind.string()));
-                try self.setProp(o, "fallback", try Value.strAlloc(self.arena, data.fallback.string()));
+                try self.setProp(o, "style", data.style.value());
+                try self.setProp(o, "type", data.kind.value());
+                try self.setProp(o, "fallback", data.fallback.value());
                 if (data.kind == .language)
-                    try self.setProp(o, "languageDisplay", try Value.strAlloc(self.arena, data.language_display.string()));
+                    try self.setProp(o, "languageDisplay", data.language_display.value());
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
                 const data = this.asObj().intlSegmenterData().?;
                 try self.setProp(o, "granularity", data.granularity.value());

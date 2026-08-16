@@ -18781,6 +18781,42 @@ test "Intl.Collator compare reclaims adversarial sort keys under a heap limit" {
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
+test "Intl.DisplayNames resolved enums use exact unmanaged static cells" {
+    const Case = struct { source: []const u8, expected: []const u8, cell: *const strcell.StringCell };
+    const cases = [_]Case{
+        .{ .source = "new Intl.DisplayNames('en',{type:'language',style:'narrow'}).resolvedOptions().style", .expected = "narrow", .cell = strcell.staticCell("narrow") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'language',style:'short'}).resolvedOptions().style", .expected = "short", .cell = strcell.staticCell("short") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'language',style:'long'}).resolvedOptions().style", .expected = "long", .cell = strcell.staticCell("long") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'language'}).resolvedOptions().type", .expected = "language", .cell = strcell.staticCell("language") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'region'}).resolvedOptions().type", .expected = "region", .cell = strcell.staticCell("region") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'script'}).resolvedOptions().type", .expected = "script", .cell = strcell.staticCell("script") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'currency'}).resolvedOptions().type", .expected = "currency", .cell = strcell.staticCell("currency") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'calendar'}).resolvedOptions().type", .expected = "calendar", .cell = strcell.staticCell("calendar") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'dateTimeField'}).resolvedOptions().type", .expected = "dateTimeField", .cell = strcell.staticCell("dateTimeField") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'region',fallback:'code'}).resolvedOptions().fallback", .expected = "code", .cell = strcell.staticCell("code") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'region',fallback:'none'}).resolvedOptions().fallback", .expected = "none", .cell = strcell.staticCell("none") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'language',languageDisplay:'dialect'}).resolvedOptions().languageDisplay", .expected = "dialect", .cell = strcell.staticCell("dialect") },
+        .{ .source = "new Intl.DisplayNames('en',{type:'language',languageDisplay:'standard'}).resolvedOptions().languageDisplay", .expected = "standard", .cell = strcell.staticCell("standard") },
+    };
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    var last: Value = Value.undef();
+    for (cases) |case| {
+        last = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, last.asStr());
+        try std.testing.expectEqual(case.cell, last.asStringCell());
+        try std.testing.expect(!last.asStringCell().isGcManaged());
+    }
+    const dynamic_locale = try ctx.evaluate("new Intl.DisplayNames('de',{type:'language'}).resolvedOptions().locale");
+    try std.testing.expect(dynamic_locale.asStringCell().isGcManaged());
+    ctx.collectGarbage();
+    try std.testing.expectEqualStrings("standard", last.asStr());
+}
+
 test "Intl.DisplayNames reclaims compound-tag scratch under a heap limit" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

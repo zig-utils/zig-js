@@ -1386,6 +1386,14 @@ pub const IntlDisplayNamesData = struct {
         pub fn string(self: Style) []const u8 {
             return @tagName(self);
         }
+
+        pub fn value(self: Style) Value {
+            return switch (self) {
+                .narrow => Value.str("narrow"),
+                .short => Value.str("short"),
+                .long => Value.str("long"),
+            };
+        }
     };
 
     pub const Kind = enum(u8) {
@@ -1411,6 +1419,17 @@ pub const IntlDisplayNamesData = struct {
                 else => @tagName(self),
             };
         }
+
+        pub fn value(self: Kind) Value {
+            return switch (self) {
+                .language => Value.str("language"),
+                .region => Value.str("region"),
+                .script => Value.str("script"),
+                .currency => Value.str("currency"),
+                .calendar => Value.str("calendar"),
+                .date_time_field => Value.str("dateTimeField"),
+            };
+        }
     };
 
     pub const Fallback = enum(u8) {
@@ -1424,6 +1443,13 @@ pub const IntlDisplayNamesData = struct {
         pub fn string(self: Fallback) []const u8 {
             return @tagName(self);
         }
+
+        pub fn value(self: Fallback) Value {
+            return switch (self) {
+                .code => Value.str("code"),
+                .none => Value.str("none"),
+            };
+        }
     };
 
     pub const LanguageDisplay = enum(u8) {
@@ -1436,6 +1462,13 @@ pub const IntlDisplayNamesData = struct {
 
         pub fn string(self: LanguageDisplay) []const u8 {
             return @tagName(self);
+        }
+
+        pub fn value(self: LanguageDisplay) Value {
+            return switch (self) {
+                .dialect => Value.str("dialect"),
+                .standard => Value.str("standard"),
+            };
         }
     };
 
