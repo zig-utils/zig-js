@@ -217,54 +217,42 @@ fn nodeHasYield(node: *const ast.Node) bool {
     };
 }
 
-/// Does a `let`/`const` for-loop capture one of the loop's per-iteration binding
-/// names inside a nested closure in its head, test, update, or body? Such loops
-/// need a fresh binding created per iteration (CreatePerIterationEnvironment).
-/// Captured supported heads use environment cells; `var` loops and lexical loops
-/// whose closures never reference a loop name keep the fast frame-slot VM path.
 /// Whether a loop `body` declares a block-scoped (`let`/`const`) binding that a
 /// closure in the body captures — which needs a fresh per-iteration binding the
 /// VM's single flat frame slot can't provide (all iterations' closures would
 /// share the last value). Descends into blocks/if/try/switch/labeled but NOT into
 /// nested functions or nested loops (which manage their own body bindings).
-fn loopBodyCapturesLexical(body: *const ast.Node) bool {
-    return bodyStmtCapturesLexical(body, body);
-}
-
 /// Captured declarations can use a declarative environment at the block that
 /// owns them. Nested loops establish their own repeated-body root.
-fn repeatedBodyCapturesSupported(node: *const ast.Node, body: *const ast.Node) bool {
+fn repeatedBodyCapturesSupported(node: *const ast.Node, captures: *const RepeatedBodyCaptures) bool {
     return switch (node.*) {
         .var_decl => true,
         .decl_group => |declarations| blk: {
             for (declarations) |declaration|
-                if (!repeatedBodyCapturesSupported(declaration, body)) break :blk false;
+                if (!repeatedBodyCapturesSupported(declaration, captures)) break :blk false;
             break :blk true;
         },
         .destructure_decl => |declaration| blk: {
-            const captured = declaration.kind != .@"var" and patternNameCaptured(declaration.pattern, body);
+            const captured = declaration.kind != .@"var" and captures.patternCaptured(declaration.pattern);
             break :blk !captured or patternSupportsEnvironmentNode(declaration.pattern);
         },
         .block => |statements| blk: {
-            for (statements) |statement| if (!repeatedBodyCapturesSupported(statement, body)) break :blk false;
+            for (statements) |statement| if (!repeatedBodyCapturesSupported(statement, captures)) break :blk false;
             break :blk true;
         },
-        .if_stmt => |statement| repeatedBodyCapturesSupported(statement.consequent, body) and
-            (if (statement.alternate) |alternate| repeatedBodyCapturesSupported(alternate, body) else true),
-        .labeled_stmt => |statement| repeatedBodyCapturesSupported(statement.body, body),
+        .if_stmt => |statement| repeatedBodyCapturesSupported(statement.consequent, captures) and
+            (if (statement.alternate) |alternate| repeatedBodyCapturesSupported(alternate, captures) else true),
+        .labeled_stmt => |statement| repeatedBodyCapturesSupported(statement.body, captures),
         .try_stmt => |statement| blk: {
-            const captured_catch = if (statement.catch_param) |catch_param|
-                if (statement.catch_block) |catch_block| patternNameCaptured(catch_param, catch_block) else false
-            else
-                false;
+            const captured_catch = if (statement.catch_param) |catch_param| captures.catchPatternCaptured(catch_param) else false;
             if (captured_catch and !patternSupportsEnvironmentNode(statement.catch_param.?)) break :blk false;
-            break :blk repeatedBodyCapturesSupported(statement.block, body) and
-                (if (statement.catch_block) |catch_block| repeatedBodyCapturesSupported(catch_block, body) else true) and
-                (if (statement.finally_block) |finally_block| repeatedBodyCapturesSupported(finally_block, body) else true);
+            break :blk repeatedBodyCapturesSupported(statement.block, captures) and
+                (if (statement.catch_block) |catch_block| repeatedBodyCapturesSupported(catch_block, captures) else true) and
+                (if (statement.finally_block) |finally_block| repeatedBodyCapturesSupported(finally_block, captures) else true);
         },
         .switch_stmt => |statement| blk: {
             for (statement.cases) |case| for (case.body) |case_statement|
-                if (!repeatedBodyCapturesSupported(case_statement, body)) break :blk false;
+                if (!repeatedBodyCapturesSupported(case_statement, captures)) break :blk false;
             break :blk true;
         },
         // Nested iteration statements compile their own body with a new root.
@@ -291,38 +279,16 @@ fn patternSupportsEnvironmentNode(pattern: *const ast.Node) bool {
     };
 }
 
-fn bodyStmtCapturesLexical(node: *const ast.Node, body: *const ast.Node) bool {
-    return switch (node.*) {
-        .var_decl => |d| d.kind != .@"var" and nameRefInClosure(body, d.name, false),
-        .destructure_decl => |d| d.kind != .@"var" and patternNameCaptured(d.pattern, body),
-        .block => |stmts| blk: {
-            for (stmts) |s| if (bodyStmtCapturesLexical(s, body)) break :blk true;
-            break :blk false;
-        },
-        .decl_group => |stmts| blk: {
-            for (stmts) |s| if (bodyStmtCapturesLexical(s, body)) break :blk true;
-            break :blk false;
-        },
-        .if_stmt => |s| bodyStmtCapturesLexical(s.consequent, body) or
-            (if (s.alternate) |a| bodyStmtCapturesLexical(a, body) else false),
-        .labeled_stmt => |s| bodyStmtCapturesLexical(s.body, body),
-        .try_stmt => |t| bodyStmtCapturesLexical(t.block, body) or
-            (if (t.catch_param) |catch_param|
-                if (t.catch_block) |catch_block| patternNameCaptured(catch_param, catch_block) else false
-            else
-                false) or
-            (if (t.catch_block) |cb| bodyStmtCapturesLexical(cb, body) else false) or
-            (if (t.finally_block) |fb| bodyStmtCapturesLexical(fb, body) else false),
-        .switch_stmt => |s| blk: {
-            for (s.cases) |c| for (c.body) |st| if (bodyStmtCapturesLexical(st, body)) break :blk true;
-            break :blk false;
-        },
-        else => false, // nested loops/functions manage their own bindings
-    };
-}
-
 const CapturedBindingReferences = struct {
     names: *const std.StringHashMapUnmanaged(void),
+};
+
+/// Set-valued capture classification must visit the complete AST even after the
+/// first match. Returning false after recording prevents the generic exhaustive
+/// walk from short-circuiting while pre-reserved storage keeps matching infallible.
+const RecordingCapturedBindingReferences = struct {
+    names: *std.StringHashMapUnmanaged(bool),
+    captured_count: *usize,
 };
 
 const LoopBindingNames = struct {
@@ -350,7 +316,91 @@ const LoopBindingNames = struct {
     }
 };
 
-fn collectPatternBindingNames(arena: std.mem.Allocator, pattern: *const ast.Node, names: *LoopBindingNames) CompileError!void {
+const RepeatedBodyNameCaptures = struct {
+    single: ?[]const u8 = null,
+    single_captured: bool = false,
+    multiple: std.StringHashMapUnmanaged(bool) = .{},
+    captured_count: usize = 0,
+
+    fn add(self: *RepeatedBodyNameCaptures, arena: std.mem.Allocator, name: []const u8) CompileError!void {
+        if (self.multiple.count() != 0) {
+            try self.multiple.put(arena, name, false);
+            return;
+        }
+        if (self.single) |existing| {
+            if (std.mem.eql(u8, existing, name)) return;
+            try self.multiple.put(arena, existing, false);
+            try self.multiple.put(arena, name, false);
+            return;
+        }
+        self.single = name;
+    }
+
+    fn classify(self: *RepeatedBodyNameCaptures, node: *const ast.Node) void {
+        if (self.multiple.count() == 0) {
+            self.single_captured = if (self.single) |name| nameRefInClosure(node, name, false) else false;
+            return;
+        }
+        _ = nameRefInClosure(node, RecordingCapturedBindingReferences{
+            .names = &self.multiple,
+            .captured_count = &self.captured_count,
+        }, false);
+    }
+
+    fn captures(self: *const RepeatedBodyNameCaptures, name: []const u8) bool {
+        if (self.multiple.count() == 0)
+            return self.single_captured and self.single != null and std.mem.eql(u8, self.single.?, name);
+        return self.multiple.get(name) orelse false;
+    }
+
+    fn any(self: *const RepeatedBodyNameCaptures) bool {
+        return self.single_captured or self.captured_count != 0;
+    }
+};
+
+const RepeatedBodyCaptures = struct {
+    bindings: RepeatedBodyNameCaptures = .{},
+    captured_catch_patterns: std.AutoHashMapUnmanaged(*const ast.Node, void) = .{},
+
+    fn init(arena: std.mem.Allocator, root: *const ast.Node) CompileError!RepeatedBodyCaptures {
+        var captures: RepeatedBodyCaptures = .{};
+        try collectRepeatedBodyBindings(arena, root, &captures);
+        captures.bindings.classify(root);
+        return captures;
+    }
+
+    fn nameCaptured(self: *const RepeatedBodyCaptures, name: []const u8) bool {
+        return self.bindings.captures(name);
+    }
+
+    fn patternCaptured(self: *const RepeatedBodyCaptures, pattern: *const ast.Node) bool {
+        return switch (pattern.*) {
+            .identifier => |name| self.nameCaptured(name),
+            .obj_pattern => |object| blk: {
+                for (object.props) |property| if (self.patternCaptured(property.target)) break :blk true;
+                if (object.rest) |rest| if (self.patternCaptured(rest)) break :blk true;
+                break :blk false;
+            },
+            .arr_pattern => |array| blk: {
+                for (array.elems) |element| if (element.target) |target|
+                    if (self.patternCaptured(target)) break :blk true;
+                if (array.rest) |rest| if (self.patternCaptured(rest)) break :blk true;
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn catchPatternCaptured(self: *const RepeatedBodyCaptures, pattern: *const ast.Node) bool {
+        return self.captured_catch_patterns.contains(pattern);
+    }
+
+    fn any(self: *const RepeatedBodyCaptures) bool {
+        return self.bindings.any() or self.captured_catch_patterns.count() != 0;
+    }
+};
+
+fn collectPatternBindingNames(arena: std.mem.Allocator, pattern: *const ast.Node, names: anytype) CompileError!void {
     switch (pattern.*) {
         .identifier => |name| try names.add(arena, name),
         .obj_pattern => |object| {
@@ -416,23 +466,46 @@ fn forOfCapturesLexical(arena: std.mem.Allocator, target: *const ast.Node, var_i
         names.referencedBy(iterable) or names.referencedBy(body);
 }
 
-/// Are any of the binding identifiers in a destructuring loop head (`for (let
-/// [a, b] = …)`) captured by a closure in `body`?
-fn patternNameCaptured(pat: *const ast.Node, body: *const ast.Node) bool {
-    return switch (pat.*) {
-        .identifier => |nm| nameRefInClosure(body, nm, false),
-        .obj_pattern => |p| blk: {
-            for (p.props) |pp| if (patternNameCaptured(pp.target, body)) break :blk true;
-            if (p.rest) |r| if (patternNameCaptured(r, body)) break :blk true;
-            break :blk false;
+/// Collect declarations owned by one repeated-body root. Nested loops establish
+/// their own root; nested functions contain references but not declarations owned
+/// by this iteration. Catch parameters have their own lexical scope, so each is
+/// classified once against only its catch block and cached by pattern identity.
+fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, captures: *RepeatedBodyCaptures) CompileError!void {
+    switch (node.*) {
+        .var_decl => |declaration| if (declaration.kind != .@"var")
+            try captures.bindings.add(arena, declaration.name),
+        .destructure_decl => |declaration| if (declaration.kind != .@"var")
+            try collectPatternBindingNames(arena, declaration.pattern, &captures.bindings),
+        .decl_group => |declarations| for (declarations) |declaration|
+            try collectRepeatedBodyBindings(arena, declaration, captures),
+        .block => |statements| for (statements) |statement|
+            try collectRepeatedBodyBindings(arena, statement, captures),
+        .if_stmt => |statement| {
+            try collectRepeatedBodyBindings(arena, statement.consequent, captures);
+            if (statement.alternate) |alternate| try collectRepeatedBodyBindings(arena, alternate, captures);
         },
-        .arr_pattern => |p| blk: {
-            for (p.elems) |e| if (e.target) |t| if (patternNameCaptured(t, body)) break :blk true;
-            if (p.rest) |r| if (patternNameCaptured(r, body)) break :blk true;
-            break :blk false;
+        .labeled_stmt => |statement| try collectRepeatedBodyBindings(arena, statement.body, captures),
+        .try_stmt => |statement| {
+            try collectRepeatedBodyBindings(arena, statement.block, captures);
+            if (statement.catch_block) |catch_block| {
+                if (statement.catch_param) |catch_param| {
+                    var catch_captures: RepeatedBodyNameCaptures = .{};
+                    try collectPatternBindingNames(arena, catch_param, &catch_captures);
+                    catch_captures.classify(catch_block);
+                    if (catch_captures.any()) try captures.captured_catch_patterns.put(arena, catch_param, {});
+                }
+                try collectRepeatedBodyBindings(arena, catch_block, captures);
+            }
+            if (statement.finally_block) |finally_block|
+                try collectRepeatedBodyBindings(arena, finally_block, captures);
         },
-        else => false,
-    };
+        .switch_stmt => |statement| for (statement.cases) |case| for (case.body) |case_statement|
+            try collectRepeatedBodyBindings(arena, case_statement, captures),
+        // Nested iteration statements own their declarations. Their references
+        // still participate when the exhaustive root traversal runs below.
+        .while_stmt, .do_while_stmt, .for_stmt, .for_in, .function, .func_decl => {},
+        else => {},
+    }
 }
 
 /// Exhaustive identifier-reference walk shared by exact-name capture queries and
@@ -455,8 +528,13 @@ fn identifierReferenceMatches(query: anytype, identifier: []const u8) bool {
         break :pending binding.lexical and !query.declared.contains(identifier);
     } else if (comptime @TypeOf(query) == CapturedBindingReferences)
         query.names.contains(identifier)
-    else
-        std.mem.eql(u8, identifier, query);
+    else if (comptime @TypeOf(query) == RecordingCapturedBindingReferences) recording: {
+        if (query.names.getPtr(identifier)) |captured| if (!captured.*) {
+            captured.* = true;
+            query.captured_count.* += 1;
+        };
+        break :recording false;
+    } else std.mem.eql(u8, identifier, query);
 }
 
 fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
@@ -850,10 +928,10 @@ pub const Compiler = struct {
     /// Number of runtime declarative/with environments emitted above this
     /// activation's entry environment.
     environment_depth: u32 = 0,
-    /// The repeated loop body whose captured lexical declarations are currently
-    /// being lowered. Every nested block compares its direct declarations
-    /// against this root and creates an environment only when capture requires it.
-    repeated_body_root: ?*const Node = null,
+    /// The single classification for the repeated loop body currently being
+    /// lowered. Nested blocks reuse its exact captured-name and catch-pattern
+    /// results instead of walking the root once per lexical declaration.
+    repeated_body_captures: ?*const RepeatedBodyCaptures = null,
     /// >0 while compiling the body of a `try` whose catch handler is still live on
     /// the VM handler stack (the no-finally case). A call in tail position there
     /// must NOT be a tail call: the handler has to survive the call so a throw from
@@ -1422,65 +1500,61 @@ pub const Compiler = struct {
         for (stmts) |stmt| try self.predeclareLexicalNode(stmt);
     }
 
-    fn repeatedBodyBindingCaptured(body: *const Node, name: []const u8) bool {
-        return nameRefInClosure(body, name, false);
-    }
-
-    fn predeclareRepeatedBodyNode(self: *Compiler, node: *Node, body: *const Node) CompileError!void {
+    fn predeclareRepeatedBodyNode(self: *Compiler, node: *Node, captures: *const RepeatedBodyCaptures) CompileError!void {
         const scope = self.scope orelse return;
         switch (node.*) {
             .var_decl => |declaration| {
                 if (declaration.kind == .@"var") return;
-                if (repeatedBodyBindingCaptured(body, declaration.name))
+                if (captures.nameCaptured(declaration.name))
                     try scope.addEnvironmentLexical(self.arena, declaration.name, declaration.kind == .@"const")
                 else
                     _ = try scope.addLexical(self.arena, declaration.name, declaration.kind == .@"const");
             },
             .decl_group => |declarations| for (declarations) |declaration|
-                try self.predeclareRepeatedBodyNode(declaration, body),
+                try self.predeclareRepeatedBodyNode(declaration, captures),
             .destructure_decl => |declaration| {
                 if (declaration.kind == .@"var") return;
-                if (!patternNameCaptured(declaration.pattern, body)) return error.Unsupported;
+                if (!captures.patternCaptured(declaration.pattern)) return error.Unsupported;
                 try self.markEnvironmentLexicalPattern(declaration.pattern, declaration.kind == .@"const");
             },
             else => {},
         }
     }
 
-    fn predeclareRepeatedBodyList(self: *Compiler, stmts: []*Node, body: *const Node) CompileError!void {
-        for (stmts) |statement| try self.predeclareRepeatedBodyNode(statement, body);
+    fn predeclareRepeatedBodyList(self: *Compiler, stmts: []*Node, captures: *const RepeatedBodyCaptures) CompileError!void {
+        for (stmts) |statement| try self.predeclareRepeatedBodyNode(statement, captures);
     }
 
-    fn emitDeclareRepeatedBodyNode(self: *Compiler, node: *const Node, body: *const Node) CompileError!void {
+    fn emitDeclareRepeatedBodyNode(self: *Compiler, node: *const Node, captures: *const RepeatedBodyCaptures) CompileError!void {
         switch (node.*) {
-            .var_decl => |declaration| if (declaration.kind != .@"var" and repeatedBodyBindingCaptured(body, declaration.name))
+            .var_decl => |declaration| if (declaration.kind != .@"var" and captures.nameCaptured(declaration.name))
                 try self.emitDeclareEnvironmentLexicalName(declaration.name, declaration.kind == .@"const"),
-            .destructure_decl => |declaration| if (declaration.kind != .@"var" and patternNameCaptured(declaration.pattern, body))
+            .destructure_decl => |declaration| if (declaration.kind != .@"var" and captures.patternCaptured(declaration.pattern))
                 try self.emitDeclareEnvironmentLexicalPattern(declaration.pattern, declaration.kind == .@"const"),
             .decl_group => |declarations| for (declarations) |declaration|
-                try self.emitDeclareRepeatedBodyNode(declaration, body),
+                try self.emitDeclareRepeatedBodyNode(declaration, captures),
             else => {},
         }
     }
 
-    fn emitDeclareRepeatedBodyList(self: *Compiler, stmts: []*Node, body: *const Node) CompileError!void {
-        for (stmts) |statement| try self.emitDeclareRepeatedBodyNode(statement, body);
+    fn emitDeclareRepeatedBodyList(self: *Compiler, stmts: []*Node, captures: *const RepeatedBodyCaptures) CompileError!void {
+        for (stmts) |statement| try self.emitDeclareRepeatedBodyNode(statement, captures);
     }
 
-    fn repeatedBodyNodeNeedsEnvironment(node: *const Node, body: *const Node) bool {
+    fn repeatedBodyNodeNeedsEnvironment(node: *const Node, captures: *const RepeatedBodyCaptures) bool {
         return switch (node.*) {
-            .var_decl => |declaration| declaration.kind != .@"var" and repeatedBodyBindingCaptured(body, declaration.name),
-            .destructure_decl => |declaration| declaration.kind != .@"var" and patternNameCaptured(declaration.pattern, body),
+            .var_decl => |declaration| declaration.kind != .@"var" and captures.nameCaptured(declaration.name),
+            .destructure_decl => |declaration| declaration.kind != .@"var" and captures.patternCaptured(declaration.pattern),
             .decl_group => |declarations| blk: {
-                for (declarations) |declaration| if (repeatedBodyNodeNeedsEnvironment(declaration, body)) break :blk true;
+                for (declarations) |declaration| if (repeatedBodyNodeNeedsEnvironment(declaration, captures)) break :blk true;
                 break :blk false;
             },
             else => false,
         };
     }
 
-    fn repeatedBodyListNeedsEnvironment(stmts: []*Node, body: *const Node) bool {
-        for (stmts) |statement| if (repeatedBodyNodeNeedsEnvironment(statement, body)) return true;
+    fn repeatedBodyListNeedsEnvironment(stmts: []*Node, captures: *const RepeatedBodyCaptures) bool {
+        for (stmts) |statement| if (repeatedBodyNodeNeedsEnvironment(statement, captures)) return true;
         return false;
     }
 
@@ -1890,13 +1964,13 @@ pub const Compiler = struct {
             .block => |stmts| {
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
-                const repeated_root = self.repeated_body_root;
-                const captured_environment = if (repeated_root) |root|
-                    repeatedBodyListNeedsEnvironment(stmts, root)
+                const repeated_captures = self.repeated_body_captures;
+                const captured_environment = if (repeated_captures) |captures|
+                    repeatedBodyListNeedsEnvironment(stmts, captures)
                 else
                     false;
-                if (repeated_root) |root|
-                    try self.predeclareRepeatedBodyList(stmts, root)
+                if (repeated_captures) |captures|
+                    try self.predeclareRepeatedBodyList(stmts, captures)
                 else
                     try self.predeclareLexicalList(stmts);
                 const disposable_scope = self.scope == null and stmtListHasDisposableDecl(stmts);
@@ -1910,7 +1984,7 @@ pub const Compiler = struct {
                 if (captured_environment and !disposable_scope) {
                     try self.emitEnterEnvironment();
                 }
-                if (captured_environment) try self.emitDeclareRepeatedBodyList(stmts, repeated_root.?);
+                if (captured_environment) try self.emitDeclareRepeatedBodyList(stmts, repeated_captures.?);
                 try self.emitLexicalInitializersForList(stmts);
                 try self.compileStmtList(stmts);
                 if (captured_environment and !disposable_scope) try self.emitExitEnvironment();
@@ -2003,10 +2077,8 @@ pub const Compiler = struct {
 
     fn catchPatternUsesEnvironment(self: *Compiler, pattern: *Node, catch_block: *Node) bool {
         if (self.scope == null) return true;
-        return if (self.repeated_body_root != null)
-            patternNameCaptured(pattern, catch_block)
-        else
-            false;
+        _ = catch_block;
+        return if (self.repeated_body_captures) |captures| captures.catchPatternCaptured(pattern) else false;
     }
 
     /// Create every catch-pattern binding before BindingInitialization begins.
@@ -2152,12 +2224,12 @@ pub const Compiler = struct {
 
         try self.pushLexicalScope();
         defer self.popLexicalScope();
-        const repeated_root = self.repeated_body_root;
+        const repeated_captures = self.repeated_body_captures;
         var captured_environment = false;
         for (cases) |case| {
-            if (repeated_root) |root| {
-                try self.predeclareRepeatedBodyList(case.body, root);
-                captured_environment = captured_environment or repeatedBodyListNeedsEnvironment(case.body, root);
+            if (repeated_captures) |captures| {
+                try self.predeclareRepeatedBodyList(case.body, captures);
+                captured_environment = captured_environment or repeatedBodyListNeedsEnvironment(case.body, captures);
             } else try self.predeclareLexicalList(case.body);
         }
 
@@ -2165,7 +2237,7 @@ pub const Compiler = struct {
         // after discriminant evaluation but before any case-test evaluation.
         if (captured_environment) {
             try self.emitEnterEnvironment();
-            for (cases) |case| try self.emitDeclareRepeatedBodyList(case.body, repeated_root.?);
+            for (cases) |case| try self.emitDeclareRepeatedBodyList(case.body, repeated_captures.?);
         }
         if (self.scope != null) for (cases) |case| try self.emitLexicalInitializersForList(case.body);
 
@@ -2217,11 +2289,12 @@ pub const Compiler = struct {
     }
 
     fn compileRepeatedBody(self: *Compiler, body: *Node) CompileError!void {
-        if (!loopBodyCapturesLexical(body)) return self.compileStmt(body);
-        if (!repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
-        const saved_root = self.repeated_body_root;
-        self.repeated_body_root = body;
-        defer self.repeated_body_root = saved_root;
+        var captures = try RepeatedBodyCaptures.init(self.arena, body);
+        if (!captures.any()) return self.compileStmt(body);
+        if (!repeatedBodyCapturesSupported(body, &captures)) return error.Unsupported;
+        const saved_captures = self.repeated_body_captures;
+        self.repeated_body_captures = &captures;
+        defer self.repeated_body_captures = saved_captures;
         try self.compileStmt(body);
     }
 
@@ -2263,7 +2336,6 @@ pub const Compiler = struct {
         const captured_head = if (init_node) |ini| try forLoopCapturesLexical(self.arena, ini, cond, update, body) else false;
         if (captured_head and !loopHeadSupportsEnvironment(init_node.?))
             return error.Unsupported;
-        if (loopBodyCapturesLexical(body) and !repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
         const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
         if (lexical_scope) {
             try self.pushLexicalScope();
@@ -2384,7 +2456,6 @@ pub const Compiler = struct {
             kind != .@"var" and try forOfCapturesLexical(self.arena, target, var_init, iterable, body)
         else
             false;
-        if (loopBodyCapturesLexical(body) and !repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
         if (captured_binding and !patternSupportsEnvironment(target)) return error.Unsupported;
         const lexical_scope = self.scope != null and if (decl_kind) |kind|
             kind != .@"var" and (target.* == .identifier or captured_binding)
@@ -3989,6 +4060,47 @@ test "compiler loop binding query preserves capture classifications" {
             else => return error.TestUnexpectedResult,
         };
         try std.testing.expectEqual(case.captured, captured);
+    }
+}
+
+test "compiler repeated body query preserves capture classifications" {
+    const cases = [_]struct {
+        source: []const u8,
+        first: bool = false,
+        last: bool = false,
+        catch_binding: bool = false,
+        any: bool,
+    }{
+        .{ .source = "function f(){ while(false){ let first=0; let last=1; } }", .any = false },
+        .{ .source = "function f(){ while(false){ let first=0; let last=1; (function(){ return unrelated; }); } }", .any = false },
+        .{ .source = "function f(){ while(false){ let first=0; let last=1; (function(){ return first; }); } }", .first = true, .any = true },
+        .{ .source = "function f(){ while(false){ let first=0; let last=1; (function(){ return last; }); } }", .last = true, .any = true },
+        .{ .source = "function f(){ while(false){ let [first,last]=[]; (function(){ return last; }); } }", .last = true, .any = true },
+        .{ .source = "function f(){ while(false){ if(false){ let first=0; (function(){ return first; }); } } }", .first = true, .any = true },
+        .{ .source = "function f(){ while(false){ switch(0){ case 0: let last=1; (function(){ return last; }); } } }", .last = true, .any = true },
+        .{ .source = "function f(){ while(false){ try{ let first=0; (function(){ return first; }); }finally{} } }", .first = true, .any = true },
+        .{ .source = "function f(){ while(false){ try{}catch([first,last]){ (function(){ return last; }); } } }", .catch_binding = true, .any = true },
+        .{ .source = "function f(){ while(false){ while(false){ let first=0; (function(){ return first; }); } } }", .any = false },
+        .{ .source = "function f(){ while(false){ let first=0; while(false){ (function(){ return first; }); } } }", .first = true, .any = true },
+        .{ .source = "function f(){ while(false){ let last=1; class Box{ field=last; } } }", .last = true, .any = true },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
+        const program = try parser.parseProgram();
+        const statement = program.program[0].func_decl.body.block[0];
+        if (statement.* != .while_stmt) return error.TestUnexpectedResult;
+        const body = statement.while_stmt.body;
+        const captures = try RepeatedBodyCaptures.init(arena.allocator(), body);
+        try std.testing.expectEqual(case.first, captures.nameCaptured("first"));
+        try std.testing.expectEqual(case.last, captures.nameCaptured("last"));
+        try std.testing.expectEqual(case.any, captures.any());
+        if (case.catch_binding) {
+            if (body.* != .block or body.block.len != 1 or body.block[0].* != .try_stmt)
+                return error.TestUnexpectedResult;
+            try std.testing.expect(captures.catchPatternCaptured(body.block[0].try_stmt.catch_param.?));
+        }
     }
 }
 
