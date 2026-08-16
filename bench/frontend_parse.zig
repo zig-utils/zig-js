@@ -143,6 +143,8 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_param_body_direct_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_param_body_nested_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_escaped_identifiers_4096")) return 4096;
@@ -246,6 +248,14 @@ fn isUnicodeIdentifierWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_unicode_identifiers_");
 }
 
+fn isParamBodyDirectWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_param_body_direct_4096");
+}
+
+fn isParamBodyNestedWorkload(name: []const u8) bool {
+    return std.mem.eql(u8, name, "representative_frontend_param_body_nested_4096");
+}
+
 fn isPrivateNameWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_private_names_");
 }
@@ -322,7 +332,9 @@ fn isAnnexBRegexLiteralWorkload(name: []const u8) bool {
     return std.mem.eql(u8, name, "representative_frontend_regex_literals_annex_b_4096");
 }
 
-fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool) ![]const u8 {
+const ParamBodyShape = enum { ordinary, direct_lexical, nested_lexical };
+
+fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: bool, body_shape: ParamBodyShape) ![]const u8 {
     var source: std.ArrayListUnmanaged(u8) = .empty;
     try source.appendSlice(allocator, "function strictWidth(");
     for (0..width) |index| {
@@ -330,7 +342,13 @@ fn strictFunctionSource(allocator: std.mem.Allocator, width: usize, escaped: boo
         try source.appendSlice(allocator, if (escaped) "paramet\\u0065r" else "parameter");
         try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
     }
-    try source.appendSlice(allocator, "){\"use strict\";return 7;}");
+    try source.appendSlice(allocator, switch (body_shape) {
+        .ordinary => "){\"use strict\";return 7;}",
+        .direct_lexical => "){\"use strict\";let bodyOnly=1;return bodyOnly;}",
+        // A nested lexical binding may shadow a parameter; it is outside the
+        // function body's direct LexicallyDeclaredNames conflict set.
+        .nested_lexical => "){\"use strict\";{let parameter0=1;}return 7;}",
+    });
     return source.items;
 }
 
@@ -779,6 +797,28 @@ fn parseOnce(
     const scratch_allocator = if (observation != null) scratch_measured.allocator() else allocator;
     var parser = try js.Parser.initWithScratch(parser_allocator, scratch_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (isParamBodyDirectWorkload(workload) or isParamBodyNestedWorkload(workload)) {
+        const width = try workloadWidth(workload);
+        if (program.* != .program or program.program.len != 1) return error.InvalidProgram;
+        const declaration = program.program[0];
+        if (declaration.* != .func_decl or declaration.func_decl.params.len != width or
+            declaration.func_decl.body.* != .block or declaration.func_decl.body.block.len != 3)
+            return error.InvalidProgram;
+        const lexical = declaration.func_decl.body.block[1];
+        const lexical_name = if (isParamBodyNestedWorkload(workload)) nested: {
+            if (lexical.* != .block or lexical.block.len != 1 or lexical.block[0].* != .var_decl or
+                lexical.block[0].var_decl.kind != .let or
+                !std.mem.eql(u8, lexical.block[0].var_decl.name, "parameter0"))
+                return error.InvalidProgram;
+            break :nested lexical.block[0].var_decl.name;
+        } else direct: {
+            if (lexical.* != .var_decl or lexical.var_decl.kind != .let or
+                !std.mem.eql(u8, lexical.var_decl.name, "bodyOnly"))
+                return error.InvalidProgram;
+            break :direct lexical.var_decl.name;
+        };
+        return source.len + width + declaration.func_decl.body.block.len + lexical_name.len;
+    }
     if (isNestedArrowArgumentsWorkload(workload))
         return validateNestedArrowArgumentsProgram(program, source, try workloadWidth(workload));
     if (isNestedFunctionWorkload(workload))
@@ -1191,7 +1231,17 @@ pub fn main(init: std.process.Init) !void {
     } else if (isUnicodeIdentifierWorkload(workload))
         try unicodeIdentifierSource(init.arena.allocator(), width)
     else
-        try strictFunctionSource(init.arena.allocator(), width, isEscapedIdentifierWorkload(workload));
+        try strictFunctionSource(
+            init.arena.allocator(),
+            width,
+            isEscapedIdentifierWorkload(workload),
+            if (isParamBodyDirectWorkload(workload))
+                .direct_lexical
+            else if (isParamBodyNestedWorkload(workload))
+                .nested_lexical
+            else
+                .ordinary,
+        );
     for (0..warmup_calls) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;
