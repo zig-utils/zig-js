@@ -1157,16 +1157,28 @@ pub const Compiler = struct {
         }
     }
 
-    /// Detect functions with repeated lexical spellings. Their bindings receive
-    /// distinct slots, but the TDZ hazard scan is still spelling-based, so these
-    /// functions conservatively enable checks for every lexical slot.
-    fn functionHasShadowableLexical(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!bool {
-        var m: std.StringHashMapUnmanaged(ShadowBind) = .empty;
-        for (fnode.params) |p| try shadowAdd(arena, &m, p.name, false);
-        if (!fnode.is_expr_body) try shadowScanStmt(arena, &m, fnode.body);
-        var it = m.iterator();
-        while (it.next()) |e| if (e.value_ptr.lexical and e.value_ptr.count >= 2) return true;
-        return false;
+    const FunctionBindingInventory = struct {
+        bindings: std.StringHashMapUnmanaged(ShadowBind) = .empty,
+        has_lexical: bool = false,
+        has_shadowing: bool = false,
+    };
+
+    /// Build the spelling-based binding inventory once for both shadow and TDZ
+    /// classification. Distinct lexical bindings still receive distinct slots;
+    /// repeated spellings conservatively enable checks for every lexical slot.
+    fn functionBindingInventory(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!FunctionBindingInventory {
+        var inventory: FunctionBindingInventory = .{};
+        for (fnode.params) |param| try shadowAdd(arena, &inventory.bindings, param.name, false);
+        if (!fnode.is_expr_body) try shadowScanStmt(arena, &inventory.bindings, fnode.body);
+        var bindings = inventory.bindings.iterator();
+        while (bindings.next()) |entry| if (entry.value_ptr.lexical) {
+            inventory.has_lexical = true;
+            if (entry.value_ptr.count >= 2) {
+                inventory.has_shadowing = true;
+                break;
+            }
+        };
+        return inventory;
     }
 
     fn tdzDeclarePattern(arena: std.mem.Allocator, declared: *std.StringHashMapUnmanaged(void), pattern: *Node) CompileError!void {
@@ -1262,13 +1274,23 @@ pub const Compiler = struct {
     /// retained as a code-shape decision: only these chunks receive checked
     /// lexical opcodes, so ordinary initialized `let` loops keep their existing
     /// native-tier and quickening eligibility.
-    fn functionHasTdzHazard(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!bool {
+    fn functionHasTdzHazard(
+        arena: std.mem.Allocator,
+        fnode: *const ast.FunctionNode,
+        bindings: *const std.StringHashMapUnmanaged(ShadowBind),
+    ) CompileError!bool {
         if (fnode.is_expr_body) return false;
-        var bindings: std.StringHashMapUnmanaged(ShadowBind) = .empty;
-        for (fnode.params) |param| try shadowAdd(arena, &bindings, param.name, false);
-        try shadowScanStmt(arena, &bindings, fnode.body);
         var declared: std.StringHashMapUnmanaged(void) = .empty;
-        return tdzScanStmt(arena, fnode.body, &bindings, &declared);
+        return tdzScanStmt(arena, fnode.body, bindings, &declared);
+    }
+
+    fn functionNeedsTdzChecks(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!bool {
+        const binding_inventory = try functionBindingInventory(arena, fnode);
+        if (binding_inventory.has_shadowing) return true;
+        // With no lexical binding, no identifier can require a TDZ check. The
+        // exhaustive inventory proves that negative without a second AST walk.
+        if (!binding_inventory.has_lexical) return false;
+        return functionHasTdzHazard(arena, fnode, &binding_inventory.bindings);
     }
 
     pub const PlainFunctionCode = struct {
@@ -1338,8 +1360,7 @@ pub const Compiler = struct {
         // Shadowed lexicals receive distinct slots below. Conservatively check
         // every lexical in such a function until the TDZ scan itself is keyed by
         // binding identity rather than spelling.
-        const has_shadowing = try functionHasShadowableLexical(arena, fnode);
-        const tdz_checks = has_shadowing or try functionHasTdzHazard(arena, fnode);
+        const tdz_checks = try functionNeedsTdzChecks(arena, fnode);
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null, .tdz_checks = tdz_checks };
         for (fnode.params) |p| {
@@ -3748,10 +3769,10 @@ pub const Compiler = struct {
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
         const scope = try self.arena.create(FnScope);
-        const has_shadowing = !fnode.is_generator and try functionHasShadowableLexical(self.arena, fnode);
+        const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, fnode);
         scope.* = .{
             .parent = self.scope,
-            .tdz_checks = if (!fnode.is_generator) has_shadowing or try functionHasTdzHazard(self.arena, fnode) else false,
+            .tdz_checks = tdz_checks,
         };
 
         var template_admission: bc.FnTemplateAdmission = undefined;
@@ -4024,10 +4045,35 @@ test "compiler pending lexical query preserves TDZ classifications" {
         defer arena.deinit();
         var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
         const program = try parser.parseProgram();
+        const binding_inventory = try Compiler.functionBindingInventory(arena.allocator(), program.program[0].func_decl);
         try std.testing.expectEqual(
             case.hazardous,
-            try Compiler.functionHasTdzHazard(arena.allocator(), program.program[0].func_decl),
+            try Compiler.functionHasTdzHazard(
+                arena.allocator(),
+                program.program[0].func_decl,
+                &binding_inventory.bindings,
+            ),
         );
+    }
+}
+
+test "compiler plain function binding inventory preserves lexical and shadow classifications" {
+    const cases = [_]struct { source: []const u8, has_lexical: bool, has_shadowing: bool }{
+        .{ .source = "function f(parameter){ var local; }", .has_lexical = false, .has_shadowing = false },
+        .{ .source = "function f(){ let local; }", .has_lexical = true, .has_shadowing = false },
+        .{ .source = "function f(){ let [first, second] = []; }", .has_lexical = true, .has_shadowing = false },
+        .{ .source = "function f(){ { let local; } { let local; } }", .has_lexical = true, .has_shadowing = true },
+        .{ .source = "function f(parameter){ { let parameter; } }", .has_lexical = true, .has_shadowing = true },
+        .{ .source = "function f(){ try {} catch (caught) {} }", .has_lexical = true, .has_shadowing = false },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
+        const program = try parser.parseProgram();
+        const inventory = try Compiler.functionBindingInventory(arena.allocator(), program.program[0].func_decl);
+        try std.testing.expectEqual(case.has_lexical, inventory.has_lexical);
+        try std.testing.expectEqual(case.has_shadowing, inventory.has_shadowing);
     }
 }
 
