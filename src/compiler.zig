@@ -309,10 +309,14 @@ const LoopBindingNames = struct {
         self.single = name;
     }
 
-    fn referencedBy(self: *const LoopBindingNames, node: *const ast.Node) bool {
+    fn referencedByIn(self: *const LoopBindingNames, node: *const ast.Node, in_fn: bool) bool {
         if (self.multiple.count() == 0)
-            return if (self.single) |name| nameRefInClosure(node, name, false) else false;
-        return nameRefInClosure(node, CapturedBindingReferences{ .names = &self.multiple }, false);
+            return if (self.single) |name| nameRefInClosure(node, name, in_fn) else false;
+        return nameRefInClosure(node, CapturedBindingReferences{ .names = &self.multiple }, in_fn);
+    }
+
+    fn referencedBy(self: *const LoopBindingNames, node: *const ast.Node) bool {
+        return self.referencedByIn(node, false);
     }
 };
 
@@ -769,16 +773,16 @@ fn stmtListContainsNestedFuncDecl(stmts: []*Node) bool {
     return false;
 }
 
-/// Whether a deferred class member body references `name`. Computed keys are
+/// Whether deferred class member bodies reference any frame-slot name. Computed keys are
 /// deliberately excluded: they execute eagerly as VM operations, so closures
 /// created there capture frame slots normally. Methods, field initializers, and
 /// static blocks execute later through `eval_class` and can only resolve names
 /// available through its Environment chain.
-fn classDeferredBodiesCaptureName(members: []const ast.ClassMember, name: []const u8) bool {
+fn classDeferredBodiesCaptureNames(members: []const ast.ClassMember, names: *const LoopBindingNames) bool {
     for (members) |m| {
-        if (m.func) |func| if (nameRefInClosure(func, name, true)) return true;
-        if (m.field_init) |init| if (nameRefInClosure(init, name, true)) return true;
-        if (m.static_block) |block| if (nameRefInClosure(block, name, true)) return true;
+        if (m.func) |func| if (names.referencedByIn(func, true)) return true;
+        if (m.field_init) |init| if (names.referencedByIn(init, true)) return true;
+        if (m.static_block) |block| if (names.referencedByIn(block, true)) return true;
     }
     return false;
 }
@@ -787,25 +791,23 @@ fn classDeferredBodiesCaptureName(members: []const ast.ClassMember, name: []cons
 /// none of them closes over a slot in that activation or an enclosing VM frame.
 /// Global-only methods therefore remain bytecode-eligible; a real frame capture
 /// still rejects the whole function before execution.
-fn classDeferredBodiesCaptureFrame(scope: *const FnScope, members: []const ast.ClassMember) bool {
+fn classDeferredBodiesCaptureFrame(arena: std.mem.Allocator, scope: *const FnScope, members: []const ast.ClassMember) CompileError!bool {
+    var frame_names: LoopBindingNames = .{};
     var current: ?*const FnScope = scope;
     while (current) |frame_scope| : (current = frame_scope.parent) {
         var names = frame_scope.names.keyIterator();
-        while (names.next()) |name| {
-            if (classDeferredBodiesCaptureName(members, name.*)) return true;
-        }
+        while (names.next()) |name| try frame_names.add(arena, name.*);
         for (frame_scope.lexical_scopes.items) |bindings| {
             var lexical = bindings.iterator();
             while (lexical.next()) |entry| {
                 // Environment-backed bindings are exactly what eval_class can
                 // capture through its live Environment chain. Only a real frame
                 // slot remains unavailable to deferred class member evaluation.
-                if (!entry.value_ptr.environment and classDeferredBodiesCaptureName(members, entry.key_ptr.*))
-                    return true;
+                if (!entry.value_ptr.environment) try frame_names.add(arena, entry.key_ptr.*);
             }
         }
     }
-    return false;
+    return classDeferredBodiesCaptureNames(members, &frame_names);
 }
 
 fn functionHasBlockNestedFuncDecl(fnode: *const ast.FunctionNode) bool {
@@ -3252,7 +3254,7 @@ pub const Compiler = struct {
                 // global-only methods need no frame Environment and are safe.
                 // (Env-mode generators already expose locals in that chain.)
                 if (self.scope) |scope|
-                    if (classDeferredBodiesCaptureFrame(scope, c.members)) return error.Unsupported;
+                    if (try classDeferredBodiesCaptureFrame(self.arena, scope, c.members)) return error.Unsupported;
                 const computed_count = try self.compileClassComputedKeys(c.members);
                 _ = try self.chunk.emitAB(.eval_class, try self.chunk.addClass(node), computed_count);
             },
@@ -4186,28 +4188,36 @@ test "compiler reports stable plain-function admission reasons" {
 }
 
 test "compiler admits global-only class members and rejects frame captures" {
-    var safe_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer safe_arena.deinit();
-    var safe_parser = try @import("parser.zig").Parser.init(
-        safe_arena.allocator(),
+    const admitted = [_][]const u8{
         "function f(seed){ class Box { constructor(value){ this.value = value; } read(){ return this.value; } } return new Box(seed).read(); }",
-    );
-    const safe_program = try safe_parser.parseProgram();
-    switch (try Compiler.admitPlainFunction(safe_arena.allocator(), safe_program.program[0].func_decl)) {
-        .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
-        .rejected => return error.TestUnexpectedResult,
+        "function f(seed){ class Box { [seed](){ return 7; } } return Box; }",
+        "function f(){ while(false){ let seed=1; class Box { read(){ return seed; } } } return 7; }",
+    };
+    for (admitted) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
+        const program = try parser.parseProgram();
+        switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+            .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
+            .rejected => return error.TestUnexpectedResult,
+        }
     }
 
-    var capture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer capture_arena.deinit();
-    var capture_parser = try @import("parser.zig").Parser.init(
-        capture_arena.allocator(),
+    const rejected = [_][]const u8{
         "function f(seed){ class Box { read(){ return seed; } } return new Box().read(); }",
-    );
-    const capture_program = try capture_parser.parseProgram();
-    switch (try Compiler.admitPlainFunction(capture_arena.allocator(), capture_program.program[0].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+        "function f(seed){ class Box { field=seed; } return Box; }",
+        "function f(seed){ class Box { static { seed; } } return Box; }",
+    };
+    for (rejected) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
+        const program = try parser.parseProgram();
+        switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+            .compiled => return error.TestUnexpectedResult,
+            .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+        }
     }
 
     var private_key_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
