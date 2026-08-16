@@ -27,6 +27,11 @@ pub const StatementLocation = struct {
     debugger_statement: bool = false,
 };
 
+const StatementLocationCheckpoint = struct {
+    cursor: SourceLocation,
+    published_len: usize,
+};
+
 /// Whether `parseStatement` can publish `node` in `statement_locations`.
 /// Expression and synthetic Program nodes never enter that registry, so the
 /// evaluator can avoid a guaranteed-negative debugger lookup without weakening
@@ -145,12 +150,12 @@ pub const Parser = struct {
     /// Modules reject this exact offset before parsing, so one token stream can
     /// serve both public parse entry points without lexical-goal ambiguity.
     html_comment_offset: ?usize = null,
-    /// Statement locations are often requested in completion order rather than
-    /// source order (inner statement, block, outer statement). Keep the first
-    /// two one-shot lookups allocation-free, then build one exact line-start
-    /// table so attacker-controlled statement counts cannot rescan every prefix.
-    statement_location_queries: u8 = 0,
-    line_starts: ?[]usize = null,
+    /// Statement nodes are published in completion order (inner statement,
+    /// block, outer statement), but their parse entries are encountered in source
+    /// order. Resolve coordinates at entry with one forward-only cursor, then
+    /// retain the value until publication. This avoids both prefix rescans and an
+    /// attacker-proportional line index without widening tokens or AST nodes.
+    statement_location_cursor: SourceLocation = .{ .byte_offset = 0, .line = 1, .column = 1 },
     /// True while parsing a generator body, so `yield` is recognized as a yield
     /// expression rather than an identifier. Saved/restored around each function.
     in_generator: bool = false,
@@ -369,65 +374,45 @@ pub const Parser = struct {
         return sourceLocationAt(self.source, offset);
     }
 
-    fn statementLocationAt(self: *Parser, raw_offset: usize) std.mem.Allocator.Error!SourceLocation {
+    fn statementLocationAt(self: *Parser, raw_offset: usize) ParseError!SourceLocation {
         const offset = @min(raw_offset, self.source.len);
-        if (self.line_starts) |starts| return indexedSourceLocation(starts, offset);
-        if (self.statement_location_queries < 2) {
-            self.statement_location_queries += 1;
-            return sourceLocationAt(self.source, offset);
-        }
+        // Recursive-descent may rewind inside one statement while refining cover
+        // grammars, but it must never enter a later statement behind an earlier
+        // entry. Reject a future invariant violation instead of underflowing or
+        // reintroducing attacker-controlled prefix rescans.
+        if (offset < self.statement_location_cursor.byte_offset)
+            return self.fail(ParseError.UnexpectedToken);
 
-        const starts = try self.buildLineStarts();
-        self.line_starts = starts;
-        return indexedSourceLocation(starts, offset);
-    }
-
-    fn buildLineStarts(self: *Parser) std.mem.Allocator.Error![]usize {
-        var count: usize = 1;
-        var cursor: usize = 0;
-        while (cursor < self.source.len) {
+        var location = self.statement_location_cursor;
+        var cursor = location.byte_offset;
+        while (cursor < offset) {
             if (lex.lineTerminatorLen(self.source, cursor)) |len| {
-                count = std.math.add(usize, count, 1) catch return error.OutOfMemory;
+                // A token cannot start inside a multi-byte line terminator. Keep
+                // that lexer/parser contract executable in release builds.
+                if (len > offset - cursor) return self.fail(ParseError.UnexpectedToken);
                 cursor += len;
+                location.line += 1;
+                location.column = 1;
             } else {
                 cursor += 1;
+                location.column += 1;
             }
         }
-
-        const starts = try self.arena.alloc(usize, count);
-        starts[0] = 0;
-        var index: usize = 1;
-        cursor = 0;
-        while (cursor < self.source.len) {
-            if (lex.lineTerminatorLen(self.source, cursor)) |len| {
-                cursor += len;
-                starts[index] = cursor;
-                index += 1;
-            } else {
-                cursor += 1;
-            }
-        }
-        std.debug.assert(index == starts.len);
-        return starts;
+        location.byte_offset = offset;
+        self.statement_location_cursor = location;
+        return location;
     }
 
-    fn indexedSourceLocation(starts: []const usize, offset: usize) SourceLocation {
-        std.debug.assert(starts.len > 0 and starts[0] == 0);
-        var low: usize = 0;
-        var high: usize = starts.len;
-        while (low < high) {
-            const middle = low + (high - low) / 2;
-            if (starts[middle] <= offset)
-                low = middle + 1
-            else
-                high = middle;
-        }
-        const line_index = low - 1;
+    fn statementLocationCheckpoint(self: *const Parser) StatementLocationCheckpoint {
         return .{
-            .byte_offset = offset,
-            .line = line_index + 1,
-            .column = offset - starts[line_index] + 1,
+            .cursor = self.statement_location_cursor,
+            .published_len = self.statement_locations.items.len,
         };
+    }
+
+    fn restoreStatementLocationCheckpoint(self: *Parser, checkpoint: StatementLocationCheckpoint) void {
+        self.statement_location_cursor = checkpoint.cursor;
+        self.statement_locations.items.len = checkpoint.published_len;
     }
 
     /// Whether no line terminator separates the token `ahead` positions away from
@@ -1369,10 +1354,13 @@ pub const Parser = struct {
         const token = self.cur();
         const is_debugger = token.kind == .identifier and
             std.mem.eql(u8, token.text, "debugger") and !token.escaped_identifier;
+        // Capture at entry: nested statements complete first, but statement entry
+        // offsets are monotonic even when a production speculatively rewinds.
+        const location = try self.statementLocationAt(token.pos);
         const node = try self.parseStatementInner();
         try self.statement_locations.append(self.arena, .{
             .node = node,
-            .location = try self.statementLocationAt(token.pos),
+            .location = location,
             .debugger_statement = is_debugger,
         });
         return node;
@@ -1866,6 +1854,7 @@ pub const Parser = struct {
         // Detect `for (... in/of ...)`. Save position so we can fall back to a
         // classic `for (init; cond; update)` if it isn't an iteration form.
         const save = self.pos;
+        const statement_location_save = self.statementLocationCheckpoint();
         var decl_kind: ?ast.DeclKind = null;
         var is_using = false;
         var dispose: u8 = 0; // 1 = `using`, 2 = `await using` (for a for-of head)
@@ -1961,6 +1950,11 @@ pub const Parser = struct {
         };
         if (is_await) return ParseError.UnexpectedToken;
         self.pos = save; // not an iteration form — rewind and parse a classic for
+        // Discard locations for function bodies reached while refining the cover
+        // grammar. The discarded AST is arena-owned but unreachable; publishing
+        // its nodes would create ghost debugger locations and leave the forward
+        // source cursor ahead of the real classic-for parse.
+        self.restoreStatementLocationCheckpoint(statement_location_save);
 
         var init_node: ?*Node = null;
         if (self.match(.semicolon)) {
@@ -4668,7 +4662,7 @@ test "parser binding keyword table preserves exact reserved memberships" {
         try std.testing.expectEqual(BindingKeywordClass{}, bindingKeywordClass(ordinary));
 }
 
-test "parser indexes repeated statement locations across every line terminator" {
+test "parser advances statement locations across every line terminator" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const source = "first;\r\n/*x*/ second;\rthird;\xe2\x80\xa8fourth;\xe2\x80\xa9fifth;";
@@ -4676,15 +4670,15 @@ test "parser indexes repeated statement locations across every line terminator" 
     const program = try parser.parseProgram();
     try std.testing.expectEqual(@as(usize, 5), program.program.len);
     try std.testing.expectEqual(@as(usize, 5), parser.statement_locations.items.len);
-    try std.testing.expectEqual(@as(usize, 5), parser.line_starts.?.len);
     for ([_][]const u8{ "first", "second", "third", "fourth", "fifth" }, parser.statement_locations.items) |name, location| {
         const offset = std.mem.indexOf(u8, source, name) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(sourceLocationAt(source, offset), location.location);
     }
+    try std.testing.expectEqual(parser.statement_locations.items[4].location, parser.statement_location_cursor);
 
     var single = try Parser.init(arena.allocator(), "var one = [1, 2, 3];");
     _ = try single.parseProgram();
-    try std.testing.expect(single.line_starts == null);
+    try std.testing.expectEqual(SourceLocation{ .byte_offset = 0, .line = 1, .column = 1 }, single.statement_location_cursor);
 }
 
 test "parser statement registry excludes expressions and synthetic program roots" {
@@ -4706,28 +4700,38 @@ test "parser statement registry excludes expressions and synthetic program roots
     try std.testing.expect(!canPublishStatementLocation(&expression));
 }
 
-test "parser statement location index propagates allocation failures" {
-    var saw_out_of_memory = false;
-    var saw_success = false;
-    for (0..64) |fail_index| {
-        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
-        var arena = std.heap.ArenaAllocator.init(failing.allocator());
-        defer arena.deinit();
-        var parser = Parser.init(arena.allocator(), "first;\nsecond;\nthird;\nfourth;") catch |err| {
-            if (err != error.OutOfMemory) return err;
-            saw_out_of_memory = true;
-            continue;
-        };
-        _ = parser.parseProgram() catch |err| {
-            if (err != error.OutOfMemory) return err;
-            saw_out_of_memory = true;
-            continue;
-        };
-        saw_success = true;
-        break;
+test "parser rejects a non-monotonic statement location entry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try Parser.init(arena.allocator(), "first;\nsecond;");
+    try std.testing.expectEqual(SourceLocation{ .byte_offset = 7, .line = 2, .column = 1 }, try parser.statementLocationAt(7));
+    try std.testing.expectError(ParseError.UnexpectedToken, parser.statementLocationAt(0));
+}
+
+test "parser preserves completion-order locations across module exports and speculative for rewind" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const source =
+        \\export function outer() {
+        \\  for ((function() { debugger; })(); false; ) {}
+        \\}
+        \\export const later = 1;
+    ;
+    var parser = try Parser.init(arena.allocator(), source);
+    _ = try parser.parseModule();
+    try std.testing.expectEqual(@as(usize, 5), parser.statement_locations.items.len);
+
+    var saw_completion_order_descent = false;
+    var previous_offset: usize = 0;
+    for (parser.statement_locations.items, 0..) |entry, index| {
+        try std.testing.expectEqual(sourceLocationAt(source, entry.location.byte_offset), entry.location);
+        if (index > 0 and entry.location.byte_offset < previous_offset)
+            saw_completion_order_descent = true;
+        previous_offset = entry.location.byte_offset;
     }
-    try std.testing.expect(saw_out_of_memory);
-    try std.testing.expect(saw_success);
+    try std.testing.expect(saw_completion_order_descent);
+    const later_offset = std.mem.indexOf(u8, source, "const later") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(sourceLocationAt(source, later_offset), parser.statement_location_cursor);
 }
 
 test "parser derives arguments use in the active ordinary function scope" {
