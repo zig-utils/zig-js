@@ -2356,6 +2356,9 @@ pub const ObjectPrivateDataTag = enum(u8) {
     /// state-cell edge. If a C-API client attaches host data, the Promise edge
     /// is first spilled to ordinary rare state so both identities survive.
     promise,
+    /// Temporal wrappers likewise publish their typed native record through the
+    /// hot word. C-API host attachment spills it to the rare-state fallback.
+    temporal,
     jsthread_thread,
     jsthread_lock,
     jsthread_condition,
@@ -3535,6 +3538,7 @@ pub const Object = struct {
     }
 
     pub inline fn temporalData(self: *const Object) ?*TemporalData {
+        if (self.private_data_tag == .temporal) return @ptrCast(@alignCast(self.private_data));
         const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.temporal)) return null;
         return cold.rare.temporal.ptr;
@@ -3703,13 +3707,38 @@ pub const Object = struct {
     }
 
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
+        // Fresh Temporal wrappers own no native/host payload. Keep their one
+        // typed edge in the hot word instead of allocating ObjectColdState only
+        // to store another pointer to the same record.
+        if (self.private_data_tag == .none and self.private_data == null) {
+            self.private_data = @ptrCast(data);
+            self.private_data_tag = .temporal;
+            return;
+        }
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
     }
 
     pub fn clearTemporalData(self: *Object) void {
+        if (self.private_data_tag == .temporal) {
+            self.private_data = null;
+            self.private_data_tag = .none;
+            return;
+        }
         const cold = self.coldState() orelse return;
         if (cold.hasRare(.temporal)) cold.rare.temporal.ptr = null;
+    }
+
+    /// Preserve the immutable Temporal edge before `private_data` is
+    /// transferred to a C-API host. Ordinary JavaScript never allocates this
+    /// fallback sidecar.
+    pub fn spillTemporalData(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!void {
+        if (self.private_data_tag != .temporal) return;
+        const data: *TemporalData = @ptrCast(@alignCast(self.private_data orelse return));
+        const state = try self.ensureRare(fallback, .temporal, .{});
+        state.ptr = data;
+        self.private_data = null;
+        self.private_data_tag = .none;
     }
 
     pub inline fn promiseData(self: *const Object) ?*anyopaque {
@@ -7170,6 +7199,19 @@ test "ordinary object keeps four named property values inline before migrating" 
     state.list.deinit(std.testing.allocator);
     std.testing.allocator.destroy(state);
     std.testing.allocator.destroy(object.storageState().?);
+}
+
+test "Temporal hot private spill preserves state on allocation failure" {
+    var data = TemporalData{ .kind = .plain_date, .year = 2024, .month = 6, .day = 15 };
+    var object = Object{};
+    object.private_data = @ptrCast(&data);
+    object.private_data_tag = .temporal;
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+
+    try std.testing.expectError(error.OutOfMemory, object.spillTemporalData(failing.allocator()));
+    try std.testing.expectEqual(ObjectPrivateDataTag.temporal, object.private_data_tag);
+    try std.testing.expectEqual(@intFromPtr(&data), @intFromPtr(object.temporalData().?));
+    try std.testing.expect(object.storageState() == null);
 }
 
 fn exerciseExternalSlotsOomRollback(allocator: std.mem.Allocator) !void {

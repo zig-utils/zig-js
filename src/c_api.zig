@@ -2304,6 +2304,10 @@ fn attachClassToExistingObject(ctx: JSContextRef, c: *Context, obj: *Object, cla
         owner.finishOnce();
         return false;
     };
+    obj.spillTemporalData(c.arena()) catch {
+        owner.finishOnce();
+        return false;
+    };
     obj.private_data = data;
     obj.private_data_tag = .host;
     obj.setCApiObjectClass(c.arena(), owner, &c_api_class_hooks) catch {
@@ -20030,6 +20034,7 @@ export fn JSObjectSetPrivate(object: JSObjectRef, data: ?*anyopaque) callconv(.c
     const gc_saved = gc_mod.setActiveContext(boxed.owner);
     defer gc_mod.restoreActiveContext(gc_saved);
     obj.spillPromiseData(boxed.owner.arena()) catch return false;
+    obj.spillTemporalData(boxed.owner.arena()) catch return false;
     if (obj.private_data_tag == .none and obj.private_data == null) {
         obj.private_data = data;
         obj.private_data_tag = .host;
@@ -26540,6 +26545,29 @@ test "C-API: JSObject private data is host-owned and guarded" {
     try std.testing.expectEqual(@intFromPtr(engine_probe_ptr), @intFromPtr(JSObjectGetPrivate(promise_obj).?));
     try std.testing.expectEqual(@intFromPtr(promise_cell), @intFromPtr(objectFromHandleInspection(promise_obj).?.promiseData().?));
     try std.testing.expect(objectFromHandleInspection(promise_obj).?.coldState().?.hasRare(.promise));
+
+    const temporal_source = JSStringCreateWithUTF8CString("new Temporal.PlainDate(2024, 6, 15)") orelse return error.StringInitFailed;
+    defer JSStringRelease(temporal_source);
+    const temporal_ref = JSEvaluateScript(ctx, temporal_source, null, null, 0, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const temporal_obj = JSValueToObject(ctx, temporal_ref, &exception) orelse return error.ObjectCreateFailed;
+    try std.testing.expect(exception == null);
+    const temporal = objectFromHandleInspection(temporal_obj).?;
+    const temporal_data = temporal.temporalData().?;
+    try std.testing.expectEqual(value.ObjectPrivateDataTag.temporal, temporal.private_data_tag);
+    try std.testing.expect(temporal.coldState() == null);
+    try std.testing.expect(JSObjectSetPrivate(temporal_obj, engine_probe_ptr));
+    try std.testing.expectEqual(@intFromPtr(engine_probe_ptr), @intFromPtr(JSObjectGetPrivate(temporal_obj).?));
+    try std.testing.expectEqual(@intFromPtr(temporal_data), @intFromPtr(temporal.temporalData().?));
+    try std.testing.expectEqual(@as(i32, 2024), temporal.temporalData().?.year);
+    try std.testing.expect(temporal.coldState().?.hasRare(.temporal));
+
+    const year_name = JSStringCreateWithUTF8CString("year") orelse return error.StringInitFailed;
+    defer JSStringRelease(year_name);
+    const year = JSObjectGetProperty(ctx, temporal_obj, year_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 2024), JSValueToNumber(ctx, year, &exception));
+    try std.testing.expect(exception == null);
 }
 
 test "C-API: JSObjectMake creates ordinary realm objects" {
