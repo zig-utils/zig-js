@@ -14,16 +14,20 @@ declare const __filename: string;
 type ScenarioName =
   | "clean_library"
   | "incremental_library"
+  | "focused_engine_relink"
+  | "focused_engine_cached"
   | "focused_test_relink"
   | "focused_test_cached"
   | "full_unit_cold_history"
   | "full_unit_warm_history"
+  | "focused_engine_tsan"
   | "tsan_focused";
 
 type Scenario = {
   name: ScenarioName;
   description: string;
   args: string[];
+  cache_group?: string;
 };
 
 type Sample = {
@@ -44,7 +48,7 @@ type Sample = {
 };
 
 type Artifact = {
-  schema: "zig-js-build-feedback-v1";
+  schema: "zig-js-build-feedback-v1" | "zig-js-build-feedback-v2";
   complete: boolean;
   statistic: "median";
   sample_count: number;
@@ -69,6 +73,16 @@ type Artifact = {
 
 function requireValue(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
+}
+
+function expectFailure(action: () => void, message: string): void {
+  try {
+    action();
+  } catch (error) {
+    requireValue(String(error).includes(message), `unexpected failure: ${String(error)}`);
+    return;
+  }
+  throw new Error(`expected failure containing: ${message}`);
 }
 
 function commandOutput(argv: string[], fallback = "unavailable"): string {
@@ -132,16 +146,31 @@ function scenarios(jobs: number): Scenario[] {
       name: "clean_library",
       description: "empty isolated local/global caches; build the library and installed headers",
       args: [],
+      cache_group: "library",
     },
     {
       name: "incremental_library",
       description: "repeat the library build against the immediately preceding isolated caches",
       args: [],
+      cache_group: "library",
+    },
+    {
+      name: "focused_engine_relink",
+      description: "build the production-module frontend artifact in an empty isolated cache and run all 12 cases",
+      args: ["test-frontend"],
+      cache_group: "focused_engine",
+    },
+    {
+      name: "focused_engine_cached",
+      description: "reuse the focused-engine artifact with an exact one-case runtime filter",
+      args: ["test-frontend", "-Dtest-filter=template interpolation"],
+      cache_group: "focused_engine",
     },
     {
       name: "focused_test_relink",
-      description: "build the combined Debug unit artifact and run the executable-memory filter",
-      args: ["test", "-Dtest-filter=executable memory"],
+      description: "build the combined Debug unit artifact in an empty isolated cache and run one exact filter",
+      args: ["test", "-Dtest-filter=executable memory target matrix separates mapping from tier support"],
+      cache_group: "combined_unit",
     },
     {
       name: "focused_test_cached",
@@ -150,21 +179,31 @@ function scenarios(jobs: number): Scenario[] {
         "test",
         "-Dtest-filter=executable memory profile verifier rejects mismatched policy",
       ],
+      cache_group: "combined_unit",
     },
     {
       name: "full_unit_cold_history",
       description: `run the complete unit suite across ${jobs} shards with an empty timing-history directory`,
       args: ["test-parallel", `-Dunit-jobs=${jobs}`],
+      cache_group: "combined_unit",
     },
     {
       name: "full_unit_warm_history",
       description: `repeat the complete ${jobs}-shard suite using the immediately preceding timing history`,
       args: ["test-parallel", `-Dunit-jobs=${jobs}`],
+      cache_group: "combined_unit",
+    },
+    {
+      name: "focused_engine_tsan",
+      description: "build the focused production-module TSan artifact in an empty isolated cache and run one case",
+      args: ["test-frontend", "-Dtsan=true", "-Dtest-filter=template interpolation"],
+      cache_group: "focused_engine_tsan",
     },
     {
       name: "tsan_focused",
-      description: "build the TSan unit artifact and run the executable-memory filter",
-      args: ["test", "-Dtsan=true", "-Dtest-filter=executable memory"],
+      description: "build the combined TSan unit artifact in an empty isolated cache and run one exact filter",
+      args: ["test", "-Dtsan=true", "-Dtest-filter=executable memory profile verifier rejects mismatched policy"],
+      cache_group: "combined_tsan",
     },
   ];
 }
@@ -203,8 +242,10 @@ function runSample(
   cacheRoot: string,
 ): Sample {
   const scenarioArgs = scenario.args.slice(),
-    unitLogDir = `${cacheRoot}/unit-shards`,
-    environment = { ZIG_GLOBAL_CACHE_DIR: `${cacheRoot}/global` };
+    cacheGroup = scenario.cache_group || "shared",
+    groupRoot = `${cacheRoot}/${cacheGroup}`,
+    unitLogDir = `${groupRoot}/unit-shards`,
+    environment = { ZIG_GLOBAL_CACHE_DIR: `${groupRoot}/global` };
   if (scenario.name === "full_unit_cold_history" || scenario.name === "full_unit_warm_history")
     scenarioArgs.push(`-Dunit-log-dir=${unitLogDir}`);
   const command = [
@@ -212,9 +253,9 @@ function runSample(
       "build",
       ...scenarioArgs,
       "--cache-dir",
-      `${cacheRoot}/local`,
+      `${groupRoot}/local`,
       "--prefix",
-      `${cacheRoot}/prefix`,
+      `${groupRoot}/prefix`,
       "--summary",
       "all",
     ],
@@ -243,11 +284,47 @@ function runSample(
 }
 
 export function validate(artifact: Artifact): void {
-  requireValue(artifact.schema === "zig-js-build-feedback-v1", "build-feedback schema drift");
+  requireValue(
+    artifact.schema === "zig-js-build-feedback-v1" || artifact.schema === "zig-js-build-feedback-v2",
+    "build-feedback schema drift",
+  );
   requireValue(Number.isInteger(artifact.sample_count) && artifact.sample_count > 0, "invalid sample count");
   const names = artifact.scenarios.map((scenario) => scenario.name);
   requireValue(new Set(names).size === names.length, "duplicate scenario name");
+  if (artifact.schema === "zig-js-build-feedback-v2") {
+    requireValue(
+      JSON.stringify(names) === JSON.stringify([
+        "clean_library",
+        "incremental_library",
+        "focused_engine_relink",
+        "focused_engine_cached",
+        "focused_test_relink",
+        "focused_test_cached",
+        "full_unit_cold_history",
+        "full_unit_warm_history",
+        "focused_engine_tsan",
+        "tsan_focused",
+      ]),
+      "V2 scenario inventory drift",
+    );
+    requireValue(
+      JSON.stringify(artifact.scenarios.map((scenario) => scenario.cache_group)) === JSON.stringify([
+        "library",
+        "library",
+        "focused_engine",
+        "focused_engine",
+        "combined_unit",
+        "combined_unit",
+        "combined_unit",
+        "combined_unit",
+        "focused_engine_tsan",
+        "combined_tsan",
+      ]),
+      "V2 cache-group boundary drift",
+    );
+  }
   for (const name of names) {
+    const scenario = artifact.scenarios.find((entry) => entry.name === name)!;
     const rows = artifact.samples.filter((sample) => sample.scenario === name);
     requireValue(rows.length === artifact.sample_count, `${name}: incomplete sample inventory`);
     rows.forEach((row, index) => {
@@ -261,6 +338,29 @@ export function validate(artifact: Artifact): void {
       );
       if (name.startsWith("full_unit_"))
         requireValue(Boolean(row.unit_plan?.startsWith("shard\testimated_ms\tname\n")), `${name}: missing unit plan`);
+      if (artifact.schema === "zig-js-build-feedback-v2") {
+        const group = scenario.cache_group!;
+        requireValue(row.environment.ZIG_GLOBAL_CACHE_DIR.endsWith(`/${group}/global`), `${name}: global cache boundary drift`);
+        const cacheIndex = row.command.indexOf("--cache-dir"), prefixIndex = row.command.indexOf("--prefix");
+        requireValue(
+          cacheIndex >= 0 && row.command[cacheIndex + 1]?.endsWith(`/${group}/local`) &&
+            prefixIndex >= 0 && row.command[prefixIndex + 1]?.endsWith(`/${group}/prefix`),
+          `${name}: local cache or prefix boundary drift`,
+        );
+        const output = `${row.stdout}\n${row.stderr}`;
+        if (name === "focused_engine_relink")
+          requireValue(output.includes("focused engine frontend: 12 cases passed"), `${name}: exact denominator drift`);
+        else if (name === "focused_engine_cached" || name === "focused_engine_tsan")
+          requireValue(output.includes("focused engine frontend: 1 cases passed"), `${name}: exact denominator drift`);
+        else if (name === "focused_test_relink" || name === "focused_test_cached" || name === "tsan_focused") {
+          const match = /matched 1 of ([1-9][0-9]*) tests/.exec(output);
+          requireValue(Boolean(match), `${name}: exact nonzero denominator drift`);
+          requireValue(
+            output.includes("summary: 1 passed; 0 skipped; 0 failed; 0 leaked;"),
+            `${name}: exact result drift`,
+          );
+        }
+      }
     });
   }
   requireValue(artifact.complete, "build-feedback artifact is incomplete");
@@ -287,6 +387,9 @@ export function render(artifact: Artifact, rawName: string): string {
     `- zig-gc: \`${artifact.identity.zig_gc_revision}\`; zig-regex: \`${artifact.identity.zig_regex_revision}\``,
     `- power: ${artifact.identity.power.replace(/\n/g, " · ")}`,
     `- sampling: ${artifact.sample_count} sequential sample${artifact.sample_count === 1 ? "" : "s"} per phase; median; no outlier removal; isolated local/global caches per sample sequence`,
+    ...(artifact.schema === "zig-js-build-feedback-v2"
+      ? ["- cache boundary: library, focused-engine, combined-unit, focused-engine TSan, and combined-unit TSan groups are isolated; only adjacent phases with the same named group reuse cache state"]
+      : []),
     "",
     "| phase | scope | median wall | wall range | median CPU (user + system) | median peak RSS |",
     "| --- | --- | ---: | ---: | ---: | ---: |",
@@ -367,9 +470,49 @@ function selfTest(): void {
           unit_plan: null,
         },
       ],
-    };
+  };
   validate(artifact);
   requireValue(render(artifact, "raw.json").includes("2.50 s"), "report renderer failed");
+  if (fileExists("docs/.data/build-feedback-2026-08-09.json"))
+    validate(JSON.parse(readText("docs/.data/build-feedback-2026-08-09.json")) as Artifact);
+
+  const v2Scenarios = scenarios(2),
+    v2Samples = v2Scenarios.map((entry): Sample => {
+      const group = entry.cache_group!, output = entry.name === "focused_engine_relink"
+        ? "focused engine frontend: 12 cases passed\n"
+        : entry.name === "focused_engine_cached" || entry.name === "focused_engine_tsan"
+        ? "focused engine frontend: 1 cases passed\n"
+        : entry.name === "focused_test_relink" || entry.name === "focused_test_cached" || entry.name === "tsan_focused"
+        ? "zig-js unit tests: filter 'fixture' matched 1 of 1731 tests; shard 0/1 running 1\nzig-js unit tests: shard 0/1 summary: 1 passed; 0 skipped; 0 failed; 0 leaked; 0 ms\n"
+        : "";
+      return {
+        scenario: entry.name,
+        sample: 0,
+        command: ["zig", "build", ...entry.args, "--cache-dir", `/tmp/${group}/local`, "--prefix", `/tmp/${group}/prefix`],
+        environment: { ZIG_GLOBAL_CACHE_DIR: `/tmp/${group}/global` },
+        exit_code: 0,
+        timed_out: false,
+        ...parsed,
+        build_summary: ["Build Summary: 2/2 steps succeeded"],
+        stdout: output,
+        stderr: "",
+        unit_plan: entry.name.startsWith("full_unit_") ? "shard\testimated_ms\tname\n0\t1\tfixture\n" : null,
+      };
+    }),
+    v2Artifact: Artifact = {
+      ...artifact,
+      schema: "zig-js-build-feedback-v2",
+      scenarios: v2Scenarios,
+      samples: v2Samples,
+    };
+  validate(v2Artifact);
+  const brokenGroup = JSON.parse(JSON.stringify(v2Artifact)) as Artifact;
+  brokenGroup.scenarios[2].cache_group = "combined_unit";
+  expectFailure(() => validate(brokenGroup), "cache-group boundary drift");
+  const brokenDenominator = JSON.parse(JSON.stringify(v2Artifact)) as Artifact;
+  brokenDenominator.samples.find((row) => row.scenario === "focused_engine_cached")!.stdout =
+    "focused engine frontend: 0 cases passed\n";
+  expectFailure(() => validate(brokenDenominator), "exact denominator drift");
   console.log("build-feedback self-test: ok");
 }
 
@@ -395,7 +538,7 @@ function main(): void {
 
   const definitions = scenarios(options.jobs),
     artifact: Artifact = {
-      schema: "zig-js-build-feedback-v1",
+      schema: "zig-js-build-feedback-v2",
       complete: false,
       statistic: "median",
       sample_count: options.samples,
@@ -406,7 +549,8 @@ function main(): void {
   for (let sample = 0; sample < options.samples; sample += 1) {
     const cacheRoot = temporaryDirectory("zig-js-build-feedback");
     try {
-      for (const scenario of definitions) {
+      for (let scenarioIndex = 0; scenarioIndex < definitions.length; scenarioIndex += 1) {
+        const scenario = definitions[scenarioIndex];
         console.log(`[${sample + 1}/${options.samples}] ${scenario.name}`);
         const row = runSample(options.zig, scenario, sample, cacheRoot);
         artifact.samples.push(row);
@@ -417,6 +561,9 @@ function main(): void {
           writeText(options.rawOut, JSON.stringify(artifact, null, 2) + "\n");
           throw new Error(`${scenario.name} failed; incomplete raw artifact preserved at ${options.rawOut}`);
         }
+        const next = definitions[scenarioIndex + 1];
+        if (!next || next.cache_group !== scenario.cache_group)
+          removeTemporaryDirectory(`${cacheRoot}/${scenario.cache_group}`);
       }
     } finally {
       removeTemporaryDirectory(cacheRoot);

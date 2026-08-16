@@ -930,24 +930,35 @@ and rerunning any causal candidate on the reference host.
 
 [`tools/build-feedback.ts`](../tools/build-feedback.ts) measures the complete
 developer feedback path without deleting or reusing the checkout's ordinary
-build cache. Each sample sequence gets isolated local/global Zig caches, an
-isolated install prefix, and an isolated unit-shard history directory. It runs
-these phases in order:
+build cache. V2 gives the library, focused-engine, combined-unit,
+focused-engine TSan, and combined-unit TSan paths separate local/global cache
+groups and install prefixes. Only adjacent phases in one named group reuse
+state, so the two test artifacts have comparable cold and cached boundaries.
+Completed groups are removed during collection to bound disk use. It runs these
+phases in order:
 
 1. a clean library/header build;
 2. the immediate incremental cache-hit build;
-3. the first combined Debug unit-artifact link plus a focused runtime filter;
-4. a different focused filter against that cached artifact;
-5. the complete unit suite with empty shard history;
-6. the complete unit suite with the immediately preceding history; and
-7. a focused TSan artifact build and run.
+3. the production-module frontend artifact from an empty cache, running all 12
+   focused cases;
+4. an exact one-case runtime filter against that cached focused artifact;
+5. the combined Debug unit artifact from a separate empty cache, running one
+   exact nonzero filter;
+6. a different exact one-test filter against that cached combined artifact;
+7. the complete unit suite with empty shard history;
+8. the complete unit suite with the immediately preceding history;
+9. the focused production-module TSan artifact from an empty cache; and
+10. the combined TSan unit artifact from a separate empty cache.
 
 Every raw sample retains the exact command, exit/timeout state, complete
 stdout/stderr, Zig build summary, wall/user/system time, peak RSS, and (for
 full-suite phases) the exact `plan.tsv`. `/usr/bin/time -lp` observes the whole
 build process and its children; these are scenario-level process resources,
 not invented compiler-internal phase counters. Samples run sequentially and no
-outlier is discarded.
+outlier is discarded. V2 additionally rejects any cache-group drift, any
+focused-engine denominator other than 12 for the cold run or one for the cached
+and TSan runs, and any combined focused run that does not select exactly one
+test from a positive linked inventory with zero skips, failures, or leaks.
 
 ```sh
 zig build build-feedback-test
@@ -973,7 +984,9 @@ unit relink, cold-history full unit, warm-history full unit, and focused TSan
 walls were 67.08, 33.42, 214.08, 170.33, and 53.86 seconds respectively. The
 immediate incremental library and cached focused-filter medians were 0.13 and
 0.35 seconds. Read the report's ranges, CPU, peak RSS, exact command boundaries,
-and full raw output before comparing a future run.
+and full raw output before comparing a future run. That artifact remains the
+accepted V1 history; V2 adds the isolated focused-engine comparison without
+rewriting it.
 
 ## VM and tree-walker baseline
 
