@@ -1,4 +1,6 @@
-//! Parser-only growth runner for representative frontend complexity witnesses.
+//! Parse and compile growth runner for representative frontend complexity witnesses.
+//! Source construction is outside the scored boundary; every job owns a fresh
+//! arena and performs its complete parse, optional compile, and shape validation.
 //!
 //! Usage:
 //!   frontend-parse-benchmark single <workload> <jobs> <samples> [--darwin-rusage]
@@ -140,6 +142,16 @@ fn nowNs(io: std.Io) i96 {
 }
 
 fn workloadWidth(name: []const u8) !usize {
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_clear_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_clear_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_clear_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_unrelated_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_forward_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_self_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_declared_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_nested_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_class_field_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_class_static_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_strict_params_4096")) return 4096;
@@ -248,6 +260,24 @@ fn isUnicodeIdentifierWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_unicode_identifiers_");
 }
 
+const TdzCompileShape = enum { clear, unrelated, forward, self, declared, nested, class_field, class_static };
+
+fn tdzCompileShape(name: []const u8) ?TdzCompileShape {
+    const prefix = "representative_frontend_compile_tdz_";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const shape_end = std.mem.lastIndexOfScalar(u8, name, '_') orelse return null;
+    const shape = name[prefix.len..shape_end];
+    if (std.mem.eql(u8, shape, "clear")) return .clear;
+    if (std.mem.eql(u8, shape, "unrelated")) return .unrelated;
+    if (std.mem.eql(u8, shape, "forward")) return .forward;
+    if (std.mem.eql(u8, shape, "self")) return .self;
+    if (std.mem.eql(u8, shape, "declared")) return .declared;
+    if (std.mem.eql(u8, shape, "nested")) return .nested;
+    if (std.mem.eql(u8, shape, "class_field")) return .class_field;
+    if (std.mem.eql(u8, shape, "class_static")) return .class_static;
+    return null;
+}
+
 fn isParamBodyDirectWorkload(name: []const u8) bool {
     return std.mem.eql(u8, name, "representative_frontend_param_body_direct_4096");
 }
@@ -330,6 +360,58 @@ fn isUnicodeRegexLiteralWorkload(name: []const u8) bool {
 
 fn isAnnexBRegexLiteralWorkload(name: []const u8) bool {
     return std.mem.eql(u8, name, "representative_frontend_regex_literals_annex_b_4096");
+}
+
+fn appendIndexedIdentifier(source: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, prefix: []const u8, index: usize) !void {
+    try source.appendSlice(allocator, prefix);
+    try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+}
+
+fn appendTdzDeclarations(source: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, width: usize, first_self_reference: bool) !void {
+    for (0..width) |index| {
+        try source.appendSlice(allocator, "let ");
+        try appendIndexedIdentifier(source, allocator, "lexical", index);
+        try source.append(allocator, '=');
+        if (first_self_reference and index == 0)
+            try appendIndexedIdentifier(source, allocator, "lexical", index)
+        else
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        try source.append(allocator, ';');
+    }
+}
+
+fn tdzCompileSource(allocator: std.mem.Allocator, width: usize, shape: TdzCompileShape) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "function tdzWidth(){");
+    switch (shape) {
+        .unrelated => for (0..width) |index| {
+            try appendIndexedIdentifier(&source, allocator, "unrelated", index);
+            try source.append(allocator, ';');
+        },
+        .forward => {
+            try appendIndexedIdentifier(&source, allocator, "lexical", width - 1);
+            try source.append(allocator, ';');
+        },
+        .nested => {
+            try source.appendSlice(allocator, "function capture(){return ");
+            try appendIndexedIdentifier(&source, allocator, "lexical", width - 1);
+            try source.appendSlice(allocator, ";}");
+        },
+        .class_field, .class_static => {
+            try source.appendSlice(allocator, if (shape == .class_static) "class Holder{static field=" else "class Holder{field=");
+            try appendIndexedIdentifier(&source, allocator, "lexical", width - 1);
+            try source.appendSlice(allocator, ";}");
+        },
+        .clear, .self, .declared => {},
+    }
+    try appendTdzDeclarations(&source, allocator, width, shape == .self);
+    if (shape == .declared) {
+        try appendIndexedIdentifier(&source, allocator, "lexical", width - 1);
+        try source.append(allocator, ';');
+    }
+    if (shape == .nested) try source.appendSlice(allocator, "return capture;");
+    try source.append(allocator, '}');
+    return source.items;
 }
 
 const ParamBodyShape = enum { ordinary, direct_lexical, nested_lexical };
@@ -777,6 +859,83 @@ const AllocationObservation = struct {
     allocated_bytes: usize = 0,
 };
 
+fn foldChecksum(seed: usize, value: usize) usize {
+    const modulus = 1_000_000_007;
+    return ((seed * 131) % modulus + value % modulus) % modulus;
+}
+
+fn foldBytes(seed_start: usize, bytes: []const u8) usize {
+    var seed = seed_start;
+    for (bytes) |byte| seed = foldChecksum(seed, byte);
+    return seed;
+}
+
+fn foldChunk(seed_start: usize, chunk: anytype) usize {
+    var seed = foldChecksum(seed_start, chunk.code.items.len);
+    seed = foldChecksum(seed, chunk.consts.items.len);
+    seed = foldChecksum(seed, chunk.names.items.len);
+    seed = foldChecksum(seed, chunk.fns.items.len);
+    seed = foldChecksum(seed, chunk.lexical_slots.len);
+    for (chunk.code.items) |instruction| {
+        seed = foldChecksum(seed, @backingInt(instruction.op));
+        seed = foldChecksum(seed, instruction.a);
+        seed = foldChecksum(seed, instruction.b);
+    }
+    for (chunk.names.items) |name| seed = foldBytes(seed, name);
+    for (chunk.lexical_slots) |slot| seed = foldChecksum(seed, slot);
+    for (chunk.fns.items) |template| {
+        seed = foldBytes(seed, template.name);
+        seed = foldChecksum(seed, @backingInt(template.admission));
+        if (template.chunk) |nested| seed = foldChunk(seed, nested);
+    }
+    return seed;
+}
+
+fn chunkHasOp(chunk: anytype, target: js.bytecode.Op) bool {
+    for (chunk.code.items) |instruction| if (instruction.op == target) return true;
+    for (chunk.fns.items) |template| if (template.chunk) |nested|
+        if (chunkHasOp(nested, target)) return true;
+    return false;
+}
+
+fn validateTdzCompileProgram(
+    allocator: std.mem.Allocator,
+    program: anytype,
+    source: []const u8,
+    width: usize,
+    shape: TdzCompileShape,
+) !usize {
+    if (program.* != .program or program.program.len != 1) return error.InvalidProgram;
+    const declaration = program.program[0];
+    if (declaration.* != .func_decl or !std.mem.eql(u8, declaration.func_decl.name, "tdzWidth"))
+        return error.InvalidProgram;
+    const admission = try js.Compiler.admitPlainFunction(allocator, declaration.func_decl);
+    const class_deferred = shape == .class_field or shape == .class_static;
+    const code = switch (admission) {
+        .rejected => |reason| {
+            if (!class_deferred or reason != .unsupported_lowering) return error.InvalidProgram;
+            var checksum = foldChecksum(source.len, width);
+            checksum = foldChecksum(checksum, @backingInt(shape));
+            return foldChecksum(checksum, @backingInt(reason));
+        },
+        .compiled => |compiled| compiled,
+    };
+    if (class_deferred) return error.InvalidProgram;
+    const hazardous = shape == .forward or shape == .self or shape == .nested;
+    const expected_locals = width + @intFromBool(shape == .nested);
+    if (code.local_count != expected_locals or
+        code.chunk.lexical_slots.len != (if (hazardous) width else 0))
+        return error.InvalidProgram;
+    const has_initializer = chunkHasOp(code.chunk, .init_local_lexical);
+    const has_checked_load = chunkHasOp(code.chunk, .load_local_lexical) or
+        chunkHasOp(code.chunk, .load_upval_lexical);
+    if (has_initializer != hazardous or has_checked_load != hazardous) return error.InvalidProgram;
+    var checksum = foldChecksum(source.len, width);
+    checksum = foldChecksum(checksum, @backingInt(shape));
+    checksum = foldChecksum(checksum, code.local_count);
+    return foldChunk(checksum, code.chunk);
+}
+
 fn parseOnce(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -797,6 +956,8 @@ fn parseOnce(
     const scratch_allocator = if (observation != null) scratch_measured.allocator() else allocator;
     var parser = try js.Parser.initWithScratch(parser_allocator, scratch_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (tdzCompileShape(workload)) |shape|
+        return validateTdzCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (isParamBodyDirectWorkload(workload) or isParamBodyNestedWorkload(workload)) {
         const width = try workloadWidth(workload);
         if (program.* != .program or program.program.len != 1) return error.InvalidProgram;
@@ -1163,8 +1324,11 @@ pub fn main(init: std.process.Init) !void {
     const nested_function_workload = isNestedFunctionWorkload(workload);
     const nested_arrow_workload = isNestedArrowArgumentsWorkload(workload);
     const regex_literal_workload = isRegexLiteralWorkload(workload);
+    const tdz_compile_shape = tdzCompileShape(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (regex_literal_workload)
+    const source = if (tdz_compile_shape) |shape|
+        try tdzCompileSource(init.arena.allocator(), width, shape)
+    else if (regex_literal_workload)
         try regexLiteralSource(
             init.arena.allocator(),
             width,
@@ -1242,7 +1406,11 @@ pub fn main(init: std.process.Init) !void {
             else
                 .ordinary,
         );
-    for (0..warmup_calls) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
+    // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
+    // complete untimed jobs settle process startup without turning ten
+    // attacker-sized classifier walks into an unreported timing boundary.
+    const workload_warmups: usize = if (tdz_compile_shape != null) 2 else warmup_calls;
+    for (0..workload_warmups) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);

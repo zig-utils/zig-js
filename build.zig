@@ -2245,7 +2245,7 @@ pub fn build(b: *std.Build) void {
         frontend_parse_benchmark.root_module.linkFramework("Foundation", .{});
     }
     const install_frontend_parse_benchmark = b.addInstallArtifact(frontend_parse_benchmark, .{});
-    const frontend_parse_benchmark_step = b.step("frontend-parse-benchmark-bin", "Build the parser-only frontend growth runner");
+    const frontend_parse_benchmark_step = b.step("frontend-parse-benchmark-bin", "Build the parse and compile frontend growth runner");
     frontend_parse_benchmark_step.dependOn(&install_frontend_parse_benchmark.step);
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{

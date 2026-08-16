@@ -59,8 +59,8 @@ export function sampleRecord(row: RunnerRow, variant: string, pairSample: number
   measured(metrics, "process_cpu_system_ns", row.process_cpu_system_ns, "/usr/bin/time -l sys");
   measured(metrics, "peak_rss_bytes", row.peak_rss_bytes, "/usr/bin/time -l maximum resident set size");
   if (row.retained_rss_bytes !== null) measured(metrics, "retained_rss_bytes", row.retained_rss_bytes, "task_vm_info.resident_size at the post-invocation live snapshot");
-  if (row.allocations !== null) measured(metrics, "allocations", row.allocations, "untimed exact-work parser allocator replay: alloc + resize/remap requests");
-  if (row.allocated_bytes !== null) measured(metrics, "allocated_bytes", row.allocated_bytes, "untimed exact-work parser allocator replay: cumulative bytes");
+  if (row.allocations !== null) measured(metrics, "allocations", row.allocations, "untimed exact-work frontend parse/compile allocator replay: alloc + resize/remap requests");
+  if (row.allocated_bytes !== null) measured(metrics, "allocated_bytes", row.allocated_bytes, "untimed exact-work frontend parse/compile allocator replay: cumulative bytes");
   measured(metrics, "instructions", row.instructions, "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta");
   measured(metrics, "cycles", row.cycles, "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta");
   measured(metrics, "energy_joules", row.energy_joules, "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9");
