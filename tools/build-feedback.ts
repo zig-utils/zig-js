@@ -351,7 +351,7 @@ export function validate(artifact: Artifact): void {
         if (name === "focused_engine_relink")
           requireValue(output.includes("focused engine frontend: 12 cases passed"), `${name}: exact denominator drift`);
         else if (name === "focused_engine_cached" || name === "focused_engine_tsan")
-          requireValue(output.includes("focused engine frontend: 1 cases passed"), `${name}: exact denominator drift`);
+          requireValue(output.includes("focused engine frontend: 1 case passed"), `${name}: exact denominator drift`);
         else if (name === "focused_test_relink" || name === "focused_test_cached" || name === "tsan_focused") {
           const match = /matched 1 of ([1-9][0-9]*) tests/.exec(output);
           requireValue(Boolean(match), `${name}: exact nonzero denominator drift`);
@@ -481,7 +481,7 @@ function selfTest(): void {
       const group = entry.cache_group!, output = entry.name === "focused_engine_relink"
         ? "focused engine frontend: 12 cases passed\n"
         : entry.name === "focused_engine_cached" || entry.name === "focused_engine_tsan"
-        ? "focused engine frontend: 1 cases passed\n"
+        ? "focused engine frontend: 1 case passed\n"
         : entry.name === "focused_test_relink" || entry.name === "focused_test_cached" || entry.name === "tsan_focused"
         ? "zig-js unit tests: filter 'fixture' matched 1 of 1731 tests; shard 0/1 running 1\nzig-js unit tests: shard 0/1 summary: 1 passed; 0 skipped; 0 failed; 0 leaked; 0 ms\n"
         : "";
@@ -570,7 +570,13 @@ function main(): void {
     }
   }
   artifact.complete = true;
-  validate(artifact);
+  try {
+    validate(artifact);
+  } catch (error) {
+    artifact.complete = false;
+    writeText(options.rawOut, JSON.stringify(artifact, null, 2) + "\n");
+    throw error;
+  }
   writeText(options.rawOut, JSON.stringify(artifact, null, 2) + "\n");
   const rawName = options.rawOut.split("/").pop();
   writeText(options.markdownOut, render(artifact, rawName));
