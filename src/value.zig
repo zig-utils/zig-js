@@ -1279,6 +1279,90 @@ pub const IntlCollatorData = struct {
     }
 };
 
+/// Fully resolved, immutable Intl.DisplayNames state. All observable option
+/// reads complete before publication; steady `of` and `resolvedOptions` calls
+/// use closed enums plus one object-owned locale copy.
+pub const IntlDisplayNamesData = struct {
+    pub const Style = enum(u8) {
+        narrow,
+        short,
+        long,
+
+        pub fn fromString(name: []const u8) Style {
+            if (std.mem.eql(u8, name, "narrow")) return .narrow;
+            if (std.mem.eql(u8, name, "short")) return .short;
+            return .long;
+        }
+
+        pub fn string(self: Style) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    pub const Kind = enum(u8) {
+        language,
+        region,
+        script,
+        currency,
+        calendar,
+        date_time_field,
+
+        pub fn fromString(name: []const u8) Kind {
+            if (std.mem.eql(u8, name, "region")) return .region;
+            if (std.mem.eql(u8, name, "script")) return .script;
+            if (std.mem.eql(u8, name, "currency")) return .currency;
+            if (std.mem.eql(u8, name, "calendar")) return .calendar;
+            if (std.mem.eql(u8, name, "dateTimeField")) return .date_time_field;
+            return .language;
+        }
+
+        pub fn string(self: Kind) []const u8 {
+            return switch (self) {
+                .date_time_field => "dateTimeField",
+                else => @tagName(self),
+            };
+        }
+    };
+
+    pub const Fallback = enum(u8) {
+        code,
+        none,
+
+        pub fn fromString(name: []const u8) Fallback {
+            return if (std.mem.eql(u8, name, "none")) .none else .code;
+        }
+
+        pub fn string(self: Fallback) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    pub const LanguageDisplay = enum(u8) {
+        dialect,
+        standard,
+
+        pub fn fromString(name: []const u8) LanguageDisplay {
+            return if (std.mem.eql(u8, name, "standard")) .standard else .dialect;
+        }
+
+        pub fn string(self: LanguageDisplay) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    locale: []const u8 = "en",
+    style: Style = .long,
+    kind: Kind = .language,
+    fallback: Fallback = .code,
+    language_display: LanguageDisplay = .dialect,
+    owned_locale: ?[]u8 = null,
+
+    pub fn deinit(self: *IntlDisplayNamesData, allocator: std.mem.Allocator) void {
+        if (self.owned_locale) |owned| allocator.free(owned);
+        self.owned_locale = null;
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1415,6 +1499,7 @@ pub const ObjectRareTag = enum(u8) {
     intl_number_format,
     intl_date_time_format,
     intl_collator,
+    intl_display_names,
     temporal,
     promise,
     constructor,
@@ -1515,6 +1600,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     intl_number_format: struct { ptr: ?*IntlNumberFormatData = null },
     intl_date_time_format: struct { ptr: ?*IntlDateTimeFormatData = null },
     intl_collator: struct { ptr: ?*IntlCollatorData = null },
+    intl_display_names: struct { ptr: ?*IntlDisplayNamesData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -1754,6 +1840,7 @@ pub const ObjectBackingFlags = packed struct {
     intl_number_format: bool = false,
     intl_date_time_format: bool = false,
     intl_collator: bool = false,
+    intl_display_names: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -3018,6 +3105,22 @@ pub const Object = struct {
         if (cold.hasRare(.intl_collator)) cold.rare.intl_collator.ptr = null;
     }
 
+    pub inline fn intlDisplayNamesData(self: *const Object) ?*IntlDisplayNamesData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_display_names)) return null;
+        return cold.rare.intl_display_names.ptr;
+    }
+
+    pub fn setIntlDisplayNamesData(self: *Object, fallback: std.mem.Allocator, data: *IntlDisplayNamesData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_display_names, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlDisplayNamesData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_display_names)) cold.rare.intl_display_names.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3372,6 +3475,17 @@ pub const Object = struct {
         data.deinit(a);
         a.destroy(data);
         self.deactivateBacking("intl_collator");
+    }
+
+    pub fn intlDisplayNamesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_display_names");
+    }
+
+    pub fn destroyUninstalledIntlDisplayNames(self: *Object, fallback: std.mem.Allocator, data: *IntlDisplayNamesData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_display_names");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {

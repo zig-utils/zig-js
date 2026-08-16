@@ -18436,6 +18436,36 @@ test "Intl.Collator compare reclaims adversarial sort keys under a heap limit" {
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
+test "Intl.DisplayNames reclaims compound-tag scratch under a heap limit" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 32 * 1024 * 1024,
+        .step_budget = std.math.maxInt(u64),
+    });
+    defer ctx.destroy();
+    const before = ctx.heapBudgetStats().?.used_bytes;
+
+    const result = try ctx.evaluate(
+        \\const languages = new Intl.DisplayNames("en", {
+        \\  type: "language",
+        \\  languageDisplay: "standard",
+        \\  fallback: "code"
+        \\});
+        \\const currencies = new Intl.DisplayNames("en", { type: "currency" });
+        \\const language = "en-Latn-US-variant1-variant2-variant3";
+        \\let checksum = 0;
+        \\for (let index = 0; index < 4096; index++) {
+        \\  checksum = (checksum + languages.of(language).length + currencies.of(index & 1 ? "usd" : "eur").length) % 1000003;
+        \\}
+        \\checksum > 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.used_bytes -| before < 4 * 1024 * 1024);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
 test "Context step_budget keeps the default runaway guard and honours an override" {
     // The guard still fires for an ordinary embedding: `evaluate` must return
     // rather than spin forever on a runaway script.
