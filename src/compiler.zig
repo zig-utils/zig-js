@@ -321,8 +321,69 @@ fn bodyStmtCapturesLexical(node: *const ast.Node, body: *const ast.Node) bool {
     };
 }
 
-fn forLoopCapturesLexical(init_node: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) bool {
-    return forLoopBindingCaptured(init_node, init_node, cond, update, body);
+const CapturedBindingReferences = struct {
+    names: *const std.StringHashMapUnmanaged(void),
+};
+
+const LoopBindingNames = struct {
+    single: ?[]const u8 = null,
+    multiple: std.StringHashMapUnmanaged(void) = .{},
+
+    fn add(self: *LoopBindingNames, arena: std.mem.Allocator, name: []const u8) CompileError!void {
+        if (self.multiple.count() != 0) {
+            try self.multiple.put(arena, name, {});
+            return;
+        }
+        if (self.single) |existing| {
+            if (std.mem.eql(u8, existing, name)) return;
+            try self.multiple.put(arena, existing, {});
+            try self.multiple.put(arena, name, {});
+            return;
+        }
+        self.single = name;
+    }
+
+    fn referencedBy(self: *const LoopBindingNames, node: *const ast.Node) bool {
+        if (self.multiple.count() == 0)
+            return if (self.single) |name| nameRefInClosure(node, name, false) else false;
+        return nameRefInClosure(node, CapturedBindingReferences{ .names = &self.multiple }, false);
+    }
+};
+
+fn collectPatternBindingNames(arena: std.mem.Allocator, pattern: *const ast.Node, names: *LoopBindingNames) CompileError!void {
+    switch (pattern.*) {
+        .identifier => |name| try names.add(arena, name),
+        .obj_pattern => |object| {
+            for (object.props) |property| try collectPatternBindingNames(arena, property.target, names);
+            if (object.rest) |rest| try collectPatternBindingNames(arena, rest, names);
+        },
+        .arr_pattern => |array| {
+            for (array.elems) |element| if (element.target) |target|
+                try collectPatternBindingNames(arena, target, names);
+            if (array.rest) |rest| try collectPatternBindingNames(arena, rest, names);
+        },
+        else => {},
+    }
+}
+
+fn collectLoopBindingNames(arena: std.mem.Allocator, node: *const ast.Node, names: *LoopBindingNames) CompileError!void {
+    switch (node.*) {
+        .var_decl => |declaration| if (declaration.kind != .@"var") try names.add(arena, declaration.name),
+        .destructure_decl => |declaration| if (declaration.kind != .@"var")
+            try collectPatternBindingNames(arena, declaration.pattern, names),
+        .decl_group => |declarations| for (declarations) |declaration|
+            try collectLoopBindingNames(arena, declaration, names),
+        else => {},
+    }
+}
+
+fn forLoopCapturesLexical(arena: std.mem.Allocator, init_node: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) CompileError!bool {
+    var names: LoopBindingNames = .{};
+    try collectLoopBindingNames(arena, init_node, &names);
+    return names.referencedBy(init_node) or
+        (if (cond) |condition| names.referencedBy(condition) else false) or
+        (if (update) |increment| names.referencedBy(increment) else false) or
+        names.referencedBy(body);
 }
 
 fn patternHasEvaluationExpressions(pattern: *const ast.Node) bool {
@@ -347,49 +408,12 @@ fn patternHasEvaluationExpressions(pattern: *const ast.Node) bool {
     };
 }
 
-fn forLoopBindingCaptured(binding_node: *const ast.Node, whole_head: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) bool {
-    return switch (binding_node.*) {
-        .var_decl => |d| d.kind != .@"var" and
-            (nameRefInClosure(whole_head, d.name, false) or
-                (if (cond) |condition| nameRefInClosure(condition, d.name, false) else false) or
-                (if (update) |increment| nameRefInClosure(increment, d.name, false) else false) or
-                nameRefInClosure(body, d.name, false)),
-        .destructure_decl => |d| d.kind != .@"var" and
-            (patternNameCaptured(d.pattern, whole_head) or
-                (if (cond) |condition| patternNameCaptured(d.pattern, condition) else false) or
-                (if (update) |increment| patternNameCaptured(d.pattern, increment) else false) or
-                patternNameCaptured(d.pattern, body)),
-        // `let a = 0, b = 0` — a group of declarators; any captured name bails.
-        .decl_group => |group| blk: {
-            for (group) |declaration| if (forLoopBindingCaptured(declaration, whole_head, cond, update, body)) break :blk true;
-            break :blk false;
-        },
-        else => false,
-    };
-}
-
-fn forOfCapturesLexical(target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) bool {
-    return patternNameCapturedInForOf(target, target, var_init, iterable, body);
-}
-
-fn patternNameCapturedInForOf(binding: *const ast.Node, whole_target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) bool {
-    return switch (binding.*) {
-        .identifier => |name| nameRefInClosure(whole_target, name, false) or
-            (if (var_init) |initializer| nameRefInClosure(initializer, name, false) else false) or
-            nameRefInClosure(iterable, name, false) or nameRefInClosure(body, name, false),
-        .obj_pattern => |pattern| blk: {
-            for (pattern.props) |property| if (patternNameCapturedInForOf(property.target, whole_target, var_init, iterable, body)) break :blk true;
-            if (pattern.rest) |rest| if (patternNameCapturedInForOf(rest, whole_target, var_init, iterable, body)) break :blk true;
-            break :blk false;
-        },
-        .arr_pattern => |pattern| blk: {
-            for (pattern.elems) |element| if (element.target) |element_target|
-                if (patternNameCapturedInForOf(element_target, whole_target, var_init, iterable, body)) break :blk true;
-            if (pattern.rest) |rest| if (patternNameCapturedInForOf(rest, whole_target, var_init, iterable, body)) break :blk true;
-            break :blk false;
-        },
-        else => false,
-    };
+fn forOfCapturesLexical(arena: std.mem.Allocator, target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) CompileError!bool {
+    var names: LoopBindingNames = .{};
+    try collectPatternBindingNames(arena, target, &names);
+    return names.referencedBy(target) or
+        (if (var_init) |initializer| names.referencedBy(initializer) else false) or
+        names.referencedBy(iterable) or names.referencedBy(body);
 }
 
 /// Are any of the binding identifiers in a destructuring loop head (`for (let
@@ -429,7 +453,10 @@ fn identifierReferenceMatches(query: anytype, identifier: []const u8) bool {
     return if (comptime @TypeOf(query) == PendingLexicalReferences) pending: {
         const binding = query.bindings.get(identifier) orelse break :pending false;
         break :pending binding.lexical and !query.declared.contains(identifier);
-    } else std.mem.eql(u8, identifier, query);
+    } else if (comptime @TypeOf(query) == CapturedBindingReferences)
+        query.names.contains(identifier)
+    else
+        std.mem.eql(u8, identifier, query);
 }
 
 fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
@@ -2233,7 +2260,7 @@ pub const Compiler = struct {
         // retain O(1) frame slots. Environment-backed patterns lower their
         // defaults and computed keys as bytecode in the active binding scope.
         if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
-        const captured_head = if (init_node) |ini| forLoopCapturesLexical(ini, cond, update, body) else false;
+        const captured_head = if (init_node) |ini| try forLoopCapturesLexical(self.arena, ini, cond, update, body) else false;
         if (captured_head and !loopHeadSupportsEnvironment(init_node.?))
             return error.Unsupported;
         if (loopBodyCapturesLexical(body) and !repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
@@ -2354,7 +2381,7 @@ pub const Compiler = struct {
         // frame slot. Environment-backed patterns lower defaults and computed
         // keys directly, so every iterator result initializes the fresh record.
         const captured_binding = if (decl_kind) |kind|
-            kind != .@"var" and forOfCapturesLexical(target, var_init, iterable, body)
+            kind != .@"var" and try forOfCapturesLexical(self.arena, target, var_init, iterable, body)
         else
             false;
         if (loopBodyCapturesLexical(body) and !repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
@@ -3928,6 +3955,40 @@ test "compiler pending lexical query preserves TDZ classifications" {
             case.hazardous,
             try Compiler.functionHasTdzHazard(arena.allocator(), program.program[0].func_decl),
         );
+    }
+}
+
+test "compiler loop binding query preserves capture classifications" {
+    const cases = [_]struct { source: []const u8, captured: bool }{
+        .{ .source = "function f(){ for (let first = 0; false;) {} }", .captured = false },
+        .{ .source = "function f(){ for (let first = 0, last = 1; false;) { (function(){ return unrelated; }); } }", .captured = false },
+        .{ .source = "function f(){ for (let first = 0, last = 1; false;) { (function(){ return first; }); } }", .captured = true },
+        .{ .source = "function f(){ for (let first = 0, last = 1; false;) { (function(){ return last; }); } }", .captured = true },
+        .{ .source = "function f(){ for (let first = function(){ return last; }, last = 1; false;) {} }", .captured = true },
+        .{ .source = "function f(){ for (let value = 0; (function(){ return value; });) {} }", .captured = true },
+        .{ .source = "function f(){ for (let value = 0; false; (function(){ return value; })) {} }", .captured = true },
+        .{ .source = "function f(){ for (let [value, read = function(){ return value; }] = []; false;) {} }", .captured = true },
+        .{ .source = "function f(){ for (let value = 0; false;) { class Box { field = value; } } }", .captured = true },
+        .{ .source = "function f(){ for (let value of []) { value; } }", .captured = false },
+        .{ .source = "function f(){ for (let value of [function(){ return value; }]) {} }", .captured = true },
+        .{ .source = "function f(){ for (let [first, last] of []) { (function(){ return last; }); } }", .captured = true },
+        .{ .source = "function f(){ for (let value of []) { for (;;) { (function(){ return value; }); } } }", .captured = true },
+        // Shadowing remains deliberately conservative, matching the previous
+        // exact-name scans until the classifier owns full lexical resolution.
+        .{ .source = "function f(){ for (let value of []) { (function(value){ return value; }); } }", .captured = true },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
+        const program = try parser.parseProgram();
+        const body = program.program[0].func_decl.body.block[0];
+        const captured = switch (body.*) {
+            .for_stmt => |loop| try forLoopCapturesLexical(arena.allocator(), loop.init.?, loop.cond, loop.update, loop.body),
+            .for_in => |loop| try forOfCapturesLexical(arena.allocator(), loop.target, loop.var_init, loop.iterable, loop.body),
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(case.captured, captured);
     }
 }
 
