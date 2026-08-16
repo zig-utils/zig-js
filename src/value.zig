@@ -1222,6 +1222,7 @@ pub const IntlDateTimeFormatData = struct {
     hour12: bool = true,
     has_hour_cycle: bool = false,
     defaults_applied: bool = false,
+    allow_temporal_zoned_date_time: bool = false,
     owned_bytes: ?[]u8 = null,
 
     pub fn deinit(self: *IntlDateTimeFormatData, allocator: std.mem.Allocator) void {

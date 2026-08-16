@@ -13319,6 +13319,36 @@ test "parallel_js: Intl.Segmenter shares immutable input without engine races" {
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl.DateTimeFormat uses only native resolved state and preserves legacy chaining" {
+    try std.testing.expect((try evalIn(
+        \\var formatter = new Intl.DateTimeFormat("hi-IN-u-ca-gregory-nu-deva", { dateStyle:"full", timeStyle:"long", timeZone:"UTC", hourCycle:"h23" });
+        \\var ownNames = Object.getOwnPropertyNames(formatter);
+        \\var options = formatter.resolvedOptions();
+        \\var forgedReads = 0;
+        \\var fake = {};
+        \\fake["\\0intl"] = "DateTimeFormat";
+        \\Object.defineProperty(fake, "\\0locale", { get:function () { forgedReads++; return "de-DE"; } });
+        \\var rejected = 0;
+        \\try { Intl.DateTimeFormat.prototype.resolvedOptions.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Object.getOwnPropertyDescriptor(Intl.DateTimeFormat.prototype, "format").get.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Intl.DateTimeFormat.prototype.formatToParts.call(fake, 0); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Intl.DateTimeFormat.prototype.formatRange.call(fake, 0, 1); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Intl.DateTimeFormat.prototype.formatRangeToParts.call(fake, 0, 1); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\var legacy = Object.create(Intl.DateTimeFormat.prototype);
+        \\var chained = Intl.DateTimeFormat.call(legacy, "de-DE", { dateStyle:"short", timeZone:"UTC" });
+        \\var fallbackSymbol = Object.getOwnPropertySymbols(chained)[0];
+        \\var inner = chained[fallbackSymbol];
+        \\var rangeRejected = false;
+        \\try { chained.formatRange(0, 1); } catch (error) { rangeRejected = error instanceof TypeError; }
+        \\ownNames.every(function (name) { return name.charCodeAt(0) !== 0; }) &&
+        \\  options.locale === "hi-IN-u-ca-gregory-nu-deva" && options.calendar === "gregory" && options.numberingSystem === "deva" && options.timeZone === "UTC" &&
+        \\  rejected === 5 && forgedReads === 0 && chained === legacy && chained.resolvedOptions().locale === "de-DE" &&
+        \\  chained.format(0) === inner.format(0) && chained.format === chained.format && rangeRejected &&
+        \\  typeof new Date(0).toLocaleString("de-DE", { timeZone:"UTC" }) === "string" &&
+        \\  typeof new Temporal.ZonedDateTime(957270896987650000n, "UTC").toLocaleString("en", { dateStyle:"short" }) === "string"
+    )).asBool());
+}
+
 test "Intl.DateTimeFormat resolved state is reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

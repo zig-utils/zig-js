@@ -10397,12 +10397,10 @@ pub const Interpreter = struct {
             const required: DtfRequired = if (eq(name, "toLocaleDateString")) .date else if (eq(name, "toLocaleTimeString")) .time else .any;
             const defaults: DtfDefaults = if (eq(name, "toLocaleDateString")) .date else if (eq(name, "toLocaleTimeString")) .time else .all;
             const dtf = (try self.newObject()).asObj();
-            try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
             const loc = localeListFirstOr(locs, "en");
-            try self.setProp(dtf, "\x00locale", try Value.strAlloc(self.arena, loc));
             const r = try dtfProcessOptionsKind(self, if (args.len > 1) args[1] else Value.undef(), required, defaults);
-            try dtfStoreOptions(self, dtf, r);
+            try dtfStoreOptions(self, dtf, loc, r, false);
             return try intlDateTimeFormatFn(@ptrCast(self), Value.obj(dtf), &.{Value.num(t)});
         }
         if (eq(name, "setTime")) {
@@ -25784,9 +25782,8 @@ fn dtfResolveLocaleExt(
 /// Resolve and publish the immutable native DateTimeFormat record. The user
 /// options bag has already been observed in specification order; no ordinary
 /// internal record is needed after this point.
-fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalError!void {
+fn dtfStoreOptions(self: *Interpreter, o: *value.Object, tag: []const u8, r_in: DtfOptions, allow_temporal_zoned_date_time: bool) EvalError!void {
     var r = r_in;
-    const tag = if (o.getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
     // Resolve the ca/hc/nu locale extensions (rebuilds the resolved locale and
     // fixes the effective calendar / numbering system).
     const ext = try dtfResolveLocaleExt(self, tag, r.calendar, r.hour_cycle, r.hour12, r.numbering_system);
@@ -25837,6 +25834,7 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, r_in: DtfOptions) EvalE
         .hour12 = r.hour12 orelse true,
         .has_hour_cycle = r.hour_cycle.len > 0,
         .defaults_applied = r.defaults_applied,
+        .allow_temporal_zoned_date_time = allow_temporal_zoned_date_time,
     };
     // BasicFormatMatcher/BestFitMatcher selected these style patterns during
     // construction. Expand them once, while retaining the original reflected
@@ -26442,11 +26440,11 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 localeListFirstDisplayNamesOr(locs, "en")
             else
                 localeListFirstSupportedOr(locs, "en");
-            // Collator and NumberFormat are branded and configured entirely by
-            // native sidecars. NumberFormat's legacy callable chaining retains
-            // the genuine inner object under the fallback symbol; neither
-            // service needs forgeable NUL-led state on that inner object.
-            if (comptime !std.mem.eql(u8, service, "Collator") and !std.mem.eql(u8, service, "NumberFormat")) {
+            // Collator, NumberFormat, and DateTimeFormat are branded and
+            // configured entirely by native sidecars. The formatters' legacy
+            // callable chaining retains the genuine inner object under the
+            // fallback symbol; none needs forgeable NUL-led state there.
+            if (comptime !std.mem.eql(u8, service, "Collator") and !std.mem.eql(u8, service, "NumberFormat") and !std.mem.eql(u8, service, "DateTimeFormat")) {
                 try self.setProp(o, "\x00intl", try Value.strAlloc(self.arena, service));
                 try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
                 try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
@@ -26458,7 +26456,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const r = try dtfProcessOptions(self, raw);
-                try dtfStoreOptions(self, o, r);
+                try dtfStoreOptions(self, o, resolved, r, false);
             } else if (comptime std.mem.eql(u8, service, "NumberFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const ro = try nfProcessOptions(self, raw);
@@ -26571,6 +26569,8 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
 fn intlBrandOk(this: Value, service: []const u8) bool {
     if (std.mem.eql(u8, service, "NumberFormat"))
         return this.isObject() and this.asObj().intlNumberFormatData() != null;
+    if (std.mem.eql(u8, service, "DateTimeFormat"))
+        return this.isObject() and this.asObj().intlDateTimeFormatData() != null;
     return this.isObject() and this.asObj().getOwn("\x00intl") != null and std.mem.eql(u8, this.asObj().getOwn("\x00intl").?.asStr(), service);
 }
 
@@ -26824,6 +26824,11 @@ fn dtfAppendMonthPart(self: *Interpreter, output: *DtfOutput, cal: []const u8, y
 /// the returned string without materializing structural parts; the parts sink
 /// preserves exact boundaries for formatToParts and range formatting.
 fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *DtfOutput) value.HostError!void {
+    // Construction publishes the complete immutable record before the object is
+    // observable. Reject a non-branded direct caller before converting its
+    // attacker-controlled value argument.
+    const data = this.asObj().intlDateTimeFormatData() orelse
+        return self.throwError("TypeError", "Intl.DateTimeFormat has no resolved state");
     // The value to format. A Temporal PlainDate/Time/DateTime/YearMonth/MonthDay
     // supplies its ISO fields directly (no TimeClip — its range exceeds Date's);
     // an Instant uses its epoch nanoseconds; everything else is a TimeClip'd time
@@ -26845,7 +26850,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
         };
         if (direct) {
             const t = t_obj.?;
-            if (t.kind == .zoned_date_time and this.asObj().getOwn("\x00allowTemporalZonedDateTime") == null)
+            if (t.kind == .zoned_date_time and !data.allow_temporal_zoned_date_time)
                 return self.throwError("TypeError", "Intl.DateTimeFormat does not support Temporal.ZonedDateTime");
             temporal_kind = t.kind;
             temporal_calendar = t.calendar;
@@ -26901,8 +26906,6 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
 
     // Constructor resolution publishes immutable native state. No user or
     // internal ordinary property lookup occurs on a steady consumer call.
-    const data = this.asObj().intlDateTimeFormatData() orelse
-        return self.throwError("TypeError", "Intl.DateTimeFormat has no resolved state");
     var o_weekday = data.weekday.string();
     var o_era = data.era.string();
     var o_year = data.year.string();
@@ -29810,7 +29813,7 @@ fn intlBoundAccessorFn(comptime service: []const u8, comptime prop: []const u8, 
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const target = if (comptime std.mem.eql(u8, service, "NumberFormat"))
+            const target = if (comptime std.mem.eql(u8, service, "NumberFormat") or std.mem.eql(u8, service, "DateTimeFormat"))
                 (try unwrapIntlThis(self, this, service)) orelse return self.throwError("TypeError", "get Intl." ++ service ++ ".prototype." ++ prop ++ " called on incompatible receiver")
             else blk: {
                 const branded = if (comptime std.mem.eql(u8, service, "Collator"))
@@ -31159,6 +31162,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try Value.strAlloc(self.arena, this.asObj().intlCollatorData().?.locale)
             else if (comptime std.mem.eql(u8, service, "NumberFormat"))
                 try Value.strAlloc(self.arena, this.asObj().intlNumberFormatData().?.resolved_locale)
+            else if (comptime std.mem.eql(u8, service, "DateTimeFormat"))
+                try Value.strAlloc(self.arena, this.asObj().intlDateTimeFormatData().?.resolved_locale)
             else
                 this.asObj().getOwn("\x00locale") orelse Value.str("en");
             try self.setProp(o, "locale", loc);
@@ -31254,7 +31259,6 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
                 const data = this.asObj().intlDateTimeFormatData() orelse
                     return self.throwError("TypeError", "Intl.DateTimeFormat has no resolved state");
-                try self.setProp(o, "locale", try Value.strAlloc(self.arena, data.resolved_locale));
                 try self.setProp(o, "calendar", try Value.strAlloc(self.arena, data.calendar));
                 try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
                 try self.setProp(o, "timeZone", try Value.strAlloc(self.arena, data.time_zone));
@@ -41081,12 +41085,8 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const t = this.asObj().temporalData().?;
     if (t.kind != .duration) {
         const dtf = (try self.newObject()).asObj();
-        try self.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
-        if (t.kind == .zoned_date_time)
-            try self.setProp(dtf, "\x00allowTemporalZonedDateTime", Value.boolVal(true));
         const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
         const loc = localeListFirstOr(locs, "en");
-        try self.setProp(dtf, "\x00locale", try Value.strAlloc(self.arena, loc));
         if (t.kind == .zoned_date_time and args.len > 1 and !args[1].isUndefined()) {
             const raw = Value.obj(try self.toObject(args[1]));
             if (!(try self.getProperty(raw, "timeZone")).isUndefined())
@@ -41137,7 +41137,7 @@ fn temporalToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) v
             r.hour_cycle = "h23";
             r.hour12 = false;
         }
-        try dtfStoreOptions(self, dtf, r);
+        try dtfStoreOptions(self, dtf, loc, r, t.kind == .zoned_date_time);
         return try intlDateTimeFormatFn(@ptrCast(self), Value.obj(dtf), &.{this});
     }
     const df = try makeDurationFormatForLocaleString(self, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef());
@@ -52059,8 +52059,7 @@ test "Intl.DateTimeFormat resolved-state publication is OOM-safe" {
                 .root_shape = root_shape,
             };
             var formatter = value.Object{};
-            try formatter.setOwn(allocator, root_shape, "\x00locale", Value.str("de-DE-u-nu-latn"));
-            try dtfStoreOptions(&machine, &formatter, .{
+            try dtfStoreOptions(&machine, &formatter, "de-DE-u-nu-latn", .{
                 .weekday = "short",
                 .year = "numeric",
                 .month = "long",
@@ -52071,7 +52070,7 @@ test "Intl.DateTimeFormat resolved-state publication is OOM-safe" {
                 .numbering_system = "latn",
                 .hour_cycle = "h23",
                 .time_zone = "UTC",
-            });
+            }, false);
             const data = formatter.intlDateTimeFormatData().?;
             try std.testing.expectEqualStrings("de-DE-u-nu-latn", data.resolved_locale);
             try std.testing.expectEqualStrings("gregory", data.calendar);
@@ -52803,9 +52802,7 @@ test "Intl.DateTimeFormat German numeric date pattern" {
     try installGlobals(&env, root_shape);
     var interp = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
     const dtf = (try interp.newObject()).asObj();
-    try interp.setProp(dtf, "\x00intl", Value.str("DateTimeFormat"));
-    try interp.setProp(dtf, "\x00locale", Value.str("de"));
-    try dtfStoreOptions(&interp, dtf, try dtfProcessOptions(&interp, Value.undef()));
+    try dtfStoreOptions(&interp, dtf, "de", try dtfProcessOptions(&interp, Value.undef()), false);
     const out = try intlDateTimeFormatFn(@ptrCast(&interp), Value.obj(dtf), &.{Value.num(24 * 60 * 60 * 1000)});
     try std.testing.expectEqualStrings("2.1.1970", out.asStr());
 }
