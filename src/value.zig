@@ -1506,6 +1506,14 @@ pub const IntlRelativeTimeFormatData = struct {
         pub fn string(self: Style) []const u8 {
             return @tagName(self);
         }
+
+        pub fn value(self: Style) Value {
+            return switch (self) {
+                .long => Value.str("long"),
+                .short => Value.str("short"),
+                .narrow => Value.str("narrow"),
+            };
+        }
     };
 
     pub const Numeric = enum(u8) {
@@ -1518,6 +1526,13 @@ pub const IntlRelativeTimeFormatData = struct {
 
         pub fn string(self: Numeric) []const u8 {
             return @tagName(self);
+        }
+
+        pub fn value(self: Numeric) Value {
+            return switch (self) {
+                .always => Value.str("always"),
+                .auto => Value.str("auto"),
+            };
         }
     };
 
@@ -1554,6 +1569,14 @@ pub const IntlListFormatData = struct {
         pub fn string(self: Kind) []const u8 {
             return @tagName(self);
         }
+
+        pub fn value(self: Kind) Value {
+            return switch (self) {
+                .conjunction => Value.str("conjunction"),
+                .disjunction => Value.str("disjunction"),
+                .unit => Value.str("unit"),
+            };
+        }
     };
 
     pub const Style = enum(u8) {
@@ -1569,6 +1592,14 @@ pub const IntlListFormatData = struct {
 
         pub fn string(self: Style) []const u8 {
             return @tagName(self);
+        }
+
+        pub fn value(self: Style) Value {
+            return switch (self) {
+                .long => Value.str("long"),
+                .short => Value.str("short"),
+                .narrow => Value.str("narrow"),
+            };
         }
     };
 

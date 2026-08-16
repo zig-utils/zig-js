@@ -31334,13 +31334,13 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try put(self, o, "timeStyle", data.time_style);
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
                 const data = this.asObj().intlRelativeTimeFormatData().?;
-                try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style.string()));
-                try self.setProp(o, "numeric", try Value.strAlloc(self.arena, data.numeric.string()));
+                try self.setProp(o, "style", data.style.value());
+                try self.setProp(o, "numeric", data.numeric.value());
                 try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
                 const data = this.asObj().intlListFormatData().?;
-                try self.setProp(o, "type", try Value.strAlloc(self.arena, data.kind.string()));
-                try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style.string()));
+                try self.setProp(o, "type", data.kind.value());
+                try self.setProp(o, "style", data.style.value());
             } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
                 // Reflect the immutable normalized record in Table-6 order.
                 const data = this.asObj().intlDisplayNamesData() orelse

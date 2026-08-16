@@ -13286,6 +13286,42 @@ test "parallel_js: Intl.PluralRules category metadata is immutable" {
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl ListFormat and RelativeTimeFormat resolved enums use exact unmanaged static cells" {
+    const Case = struct { source: []const u8, expected: []const u8, cell: *const strcell.StringCell };
+    const cases = [_]Case{
+        .{ .source = "new Intl.ListFormat('en',{type:'conjunction'}).resolvedOptions().type", .expected = "conjunction", .cell = strcell.staticCell("conjunction") },
+        .{ .source = "new Intl.ListFormat('en',{type:'disjunction'}).resolvedOptions().type", .expected = "disjunction", .cell = strcell.staticCell("disjunction") },
+        .{ .source = "new Intl.ListFormat('en',{type:'unit'}).resolvedOptions().type", .expected = "unit", .cell = strcell.staticCell("unit") },
+        .{ .source = "new Intl.ListFormat('en',{style:'long'}).resolvedOptions().style", .expected = "long", .cell = strcell.staticCell("long") },
+        .{ .source = "new Intl.ListFormat('en',{style:'short'}).resolvedOptions().style", .expected = "short", .cell = strcell.staticCell("short") },
+        .{ .source = "new Intl.ListFormat('en',{style:'narrow'}).resolvedOptions().style", .expected = "narrow", .cell = strcell.staticCell("narrow") },
+        .{ .source = "new Intl.RelativeTimeFormat('en',{style:'long'}).resolvedOptions().style", .expected = "long", .cell = strcell.staticCell("long") },
+        .{ .source = "new Intl.RelativeTimeFormat('en',{style:'short'}).resolvedOptions().style", .expected = "short", .cell = strcell.staticCell("short") },
+        .{ .source = "new Intl.RelativeTimeFormat('en',{style:'narrow'}).resolvedOptions().style", .expected = "narrow", .cell = strcell.staticCell("narrow") },
+        .{ .source = "new Intl.RelativeTimeFormat('en',{numeric:'always'}).resolvedOptions().numeric", .expected = "always", .cell = strcell.staticCell("always") },
+        .{ .source = "new Intl.RelativeTimeFormat('en',{numeric:'auto'}).resolvedOptions().numeric", .expected = "auto", .cell = strcell.staticCell("auto") },
+    };
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    var last: Value = Value.undef();
+    for (cases) |case| {
+        last = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, last.asStr());
+        try std.testing.expectEqual(case.cell, last.asStringCell());
+        try std.testing.expect(!last.asStringCell().isGcManaged());
+    }
+    const dynamic_locale = try ctx.evaluate("new Intl.ListFormat('de').resolvedOptions().locale");
+    const dynamic_numbering = try ctx.evaluate("new Intl.RelativeTimeFormat('en-u-nu-arab').resolvedOptions().numberingSystem");
+    try std.testing.expect(dynamic_locale.asStringCell().isGcManaged());
+    try std.testing.expect(dynamic_numbering.asStringCell().isGcManaged());
+    ctx.collectGarbage();
+    try std.testing.expectEqualStrings("auto", last.asStr());
+}
+
 test "Intl structural part results are reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
