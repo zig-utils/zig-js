@@ -15617,12 +15617,10 @@ pub const Interpreter = struct {
         // new Intl.NumberFormat(locales, options).format(this).
         if (eq(name, "toLocaleString")) {
             const o = (try self.newObject()).asObj();
-            try self.setProp(o, "\x00intl", Value.str("NumberFormat"));
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
             const loc = localeListFirstOr(locs, "en");
-            try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, loc));
             const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
-            try self.setProp(o, "\x00opts", Value.obj(ro));
+            try installNumberFormatData(self, o, loc, ro);
             return try intlNumberFormatFn(@ptrCast(self), Value.obj(o), &.{Value.num(n)});
         }
         if (eq(name, "toString")) {
@@ -26223,11 +26221,8 @@ fn installNumberFormatData(self: *Interpreter, formatter: *value.Object, locale:
 }
 
 fn numberFormatDataFor(self: *Interpreter, formatter: *value.Object) EvalError!*value.IntlNumberFormatData {
-    if (formatter.intlNumberFormatData()) |data| return data;
-    const locale = if (formatter.getOwn("\x00locale")) |v| (if (v.isString()) v.asStr() else "en") else "en";
-    const ro = if (formatter.getOwn("\x00opts")) |v| (if (v.isObject()) v.asObj() else (try self.newObject()).asObj()) else (try self.newObject()).asObj();
-    try installNumberFormatData(self, formatter, locale, ro);
-    return formatter.intlNumberFormatData().?;
+    return formatter.intlNumberFormatData() orelse
+        self.throwError("TypeError", "Intl.NumberFormat has no resolved state");
 }
 
 /// InitializePluralRules option reading, in spec order (localeMatcher, type,
@@ -26447,11 +26442,11 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 localeListFirstDisplayNamesOr(locs, "en")
             else
                 localeListFirstSupportedOr(locs, "en");
-            // Collator is branded and configured entirely by its native
-            // sidecar. Its callable constructor has no legacy chaining path,
-            // so publishing forgeable NUL-led service/locale properties would
-            // only expose redundant mutable-engine state to reflection.
-            if (comptime !std.mem.eql(u8, service, "Collator")) {
+            // Collator and NumberFormat are branded and configured entirely by
+            // native sidecars. NumberFormat's legacy callable chaining retains
+            // the genuine inner object under the fallback symbol; neither
+            // service needs forgeable NUL-led state on that inner object.
+            if (comptime !std.mem.eql(u8, service, "Collator") and !std.mem.eql(u8, service, "NumberFormat")) {
                 try self.setProp(o, "\x00intl", try Value.strAlloc(self.arena, service));
                 try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
                 try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
@@ -26574,6 +26569,8 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
 }
 
 fn intlBrandOk(this: Value, service: []const u8) bool {
+    if (std.mem.eql(u8, service, "NumberFormat"))
+        return this.isObject() and this.asObj().intlNumberFormatData() != null;
     return this.isObject() and this.asObj().getOwn("\x00intl") != null and std.mem.eql(u8, this.asObj().getOwn("\x00intl").?.asStr(), service);
 }
 
@@ -29533,9 +29530,7 @@ fn durUnitNf(self: *Interpreter, locale: []const u8, numbering_system: ?[]const 
     }
     if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
     const nf = (try self.newObject()).asObj();
-    try self.setProp(nf, "\x00intl", Value.str("NumberFormat"));
-    try self.setProp(nf, "\x00locale", try Value.strAlloc(self.arena, locale));
-    try self.setProp(nf, "\x00opts", Value.obj(ro));
+    try installNumberFormatData(self, nf, locale, ro);
     return Value.obj(nf);
 }
 
@@ -29560,9 +29555,7 @@ fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, numbering_system: ?
     try self.setProp(ro, "roundingMode", Value.str("trunc"));
     if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
     const nf = (try self.newObject()).asObj();
-    try self.setProp(nf, "\x00intl", Value.str("NumberFormat"));
-    try self.setProp(nf, "\x00locale", try Value.strAlloc(self.arena, locale));
-    try self.setProp(nf, "\x00opts", Value.obj(ro));
+    try installNumberFormatData(self, nf, locale, ro);
     return nfFormatOne(self, Value.obj(nf), try Value.strAlloc(self.arena, dec));
 }
 
@@ -29576,9 +29569,7 @@ fn durFmtCombineNumeric(self: *Interpreter, locale: []const u8, numbering_system
     try self.setProp(ro, "maximumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 9));
     if (sign_never) try self.setProp(ro, "signDisplay", Value.str("never"));
     const nf = (try self.newObject()).asObj();
-    try self.setProp(nf, "\x00intl", Value.str("NumberFormat"));
-    try self.setProp(nf, "\x00locale", try Value.strAlloc(self.arena, locale));
-    try self.setProp(nf, "\x00opts", Value.obj(ro));
+    try installNumberFormatData(self, nf, locale, ro);
     return nfFormatOne(self, Value.obj(nf), try Value.strAlloc(self.arena, dec));
 }
 
@@ -29819,22 +29810,27 @@ fn intlBoundAccessorFn(comptime service: []const u8, comptime prop: []const u8, 
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const branded = if (comptime std.mem.eql(u8, service, "Collator"))
-                this.isObject() and this.asObj().intlCollatorData() != null
-            else
-                intlBrandOk(this, service);
-            if (!branded) return self.throwError("TypeError", "get Intl." ++ service ++ ".prototype." ++ prop ++ " called on incompatible receiver");
-            if (this.asObj().getOwn(cache_key)) |b| return b;
-            const impl = try self.getProperty(this, impl_key);
+            const target = if (comptime std.mem.eql(u8, service, "NumberFormat"))
+                (try unwrapIntlThis(self, this, service)) orelse return self.throwError("TypeError", "get Intl." ++ service ++ ".prototype." ++ prop ++ " called on incompatible receiver")
+            else blk: {
+                const branded = if (comptime std.mem.eql(u8, service, "Collator"))
+                    this.isObject() and this.asObj().intlCollatorData() != null
+                else
+                    intlBrandOk(this, service);
+                if (!branded) return self.throwError("TypeError", "get Intl." ++ service ++ ".prototype." ++ prop ++ " called on incompatible receiver");
+                break :blk this;
+            };
+            if (target.asObj().getOwn(cache_key)) |b| return b;
+            const impl = try self.getProperty(target, impl_key);
             if (!impl.isObject()) return self.throwError("TypeError", "missing " ++ prop ++ " implementation");
-            const bound = try self.makeBound(impl.asObj(), this, &.{});
+            const bound = try self.makeBound(impl.asObj(), target, &.{});
             const ro: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
             try bound.asObj().setOwn(self.arena, self.root_shape, "name", Value.str(""));
             try bound.asObj().setAttr(self.arena, "name", ro);
             try bound.asObj().setOwn(self.arena, self.root_shape, "length", Value.num(length));
             try bound.asObj().setAttr(self.arena, "length", ro);
-            try self.setProp(this.asObj(), cache_key, bound);
-            try this.asObj().setAttr(self.arena, cache_key, .{ .writable = false, .enumerable = false, .configurable = false });
+            try self.setProp(target.asObj(), cache_key, bound);
+            try target.asObj().setAttr(self.arena, cache_key, .{ .writable = false, .enumerable = false, .configurable = false });
             return bound;
         }
     }.call;
@@ -31161,6 +31157,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try Value.strAlloc(self.arena, this.asObj().intlDurationFormatData().?.locale)
             else if (comptime std.mem.eql(u8, service, "Collator"))
                 try Value.strAlloc(self.arena, this.asObj().intlCollatorData().?.locale)
+            else if (comptime std.mem.eql(u8, service, "NumberFormat"))
+                try Value.strAlloc(self.arena, this.asObj().intlNumberFormatData().?.resolved_locale)
             else
                 this.asObj().getOwn("\x00locale") orelse Value.str("en");
             try self.setProp(o, "locale", loc);
@@ -31169,7 +31167,6 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             // services, not Collator/ListFormat.
             if (comptime std.mem.eql(u8, service, "NumberFormat")) {
                 const data = try numberFormatDataFor(self, this.asObj());
-                try self.setProp(o, "locale", try Value.strAlloc(self.arena, data.resolved_locale));
                 try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
                 try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style));
                 if (data.currency) |c| {

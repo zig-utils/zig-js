@@ -12879,6 +12879,34 @@ test "parallel_js: Intl.Locale native state is immutable after publication" {
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl.NumberFormat uses only native resolved state and preserves legacy chaining" {
+    try std.testing.expect((try evalIn(
+        \\var formatter = new Intl.NumberFormat("hi-IN-u-nu-deva", { style:"currency", currency:"INR", notation:"compact", minimumSignificantDigits:3, maximumSignificantDigits:5, useGrouping:"min2", signDisplay:"exceptZero" });
+        \\var ownNames = Object.getOwnPropertyNames(formatter);
+        \\var options = formatter.resolvedOptions();
+        \\var forgedReads = 0;
+        \\var forgedOptions = {};
+        \\Object.defineProperty(forgedOptions, "style", { get:function () { forgedReads++; return "currency"; } });
+        \\var fake = {}; fake["\\0intl"] = "NumberFormat"; fake["\\0locale"] = "de-DE"; fake["\\0opts"] = forgedOptions;
+        \\var rejected = 0;
+        \\try { Intl.NumberFormat.prototype.resolvedOptions.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, "format").get.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Intl.NumberFormat.prototype.formatToParts.call(fake, 1); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Intl.NumberFormat.prototype.formatRange.call(fake, 1, 2); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\var legacy = Object.create(Intl.NumberFormat.prototype);
+        \\var chained = Intl.NumberFormat.call(legacy, "de-DE", { minimumFractionDigits:2, maximumFractionDigits:2 });
+        \\var chainedOptions = chained.resolvedOptions();
+        \\var chainedText = chained.format(1234.5);
+        \\var rangeRejected = false;
+        \\try { chained.formatRange(1, 2); } catch (error) { rangeRejected = error instanceof TypeError; }
+        \\ownNames.every(function (name) { return name.charCodeAt(0) !== 0; }) &&
+        \\  options.locale === "hi-IN-u-nu-deva" && options.numberingSystem === "deva" && options.style === "currency" && options.currency === "INR" &&
+        \\  rejected === 4 && forgedReads === 0 && chained === legacy && chainedOptions.locale === "de-DE" &&
+        \\  chainedText === "1.234,50" && chained.format === chained.format && rangeRejected &&
+        \\  (1234.5).toLocaleString("de-DE") === "1.234,5"
+    )).asBool());
+}
+
 test "Intl.NumberFormat resolved state is reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
