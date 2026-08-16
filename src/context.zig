@@ -12255,6 +12255,46 @@ test "typeof on an undeclared identifier is \"undefined\" (no throw)" {
     )).asBool());
 }
 
+test "typeof returns the exact unmanaged static cell in every result category" {
+    const Case = struct { source: []const u8, expected: []const u8, cell: *const strcell.StringCell };
+    const cases = [_]Case{
+        .{ .source = "typeof undefined", .expected = "undefined", .cell = strcell.staticCell("undefined") },
+        .{ .source = "typeof null", .expected = "object", .cell = strcell.staticCell("object") },
+        .{ .source = "typeof true", .expected = "boolean", .cell = strcell.staticCell("boolean") },
+        .{ .source = "typeof 1", .expected = "number", .cell = strcell.staticCell("number") },
+        .{ .source = "typeof 'x'", .expected = "string", .cell = strcell.staticCell("string") },
+        .{ .source = "typeof Symbol()", .expected = "symbol", .cell = strcell.staticCell("symbol") },
+        .{ .source = "typeof 1n", .expected = "bigint", .cell = strcell.staticCell("bigint") },
+        .{ .source = "typeof function () {}", .expected = "function", .cell = strcell.staticCell("function") },
+    };
+    for (cases) |case| {
+        const result = try evalIn(case.source);
+        try std.testing.expectEqualStrings(case.expected, result.asStr());
+        try std.testing.expectEqual(case.cell, result.asStringCell());
+        try std.testing.expect(!result.asStringCell().isGcManaged());
+    }
+
+    try std.testing.expect((try evalIn(
+        \\typeof Object(Symbol()) === "object" && typeof Object(1n) === "object"
+    )).asBool());
+
+    // The shared applyUnary boundary must return the same static cell whether
+    // the caller is the semantic baseline or the suspend-capable VM.
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |case| {
+            const result = try ctx.evaluate(case.source);
+            try std.testing.expectEqualStrings(case.expected, result.asStr());
+            try std.testing.expectEqual(case.cell, result.asStringCell());
+            try std.testing.expect(!result.asStringCell().isGcManaged());
+        }
+    }
+}
+
 test "global undefined is an immutable binding, not a literal token" {
     try std.testing.expect((try evalIn(
         \\undefined = 5;

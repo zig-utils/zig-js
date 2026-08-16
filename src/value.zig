@@ -6554,16 +6554,32 @@ pub const Value = struct {
         return if (bits >> 63 != 0) 0 -% magnitude else magnitude;
     }
 
-    /// The `typeof` operator result.
-    pub fn typeOf(self: Value) []const u8 {
+    /// The `typeof` operator result as one of ECMA-262's eight fixed strings.
+    /// Returning static cells keeps resolved operands on the same immutable,
+    /// allocation-free path as the unresolved-identifier special case.
+    pub fn typeOfValue(self: Value) Value {
         return switch (self.kind()) {
-            .undefined => "undefined",
-            .null => "object",
-            .boolean => "boolean",
-            .number => "number",
-            .string => "string",
-            .object => if (self.asObj().behavior.is_htmldda) "undefined" else if (self.asObj().is_symbol) "symbol" else if (self.asObj().is_bigint) "bigint" else if (self.asObj().isCallableObject()) "function" else "object",
+            .undefined => Value.str("undefined"),
+            .null => Value.str("object"),
+            .boolean => Value.str("boolean"),
+            .number => Value.str("number"),
+            .string => Value.str("string"),
+            .object => if (self.asObj().behavior.is_htmldda)
+                Value.str("undefined")
+            else if (self.asObj().is_symbol)
+                Value.str("symbol")
+            else if (self.asObj().is_bigint)
+                Value.str("bigint")
+            else if (self.asObj().isCallableObject())
+                Value.str("function")
+            else
+                Value.str("object"),
         };
+    }
+
+    /// Byte view retained for embedding and introspection consumers.
+    pub fn typeOf(self: Value) []const u8 {
+        return self.typeOfValue().asStr();
     }
 
     /// ECMAScript ToString, allocating in `arena`.
