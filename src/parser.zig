@@ -2286,13 +2286,25 @@ pub const Parser = struct {
     /// Strict-mode early errors on a formal parameter list: a parameter named
     /// `eval`/`arguments`, or any duplicate parameter name, is a SyntaxError.
     fn validateStrictParams(self: *Parser, params: []const ast.Param) ParseError!void {
+        var simple_count: u32 = 0;
+        for (params) |p| if (p.pattern == null) {
+            if (simple_count == std.math.maxInt(u32)) return error.OutOfMemory;
+            simple_count += 1;
+        };
+
+        // The parser already owns the complete FormalParameters slice. Reserve
+        // its exact simple-name count once so an attacker-sized unique list
+        // cannot force geometric allocation and repeated rehashing. Zero and
+        // one name need only the semantic checks below and allocate no index.
         var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer seen.deinit(self.scratch_allocator);
+        if (simple_count > 1) try seen.ensureTotalCapacity(self.scratch_allocator, simple_count);
         for (params) |p| {
             if (p.pattern != null) continue;
             if (std.mem.eql(u8, p.name, "eval") or std.mem.eql(u8, p.name, "arguments"))
                 return ParseError.UnexpectedToken;
             if (isStrictReservedBinding(p.name)) return ParseError.UnexpectedToken;
+            if (simple_count == 1) continue;
             const entry = try seen.getOrPut(self.scratch_allocator, p.name);
             if (entry.found_existing) return ParseError.UnexpectedToken;
         }
@@ -4896,6 +4908,55 @@ test "parser validates wide strict parameter lists without changing duplicate se
 
     var sloppy_duplicate = try Parser.initWithScratch(a, std.testing.allocator, "function duplicate(first, second, first) {}");
     _ = try sloppy_duplicate.parseProgram();
+}
+
+test "parser reserves strict parameter uniqueness storage once" {
+    const params = [_]ast.Param{
+        .{ .name = "parameter00" },
+        .{ .name = "parameter01" },
+        .{ .name = "parameter02" },
+        .{ .name = "parameter03" },
+        .{ .name = "parameter04" },
+        .{ .name = "parameter05" },
+        .{ .name = "parameter06" },
+        .{ .name = "parameter07" },
+        .{ .name = "parameter08" },
+        .{ .name = "parameter09" },
+        .{ .name = "parameter10" },
+        .{ .name = "parameter11" },
+        .{ .name = "parameter12" },
+        .{ .name = "parameter13" },
+        .{ .name = "parameter14" },
+        .{ .name = "parameter15" },
+    };
+
+    var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var parser: Parser = undefined;
+    parser.scratch_allocator = measured.allocator();
+    try parser.validateStrictParams(&params);
+    try std.testing.expectEqual(@as(usize, 1), measured.allocations);
+    try std.testing.expectEqual(@as(usize, 1), measured.deallocations);
+    try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
+
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    parser.scratch_allocator = fixed.allocator();
+    try parser.validateStrictParams(&.{});
+    try parser.validateStrictParams(&.{.{ .name = "only" }});
+
+    var allocation_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    parser.scratch_allocator = allocation_failure.allocator();
+    try std.testing.expectError(error.OutOfMemory, parser.validateStrictParams(params[0..2]));
+    parser.scratch_allocator = std.testing.allocator;
+    try parser.validateStrictParams(params[0..2]);
+
+    const invalid = [_][]const ast.Param{
+        &.{ .{ .name = "first" }, .{ .name = "first" } },
+        &.{ .{ .name = "eval" }, .{ .name = "second" } },
+        &.{ .{ .name = "first" }, .{ .name = "arguments" } },
+        &.{ .{ .name = "first" }, .{ .name = "implements" } },
+    };
+    for (invalid) |case| try std.testing.expectError(ParseError.UnexpectedToken, parser.validateStrictParams(case));
 }
 
 test "parser builds precedence-correct tree" {
