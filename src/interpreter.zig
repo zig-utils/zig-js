@@ -51190,6 +51190,53 @@ test "Intl.Collator resolved-state publication is OOM-safe" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
 }
 
+test "Intl.Collator resolved state is immutable across native threads" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const opts = CollatorOptions{
+        .locale = "en-US-u-kn-true-kf-upper",
+        .numeric = true,
+        .case_first = .upper,
+        .sensitivity = .variant,
+        .ignore_punctuation = true,
+    };
+    var results: [4]u64 = .{ 0, 0, 0, 0 };
+    const Lane = struct {
+        fn run(shared: *const CollatorOptions, lane: usize, result: *u64) void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            var machine = Interpreter{
+                .arena = arena.allocator(),
+                .scratch_allocator = std.heap.page_allocator,
+                .env = undefined,
+                .root_shape = undefined,
+            };
+            var checksum: u64 = 0;
+            for (0..256) |iteration| {
+                const numeric = collatorCompareStrings(&machine, "file2", "file10", shared.*) catch {
+                    result.* = std.math.maxInt(u64);
+                    return;
+                };
+                const accent = collatorCompareStrings(&machine, "resume", "r\xc3\xa9sum\xc3\xa9", shared.*) catch {
+                    result.* = std.math.maxInt(u64);
+                    return;
+                };
+                checksum +%= @as(u64, @intCast(numeric + 2));
+                checksum +%= @as(u64, @intCast(accent + 2));
+                checksum +%= iteration + lane;
+            }
+            result.* = checksum;
+        }
+    };
+    var threads: [results.len]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane|
+        thread.* = try std.Thread.spawn(.{}, Lane.run, .{ &opts, lane, &results[lane] });
+    for (&threads) |*thread| thread.join();
+    for (results, 0..) |result, lane| {
+        try std.testing.expect(result != std.math.maxInt(u64));
+        try std.testing.expectEqual(results[0] + lane * 256, result);
+    }
+}
+
 test "Intl.DateTimeFormat resolved-state publication is OOM-safe" {
     const run = struct {
         fn check(backing: std.mem.Allocator) !void {
