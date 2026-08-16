@@ -1498,6 +1498,166 @@ pub const IntlSegmenterData = struct {
     }
 };
 
+pub const IntlPluralRulesData = struct {
+    pub const Kind = enum(u8) {
+        cardinal,
+        ordinal,
+        pub fn fromString(s: []const u8) Kind {
+            return if (std.mem.eql(u8, s, "ordinal")) .ordinal else .cardinal;
+        }
+        pub fn string(self: Kind) []const u8 {
+            return @tagName(self);
+        }
+        pub fn value(self: Kind) Value {
+            return switch (self) {
+                .cardinal => Value.str("cardinal"),
+                .ordinal => Value.str("ordinal"),
+            };
+        }
+    };
+    pub const Notation = enum(u8) {
+        standard,
+        scientific,
+        engineering,
+        compact,
+        pub fn fromString(s: []const u8) Notation {
+            if (std.mem.eql(u8, s, "scientific")) return .scientific;
+            if (std.mem.eql(u8, s, "engineering")) return .engineering;
+            if (std.mem.eql(u8, s, "compact")) return .compact;
+            return .standard;
+        }
+        pub fn string(self: Notation) []const u8 {
+            return @tagName(self);
+        }
+        pub fn value(self: Notation) Value {
+            return switch (self) {
+                .standard => Value.str("standard"),
+                .scientific => Value.str("scientific"),
+                .engineering => Value.str("engineering"),
+                .compact => Value.str("compact"),
+            };
+        }
+    };
+    pub const CompactDisplay = enum(u8) {
+        short,
+        long,
+        pub fn fromString(s: []const u8) CompactDisplay {
+            return if (std.mem.eql(u8, s, "long")) .long else .short;
+        }
+        pub fn string(self: CompactDisplay) []const u8 {
+            return @tagName(self);
+        }
+        pub fn value(self: CompactDisplay) Value {
+            return switch (self) {
+                .short => Value.str("short"),
+                .long => Value.str("long"),
+            };
+        }
+    };
+    pub const RoundingMode = enum(u8) {
+        ceil,
+        floor,
+        expand,
+        trunc,
+        half_ceil,
+        half_floor,
+        half_expand,
+        half_trunc,
+        half_even,
+        pub fn fromString(s: []const u8) RoundingMode {
+            if (std.mem.eql(u8, s, "ceil")) return .ceil;
+            if (std.mem.eql(u8, s, "floor")) return .floor;
+            if (std.mem.eql(u8, s, "expand")) return .expand;
+            if (std.mem.eql(u8, s, "trunc")) return .trunc;
+            if (std.mem.eql(u8, s, "halfCeil")) return .half_ceil;
+            if (std.mem.eql(u8, s, "halfFloor")) return .half_floor;
+            if (std.mem.eql(u8, s, "halfTrunc")) return .half_trunc;
+            if (std.mem.eql(u8, s, "halfEven")) return .half_even;
+            return .half_expand;
+        }
+        pub fn string(self: RoundingMode) []const u8 {
+            return switch (self) {
+                .half_ceil => "halfCeil",
+                .half_floor => "halfFloor",
+                .half_expand => "halfExpand",
+                .half_trunc => "halfTrunc",
+                .half_even => "halfEven",
+                else => @tagName(self),
+            };
+        }
+        pub fn value(self: RoundingMode) Value {
+            return switch (self) {
+                .ceil => Value.str("ceil"),
+                .floor => Value.str("floor"),
+                .expand => Value.str("expand"),
+                .trunc => Value.str("trunc"),
+                .half_ceil => Value.str("halfCeil"),
+                .half_floor => Value.str("halfFloor"),
+                .half_expand => Value.str("halfExpand"),
+                .half_trunc => Value.str("halfTrunc"),
+                .half_even => Value.str("halfEven"),
+            };
+        }
+    };
+    pub const RoundingPriority = enum(u8) {
+        auto,
+        more_precision,
+        less_precision,
+        pub fn fromString(s: []const u8) RoundingPriority {
+            if (std.mem.eql(u8, s, "morePrecision")) return .more_precision;
+            if (std.mem.eql(u8, s, "lessPrecision")) return .less_precision;
+            return .auto;
+        }
+        pub fn string(self: RoundingPriority) []const u8 {
+            return switch (self) {
+                .more_precision => "morePrecision",
+                .less_precision => "lessPrecision",
+                .auto => "auto",
+            };
+        }
+        pub fn value(self: RoundingPriority) Value {
+            return switch (self) {
+                .more_precision => Value.str("morePrecision"),
+                .less_precision => Value.str("lessPrecision"),
+                .auto => Value.str("auto"),
+            };
+        }
+    };
+    pub const TrailingZeroDisplay = enum(u8) {
+        auto,
+        strip_if_integer,
+        pub fn fromString(s: []const u8) TrailingZeroDisplay {
+            return if (std.mem.eql(u8, s, "stripIfInteger")) .strip_if_integer else .auto;
+        }
+        pub fn string(self: TrailingZeroDisplay) []const u8 {
+            return if (self == .strip_if_integer) "stripIfInteger" else "auto";
+        }
+        pub fn value(self: TrailingZeroDisplay) Value {
+            return if (self == .strip_if_integer) Value.str("stripIfInteger") else Value.str("auto");
+        }
+    };
+
+    locale: []const u8 = "en",
+    kind: Kind = .cardinal,
+    notation: Notation = .standard,
+    compact_display: CompactDisplay = .short,
+    minimum_integer_digits: u8 = 1,
+    minimum_fraction_digits: u8 = 0,
+    maximum_fraction_digits: u8 = 3,
+    minimum_significant_digits: ?u8 = null,
+    maximum_significant_digits: ?u8 = null,
+    rounding_increment: u16 = 1,
+    rounding_mode: RoundingMode = .half_expand,
+    rounding_priority: RoundingPriority = .auto,
+    trailing_zero_display: TrailingZeroDisplay = .auto,
+    owned_locale: ?[]u8 = null,
+
+    pub fn deinit(self: *IntlPluralRulesData, allocator: std.mem.Allocator) void {
+        if (self.owned_locale) |owned| allocator.free(owned);
+        self.owned_locale = null;
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1638,6 +1798,7 @@ pub const ObjectRareTag = enum(u8) {
     intl_relative_time_format,
     intl_list_format,
     intl_segmenter,
+    intl_plural_rules,
     temporal,
     promise,
     constructor,
@@ -1742,6 +1903,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     intl_relative_time_format: struct { ptr: ?*IntlRelativeTimeFormatData = null },
     intl_list_format: struct { ptr: ?*IntlListFormatData = null },
     intl_segmenter: struct { ptr: ?*IntlSegmenterData = null },
+    intl_plural_rules: struct { ptr: ?*IntlPluralRulesData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -1985,6 +2147,7 @@ pub const ObjectBackingFlags = packed struct {
     intl_relative_time_format: bool = false,
     intl_list_format: bool = false,
     intl_segmenter: bool = false,
+    intl_plural_rules: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -3313,6 +3476,20 @@ pub const Object = struct {
         if (cold.hasRare(.intl_segmenter)) cold.rare.intl_segmenter.ptr = null;
     }
 
+    pub inline fn intlPluralRulesData(self: *const Object) ?*IntlPluralRulesData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_plural_rules)) return null;
+        return cold.rare.intl_plural_rules.ptr;
+    }
+    pub fn setIntlPluralRulesData(self: *Object, fallback: std.mem.Allocator, data: *IntlPluralRulesData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_plural_rules, .{});
+        state.ptr = data;
+    }
+    pub fn clearIntlPluralRulesData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_plural_rules)) cold.rare.intl_plural_rules.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3711,6 +3888,16 @@ pub const Object = struct {
         data.deinit(a);
         a.destroy(data);
         self.deactivateBacking("intl_segmenter");
+    }
+
+    pub fn intlPluralRulesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_plural_rules");
+    }
+    pub fn destroyUninstalledIntlPluralRules(self: *Object, fallback: std.mem.Allocator, data: *IntlPluralRulesData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_plural_rules");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {

@@ -26469,8 +26469,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const ro = try prProcessOptions(self, raw);
-                try self.setProp(o, "\x00opts", Value.obj(ro));
-                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+                try installPluralRulesData(self, o, resolved, ro);
             } else if (args.len > 1 and args[1].isObject()) {
                 // Keep the options object (if any) for resolvedOptions.
                 try self.setProp(o, "\x00opts", args[1]);
@@ -27947,6 +27946,44 @@ fn installSegmenterData(self: *Interpreter, formatter: *value.Object, locale: []
     data.owned_locale = try allocator.dupe(u8, locale);
     data.locale = data.owned_locale.?;
     try formatter.setIntlSegmenterData(self.arena, data);
+    installed = true;
+}
+
+fn installPluralRulesData(self: *Interpreter, formatter: *value.Object, locale: []const u8, record: *value.Object) EvalError!void {
+    const Get = struct {
+        fn string(o: *value.Object, name: []const u8, fallback: []const u8) []const u8 {
+            if (o.getOwn(name)) |v| if (v.isString()) return v.asStr();
+            return fallback;
+        }
+        fn number(o: *value.Object, name: []const u8, fallback: u16) u16 {
+            if (o.getOwn(name)) |v| if (v.isNumber()) return @intFromFloat(v.asNum());
+            return fallback;
+        }
+    };
+    const min_fraction: u8 = @intCast(Get.number(record, "minimumFractionDigits", 0));
+    const max_fraction: u8 = @intCast(@max(min_fraction, Get.number(record, "maximumFractionDigits", 3)));
+    const has_significant = record.getOwn("minimumSignificantDigits") != null or record.getOwn("maximumSignificantDigits") != null;
+    const allocator = try formatter.intlPluralRulesAllocator(self.arena);
+    const data = try allocator.create(value.IntlPluralRulesData);
+    data.* = .{
+        .kind = .fromString(Get.string(record, "type", "cardinal")),
+        .notation = .fromString(Get.string(record, "notation", "standard")),
+        .compact_display = .fromString(Get.string(record, "compactDisplay", "short")),
+        .minimum_integer_digits = @intCast(Get.number(record, "minimumIntegerDigits", 1)),
+        .minimum_fraction_digits = min_fraction,
+        .maximum_fraction_digits = max_fraction,
+        .minimum_significant_digits = if (has_significant) @intCast(Get.number(record, "minimumSignificantDigits", 1)) else null,
+        .maximum_significant_digits = if (has_significant) @intCast(Get.number(record, "maximumSignificantDigits", 21)) else null,
+        .rounding_increment = Get.number(record, "roundingIncrement", 1),
+        .rounding_mode = .fromString(Get.string(record, "roundingMode", "halfExpand")),
+        .rounding_priority = .fromString(Get.string(record, "roundingPriority", "auto")),
+        .trailing_zero_display = .fromString(Get.string(record, "trailingZeroDisplay", "auto")),
+    };
+    var installed = false;
+    errdefer if (!installed) formatter.destroyUninstalledIntlPluralRules(self.arena, data);
+    data.owned_locale = try allocator.dupe(u8, locale);
+    data.locale = data.owned_locale.?;
+    try formatter.setIntlPluralRulesData(self.arena, data);
     installed = true;
 }
 
@@ -29949,55 +29986,40 @@ fn localeLanguage(tag: []const u8) []const u8 {
     return tag[0..end];
 }
 
-fn pluralRulesFor(this: Value) []const cldr_plurals.Rule {
-    const tag = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
-    const lang = localeLanguage(tag);
-    const is_ordinal = if (this.asObj().getOwn("\x00opts")) |ov| (ov.isObject() and ov.asObj().getOwn("type") != null and ov.asObj().getOwn("type").?.isString() and std.mem.eql(u8, ov.asObj().getOwn("type").?.asStr(), "ordinal")) else false;
-    const rules = if (is_ordinal) cldr_plurals.ordinal(lang) else cldr_plurals.cardinal(lang);
+fn pluralRulesFor(data: *const value.IntlPluralRulesData) []const cldr_plurals.Rule {
+    const lang = localeLanguage(data.locale);
+    const rules = if (data.kind == .ordinal) cldr_plurals.ordinal(lang) else cldr_plurals.cardinal(lang);
     // Fall back to English cardinal (one/other) when a language has no data.
     return rules orelse (cldr_plurals.cardinal("en") orelse &.{});
 }
 
-fn pluralFracDigits(this: Value) struct { min: usize, max: usize } {
-    var min: usize = 0;
-    var max: usize = 3;
-    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        if (ov.asObj().getOwn("minimumFractionDigits")) |m| if (m.isNumber()) {
-            min = @intFromFloat(m.asNum());
-        };
-        if (ov.asObj().getOwn("maximumFractionDigits")) |m| if (m.isNumber()) {
-            max = @intFromFloat(m.asNum());
-        };
-    };
-    if (max < min) max = min;
-    return .{ .min = min, .max = max };
+fn pluralFracDigits(data: *const value.IntlPluralRulesData) struct { min: usize, max: usize } {
+    return .{ .min = data.minimum_fraction_digits, .max = data.maximum_fraction_digits };
 }
 
 fn intlPluralSelectFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "PluralRules")) return self.throwError("TypeError", "Intl.PluralRules.prototype.select on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlPluralRulesData() == null)
+        return self.throwError("TypeError", "Intl.PluralRules.prototype.select on incompatible receiver");
+    const data = this.asObj().intlPluralRulesData().?;
     const n = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
     if (std.math.isNan(n)) return Value.str("other");
-    const fd = pluralFracDigits(this);
+    const fd = pluralFracDigits(data);
     var ops = pluralOperands(n, fd.min, fd.max);
     // The exponent operand (e/c) for scientific/engineering/compact notation.
-    var notation: []const u8 = "standard";
-    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.asObj().getOwn("notation")) |nv| if (nv.isString()) {
-        notation = nv.asStr();
-    };
     const absn = @abs(n);
-    if (absn != 0 and std.math.isFinite(absn) and !std.mem.eql(u8, notation, "standard")) {
+    if (absn != 0 and std.math.isFinite(absn) and data.notation != .standard) {
         const oom = orderOfMagnitude(absn);
-        ops.e = @floatFromInt(if (std.mem.eql(u8, notation, "scientific"))
+        ops.e = @floatFromInt(if (data.notation == .scientific)
             oom
-        else if (std.mem.eql(u8, notation, "engineering"))
+        else if (data.notation == .engineering)
             @divFloor(oom, 3) * 3
         else if (oom >= 3) // compact: a multiple-of-three magnitude >= 1000
             @divFloor(oom, 3) * 3
         else
             @as(i32, 0));
     }
-    return pluralCategory(pluralRulesFor(this), ops).value();
+    return pluralCategory(pluralRulesFor(data), ops).value();
 }
 
 /// One element of a ListFormat result: an "element" (a list item) or a
@@ -30508,7 +30530,8 @@ fn intlSegmentIterNextFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 /// "other".
 fn intlPluralSelectRangeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "PluralRules")) return self.throwError("TypeError", "Intl.PluralRules.prototype.selectRange on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlPluralRulesData() == null)
+        return self.throwError("TypeError", "Intl.PluralRules.prototype.selectRange on incompatible receiver");
     if (args.len < 2 or args[0].isUndefined() or args[1].isUndefined()) return self.throwError("TypeError", "selectRange requires two arguments");
     const start = try self.toNumberV(args[0]);
     const end = try self.toNumberV(args[1]);
@@ -31081,6 +31104,9 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) blk: {
                 if (this_recv.isObject() and this_recv.asObj().intlSegmenterData() != null) break :blk this_recv;
                 return self.throwError("TypeError", "Intl.Segmenter.prototype.resolvedOptions on incompatible receiver");
+            } else if (comptime std.mem.eql(u8, service, "PluralRules")) blk: {
+                if (this_recv.isObject() and this_recv.asObj().intlPluralRulesData() != null) break :blk this_recv;
+                return self.throwError("TypeError", "Intl.PluralRules.prototype.resolvedOptions on incompatible receiver");
             } else (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
             const o = (try self.newObject()).asObj();
             const loc = if (comptime std.mem.eql(u8, service, "DisplayNames"))
@@ -31091,6 +31117,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try Value.strAlloc(self.arena, this.asObj().intlListFormatData().?.locale)
             else if (comptime std.mem.eql(u8, service, "Segmenter"))
                 try Value.strAlloc(self.arena, this.asObj().intlSegmenterData().?.locale)
+            else if (comptime std.mem.eql(u8, service, "PluralRules"))
+                try Value.strAlloc(self.arena, this.asObj().intlPluralRulesData().?.locale)
             else
                 this.asObj().getOwn("\x00locale") orelse Value.str("en");
             try self.setProp(o, "locale", loc);
@@ -31174,35 +31202,25 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // minimumIntegerDigits, then significant-OR-fraction digits,
                 // pluralCategories, rounding*, trailingZeroDisplay. No
                 // numberingSystem.
-                const ro: ?Value = this.asObj().getOwn("\x00opts");
-                const pg = struct {
-                    fn s(src: ?Value, k: []const u8) ?Value {
-                        if (src) |v| if (v.isObject()) if (v.asObj().getOwn(k)) |x| return x;
-                        return null;
-                    }
-                }.s;
-                try self.setProp(o, "type", pg(ro, "type") orelse Value.str("cardinal"));
-                const pr_notation: []const u8 = if (pg(ro, "notation")) |n| n.asStr() else "standard";
-                try self.setProp(o, "notation", try Value.strAlloc(self.arena, pr_notation));
+                const data = this.asObj().intlPluralRulesData().?;
+                try self.setProp(o, "type", data.kind.value());
+                try self.setProp(o, "notation", data.notation.value());
                 // compactDisplay is reported only when notation is "compact".
-                if (std.mem.eql(u8, pr_notation, "compact")) {
-                    try self.setProp(o, "compactDisplay", pg(ro, "compactDisplay") orelse Value.str("short"));
+                if (data.notation == .compact) {
+                    try self.setProp(o, "compactDisplay", data.compact_display.value());
                 }
-                try self.setProp(o, "minimumIntegerDigits", Value.num(if (pg(ro, "minimumIntegerDigits")) |v| v.asNum() else 1));
-                if (pg(ro, "minimumSignificantDigits") != null or pg(ro, "maximumSignificantDigits") != null) {
-                    try self.setProp(o, "minimumSignificantDigits", Value.num(if (pg(ro, "minimumSignificantDigits")) |v| v.asNum() else 1));
-                    try self.setProp(o, "maximumSignificantDigits", Value.num(if (pg(ro, "maximumSignificantDigits")) |v| v.asNum() else 21));
+                try self.setProp(o, "minimumIntegerDigits", Value.num(@floatFromInt(data.minimum_integer_digits)));
+                if (data.minimum_significant_digits != null or data.maximum_significant_digits != null) {
+                    try self.setProp(o, "minimumSignificantDigits", Value.num(@floatFromInt(data.minimum_significant_digits orelse 1)));
+                    try self.setProp(o, "maximumSignificantDigits", Value.num(@floatFromInt(data.maximum_significant_digits orelse 21)));
                 } else {
-                    const minf: f64 = if (pg(ro, "minimumFractionDigits")) |v| v.asNum() else 0;
-                    var maxf: f64 = if (pg(ro, "maximumFractionDigits")) |v| v.asNum() else @max(minf, 3);
-                    if (maxf < minf) maxf = minf;
-                    try self.setProp(o, "minimumFractionDigits", Value.num(minf));
-                    try self.setProp(o, "maximumFractionDigits", Value.num(maxf));
+                    try self.setProp(o, "minimumFractionDigits", Value.num(@floatFromInt(data.minimum_fraction_digits)));
+                    try self.setProp(o, "maximumFractionDigits", Value.num(@floatFromInt(data.maximum_fraction_digits)));
                 }
                 // pluralCategories: the categories the locale's rules define,
                 // in CLDR order (zero, one, two, few, many, other).
                 const cats = (try self.newArray()).asObj();
-                const prules = pluralRulesFor(this);
+                const prules = pluralRulesFor(data);
                 for (plural_category_order) |cat| {
                     for (prules) |r| if (PluralCategory.fromString(r.cat) == cat) {
                         try cats.appendElement(self.arena, cat.value());
@@ -31210,10 +31228,10 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     };
                 }
                 try self.setProp(o, "pluralCategories", Value.obj(cats));
-                try self.setProp(o, "roundingIncrement", pg(ro, "roundingIncrement") orelse Value.num(1));
-                try self.setProp(o, "roundingMode", pg(ro, "roundingMode") orelse Value.str("halfExpand"));
-                try self.setProp(o, "roundingPriority", pg(ro, "roundingPriority") orelse Value.str("auto"));
-                try self.setProp(o, "trailingZeroDisplay", pg(ro, "trailingZeroDisplay") orelse Value.str("auto"));
+                try self.setProp(o, "roundingIncrement", Value.num(@floatFromInt(data.rounding_increment)));
+                try self.setProp(o, "roundingMode", data.rounding_mode.value());
+                try self.setProp(o, "roundingPriority", data.rounding_priority.value());
+                try self.setProp(o, "trailingZeroDisplay", data.trailing_zero_display.value());
             } else if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
                 const data = this.asObj().intlDateTimeFormatData() orelse
                     return self.throwError("TypeError", "Intl.DateTimeFormat has no resolved state");
@@ -51164,6 +51182,88 @@ test "Intl.PluralRules validates localeMatcher option" {
         \\let valid = new Intl.PluralRules("en", { localeMatcher: "lookup" }).select(1) === "one";
         \\invalid && nul && valid
     )).asBool());
+}
+
+test "Intl.PluralRules resolved-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{ .arena = allocator, .env = undefined, .root_shape = root_shape };
+            var formatter = value.Object{};
+            var record = value.Object{};
+            try record.setOwn(allocator, root_shape, "type", Value.str("ordinal"));
+            try record.setOwn(allocator, root_shape, "notation", Value.str("compact"));
+            try record.setOwn(allocator, root_shape, "minimumFractionDigits", Value.num(2));
+            try record.setOwn(allocator, root_shape, "maximumFractionDigits", Value.num(4));
+            try record.setOwn(allocator, root_shape, "roundingMode", Value.str("halfEven"));
+            try installPluralRulesData(&machine, &formatter, "en-US", &record);
+            const data = formatter.intlPluralRulesData().?;
+            try std.testing.expectEqualStrings("en-US", data.locale);
+            try std.testing.expectEqual(value.IntlPluralRulesData.Kind.ordinal, data.kind);
+            try std.testing.expectEqual(value.IntlPluralRulesData.Notation.compact, data.notation);
+            try std.testing.expectEqual(@as(u8, 2), data.minimum_fraction_digits);
+            try std.testing.expectEqual(@as(u8, 4), data.maximum_fraction_digits);
+            try std.testing.expectEqual(value.IntlPluralRulesData.RoundingMode.half_even, data.rounding_mode);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.PluralRules consumes immutable normalized state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var log = [];
+        \\var values = { localeMatcher:"lookup", type:"ordinal", notation:"compact", compactDisplay:"long", minimumIntegerDigits:2, minimumFractionDigits:2, maximumFractionDigits:4, minimumSignificantDigits:undefined, maximumSignificantDigits:undefined, roundingIncrement:1, roundingMode:"halfEven", roundingPriority:"auto", trailingZeroDisplay:"stripIfInteger" };
+        \\var options = {};
+        \\var keys = ["localeMatcher","type","notation","compactDisplay","minimumIntegerDigits","minimumFractionDigits","maximumFractionDigits","minimumSignificantDigits","maximumSignificantDigits","roundingIncrement","roundingMode","roundingPriority","trailingZeroDisplay"];
+        \\keys.forEach(function (key) { Object.defineProperty(options, key, { get:function () { log.push(key); return values[key]; } }); });
+        \\var rules = new Intl.PluralRules("en-US", options);
+        \\values.type = "cardinal"; values.notation = "standard"; values.minimumFractionDigits = 0;
+        \\var resolved = rules.resolvedOptions();
+        \\var fake = {}; fake["\\0intl"] = "PluralRules"; fake["\\0locale"] = "en-US"; fake["\\0opts"] = { type:"ordinal" };
+        \\var rejected = 0;
+        \\try { Intl.PluralRules.prototype.select.call(fake, 1); } catch (e) { if (e instanceof TypeError) rejected++; }
+        \\try { Intl.PluralRules.prototype.selectRange.call(fake, 1, 2); } catch (e) { if (e instanceof TypeError) rejected++; }
+        \\try { Intl.PluralRules.prototype.resolvedOptions.call(fake); } catch (e) { if (e instanceof TypeError) rejected++; }
+        \\log.join("|") === keys.join("|") && resolved.locale === "en-US" && resolved.type === "ordinal" && resolved.notation === "compact" && resolved.compactDisplay === "long" && resolved.minimumIntegerDigits === 2 && resolved.minimumFractionDigits === 2 && resolved.maximumFractionDigits === 4 && resolved.roundingMode === "halfEven" && resolved.trailingZeroDisplay === "stripIfInteger" && Object.getOwnPropertyNames(rules).indexOf("\\0opts") === -1 && rules.select(1) === "one" && rejected === 3
+    )).asBool());
+}
+
+test "Intl.PluralRules resolved state is immutable across native threads" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = undefined, .root_shape = root_shape };
+    var formatter = value.Object{};
+    var record = value.Object{};
+    try record.setOwn(allocator, root_shape, "type", Value.str("ordinal"));
+    try installPluralRulesData(&machine, &formatter, "en-US", &record);
+    var results: [4]u64 = .{ 0, 0, 0, 0 };
+    const Lane = struct {
+        fn run(shared: *const value.Object, lane: usize, result: *u64) void {
+            var checksum: u64 = 0;
+            for (0..4096) |iteration| {
+                const data = shared.intlPluralRulesData() orelse {
+                    result.* = std.math.maxInt(u64);
+                    return;
+                };
+                checksum +%= data.locale.len + data.kind.string().len + data.notation.string().len + data.maximum_fraction_digits + iteration + lane;
+            }
+            result.* = checksum;
+        }
+    };
+    var threads: [results.len]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane| thread.* = try std.Thread.spawn(.{}, Lane.run, .{ &formatter, lane, &results[lane] });
+    for (&threads) |*thread| thread.join();
+    for (results, 0..) |result, lane| try std.testing.expectEqual(results[0] + lane * 4096, result);
 }
 
 test "Intl.PluralRules preserves closed categories, coercion, and result freshness" {
