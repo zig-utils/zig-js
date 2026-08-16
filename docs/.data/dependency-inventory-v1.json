@@ -71,12 +71,23 @@
       "id": "macos-sdk-foundation",
       "class": "standard_platform_interface",
       "status": "allowed",
-      "scope": "macOS Objective-C bridge",
+      "scope": "macOS Objective-C bridge and opt-in benchmark thermal-state sampling",
       "locator": "xcrun clang and Foundation.framework",
       "pin": "selected Xcode SDK",
       "license": "platform supplied",
       "affects_runtime_semantics": false,
-      "runtime_semantics": "Implements the declared Objective-C/Foundation host binding; it is not a JavaScript engine."
+      "runtime_semantics": "Implements the declared Objective-C/Foundation host binding and reads public NSProcessInfo thermal state outside scored benchmark boundaries; it is not a JavaScript engine."
+    },
+    {
+      "id": "macos-lldb-debugger",
+      "class": "standard_platform_interface",
+      "status": "allowed",
+      "scope": "opt-in native observability conformance fixture",
+      "locator": "/usr/bin/lldb from the selected Xcode command-line tools",
+      "pin": "selected Xcode command-line tools",
+      "license": "platform supplied",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Validates generated-code registration, symbols, source rows, and frame unwinding through the real platform debugger; it is never linked into libzig-js."
     },
     {
       "id": "system-javascriptcore",
@@ -192,17 +203,18 @@
       { "name": "wasm_test_options", "external": false }
     ],
     "build_links": [
-      { "kind": "framework", "name": "Foundation", "count": 4, "edge": "macos-sdk-foundation" },
+      { "kind": "framework", "name": "Foundation", "count": 6, "edge": "macos-sdk-foundation" },
       { "kind": "framework", "name": "JavaScriptCore", "count": 2, "edge": "system-javascriptcore" }
     ],
     "system_commands": [
       { "name": "xcrun", "count": 4, "edge": "macos-sdk-foundation" },
-      { "name": "/usr/bin/env", "count": 46, "edge": "home-tool-runtime" },
+      { "name": "/usr/bin/env", "count": 53, "edge": "home-tool-runtime" },
+      { "name": "/usr/bin/lldb", "count": 1, "edge": "macos-lldb-debugger" },
       { "name": "env", "count": 2, "edge": "macos-sdk-foundation" },
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".ts", "count": 62, "edge": "home-tool-runtime" }
+      { "extension": ".ts", "count": 65, "edge": "home-tool-runtime" }
     ],
     "network_capable_scripts": [
       { "path": "tools/wasm-spec/fetch.ts", "edge": "pinned-conformance-corpora" }

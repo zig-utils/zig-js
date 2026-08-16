@@ -1,0 +1,118 @@
+{
+  "schema_version": 16,
+  "matrix_id": "zig-js-representative-v16",
+  "status": "frozen",
+  "frozen_date": "2026-08-16",
+  "owner_issue": 460,
+  "history_policy": "This version hash-inherits every V15 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance decision, and attribution metric. It changes no scored row. It integrates the completed issue-503 efficiency/thermal publication guard and issue-504 independent-suite/additional-engine boundary as hash-pinned external panels, then empties the pending-panel inventory. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v15",
+    "path": "docs/.data/representative-benchmark-matrix-v15.json",
+    "sha256": "963c9c599059504b27d3e7b3262900bc7b3d8710f30958448bcc2d45590bf6c9",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution"
+    ]
+  },
+  "change": "Freezes completed efficiency/thermal and independent-suite corroboration beside the unchanged representative rows. These panels strengthen publication evidence without folding external-suite scores into repository-owned aggregates, inventing unavailable counters, rewriting historical reports, or adding an ordinary dependency.",
+  "pending_metric_panels": [],
+  "completed_metric_panels": {
+    "efficiency_thermal": {
+      "issue": 503,
+      "status": "integrated",
+      "scored_integration": {
+        "path": "tools/exact-parent-regression.ts",
+        "sha256": "ec52fc04d30ac1739e0561d5054692d3aac0c0a9ae2926475862ffbada018f22",
+        "measured_metrics": [
+          "instructions",
+          "cycles",
+          "energy_joules",
+          "thermal_state"
+        ],
+        "material_change_categories": [
+          "cpu_work",
+          "threads",
+          "generated_code",
+          "cache_traffic"
+        ],
+        "publication_boundary": "Only an explicitly selected quiet-reference host on AC power may support an efficiency claim. Required counters must be measured and stable at at most 5% RSD, every thermal observation must remain nominal, generated-code/cache claims additionally require their exact category metric, and every raw sample remains visible. Diagnostic hosts never gate or support a public ratio."
+      },
+      "disabled_path_fixture": {
+        "path": "tools/instrumentation-overhead.ts",
+        "sha256": "f5770d500cddd55e12b2ca05d6c6517423f6cee21fd9a849a27d026250e388a0",
+        "raw_evidence": {
+          "path": "docs/.data/instrumentation-overhead-diagnostic-2026-08-04.json",
+          "sha256": "638d0a823e7ae48867e0440a8a5bc2b971b3e1970cc3d9d54e975cfebd1ed4ca"
+        },
+        "report": {
+          "path": "docs/.data/instrumentation-overhead-diagnostic-2026-08-04.md",
+          "sha256": "6d22d88dd9803feb3aed29daec22d78a9c97db342e05998fe3cdf1fb9530a07a"
+        },
+        "evidence_ruling": "The checked artifact is a seven-pair battery-host diagnostic of the opt-in boundary, not a quiet-reference efficiency claim. Current collection additionally fails closed on counter availability, calibration noise, power, and thermal drift."
+      },
+      "explicitly_unavailable": [
+        "cpu_cache_misses",
+        "tlb_misses",
+        "branches_and_misses",
+        "migrations",
+        "scheduler_wait",
+        "frequency",
+        "package_energy",
+        "peak_power"
+      ]
+    },
+    "independent_suite": {
+      "issue": 504,
+      "status": "integrated",
+      "inventory": {
+        "path": "docs/.data/independent-suite-inventory-v1.json",
+        "sha256": "9679245e671e044d96f7ed620a509253b5ed52fe938b4ccbc60dbad2d8df0878"
+      },
+      "offline_verifier": {
+        "path": "tools/independent_suite_inventory.zig",
+        "sha256": "5dc1904fab83a31ce9fbe5ae6f49b31c85c39a8b1dc120d758f3187b693bf77a"
+      },
+      "adapters": [
+        {
+          "engine": "zig-js",
+          "path": "bench/independent_suite_zig_js.zig",
+          "sha256": "45577603df0f36936647116ec6d32233fbcb951b02c149919f29da192309f864"
+        },
+        {
+          "engine": "system-jsc",
+          "path": "bench/independent_suite_jsc.zig",
+          "sha256": "87fb69c84b140c60e532b6f3b5e4c181a9c5ddb250721526f44f7988c5431bcb"
+        },
+        {
+          "engine": "node-v8",
+          "path": "bench/independent_suite_node_v8.js",
+          "sha256": "46310908dcf77b8711ec23302f4d13672ac6d418edc54e2661f00bed0a31d377"
+        }
+      ],
+      "collector": {
+        "path": "tools/independent-suite-collector.ts",
+        "sha256": "88e2abc62072707e162fd262733b001e421285adb1d90fa1f7398135747d60f4"
+      },
+      "recognizer": {
+        "path": "tools/independent-suite-recognizer.ts",
+        "sha256": "0eb81e05793ff3f09d4838e17b342de6001d27d16e00e7cfdefc074854c4b106",
+        "required_equivalence": "Exact pinned sources and deterministic source-hash-mutated variants must retain identical required output contracts and identical nonzero execution-tier and bytecode-admission sets. Scored upstream sources remain byte-for-byte unchanged."
+      },
+      "unavailable_optional_engines": [
+        "standalone-v8",
+        "spidermonkey",
+        "quickjs"
+      ],
+      "publication_boundary": "Independent-suite artifacts remain out of tree and outside ordinary dependencies. Every applicable row, failure, skip, raw sample, dispersion value, output check, timed boundary, engine/dependency identity, and exclusion remains visible. The retired selected Octane subset is corroboration only and is never folded into the repository-owned representative aggregate or described as a browser/full-suite score."
+    }
+  }
+}

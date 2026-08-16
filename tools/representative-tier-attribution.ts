@@ -1328,7 +1328,7 @@ export function selfTest(): void {
   const manifest = loadManifest(DEFAULT_MANIFEST),
     entries = workloadEntries(manifest),
     rows = syntheticRows(manifest);
-  requireValue(entries.length === 170 && rows.length === 510, "V15 attribution coverage drift");
+  requireValue(entries.length === 170 && rows.length === 510, "V16 attribution coverage drift");
   validate(rows, manifest, true);
   const mismatch = JSON.parse(JSON.stringify(rows));
   mismatch[4].execution.tree_walker_entries = 1;

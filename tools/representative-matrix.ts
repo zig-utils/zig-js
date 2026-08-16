@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v15.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v16.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -13,10 +13,17 @@ function digest(path: string): string {
 }
 const same = (left: any[], right: any[]) => left.length === right.length && left.every((value, index) => value === right[index]);
 const unique = (values: any[]) => new Set(values).size === values.length;
+function validatePinnedFile(entry: any, label: string, root: string): void {
+  requireValue(entry && typeof entry.path === "string" && entry.path.length > 0, `${label} path is invalid`);
+  requireValue(typeof entry.sha256 === "string" && /^[0-9a-f]{64}$/.test(entry.sha256), `${label} SHA-256 is invalid`);
+  const path = root + "/" + entry.path;
+  requireValue(Home.fileExists(path), `${label} path does not exist: ${entry.path}`);
+  requireValue(digest(path) === entry.sha256, `${label} changed without a matrix version bump: ${entry.path}`);
+}
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 15, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 16, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -31,6 +38,13 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
   if (child.schema_version === 2) return { ...inherited, ...child };
+  if (child.schema_version === 16) {
+    requireValue(child.tier_attribution === undefined, "v16 must inherit the attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v16 changes external panel integration only");
+    requireValue(Array.isArray(child.pending_metric_panels) && child.pending_metric_panels.length === 0, "v16 must empty the completed pending-panel inventory");
+    requireValue(child.completed_metric_panels && typeof child.completed_metric_panels === "object", "v16 must integrate the completed external panels");
+    return { ...inherited, ...child };
+  }
   if (child.schema_version >= 9) {
     requireValue(child.tier_attribution && typeof child.tier_attribution === "object", `v${child.schema_version} must replace the attribution contract`);
     requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, `v${child.schema_version} changes attribution only`);
@@ -55,7 +69,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 15, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 16, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -161,7 +175,58 @@ export function validate(manifest: any, root = ROOT): void {
   requireValue(same(Object.keys(modes).sort(), ["independent_cold", "independent_steady", "shared", "single_warm"]), "v1 mode inventory changed");
   requireValue(same(modes.shared.engines, ["zig-js"]), "shared mode must not construct a JSC ratio");
   requireValue(Array.isArray(manifest.pending_metric_panels), "pending metric inventory must remain explicit");
-  if (manifest.schema_version >= 13) {
+  if (manifest.schema_version >= 16) {
+    requireValue(manifest.pending_metric_panels.length === 0, "V16 completed pending metric inventory must be empty");
+    const completed = manifest.completed_metric_panels;
+    requireValue(
+      completed && same(Object.keys(completed).sort(), ["efficiency_thermal", "independent_suite"]),
+      "V16 completed panel inventory drift",
+    );
+    const efficiency = completed.efficiency_thermal;
+    requireValue(efficiency.issue === 503 && efficiency.status === "integrated", "V16 efficiency panel identity drift");
+    validatePinnedFile(efficiency.scored_integration, "V16 exact-parent integration", root);
+    validatePinnedFile(efficiency.disabled_path_fixture, "V16 instrumentation fixture", root);
+    validatePinnedFile(efficiency.disabled_path_fixture.raw_evidence, "V16 instrumentation raw evidence", root);
+    validatePinnedFile(efficiency.disabled_path_fixture.report, "V16 instrumentation report", root);
+    requireValue(
+      same(efficiency.scored_integration.measured_metrics || [], ["instructions", "cycles", "energy_joules", "thermal_state"]),
+      "V16 measured efficiency metric inventory drift",
+    );
+    requireValue(
+      same(efficiency.scored_integration.material_change_categories || [], ["cpu_work", "threads", "generated_code", "cache_traffic"]),
+      "V16 material-change category inventory drift",
+    );
+    requireValue(
+      same(efficiency.explicitly_unavailable || [], ["cpu_cache_misses", "tlb_misses", "branches_and_misses", "migrations", "scheduler_wait", "frequency", "package_energy", "peak_power"]),
+      "V16 unavailable efficiency metric inventory drift",
+    );
+    requireValue(
+      typeof efficiency.scored_integration.publication_boundary === "string" && efficiency.scored_integration.publication_boundary.length > 0 &&
+        typeof efficiency.disabled_path_fixture.evidence_ruling === "string" && efficiency.disabled_path_fixture.evidence_ruling.length > 0,
+      "V16 efficiency publication ruling is incomplete",
+    );
+
+    const independent = completed.independent_suite;
+    requireValue(independent.issue === 504 && independent.status === "integrated", "V16 independent-suite panel identity drift");
+    validatePinnedFile(independent.inventory, "V16 independent-suite inventory", root);
+    validatePinnedFile(independent.offline_verifier, "V16 independent-suite verifier", root);
+    requireValue(
+      Array.isArray(independent.adapters) && same(independent.adapters.map((entry: any) => entry.engine), ["zig-js", "system-jsc", "node-v8"]),
+      "V16 independent engine adapter inventory drift",
+    );
+    for (const adapter of independent.adapters) validatePinnedFile(adapter, `V16 ${adapter.engine} adapter`, root);
+    validatePinnedFile(independent.collector, "V16 independent-suite collector", root);
+    validatePinnedFile(independent.recognizer, "V16 independent-suite recognizer", root);
+    requireValue(
+      same(independent.unavailable_optional_engines || [], ["standalone-v8", "spidermonkey", "quickjs"]),
+      "V16 unavailable optional-engine inventory drift",
+    );
+    requireValue(
+      typeof independent.recognizer.required_equivalence === "string" && independent.recognizer.required_equivalence.length > 0 &&
+        typeof independent.publication_boundary === "string" && independent.publication_boundary.length > 0,
+      "V16 independent-suite publication ruling is incomplete",
+    );
+  } else if (manifest.schema_version >= 13) {
     const pending = manifest.pending_metric_panels;
     requireValue(
       pending.length === 2 &&

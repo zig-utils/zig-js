@@ -26,4 +26,8 @@ rejects("missing shared attribution runner", value => value.tier_attribution.run
 rejects("shared attribution lanes", value => value.tier_attribution.shared_lanes.pop(), "shared attribution lanes drift");
 rejects("missing attribution coverage", value => { value.tier_attribution.workload_coverage = ""; }, "complete workload coverage");
 rejects("resident source drift", value => { value.tier_attribution.process_resident_source = "mixed APIs"; }, "process resident source drift");
-console.log("representative matrix structural tests: 18/18 passed");
+rejects("restored pending panel", value => value.pending_metric_panels.push({ issue: 503 }), "must be empty");
+rejects("missing completed panel", value => { delete value.completed_metric_panels.independent_suite; }, "completed panel inventory drift");
+rejects("efficiency source drift", value => { value.completed_metric_panels.efficiency_thermal.scored_integration.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+rejects("independent adapter drift", value => value.completed_metric_panels.independent_suite.adapters.pop(), "adapter inventory drift");
+console.log("representative matrix structural tests: 22/22 passed");
