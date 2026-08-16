@@ -1366,6 +1366,54 @@ pub const IntlDisplayNamesData = struct {
     }
 };
 
+/// Fully resolved, immutable Intl.RelativeTimeFormat state. Constructor option
+/// observation finishes before this record is published; formatting threads
+/// subsequently read only owned strings and closed enums.
+pub const IntlRelativeTimeFormatData = struct {
+    pub const Style = enum(u8) {
+        long,
+        short,
+        narrow,
+
+        pub fn fromString(name: []const u8) Style {
+            if (std.mem.eql(u8, name, "short")) return .short;
+            if (std.mem.eql(u8, name, "narrow")) return .narrow;
+            return .long;
+        }
+
+        pub fn string(self: Style) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    pub const Numeric = enum(u8) {
+        always,
+        auto,
+
+        pub fn fromString(name: []const u8) Numeric {
+            return if (std.mem.eql(u8, name, "auto")) .auto else .always;
+        }
+
+        pub fn string(self: Numeric) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    locale: []const u8 = "en",
+    numbering_system: []const u8 = "latn",
+    style: Style = .long,
+    numeric: Numeric = .always,
+    owned_locale: ?[]u8 = null,
+    owned_numbering_system: ?[]u8 = null,
+
+    pub fn deinit(self: *IntlRelativeTimeFormatData, allocator: std.mem.Allocator) void {
+        if (self.owned_locale) |owned| allocator.free(owned);
+        if (self.owned_numbering_system) |owned| allocator.free(owned);
+        self.owned_locale = null;
+        self.owned_numbering_system = null;
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1503,6 +1551,7 @@ pub const ObjectRareTag = enum(u8) {
     intl_date_time_format,
     intl_collator,
     intl_display_names,
+    intl_relative_time_format,
     temporal,
     promise,
     constructor,
@@ -1604,6 +1653,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     intl_date_time_format: struct { ptr: ?*IntlDateTimeFormatData = null },
     intl_collator: struct { ptr: ?*IntlCollatorData = null },
     intl_display_names: struct { ptr: ?*IntlDisplayNamesData = null },
+    intl_relative_time_format: struct { ptr: ?*IntlRelativeTimeFormatData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -1844,6 +1894,7 @@ pub const ObjectBackingFlags = packed struct {
     intl_date_time_format: bool = false,
     intl_collator: bool = false,
     intl_display_names: bool = false,
+    intl_relative_time_format: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -3124,6 +3175,22 @@ pub const Object = struct {
         if (cold.hasRare(.intl_display_names)) cold.rare.intl_display_names.ptr = null;
     }
 
+    pub inline fn intlRelativeTimeFormatData(self: *const Object) ?*IntlRelativeTimeFormatData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_relative_time_format)) return null;
+        return cold.rare.intl_relative_time_format.ptr;
+    }
+
+    pub fn setIntlRelativeTimeFormatData(self: *Object, fallback: std.mem.Allocator, data: *IntlRelativeTimeFormatData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_relative_time_format, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlRelativeTimeFormatData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_relative_time_format)) cold.rare.intl_relative_time_format.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3489,6 +3556,17 @@ pub const Object = struct {
         data.deinit(a);
         a.destroy(data);
         self.deactivateBacking("intl_display_names");
+    }
+
+    pub fn intlRelativeTimeFormatAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_relative_time_format");
+    }
+
+    pub fn destroyUninstalledIntlRelativeTimeFormat(self: *Object, fallback: std.mem.Allocator, data: *IntlRelativeTimeFormatData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_relative_time_format");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {

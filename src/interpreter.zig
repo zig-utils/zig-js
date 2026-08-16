@@ -26351,19 +26351,21 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const ro = try nfProcessOptions(self, raw);
                 try installNumberFormatData(self, o, resolved, ro);
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
-                // Validate style/numeric and store a normalized options bag.
+                // Read every observable option in InitializeRelativeTimeFormat
+                // order, then publish one immutable native record.
                 const raw_arg = if (args.len > 1) args[1] else Value.undef();
                 // RelativeTimeFormat uses CoerceOptionsToObject (primitive -> boxed).
                 const raw: Value = if (raw_arg.isUndefined()) Value.undef() else Value.obj(try self.toObject(raw_arg));
-                const ro = (try self.newObject()).asObj();
+                var numbering_system: ?[]const u8 = null;
+                var style: []const u8 = "long";
+                var numeric: []const u8 = "always";
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetType(self, raw, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
-                    if (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, null)) |s| try self.setProp(ro, "style", try Value.strAlloc(self.arena, s));
-                    if (try dtfGetStr(self, raw, "numeric", &.{ "always", "auto" }, null)) |nu| try self.setProp(ro, "numeric", try Value.strAlloc(self.arena, nu));
+                    numbering_system = try dtfGetType(self, raw, "numberingSystem");
+                    style = (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, "long")).?;
+                    numeric = (try dtfGetStr(self, raw, "numeric", &.{ "always", "auto" }, "always")).?;
                 }
-                try self.setProp(o, "\x00opts", Value.obj(ro));
-                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+                try installRelativeTimeFormatData(self, o, resolved, numbering_system, style, numeric);
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
                 // Validate type/style and store a normalized options bag.
                 const raw = if (args.len > 1) args[1] else Value.undef();
@@ -27857,12 +27859,16 @@ fn nfRoundExact(self: *Interpreter, coefficient: []const u8, decimal_pos: usize,
     return nfExactFromCoefficient(self, quantized, -@as(isize, @intCast(max_frac)), min_int, min_frac);
 }
 
-/// ResolveLocale numbering for resolvedOptions: a supported `numberingSystem`
-/// option wins; otherwise a supported `-u-nu-` extension; otherwise "latn". The
-/// resolved locale keeps `-u-nu-<sys>` only when the value came from a supported
-/// extension equal to the resolved system. Sets `locale` + `numberingSystem` on
-/// `out`.
-fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8, opt_ns: ?[]const u8) value.HostError!void {
+const IntlResolvedNumbering = struct {
+    locale: []const u8,
+    numbering_system: []const u8,
+};
+
+/// ResolveLocale's numbering-system key once for constructors and reflected
+/// options. A supported option wins, then a supported `-u-nu-` extension, then
+/// the locale's generated CLDR default. Retain the extension spelling only
+/// when that extension selected the final system.
+fn intlResolvedNumbering(self: *Interpreter, tag: []const u8, opt_ns: ?[]const u8) EvalError!IntlResolvedNumbering {
     const ext_ns = localeUValue(tag, "nu");
     const ext_ok = if (ext_ns) |e| numbering_systems.digits(e) != null else false;
     const opt_ok = if (opt_ns) |p| numbering_systems.digits(p) != null else false;
@@ -27873,8 +27879,43 @@ fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8,
         try std.fmt.allocPrint(self.arena, "{s}-u-nu-{s}", .{ lang_base, ns })
     else
         lang_base;
-    try self.setProp(out, "locale", try Value.strAlloc(self.arena, rloc));
-    try self.setProp(out, "numberingSystem", try Value.strAlloc(self.arena, ns));
+    return .{ .locale = rloc, .numbering_system = ns };
+}
+
+/// Set `locale` and `numberingSystem` on an Intl `resolvedOptions` result.
+fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8, opt_ns: ?[]const u8) value.HostError!void {
+    const resolved = try intlResolvedNumbering(self, tag, opt_ns);
+    try self.setProp(out, "locale", try Value.strAlloc(self.arena, resolved.locale));
+    try self.setProp(out, "numberingSystem", try Value.strAlloc(self.arena, resolved.numbering_system));
+}
+
+/// Resolve and publish the complete RelativeTimeFormat record after all
+/// user-observable option reads. The locale spelling follows ResolveLocale:
+/// retain `-u-nu-` only when it selected the supported resolved system.
+fn installRelativeTimeFormatData(
+    self: *Interpreter,
+    formatter: *value.Object,
+    locale: []const u8,
+    option_numbering_system: ?[]const u8,
+    style: []const u8,
+    numeric: []const u8,
+) EvalError!void {
+    const resolved = try intlResolvedNumbering(self, locale, option_numbering_system);
+
+    const allocator = try formatter.intlRelativeTimeFormatAllocator(self.arena);
+    const data = try allocator.create(value.IntlRelativeTimeFormatData);
+    data.* = .{
+        .style = .fromString(style),
+        .numeric = .fromString(numeric),
+    };
+    var installed = false;
+    errdefer if (!installed) formatter.destroyUninstalledIntlRelativeTimeFormat(self.arena, data);
+    data.owned_locale = try allocator.dupe(u8, resolved.locale);
+    data.locale = data.owned_locale.?;
+    data.owned_numbering_system = try allocator.dupe(u8, resolved.numbering_system);
+    data.numbering_system = data.owned_numbering_system.?;
+    try formatter.setIntlRelativeTimeFormatData(self.arena, data);
+    installed = true;
 }
 
 /// ResolveLocale for Collator's relevant extension keys kn (numeric) and kf
@@ -30880,16 +30921,10 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
     const unit_s = try self.toStringWtf8(if (args.len > 1) args[1] else Value.undef());
     const info = rtfUnitInfo(unit_s) orelse return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid unit '{s}'", .{unit_s}));
 
-    var numeric: []const u8 = "always";
-    var style: []const u8 = "long";
-    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        if (ov.asObj().getOwn("numeric")) |nv| if (nv.isString()) {
-            numeric = nv.asStr();
-        };
-        if (ov.asObj().getOwn("style")) |sv| if (sv.isString()) {
-            style = sv.asStr();
-        };
-    };
+    const data = this.asObj().intlRelativeTimeFormatData() orelse
+        return self.throwError("TypeError", "Intl.RelativeTimeFormat has no resolved state");
+    const numeric = data.numeric.string();
+    const style = data.style.string();
     const neg = std.math.signbit(valnum); // -0 formats as past
 
     if (std.mem.eql(u8, numeric, "auto") and valnum == @trunc(valnum) and @abs(valnum) <= 1) {
@@ -30911,8 +30946,8 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
         .is_zero = rounded.is_zero,
     };
     const plural = mag != 1;
-    const locale = if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) lv.asStr() else "en" else "en";
-    const numbering = resolveNumberingSystem(this);
+    const locale = data.locale;
+    const numbering = data.numbering_system;
     const syms = localeNumberSymbols(locale, numbering);
     const lang = localeLanguage(locale);
     const is_narrow = std.mem.eql(u8, style, "narrow");
@@ -30949,7 +30984,8 @@ fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostEr
 
 fn intlRelativeTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "RelativeTimeFormat")) return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.format on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlRelativeTimeFormatData() == null)
+        return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.format on incompatible receiver");
     const r = try rtfCompute(self, this, args);
     if (r.term) |t| return try Value.strAlloc(self.arena, t);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -30982,7 +31018,8 @@ fn rtfTranslateNumber(self: *Interpreter, s: []const u8, numbering: []const u8) 
 
 fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "RelativeTimeFormat")) return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.formatToParts on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlRelativeTimeFormatData() == null)
+        return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.formatToParts on incompatible receiver");
     const r = try rtfCompute(self, this, args);
     const arr = (try self.newArray()).asObj();
     const addPart = struct {
@@ -31027,10 +31064,15 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             const this = if (comptime std.mem.eql(u8, service, "DisplayNames")) blk: {
                 if (this_recv.isObject() and this_recv.asObj().intlDisplayNamesData() != null) break :blk this_recv;
                 return self.throwError("TypeError", "Intl.DisplayNames.prototype.resolvedOptions on incompatible receiver");
+            } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) blk: {
+                if (this_recv.isObject() and this_recv.asObj().intlRelativeTimeFormatData() != null) break :blk this_recv;
+                return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.resolvedOptions on incompatible receiver");
             } else (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
             const o = (try self.newObject()).asObj();
             const loc = if (comptime std.mem.eql(u8, service, "DisplayNames"))
                 try Value.strAlloc(self.arena, this.asObj().intlDisplayNamesData().?.locale)
+            else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat"))
+                try Value.strAlloc(self.arena, this.asObj().intlRelativeTimeFormatData().?.locale)
             else
                 this.asObj().getOwn("\x00locale") orelse Value.str("en");
             try self.setProp(o, "locale", loc);
@@ -31185,20 +31227,10 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try put(self, o, "dateStyle", data.date_style.string());
                 try put(self, o, "timeStyle", data.time_style.string());
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
-                var style: []const u8 = "long";
-                var numeric: []const u8 = "always";
-                if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                    if (ov.asObj().getOwn("style")) |sv| if (sv.isString()) {
-                        style = sv.asStr();
-                    };
-                    if (ov.asObj().getOwn("numeric")) |nv| if (nv.isString()) {
-                        numeric = nv.asStr();
-                    };
-                };
-                try self.setProp(o, "style", try Value.strAlloc(self.arena, style));
-                try self.setProp(o, "numeric", try Value.strAlloc(self.arena, numeric));
-                const rtf_ns: ?[]const u8 = if (this.asObj().getOwn("\x00opts")) |ov| (if (ov.isObject()) (if (ov.asObj().getOwn("numberingSystem")) |n| (if (n.isString()) n.asStr() else null) else null) else null) else null;
-                try intlResolveNumbering(self, o, loc.asStr(), rtf_ns);
+                const data = this.asObj().intlRelativeTimeFormatData().?;
+                try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style.string()));
+                try self.setProp(o, "numeric", try Value.strAlloc(self.arena, data.numeric.string()));
+                try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
                 var typ: []const u8 = "conjunction";
                 var style: []const u8 = "long";
@@ -51344,6 +51376,105 @@ test "Intl.DisplayNames resolved-state publication is OOM-safe" {
     const previous_heap = gc_mod.setActiveHeap(null);
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.RelativeTimeFormat resolved-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{
+                .arena = allocator,
+                .env = undefined,
+                .root_shape = root_shape,
+            };
+            var formatter = value.Object{};
+
+            try installRelativeTimeFormatData(&machine, &formatter, "ar-EG-u-nu-arab", "latn", "narrow", "auto");
+            const data = formatter.intlRelativeTimeFormatData().?;
+            try std.testing.expectEqualStrings("ar-EG", data.locale);
+            try std.testing.expectEqualStrings("latn", data.numbering_system);
+            try std.testing.expectEqual(value.IntlRelativeTimeFormatData.Style.narrow, data.style);
+            try std.testing.expectEqual(value.IntlRelativeTimeFormatData.Numeric.auto, data.numeric);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.RelativeTimeFormat consumes immutable normalized state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var log = [];
+        \\var values = { localeMatcher: "lookup", numberingSystem: "latn", style: "narrow", numeric: "auto" };
+        \\var options = {};
+        \\["localeMatcher", "numberingSystem", "style", "numeric"].forEach(function (key) {
+        \\  Object.defineProperty(options, key, { get: function () { log.push(key); return values[key]; } });
+        \\});
+        \\var relative = new Intl.RelativeTimeFormat("ar-EG-u-nu-arab", options);
+        \\values.numberingSystem = "arab";
+        \\values.style = "long";
+        \\values.numeric = "always";
+        \\var resolved = relative.resolvedOptions();
+        \\var fake = {};
+        \\fake["\\0intl"] = "RelativeTimeFormat";
+        \\fake["\\0locale"] = "en";
+        \\fake["\\0opts"] = { style: "narrow", numeric: "auto", numberingSystem: "latn" };
+        \\var formatRejected = false;
+        \\var partsRejected = false;
+        \\var resolvedRejected = false;
+        \\try { Intl.RelativeTimeFormat.prototype.format.call(fake, 0, "day"); } catch (error) { formatRejected = error instanceof TypeError; }
+        \\try { Intl.RelativeTimeFormat.prototype.formatToParts.call(fake, 0, "day"); } catch (error) { partsRejected = error instanceof TypeError; }
+        \\try { Intl.RelativeTimeFormat.prototype.resolvedOptions.call(fake); } catch (error) { resolvedRejected = error instanceof TypeError; }
+        \\log.join("|") === "localeMatcher|numberingSystem|style|numeric" &&
+        \\  relative.format(0, "day") === "today" && resolved.locale === "ar-EG" &&
+        \\  resolved.numberingSystem === "latn" && resolved.style === "narrow" && resolved.numeric === "auto" &&
+        \\  Object.getOwnPropertyNames(relative).indexOf("\\0opts") === -1 &&
+        \\  formatRejected && partsRejected && resolvedRejected
+    )).asBool());
+}
+
+test "Intl.RelativeTimeFormat resolved state is immutable across native threads" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = undefined,
+        .root_shape = root_shape,
+    };
+    var formatter = value.Object{};
+    try installRelativeTimeFormatData(&machine, &formatter, "pl-PL-u-nu-latn", null, "short", "always");
+
+    var results: [4]u64 = .{ 0, 0, 0, 0 };
+    const Lane = struct {
+        fn run(shared: *const value.Object, lane: usize, result: *u64) void {
+            var checksum: u64 = 0;
+            for (0..4096) |iteration| {
+                const data = shared.intlRelativeTimeFormatData() orelse {
+                    result.* = std.math.maxInt(u64);
+                    return;
+                };
+                checksum +%= data.locale.len + data.numbering_system.len + data.style.string().len +
+                    data.numeric.string().len + iteration + lane;
+            }
+            result.* = checksum;
+        }
+    };
+    var threads: [results.len]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane|
+        thread.* = try std.Thread.spawn(.{}, Lane.run, .{ &formatter, lane, &results[lane] });
+    for (&threads) |*thread| thread.join();
+    for (results, 0..) |result, lane| {
+        try std.testing.expect(result != std.math.maxInt(u64));
+        try std.testing.expectEqual(results[0] + lane * 4096, result);
+    }
 }
 
 test "Intl.DisplayNames consumes immutable normalized state" {
