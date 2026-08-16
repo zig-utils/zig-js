@@ -1841,6 +1841,14 @@ pub fn build(b: *std.Build) void {
     const test262_bin_step = b.step("test262-bin", "Build the test262 runner exe only (no run)");
     test262_bin_step.dependOn(&test262_install.step);
 
+    const displaynames_jsc_diff_cmd = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/intl-displaynames-jsc-diff.ts" });
+    displaynames_jsc_diff_cmd.addArtifactArg(test262);
+    const displaynames_jsc_diff_step = b.step(
+        "intl-displaynames-jsc-diff",
+        "Compare pinned Intl.DisplayNames controls with system JSC (macOS)",
+    );
+    displaynames_jsc_diff_step.dependOn(&displaynames_jsc_diff_cmd.step);
+
     // Real-corpus forced-tier witnesses for #465. test262 assertions provide
     // result/exception/side-effect/async-order oracles; required-bytecode turns
     // every compiler or nested-template fallback into a hard failure. PR-249

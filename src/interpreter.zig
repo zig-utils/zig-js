@@ -24838,6 +24838,16 @@ fn localeListFirstSupportedOr(locs: *const value.Object, fallback: []const u8) [
     return fallback;
 }
 
+fn localeListFirstDisplayNamesOr(locs: *const value.Object, fallback: []const u8) []const u8 {
+    const n = locs.elementsLen();
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const v = locs.elementAt(i) orelse continue;
+        if (v.isString() and dnLocaleIndex(v.asStr()) != null) return v.asStr();
+    }
+    return fallback;
+}
+
 fn intlLocaleSupported(tag: []const u8) bool {
     const end = std.mem.indexOfScalar(u8, tag, '-') orelse tag.len;
     const lang = tag[0..end];
@@ -24858,7 +24868,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const key = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
     const arr = (try self.newArray()).asObj();
     if (std.mem.eql(u8, key, "currency")) {
-        for (dn_data.currencies) |entry|
+        for (dn_data.en_currencies_long) |entry|
             try arr.appendElement(self.arena, try Value.strAlloc(self.arena, entry.code));
         return Value.obj(arr);
     }
@@ -26321,7 +26331,10 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
             };
             // Resolve the locale (first supported requested, else "en").
             const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-            const resolved = localeListFirstSupportedOr(locs, "en");
+            const resolved = if (comptime std.mem.eql(u8, service, "DisplayNames"))
+                localeListFirstDisplayNamesOr(locs, "en")
+            else
+                localeListFirstSupportedOr(locs, "en");
             try self.setProp(o, "\x00intl", try Value.strAlloc(self.arena, service));
             try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
             try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
@@ -30469,6 +30482,78 @@ fn dnLookup(table: []const dn_data.Entry, code: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Resolve the formatter's already-canonicalized locale to the most specific
+/// generated CLDR bundle. Unicode extensions do not select DisplayNames data;
+/// missing region bundles inherit from their language. A locale with no owned
+/// bundle is excluded from DisplayNames availability and resolves to English.
+fn dnLocaleIndex(locale: []const u8) ?u8 {
+    var candidate = if (std.mem.indexOf(u8, locale, "-u-")) |extension| locale[0..extension] else locale;
+    while (true) {
+        var lo: usize = 0;
+        var hi: usize = dn_data.locales.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const ord = std.mem.order(u8, dn_data.locales[mid].locale, candidate);
+            if (ord == .eq) return @intCast(mid);
+            if (ord == .lt) lo = mid + 1 else hi = mid;
+        }
+        const separator = std.mem.lastIndexOfScalar(u8, candidate, '-') orelse break;
+        candidate = candidate[0..separator];
+    }
+    return null;
+}
+
+fn dnLocaleData(locale: []const u8) ?*const dn_data.LocaleData {
+    const index = dnLocaleIndex(locale) orelse return null;
+    return &dn_data.locales[index];
+}
+
+fn dnLocaleDataAt(index: ?u8) ?*const dn_data.LocaleData {
+    const i = index orelse return null;
+    if (i >= dn_data.locales.len) return null;
+    return &dn_data.locales[i];
+}
+
+fn dnStyleLookup(
+    style: value.IntlDisplayNamesData.Style,
+    long: []const dn_data.Entry,
+    short: []const dn_data.Entry,
+    narrow: []const dn_data.Entry,
+    code: []const u8,
+) ?[]const u8 {
+    switch (style) {
+        .narrow => if (dnLookup(narrow, code)) |name| return name,
+        .short => {},
+        .long => return dnLookup(long, code),
+    }
+    if (dnLookup(short, code)) |name| return name;
+    return dnLookup(long, code);
+}
+
+/// Apply a validated CLDR locale-display pattern containing `{0}` and `{1}`.
+fn dnFormatPattern(
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    first: []const u8,
+    second: []const u8,
+) EvalError![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var cursor: usize = 0;
+    while (cursor < pattern.len) {
+        if (std.mem.startsWith(u8, pattern[cursor..], "{0}")) {
+            try out.appendSlice(allocator, first);
+            cursor += 3;
+        } else if (std.mem.startsWith(u8, pattern[cursor..], "{1}")) {
+            try out.appendSlice(allocator, second);
+            cursor += 3;
+        } else {
+            try out.append(allocator, pattern[cursor]);
+            cursor += 1;
+        }
+    }
+    return out.items;
+}
+
 fn installDisplayNamesData(
     self: *Interpreter,
     formatter: *value.Object,
@@ -30481,6 +30566,7 @@ fn installDisplayNamesData(
     const allocator = try formatter.intlDisplayNamesAllocator(self.arena);
     const data = try allocator.create(value.IntlDisplayNamesData);
     data.* = .{
+        .locale_data_index = dnLocaleIndex(locale),
         .style = .fromString(style),
         .kind = .fromString(kind),
         .fallback = .fromString(fallback),
@@ -30498,53 +30584,65 @@ fn dnIsAllAlpha(s: []const u8) bool {
     for (s) |c| if (!std.ascii.isAlphabetic(c)) return false;
     return s.len > 0;
 }
-/// Canonicalize one language-tag subtag by position: language lowercase, script
-/// (4 alpha) titlecase, region (2 alpha) uppercase; digits/others unchanged.
-fn dnCanonSubtag(allocator: std.mem.Allocator, sub: []const u8, first: bool) EvalError![]const u8 {
-    if (first) return try std.ascii.allocLowerString(allocator, sub);
-    if (sub.len == 4 and dnIsAllAlpha(sub)) {
-        const out = try allocator.alloc(u8, 4);
-        out[0] = std.ascii.toUpper(sub[0]);
-        for (sub[1..], 1..) |c, i| out[i] = std.ascii.toLower(c);
-        return out;
-    }
-    if (sub.len == 2 and dnIsAllAlpha(sub)) return try std.ascii.allocUpperString(allocator, sub);
-    return try allocator.dupe(u8, sub);
+
+fn dnIsVariantSubtag(subtag: []const u8) bool {
+    if (subtag.len >= 5 and subtag.len <= 8) return true;
+    return subtag.len == 4 and std.ascii.isDigit(subtag[0]);
 }
-/// Render a language tag's English name: try the whole dialect tag, else compose
-/// "Language (Script, Region, …)" from the base language + qualifier names.
-fn dnLanguageName(allocator: std.mem.Allocator, canon_tag: []const u8, dialect: bool, want_short: bool) EvalError!?[]const u8 {
+/// Render a language tag using the resolved locale's dialect names and CLDR
+/// composition patterns. Unknown qualifiers remain visible in the result.
+fn dnLanguageName(
+    allocator: std.mem.Allocator,
+    locale: *const dn_data.LocaleData,
+    style: value.IntlDisplayNamesData.Style,
+    canon_tag: []const u8,
+    dialect: bool,
+) EvalError!?[]const u8 {
     if (dialect) {
-        if (want_short) if (dnLookup(&dn_data.languages_short, canon_tag)) |n| return n;
-        if (dnLookup(&dn_data.languages, canon_tag)) |n| return n;
+        if (dnStyleLookup(style, locale.languages_long, locale.languages_short, locale.languages_narrow, canon_tag)) |name| return name;
     }
     var it = std.mem.splitScalar(u8, canon_tag, '-');
     const base = it.next() orelse return null;
-    const base_name = dnLookup(&dn_data.languages, base) orelse return null;
-    var quals: std.ArrayListUnmanaged([]const u8) = .empty;
-    while (it.next()) |sub| {
-        if (sub.len == 4 and dnIsAllAlpha(sub)) {
-            try quals.append(allocator, dnLookup(&dn_data.scripts, sub) orelse sub);
-        } else if ((sub.len == 2 and dnIsAllAlpha(sub)) or sub.len == 3) {
-            try quals.append(allocator, dnLookup(&dn_data.regions, sub) orelse sub);
-        } else {
-            try quals.append(allocator, sub);
+    var base_name = dnStyleLookup(style, locale.languages_long, locale.languages_short, locale.languages_narrow, base) orelse return null;
+    var qualifier_source = canon_tag[base.len..];
+    if (qualifier_source.len > 0) qualifier_source = qualifier_source[1..];
+    if (dialect) {
+        var offset = base.len + 1;
+        var subtags = std.mem.splitScalar(u8, qualifier_source, '-');
+        while (subtags.next()) |subtag| {
+            if (dnIsVariantSubtag(subtag)) {
+                const dialect_code = canon_tag[0 .. offset - 1];
+                if (dnStyleLookup(style, locale.languages_long, locale.languages_short, locale.languages_narrow, dialect_code)) |name| {
+                    base_name = name;
+                    qualifier_source = canon_tag[offset..];
+                }
+                break;
+            }
+            offset += subtag.len + 1;
         }
     }
-    if (quals.items.len == 0) return base_name;
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    try out.appendSlice(allocator, base_name);
-    try out.appendSlice(allocator, " (");
-    for (quals.items, 0..) |q, i| {
-        if (i != 0) try out.appendSlice(allocator, ", ");
-        try out.appendSlice(allocator, q);
+    var qualifier: ?[]const u8 = null;
+    var qualifiers = std.mem.splitScalar(u8, qualifier_source, '-');
+    while (qualifiers.next()) |sub| {
+        if (sub.len == 0) continue;
+        const name = if (sub.len == 4 and dnIsAllAlpha(sub))
+            dnStyleLookup(style, locale.scripts_long, locale.scripts_short, locale.scripts_narrow, sub) orelse sub
+        else if ((sub.len == 2 and dnIsAllAlpha(sub)) or sub.len == 3)
+            dnStyleLookup(style, locale.regions_long, locale.regions_short, locale.regions_narrow, sub) orelse sub
+        else if (dnIsVariantSubtag(sub))
+            dnStyleLookup(style, locale.variants_long, locale.variants_short, locale.variants_narrow, sub) orelse sub
+        else
+            sub;
+        qualifier = if (qualifier) |prior|
+            try dnFormatPattern(allocator, locale.locale_separator, prior, name)
+        else
+            name;
     }
-    try out.append(allocator, ')');
-    return out.items;
+    return if (qualifier) |q| try dnFormatPattern(allocator, locale.locale_pattern, base_name, q) else base_name;
 }
-/// `Intl.DisplayNames.prototype.of(code)` — validates the code's structure for
-/// the configured type (RangeError otherwise), then renders its English display
-/// name from the CLDR tables (for an `en` locale). When no name is found,
+/// `Intl.DisplayNames.prototype.of(code)` — applies ECMA-402
+/// CanonicalCodeForDisplayNames, then renders its localized display
+/// name from the resolved locale's pinned CLDR tables. When no name is found,
 /// fallback "none" returns undefined and "code" returns the canonicalized code.
 fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -30554,9 +30652,7 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
     var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
     defer scratch.deinit();
     const scratch_allocator = scratch.allocator();
-    const want_short = data.style == .short;
-    // English CLDR names apply when the resolved locale is English.
-    const is_en = std.mem.eql(u8, data.locale, "en") or std.mem.startsWith(u8, data.locale, "en-");
+    const locale = dnLocaleDataAt(data.locale_data_index);
     const allAlpha = dnIsAllAlpha;
     var canon: []const u8 = code;
     var name: ?[]const u8 = null;
@@ -30567,28 +30663,23 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
                 break :blk code.len == 3;
             };
             if (!((code.len == 2 and allAlpha(code)) or digits)) return self.throwError("RangeError", "invalid region code");
-            // ICU looks up region codes case-sensitively (uppercase CLDR keys).
-            if (is_en) {
-                if (want_short) name = dnLookup(&dn_data.regions_short, code);
-                if (name == null) name = dnLookup(&dn_data.regions, code);
-            }
+            var region_buf: [3]u8 = undefined;
+            canon = std.ascii.upperString(region_buf[0..code.len], code);
+            if (locale) |names| name = dnStyleLookup(data.style, names.regions_long, names.regions_short, names.regions_narrow, canon);
         },
         .script => {
             if (code.len != 4 or !allAlpha(code)) return self.throwError("RangeError", "invalid script code");
-            if (is_en) {
-                if (want_short) name = dnLookup(&dn_data.scripts_short, code);
-                if (name == null) name = dnLookup(&dn_data.scripts, code);
-            }
+            var script_buf: [4]u8 = undefined;
+            _ = std.ascii.lowerString(&script_buf, code);
+            script_buf[0] = std.ascii.toUpper(script_buf[0]);
+            canon = &script_buf;
+            if (locale) |names| name = dnStyleLookup(data.style, names.scripts_long, names.scripts_short, names.scripts_narrow, canon);
         },
         .currency => {
             if (code.len != 3 or !allAlpha(code)) return self.throwError("RangeError", "invalid currency code");
             var currency_buf: [3]u8 = undefined;
             canon = std.ascii.upperString(&currency_buf, code);
-            if (is_en) name = dnLookup(&dn_data.currencies, canon);
-            if (name == null) {
-                // The currencies enumerated by supportedValuesOf have a stand-in name.
-                for (supported_currencies) |c| if (std.mem.eql(u8, c, canon)) return try Value.strAlloc(self.arena, canon);
-            }
+            if (locale) |names| name = dnStyleLookup(data.style, names.currencies_long, names.currencies_short, names.currencies_narrow, canon);
         },
         .language => {
             // A unicode_language_id: structurally valid AND no extension (singleton)
@@ -30606,29 +30697,20 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
                 const low = std.ascii.lowerString(language_buf[0..code.len], code);
                 canon = dnLookup(&dn_data.language_aliases, low) orelse low;
             } else {
-                var parts: std.ArrayListUnmanaged(u8) = .empty;
-                var sit = std.mem.splitScalar(u8, code, '-');
-                var first = true;
-                while (sit.next()) |sub| {
-                    if (first) {
-                        const low = try std.ascii.allocLowerString(scratch_allocator, sub);
-                        try parts.appendSlice(scratch_allocator, dnLookup(&dn_data.language_aliases, low) orelse low);
-                    } else {
-                        try parts.append(scratch_allocator, '-');
-                        try parts.appendSlice(scratch_allocator, try dnCanonSubtag(scratch_allocator, sub, false));
-                    }
-                    first = false;
-                }
-                canon = parts.items;
+                canon = try canonicalizeLocaleTagForIntl(self, scratch_allocator, code);
             }
-            if (is_en) name = try dnLanguageName(scratch_allocator, canon, data.language_display == .dialect, want_short);
+            if (locale) |names| name = try dnLanguageName(scratch_allocator, names, data.style, canon, data.language_display == .dialect);
         },
         .calendar => {
             if (!dtfWellFormedType(code)) return self.throwError("RangeError", "invalid calendar code");
-            // Calendars enumerated by supportedValuesOf resolve under fallback:"none".
-            const cc = dtfCanonCalendar(code);
-            if (dtfCalAvail(cc)) return try Value.strAlloc(self.arena, cc);
-            canon = cc;
+            canon = try std.ascii.allocLowerString(scratch_allocator, code);
+            const cldr_code = if (std.mem.eql(u8, canon, "gregory"))
+                "gregorian"
+            else if (std.mem.eql(u8, canon, "ethioaa"))
+                "ethiopic-amete-alem"
+            else
+                canon;
+            if (locale) |names| name = dnLookup(names.calendars_long, cldr_code);
         },
         .date_time_field => {
             const fields = [_][]const u8{ "era", "year", "quarter", "month", "weekOfYear", "weekday", "day", "dayPeriod", "hour", "minute", "second", "timeZoneName" };
@@ -30637,6 +30719,7 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
                 ok = true;
             };
             if (!ok) return self.throwError("RangeError", "invalid dateTimeField");
+            if (locale) |names| name = dnStyleLookup(data.style, names.date_fields_long, names.date_fields_short, names.date_fields_narrow, code);
         },
     }
     if (name) |n| return try Value.strAlloc(self.arena, n);
@@ -31171,33 +31254,42 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
     }.call;
 }
 
-fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    // CanonicalizeLocaleList(locales) first (throws on a structurally invalid tag).
-    const arr = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
-    // SupportedLocales: if options is not undefined, ToObject it (TypeError for
-    // null) and validate the localeMatcher option (RangeError otherwise).
-    if (args.len > 1 and !args[1].isUndefined()) {
-        const opts: Value = Value.obj(try self.toObject(args[1]));
-        const lm = try self.getProperty(opts, "localeMatcher");
-        if (!lm.isUndefined()) {
-            const s = try self.toStringWtf8(lm);
-            if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
+fn intlSupportedLocalesOfFn(comptime service: []const u8) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = this;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            // CanonicalizeLocaleList(locales) first (throws on a structurally invalid tag).
+            const arr = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
+            // SupportedLocales: if options is not undefined, ToObject it (TypeError for
+            // null) and validate the localeMatcher option (RangeError otherwise).
+            if (args.len > 1 and !args[1].isUndefined()) {
+                const opts: Value = Value.obj(try self.toObject(args[1]));
+                const lm = try self.getProperty(opts, "localeMatcher");
+                if (!lm.isUndefined()) {
+                    const s = try self.toStringWtf8(lm);
+                    if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
+                }
+            }
+            // A service can advertise only locales for which its own immutable
+            // data exists. DisplayNames has an explicit generated locale set;
+            // other services retain the engine-wide CLDR availability rule.
+            const out = (try self.newArray()).asObj();
+            const n = arr.elementsLen();
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const lv = arr.elementAt(i) orelse continue;
+                if (!lv.isString()) continue;
+                const supported = if (comptime std.mem.eql(u8, service, "DisplayNames"))
+                    dnLocaleIndex(lv.asStr()) != null
+                else
+                    intlLocaleSupported(lv.asStr());
+                if (!supported) continue;
+                try out.appendElement(self.arena, lv);
+            }
+            return Value.obj(out);
         }
-    }
-    // Report requested locales as supported only when we have basic CLDR locale
-    // data for the primary language.
-    const out = (try self.newArray()).asObj();
-    const n = arr.elementsLen();
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const lv = arr.elementAt(i) orelse continue;
-        if (!lv.isString()) continue;
-        if (!intlLocaleSupported(lv.asStr())) continue;
-        try out.appendElement(self.arena, lv);
-    }
-    return Value.obj(out);
+    }.call;
 }
 
 /// Install the `Intl` namespace and its services.
@@ -31228,13 +31320,13 @@ fn installIntl(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalE
 
     // Helper to register one Intl service constructor with a prototype.
     const Svc = struct {
-        fn install(self_a: std.mem.Allocator, shp: *Shape, e: *Environment, namespace: *value.Object, op: *value.Object, name: []const u8, arity: usize, ctor_fn: value.NativeFn, ttag: ?[]const u8) EvalError!*value.Object {
+        fn install(self_a: std.mem.Allocator, shp: *Shape, e: *Environment, namespace: *value.Object, op: *value.Object, comptime name: []const u8, arity: usize, ctor_fn: value.NativeFn, ttag: ?[]const u8) EvalError!*value.Object {
             const proto = try gc_mod.allocObj(self_a);
             proto.* = .{ .proto = op };
             const ctor = try gc_mod.allocObj(self_a);
             ctor.* = .{ .native = ctor_fn, .native_ctor = true };
             try installNativeProps(self_a, shp, ctor, name, arity);
-            try setNative(self_a, shp, ctor, "supportedLocalesOf", 1, intlSupportedLocalesOfFn);
+            try setNative(self_a, shp, ctor, "supportedLocalesOf", 1, intlSupportedLocalesOfFn(name));
             try ctor.setOwn(self_a, shp, "prototype", Value.obj(proto));
             try ctor.setAttr(self_a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
             try setConstructor(self_a, shp, proto, ctor);
@@ -51242,6 +51334,7 @@ test "Intl.DisplayNames resolved-state publication is OOM-safe" {
             try installDisplayNamesData(&machine, &formatter, "en-US", "short", "language", "none", "standard");
             const data = formatter.intlDisplayNamesData().?;
             try std.testing.expectEqualStrings("en-US", data.locale);
+            try std.testing.expectEqualStrings("en", dnLocaleDataAt(data.locale_data_index).?.locale);
             try std.testing.expectEqual(value.IntlDisplayNamesData.Style.short, data.style);
             try std.testing.expectEqual(value.IntlDisplayNamesData.Kind.language, data.kind);
             try std.testing.expectEqual(value.IntlDisplayNamesData.Fallback.none, data.fallback);
@@ -51282,6 +51375,90 @@ test "Intl.DisplayNames consumes immutable normalized state" {
     )).asBool());
 }
 
+test "Intl.DisplayNames uses pinned locale data and composition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\function named(locale, type, style, code, languageDisplay) {
+        \\  return new Intl.DisplayNames(locale, {
+        \\    type: type, style: style, languageDisplay: languageDisplay || "dialect"
+        \\  }).of(code);
+        \\}
+        \\var actual = [
+        \\  named("en", "language", "long", "zh-Hant"),
+        \\  named("en", "language", "short", "en-US", "standard"),
+        \\  named("fr", "language", "long", "en-Latn-US", "standard"),
+        \\  named("fr", "region", "short", "us"),
+        \\  named("fr", "script", "narrow", "lAtN"),
+        \\  named("fr", "currency", "narrow", "USD"),
+        \\  named("fr", "calendar", "short", "GREGORY"),
+        \\  named("fr", "dateTimeField", "short", "timeZoneName"),
+        \\  named("de-AT", "currency", "long", "USD"),
+        \\  named("zh-Hant", "language", "long", "en-Latn-US", "standard"),
+        \\  named("en", "language", "long", "en-US-posix"),
+        \\  named("af", "currency", "long", "USD")
+        \\];
+        \\var unsupported = new Intl.DisplayNames("af", { type: "currency", fallback: "none" });
+        \\actual.join("|") === "Traditional Chinese|English (US)|anglais (latin, États-Unis)|É.-U.|latin|$|calendrier grégorien|fuseau horaire|US-Dollar|英文（拉丁字母，美國）|American English (Computer)|US Dollar" &&
+        \\  unsupported.resolvedOptions().locale === "en" && unsupported.of("USD") === "US Dollar" &&
+        \\  Intl.DisplayNames.supportedLocalesOf(["af", "fr"]).join("|") === "fr"
+    )).asBool());
+}
+
+test "Intl.DisplayNames generated tables and locale inheritance are deterministic" {
+    const sorted = struct {
+        fn check(table: []const dn_data.Entry) !void {
+            if (table.len > 1) for (table[1..], 1..) |entry, index|
+                try std.testing.expect(std.mem.order(u8, table[index - 1].code, entry.code) == .lt);
+        }
+    }.check;
+    try std.testing.expectEqual(@as(usize, 51), dn_data.locales.len);
+    for (dn_data.locales, 0..) |locale, index| {
+        if (index > 0) try std.testing.expect(std.mem.order(u8, dn_data.locales[index - 1].locale, locale.locale) == .lt);
+        try std.testing.expect(std.mem.indexOf(u8, locale.locale_pattern, "{0}") != null);
+        try std.testing.expect(std.mem.indexOf(u8, locale.locale_pattern, "{1}") != null);
+        try std.testing.expect(std.mem.indexOf(u8, locale.locale_separator, "{0}") != null);
+        try std.testing.expect(std.mem.indexOf(u8, locale.locale_separator, "{1}") != null);
+        try sorted(locale.languages_long);
+        try sorted(locale.languages_short);
+        try sorted(locale.languages_narrow);
+        try sorted(locale.regions_long);
+        try sorted(locale.regions_short);
+        try sorted(locale.regions_narrow);
+        try sorted(locale.scripts_long);
+        try sorted(locale.scripts_short);
+        try sorted(locale.scripts_narrow);
+        try sorted(locale.variants_long);
+        try sorted(locale.variants_short);
+        try sorted(locale.variants_narrow);
+        try sorted(locale.currencies_long);
+        try sorted(locale.currencies_short);
+        try sorted(locale.currencies_narrow);
+        try sorted(locale.calendars_long);
+        try sorted(locale.date_fields_long);
+        try sorted(locale.date_fields_short);
+        try sorted(locale.date_fields_narrow);
+    }
+    try std.testing.expectEqualStrings("de", dnLocaleData("de-AT").?.locale);
+    try std.testing.expectEqualStrings("zh-Hant", dnLocaleData("zh-Hant-TW-u-ca-gregory").?.locale);
+    try std.testing.expect(dnLocaleData("af") == null);
+}
+
+test "Intl.DisplayNames locale-pattern composition is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const names = dnLocaleData("fr").?;
+            const rendered = (try dnLanguageName(arena.allocator(), names, .long, "en-Latn-US", false)).?;
+            try std.testing.expectEqualStrings("anglais (latin, États-Unis)", rendered);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
 test "Intl.DisplayNames resolved state is immutable across native threads" {
     if (builtin.single_threaded) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -51305,12 +51482,13 @@ test "Intl.DisplayNames resolved state is immutable across native threads" {
                     result.* = std.math.maxInt(u64);
                     return;
                 };
-                const name = dnLookup(&dn_data.regions_short, "US") orelse {
+                const name = dnLookup(&dn_data.en_regions_short, "US") orelse {
                     result.* = std.math.maxInt(u64);
                     return;
                 };
                 checksum +%= data.locale.len + data.style.string().len + data.kind.string().len +
-                    data.fallback.string().len + data.language_display.string().len + name.len + iteration + lane;
+                    data.fallback.string().len + data.language_display.string().len +
+                    (data.locale_data_index orelse 0) + name.len + iteration + lane;
             }
             result.* = checksum;
         }

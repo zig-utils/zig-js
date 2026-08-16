@@ -1351,6 +1351,9 @@ pub const IntlDisplayNamesData = struct {
     };
 
     locale: []const u8 = "en",
+    /// Index into the generated immutable DisplayNames locale table. Public
+    /// construction resolves unsupported locale families to the English bundle.
+    locale_data_index: ?u8 = null,
     style: Style = .long,
     kind: Kind = .language,
     fallback: Fallback = .code,
