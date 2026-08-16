@@ -163,12 +163,19 @@ pub const Memory = struct {
     }
 
     pub fn deinit(self: *Memory) void {
-        const selected = comptime host_profile orelse unreachable;
-        if (comptime selected.backend == .darwin_map_jit) {
-            if (self.state == .writable) pthread_jit_write_protect_np(1);
-        }
-        std.posix.munmap(self.mapping);
-        self.* = undefined;
+        // `init` refuses unsupported targets, so no Memory can exist here and
+        // the trap can never fire at runtime - but it must BE a runtime trap.
+        // The previous `comptime host_profile orelse unreachable` folded
+        // during analysis, so merely cross-compiling a consumer for a
+        // profileless target (x86_64-windows, darwin-x86_64) failed the whole
+        // build even though this code was dead there.
+        if (comptime host_profile) |selected| {
+            if (comptime selected.backend == .darwin_map_jit) {
+                if (self.state == .writable) pthread_jit_write_protect_np(1);
+            }
+            std.posix.munmap(self.mapping);
+            self.* = undefined;
+        } else unreachable;
     }
 
     /// Ephemeral emitter view. Retaining and writing through this slice after
@@ -184,17 +191,19 @@ pub const Memory = struct {
     pub fn publish(self: *Memory, used: usize) PublishError!void {
         if (used == 0 or used > self.mapping.len) return error.InvalidCodeSize;
         std.debug.assert(self.state == .writable);
-        const selected = comptime host_profile orelse unreachable;
-        synchronizeInstructionCache(self.mapping.ptr, used);
-        switch (comptime selected.backend) {
-            .darwin_map_jit => pthread_jit_write_protect_np(1),
-            .posix_mprotect => try std.process.protectMemory(self.mapping, .{
-                .read = true,
-                .execute = true,
-            }),
-        }
-        self.used = used;
-        self.state = .executable;
+        // Runtime trap, not a comptime fold - see deinit.
+        if (comptime host_profile) |selected| {
+            synchronizeInstructionCache(self.mapping.ptr, used);
+            switch (comptime selected.backend) {
+                .darwin_map_jit => pthread_jit_write_protect_np(1),
+                .posix_mprotect => try std.process.protectMemory(self.mapping, .{
+                    .read = true,
+                    .execute = true,
+                }),
+            }
+            self.used = used;
+            self.state = .executable;
+        } else unreachable;
     }
 
     pub fn executableBytes(self: *const Memory) []const u8 {
@@ -212,12 +221,14 @@ fn alignedCapacity(min_capacity: usize) error{InvalidCapacity}!usize {
 }
 
 fn synchronizeInstructionCache(start: [*]u8, len: usize) void {
-    const selected = comptime host_profile orelse unreachable;
-    switch (comptime selected.cache_synchronization) {
-        .coherent => {},
-        .darwin_icache_invalidate => sys_icache_invalidate(start, len),
-        .compiler_rt_clear_cache => __clear_cache(@intFromPtr(start), @intFromPtr(start) + len),
-    }
+    // Runtime trap, not a comptime fold - see Memory.deinit.
+    if (comptime host_profile) |selected| {
+        switch (comptime selected.cache_synchronization) {
+            .coherent => {},
+            .darwin_icache_invalidate => sys_icache_invalidate(start, len),
+            .compiler_rt_clear_cache => __clear_cache(@intFromPtr(start), @intFromPtr(start) + len),
+        }
+    } else unreachable;
 }
 
 extern "c" fn pthread_jit_write_protect_np(enabled: c_int) callconv(.c) void;
