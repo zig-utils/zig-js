@@ -9618,24 +9618,6 @@ pub const Interpreter = struct {
         return utf16LenOfString(v.asStr());
     }
 
-    pub fn stringIncludesUtf16(haystack: []const u8, needle: []const u8) bool {
-        const haystack_len = utf16LenOfString(haystack);
-        const needle_len = utf16LenOfString(needle);
-        if (needle_len == 0) return true;
-        if (needle_len > haystack_len) return false;
-        var start: usize = 0;
-        while (start <= haystack_len - needle_len) : (start += 1) {
-            var offset: usize = 0;
-            while (offset < needle_len) : (offset += 1) {
-                const left = stringCodeUnitAt(haystack, start + offset) orelse break;
-                const right = stringCodeUnitAt(needle, offset) orelse break;
-                if (left.unit != right.unit) break;
-            }
-            if (offset == needle_len) return true;
-        }
-        return false;
-    }
-
     pub fn jsStringIs8Bit(s: []const u8) bool {
         var i: usize = 0;
         while (i < s.len) {
@@ -9844,6 +9826,94 @@ pub const Interpreter = struct {
     fn utf16LenOfStringA(s: []const u8, ascii: bool) usize {
         if (ascii) return s.len;
         return utf16LenOfString(s);
+    }
+
+    fn stringBytesAreAscii(s: []const u8) bool {
+        for (s) |byte| if (byte >= 0x80) return false;
+        return true;
+    }
+
+    /// ECMA-262 StringIndexOf over the engine's WTF-8 storage. The common
+    /// ASCII representation is already one byte per UTF-16 code unit. Other
+    /// strings stream their abstract code units through KMP so astral halves
+    /// and lone surrogates remain observable without repeated rescans.
+    fn stringIndexOfUtf16(self: *Interpreter, haystack: []const u8, needle: []const u8, start: usize, haystack_len: usize, haystack_ascii: bool) EvalError!?usize {
+        if (start > haystack_len) return null;
+        if (needle.len == 0) return start;
+        const needle_ascii = stringBytesAreAscii(needle);
+        if (haystack_ascii) {
+            if (!needle_ascii) return null;
+            return std.mem.indexOfPos(u8, haystack, @min(start, haystack.len), needle);
+        }
+
+        const needle_len = utf16LenOfString(needle);
+        if (needle_len == 0) return start;
+        if (needle_len > haystack_len - start) return null;
+        if (needle_len > std.math.maxInt(u32)) return error.OutOfMemory;
+        const scratch = self.scratch_allocator orelse self.arena;
+        const units = try scratch.alloc(u16, needle_len);
+        defer scratch.free(units);
+        var needle_it = Utf16CodeUnits{ .s = needle };
+        for (units) |*unit| unit.* = needle_it.next().?;
+
+        // Ordinary constructed strings are capped at `max_string_bytes` (2^26);
+        // the explicit guard above also covers larger external/private-ABI
+        // strings. A u32 prefix bounds freeable KMP scratch to six bytes per
+        // needle code unit instead of a native usize pair.
+        const prefix = try scratch.alloc(u32, needle_len);
+        defer scratch.free(prefix);
+        prefix[0] = 0;
+        var prefix_len: usize = 0;
+        var prefix_index: usize = 1;
+        while (prefix_index < needle_len) : (prefix_index += 1) {
+            while (prefix_len > 0 and units[prefix_index] != units[prefix_len])
+                prefix_len = @intCast(prefix[prefix_len - 1]);
+            if (units[prefix_index] == units[prefix_len]) prefix_len += 1;
+            prefix[prefix_index] = @intCast(prefix_len);
+        }
+
+        var haystack_it = Utf16CodeUnits{ .s = haystack };
+        var index: usize = 0;
+        while (index < start) : (index += 1) _ = haystack_it.next() orelse return null;
+        var matched: usize = 0;
+        while (haystack_it.next()) |unit| {
+            while (matched > 0 and unit != units[matched]) matched = @intCast(prefix[matched - 1]);
+            if (unit == units[matched]) matched += 1;
+            index += 1;
+            if (matched == needle_len) return index - needle_len;
+        }
+        return null;
+    }
+
+    /// Private-ABI contains operation. Unlike String.prototype.includes this
+    /// has no position argument, but it shares the exact, bounded matcher and
+    /// must surface scratch-allocation failure to the embedding exception path.
+    pub fn stringIncludesUtf16(self: *Interpreter, haystack: []const u8, needle: []const u8) EvalError!bool {
+        const haystack_ascii = stringBytesAreAscii(haystack);
+        const haystack_len = utf16LenOfStringA(haystack, haystack_ascii);
+        return (try self.stringIndexOfUtf16(haystack, needle, 0, haystack_len, haystack_ascii)) != null;
+    }
+
+    /// Compare `needle` with the UTF-16 substring beginning at `start` without
+    /// materializing that substring. This differs from converting `start` to a
+    /// byte offset: the index may designate the low half of an astral scalar.
+    fn stringCodeUnitsEqualAt(haystack: []const u8, needle: []const u8, start: usize, haystack_ascii: bool) bool {
+        if (needle.len == 0) return true;
+        const needle_ascii = stringBytesAreAscii(needle);
+        if (haystack_ascii) {
+            if (!needle_ascii or start > haystack.len) return false;
+            return std.mem.startsWith(u8, haystack[start..], needle);
+        }
+
+        var haystack_it = Utf16CodeUnits{ .s = haystack };
+        var skipped: usize = 0;
+        while (skipped < start) : (skipped += 1) _ = haystack_it.next() orelse return false;
+        var needle_it = Utf16CodeUnits{ .s = needle };
+        while (needle_it.next()) |expected| {
+            const actual = haystack_it.next() orelse return false;
+            if (actual != expected) return false;
+        }
+        return true;
     }
 
     fn appendWtf8CodeUnit(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, cu: u16) !void {
@@ -15865,21 +15935,33 @@ pub const Interpreter = struct {
         if (eq(name, "includes")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.includes must not be a regular expression");
             const sub = try self.toStringWtf8(arg0(args));
-            const pos = try self.clampPos(arg(args, 1), s.len);
-            return Value.boolVal(std.mem.indexOf(u8, s[pos..], sub) != null);
+            // ECMA-262 String.prototype.includes steps 7–10: positions and
+            // StringIndexOf operate on UTF-16 code units, not backing bytes.
+            const len = utf16LenOfStringA(s, s_ascii);
+            const pos = try self.clampPos(arg(args, 1), len);
+            return Value.boolVal((try self.stringIndexOfUtf16(s, sub, pos, len, s_ascii)) != null);
         }
         if (eq(name, "startsWith")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.startsWith must not be a regular expression");
             const sub = try self.toStringWtf8(arg0(args));
-            const pos = try self.clampPos(arg(args, 1), s.len);
-            return Value.boolVal(std.mem.startsWith(u8, s[pos..], sub));
+            // ECMA-262 String.prototype.startsWith steps 7–15: `start` and the
+            // extracted substring are UTF-16 code-unit boundaries.
+            const len = utf16LenOfStringA(s, s_ascii);
+            const pos = try self.clampPos(arg(args, 1), len);
+            const sub_len = utf16LenOfStringA(sub, stringBytesAreAscii(sub));
+            if (sub_len > len - pos) return Value.boolVal(false);
+            return Value.boolVal(stringCodeUnitsEqualAt(s, sub, pos, s_ascii));
         }
         if (eq(name, "endsWith")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.endsWith must not be a regular expression");
             const sub = try self.toStringWtf8(arg0(args));
-            // `endPosition` defaults to the string length; the match ends there.
-            const end_pos = if (args.len > 1 and !args[1].isUndefined()) try self.clampPos(args[1], s.len) else s.len;
-            return Value.boolVal(std.mem.endsWith(u8, s[0..end_pos], sub));
+            // ECMA-262 String.prototype.endsWith steps 7–14: compute the
+            // candidate substring entirely in UTF-16 code-unit space.
+            const len = utf16LenOfStringA(s, s_ascii);
+            const end_pos = if (args.len > 1 and !args[1].isUndefined()) try self.clampPos(args[1], len) else len;
+            const sub_len = utf16LenOfStringA(sub, stringBytesAreAscii(sub));
+            if (sub_len > end_pos) return Value.boolVal(false);
+            return Value.boolVal(stringCodeUnitsEqualAt(s, sub, end_pos - sub_len, s_ascii));
         }
         if (eq(name, "slice")) {
             const len = utf16LenOfStringA(s, s_ascii);
@@ -51039,6 +51121,50 @@ test "interpreter String.prototype methods" {
         \\ok = ok && it.next().value === lo;
         \\ok = ok && it.next().done === true;
         \\ok
+    )).asBool());
+}
+
+test "interpreter String search predicates use UTF-16 code units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\let bmp = "éa";
+        \\bmp.includes("a", 1) &&
+        \\bmp.startsWith("a", 1) &&
+        \\bmp.endsWith("é", 1) &&
+        \\bmp.includes("", bmp.length) &&
+        \\bmp.startsWith("", Infinity) &&
+        \\bmp.endsWith("", -Infinity)
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let astral = "💩a";
+        \\astral.includes("\uD83D") &&
+        \\astral.includes("\uDCA9") &&
+        \\astral.includes("a", 1) &&
+        \\astral.startsWith("\uDCA9", 1) &&
+        \\!astral.startsWith("a", 1) &&
+        \\astral.endsWith("\uD83D", 1) &&
+        \\astral.endsWith("\uDCA9", 2) &&
+        \\astral.endsWith("a", 3)
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let lone = "\uD83Dx\uDCA9";
+        \\lone.startsWith("\uD83D") &&
+        \\lone.includes("x\uDCA9", 1) &&
+        \\lone.endsWith("\uDCA9") &&
+        \\!lone.includes("💩")
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let order = "";
+        \\let search = { toString() { order += "s"; return "a"; } };
+        \\let position = { valueOf() { order += "p"; return 1; } };
+        \\"ba".includes(search, position) && order === "sp"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let prefix = "a".repeat(2048);
+        \\(prefix + prefix + "b").includes(prefix + "b")
     )).asBool());
 }
 

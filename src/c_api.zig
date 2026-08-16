@@ -4134,7 +4134,10 @@ export fn JSC__JSValue__stringIncludes(
         privateSetPendingAbrupt(context, &machine, err);
         return false;
     };
-    return interp.Interpreter.stringIncludesUtf16(haystack, needle);
+    return machine.stringIncludesUtf16(haystack, needle) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
 }
 
 export fn JSC__JSValue__isClass(encoded: EncodedValue, global: JSContextRef) callconv(.c) bool {

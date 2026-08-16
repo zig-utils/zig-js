@@ -124,6 +124,57 @@ const jit_cases = [_]Case{
 
 const runtime_cases = [_]Case{
     .{
+        .name = "UTF-16 string search predicates BMP positions",
+        .source =
+        \\let bmp = "éa";
+        \\let ok = bmp.includes("a", 1) && bmp.startsWith("a", 1) && bmp.endsWith("é", 1);
+        \\ok = ok && bmp.includes("", bmp.length) && bmp.startsWith("", Infinity) && bmp.endsWith("", -Infinity);
+        \\ok ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
+        .name = "UTF-16 string search predicates astral halves",
+        .source =
+        \\let astral = "💩a";
+        \\(astral.includes("\uD83D") ? 1 : 0) +
+        \\(astral.includes("\uDCA9") ? 2 : 0) +
+        \\(astral.includes("a", 1) ? 4 : 0) +
+        \\(astral.startsWith("\uDCA9", 1) ? 8 : 0) +
+        \\(!astral.startsWith("a", 1) ? 16 : 0) +
+        \\(astral.endsWith("\uD83D", 1) ? 32 : 0) +
+        \\(astral.endsWith("\uDCA9", 2) ? 64 : 0) +
+        \\(astral.endsWith("a", 3) ? 128 : 0)
+        ,
+        .expected = 255,
+    },
+    .{
+        .name = "UTF-16 string search predicates lone surrogates",
+        .source =
+        \\let lone = "\uD83Dx\uDCA9";
+        \\lone.startsWith("\uD83D") && lone.includes("x\uDCA9", 1) && lone.endsWith("\uDCA9") && !lone.includes("💩") ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
+        .name = "UTF-16 string search predicates coercion order",
+        .source =
+        \\let order = "";
+        \\let search = { toString() { order += "s"; return "a"; } };
+        \\let position = { valueOf() { order += "p"; return 1; } };
+        \\"ba".includes(search, position) && order === "sp" ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
+        .name = "UTF-16 string search predicates linear pattern",
+        .source =
+        \\let prefix = "a".repeat(2048);
+        \\(prefix + prefix + "b").includes(prefix + "b") ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
         .name = "JSON hostile nesting is catchable",
         .source =
         \\function rejectsDepth(text) {
