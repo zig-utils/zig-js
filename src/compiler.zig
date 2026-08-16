@@ -411,19 +411,30 @@ fn patternNameCaptured(pat: *const ast.Node, body: *const ast.Node) bool {
     };
 }
 
-/// Recursion core for `forLoopCapturesLexical`: is there an identifier reference
-/// to `name` inside a nested function/arrow within `node`? `in_fn` tracks whether
-/// the current subtree already sits (transitively) inside a function boundary —
-/// only references there capture the loop variable, so a plain `body` read that is
-/// NOT inside a closure does not force a bail. Unlike `nodeHasYield` this descends
-/// INTO nested functions. The switch is exhaustive (no `else`) so a newly added
-/// node kind can't silently become a false negative that reinstates the bug.
-/// Deliberately ignores shadowing (an inner binding also named `name`) and treats
-/// deferred class bodies as closures: over-matching only forces the correct-but-
-/// slower tree-walker path, never a wrong VM lowering.
-fn nameRefInClosure(node: *const ast.Node, name: []const u8, in_fn: bool) bool {
+/// Exhaustive identifier-reference walk shared by exact-name capture queries and
+/// the set-valued pending-TDZ query. `in_fn` tracks whether the current subtree
+/// already sits (transitively) inside a function boundary: loop-capture callers
+/// ignore plain body reads, while TDZ callers begin inside the current function.
+/// Unlike `nodeHasYield` this descends INTO nested functions. The switch has no
+/// `else`, so a new node kind cannot silently become a capture or TDZ false
+/// negative. It deliberately ignores shadowing and treats deferred class bodies
+/// as closures: over-matching selects checked bytecode or the correct-but-slower
+/// tree-walker, never a wrong lowering.
+const PendingLexicalReferences = struct {
+    bindings: *const std.StringHashMapUnmanaged(Compiler.ShadowBind),
+    declared: *const std.StringHashMapUnmanaged(void),
+};
+
+fn identifierReferenceMatches(query: anytype, identifier: []const u8) bool {
+    return if (comptime @TypeOf(query) == PendingLexicalReferences) pending: {
+        const binding = query.bindings.get(identifier) orelse break :pending false;
+        break :pending binding.lexical and !query.declared.contains(identifier);
+    } else std.mem.eql(u8, identifier, query);
+}
+
+fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
     return switch (node.*) {
-        .identifier => |id| in_fn and std.mem.eql(u8, id, name),
+        .identifier => |id| in_fn and identifierReferenceMatches(name, id),
 
         .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit, .elision, .this_expr, .new_target_expr, .regex_literal, .import_meta, .import_decl, .break_stmt, .continue_stmt, .debugger_stmt => false,
 
@@ -570,7 +581,7 @@ fn nameRefInClosure(node: *const ast.Node, name: []const u8, in_fn: bool) bool {
 /// A nested function/arrow captures `name` if its body — or any parameter default
 /// or destructuring-pattern parameter (which execute in the function's own scope)
 /// — references it. Always searched with `in_fn = true`.
-fn fnCaptures(fnode: *const ast.FunctionNode, name: []const u8) bool {
+fn fnCaptures(fnode: *const ast.FunctionNode, name: anytype) bool {
     for (fnode.params) |p| {
         if (p.default) |d| if (nameRefInClosure(d, name, true)) return true;
         if (p.pattern) |pat| if (nameRefInClosure(pat, name, true)) return true;
@@ -1067,12 +1078,14 @@ pub const Compiler = struct {
     }
 
     fn tdzRefsPending(node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *const std.StringHashMapUnmanaged(void)) bool {
-        var it = m.iterator();
-        while (it.next()) |entry| {
-            if (!entry.value_ptr.lexical or declared.contains(entry.key_ptr.*)) continue;
-            if (nameRefInClosure(node, entry.key_ptr.*, true)) return true;
-        }
-        return false;
+        // The query is the disjunction the old per-binding scans implemented:
+        // visit each identifier once, then test exact pending-lexical membership.
+        // Keeping the shared exhaustive walker means new AST node kinds still
+        // fail compilation until both capture and TDZ classification handle them.
+        return nameRefInClosure(node, PendingLexicalReferences{
+            .bindings = m,
+            .declared = declared,
+        }, true);
     }
 
     fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *std.StringHashMapUnmanaged(void)) CompileError!bool {
@@ -3893,6 +3906,29 @@ test "compiler checks hoisted function closure over later lexical TDZ" {
     };
     try std.testing.expect(saw_init);
     try std.testing.expect(saw_captured_check);
+}
+
+test "compiler pending lexical query preserves TDZ classifications" {
+    const cases = [_]struct { source: []const u8, hazardous: bool }{
+        .{ .source = "function f(){ let value = 1; return value; }", .hazardous = false },
+        .{ .source = "function f(){ unrelated; let value = 1; }", .hazardous = false },
+        .{ .source = "function f(){ value; let value = 1; }", .hazardous = true },
+        .{ .source = "function f(){ let value = value; }", .hazardous = true },
+        .{ .source = "function f(){ function read(){ return value; } let value = 1; }", .hazardous = true },
+        .{ .source = "function f(){ class Box { field = value; } let value = 1; }", .hazardous = true },
+        .{ .source = "function f(){ class Box { static field = value; } let value = 1; }", .hazardous = true },
+        .{ .source = "function f(){ let value = 1; class Box { field = value; } }", .hazardous = false },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
+        const program = try parser.parseProgram();
+        try std.testing.expectEqual(
+            case.hazardous,
+            try Compiler.functionHasTdzHazard(arena.allocator(), program.program[0].func_decl),
+        );
+    }
 }
 
 test "compiler reports stable plain-function admission reasons" {
