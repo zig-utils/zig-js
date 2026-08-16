@@ -26427,10 +26427,16 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 localeListFirstDisplayNamesOr(locs, "en")
             else
                 localeListFirstSupportedOr(locs, "en");
-            try self.setProp(o, "\x00intl", try Value.strAlloc(self.arena, service));
-            try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
-            try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
-            try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+            // Collator is branded and configured entirely by its native
+            // sidecar. Its callable constructor has no legacy chaining path,
+            // so publishing forgeable NUL-led service/locale properties would
+            // only expose redundant mutable-engine state to reflection.
+            if (comptime !std.mem.eql(u8, service, "Collator")) {
+                try self.setProp(o, "\x00intl", try Value.strAlloc(self.arena, service));
+                try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
+                try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
+                try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+            }
             // DateTimeFormat validates and normalizes its options eagerly (so
             // bad values throw at construction and resolvedOptions can reflect
             // canonical values); other services keep the raw options bag.
@@ -26515,8 +26521,6 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     const ip = try self.getProperty(raw, "ignorePunctuation");
                     if (!ip.isUndefined()) try self.setProp(ro, "ignorePunctuation", Value.boolVal(ip.toBoolean()));
                 }
-                try self.setProp(o, "\x00opts", Value.obj(ro));
-                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
                 try installCollatorData(self, o, resolved, ro);
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
@@ -28068,54 +28072,50 @@ fn installPluralRulesData(self: *Interpreter, formatter: *value.Object, locale: 
     installed = true;
 }
 
-/// ResolveLocale for Collator's relevant extension keys kn (numeric) and kf
-/// (caseFirst): an option wins over the `-u-` value; the keyword stays in the
-/// resolved locale only when it came from the extension and wasn't overridden by
-/// a differing option. Returns the resolved values and sets `locale` on `out`.
+/// ResolveLocale for Collator's relevant `co`, `kf`, and `kn` extension keys.
+/// The already-normalized native values determine which supported keywords
+/// remain in the resolved locale. Build the final spelling directly in the
+/// formatter's backing allocator so no GC string or temporary result object can
+/// become the publication boundary.
 fn collatorCollationSupported(tag: []const u8, collation: []const u8) bool {
     if (std.mem.eql(u8, collation, "emoji") or std.mem.eql(u8, collation, "eor")) return true;
     return std.mem.eql(u8, collation, "phonebk") and std.mem.eql(u8, parseTriple(tag).l, "de");
 }
 
-fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8, opt_num: ?bool, opt_kf: ?[]const u8, opt_co: ?[]const u8) value.HostError!struct { numeric: bool, case_first: []const u8, collation: []const u8 } {
+fn collatorResolvedLocaleAlloc(allocator: std.mem.Allocator, tag: []const u8, options: CollatorOptions) std.mem.Allocator.Error![]u8 {
     const co_ext = localeUValue(tag, "co");
     const ext_co: ?[]const u8 = if (co_ext) |v| if (collatorCollationSupported(tag, v)) v else null else null;
-    const opt_co_ok: ?[]const u8 = if (opt_co) |v| if (collatorCollationSupported(tag, v)) v else null else null;
-    const collation: []const u8 = if (opt_co_ok) |v| v else (ext_co orelse "default");
-    const keep_co = ext_co != null and std.mem.eql(u8, collation, ext_co.?);
+    const keep_co = ext_co != null and std.mem.eql(u8, options.collation.string(), ext_co.?);
 
     const kn_ext = localeUValue(tag, "kn");
     const ext_num: ?bool = if (kn_ext) |v| !std.mem.eql(u8, v, "false") else null;
-    const numeric: bool = if (opt_num) |o| o else (ext_num orelse false);
-    const keep_kn = ext_num != null and (opt_num == null or opt_num.? == ext_num.?);
+    const keep_kn = ext_num != null and options.numeric == ext_num.?;
 
     const kf_raw = localeUValue(tag, "kf");
     const ext_kf: ?[]const u8 = if (kf_raw) |v| (if (std.mem.eql(u8, v, "upper") or std.mem.eql(u8, v, "lower") or std.mem.eql(u8, v, "false")) v else null) else null;
-    const case_first: []const u8 = if (opt_kf) |o| o else (ext_kf orelse "false");
-    const keep_kf = ext_kf != null and (opt_kf == null or std.mem.eql(u8, opt_kf.?, ext_kf.?));
+    const keep_kf = ext_kf != null and std.mem.eql(u8, options.case_first.string(), ext_kf.?);
 
     const base = if (std.mem.indexOf(u8, tag, "-u-")) |u| tag[0..u] else tag;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    try buf.appendSlice(self.arena, base);
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, base);
     var any_kw = false;
     // Canonical key order: co before kf before kn.
     if (keep_co) {
-        try buf.appendSlice(self.arena, "-u-co-");
-        try buf.appendSlice(self.arena, collation);
+        try buf.appendSlice(allocator, "-u-co-");
+        try buf.appendSlice(allocator, ext_co.?);
         any_kw = true;
     }
     if (keep_kf) {
-        try buf.appendSlice(self.arena, if (any_kw) "-kf-" else "-u-kf-");
-        try buf.appendSlice(self.arena, case_first);
+        try buf.appendSlice(allocator, if (any_kw) "-kf-" else "-u-kf-");
+        try buf.appendSlice(allocator, ext_kf.?);
         any_kw = true;
     }
     if (keep_kn) {
-        try buf.appendSlice(self.arena, if (any_kw) "-kn" else "-u-kn");
-        if (!numeric) try buf.appendSlice(self.arena, "-false");
-        any_kw = true;
+        try buf.appendSlice(allocator, if (any_kw) "-kn" else "-u-kn");
+        if (!options.numeric) try buf.appendSlice(allocator, "-false");
     }
-    try self.setProp(out, "locale", try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena)));
-    return .{ .numeric = numeric, .case_first = case_first, .collation = collation };
+    return try buf.toOwnedSlice(allocator);
 }
 
 const CollatorOptions = value.IntlCollatorData;
@@ -28196,7 +28196,7 @@ fn installCollatorData(self: *Interpreter, collator: *value.Object, locale: []co
     var installed = false;
     errdefer if (!installed) collator.destroyUninstalledIntlCollator(self.arena, data);
     data.* = resolved;
-    data.owned_locale = try allocator.dupe(u8, resolved.locale);
+    data.owned_locale = try collatorResolvedLocaleAlloc(allocator, locale, resolved);
     data.locale = data.owned_locale.?;
     try collator.setIntlCollatorData(self.arena, data);
     installed = true;
@@ -29799,7 +29799,11 @@ fn intlBoundAccessorFn(comptime service: []const u8, comptime prop: []const u8, 
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!intlBrandOk(this, service)) return self.throwError("TypeError", "get Intl." ++ service ++ ".prototype." ++ prop ++ " called on incompatible receiver");
+            const branded = if (comptime std.mem.eql(u8, service, "Collator"))
+                this.isObject() and this.asObj().intlCollatorData() != null
+            else
+                intlBrandOk(this, service);
+            if (!branded) return self.throwError("TypeError", "get Intl." ++ service ++ ".prototype." ++ prop ++ " called on incompatible receiver");
             if (this.asObj().getOwn(cache_key)) |b| return b;
             const impl = try self.getProperty(this, impl_key);
             if (!impl.isObject()) return self.throwError("TypeError", "missing " ++ prop ++ " implementation");
@@ -31118,6 +31122,9 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) blk: {
                 if (this_recv.isObject() and this_recv.asObj().intlDurationFormatData() != null) break :blk this_recv;
                 return self.throwError("TypeError", "Intl.DurationFormat.prototype.resolvedOptions on incompatible receiver");
+            } else if (comptime std.mem.eql(u8, service, "Collator")) blk: {
+                if (this_recv.isObject() and this_recv.asObj().intlCollatorData() != null) break :blk this_recv;
+                return self.throwError("TypeError", "Intl.Collator.prototype.resolvedOptions on incompatible receiver");
             } else (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
             const o = (try self.newObject()).asObj();
             const loc = if (comptime std.mem.eql(u8, service, "DisplayNames"))
@@ -31132,6 +31139,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try Value.strAlloc(self.arena, this.asObj().intlPluralRulesData().?.locale)
             else if (comptime std.mem.eql(u8, service, "DurationFormat"))
                 try Value.strAlloc(self.arena, this.asObj().intlDurationFormatData().?.locale)
+            else if (comptime std.mem.eql(u8, service, "Collator"))
+                try Value.strAlloc(self.arena, this.asObj().intlCollatorData().?.locale)
             else
                 this.asObj().getOwn("\x00locale") orelse Value.str("en");
             try self.setProp(o, "locale", loc);
@@ -31183,33 +31192,13 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "roundingPriority", try Value.strAlloc(self.arena, data.rounding_priority));
                 try self.setProp(o, "trailingZeroDisplay", try Value.strAlloc(self.arena, data.trailing_zero_display));
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
-                // Reflect the normalized options over the spec defaults, in the
-                // resolvedOptions field order.
-                const rv: ?Value = this.asObj().getOwn("\x00opts");
-                const cget = struct {
-                    fn s(src: ?Value, k: []const u8) ?Value {
-                        if (src) |v| if (v.isObject()) if (v.asObj().getOwn(k)) |x| return x;
-                        return null;
-                    }
-                }.s;
-                // numeric/caseFirst resolve from option or the -u-kn/-u-kf
-                // extension, and may rewrite the resolved locale.
-                const opt_num: ?bool = if (cget(rv, "numeric")) |n| n.asBool() else null;
-                const opt_kf: ?[]const u8 = if (cget(rv, "caseFirst")) |c| c.asStr() else null;
-                const opt_co: ?[]const u8 = if (cget(rv, "collation")) |c| c.asStr() else null;
-                const res = try collatorResolveLocale(self, o, loc.asStr(), opt_num, opt_kf, opt_co);
-                try self.setProp(o, "usage", cget(rv, "usage") orelse Value.str("sort"));
-                try self.setProp(o, "sensitivity", cget(rv, "sensitivity") orelse Value.str("variant"));
-                // ignorePunctuation defaults from locale data: Thai ("th") is the
-                // only locale whose CLDR default is true.
-                const ip_default = blk: {
-                    const lang = parseTriple(loc.asStr()).l;
-                    break :blk std.mem.eql(u8, lang, "th");
-                };
-                try self.setProp(o, "ignorePunctuation", cget(rv, "ignorePunctuation") orelse Value.boolVal(ip_default));
-                try self.setProp(o, "collation", try Value.strAlloc(self.arena, res.collation));
-                try self.setProp(o, "numeric", Value.boolVal(res.numeric));
-                try self.setProp(o, "caseFirst", try Value.strAlloc(self.arena, res.case_first));
+                const data = this.asObj().intlCollatorData().?;
+                try self.setProp(o, "usage", data.usage.value());
+                try self.setProp(o, "sensitivity", data.sensitivity.value());
+                try self.setProp(o, "ignorePunctuation", Value.boolVal(data.ignore_punctuation));
+                try self.setProp(o, "collation", data.collation.value());
+                try self.setProp(o, "numeric", Value.boolVal(data.numeric));
+                try self.setProp(o, "caseFirst", data.case_first.value());
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
                 // Spec key order: locale (set above), type, notation,
                 // minimumIntegerDigits, then significant-OR-fraction digits,
@@ -51412,7 +51401,7 @@ test "Intl.Collator resolved-state publication is OOM-safe" {
 
             try installCollatorData(&machine, &collator, "de-DE-u-kn-kf-lower", &options);
             const data = collator.intlCollatorData().?;
-            try std.testing.expectEqualStrings("de-DE-u-kn-kf-lower", data.locale);
+            try std.testing.expectEqualStrings("de-DE-u-kn", data.locale);
             try std.testing.expectEqual(value.IntlCollatorData.Usage.search, data.usage);
             try std.testing.expectEqual(value.IntlCollatorData.Collation.phonebk, data.collation);
             try std.testing.expectEqual(value.IntlCollatorData.CaseFirst.upper, data.case_first);
@@ -51424,6 +51413,36 @@ test "Intl.Collator resolved-state publication is OOM-safe" {
     const previous_heap = gc_mod.setActiveHeap(null);
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.Collator publishes complete immutable resolved state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var keys = ["usage", "localeMatcher", "collation", "numeric", "caseFirst", "sensitivity", "ignorePunctuation"];
+        \\var log = [];
+        \\var values = { usage:"search", localeMatcher:"lookup", collation:"emoji", numeric:true, caseFirst:"lower", sensitivity:"base", ignorePunctuation:true };
+        \\var options = {};
+        \\keys.forEach(function (key) { Object.defineProperty(options, key, { get:function () { log.push(key); return values[key]; } }); });
+        \\var collator = new Intl.Collator("en-US-u-kn-kf-lower", options);
+        \\values.usage = "sort"; values.collation = "default"; values.numeric = false; values.caseFirst = "upper"; values.sensitivity = "variant"; values.ignorePunctuation = false;
+        \\for (var allocation = 0; allocation < 128; allocation++) new Intl.DateTimeFormat(allocation & 1 ? "de-DE" : "en-US", { timeZone:"UTC" });
+        \\var resolved = collator.resolvedOptions();
+        \\var equal = new Intl.Collator("en-US-u-kn-kf-lower", { numeric:true, caseFirst:"lower" }).resolvedOptions();
+        \\var override = new Intl.Collator("en-US-u-kn-kf-lower", { numeric:false, caseFirst:"upper" }).resolvedOptions();
+        \\var phonebook = new Intl.Collator("de-u-co-phonebk").resolvedOptions();
+        \\var fake = {}; fake["\\0intl"] = "Collator"; fake["\\0locale"] = "en-US"; fake["\\0opts"] = { numeric:true };
+        \\var rejected = 0;
+        \\try { Intl.Collator.prototype.resolvedOptions.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Object.getOwnPropertyDescriptor(Intl.Collator.prototype, "compare").get.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\var ownNames = Object.getOwnPropertyNames(collator);
+        \\log.join("|") === keys.join("|") && ownNames.indexOf("\\0intl") === -1 && ownNames.indexOf("\\0locale") === -1 && ownNames.indexOf("\\0opts") === -1 &&
+        \\  resolved.locale === "en-US-u-kf-lower-kn" && resolved.usage === "search" && resolved.sensitivity === "base" &&
+        \\  resolved.ignorePunctuation === true && resolved.collation === "emoji" && resolved.numeric === true && resolved.caseFirst === "lower" &&
+        \\  equal.locale === "en-US-u-kf-lower-kn" && equal.numeric === true && equal.caseFirst === "lower" &&
+        \\  override.locale === "en-US" && override.numeric === false && override.caseFirst === "upper" &&
+        \\  phonebook.locale === "de-u-co-phonebk" && phonebook.collation === "phonebk" && collator.compare === collator.compare && rejected === 2
+    )).asBool());
 }
 
 test "Intl.DisplayNames resolved-state publication is OOM-safe" {

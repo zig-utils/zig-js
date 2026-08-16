@@ -1210,6 +1210,13 @@ pub const IntlCollatorData = struct {
         pub fn string(self: Usage) []const u8 {
             return @tagName(self);
         }
+
+        pub fn value(self: Usage) Value {
+            return switch (self) {
+                .sort => Value.str("sort"),
+                .search => Value.str("search"),
+            };
+        }
     };
 
     pub const Collation = enum(u8) {
@@ -1227,6 +1234,15 @@ pub const IntlCollatorData = struct {
 
         pub fn string(self: Collation) []const u8 {
             return @tagName(self);
+        }
+
+        pub fn value(self: Collation) Value {
+            return switch (self) {
+                .default => Value.str("default"),
+                .emoji => Value.str("emoji"),
+                .eor => Value.str("eor"),
+                .phonebk => Value.str("phonebk"),
+            };
         }
     };
 
@@ -1246,6 +1262,15 @@ pub const IntlCollatorData = struct {
         pub fn string(self: Sensitivity) []const u8 {
             return @tagName(self);
         }
+
+        pub fn value(self: Sensitivity) Value {
+            return switch (self) {
+                .base => Value.str("base"),
+                .accent => Value.str("accent"),
+                .case => Value.str("case"),
+                .variant => Value.str("variant"),
+            };
+        }
     };
 
     pub const CaseFirst = enum(u8) {
@@ -1261,6 +1286,14 @@ pub const IntlCollatorData = struct {
 
         pub fn string(self: CaseFirst) []const u8 {
             return if (self == .off) "false" else @tagName(self);
+        }
+
+        pub fn value(self: CaseFirst) Value {
+            return switch (self) {
+                .upper => Value.str("upper"),
+                .lower => Value.str("lower"),
+                .off => Value.str("false"),
+            };
         }
     };
 
