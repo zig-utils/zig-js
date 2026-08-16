@@ -1426,6 +1426,26 @@ var representativeIntlRelativeValues = [-12, -3, -1, 0, 1, 3, 12, 1250];
 var representativeIntlRelativeUnits = [
   "day", "hour", "minute", "second", "week", "month", "quarter", "year"
 ];
+var representativeIntlListResolvedFormatters = [
+  new Intl.ListFormat("en-US", { style: "long", type: "conjunction" }),
+  new Intl.ListFormat("en-US", { style: "short", type: "disjunction" }),
+  new Intl.ListFormat("en-US", { style: "narrow", type: "unit" }),
+  new Intl.ListFormat("de-DE", { style: "long", type: "disjunction" }),
+  new Intl.ListFormat("de-DE", { style: "short", type: "unit" }),
+  new Intl.ListFormat("en-US", { style: "narrow", type: "conjunction" }),
+  new Intl.ListFormat("en-US", { style: "long", type: "unit" }),
+  new Intl.ListFormat("de-DE", { style: "narrow", type: "disjunction" })
+];
+var representativeIntlRelativeResolvedFormatters = [
+  new Intl.RelativeTimeFormat("en-US", { style: "long", numeric: "always" }),
+  new Intl.RelativeTimeFormat("en-US", { style: "short", numeric: "auto" }),
+  new Intl.RelativeTimeFormat("en-US", { style: "narrow", numeric: "always" }),
+  new Intl.RelativeTimeFormat("de-DE", { style: "long", numeric: "auto" }),
+  new Intl.RelativeTimeFormat("de-DE", { style: "short", numeric: "always" }),
+  new Intl.RelativeTimeFormat("en-US", { style: "narrow", numeric: "auto" }),
+  new Intl.RelativeTimeFormat("en-US", { style: "long", numeric: "auto" }),
+  new Intl.RelativeTimeFormat("de-DE", { style: "narrow", numeric: "always" })
+];
 var representativeIntlDurationFormatter = new Intl.DurationFormat("en-US", {
   style: "long"
 });
@@ -1467,6 +1487,29 @@ function representativeIntlStructuralService(jobs, lane, service) {
         parts = representativeIntlDurationFormatter.formatToParts(representativeIntlDurationInputs[index]);
       }
       total = (total + representativeIntlStructuralChecksum(parts)) % 1000000007;
+    }
+  }
+  return total;
+}
+
+// Combined reflection creates one fresh result from each service per scored
+// operation and consumes every field. The matrices cover every closed enum;
+// locale and numbering-system bytes remain visible dynamic controls.
+var representativeIntlListResolvedKeys = ["locale", "type", "style"];
+var representativeIntlRelativeResolvedKeys = ["locale", "style", "numeric", "numberingSystem"];
+
+function representativeIntlListRelativeResolvedConsumer(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var formatterIndex = (job + i + lane) & 7;
+      var listOptions = representativeIntlListResolvedFormatters[formatterIndex].resolvedOptions();
+      var relativeOptions = representativeIntlRelativeResolvedFormatters[formatterIndex].resolvedOptions();
+      total = (total + Object.keys(listOptions).length + Object.keys(relativeOptions).length + formatterIndex + i + lane) % 1000000007;
+      for (var listKey = 0; listKey < representativeIntlListResolvedKeys.length; listKey = listKey + 1)
+        total = (total + representativeIntlDateTimeChecksum(listOptions[representativeIntlListResolvedKeys[listKey]]) + listKey) % 1000000007;
+      for (var relativeKey = 0; relativeKey < representativeIntlRelativeResolvedKeys.length; relativeKey = relativeKey + 1)
+        total = (total + representativeIntlDateTimeChecksum(relativeOptions[representativeIntlRelativeResolvedKeys[relativeKey]]) + relativeKey) % 1000000007;
     }
   }
   return total;
@@ -2203,6 +2246,7 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_number_format_numbering_system_cldr_resolved") return function (jobs, lane) { return representativeIntlNumberFormatNumberingSystemCldr(jobs, lane, "resolved"); };
   if (name === "representative_intl_list_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "list"); };
   if (name === "representative_intl_relative_time_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "relative"); };
+  if (name === "representative_intl_list_relative_resolved") return representativeIntlListRelativeResolvedConsumer;
   if (name === "representative_intl_duration_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "duration"); };
   if (name === "representative_intl_duration_format_resolved") return representativeIntlDurationResolvedConsumer;
   if (name === "representative_intl_segmenter_iterate_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "iterate"); };
