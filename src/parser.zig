@@ -60,6 +60,50 @@ pub inline fn canPublishStatementLocation(node: *const Node) bool {
     };
 }
 
+const BindingKeywordClass = packed struct {
+    always_reserved: bool = false,
+    grammar_reserved: bool = false,
+    strict_reserved: bool = false,
+};
+
+const always_and_grammar = BindingKeywordClass{ .always_reserved = true, .grammar_reserved = true };
+const always_only = BindingKeywordClass{ .always_reserved = true };
+const grammar_and_strict = BindingKeywordClass{ .grammar_reserved = true, .strict_reserved = true };
+const strict_only = BindingKeywordClass{ .strict_reserved = true };
+
+/// Immutable ECMA-262 keyword membership. StaticStringMap partitions by byte
+/// length first, so ordinary long bindings reject without walking every word.
+const binding_keyword_entries = .{
+    .{ "break", always_and_grammar },  .{ "case", always_and_grammar },
+    .{ "catch", always_and_grammar },  .{ "class", always_and_grammar },
+    .{ "const", always_and_grammar },  .{ "continue", always_and_grammar },
+    .{ "debugger", always_only },      .{ "default", always_and_grammar },
+    .{ "delete", always_and_grammar }, .{ "do", always_and_grammar },
+    .{ "else", always_and_grammar },   .{ "enum", always_and_grammar },
+    .{ "export", always_and_grammar }, .{ "extends", always_and_grammar },
+    .{ "false", always_and_grammar },  .{ "finally", always_and_grammar },
+    .{ "for", always_and_grammar },    .{ "function", always_and_grammar },
+    .{ "if", always_and_grammar },     .{ "import", always_and_grammar },
+    .{ "in", always_and_grammar },     .{ "instanceof", always_and_grammar },
+    .{ "new", always_and_grammar },    .{ "null", always_and_grammar },
+    .{ "return", always_and_grammar }, .{ "super", always_and_grammar },
+    .{ "switch", always_and_grammar }, .{ "this", always_and_grammar },
+    .{ "throw", always_and_grammar },  .{ "true", always_and_grammar },
+    .{ "try", always_and_grammar },    .{ "typeof", always_and_grammar },
+    .{ "var", always_and_grammar },    .{ "void", always_and_grammar },
+    .{ "while", always_and_grammar },  .{ "with", always_only },
+    .{ "let", grammar_and_strict },    .{ "yield", grammar_and_strict },
+    .{ "implements", strict_only },    .{ "interface", strict_only },
+    .{ "package", strict_only },       .{ "private", strict_only },
+    .{ "protected", strict_only },     .{ "public", strict_only },
+    .{ "static", strict_only },
+};
+const binding_keyword_classes = std.StaticStringMap(BindingKeywordClass).initComptime(binding_keyword_entries);
+
+inline fn bindingKeywordClass(text: []const u8) BindingKeywordClass {
+    return binding_keyword_classes.get(text) orelse .{};
+}
+
 pub fn sourceLocationAt(source: []const u8, raw_offset: usize) SourceLocation {
     const offset = @min(raw_offset, source.len);
     var line: usize = 1;
@@ -481,61 +525,37 @@ pub const Parser = struct {
     /// `undefined`, `eval`/`arguments`, … — which are legal binding names in at
     /// least some contexts, so this never false-rejects them.
     fn isAlwaysReservedBinding(text: []const u8) bool {
-        const words = [_][]const u8{
-            "break",    "case",    "catch",  "class",      "const", "continue",
-            "debugger", "default", "delete", "do",         "else",  "enum",
-            "export",   "extends", "false",  "finally",    "for",   "function",
-            "if",       "import",  "in",     "instanceof", "new",   "null",
-            "return",   "super",   "switch", "this",       "throw", "true",
-            "try",      "typeof",  "var",    "void",       "while", "with",
-        };
-        for (words) |w| if (std.mem.eql(u8, text, w)) return true;
-        return false;
+        return bindingKeywordClass(text).always_reserved;
     }
 
     fn isReservedWord(text: []const u8) bool {
-        const words = [_][]const u8{
-            "true",   "false",   "null",    "this",       "typeof",
-            "void",   "new",     "in",      "instanceof", "function",
-            "return", "var",     "let",     "const",      "if",
-            "else",   "while",   "do",      "for",        "switch",
-            "case",   "default", "break",   "continue",   "throw",
-            "try",    "catch",   "finally", "delete",     "class",
-            "enum",   "export",  "extends", "import",     "super",
-            "yield",
-        };
-        for (words) |w| {
-            if (std.mem.eql(u8, text, w)) return true;
-        }
-        return false;
+        return bindingKeywordClass(text).grammar_reserved;
     }
 
     fn isStrictReservedBinding(text: []const u8) bool {
-        const words = [_][]const u8{
-            "implements", "interface", "let",    "package", "private",
-            "protected",  "public",    "static", "yield",
-        };
-        for (words) |w| if (std.mem.eql(u8, text, w)) return true;
-        return false;
+        return bindingKeywordClass(text).strict_reserved;
     }
 
     fn isForbiddenBindingName(self: *Parser, text: []const u8) bool {
-        return isAlwaysReservedBinding(text) or
+        const keyword = bindingKeywordClass(text);
+        return keyword.always_reserved or
             ((self.module or self.in_async) and std.mem.eql(u8, text, "await")) or
             (self.in_generator and std.mem.eql(u8, text, "yield")) or
-            (self.strict and (isStrictReservedBinding(text) or isEvalOrArguments(text)));
+            (self.strict and (keyword.strict_reserved or isEvalOrArguments(text)));
     }
 
     fn isForbiddenLabelName(self: *Parser, text: []const u8) bool {
-        return isAlwaysReservedBinding(text) or
+        const keyword = bindingKeywordClass(text);
+        return keyword.always_reserved or
             ((self.module or self.in_async) and std.mem.eql(u8, text, "await")) or
             (self.in_generator and std.mem.eql(u8, text, "yield")) or
-            (self.strict and isStrictReservedBinding(text));
+            (self.strict and keyword.strict_reserved);
     }
 
     fn isEscapedReservedWord(self: *Parser, t: Token) bool {
+        const keyword = bindingKeywordClass(t.text);
         return t.kind == .identifier and t.escaped_identifier and
-            (isAlwaysReservedBinding(t.text) or (self.strict and isStrictReservedBinding(t.text)));
+            (keyword.always_reserved or (self.strict and keyword.strict_reserved));
     }
 
     fn letDeclAhead(self: *Parser) bool {
@@ -4618,6 +4638,34 @@ test "parser source locations map byte offsets to one-based line columns" {
     try std.testing.expectEqual(SourceLocation{ .byte_offset = 7, .line = 2, .column = 1 }, sourceLocationAt(src, 7));
     try std.testing.expectEqual(SourceLocation{ .byte_offset = 14, .line = 3, .column = 1 }, sourceLocationAt(src, 14));
     try std.testing.expectEqual(SourceLocation{ .byte_offset = src.len, .line = 3, .column = 6 }, sourceLocationAt(src, src.len + 99));
+}
+
+test "parser binding keyword table preserves exact reserved memberships" {
+    @setEvalBranchQuota(10_000);
+    var always_count: usize = 0;
+    var grammar_count: usize = 0;
+    var strict_count: usize = 0;
+    inline for (binding_keyword_entries, 0..) |entry, index| {
+        const key = entry.@"0";
+        const expected = entry.@"1";
+        try std.testing.expectEqual(expected, bindingKeywordClass(key));
+        always_count += @intFromBool(expected.always_reserved);
+        grammar_count += @intFromBool(expected.grammar_reserved);
+        strict_count += @intFromBool(expected.strict_reserved);
+        inline for (binding_keyword_entries, 0..) |other, other_index|
+            if (index < other_index)
+                try std.testing.expect(!std.mem.eql(u8, key, other.@"0"));
+    }
+    try std.testing.expectEqual(@as(usize, 36), always_count);
+    try std.testing.expectEqual(@as(usize, 36), grammar_count);
+    try std.testing.expectEqual(@as(usize, 9), strict_count);
+
+    try std.testing.expectEqual(always_only, bindingKeywordClass("debugger"));
+    try std.testing.expectEqual(always_only, bindingKeywordClass("with"));
+    try std.testing.expectEqual(grammar_and_strict, bindingKeywordClass("let"));
+    try std.testing.expectEqual(grammar_and_strict, bindingKeywordClass("yield"));
+    for ([_][]const u8{ "await", "async", "eval", "arguments", "get", "set", "of", "undefined", "parameter4096", "πparameter" }) |ordinary|
+        try std.testing.expectEqual(BindingKeywordClass{}, bindingKeywordClass(ordinary));
 }
 
 test "parser indexes repeated statement locations across every line terminator" {
