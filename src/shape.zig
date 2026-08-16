@@ -398,6 +398,36 @@ pub const Shape = struct {
         };
     }
 
+    /// Resolve a small compile-time field set with one newest-to-oldest walk of
+    /// a shallow immutable Shape. `classify` must return an exact field index,
+    /// not a hash-only identity. Deep shapes deliberately decline this bounded
+    /// path and retain their persistent-tree lookups at the caller.
+    pub fn classifiedLookupStatesShallow(
+        self: *Shape,
+        comptime field_count: usize,
+        comptime classify: anytype,
+        out: *[field_count]LookupState,
+    ) bool {
+        comptime std.debug.assert(field_count > 0 and field_count <= 64);
+        if (self.depth > lookup_index_threshold) return false;
+        @memset(out, .absent);
+        var resolved: u64 = 0;
+        var shape: ?*Shape = self;
+        while (shape) |current| : (shape = current.parent) {
+            const name = current.name orelse continue;
+            const index = classify(name) orelse continue;
+            if (index >= field_count) return false;
+            const bit = @as(u64, 1) << @intCast(index);
+            if (resolved & bit != 0) continue;
+            out[index] = if (current.deleted)
+                .{ .deleted = current.slot }
+            else
+                .{ .present = current.slot };
+            resolved |= bit;
+        }
+        return true;
+    }
+
     /// The shape that results from adding `name` to this one. Cached: the same
     /// `name` added to the same shape always returns the same child, so objects
     /// share structure.
@@ -627,6 +657,42 @@ test "shape deletion transitions preserve slots and undo immediate re-adds" {
     try std.testing.expectEqual(ab, without_c);
     try std.testing.expectEqual(@as(u32, 2), without_c.count);
     try std.testing.expectEqual(@as(u32, 2), without_c.live_count);
+}
+
+test "classified shallow lookup preserves newest deletion state and bounds depth" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try Shape.createRoot(arena.allocator());
+    const a = try root.transition("alpha");
+    const ab = try a.transition("beta");
+    const abc = try ab.transition("gamma");
+    const without_b = (try abc.deleteTransition("beta")).?;
+    const classify = struct {
+        fn field(name: []const u8) ?usize {
+            if (std.mem.eql(u8, name, "alpha")) return 0;
+            if (std.mem.eql(u8, name, "beta")) return 1;
+            if (std.mem.eql(u8, name, "gamma")) return 2;
+            return null;
+        }
+    }.field;
+
+    var states: [3]Shape.LookupState = undefined;
+    try std.testing.expect(without_b.classifiedLookupStatesShallow(3, classify, &states));
+    try std.testing.expectEqual(@as(Shape.LookupState, .{ .present = 0 }), states[0]);
+    try std.testing.expectEqual(@as(Shape.LookupState, .{ .deleted = 1 }), states[1]);
+    try std.testing.expectEqual(@as(Shape.LookupState, .{ .present = 2 }), states[2]);
+
+    const restored = try without_b.transition("beta");
+    try std.testing.expect(restored.classifiedLookupStatesShallow(3, classify, &states));
+    try std.testing.expectEqual(@as(Shape.LookupState, .{ .present = 1 }), states[1]);
+
+    var deep = restored;
+    var key_storage: [32]u8 = undefined;
+    for (0..Shape.lookup_index_threshold) |index| {
+        const key = try std.fmt.bufPrint(&key_storage, "extra-{d}", .{index});
+        deep = try deep.transition(key);
+    }
+    try std.testing.expect(!deep.classifiedLookupStatesShallow(3, classify, &states));
 }
 
 test "shape deletion transitions converge under concurrent same-name removal" {

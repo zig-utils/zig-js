@@ -5711,43 +5711,53 @@ pub const Object = struct {
         } };
     }
 
-    /// Snapshot a fixed set of ordinary named data properties as one logical
-    /// read. `false` means at least one requested name is an accessor, so a
-    /// caller that must preserve getter ordering has to use ordinary [[Get]].
+    /// Snapshot a compile-time-classified set of ordinary named data properties
+    /// as one logical read. `false` means either a requested name is an accessor
+    /// or the Shape is too deep for the bounded scan, so a caller that must
+    /// preserve getter ordering has to use ordinary [[Get]].
     ///
     /// The all-absent path remains lock-free: immutable Shape publication and
     /// the accessor reader gate give it a valid linearization point. Once any
-    /// data slot is present, one property-lock transaction revalidates every
-    /// descriptor before copying values, avoiding a torn multi-name snapshot
-    /// and one lock acquisition per present field in shared realms.
-    pub fn namedOwnDataValuesSnapshot(self: *const Object, names: []const []const u8, out: []?Value) bool {
-        std.debug.assert(names.len == out.len);
+    /// data slot is present, one property-lock transaction revalidates the
+    /// Shape before copying values, avoiding a torn multi-name snapshot and one
+    /// lock acquisition per present field in shared realms.
+    pub fn classifiedOwnDataValuesSnapshot(
+        self: *const Object,
+        comptime field_count: usize,
+        comptime classify: anytype,
+        out: *[field_count]?Value,
+    ) bool {
         @memset(out, null);
 
         if (self.coldState()) |cold| if (cold.accessors.load(.acquire)) |accessors| {
             beginAccessorRead(cold);
             defer endAccessorRead(cold);
-            for (names) |name| if (accessors.contains(name)) return false;
+            var iterator = accessors.iterator();
+            while (iterator.next()) |entry| if (classify(entry.key_ptr.*) != null) return false;
         };
 
         const published = @atomicLoad(?*Shape, &self.shape, .acquire) orelse return true;
+        var states: [field_count]Shape.LookupState = undefined;
+        if (!published.classifiedLookupStatesShallow(field_count, classify, &states)) return false;
         var any_data = false;
-        for (names) |name| if ((@constCast(published)).lookup(name) != null) {
-            any_data = true;
-            break;
-        };
+        for (states) |state| {
+            if (state == .present) any_data = true;
+        }
         if (!any_data) return true;
 
         self.lockPropertiesFor(.named_snapshot);
         defer self.unlockProperties();
-        if (self.accessorsMap()) |accessors|
-            for (names) |name| if (accessors.contains(name)) return false;
-        const shape = self.shape orelse return true;
-        const slots = self.slotsItems();
-        for (names, out) |name, *slot_value| {
-            const slot = (@constCast(shape)).lookup(name) orelse continue;
-            slot_value.* = slots[slot];
+        if (self.accessorsMap()) |accessors| {
+            var iterator = accessors.iterator();
+            while (iterator.next()) |entry| if (classify(entry.key_ptr.*) != null) return false;
         }
+        const shape = self.shape orelse return true;
+        if (!shape.classifiedLookupStatesShallow(field_count, classify, &states)) return false;
+        const slots = self.slotsItems();
+        for (states, out) |state, *slot_value| switch (state) {
+            .present => |slot| slot_value.* = slots[slot],
+            .absent, .deleted => {},
+        };
         return true;
     }
 

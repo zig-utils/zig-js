@@ -35459,11 +35459,30 @@ const dur_read_fields = [_]DurField{
     .{ .name = "years", .idx = 0 },
 };
 
-const dur_read_names = names: {
-    var names: [dur_read_fields.len][]const u8 = undefined;
-    for (dur_read_fields, 0..) |field, index| names[index] = field.name;
-    break :names names;
-};
+fn durationReadFieldIndex(name: []const u8) ?usize {
+    return switch (name.len) {
+        4 => if (std.mem.eql(u8, name, "days")) 0 else null,
+        5 => switch (name[0]) {
+            'h' => if (std.mem.eql(u8, name, "hours")) 1 else null,
+            'w' => if (std.mem.eql(u8, name, "weeks")) 8 else null,
+            'y' => if (std.mem.eql(u8, name, "years")) 9 else null,
+            else => null,
+        },
+        6 => if (std.mem.eql(u8, name, "months")) 5 else null,
+        7 => switch (name[0]) {
+            'm' => if (std.mem.eql(u8, name, "minutes")) 4 else null,
+            's' => if (std.mem.eql(u8, name, "seconds")) 7 else null,
+            else => null,
+        },
+        11 => if (std.mem.eql(u8, name, "nanoseconds")) 6 else null,
+        12 => switch (name[2]) {
+            'c' => if (std.mem.eql(u8, name, "microseconds")) 2 else null,
+            'l' => if (std.mem.eql(u8, name, "milliseconds")) 3 else null,
+            else => null,
+        },
+        else => null,
+    };
+}
 
 fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -38169,12 +38188,12 @@ fn durationFromOrdinaryNumericBag(self: *Interpreter, object: *value.Object) Eva
     const object_proto = self.objectProto() orelse return null;
     if (object.protoAtomic() != object_proto) return null;
 
-    var own = std.mem.zeroes([dur_read_names.len]?Value);
-    var inherited = std.mem.zeroes([dur_read_names.len]?Value);
-    if (!object.namedOwnDataValuesSnapshot(&dur_read_names, &own)) return null;
-    if (!object_proto.namedOwnDataValuesSnapshot(&dur_read_names, &inherited)) return null;
+    var own = std.mem.zeroes([dur_read_fields.len]?Value);
+    var inherited = std.mem.zeroes([dur_read_fields.len]?Value);
+    if (!object.classifiedOwnDataValuesSnapshot(dur_read_fields.len, durationReadFieldIndex, &own)) return null;
+    if (!object_proto.classifiedOwnDataValuesSnapshot(dur_read_fields.len, durationReadFieldIndex, &inherited)) return null;
 
-    var raw: [dur_read_names.len]Value = undefined;
+    var raw: [dur_read_fields.len]Value = undefined;
     for (&raw, own, inherited) |*result, own_value, inherited_value| {
         result.* = own_value orelse inherited_value orelse Value.undef();
         if (!result.isUndefined() and !result.isNumber()) return null;
