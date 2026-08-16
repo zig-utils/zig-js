@@ -142,6 +142,14 @@ fn nowNs(io: std.Io) i96 {
 }
 
 fn workloadWidth(name: []const u8) !usize {
+    if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_clear_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_clear_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_clear_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_unrelated_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_first_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_last_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_for_of_clear_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_for_of_last_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_clear_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_clear_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_compile_tdz_clear_4096")) return 4096;
@@ -261,6 +269,22 @@ fn isUnicodeIdentifierWorkload(name: []const u8) bool {
 }
 
 const TdzCompileShape = enum { clear, unrelated, forward, self, declared, nested, class_field, class_static };
+
+const LoopCaptureCompileShape = enum { clear, unrelated, first, last, for_of_clear, for_of_last };
+
+fn loopCaptureCompileShape(name: []const u8) ?LoopCaptureCompileShape {
+    const prefix = "representative_frontend_compile_loop_capture_";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const shape_end = std.mem.lastIndexOfScalar(u8, name, '_') orelse return null;
+    const shape = name[prefix.len..shape_end];
+    if (std.mem.eql(u8, shape, "clear")) return .clear;
+    if (std.mem.eql(u8, shape, "unrelated")) return .unrelated;
+    if (std.mem.eql(u8, shape, "first")) return .first;
+    if (std.mem.eql(u8, shape, "last")) return .last;
+    if (std.mem.eql(u8, shape, "for_of_clear")) return .for_of_clear;
+    if (std.mem.eql(u8, shape, "for_of_last")) return .for_of_last;
+    return null;
+}
 
 fn tdzCompileShape(name: []const u8) ?TdzCompileShape {
     const prefix = "representative_frontend_compile_tdz_";
@@ -411,6 +435,44 @@ fn tdzCompileSource(allocator: std.mem.Allocator, width: usize, shape: TdzCompil
     }
     if (shape == .nested) try source.appendSlice(allocator, "return capture;");
     try source.append(allocator, '}');
+    return source.items;
+}
+
+fn appendLoopBindingNames(source: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, width: usize, initializer: bool) !void {
+    for (0..width) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        try appendIndexedIdentifier(source, allocator, "loopBinding", index);
+        if (initializer) {
+            try source.append(allocator, '=');
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+        }
+    }
+}
+
+fn loopCaptureCompileSource(allocator: std.mem.Allocator, width: usize, shape: LoopCaptureCompileShape) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "function loopCaptureWidth(){for(let ");
+    const for_of = shape == .for_of_clear or shape == .for_of_last;
+    if (for_of) try source.append(allocator, '[');
+    try appendLoopBindingNames(&source, allocator, width, !for_of);
+    if (for_of) {
+        try source.appendSlice(allocator, "] of [[]]){");
+    } else {
+        try source.appendSlice(allocator, ";false;){");
+    }
+    switch (shape) {
+        .unrelated => for (0..width) |index| {
+            try appendIndexedIdentifier(&source, allocator, "unrelated", index);
+            try source.append(allocator, ';');
+        },
+        .first, .last, .for_of_last => {
+            try source.appendSlice(allocator, "(function(){return ");
+            try appendIndexedIdentifier(&source, allocator, "loopBinding", if (shape == .first) 0 else width - 1);
+            try source.appendSlice(allocator, ";});");
+        },
+        .clear, .for_of_clear => {},
+    }
+    try source.appendSlice(allocator, "}return 7;}");
     return source.items;
 }
 
@@ -936,6 +998,39 @@ fn validateTdzCompileProgram(
     return foldChunk(checksum, code.chunk);
 }
 
+fn validateLoopCaptureCompileProgram(
+    allocator: std.mem.Allocator,
+    program: anytype,
+    source: []const u8,
+    width: usize,
+    shape: LoopCaptureCompileShape,
+) !usize {
+    if (program.* != .program or program.program.len != 1) return error.InvalidProgram;
+    const declaration = program.program[0];
+    if (declaration.* != .func_decl or !std.mem.eql(u8, declaration.func_decl.name, "loopCaptureWidth"))
+        return error.InvalidProgram;
+    const admission = try js.Compiler.admitPlainFunction(allocator, declaration.func_decl);
+    const unsupported_control = shape == .for_of_clear;
+    const code = switch (admission) {
+        .rejected => |reason| {
+            if (!unsupported_control or reason != .unsupported_lowering) return error.InvalidProgram;
+            var checksum = foldChecksum(source.len, width);
+            checksum = foldChecksum(checksum, @backingInt(shape));
+            return foldChecksum(checksum, @backingInt(reason));
+        },
+        .compiled => |compiled| compiled,
+    };
+    if (unsupported_control) return error.InvalidProgram;
+    const captured = shape == .first or shape == .last or shape == .for_of_last;
+    const has_environment = chunkHasOp(code.chunk, .enter_block) and
+        chunkHasOp(code.chunk, .exit_block) and chunkHasOp(code.chunk, .def_lex);
+    if (has_environment != captured or (!captured and code.local_count < width)) return error.InvalidProgram;
+    var checksum = foldChecksum(source.len, width);
+    checksum = foldChecksum(checksum, @backingInt(shape));
+    checksum = foldChecksum(checksum, code.local_count);
+    return foldChunk(checksum, code.chunk);
+}
+
 fn parseOnce(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -956,6 +1051,8 @@ fn parseOnce(
     const scratch_allocator = if (observation != null) scratch_measured.allocator() else allocator;
     var parser = try js.Parser.initWithScratch(parser_allocator, scratch_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (loopCaptureCompileShape(workload)) |shape|
+        return validateLoopCaptureCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (tdzCompileShape(workload)) |shape|
         return validateTdzCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (isParamBodyDirectWorkload(workload) or isParamBodyNestedWorkload(workload)) {
@@ -1324,9 +1421,12 @@ pub fn main(init: std.process.Init) !void {
     const nested_function_workload = isNestedFunctionWorkload(workload);
     const nested_arrow_workload = isNestedArrowArgumentsWorkload(workload);
     const regex_literal_workload = isRegexLiteralWorkload(workload);
+    const loop_capture_compile_shape = loopCaptureCompileShape(workload);
     const tdz_compile_shape = tdzCompileShape(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (tdz_compile_shape) |shape|
+    const source = if (loop_capture_compile_shape) |shape|
+        try loopCaptureCompileSource(init.arena.allocator(), width, shape)
+    else if (tdz_compile_shape) |shape|
         try tdzCompileSource(init.arena.allocator(), width, shape)
     else if (regex_literal_workload)
         try regexLiteralSource(
@@ -1407,9 +1507,9 @@ pub fn main(init: std.process.Init) !void {
                 .ordinary,
         );
     // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
-    // complete untimed jobs settle process startup without turning ten
+    // complete untimed jobs settle process startup without turning repeated
     // attacker-sized classifier walks into an unreported timing boundary.
-    const workload_warmups: usize = if (tdz_compile_shape != null) 2 else warmup_calls;
+    const workload_warmups: usize = if (tdz_compile_shape != null or loop_capture_compile_shape != null) 2 else warmup_calls;
     for (0..workload_warmups) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;
