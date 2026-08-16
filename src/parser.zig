@@ -731,6 +731,19 @@ pub const Parser = struct {
     /// declarations, so nothing to check.
     fn checkParamBodyConflict(self: *Parser, params: []const ast.Param, body: *Node) ParseError!void {
         if (body.* != .block) return;
+        // Only the function body's direct LexicallyDeclaredNames participate.
+        // Most bodies contain no such declaration; reject that impossible case
+        // before hashing an attacker-sized parameter list. Nested blocks are
+        // separate lexical scopes and deliberately do not keep this path alive.
+        var may_conflict = false;
+        for (body.block) |statement| {
+            if (hasDirectLexicalDeclaration(statement)) {
+                may_conflict = true;
+                break;
+            }
+        }
+        if (!may_conflict) return;
+
         var pnames: std.StringHashMapUnmanaged(void) = .empty;
         for (params) |p| {
             if (p.pattern) |pat| {
@@ -757,6 +770,18 @@ pub const Parser = struct {
             },
             .class_expr => |c| if (c.name.len > 0 and pnames.contains(c.name)) return ParseError.UnexpectedToken,
             else => {},
+        };
+    }
+
+    fn hasDirectLexicalDeclaration(statement: *const Node) bool {
+        return switch (statement.*) {
+            .var_decl => |decl| decl.kind != .@"var",
+            .destructure_decl => |decl| decl.kind != .@"var",
+            .decl_group => |group| for (group) |decl| {
+                if (hasDirectLexicalDeclaration(decl)) break true;
+            } else false,
+            .class_expr => |class| class.name.len > 0,
+            else => false,
         };
     }
 
@@ -4706,6 +4731,49 @@ test "parser rejects a non-monotonic statement location entry" {
     var parser = try Parser.init(arena.allocator(), "first;\nsecond;");
     try std.testing.expectEqual(SourceLocation{ .byte_offset = 7, .line = 2, .column = 1 }, try parser.statementLocationAt(7));
     try std.testing.expectError(ParseError.UnexpectedToken, parser.statementLocationAt(0));
+}
+
+test "parser allocates parameter body conflict indexes only for direct lexical declarations" {
+    var no_memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    var parser: Parser = undefined;
+    parser.arena = fixed.allocator();
+    const params = [_]ast.Param{.{ .name = "value" }};
+
+    var empty_body = Node{ .block = &.{} };
+    try parser.checkParamBodyConflict(&params, &empty_body);
+
+    var nested_decl = Node{ .var_decl = .{ .kind = .let, .name = "value", .init = null } };
+    var nested_items = [_]*Node{&nested_decl};
+    var nested_block = Node{ .block = &nested_items };
+    var outer_items = [_]*Node{&nested_block};
+    var nested_body = Node{ .block = &outer_items };
+    try parser.checkParamBodyConflict(&params, &nested_body);
+
+    var direct_items = [_]*Node{&nested_decl};
+    var direct_body = Node{ .block = &direct_items };
+    try std.testing.expectError(error.OutOfMemory, parser.checkParamBodyConflict(&params, &direct_body));
+}
+
+test "parser preserves every direct parameter body conflict shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const rejected = [_][]const u8{
+        "function ordinary(value) { let value; }",
+        "async function asynchronous(value) { const value = 1; }",
+        "function* generator(value) { class value {} }",
+        "function destructured(value) { let [value] = []; }",
+        "function grouped(value) { let other = 0, value = 1; }",
+        "(value) => { let value; };",
+        "({ method(value) { const value = 1; } });",
+    };
+    for (rejected) |source| {
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
+
+    var nested = try Parser.init(arena.allocator(), "function nested(value) { var value; { let value; } if (true) { const value = 1; } return value; }");
+    _ = try nested.parseProgram();
 }
 
 test "parser preserves completion-order locations across module exports and speculative for rewind" {
