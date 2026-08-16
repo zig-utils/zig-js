@@ -26287,6 +26287,98 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
 /// The ten Intl.DurationFormat units, in resolvedOptions / format order.
 const duration_units = [_][]const u8{ "years", "months", "weeks", "days", "hours", "minutes", "seconds", "milliseconds", "microseconds", "nanoseconds" };
 
+const DurationFormatOptions = struct {
+    numbering_system: ?[]const u8 = null,
+    style: value.IntlDurationFormatData.Style = .short,
+    explicit_styles: [duration_units.len]?value.IntlDurationFormatData.UnitStyle,
+    explicit_displays: [duration_units.len]?value.IntlDurationFormatData.Display,
+    unit_styles: [duration_units.len]value.IntlDurationFormatData.UnitStyle,
+    unit_displays: [duration_units.len]value.IntlDurationFormatData.Display,
+    fractional_digits: ?u8 = null,
+};
+
+/// GetDurationUnitOptions over fixed native arrays. All observable getters run
+/// before this cascade; a conflict is therefore reported only after the final
+/// fractionalDigits read, matching InitializeDurationFormat ordering.
+fn resolveDurationUnitOptions(options: *DurationFormatOptions) bool {
+    const UnitStyle = value.IntlDurationFormatData.UnitStyle;
+    const digital = options.style == .digital;
+    var previous_numeric = false;
+    var conflict = false;
+    inline for (0..duration_units.len) |index| {
+        const is_ymwd = index <= 3;
+        const is_minutes_or_seconds = index == 5 or index == 6;
+        const is_hms = index >= 4 and index <= 6;
+        var style: UnitStyle = if (options.explicit_styles[index]) |explicit|
+            explicit
+        else if (digital)
+            if (is_ymwd) .short else .numeric
+        else if (previous_numeric)
+            if (is_minutes_or_seconds) .two_digit else .numeric
+        else switch (options.style) {
+            .long => .long,
+            .short => .short,
+            .narrow => .narrow,
+            .digital => unreachable,
+        };
+        const display = options.explicit_displays[index] orelse
+            if (options.explicit_styles[index] != null or (digital and is_hms))
+                value.IntlDurationFormatData.Display.always
+            else
+                .auto;
+        if (previous_numeric) {
+            if (!style.isNumeric()) {
+                conflict = true;
+            } else if (is_minutes_or_seconds) {
+                style = .two_digit;
+            }
+        }
+        options.unit_styles[index] = style;
+        options.unit_displays[index] = display;
+        previous_numeric = style.isNumeric();
+    }
+    return conflict;
+}
+
+/// Observe and validate every InitializeDurationFormat option in spec order,
+/// retaining only native temporary state until the complete record is valid.
+fn durationFormatProcessOptions(self: *Interpreter, raw: Value) EvalError!DurationFormatOptions {
+    if (!raw.isUndefined() and !(raw.isObject() and !raw.asObj().is_symbol and !raw.asObj().is_bigint))
+        return self.throwError("TypeError", "options must be an object");
+    var options = DurationFormatOptions{
+        .explicit_styles = @splat(null),
+        .explicit_displays = @splat(null),
+        .unit_styles = undefined,
+        .unit_displays = undefined,
+    };
+    if (raw.isObject()) {
+        _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
+        options.numbering_system = try dtfGetType(self, raw, "numberingSystem");
+        options.style = .fromString((try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow", "digital" }, "short")).?);
+        inline for (duration_units, 0..) |unit, index| {
+            const is_time = index >= 4 and index <= 6;
+            const allowed: []const []const u8 = if (is_time)
+                &.{ "long", "short", "narrow", "numeric", "2-digit" }
+            else
+                &.{ "long", "short", "narrow", "numeric" };
+            if (try dtfGetStr(self, raw, unit, allowed, null)) |name|
+                options.explicit_styles[index] = .fromString(name);
+            if (try dtfGetStr(self, raw, unit ++ "Display", &.{ "always", "auto" }, null)) |name|
+                options.explicit_displays[index] = .fromString(name);
+        }
+        const fractional = try self.getProperty(raw, "fractionalDigits");
+        if (!fractional.isUndefined()) {
+            const number = @trunc(try self.toNumberV(fractional));
+            if (std.math.isNan(number) or number < 0 or number > 9)
+                return self.throwError("RangeError", "fractionalDigits out of range");
+            options.fractional_digits = @intFromFloat(number);
+        }
+    }
+    if (resolveDurationUnitOptions(&options))
+        return self.throwError("RangeError", "invalid duration unit style following a numeric unit");
+    return options;
+}
+
 /// services that allow it (NumberFormat/DateTimeFormat/Collator).
 fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
     return struct {
@@ -26428,44 +26520,8 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 try installCollatorData(self, o, resolved, ro);
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
-                // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
-                // BigInt, which are .object-tagged primitives) -> TypeError.
-                if (!raw.isUndefined() and !(raw.isObject() and !raw.asObj().is_symbol and !raw.asObj().is_bigint)) return self.throwError("TypeError", "options must be an object");
-                const ro = (try self.newObject()).asObj();
-                var base: []const u8 = "short";
-                if (raw.isObject()) {
-                    _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetType(self, raw, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
-                    base = (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow", "digital" }, "short")).?;
-                    try self.setProp(ro, "style", try Value.strAlloc(self.arena, base));
-                    // Per-unit style + display options (validated; defaults derived below).
-                    const time_units = [_][]const u8{ "hours", "minutes", "seconds" };
-                    inline for (duration_units) |u| {
-                        const is_time = for (time_units) |t| {
-                            if (std.mem.eql(u8, u, t)) break true;
-                        } else false;
-                        const allowed: []const []const u8 = if (is_time) &.{ "long", "short", "narrow", "numeric", "2-digit" } else &.{ "long", "short", "narrow", "numeric" };
-                        if (try dtfGetStr(self, raw, u, allowed, null)) |v| try self.setProp(ro, u, try Value.strAlloc(self.arena, v));
-                        const dkey = u ++ "Display";
-                        if (try dtfGetStr(self, raw, dkey, &.{ "always", "auto" }, null)) |d| try self.setProp(ro, dkey, try Value.strAlloc(self.arena, d));
-                    }
-                    const fd = try self.getProperty(raw, "fractionalDigits");
-                    if (!fd.isUndefined()) {
-                        const n = @trunc(try self.toNumberV(fd));
-                        if (std.math.isNan(n) or n < 0 or n > 9) return self.throwError("RangeError", "fractionalDigits out of range");
-                        try self.setProp(ro, "fractionalDigits", Value.num(n));
-                    }
-                } else {
-                    try self.setProp(ro, "style", try Value.strAlloc(self.arena, base));
-                }
-                // An explicit non-numeric style after a numeric/2-digit unit is invalid.
-                var rstyles: [10][]const u8 = undefined;
-                var rdisplays: [10][]const u8 = undefined;
-                if (durResolveUnits(Value.obj(ro), base, &rstyles, &rdisplays)) {
-                    return self.throwError("RangeError", "invalid duration unit style following a numeric unit");
-                }
-                try self.setProp(o, "\x00opts", Value.obj(ro));
-                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+                const options = try durationFormatProcessOptions(self, raw);
+                try installDurationFormatData(self, o, resolved, &options);
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const ro = try prProcessOptions(self, raw);
@@ -27885,6 +27941,31 @@ fn intlResolveNumbering(self: *Interpreter, out: *value.Object, tag: []const u8,
     const resolved = try intlResolvedNumbering(self, tag, opt_ns);
     try self.setProp(out, "locale", try Value.strAlloc(self.arena, resolved.locale));
     try self.setProp(out, "numberingSystem", try Value.strAlloc(self.arena, resolved.numbering_system));
+}
+
+fn installDurationFormatData(
+    self: *Interpreter,
+    formatter: *value.Object,
+    locale: []const u8,
+    options: *const DurationFormatOptions,
+) EvalError!void {
+    const resolved = try intlResolvedNumbering(self, locale, options.numbering_system);
+    const allocator = try formatter.intlDurationFormatAllocator(self.arena);
+    const data = try allocator.create(value.IntlDurationFormatData);
+    data.* = .{
+        .style = options.style,
+        .unit_styles = options.unit_styles,
+        .unit_displays = options.unit_displays,
+        .fractional_digits = options.fractional_digits,
+    };
+    var installed = false;
+    errdefer if (!installed) formatter.destroyUninstalledIntlDurationFormat(self.arena, data);
+    data.owned_locale = try allocator.dupe(u8, resolved.locale);
+    data.locale = data.owned_locale.?;
+    data.owned_numbering_system = try allocator.dupe(u8, resolved.numbering_system);
+    data.numbering_system = data.owned_numbering_system.?;
+    try formatter.setIntlDurationFormatData(self.arena, data);
+    installed = true;
 }
 
 /// Resolve and publish the complete RelativeTimeFormat record after all
@@ -29407,77 +29488,9 @@ fn durationToRecord(self: *Interpreter, d: Value) value.HostError![10]f64 {
 /// "digital" making hours/minutes/seconds "numeric".
 /// Digital style displays a zero "minutes" when a numeric "hours" precedes and
 /// seconds (or sub-seconds) will be shown — "1:00:03" rather than "1:03".
-fn durMinutesRequired(ov: ?Value, need_sep: bool, unit: []const u8, vals: [10]f64) bool {
-    if (!std.mem.eql(u8, unit, "minutes") or !need_sep) return false;
-    var sd: []const u8 = "auto";
-    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("secondsDisplay")) |s| if (s.isString()) {
-        sd = s.asStr();
-    };
-    return std.mem.eql(u8, sd, "always") or vals[6] != 0 or vals[7] != 0 or vals[8] != 0 or vals[9] != 0;
-}
-
-fn durUnitStyle(ov: ?Value, base: []const u8, unit: []const u8) []const u8 {
-    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn(unit)) |s| if (s.isString()) return s.asStr();
-    if (std.mem.eql(u8, base, "digital")) {
-        // hours/minutes/seconds and the sub-second units are numeric (sub-seconds
-        // combine into the seconds fraction); years/months/weeks/days are short.
-        if (std.mem.eql(u8, unit, "years") or std.mem.eql(u8, unit, "months") or std.mem.eql(u8, unit, "weeks") or std.mem.eql(u8, unit, "days")) return "short";
-        return "numeric";
-    }
-    return base;
-}
-
-/// GetDurationUnitOptions for every unit, in order, tracking prevStyle. Fills
-/// `styles`/`displays` with the resolved per-unit style and display, applying:
-///   - digital defaults (h/m/s numeric + display "always"; rest short + "auto"),
-///   - the prevStyle cascade (a unit after a numeric/2-digit one defaults to
-///     numeric, or 2-digit for minutes/seconds), and
-///   - the 2-digit promotion of an explicit/defaulted numeric minutes/seconds
-///     that follows a numeric/2-digit unit.
-/// Returns true if an explicit non-numeric style follows a numeric/2-digit unit
-/// (a RangeError condition the constructor must surface).
-fn durResolveUnits(ov: ?Value, base: []const u8, styles: *[10][]const u8, displays: *[10][]const u8) bool {
-    const digital = std.mem.eql(u8, base, "digital");
-    var prev_numlike = false;
-    var conflict = false;
-    inline for (duration_units, 0..) |u, i| {
-        const is_ymwd = std.mem.eql(u8, u, "years") or std.mem.eql(u8, u, "months") or std.mem.eql(u8, u, "weeks") or std.mem.eql(u8, u, "days");
-        const is_ms = std.mem.eql(u8, u, "minutes") or std.mem.eql(u8, u, "seconds");
-        const is_hms = is_ms or std.mem.eql(u8, u, "hours");
-        var explicit: ?[]const u8 = null;
-        if (ov) |o| if (o.isObject()) if (o.asObj().getOwn(u)) |s| if (s.isString()) {
-            explicit = s.asStr();
-        };
-        var style: []const u8 = undefined;
-        var display_default: []const u8 = "always";
-        if (explicit) |e| {
-            style = e;
-        } else if (digital) {
-            if (!is_hms) display_default = "auto";
-            style = if (is_ymwd) "short" else "numeric";
-        } else {
-            display_default = "auto";
-            if (prev_numlike) {
-                style = if (is_ms) "2-digit" else "numeric";
-            } else style = base;
-        }
-        var display: []const u8 = display_default;
-        if (ov) |o| if (o.isObject()) if (o.asObj().getOwn(u ++ "Display")) |dv| if (dv.isString()) {
-            display = dv.asStr();
-        };
-        if (prev_numlike) {
-            const numlike = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
-            if (!numlike) {
-                conflict = true;
-            } else if (is_ms) {
-                style = "2-digit";
-            }
-        }
-        styles[i] = style;
-        displays[i] = display;
-        prev_numlike = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
-    }
-    return conflict;
+fn durMinutesRequired(data: *const value.IntlDurationFormatData, need_sep: bool, unit_index: usize, vals: [10]f64) bool {
+    if (unit_index != 5 or !need_sep) return false;
+    return data.unit_displays[6] == .always or vals[6] != 0 or vals[7] != 0 or vals[8] != 0 or vals[9] != 0;
 }
 
 /// Format one duration unit value via a NumberFormat instance, mirroring the
@@ -29485,8 +29498,10 @@ fn durResolveUnits(ov: ?Value, base: []const u8, styles: *[10][]const u8, displa
 /// plain digits (useGrouping:false, +2-digit padding); non-first units suppress
 /// the sign. Returns the formatted string.
 /// Build the NumberFormat instance used to format one duration unit's value.
-fn durUnitNf(self: *Interpreter, locale: []const u8, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError!Value {
+fn durUnitNf(self: *Interpreter, locale: []const u8, numbering_system: ?[]const u8, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError!Value {
     const ro = (try self.newObject()).asObj();
+    if (numbering_system) |name|
+        try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, name));
     const standalone = !std.mem.eql(u8, style, "numeric") and !std.mem.eql(u8, style, "2-digit");
     if (standalone) {
         try self.setProp(ro, "style", Value.str("unit"));
@@ -29504,8 +29519,8 @@ fn durUnitNf(self: *Interpreter, locale: []const u8, style: []const u8, unit_sin
     return Value.obj(nf);
 }
 
-fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError![]const u8 {
-    return nfFormatOne(self, try durUnitNf(self, locale, style, unit_singular, sign_never), Value.num(num));
+fn durFmtVal(self: *Interpreter, locale: []const u8, numbering_system: ?[]const u8, num: f64, style: []const u8, unit_singular: []const u8, sign_never: bool) value.HostError![]const u8 {
+    return nfFormatOne(self, try durUnitNf(self, locale, numbering_system, style, unit_singular, sign_never), Value.num(num));
 }
 
 /// Format a combined fractional value (a decimal string like "444.055006") for a
@@ -29513,8 +29528,10 @@ fn durFmtVal(self: *Interpreter, locale: []const u8, num: f64, style: []const u8
 /// NumberFormat with trunc rounding and the fractional-digit bounds. The decimal
 /// string is fed verbatim so precision matches the conformance reference, which
 /// formats the same constructed string.
-fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, dec: []const u8, style: []const u8, unit_singular: []const u8, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
+fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, numbering_system: ?[]const u8, dec: []const u8, style: []const u8, unit_singular: []const u8, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
     const ro = (try self.newObject()).asObj();
+    if (numbering_system) |name|
+        try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, name));
     try self.setProp(ro, "style", Value.str("unit"));
     try self.setProp(ro, "unit", try Value.strAlloc(self.arena, unit_singular));
     try self.setProp(ro, "unitDisplay", try Value.strAlloc(self.arena, style));
@@ -29529,8 +29546,10 @@ fn durFmtCombineUnit(self: *Interpreter, locale: []const u8, dec: []const u8, st
     return nfFormatOne(self, Value.obj(nf), try Value.strAlloc(self.arena, dec));
 }
 
-fn durFmtCombineNumeric(self: *Interpreter, locale: []const u8, dec: []const u8, min_int: usize, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
+fn durFmtCombineNumeric(self: *Interpreter, locale: []const u8, numbering_system: ?[]const u8, dec: []const u8, min_int: usize, sign_never: bool, fd: ?usize) value.HostError![]const u8 {
     const ro = (try self.newObject()).asObj();
+    if (numbering_system) |name|
+        try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, name));
     try self.setProp(ro, "useGrouping", Value.boolVal(false));
     try self.setProp(ro, "minimumIntegerDigits", Value.num(@floatFromInt(min_int)));
     try self.setProp(ro, "minimumFractionDigits", Value.num(if (fd) |f| @floatFromInt(f) else 0));
@@ -29543,11 +29562,6 @@ fn durFmtCombineNumeric(self: *Interpreter, locale: []const u8, dec: []const u8,
     return nfFormatOne(self, Value.obj(nf), try Value.strAlloc(self.arena, dec));
 }
 
-fn durFracDigits(ov: ?Value) ?usize {
-    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("fractionalDigits")) |f| if (f.isNumber()) return @intFromFloat(f.asNum());
-    return null;
-}
-
 /// The combined sub-second total for `unit` is non-zero (so it must display even
 /// when the unit's own value is 0, e.g. seconds 0 with milliseconds present).
 fn durCombineNonzero(vals: [10]f64, unit: []const u8) bool {
@@ -29557,11 +29571,12 @@ fn durCombineNonzero(vals: [10]f64, unit: []const u8) bool {
     return false;
 }
 
-/// Whether `unit` (seconds/milliseconds/microseconds) combines its sub-second
-/// units into a fractional value — i.e. the next-finer unit is "numeric".
-fn durCombines(ov: ?Value, base: []const u8, unit: []const u8) bool {
-    const next: []const u8 = if (std.mem.eql(u8, unit, "seconds")) "milliseconds" else if (std.mem.eql(u8, unit, "milliseconds")) "microseconds" else if (std.mem.eql(u8, unit, "microseconds")) "nanoseconds" else return false;
-    return std.mem.eql(u8, durUnitStyle(ov, base, next), "numeric");
+/// NumberFormat already observes a supported `-u-nu-` extension in the locale.
+/// Forward a separate option only when InitializeDurationFormat selected a
+/// different system (normally an explicit non-default numberingSystem).
+fn durNumberingOption(data: *const value.IntlDurationFormatData) ?[]const u8 {
+    const locale_system = localeUValue(data.locale, "nu") orelse localeDefaultNumberingSystem(data.locale);
+    return if (std.mem.eql(u8, locale_system, data.numbering_system)) null else data.numbering_system;
 }
 
 /// DurationToFractional: combine `unit` with its finer sub-second units into one
@@ -29610,15 +29625,14 @@ fn durCombineFrac(self: *Interpreter, vals: [10]f64, unit: []const u8, max_f: us
 
 fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "DurationFormat")) return self.throwError("TypeError", "Intl.DurationFormat.prototype.format on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlDurationFormatData() == null)
+        return self.throwError("TypeError", "Intl.DurationFormat.prototype.format on incompatible receiver");
+    const data = this.asObj().intlDurationFormatData().?;
     const d = if (args.len > 0) args[0] else Value.undef();
     const vals = try durationToRecord(self, d);
-    var base: []const u8 = "short";
-    const ov = this.asObj().getOwn("\x00opts");
-    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("style")) |s| if (s.isString()) {
-        base = s.asStr();
-    };
-    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
+    const base = data.style.string();
+    const locale = data.locale;
+    const numbering_system = durNumberingOption(data);
 
     // Build the list of formatted items. Consecutive numeric/2-digit units join
     // with ":" into one item (digital style); standalone units are separate
@@ -29630,17 +29644,14 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
         for (vals) |vv| if (vv < 0) break :blk true;
         break :blk false;
     };
-    var styles: [10][]const u8 = undefined;
-    var displays: [10][]const u8 = undefined;
-    _ = durResolveUnits(ov, base, &styles, &displays);
     inline for (duration_units, 0..) |u, i| {
         const uval = vals[i];
-        const style = styles[i];
-        const display = displays[i];
+        const unit_style = data.unit_styles[i];
+        const style = unit_style.string();
         // seconds/milliseconds/microseconds fold their finer units into a
         // fraction when the next-finer unit resolved to a numeric style.
-        const combine = (i == 6 or i == 7 or i == 8) and std.mem.eql(u8, styles[i + 1], "numeric");
-        const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
+        const combine = (i == 6 or i == 7 or i == 8) and data.unit_styles[i + 1] == .numeric;
+        const shown = uval != 0 or data.unit_displays[i] != .auto or durMinutesRequired(data, need_sep, i, vals) or (combine and durCombineNonzero(vals, u));
         if (shown) {
             const sign_never = !first;
             const is_first = first;
@@ -29648,17 +29659,17 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
             // First displayed unit bears the sign; a zero first unit shows "-0"
             // when the overall duration is negative (DurationToFractional / -0).
             const fnum = if (is_first and uval == 0 and dur_neg) -@as(f64, 0.0) else uval;
-            const min_int: usize = if (std.mem.eql(u8, style, "2-digit")) 2 else 1;
-            const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
+            const min_int: usize = if (unit_style == .two_digit) 2 else 1;
+            const numeric = unit_style.isNumeric();
             const s = if (combine) blk: {
-                const fd = durFracDigits(ov);
+                const fd: ?usize = if (data.fractional_digits) |digits| digits else null;
                 const dec = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
                 // A standalone-styled combine unit renders the fractional value
                 // with its unit name ("444.055006 millisecond"); numeric/2-digit
                 // units stay bare digits for the ":"-joined run.
-                if (numeric) break :blk try durFmtCombineNumeric(self, locale, dec, min_int, sign_never, fd);
-                break :blk try durFmtCombineUnit(self, locale, dec, style, u[0 .. u.len - 1], sign_never, fd);
-            } else try durFmtVal(self, locale, fnum, style, u[0 .. u.len - 1], sign_never);
+                if (numeric) break :blk try durFmtCombineNumeric(self, locale, numbering_system, dec, min_int, sign_never, fd);
+                break :blk try durFmtCombineUnit(self, locale, numbering_system, dec, style, u[0 .. u.len - 1], sign_never, fd);
+            } else try durFmtVal(self, locale, numbering_system, fnum, style, u[0 .. u.len - 1], sign_never);
             // Once a numeric run starts (need_sep latches), every later unit
             // appends to it with ":" — even standalone ones (digital
             // "4:5:6:7 millisecond").
@@ -29673,7 +29684,7 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
     }
     // Join the items as a type:"unit" list (locale + style aware; digital uses
     // the short list style).
-    const lstyle = if (std.mem.eql(u8, base, "digital")) "short" else base;
+    const lstyle = if (data.style == .digital) "short" else base;
     const uc = unitConnectors(localeLanguage(locale), lstyle);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (items.items, 0..) |it, idx| {
@@ -29690,15 +29701,15 @@ const DurPart = struct { typ: NfPartType, value: []const u8, unit: ?[]const u8 }
 
 fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "DurationFormat")) return self.throwError("TypeError", "Intl.DurationFormat.prototype.formatToParts on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlDurationFormatData() == null)
+        return self.throwError("TypeError", "Intl.DurationFormat.prototype.formatToParts on incompatible receiver");
+    const data = this.asObj().intlDurationFormatData().?;
     const d = if (args.len > 0) args[0] else Value.undef();
     const vals = try durationToRecord(self, d);
-    var base: []const u8 = "short";
-    const ov = this.asObj().getOwn("\x00opts");
-    if (ov) |o| if (o.isObject()) if (o.asObj().getOwn("style")) |s| if (s.isString()) {
-        base = s.asStr();
-    };
-    const locale = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) lv.asStr() else "en") else "en";
+    const base = data.style.string();
+    const locale = data.locale;
+    const numbering_system = durNumberingOption(data);
+    const number_symbols = localeNumberSymbols(locale, data.numbering_system);
 
     // Each group is one ListFormat "element" (a unit, or a ":"-joined numeric run).
     var groups: std.ArrayListUnmanaged(std.ArrayListUnmanaged(DurPart)) = .empty;
@@ -29708,24 +29719,21 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
         for (vals) |vv| if (vv < 0) break :blk true;
         break :blk false;
     };
-    var styles: [10][]const u8 = undefined;
-    var displays: [10][]const u8 = undefined;
-    _ = durResolveUnits(ov, base, &styles, &displays);
     inline for (duration_units, 0..) |u, i| {
         const uval = vals[i];
-        const style = styles[i];
-        const display = displays[i];
+        const unit_style = data.unit_styles[i];
+        const style = unit_style.string();
         // seconds/milliseconds/microseconds fold their finer units into a
         // fraction when the next-finer unit resolved to a numeric style.
-        const combine = (i == 6 or i == 7 or i == 8) and std.mem.eql(u8, styles[i + 1], "numeric");
-        const shown = uval != 0 or !std.mem.eql(u8, display, "auto") or durMinutesRequired(ov, need_sep, u, vals) or (combine and durCombineNonzero(vals, u));
+        const combine = (i == 6 or i == 7 or i == 8) and data.unit_styles[i + 1] == .numeric;
+        const shown = uval != 0 or data.unit_displays[i] != .auto or durMinutesRequired(data, need_sep, i, vals) or (combine and durCombineNonzero(vals, u));
         if (shown) {
             const sign_never = !first;
             const is_first = first;
             first = false;
             const fnum = if (is_first and uval == 0 and dur_neg) -@as(f64, 0.0) else uval;
             const sing = u[0 .. u.len - 1];
-            const numeric = std.mem.eql(u8, style, "numeric") or std.mem.eql(u8, style, "2-digit");
+            const numeric = unit_style.isNumeric();
             var grp: *std.ArrayListUnmanaged(DurPart) = undefined;
             if (need_sep and groups.items.len > 0) {
                 grp = &groups.items[groups.items.len - 1];
@@ -29737,29 +29745,29 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             }
             if (combine) {
                 // Parse the exact "[-]int[.frac]" combine string into typed parts.
-                const fd = durFracDigits(ov);
-                const min_int: usize = if (std.mem.eql(u8, style, "2-digit")) 2 else 1;
+                const fd: ?usize = if (data.fractional_digits) |digits| digits else null;
+                const min_int: usize = if (unit_style == .two_digit) 2 else 1;
                 var s = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
                 if (s.len > 0 and s[0] == '-') {
                     try grp.append(self.arena, .{ .typ = .minus_sign, .value = "-", .unit = sing });
                     s = s[1..];
                 }
                 if (std.mem.indexOfScalar(u8, s, '.')) |dot| {
-                    try grp.append(self.arena, .{ .typ = .integer, .value = s[0..dot], .unit = sing });
-                    try grp.append(self.arena, .{ .typ = .decimal, .value = ".", .unit = sing });
-                    try grp.append(self.arena, .{ .typ = .fraction, .value = s[dot + 1 ..], .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .integer, .value = try rtfTranslateNumber(self, s[0..dot], data.numbering_system), .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .decimal, .value = number_symbols.decimal, .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .fraction, .value = try rtfTranslateNumber(self, s[dot + 1 ..], data.numbering_system), .unit = sing });
                 } else {
-                    try grp.append(self.arena, .{ .typ = .integer, .value = s, .unit = sing });
+                    try grp.append(self.arena, .{ .typ = .integer, .value = try rtfTranslateNumber(self, s, data.numbering_system), .unit = sing });
                 }
             } else {
-                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, style, sing, sign_never), &.{Value.num(fnum)});
+                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, numbering_system, style, sing, sign_never), &.{Value.num(fnum)});
                 for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
             }
         }
         if (combine and shown) break;
     }
     // Flatten: a type:"unit" list literal between element groups (locale/style aware).
-    const lstyle = if (std.mem.eql(u8, base, "digital")) "short" else base;
+    const lstyle = if (data.style == .digital) "short" else base;
     const uc = unitConnectors(localeLanguage(locale), lstyle);
     const arr = (try self.newArray()).asObj();
     for (groups.items, 0..) |grp, gi| {
@@ -31107,6 +31115,9 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "PluralRules")) blk: {
                 if (this_recv.isObject() and this_recv.asObj().intlPluralRulesData() != null) break :blk this_recv;
                 return self.throwError("TypeError", "Intl.PluralRules.prototype.resolvedOptions on incompatible receiver");
+            } else if (comptime std.mem.eql(u8, service, "DurationFormat")) blk: {
+                if (this_recv.isObject() and this_recv.asObj().intlDurationFormatData() != null) break :blk this_recv;
+                return self.throwError("TypeError", "Intl.DurationFormat.prototype.resolvedOptions on incompatible receiver");
             } else (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
             const o = (try self.newObject()).asObj();
             const loc = if (comptime std.mem.eql(u8, service, "DisplayNames"))
@@ -31119,6 +31130,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try Value.strAlloc(self.arena, this.asObj().intlSegmenterData().?.locale)
             else if (comptime std.mem.eql(u8, service, "PluralRules"))
                 try Value.strAlloc(self.arena, this.asObj().intlPluralRulesData().?.locale)
+            else if (comptime std.mem.eql(u8, service, "DurationFormat"))
+                try Value.strAlloc(self.arena, this.asObj().intlDurationFormatData().?.locale)
             else
                 this.asObj().getOwn("\x00locale") orelse Value.str("en");
             try self.setProp(o, "locale", loc);
@@ -31284,26 +31297,15 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 const data = this.asObj().intlSegmenterData().?;
                 try self.setProp(o, "granularity", data.granularity.value());
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
-                const ro: ?Value = this.asObj().getOwn("\x00opts");
-                const dget = struct {
-                    fn s(src: ?Value, k: []const u8) ?Value {
-                        if (src) |v| if (v.isObject()) if (v.asObj().getOwn(k)) |x| return x;
-                        return null;
-                    }
-                }.s;
-                const base = if (dget(ro, "style")) |st| st.asStr() else "short";
-                try intlResolveNumbering(self, o, loc.asStr(), if (dget(ro, "numberingSystem")) |n| n.asStr() else null);
-                try self.setProp(o, "style", try Value.strAlloc(self.arena, base));
-                // Resolved per-unit style/display via GetDurationUnitOptions
-                // (prevStyle cascade, digital defaults, 2-digit promotion).
-                var styles: [10][]const u8 = undefined;
-                var displays: [10][]const u8 = undefined;
-                _ = durResolveUnits(ro, base, &styles, &displays);
+                const data = this.asObj().intlDurationFormatData().?;
+                try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
+                try self.setProp(o, "style", data.style.value());
                 inline for (duration_units, 0..) |u, i| {
-                    try self.setProp(o, u, try Value.strAlloc(self.arena, styles[i]));
-                    try self.setProp(o, u ++ "Display", try Value.strAlloc(self.arena, displays[i]));
+                    try self.setProp(o, u, data.unit_styles[i].value());
+                    try self.setProp(o, u ++ "Display", data.unit_displays[i].value());
                 }
-                if (dget(ro, "fractionalDigits")) |fd| try self.setProp(o, "fractionalDigits", fd);
+                if (data.fractional_digits) |digits|
+                    try self.setProp(o, "fractionalDigits", Value.num(@floatFromInt(digits)));
             }
             return Value.obj(o);
         }
@@ -41060,39 +41062,8 @@ fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options
     try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
     try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
 
-    if (!options.isUndefined() and !(options.isObject() and !options.asObj().is_symbol and !options.asObj().is_bigint))
-        return self.throwError("TypeError", "options must be an object");
-    const ro = (try self.newObject()).asObj();
-    var base: []const u8 = "short";
-    if (options.isObject()) {
-        _ = try dtfGetStr(self, options, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-        if (try dtfGetType(self, options, "numberingSystem")) |ns| try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
-        base = (try dtfGetStr(self, options, "style", &.{ "long", "short", "narrow", "digital" }, "short")).?;
-        try self.setProp(ro, "style", try Value.strAlloc(self.arena, base));
-        const time_units = [_][]const u8{ "hours", "minutes", "seconds" };
-        inline for (duration_units) |u| {
-            const is_time = for (time_units) |tu| {
-                if (std.mem.eql(u8, u, tu)) break true;
-            } else false;
-            const allowed: []const []const u8 = if (is_time) &.{ "long", "short", "narrow", "numeric", "2-digit" } else &.{ "long", "short", "narrow", "numeric" };
-            if (try dtfGetStr(self, options, u, allowed, null)) |v| try self.setProp(ro, u, try Value.strAlloc(self.arena, v));
-            if (try dtfGetStr(self, options, u ++ "Display", &.{ "always", "auto" }, null)) |d| try self.setProp(ro, u ++ "Display", try Value.strAlloc(self.arena, d));
-        }
-        const fd = try self.getProperty(options, "fractionalDigits");
-        if (!fd.isUndefined()) {
-            const n = @trunc(try self.toNumberV(fd));
-            if (std.math.isNan(n) or n < 0 or n > 9) return self.throwError("RangeError", "fractionalDigits out of range");
-            try self.setProp(ro, "fractionalDigits", Value.num(n));
-        }
-    } else {
-        try self.setProp(ro, "style", try Value.strAlloc(self.arena, base));
-    }
-    var styles: [10][]const u8 = undefined;
-    var displays: [10][]const u8 = undefined;
-    if (durResolveUnits(Value.obj(ro), base, &styles, &displays))
-        return self.throwError("RangeError", "invalid duration unit style following a numeric unit");
-    try self.setProp(o, "\x00opts", Value.obj(ro));
-    try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+    const normalized = try durationFormatProcessOptions(self, options);
+    try installDurationFormatData(self, o, resolved, &normalized);
     return o;
 }
 
@@ -52403,6 +52374,131 @@ test "Intl.NumberFormat sink emission is OOM-safe" {
     const previous_heap = gc_mod.setActiveHeap(null);
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.DurationFormat resolved-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{ .arena = allocator, .env = undefined, .root_shape = root_shape };
+            var formatter = value.Object{};
+            var options = DurationFormatOptions{
+                .style = .digital,
+                .explicit_styles = @splat(null),
+                .explicit_displays = @splat(null),
+                .unit_styles = undefined,
+                .unit_displays = undefined,
+                .fractional_digits = 3,
+            };
+            options.explicit_styles[4] = .numeric;
+            options.explicit_styles[5] = .numeric;
+            options.explicit_styles[6] = .two_digit;
+            try std.testing.expect(!resolveDurationUnitOptions(&options));
+            try installDurationFormatData(&machine, &formatter, "en-US-u-nu-arab", &options);
+            const data = formatter.intlDurationFormatData().?;
+            try std.testing.expectEqualStrings("en-US-u-nu-arab", data.locale);
+            try std.testing.expectEqualStrings("arab", data.numbering_system);
+            try std.testing.expectEqual(value.IntlDurationFormatData.Style.digital, data.style);
+            try std.testing.expectEqual(value.IntlDurationFormatData.UnitStyle.two_digit, data.unit_styles[5]);
+            try std.testing.expectEqual(value.IntlDurationFormatData.Display.always, data.unit_displays[6]);
+            try std.testing.expectEqual(@as(?u8, 3), data.fractional_digits);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.DurationFormat consumes complete immutable normalized state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var keys = ["localeMatcher", "numberingSystem", "style",
+        \\  "years", "yearsDisplay", "months", "monthsDisplay", "weeks", "weeksDisplay", "days", "daysDisplay",
+        \\  "hours", "hoursDisplay", "minutes", "minutesDisplay", "seconds", "secondsDisplay",
+        \\  "milliseconds", "millisecondsDisplay", "microseconds", "microsecondsDisplay", "nanoseconds", "nanosecondsDisplay",
+        \\  "fractionalDigits"];
+        \\var log = [];
+        \\var values = { localeMatcher:"lookup", numberingSystem:"latn", style:"digital", hours:"numeric", minutes:"numeric", seconds:"numeric", secondsDisplay:"always", fractionalDigits:3 };
+        \\var options = {};
+        \\keys.forEach(function (key) { Object.defineProperty(options, key, { get:function () { log.push(key); return values[key]; } }); });
+        \\var formatter = new Intl.DurationFormat("en-US", options);
+        \\values.style = "long"; values.hours = "long"; values.fractionalDigits = 9;
+        \\var resolved = formatter.resolvedOptions();
+        \\var explicitDisplay = new Intl.DurationFormat("en-US", { days:"short" }).resolvedOptions();
+        \\var arab = new Intl.DurationFormat("en-US", { numberingSystem:"arab", style:"digital", fractionalDigits:3 });
+        \\var arabText = arab.format({ hours:1, minutes:2, seconds:3 });
+        \\var arabPartsText = arab.formatToParts({ hours:1, minutes:2, seconds:3 }).map(function (part) { return part.value; }).join("");
+        \\var fake = {}; fake["\\0intl"] = "DurationFormat"; fake["\\0locale"] = "en-US";
+        \\fake["\\0opts"] = { style:"digital", hours:"numeric", minutes:"numeric", seconds:"numeric" };
+        \\var rejected = 0;
+        \\try { Intl.DurationFormat.prototype.format.call(fake, { hours:1 }); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Intl.DurationFormat.prototype.formatToParts.call(fake, { hours:1 }); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Intl.DurationFormat.prototype.resolvedOptions.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\var conflictLog = [];
+        \\var conflict = {};
+        \\keys.forEach(function (key) { Object.defineProperty(conflict, key, { get:function () {
+        \\  conflictLog.push(key); if (key === "years") return "numeric"; if (key === "months") return "long"; return undefined;
+        \\} }); });
+        \\var conflictRejected = false;
+        \\try { new Intl.DurationFormat("en-US", conflict); } catch (error) { conflictRejected = error instanceof RangeError; }
+        \\log.join("|") === keys.join("|") && conflictLog.join("|") === keys.join("|") && conflictRejected &&
+        \\  resolved.locale === "en-US" && resolved.numberingSystem === "latn" && resolved.style === "digital" &&
+        \\  resolved.years === "short" && resolved.yearsDisplay === "auto" && resolved.hours === "numeric" &&
+        \\  resolved.hoursDisplay === "always" && resolved.minutes === "2-digit" && resolved.seconds === "2-digit" &&
+        \\  resolved.secondsDisplay === "always" && resolved.milliseconds === "numeric" && resolved.fractionalDigits === 3 &&
+        \\  explicitDisplay.days === "short" && explicitDisplay.daysDisplay === "always" &&
+        \\  arab.resolvedOptions().numberingSystem === "arab" && arabText === "١:٠٢:٠٣٫٠٠٠" && arabPartsText === arabText &&
+        \\  formatter.format({ hours:1, minutes:2, seconds:3 }) === "1:02:03.000" &&
+        \\  Object.getOwnPropertyNames(formatter).indexOf("\\0opts") === -1 && rejected === 3
+    )).asBool());
+}
+
+test "Intl.DurationFormat resolved state is immutable across native threads" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = undefined, .root_shape = root_shape };
+    var formatter = value.Object{};
+    var options = DurationFormatOptions{
+        .style = .long,
+        .explicit_styles = @splat(null),
+        .explicit_displays = @splat(null),
+        .unit_styles = undefined,
+        .unit_displays = undefined,
+        .fractional_digits = 6,
+    };
+    try std.testing.expect(!resolveDurationUnitOptions(&options));
+    try installDurationFormatData(&machine, &formatter, "en-US", &options);
+    var results: [4]u64 = @splat(0);
+    const Lane = struct {
+        fn run(shared: *const value.Object, lane: usize, result: *u64) void {
+            var checksum: u64 = 0;
+            for (0..4096) |iteration| {
+                const data = shared.intlDurationFormatData() orelse {
+                    result.* = std.math.maxInt(u64);
+                    return;
+                };
+                checksum +%= data.locale.len + data.numbering_system.len + data.style.string().len +
+                    data.unit_styles[iteration % data.unit_styles.len].string().len +
+                    data.unit_displays[iteration % data.unit_displays.len].string().len + iteration + lane;
+            }
+            result.* = checksum;
+        }
+    };
+    var threads: [results.len]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane|
+        thread.* = try std.Thread.spawn(.{}, Lane.run, .{ &formatter, lane, &results[lane] });
+    for (&threads) |*thread| thread.join();
+    for (results, 0..) |result, lane| {
+        try std.testing.expect(result != std.math.maxInt(u64));
+        try std.testing.expectEqual(results[0] + lane * 4096, result);
+    }
 }
 
 test "Intl structural services preserve part metadata and result ownership" {

@@ -1658,6 +1658,105 @@ pub const IntlPluralRulesData = struct {
     }
 };
 
+/// Fully resolved, immutable Intl.DurationFormat state. Constructor option
+/// observation and the ten-unit style cascade finish before publication, so
+/// formatting and reflection read only owned strings and closed native fields.
+pub const IntlDurationFormatData = struct {
+    pub const Style = enum(u8) {
+        long,
+        short,
+        narrow,
+        digital,
+
+        pub fn fromString(name: []const u8) Style {
+            if (std.mem.eql(u8, name, "long")) return .long;
+            if (std.mem.eql(u8, name, "narrow")) return .narrow;
+            if (std.mem.eql(u8, name, "digital")) return .digital;
+            return .short;
+        }
+
+        pub fn string(self: Style) []const u8 {
+            return @tagName(self);
+        }
+
+        pub fn value(self: Style) Value {
+            return switch (self) {
+                .long => Value.str("long"),
+                .short => Value.str("short"),
+                .narrow => Value.str("narrow"),
+                .digital => Value.str("digital"),
+            };
+        }
+    };
+
+    pub const UnitStyle = enum(u8) {
+        long,
+        short,
+        narrow,
+        numeric,
+        two_digit,
+
+        pub fn fromString(name: []const u8) UnitStyle {
+            if (std.mem.eql(u8, name, "long")) return .long;
+            if (std.mem.eql(u8, name, "narrow")) return .narrow;
+            if (std.mem.eql(u8, name, "numeric")) return .numeric;
+            if (std.mem.eql(u8, name, "2-digit")) return .two_digit;
+            return .short;
+        }
+
+        pub fn string(self: UnitStyle) []const u8 {
+            return if (self == .two_digit) "2-digit" else @tagName(self);
+        }
+
+        pub fn value(self: UnitStyle) Value {
+            return switch (self) {
+                .long => Value.str("long"),
+                .short => Value.str("short"),
+                .narrow => Value.str("narrow"),
+                .numeric => Value.str("numeric"),
+                .two_digit => Value.str("2-digit"),
+            };
+        }
+
+        pub fn isNumeric(self: UnitStyle) bool {
+            return self == .numeric or self == .two_digit;
+        }
+    };
+
+    pub const Display = enum(u8) {
+        always,
+        auto,
+
+        pub fn fromString(name: []const u8) Display {
+            return if (std.mem.eql(u8, name, "auto")) .auto else .always;
+        }
+
+        pub fn string(self: Display) []const u8 {
+            return @tagName(self);
+        }
+
+        pub fn value(self: Display) Value {
+            return if (self == .auto) Value.str("auto") else Value.str("always");
+        }
+    };
+
+    locale: []const u8 = "en",
+    numbering_system: []const u8 = "latn",
+    style: Style = .short,
+    unit_styles: [10]UnitStyle = @splat(.short),
+    unit_displays: [10]Display = @splat(.auto),
+    fractional_digits: ?u8 = null,
+    owned_locale: ?[]u8 = null,
+    owned_numbering_system: ?[]u8 = null,
+
+    pub fn deinit(self: *IntlDurationFormatData, allocator: std.mem.Allocator) void {
+        if (self.owned_locale) |owned| allocator.free(owned);
+        if (self.owned_numbering_system) |owned| allocator.free(owned);
+        self.owned_locale = null;
+        self.owned_numbering_system = null;
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1799,6 +1898,7 @@ pub const ObjectRareTag = enum(u8) {
     intl_list_format,
     intl_segmenter,
     intl_plural_rules,
+    intl_duration_format,
     temporal,
     promise,
     constructor,
@@ -1904,6 +2004,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     intl_list_format: struct { ptr: ?*IntlListFormatData = null },
     intl_segmenter: struct { ptr: ?*IntlSegmenterData = null },
     intl_plural_rules: struct { ptr: ?*IntlPluralRulesData = null },
+    intl_duration_format: struct { ptr: ?*IntlDurationFormatData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -2148,6 +2249,7 @@ pub const ObjectBackingFlags = packed struct {
     intl_list_format: bool = false,
     intl_segmenter: bool = false,
     intl_plural_rules: bool = false,
+    intl_duration_format: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -3490,6 +3592,22 @@ pub const Object = struct {
         if (cold.hasRare(.intl_plural_rules)) cold.rare.intl_plural_rules.ptr = null;
     }
 
+    pub inline fn intlDurationFormatData(self: *const Object) ?*IntlDurationFormatData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_duration_format)) return null;
+        return cold.rare.intl_duration_format.ptr;
+    }
+
+    pub fn setIntlDurationFormatData(self: *Object, fallback: std.mem.Allocator, data: *IntlDurationFormatData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_duration_format, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlDurationFormatData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_duration_format)) cold.rare.intl_duration_format.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3898,6 +4016,17 @@ pub const Object = struct {
         data.deinit(a);
         a.destroy(data);
         self.deactivateBacking("intl_plural_rules");
+    }
+
+    pub fn intlDurationFormatAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_duration_format");
+    }
+
+    pub fn destroyUninstalledIntlDurationFormat(self: *Object, fallback: std.mem.Allocator, data: *IntlDurationFormatData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_duration_format");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {
