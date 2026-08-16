@@ -9833,6 +9833,54 @@ pub const Interpreter = struct {
         return true;
     }
 
+    const Utf16KmpPattern = struct {
+        scratch: std.mem.Allocator,
+        units: []u16,
+        prefix: []u32,
+
+        fn init(scratch: std.mem.Allocator, needle: []const u8, needle_len: usize) EvalError!Utf16KmpPattern {
+            std.debug.assert(needle_len > 0);
+            if (needle_len > std.math.maxInt(u32)) return error.OutOfMemory;
+            const units = try scratch.alloc(u16, needle_len);
+            errdefer scratch.free(units);
+            var needle_it = Utf16CodeUnits{ .s = needle };
+            for (units) |*unit| unit.* = needle_it.next().?;
+
+            // Ordinary constructed strings are capped at `max_string_bytes`
+            // (2^26); the explicit guard above also covers larger external
+            // strings. A u32 prefix bounds freeable KMP scratch to six bytes
+            // per needle code unit instead of a native usize pair.
+            const prefix = try scratch.alloc(u32, needle_len);
+            errdefer scratch.free(prefix);
+            prefix[0] = 0;
+            var prefix_len: usize = 0;
+            var prefix_index: usize = 1;
+            while (prefix_index < needle_len) : (prefix_index += 1) {
+                while (prefix_len > 0 and units[prefix_index] != units[prefix_len])
+                    prefix_len = @intCast(prefix[prefix_len - 1]);
+                if (units[prefix_index] == units[prefix_len]) prefix_len += 1;
+                prefix[prefix_index] = @intCast(prefix_len);
+            }
+            return .{ .scratch = scratch, .units = units, .prefix = prefix };
+        }
+
+        fn deinit(self: *Utf16KmpPattern) void {
+            self.scratch.free(self.prefix);
+            self.scratch.free(self.units);
+        }
+
+        fn accepts(self: *const Utf16KmpPattern, matched: *usize, unit: u16) bool {
+            while (matched.* > 0 and unit != self.units[matched.*])
+                matched.* = @intCast(self.prefix[matched.* - 1]);
+            if (unit == self.units[matched.*]) matched.* += 1;
+            if (matched.* != self.units.len) return false;
+            // Retain the longest suffix-prefix so a last-index scan recognizes
+            // overlapping matches (for example, "aaaa" / "aaa").
+            matched.* = @intCast(self.prefix[self.units.len - 1]);
+            return true;
+        }
+    };
+
     /// ECMA-262 StringIndexOf over the engine's WTF-8 storage. The common
     /// ASCII representation is already one byte per UTF-16 code unit. Other
     /// strings stream their abstract code units through KMP so astral halves
@@ -9849,40 +9897,53 @@ pub const Interpreter = struct {
         const needle_len = utf16LenOfString(needle);
         if (needle_len == 0) return start;
         if (needle_len > haystack_len - start) return null;
-        if (needle_len > std.math.maxInt(u32)) return error.OutOfMemory;
         const scratch = self.scratch_allocator orelse self.arena;
-        const units = try scratch.alloc(u16, needle_len);
-        defer scratch.free(units);
-        var needle_it = Utf16CodeUnits{ .s = needle };
-        for (units) |*unit| unit.* = needle_it.next().?;
-
-        // Ordinary constructed strings are capped at `max_string_bytes` (2^26);
-        // the explicit guard above also covers larger external/private-ABI
-        // strings. A u32 prefix bounds freeable KMP scratch to six bytes per
-        // needle code unit instead of a native usize pair.
-        const prefix = try scratch.alloc(u32, needle_len);
-        defer scratch.free(prefix);
-        prefix[0] = 0;
-        var prefix_len: usize = 0;
-        var prefix_index: usize = 1;
-        while (prefix_index < needle_len) : (prefix_index += 1) {
-            while (prefix_len > 0 and units[prefix_index] != units[prefix_len])
-                prefix_len = @intCast(prefix[prefix_len - 1]);
-            if (units[prefix_index] == units[prefix_len]) prefix_len += 1;
-            prefix[prefix_index] = @intCast(prefix_len);
-        }
+        var pattern = try Utf16KmpPattern.init(scratch, needle, needle_len);
+        defer pattern.deinit();
 
         var haystack_it = Utf16CodeUnits{ .s = haystack };
         var index: usize = 0;
         while (index < start) : (index += 1) _ = haystack_it.next() orelse return null;
         var matched: usize = 0;
         while (haystack_it.next()) |unit| {
-            while (matched > 0 and unit != units[matched]) matched = @intCast(prefix[matched - 1]);
-            if (unit == units[matched]) matched += 1;
             index += 1;
-            if (matched == needle_len) return index - needle_len;
+            if (pattern.accepts(&matched, unit)) return index - needle_len;
         }
         return null;
+    }
+
+    /// Greatest UTF-16 match start at or before `limit`. Scanning only through
+    /// `max_start + needle_len` observes every admissible candidate exactly
+    /// once, including overlaps, without a reverse/random-access decode.
+    fn stringLastIndexOfUtf16(self: *Interpreter, haystack: []const u8, needle: []const u8, limit: usize, haystack_len: usize, haystack_ascii: bool) EvalError!?usize {
+        if (limit > haystack_len) return null;
+        if (needle.len == 0) return limit;
+        const needle_ascii = stringBytesAreAscii(needle);
+        if (haystack_ascii) {
+            if (!needle_ascii or needle.len > haystack.len) return null;
+            const max_start = @min(limit, haystack.len - needle.len);
+            return std.mem.lastIndexOf(u8, haystack[0 .. max_start + needle.len], needle);
+        }
+
+        const needle_len = utf16LenOfString(needle);
+        if (needle_len == 0) return limit;
+        if (needle_len > haystack_len) return null;
+        const max_start = @min(limit, haystack_len - needle_len);
+        const scan_units = max_start + needle_len;
+        const scratch = self.scratch_allocator orelse self.arena;
+        var pattern = try Utf16KmpPattern.init(scratch, needle, needle_len);
+        defer pattern.deinit();
+
+        var haystack_it = Utf16CodeUnits{ .s = haystack };
+        var index: usize = 0;
+        var matched: usize = 0;
+        var last: ?usize = null;
+        while (index < scan_units) {
+            const unit = haystack_it.next() orelse break;
+            index += 1;
+            if (pattern.accepts(&matched, unit)) last = index - needle_len;
+        }
+        return last;
     }
 
     /// Private-ABI contains operation. Unlike String.prototype.includes this
@@ -15924,13 +15985,11 @@ pub const Interpreter = struct {
             // the argument's valueOf/toString (so an abrupt completion in either
             // propagates in spec order).
             const sub = try self.toStringWtf8(arg0(args));
-            // `position` and the returned index are UTF-16 code-unit offsets, not
-            // byte offsets: clamp the position in code units, convert to a byte
-            // offset for the (self-synchronizing WTF-8) byte search, then map the
-            // match byte offset back to a code-unit index.
-            const start_cu = try self.stringClampPosition(s, arg(args, 1), 0, s_ascii);
-            const start_byte = byteOffsetForUtf16IndexA(s, start_cu, s_ascii);
-            return Value.num(if (std.mem.indexOfPos(u8, s, start_byte, sub)) |idx| @floatFromInt(utf16IndexForByteOffsetA(s, idx, s_ascii)) else -1);
+            // ECMA-262 String.prototype.indexOf steps 5–10: both `start` and
+            // StringIndexOf are defined over UTF-16 code units.
+            const len = utf16LenOfStringA(s, s_ascii);
+            const start = try self.clampPos(arg(args, 1), len);
+            return Value.num(if (try self.stringIndexOfUtf16(s, sub, start, len, s_ascii)) |index| @floatFromInt(index) else -1);
         }
         if (eq(name, "includes")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.includes must not be a regular expression");
@@ -16255,12 +16314,9 @@ pub const Interpreter = struct {
             const limit_cu: usize = if (std.math.isNan(np)) cu_len else if (np <= 0)
                 0
             else if (np >= @as(f64, @floatFromInt(cu_len))) cu_len else @intFromFloat(@trunc(np));
-            if (sub.len == 0) return Value.num(@floatFromInt(limit_cu));
-            // A match starting at code-unit ≤ limit occupies s[kb .. kb+sub.len) in
-            // bytes; the largest such start lies within s[0 .. limit_byte+sub.len].
-            const limit_byte = byteOffsetForUtf16IndexA(s, limit_cu, s_ascii);
-            const hi = @min(limit_byte + sub.len, s.len);
-            return Value.num(if (std.mem.lastIndexOf(u8, s[0..hi], sub)) |idx| @floatFromInt(utf16IndexForByteOffsetA(s, idx, s_ascii)) else -1);
+            // StringLastIndexOf compares the abstract code-unit sequence and
+            // constrains the match's start (not its end) to `limit_cu`.
+            return Value.num(if (try self.stringLastIndexOfUtf16(s, sub, limit_cu, cu_len, s_ascii)) |index| @floatFromInt(index) else -1);
         }
         if (eq(name, "substr")) {
             // `substr(start, length)`: start may count from the end.
@@ -51165,6 +51221,63 @@ test "interpreter String search predicates use UTF-16 code units" {
     try std.testing.expect((try evalSource(a,
         \\let prefix = "a".repeat(2048);
         \\(prefix + prefix + "b").includes(prefix + "b")
+    )).asBool());
+}
+
+test "interpreter String index search uses UTF-16 code units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\let bmp = "éaé";
+        \\bmp.indexOf("a", 1) === 1 &&
+        \\bmp.indexOf("é", 1) === 2 &&
+        \\bmp.lastIndexOf("é") === 2 &&
+        \\bmp.lastIndexOf("é", 1) === 0
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let astral = "💩x💩";
+        \\astral.indexOf("\uD83D") === 0 &&
+        \\astral.indexOf("\uDCA9") === 1 &&
+        \\astral.indexOf("\uD83D", 1) === 3 &&
+        \\astral.indexOf("\uDCA9", 2) === 4 &&
+        \\astral.lastIndexOf("\uD83D") === 3 &&
+        \\astral.lastIndexOf("\uDCA9") === 4 &&
+        \\astral.lastIndexOf("\uDCA9", 3) === 1 &&
+        \\astral.lastIndexOf("\uD83D", 2) === 0
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let lone = "\uD83Dx\uDCA9";
+        \\lone.indexOf("\uD83D") === 0 &&
+        \\lone.indexOf("\uDCA9") === 2 &&
+        \\lone.lastIndexOf("\uDCA9") === 2 &&
+        \\lone.indexOf("💩") === -1
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let astral = "💩";
+        \\astral.indexOf("", 1) === 1 &&
+        \\astral.indexOf("", Infinity) === 2 &&
+        \\astral.lastIndexOf("") === 2 &&
+        \\astral.lastIndexOf("", 1) === 1 &&
+        \\astral.lastIndexOf("", -1) === 0
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let order = "";
+        \\let search = { toString() { order += "s"; return "a"; } };
+        \\let position = { valueOf() { order += "p"; return 1; } };
+        \\let ok = "ba".indexOf(search, position) === 1 && order === "sp";
+        \\order = "";
+        \\ok &&= "ba".lastIndexOf(search, position) === 1 && order === "sp";
+        \\ok
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let prefix = "a".repeat(2048);
+        \\let text = prefix + prefix + "b";
+        \\text.indexOf(prefix + "b") === 2048 &&
+        \\text.lastIndexOf(prefix + "b") === 2048 &&
+        \\text.lastIndexOf(prefix, 2047) === 2047 &&
+        \\"aaaaa".lastIndexOf("aaa") === 2
     )).asBool());
 }
 

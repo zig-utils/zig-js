@@ -175,6 +175,47 @@ const runtime_cases = [_]Case{
         .expected = 1,
     },
     .{
+        .name = "UTF-16 String index search astral limits",
+        .source =
+        \\let astral = "💩x💩";
+        \\(astral.indexOf("\uD83D") === 0 ? 1 : 0) +
+        \\(astral.indexOf("\uDCA9") === 1 ? 2 : 0) +
+        \\(astral.indexOf("\uD83D", 1) === 3 ? 4 : 0) +
+        \\(astral.indexOf("\uDCA9", 2) === 4 ? 8 : 0) +
+        \\(astral.lastIndexOf("\uD83D") === 3 ? 16 : 0) +
+        \\(astral.lastIndexOf("\uDCA9") === 4 ? 32 : 0) +
+        \\(astral.lastIndexOf("\uDCA9", 3) === 1 ? 64 : 0) +
+        \\(astral.lastIndexOf("\uD83D", 2) === 0 ? 128 : 0)
+        ,
+        .expected = 255,
+    },
+    .{
+        .name = "UTF-16 String index search empty and coercion",
+        .source =
+        \\let astral = "💩";
+        \\let order = "";
+        \\let search = { toString() { order += "s"; return "a"; } };
+        \\let position = { valueOf() { order += "p"; return 1; } };
+        \\let ok = astral.indexOf("", 1) === 1 && astral.indexOf("", Infinity) === 2;
+        \\ok = ok && astral.lastIndexOf("") === 2 && astral.lastIndexOf("", 1) === 1;
+        \\ok = ok && "ba".indexOf(search, position) === 1 && order === "sp";
+        \\order = "";
+        \\ok = ok && "ba".lastIndexOf(search, position) === 1 && order === "sp";
+        \\ok ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
+        .name = "UTF-16 String index search linear overlap",
+        .source =
+        \\let prefix = "a".repeat(2048);
+        \\let text = prefix + prefix + "b";
+        \\text.indexOf(prefix + "b") === 2048 && text.lastIndexOf(prefix + "b") === 2048 &&
+        \\text.lastIndexOf(prefix, 2047) === 2047 && "aaaaa".lastIndexOf("aaa") === 2 ? 1 : 0
+        ,
+        .expected = 1,
+    },
+    .{
         .name = "JSON hostile nesting is catchable",
         .source =
         \\function rejectsDepth(text) {
