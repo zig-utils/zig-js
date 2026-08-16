@@ -1658,7 +1658,7 @@ var representativeIntlCollators = [
   new Intl.Collator("en-US"),
   new Intl.Collator("en-US", { numeric: true }),
   new Intl.Collator("de-DE-u-co-phonebk"),
-  new Intl.Collator("de-DE", { usage: "search", sensitivity: "base" }),
+  new Intl.Collator("en-US", { usage: "search", sensitivity: "base" }),
   new Intl.Collator("en-US", { caseFirst: "upper" }),
   new Intl.Collator("en-US", { sensitivity: "base" }),
   new Intl.Collator("th", { ignorePunctuation: true }),
@@ -1707,6 +1707,44 @@ function representativeIntlCollatorConsumer(jobs, lane, kind) {
         values.sort(representativeIntlCollatorComparators[index]);
         for (var valueIndex = 0; valueIndex < values.length; valueIndex = valueIndex + 1)
           total = (total * 131 + representativeIntlDateTimeChecksum(values[valueIndex]) + valueIndex + sortIndex + lane) % 1000000007;
+      }
+    }
+  }
+  return total;
+}
+
+// Collator reflection keeps construction outside the timed boundary and
+// consumes every field from each fresh ordinary result. The matrix separates
+// default values, explicit options, supported collation, and retained/removed
+// Unicode extension keywords without sharing result objects across calls.
+var representativeIntlCollatorResolvedFormatters = [
+  new Intl.Collator("en-US"),
+  new Intl.Collator("de-DE", { usage: "search", sensitivity: "base" }),
+  new Intl.Collator("en-US", { numeric: true, caseFirst: "upper" }),
+  new Intl.Collator("th", { ignorePunctuation: false }),
+  new Intl.Collator("de-u-co-phonebk"),
+  new Intl.Collator("en-US-u-kn-kf-lower"),
+  new Intl.Collator("en-US-u-kn-kf-lower", { numeric: true, caseFirst: "lower" }),
+  new Intl.Collator("en-US-u-kn-kf-lower", { numeric: false, caseFirst: "upper" })
+];
+var representativeIntlCollatorResolvedKeys = [
+  "locale", "usage", "sensitivity", "ignorePunctuation",
+  "collation", "numeric", "caseFirst"
+];
+
+function representativeIntlCollatorResolvedConsumer(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var formatterIndex = (job + i + lane) & 7;
+      var options = representativeIntlCollatorResolvedFormatters[formatterIndex].resolvedOptions();
+      total = (total + Object.keys(options).length + formatterIndex + i + lane) % 1000000007;
+      for (var keyIndex = 0; keyIndex < representativeIntlCollatorResolvedKeys.length; keyIndex = keyIndex + 1) {
+        var reflected = options[representativeIntlCollatorResolvedKeys[keyIndex]];
+        var reflectedChecksum = typeof reflected === "string"
+          ? representativeIntlDateTimeChecksum(reflected)
+          : (reflected ? 97 : 31);
+        total = (total + reflectedChecksum + keyIndex) % 1000000007;
       }
     }
   }
@@ -2111,6 +2149,7 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_display_names_of") return representativeIntlDisplayNamesConsumer;
   if (name === "representative_intl_collator_compare") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "compare"); };
   if (name === "representative_intl_collator_sort") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "sort"); };
+  if (name === "representative_intl_collator_resolved") return representativeIntlCollatorResolvedConsumer;
   if (name === "representative_intl_date_time_format_consumer_text") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "text"); };
   if (name === "representative_intl_date_time_format_consumer_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "parts"); };
   if (name === "representative_intl_date_time_format_consumer_range") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "range"); };
