@@ -26367,19 +26367,20 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 }
                 try installRelativeTimeFormatData(self, o, resolved, numbering_system, style, numeric);
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
-                // Validate type/style and store a normalized options bag.
+                // Validate in InitializeListFormat order, then publish one
+                // immutable record after every observable option read.
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
                 // BigInt, which are .object-tagged primitives) -> TypeError.
                 if (!raw.isUndefined() and !(raw.isObject() and !raw.asObj().is_symbol and !raw.asObj().is_bigint)) return self.throwError("TypeError", "options must be an object");
-                const ro = (try self.newObject()).asObj();
+                var kind: []const u8 = "conjunction";
+                var style: []const u8 = "long";
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetStr(self, raw, "type", &.{ "conjunction", "disjunction", "unit" }, null)) |t| try self.setProp(ro, "type", try Value.strAlloc(self.arena, t));
-                    if (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, null)) |s| try self.setProp(ro, "style", try Value.strAlloc(self.arena, s));
+                    kind = (try dtfGetStr(self, raw, "type", &.{ "conjunction", "disjunction", "unit" }, "conjunction")).?;
+                    style = (try dtfGetStr(self, raw, "style", &.{ "long", "short", "narrow" }, "long")).?;
                 }
-                try self.setProp(o, "\x00opts", Value.obj(ro));
-                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+                try installListFormatData(self, o, resolved, kind, style);
             } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
                 // options is required; `type` is required. Read in spec order.
                 const raw = if (args.len > 1) args[1] else Value.undef();
@@ -27915,6 +27916,27 @@ fn installRelativeTimeFormatData(
     data.owned_numbering_system = try allocator.dupe(u8, resolved.numbering_system);
     data.numbering_system = data.owned_numbering_system.?;
     try formatter.setIntlRelativeTimeFormatData(self.arena, data);
+    installed = true;
+}
+
+fn installListFormatData(
+    self: *Interpreter,
+    formatter: *value.Object,
+    locale: []const u8,
+    kind: []const u8,
+    style: []const u8,
+) EvalError!void {
+    const allocator = try formatter.intlListFormatAllocator(self.arena);
+    const data = try allocator.create(value.IntlListFormatData);
+    data.* = .{
+        .kind = .fromString(kind),
+        .style = .fromString(style),
+    };
+    var installed = false;
+    errdefer if (!installed) formatter.destroyUninstalledIntlListFormat(self.arena, data);
+    data.owned_locale = try allocator.dupe(u8, locale);
+    data.locale = data.owned_locale.?;
+    try formatter.setIntlListFormatData(self.arena, data);
     installed = true;
 }
 
@@ -30015,20 +30037,16 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
         try strs.append(self.arena, try nv.asWtf8(self.arena));
     }
     const list = strs.items;
-    var typ: []const u8 = "conjunction";
-    var style: []const u8 = "long";
-    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        const tv = try self.getProperty(ov, "type");
-        if (tv.isString()) typ = tv.asStr();
-        const sv = try self.getProperty(ov, "style");
-        if (sv.isString()) style = sv.asStr();
-    };
+    const data = this.asObj().intlListFormatData() orelse
+        return self.throwError("TypeError", "Intl.ListFormat has no resolved state");
+    const typ = data.kind.string();
+    const style = data.style.string();
     // en connectors by type+style: pair (two items) / final (≥3) / middle.
     const is_unit = std.mem.eql(u8, typ, "unit");
     const is_disj = std.mem.eql(u8, typ, "disjunction");
     const narrow = std.mem.eql(u8, style, "narrow");
     const short = std.mem.eql(u8, style, "short");
-    const lang = if (this.asObj().getOwn("\x00locale")) |lv| (if (lv.isString()) localeLanguage(lv.asStr()) else "en") else "en";
+    const lang = localeLanguage(data.locale);
     const es = std.mem.eql(u8, lang, "es");
     var middle: []const u8 = ", ";
     var pair: []const u8 = " and ";
@@ -30770,7 +30788,8 @@ fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value
 
 fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "ListFormat")) return self.throwError("TypeError", "Intl.ListFormat.prototype.format on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlListFormatData() == null)
+        return self.throwError("TypeError", "Intl.ListFormat.prototype.format on incompatible receiver");
     const parts = try lfBuildParts(self, this, args);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     for (parts.items) |p| try buf.appendSlice(self.arena, p.value);
@@ -30779,7 +30798,8 @@ fn intlListFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 
 fn intlListFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "ListFormat")) return self.throwError("TypeError", "Intl.ListFormat.prototype.formatToParts on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlListFormatData() == null)
+        return self.throwError("TypeError", "Intl.ListFormat.prototype.formatToParts on incompatible receiver");
     const parts = try lfBuildParts(self, this, args);
     const arr = (try self.newArray()).asObj();
     for (parts.items) |p| {
@@ -31067,12 +31087,17 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) blk: {
                 if (this_recv.isObject() and this_recv.asObj().intlRelativeTimeFormatData() != null) break :blk this_recv;
                 return self.throwError("TypeError", "Intl.RelativeTimeFormat.prototype.resolvedOptions on incompatible receiver");
+            } else if (comptime std.mem.eql(u8, service, "ListFormat")) blk: {
+                if (this_recv.isObject() and this_recv.asObj().intlListFormatData() != null) break :blk this_recv;
+                return self.throwError("TypeError", "Intl.ListFormat.prototype.resolvedOptions on incompatible receiver");
             } else (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
             const o = (try self.newObject()).asObj();
             const loc = if (comptime std.mem.eql(u8, service, "DisplayNames"))
                 try Value.strAlloc(self.arena, this.asObj().intlDisplayNamesData().?.locale)
             else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat"))
                 try Value.strAlloc(self.arena, this.asObj().intlRelativeTimeFormatData().?.locale)
+            else if (comptime std.mem.eql(u8, service, "ListFormat"))
+                try Value.strAlloc(self.arena, this.asObj().intlListFormatData().?.locale)
             else
                 this.asObj().getOwn("\x00locale") orelse Value.str("en");
             try self.setProp(o, "locale", loc);
@@ -31232,18 +31257,9 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "numeric", try Value.strAlloc(self.arena, data.numeric.string()));
                 try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) {
-                var typ: []const u8 = "conjunction";
-                var style: []const u8 = "long";
-                if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                    if (ov.asObj().getOwn("type")) |tv| if (tv.isString()) {
-                        typ = tv.asStr();
-                    };
-                    if (ov.asObj().getOwn("style")) |sv| if (sv.isString()) {
-                        style = sv.asStr();
-                    };
-                };
-                try self.setProp(o, "type", try Value.strAlloc(self.arena, typ));
-                try self.setProp(o, "style", try Value.strAlloc(self.arena, style));
+                const data = this.asObj().intlListFormatData().?;
+                try self.setProp(o, "type", try Value.strAlloc(self.arena, data.kind.string()));
+                try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style.string()));
             } else if (comptime std.mem.eql(u8, service, "DisplayNames")) {
                 // Reflect the immutable normalized record in Table-6 order.
                 const data = this.asObj().intlDisplayNamesData() orelse
@@ -51463,6 +51479,102 @@ test "Intl.RelativeTimeFormat resolved state is immutable across native threads"
                 };
                 checksum +%= data.locale.len + data.numbering_system.len + data.style.string().len +
                     data.numeric.string().len + iteration + lane;
+            }
+            result.* = checksum;
+        }
+    };
+    var threads: [results.len]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane|
+        thread.* = try std.Thread.spawn(.{}, Lane.run, .{ &formatter, lane, &results[lane] });
+    for (&threads) |*thread| thread.join();
+    for (results, 0..) |result, lane| {
+        try std.testing.expect(result != std.math.maxInt(u64));
+        try std.testing.expectEqual(results[0] + lane * 4096, result);
+    }
+}
+
+test "Intl.ListFormat resolved-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{
+                .arena = allocator,
+                .env = undefined,
+                .root_shape = root_shape,
+            };
+            var formatter = value.Object{};
+
+            try installListFormatData(&machine, &formatter, "es-MX", "unit", "narrow");
+            const data = formatter.intlListFormatData().?;
+            try std.testing.expectEqualStrings("es-MX", data.locale);
+            try std.testing.expectEqual(value.IntlListFormatData.Kind.unit, data.kind);
+            try std.testing.expectEqual(value.IntlListFormatData.Style.narrow, data.style);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.ListFormat consumes immutable normalized state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var log = [];
+        \\var values = { localeMatcher: "lookup", type: "unit", style: "narrow" };
+        \\var options = {};
+        \\["localeMatcher", "type", "style"].forEach(function (key) {
+        \\  Object.defineProperty(options, key, { get: function () { log.push(key); return values[key]; } });
+        \\});
+        \\var list = new Intl.ListFormat("es-MX", options);
+        \\values.type = "conjunction";
+        \\values.style = "long";
+        \\var resolved = list.resolvedOptions();
+        \\var fake = {};
+        \\fake["\\0intl"] = "ListFormat";
+        \\fake["\\0locale"] = "es-MX";
+        \\fake["\\0opts"] = { type: "unit", style: "narrow" };
+        \\var formatRejected = false;
+        \\var partsRejected = false;
+        \\var resolvedRejected = false;
+        \\try { Intl.ListFormat.prototype.format.call(fake, ["uno", "dos"]); } catch (error) { formatRejected = error instanceof TypeError; }
+        \\try { Intl.ListFormat.prototype.formatToParts.call(fake, ["uno", "dos"]); } catch (error) { partsRejected = error instanceof TypeError; }
+        \\try { Intl.ListFormat.prototype.resolvedOptions.call(fake); } catch (error) { resolvedRejected = error instanceof TypeError; }
+        \\log.join("|") === "localeMatcher|type|style" &&
+        \\  list.format(["uno", "dos", "tres"]) === "uno dos tres" && resolved.locale === "es-MX" &&
+        \\  resolved.type === "unit" && resolved.style === "narrow" &&
+        \\  Object.getOwnPropertyNames(list).indexOf("\\0opts") === -1 &&
+        \\  formatRejected && partsRejected && resolvedRejected
+    )).asBool());
+}
+
+test "Intl.ListFormat resolved state is immutable across native threads" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = undefined,
+        .root_shape = root_shape,
+    };
+    var formatter = value.Object{};
+    try installListFormatData(&machine, &formatter, "es-MX", "disjunction", "short");
+
+    var results: [4]u64 = .{ 0, 0, 0, 0 };
+    const Lane = struct {
+        fn run(shared: *const value.Object, lane: usize, result: *u64) void {
+            var checksum: u64 = 0;
+            for (0..4096) |iteration| {
+                const data = shared.intlListFormatData() orelse {
+                    result.* = std.math.maxInt(u64);
+                    return;
+                };
+                checksum +%= data.locale.len + data.kind.string().len + data.style.string().len + iteration + lane;
             }
             result.* = checksum;
         }

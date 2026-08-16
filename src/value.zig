@@ -1414,6 +1414,53 @@ pub const IntlRelativeTimeFormatData = struct {
     }
 };
 
+/// Fully resolved, immutable Intl.ListFormat state. Locale/type/style are
+/// observed and normalized once, then published as owned native data for all
+/// steady formatting and reflection calls.
+pub const IntlListFormatData = struct {
+    pub const Kind = enum(u8) {
+        conjunction,
+        disjunction,
+        unit,
+
+        pub fn fromString(name: []const u8) Kind {
+            if (std.mem.eql(u8, name, "disjunction")) return .disjunction;
+            if (std.mem.eql(u8, name, "unit")) return .unit;
+            return .conjunction;
+        }
+
+        pub fn string(self: Kind) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    pub const Style = enum(u8) {
+        long,
+        short,
+        narrow,
+
+        pub fn fromString(name: []const u8) Style {
+            if (std.mem.eql(u8, name, "short")) return .short;
+            if (std.mem.eql(u8, name, "narrow")) return .narrow;
+            return .long;
+        }
+
+        pub fn string(self: Style) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    locale: []const u8 = "en",
+    kind: Kind = .conjunction,
+    style: Style = .long,
+    owned_locale: ?[]u8 = null,
+
+    pub fn deinit(self: *IntlListFormatData, allocator: std.mem.Allocator) void {
+        if (self.owned_locale) |owned| allocator.free(owned);
+        self.owned_locale = null;
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1552,6 +1599,7 @@ pub const ObjectRareTag = enum(u8) {
     intl_collator,
     intl_display_names,
     intl_relative_time_format,
+    intl_list_format,
     temporal,
     promise,
     constructor,
@@ -1654,6 +1702,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     intl_collator: struct { ptr: ?*IntlCollatorData = null },
     intl_display_names: struct { ptr: ?*IntlDisplayNamesData = null },
     intl_relative_time_format: struct { ptr: ?*IntlRelativeTimeFormatData = null },
+    intl_list_format: struct { ptr: ?*IntlListFormatData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -1895,6 +1944,7 @@ pub const ObjectBackingFlags = packed struct {
     intl_collator: bool = false,
     intl_display_names: bool = false,
     intl_relative_time_format: bool = false,
+    intl_list_format: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -3191,6 +3241,22 @@ pub const Object = struct {
         if (cold.hasRare(.intl_relative_time_format)) cold.rare.intl_relative_time_format.ptr = null;
     }
 
+    pub inline fn intlListFormatData(self: *const Object) ?*IntlListFormatData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_list_format)) return null;
+        return cold.rare.intl_list_format.ptr;
+    }
+
+    pub fn setIntlListFormatData(self: *Object, fallback: std.mem.Allocator, data: *IntlListFormatData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_list_format, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlListFormatData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_list_format)) cold.rare.intl_list_format.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3567,6 +3633,17 @@ pub const Object = struct {
         data.deinit(a);
         a.destroy(data);
         self.deactivateBacking("intl_relative_time_format");
+    }
+
+    pub fn intlListFormatAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_list_format");
+    }
+
+    pub fn destroyUninstalledIntlListFormat(self: *Object, fallback: std.mem.Allocator, data: *IntlListFormatData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_list_format");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {
