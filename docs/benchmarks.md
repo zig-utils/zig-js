@@ -959,10 +959,12 @@ outlier is discarded. V2 additionally rejects any cache-group drift, any
 focused-engine denominator other than 12 for the cold run or one for the cached
 and TSan runs, and any combined focused run that does not select exactly one
 test from a positive linked inventory with zero skips, failures, or leaks. A
-preflight before every phase rejects another active Zig compiler/build-driver
-process outside the collector's own ancestor chain. Any command, preflight, or
-final-validation failure preserves the collected rows in an explicitly
-incomplete raw artifact rather than publishing a partial report.
+preflight before and postflight after every phase reject another active Zig
+compiler/build-driver process outside the collector's own ancestor chain. A
+competitor that appears while a command is running therefore leaves that row
+only in an incomplete artifact. Any command, process-boundary, or
+final-validation failure preserves the collected rows rather than publishing a
+partial report.
 
 ```sh
 zig build build-feedback-test

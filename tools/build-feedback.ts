@@ -594,6 +594,7 @@ function main(): void {
           console.log(`[${sample + 1}/${options.samples}] ${scenario.name}`);
           const row = runSample(options.zig, scenario, sample, cacheRoot);
           artifact.samples.push(row);
+          requireNoCompetingZigProcess();
           console.log(
             `  exit=${row.exit_code} wall=${row.wall_seconds.toFixed(2)}s cpu=${(row.user_seconds + row.system_seconds).toFixed(2)}s rss=${formatBytes(row.peak_rss_bytes)}`,
           );
