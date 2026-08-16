@@ -1751,6 +1751,45 @@ function representativeIntlCollatorResolvedConsumer(jobs, lane) {
   return total;
 }
 
+// Locale reflection keeps construction/canonicalization outside the timed
+// boundary. Every loop consumes the stable tag, each base-name component, and
+// every supported Unicode keyword accessor; absent fields and booleans remain
+// part of the checksum so an implementation cannot skip sparse state.
+var representativeIntlLocaleReflectionLocales = [
+  new Intl.Locale("en"),
+  new Intl.Locale("zh-Hant-TW"),
+  new Intl.Locale("de-DE-1996-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn"),
+  new Intl.Locale("ar-EG-u-ca-islamic-nu-arab"),
+  new Intl.Locale("th-TH-u-fw-sun-hc-h24"),
+  new Intl.Locale("sr-Cyrl-RS-fonipa-u-kf-lower-kn-false"),
+  new Intl.Locale("fr-CA-u-ca-iso8601-co-emoji-nu-latn"),
+  new Intl.Locale("ja-JP-u-ca-japanese-fw-tue-hc-h11")
+];
+var representativeIntlLocaleReflectionKeys = [
+  "baseName", "language", "script", "region", "variants", "calendar",
+  "caseFirst", "collation", "firstDayOfWeek", "hourCycle", "numeric",
+  "numberingSystem"
+];
+
+function representativeIntlLocaleReflectionConsumer(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 96; i = i + 1) {
+      var localeIndex = (job + i + lane) & 7;
+      var locale = representativeIntlLocaleReflectionLocales[localeIndex];
+      total = (total + representativeIntlDateTimeChecksum(locale.toString()) + localeIndex + i + lane) % 1000000007;
+      for (var keyIndex = 0; keyIndex < representativeIntlLocaleReflectionKeys.length; keyIndex = keyIndex + 1) {
+        var reflected = locale[representativeIntlLocaleReflectionKeys[keyIndex]];
+        var reflectedChecksum = typeof reflected === "string"
+          ? representativeIntlDateTimeChecksum(reflected)
+          : (reflected === undefined ? 17 : (reflected ? 97 : 31));
+        total = (total + reflectedChecksum + keyIndex) % 1000000007;
+      }
+    }
+  }
+  return total;
+}
+
 // DateTimeFormat controls separate constructor resolution from steady
 // consumers. Keep the fixed UTC inputs and formatter construction outside the
 // timed steady boundary so changes to resolved-state ownership are attributable
@@ -2150,6 +2189,7 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_collator_compare") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "compare"); };
   if (name === "representative_intl_collator_sort") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "sort"); };
   if (name === "representative_intl_collator_resolved") return representativeIntlCollatorResolvedConsumer;
+  if (name === "representative_intl_locale_reflection") return representativeIntlLocaleReflectionConsumer;
   if (name === "representative_intl_date_time_format_consumer_text") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "text"); };
   if (name === "representative_intl_date_time_format_consumer_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "parts"); };
   if (name === "representative_intl_date_time_format_consumer_range") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "range"); };
