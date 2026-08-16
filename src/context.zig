@@ -12793,6 +12793,92 @@ test "parallel_js: Intl locale-list indexes stay invocation local" {
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "Intl.Locale reflection stays bounded under a precise heap" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var boundedLocale = new Intl.Locale("sr-Cyrl-RS-fonipa-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn");
+        \\var boundedLocaleChecksum = 0;
+        \\for (var round = 0; round < 32; round++) {
+        \\  for (var i = 0; i < 64; i++) {
+        \\    boundedLocaleChecksum += boundedLocale.toString().length + boundedLocale.baseName.length + boundedLocale.language.length;
+        \\    boundedLocaleChecksum += boundedLocale.script.length + boundedLocale.region.length + boundedLocale.variants.length;
+        \\    boundedLocaleChecksum += boundedLocale.calendar.length + boundedLocale.collation.length + boundedLocale.firstDayOfWeek.length;
+        \\    boundedLocaleChecksum += boundedLocale.hourCycle.length + boundedLocale.caseFirst.length + boundedLocale.numberingSystem.length;
+        \\    boundedLocaleChecksum += boundedLocale.numeric ? 1 : 0;
+        \\  }
+        \\  if ((round & 3) === 3) gc();
+        \\}
+        \\gc();
+        \\boundedLocaleChecksum > 0;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+}
+
+test "moving nursery rewrites Intl.Locale canonical string state" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    _ = try ctx.evaluate(
+        \\globalThis.__movingLocale = new Intl.Locale("sr-Cyrl-RS-fonipa-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn");
+    );
+    const before_object = ctx.global_object.getOwn("__movingLocale").?.asObj();
+    const before_string = before_object.intlLocaleData().?.locale.asStringCell();
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after_object = ctx.global_object.getOwn("__movingLocale").?.asObj();
+    const after_string = after_object.intlLocaleData().?.locale.asStringCell();
+    try std.testing.expect(before_object != after_object);
+    try std.testing.expect(before_string != after_string);
+    try std.testing.expect((try ctx.evaluate(
+        \\__movingLocale.toString() === "sr-Cyrl-RS-fonipa-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn" &&
+        \\  __movingLocale.baseName === "sr-Cyrl-RS-fonipa" && __movingLocale.calendar === "gregory" &&
+        \\  __movingLocale.collation === "phonebk" && __movingLocale.numeric === true
+    )).asBool());
+}
+
+test "parallel_js: Intl.Locale native state is immutable after publication" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\globalThis.__sharedLocale = new Intl.Locale("sr-Cyrl-RS-fonipa-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn");
+        \\function localeStateLane(lane) {
+        \\  var checksum = lane;
+        \\  for (var i = 0; i < 256; i++) {
+        \\    if (__sharedLocale.toString() !== "sr-Cyrl-RS-fonipa-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn") return 0;
+        \\    if (__sharedLocale.baseName !== "sr-Cyrl-RS-fonipa" || __sharedLocale.language !== "sr" || __sharedLocale.script !== "Cyrl" || __sharedLocale.region !== "RS" || __sharedLocale.variants !== "fonipa") return 0;
+        \\    if (__sharedLocale.calendar !== "gregory" || __sharedLocale.collation !== "phonebk" || __sharedLocale.firstDayOfWeek !== "mon" || __sharedLocale.hourCycle !== "h23" || __sharedLocale.caseFirst !== "upper" || !__sharedLocale.numeric || __sharedLocale.numberingSystem !== "latn") return 0;
+        \\    checksum += __sharedLocale.language.length + __sharedLocale.region.length;
+        \\  }
+        \\  return checksum === lane + 1024 ? 1 : 0;
+        \\}
+        \\var localeStateThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) localeStateThreads.push(new Thread(localeStateLane, lane));
+        \\var localeStateTotal = 0;
+        \\for (var index = 0; index < localeStateThreads.length; index++) localeStateTotal += localeStateThreads[index].join();
+        \\localeStateTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+}
+
 test "Intl.NumberFormat resolved state is reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

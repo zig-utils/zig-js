@@ -1056,6 +1056,41 @@ pub const TemporalData = struct {
     calendar: []const u8 = "iso8601",
 };
 
+/// Immutable ECMA-402 Intl.Locale internal slots. The canonical string is a
+/// strong GC edge retained by the branded object; byte ranges point into that
+/// string and make reflection a bounds check instead of reparsing BCP 47.
+pub const IntlLocaleData = struct {
+    pub const Range = struct {
+        start: usize,
+        end: usize,
+
+        pub fn bytes(self: Range, tag: []const u8) []const u8 {
+            std.debug.assert(self.start <= self.end and self.end <= tag.len);
+            return tag[self.start..self.end];
+        }
+
+        pub fn fromSlice(tag: []const u8, part: []const u8) Range {
+            const start = @intFromPtr(part.ptr) - @intFromPtr(tag.ptr);
+            std.debug.assert(start <= tag.len and part.len <= tag.len - start);
+            return .{ .start = start, .end = start + part.len };
+        }
+    };
+
+    locale: Value = Value.undef(),
+    base_name: Range = .{ .start = 0, .end = 0 },
+    language: Range = .{ .start = 0, .end = 0 },
+    script: ?Range = null,
+    region: ?Range = null,
+    variants: ?Range = null,
+    calendar: ?Range = null,
+    case_first: ?Range = null,
+    collation: ?Range = null,
+    first_day_of_week: ?Range = null,
+    hour_cycle: ?Range = null,
+    numbering_system: ?Range = null,
+    numeric: bool = false,
+};
+
 /// Fully resolved, immutable Intl.NumberFormat state. User option getters and
 /// coercions run before this record is published; steady formatting can then
 /// read native fields without re-entering ordinary JavaScript property lookup.
@@ -1923,6 +1958,7 @@ pub const ObjectRareTag = enum(u8) {
     async_context_frame,
     proxy,
     buffer_view,
+    intl_locale,
     intl_number_format,
     intl_date_time_format,
     intl_collator,
@@ -2029,6 +2065,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         typed_array: ?*TypedArrayData = null,
         data_view: ?*DataViewData = null,
     },
+    intl_locale: struct { ptr: ?*IntlLocaleData = null },
     intl_number_format: struct { ptr: ?*IntlNumberFormatData = null },
     intl_date_time_format: struct { ptr: ?*IntlDateTimeFormatData = null },
     intl_collator: struct { ptr: ?*IntlCollatorData = null },
@@ -2274,6 +2311,7 @@ pub const ObjectBackingFlags = packed struct {
     typed_array: bool = false,
     data_view: bool = false,
     temporal: bool = false,
+    intl_locale: bool = false,
     intl_number_format: bool = false,
     intl_date_time_format: bool = false,
     intl_collator: bool = false,
@@ -2394,7 +2432,7 @@ pub const Object = struct {
     /// `backingFor`/`(de)activateBacking` touch storage-state allocator flags
     /// while the caller holds *whichever* structure lock matches the field
     /// (elements_lock for elements, property_lock for slots/attrs/accessors), so
-    /// those don't mutually exclude on the shared packed `backing_flags` byte —
+    /// those don't mutually exclude on the shared packed `backing_flags` word —
     /// under `parallel_js` an elements-grow on one thread races an attrs-grow on
     /// another. This dedicated lock serializes backing activation across them.
     /// Gated on `element_locks_enabled` so the default engine pays nothing.
@@ -3004,6 +3042,7 @@ pub const Object = struct {
         arg_map_env: ?*anyopaque,
         typed_array: ?*TypedArrayData,
         data_view: ?*DataViewData,
+        intl_locale_value: ?Value,
         getter_setter_getter: ?Value,
         getter_setter_setter: ?Value,
         wasm: WasmTraceSnapshot,
@@ -3032,6 +3071,7 @@ pub const Object = struct {
             .arg_map_env = if (cold) |state| state.arg_map_env else null,
             .typed_array = self.typedArray(),
             .data_view = self.dataView(),
+            .intl_locale_value = if (self.intlLocaleData()) |data| data.locale else null,
             .getter_setter_getter = if (self.getterSetterCellData()) |cell| cell.getterValue() else null,
             .getter_setter_setter = if (self.getterSetterCellData()) |cell| cell.setterValue() else null,
             .wasm = if (cold) |state| wasmTraceSnapshot(state) else .{},
@@ -3505,6 +3545,26 @@ pub const Object = struct {
         return cold.rare.intl_number_format.ptr;
     }
 
+    pub inline fn intlLocaleData(self: *const Object) ?*IntlLocaleData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_locale)) return null;
+        return cold.rare.intl_locale.ptr;
+    }
+
+    pub fn setIntlLocaleData(self: *Object, fallback: std.mem.Allocator, data: *IntlLocaleData) std.mem.Allocator.Error!void {
+        // The canonical StringCell is the one managed edge in this native
+        // record. Shade it before sidecar publication so an incremental mark
+        // cannot observe the owner first and collect the newly installed tag.
+        gcBarrier(self, data.locale);
+        const state = try self.ensureRare(fallback, .intl_locale, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlLocaleData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_locale)) cold.rare.intl_locale.ptr = null;
+    }
+
     pub fn setIntlNumberFormatData(self: *Object, fallback: std.mem.Allocator, data: *IntlNumberFormatData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .intl_number_format, .{});
         state.ptr = data;
@@ -3966,6 +4026,16 @@ pub const Object = struct {
 
     pub fn intlNumberFormatAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
         return self.ensureBackingFor(fallback, "intl_number_format");
+    }
+
+    pub fn intlLocaleAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_locale");
+    }
+
+    pub fn destroyUninstalledIntlLocale(self: *Object, fallback: std.mem.Allocator, data: *IntlLocaleData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        a.destroy(data);
+        self.deactivateBacking("intl_locale");
     }
 
     pub fn destroyUninstalledIntlNumberFormat(self: *Object, fallback: std.mem.Allocator, data: *IntlNumberFormatData) void {

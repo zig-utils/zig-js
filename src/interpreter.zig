@@ -24738,8 +24738,9 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     const scratch = gc_mod.temporaryAllocator(self.arena);
     // A string or a single Intl.Locale is wrapped as a one-element list (its
     // [[Locale]] slot is used; toString is not observed).
-    if (v.isString() or (v.isObject() and v.asObj().getOwn("\x00locale") != null)) {
-        const s = if (v.isString()) v.asStr() else v.asObj().getOwn("\x00locale").?.asStr();
+    const locale_tag = intlLocaleTag(v);
+    if (v.isString() or locale_tag != null) {
+        const s = if (v.isString()) v.asStr() else locale_tag.?;
         var canonical_arena = std.heap.ArenaAllocator.init(scratch);
         defer canonical_arena.deinit();
         const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
@@ -24775,10 +24776,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         if (!ev.isString() and !ev.isObject()) return self.throwError("TypeError", "Intl: locale must be a string or object");
         // An Intl.Locale element contributes its [[Locale]] slot directly (its
         // toString must not be observed).
-        const s = if (ev.isObject() and ev.asObj().getOwn("\x00locale") != null)
-            ev.asObj().getOwn("\x00locale").?.asStr()
-        else
-            try self.toStringV(ev);
+        const s = intlLocaleTag(ev) orelse try self.toStringV(ev);
         _ = canonical_arena.reset(.retain_capacity);
         const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
         var duplicate = if (locale_index) |*index|
@@ -24940,6 +24938,88 @@ fn localeUValue(tag: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+fn intlLocaleTag(v: Value) ?[]const u8 {
+    if (!v.isObject()) return null;
+    const data = v.asObj().intlLocaleData() orelse return null;
+    return data.locale.asStr();
+}
+
+fn intlLocaleKeywordRange(tag: []const u8, key: []const u8) ?value.IntlLocaleData.Range {
+    const part = localeUValue(tag, key) orelse return null;
+    // A bare Unicode boolean key is represented by a present empty range.
+    return if (part.len == 0) .{ .start = 0, .end = 0 } else .fromSlice(tag, part);
+}
+
+fn resolvedIntlLocaleData(locale: Value) value.IntlLocaleData {
+    const tag = locale.asStr();
+    var base_end = tag.len;
+    var subtags = std.mem.splitScalar(u8, tag, '-');
+    var offset: usize = 0;
+    while (subtags.next()) |part| {
+        if (part.len == 1) {
+            base_end = if (offset == 0) 0 else offset - 1;
+            break;
+        }
+        offset += part.len + 1;
+    }
+
+    const base = tag[0..base_end];
+    var base_parts = std.mem.splitScalar(u8, base, '-');
+    const language = base_parts.next() orelse "";
+    var script: ?value.IntlLocaleData.Range = null;
+    var region: ?value.IntlLocaleData.Range = null;
+    var variants_start: ?usize = null;
+    var variants_end: usize = 0;
+    while (base_parts.next()) |part| {
+        if (script == null and region == null and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
+            script = .fromSlice(tag, part);
+        } else if (region == null and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
+            region = .fromSlice(tag, part);
+        } else {
+            const range = value.IntlLocaleData.Range.fromSlice(tag, part);
+            if (variants_start == null) variants_start = range.start;
+            variants_end = range.end;
+        }
+    }
+
+    const kn = localeUValue(tag, "kn");
+    return .{
+        .locale = locale,
+        .base_name = .{ .start = 0, .end = base_end },
+        .language = .fromSlice(tag, language),
+        .script = script,
+        .region = region,
+        .variants = if (variants_start) |start| .{ .start = start, .end = variants_end } else null,
+        .calendar = intlLocaleKeywordRange(tag, "ca"),
+        .case_first = intlLocaleKeywordRange(tag, "kf"),
+        .collation = intlLocaleKeywordRange(tag, "co"),
+        .first_day_of_week = intlLocaleKeywordRange(tag, "fw"),
+        .hour_cycle = intlLocaleKeywordRange(tag, "hc"),
+        .numbering_system = intlLocaleKeywordRange(tag, "nu"),
+        .numeric = if (kn) |numeric| numeric.len == 0 or std.mem.eql(u8, numeric, "true") else false,
+    };
+}
+
+fn installIntlLocaleData(self: *Interpreter, object: *value.Object, canonical: []const u8) EvalError!void {
+    const locale = try Value.strAlloc(self.arena, canonical);
+    const allocator = try object.intlLocaleAllocator(self.arena);
+    const data = try allocator.create(value.IntlLocaleData);
+    var installed = false;
+    errdefer if (!installed) object.destroyUninstalledIntlLocale(self.arena, data);
+    data.* = resolvedIntlLocaleData(locale);
+    try object.setIntlLocaleData(self.arena, data);
+    installed = true;
+}
+
+fn intlLocaleTriple(data: *const value.IntlLocaleData) Triple {
+    const tag = data.locale.asStr();
+    return .{
+        .l = data.language.bytes(tag),
+        .s = if (data.script) |range| range.bytes(tag) else "",
+        .r = if (data.region) |range| range.bytes(tag) else "",
+    };
+}
+
 const LocaleOptKind = enum { set, language, script, region, type, variants };
 
 fn localeSubtagValid(kind: LocaleOptKind, s: []const u8) bool {
@@ -25019,10 +25099,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Intl.Locale requires 'new'");
     const tagv = if (args.len > 0) args[0] else Value.undef();
     if (!tagv.isString() and !tagv.isObject()) return self.throwError("TypeError", "Locale tag must be a string or Intl.Locale");
-    const tag_raw = if (tagv.isObject() and tagv.asObj().getOwn("\x00locale") != null)
-        tagv.asObj().getOwn("\x00locale").?.asStr()
-    else
-        try self.toStringV(tagv);
+    const tag_raw = intlLocaleTag(tagv) orelse try self.toStringV(tagv);
     var canon = try canonicalizeLocaleTagForIntl(self, self.arena, tag_raw);
 
     // Apply the options bag (ApplyOptionsToTag + per-keyword -u- options).
@@ -25133,8 +25210,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
 
     const o = (try self.newObject()).asObj();
     if (self.new_target.isObject()) o.setProtoAtomic(try self.ctorRealmProto(self.new_target.asObj(), "Locale"));
-    try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, canon));
-    try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+    try installIntlLocaleData(self, o, canon);
     return Value.obj(o);
 }
 
@@ -25144,56 +25220,29 @@ fn intlLocaleGetter(comptime f: LocaleField) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale accessor on incompatible receiver");
-            const tag = this.asObj().getOwn("\x00locale").?.asStr();
+            if (!this.isObject()) return self.throwError("TypeError", "Intl.Locale accessor on incompatible receiver");
+            const data = this.asObj().intlLocaleData() orelse return self.throwError("TypeError", "Intl.Locale accessor on incompatible receiver");
+            const tag = data.locale.asStr();
             // -u- extension keyword accessors.
             switch (f) {
-                .calendar => return if (localeUValue(tag, "ca")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
-                .case_first => return if (localeUValue(tag, "kf")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
-                .collation => return if (localeUValue(tag, "co")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
-                .hour_cycle => return if (localeUValue(tag, "hc")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
-                .numbering_system => return if (localeUValue(tag, "nu")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
-                .numeric => return Value.boolVal(if (localeUValue(tag, "kn")) |v| (v.len == 0 or std.mem.eql(u8, v, "true")) else false),
-                .first_day_of_week => return if (localeUValue(tag, "fw")) |v| try Value.strAlloc(self.arena, v) else Value.undef(),
+                .calendar => return if (data.calendar) |range| try Value.strAlloc(self.arena, range.bytes(tag)) else Value.undef(),
+                .case_first => return if (data.case_first) |range| try Value.strAlloc(self.arena, range.bytes(tag)) else Value.undef(),
+                .collation => return if (data.collation) |range| try Value.strAlloc(self.arena, range.bytes(tag)) else Value.undef(),
+                .hour_cycle => return if (data.hour_cycle) |range| try Value.strAlloc(self.arena, range.bytes(tag)) else Value.undef(),
+                .numbering_system => return if (data.numbering_system) |range| try Value.strAlloc(self.arena, range.bytes(tag)) else Value.undef(),
+                .numeric => return Value.boolVal(data.numeric),
+                .first_day_of_week => return if (data.first_day_of_week) |range| try Value.strAlloc(self.arena, range.bytes(tag)) else Value.undef(),
                 else => {},
             }
-            // baseName (GetLocaleBaseName) is the language-id prefix: everything
-            // up to the first singleton ("-X-") subtag. language/script/region/
-            // variants are its components.
-            var base_end: usize = tag.len;
-            {
-                var bit = std.mem.splitScalar(u8, tag, '-');
-                var off: usize = 0;
-                while (bit.next()) |part| {
-                    if (part.len == 1) {
-                        base_end = if (off == 0) 0 else off - 1; // drop the joining '-'
-                        break;
-                    }
-                    off += part.len + 1;
-                }
-            }
-            const base = tag[0..base_end];
-            if (f == .base_name) return try Value.strAlloc(self.arena, base);
-            var it = std.mem.splitScalar(u8, base, '-');
-            const lang = it.next() orelse "";
-            if (f == .language) return try Value.strAlloc(self.arena, lang);
-            var have_script = false;
-            var have_region = false;
-            var variants: std.ArrayListUnmanaged(u8) = .empty;
-            while (it.next()) |part| {
-                if (!have_script and !have_region and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
-                    have_script = true;
-                    if (f == .script) return try Value.strAlloc(self.arena, part);
-                } else if (!have_region and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
-                    have_region = true;
-                    if (f == .region) return try Value.strAlloc(self.arena, part);
-                } else {
-                    if (variants.items.len > 0) try variants.append(self.arena, '-');
-                    try variants.appendSlice(self.arena, part);
-                }
-            }
-            if (f == .variants) return if (variants.items.len > 0) try Value.strOwned(self.arena, try variants.toOwnedSlice(self.arena)) else Value.undef();
-            return Value.undef();
+            const range = switch (f) {
+                .base_name => data.base_name,
+                .language => data.language,
+                .script => data.script orelse return Value.undef(),
+                .region => data.region orelse return Value.undef(),
+                .variants => data.variants orelse return Value.undef(),
+                else => unreachable,
+            };
+            return try Value.strAlloc(self.arena, range.bytes(tag));
         }
     }.call;
 }
@@ -25205,39 +25254,22 @@ fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+            if (!this.isObject()) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+            const data = this.asObj().intlLocaleData() orelse return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
             const a = self.arena;
-            const tag = this.asObj().getOwn("\x00locale").?.asStr();
-            // Split off the base language-id (up to the first singleton) and tail.
-            var base_end: usize = tag.len;
-            {
-                var bit = std.mem.splitScalar(u8, tag, '-');
-                var off: usize = 0;
-                while (bit.next()) |part| {
-                    if (part.len == 1) {
-                        base_end = if (off == 0) 0 else off - 1;
-                        break;
-                    }
-                    off += part.len + 1;
-                }
-            }
-            const base = tag[0..base_end];
-            const tail = tag[base_end..]; // "-u-…" etc. (leading '-' or empty)
-            // Parse base into lowercased lang/script/region plus variants.
-            var t: Triple = .{ .l = "" };
+            const tag = data.locale.asStr();
+            const tail = tag[data.base_name.end..]; // "-u-…" etc. (leading '-' or empty)
+            // Likely-subtags data is lowercase; cached ranges avoid reparsing
+            // the base name while preserving variants and every extension.
+            var t = intlLocaleTriple(data);
+            t.l = lowerDup(a, t.l) orelse return error.OutOfMemory;
+            if (t.s.len > 0) t.s = lowerDup(a, t.s) orelse return error.OutOfMemory;
+            if (t.r.len > 0) t.r = lowerDup(a, t.r) orelse return error.OutOfMemory;
             var variants: std.ArrayListUnmanaged([]const u8) = .empty;
-            {
-                var bit = std.mem.splitScalar(u8, base, '-');
-                t.l = lowerDup(a, bit.next() orelse "") orelse return error.OutOfMemory;
-                while (bit.next()) |part| {
-                    if (t.s.len == 0 and t.r.len == 0 and variants.items.len == 0 and part.len == 4 and std.ascii.isAlphabetic(part[0])) {
-                        t.s = lowerDup(a, part) orelse return error.OutOfMemory;
-                    } else if (t.r.len == 0 and variants.items.len == 0 and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
-                        t.r = lowerDup(a, part) orelse return error.OutOfMemory;
-                    } else {
-                        try variants.append(a, lowerDup(a, part) orelse return error.OutOfMemory);
-                    }
-                }
+            if (data.variants) |range| {
+                var parts = std.mem.splitScalar(u8, range.bytes(tag), '-');
+                while (parts.next()) |part|
+                    try variants.append(a, lowerDup(a, part) orelse return error.OutOfMemory);
             }
             const res = (try if (kind == .max) cldrMaximize(a, t) else cldrMinimize(a, t)) orelse t;
             var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -25259,8 +25291,7 @@ fn intlLocaleTransformFn(comptime kind: enum { max, min }) value.NativeFn {
             const canon = try canonicalizeLocaleTagForIntl(self, a, buf.items);
             const o = (try self.newObject()).asObj();
             o.setProtoAtomic(this.asObj().proto);
-            try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, canon));
-            try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
+            try installIntlLocaleData(self, o, canon);
             return Value.obj(o);
         }
     }.call;
@@ -25273,20 +25304,21 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
-            const tag = this.asObj().getOwn("\x00locale").?.asStr();
+            if (!this.isObject()) return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+            const data = this.asObj().intlLocaleData() orelse return self.throwError("TypeError", "Intl.Locale.prototype method on incompatible receiver");
+            const tag = data.locale.asStr();
             const arr = (try self.newArray()).asObj();
             // The region drives calendar/hour-cycle preferences (maximize when the
             // tag has no region).
-            var tri = parseTriple(tag);
+            var tri = intlLocaleTriple(data);
             if ((which == .calendars or which == .hour_cycles) and tri.r.len == 0)
                 if (try cldrMaximize(self.arena, tri)) |m| {
                     tri = m;
                 };
             switch (which) {
                 .calendars => {
-                    if (localeUValue(tag, "ca")) |ca| {
-                        try arr.appendElement(self.arena, try Value.strAlloc(self.arena, ca));
+                    if (data.calendar) |range| {
+                        try arr.appendElement(self.arena, try Value.strAlloc(self.arena, range.bytes(tag)));
                     } else {
                         var list: []const []const u8 = &localeinfo.default_calendars;
                         for (localeinfo.calendars) |c| if (std.ascii.eqlIgnoreCase(c.region, tri.r)) {
@@ -25297,15 +25329,15 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
                 },
                 .hour_cycles => {
                     var hc: []const u8 = localeinfo.default_hour_cycle;
-                    if (localeUValue(tag, "hc")) |k| {
-                        hc = k;
+                    if (data.hour_cycle) |range| {
+                        hc = range.bytes(tag);
                     } else for (localeinfo.hour_cycles) |h| if (std.ascii.eqlIgnoreCase(h.region, tri.r)) {
                         hc = h.hc;
                     };
                     try arr.appendElement(self.arena, try Value.strAlloc(self.arena, hc));
                 },
-                .collations => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, localeUValue(tag, "co") orelse "default")),
-                .numbering_systems => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, localeUValue(tag, "nu") orelse localeDefaultNumberingSystem(tag))),
+                .collations => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, if (data.collation) |range| range.bytes(tag) else "default")),
+                .numbering_systems => try arr.appendElement(self.arena, try Value.strAlloc(self.arena, if (data.numbering_system) |range| range.bytes(tag) else localeDefaultNumberingSystem(tag))),
                 .time_zones => {}, // requires region-to-zone data
             }
             return Value.obj(arr);
@@ -25316,10 +25348,10 @@ fn intlLocaleListFn(comptime which: enum { calendars, collations, hour_cycles, n
 fn intlLocaleTextInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTextInfo on incompatible receiver");
+    if (!this.isObject()) return self.throwError("TypeError", "Intl.Locale.prototype.getTextInfo on incompatible receiver");
+    const data = this.asObj().intlLocaleData() orelse return self.throwError("TypeError", "Intl.Locale.prototype.getTextInfo on incompatible receiver");
     const o = (try self.newObject()).asObj();
-    const tag = this.asObj().getOwn("\x00locale").?.asStr();
-    var tri = parseTriple(tag);
+    var tri = intlLocaleTriple(data);
     if (tri.s.len == 0) if (try cldrMaximize(self.arena, tri)) |m| {
         tri = m;
     };
@@ -25335,11 +25367,12 @@ fn intlLocaleTextInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getWeekInfo on incompatible receiver");
-    const tag = this.asObj().getOwn("\x00locale").?.asStr();
+    if (!this.isObject()) return self.throwError("TypeError", "Intl.Locale.prototype.getWeekInfo on incompatible receiver");
+    const data = this.asObj().intlLocaleData() orelse return self.throwError("TypeError", "Intl.Locale.prototype.getWeekInfo on incompatible receiver");
+    const tag = data.locale.asStr();
     const o = (try self.newObject()).asObj();
     // Region drives the CLDR week data; maximize when the tag has no region.
-    var tri = parseTriple(tag);
+    var tri = intlLocaleTriple(data);
     if (tri.r.len == 0) if (try cldrMaximize(self.arena, tri)) |m| {
         tri = m;
     };
@@ -25348,7 +25381,8 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
     for (weekdata.first_day) |f| if (std.ascii.eqlIgnoreCase(f.region, tri.r)) {
         first_day = @floatFromInt(f.day);
     };
-    if (localeUValue(tag, "fw")) |fw| {
+    if (data.first_day_of_week) |range| {
+        const fw = range.bytes(tag);
         const names = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
         for (names, 1..) |n, i| if (std.mem.eql(u8, fw, n)) {
             first_day = @floatFromInt(i);
@@ -25368,25 +25402,10 @@ fn intlLocaleWeekInfoFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn intlLocaleTimeZonesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.getTimeZones on incompatible receiver");
-    const tag = this.asObj().getOwn("\x00locale").?.asStr();
+    if (!this.isObject()) return self.throwError("TypeError", "Intl.Locale.prototype.getTimeZones on incompatible receiver");
+    const data = this.asObj().intlLocaleData() orelse return self.throwError("TypeError", "Intl.Locale.prototype.getTimeZones on incompatible receiver");
     // Without a region subtag in the language-id, return undefined.
-    var has_region = false;
-    {
-        var it = std.mem.splitScalar(u8, tag, '-');
-        _ = it.next(); // language
-        var saw_var = false;
-        while (it.next()) |part| {
-            if (part.len == 1) break; // extension
-            if (!saw_var and ((part.len == 2 and std.ascii.isAlphabetic(part[0])) or (part.len == 3 and std.ascii.isDigit(part[0])))) {
-                has_region = true;
-                break;
-            }
-            if (part.len == 4 and std.ascii.isAlphabetic(part[0])) continue; // script
-            saw_var = true; // variants follow; region can't appear after
-        }
-    }
-    if (!has_region) return Value.undef();
+    if (data.region == null) return Value.undef();
     // We lack per-region zone data; report UTC so the result is a non-empty array.
     const arr = (try self.newArray()).asObj();
     try arr.appendElement(self.arena, Value.str("UTC"));
@@ -25396,8 +25415,9 @@ fn intlLocaleTimeZonesFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 fn intlLocaleToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().getOwn("\x00locale") == null) return self.throwError("TypeError", "Intl.Locale.prototype.toString on incompatible receiver");
-    return this.asObj().getOwn("\x00locale").?;
+    if (!this.isObject()) return self.throwError("TypeError", "Intl.Locale.prototype.toString on incompatible receiver");
+    const data = this.asObj().intlLocaleData() orelse return self.throwError("TypeError", "Intl.Locale.prototype.toString on incompatible receiver");
+    return data.locale;
 }
 
 // ---- Intl formatter constructors (en-centric) -----------------------
@@ -51342,6 +51362,71 @@ test "Intl locale-list canonicalization and index publication are OOM-safe" {
     const previous_heap = gc_mod.setActiveHeap(null);
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.Locale native-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var machine = Interpreter{
+                .arena = allocator,
+                .env = undefined,
+                .root_shape = undefined,
+            };
+            var locale = value.Object{};
+            try installIntlLocaleData(&machine, &locale, "sr-Cyrl-RS-fonipa-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn");
+            const data = locale.intlLocaleData().?;
+            const tag = data.locale.asStr();
+            try std.testing.expectEqualStrings("sr-Cyrl-RS-fonipa-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn", tag);
+            try std.testing.expectEqualStrings("sr-Cyrl-RS-fonipa", data.base_name.bytes(tag));
+            try std.testing.expectEqualStrings("Cyrl", data.script.?.bytes(tag));
+            try std.testing.expectEqualStrings("RS", data.region.?.bytes(tag));
+            try std.testing.expectEqualStrings("fonipa", data.variants.?.bytes(tag));
+            try std.testing.expectEqualStrings("phonebk", data.collation.?.bytes(tag));
+            try std.testing.expectEqualStrings("mon", data.first_day_of_week.?.bytes(tag));
+            try std.testing.expect(data.numeric);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.Locale publishes immutable native state and an unforgeable brand" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var keys = ["language", "script", "region", "variants", "calendar", "collation", "hourCycle", "caseFirst", "numeric", "numberingSystem", "firstDayOfWeek"];
+        \\var log = [];
+        \\var values = { language:"sr", script:"Cyrl", region:"RS", variants:"fonipa", calendar:"gregory", collation:"phonebk", hourCycle:"h23", caseFirst:"upper", numeric:true, numberingSystem:"latn", firstDayOfWeek:1 };
+        \\var options = {};
+        \\keys.forEach(function (key) { Object.defineProperty(options, key, { get:function () { log.push(key); return values[key]; } }); });
+        \\var locale = new Intl.Locale("de-DE-1996-u-kn-kf-lower", options);
+        \\for (var key in values) values[key] = undefined;
+        \\var expected = "sr-Cyrl-RS-fonipa-u-ca-gregory-co-phonebk-fw-mon-hc-h23-kf-upper-kn-nu-latn";
+        \\var ownNames = Object.getOwnPropertyNames(locale);
+        \\var fakeCalls = 0;
+        \\var fake = { toString:function () { fakeCalls++; return "fr-CA"; } }; fake["\\0locale"] = "ja-JP";
+        \\var rejected = 0;
+        \\try { Intl.Locale.prototype.toString.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Object.getOwnPropertyDescriptor(Intl.Locale.prototype, "language").get.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\try { Intl.Locale.prototype.maximize.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\var forgedConstructor = new Intl.Locale(fake).toString();
+        \\var forgedList = Intl.getCanonicalLocales([fake])[0];
+        \\var subclassCalls = 0;
+        \\class LocaleSubclass extends Intl.Locale { toString() { subclassCalls++; return "ja-JP"; } }
+        \\var subclass = new LocaleSubclass("en-US");
+        \\var subclassConstructor = new Intl.Locale(subclass).toString();
+        \\var subclassList = Intl.getCanonicalLocales([subclass])[0];
+        \\log.join("|") === keys.join("|") && ownNames.every(function (name) { return name.charCodeAt(0) !== 0; }) &&
+        \\  locale.toString() === expected && locale.baseName === "sr-Cyrl-RS-fonipa" && locale.language === "sr" && locale.script === "Cyrl" && locale.region === "RS" && locale.variants === "fonipa" &&
+        \\  locale.calendar === "gregory" && locale.collation === "phonebk" && locale.firstDayOfWeek === "mon" && locale.hourCycle === "h23" && locale.caseFirst === "upper" && locale.numeric === true && locale.numberingSystem === "latn" &&
+        \\  locale.maximize().toString().indexOf("sr-Cyrl-RS-fonipa-u-") === 0 && new Intl.Locale("en-Latn-US").minimize().toString() === "en" &&
+        \\  rejected === 3 && forgedConstructor === "fr-CA" && forgedList === "fr-CA" && fakeCalls === 2 &&
+        \\  subclassConstructor === "en-US" && subclassList === "en-US" && subclassCalls === 0
+    )).asBool());
 }
 
 test "Intl.NumberFormat resolved-state publication is OOM-safe" {

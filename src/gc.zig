@@ -178,6 +178,7 @@ inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
         flags.typed_array or
         flags.data_view or
         flags.temporal or
+        flags.intl_locale or
         flags.intl_number_format or
         flags.intl_date_time_format or
         flags.intl_collator or
@@ -260,6 +261,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     markValueOpt(v, cold.async_context_callback);
     markValueOpt(v, cold.async_context);
     markValueOpt(v, cold.collection_iterator_source);
+    markValueOpt(v, cold.intl_locale_value);
     markValueOpt(v, cold.getter_setter_getter);
     markValueOpt(v, cold.getter_setter_setter);
     if (cold.weak_ref_target_slot) |slot| markWeakObject(v, slot); // stable cold-slot address
@@ -382,6 +384,8 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
             if (cold.rare.buffer_view.data_view) |data_view|
                 gc_relocation.rewriteRequiredSlot(v, Object, &data_view.buffer);
         },
+        .intl_locale => if (cold.rare.intl_locale.ptr) |data|
+            gc_relocation.rewriteValueSlot(v, &data.locale),
         .promise => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.promise.ptr),
         .constructor => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.constructor.ptr),
         .js_function => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.js_function.ptr),
@@ -900,6 +904,7 @@ pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
         .async_context_frame,
         .proxy,
         .buffer_view,
+        .intl_locale,
         .intl_number_format,
         .intl_date_time_format,
         .intl_collator,
@@ -1382,6 +1387,13 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         if (o.temporalData()) |t| {
             a.destroy(t);
             o.clearTemporalData();
+        }
+        released += 1;
+    }
+    if (flags.intl_locale) {
+        if (o.intlLocaleData()) |data| {
+            a.destroy(data);
+            o.clearIntlLocaleData();
         }
         released += 1;
     }
