@@ -27694,6 +27694,58 @@ test "Temporal June 2024 removed API surface is absent" {
     )).asBool());
 }
 
+test "Temporal duration bag snapshot preserves observable Get and conversion semantics" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\(() => {
+        \\  const date = new Temporal.PlainDate(2024, 1, 1);
+        \\  const instant = Temporal.Instant.from("2024-01-01T00:00:00Z");
+        \\  const plain = date.add({ days: 2 });
+        \\  const shifted = instant.add({ milliseconds: 13 });
+        \\  const inheritedBag = Object.create({ hours: 2 });
+        \\  inheritedBag.days = 1;
+        \\  const inherited = date.add(inheritedBag);
+        \\  const order = [];
+        \\  const accessorBag = {};
+        \\  for (const name of ["days", "hours", "microseconds", "milliseconds", "minutes", "months", "nanoseconds", "seconds", "weeks", "years"]) {
+        \\    Object.defineProperty(accessorBag, name, { get() { order.push(name); return name === "days" ? 1 : undefined; } });
+        \\  }
+        \\  date.add(accessorBag);
+        \\  const conversionOrder = [];
+        \\  const conversionBag = {
+        \\    days: { valueOf() { conversionOrder.push("convert-days"); return 1; } },
+        \\    get hours() { conversionOrder.push("get-hours"); return 2; }
+        \\  };
+        \\  date.add(conversionBag);
+        \\  const traps = [];
+        \\  date.add(new Proxy({ days: 1 }, { get(target, key, receiver) { traps.push(key); return Reflect.get(target, key, receiver); } }));
+        \\  Object.defineProperty(Object.prototype, "weeks", { configurable: true, get() { order.push("proto-weeks"); return 1; } });
+        \\  const protoResult = date.add({ days: 1 });
+        \\  delete Object.prototype.weeks;
+        \\  let range = false;
+        \\  try { date.add({ days: 1, hours: 0.5 }); } catch (error) { range = error instanceof RangeError; }
+        \\  return [
+        \\    plain.day,
+        \\    shifted.epochMilliseconds,
+        \\    inherited.day,
+        \\    inherited.hour === undefined,
+        \\    order.slice(0, 10).join(","),
+        \\    conversionOrder.join(","),
+        \\    traps.join(","),
+        \\    protoResult.day,
+        \\    order[10],
+        \\    range
+        \\  ].join("|");
+        \\})()
+    );
+    try std.testing.expectEqualStrings(
+        "3|1704067200013|2|true|days,hours,microseconds,milliseconds,minutes,months,nanoseconds,seconds,weeks,years|convert-days,get-hours|days,hours,microseconds,milliseconds,minutes,months,nanoseconds,seconds,weeks,years|9|proto-weeks|true",
+        try result.asWtf8(std.testing.allocator),
+    );
+}
+
 test "enable_gc: Temporal metadata releases when collected" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

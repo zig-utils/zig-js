@@ -35459,6 +35459,12 @@ const dur_read_fields = [_]DurField{
     .{ .name = "years", .idx = 0 },
 };
 
+const dur_read_names = names: {
+    var names: [dur_read_fields.len][]const u8 = undefined;
+    for (dur_read_fields, 0..) |field, index| names[index] = field.name;
+    break :names names;
+};
+
 fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -38129,6 +38135,7 @@ fn parseDurationString(self: *Interpreter, s: []const u8) EvalError![10]f64 {
 fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
     if (tIsTemporal(v, .duration)) return v.asObj().temporalData().?.dur;
     if (v.isObject()) {
+        if (try durationFromOrdinaryNumericBag(self, v.asObj())) |fast| return fast;
         var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
         var any = false;
         for (dur_read_fields) |field| {
@@ -38145,6 +38152,45 @@ fn durationFromArg(self: *Interpreter, v: Value) EvalError![10]f64 {
     }
     if (!v.isString()) return self.throwError("TypeError", "duration must be an object or string");
     return parseDurationString(self, v.asStr());
+}
+
+/// Fast ToTemporalDurationRecord for an exact ordinary data bag. This path is
+/// deliberately narrower than "object literal": all requested own and
+/// inherited descriptors are snapshotted as data properties, every observed
+/// value is already a Number (or undefined), and the receiver has this realm's
+/// exact %Object.prototype%. Anything capable of running user code falls back
+/// before the first observable operation, preserving the spec's ordered Get /
+/// ToNumber sequence for accessors, Proxies, host hooks, and object conversion.
+fn durationFromOrdinaryNumericBag(self: *Interpreter, object: *value.Object) EvalError!?[10]f64 {
+    try self.checkRestricted(object);
+    if (object.proxyHandler() != null or object.proxy_revoked or moduleNsOf(object) != null or
+        object.hostClassHooks() != null or (self.global_object != null and object == self.global_object.?)) return null;
+
+    const object_proto = self.objectProto() orelse return null;
+    if (object.protoAtomic() != object_proto) return null;
+
+    var own = std.mem.zeroes([dur_read_names.len]?Value);
+    var inherited = std.mem.zeroes([dur_read_names.len]?Value);
+    if (!object.namedOwnDataValuesSnapshot(&dur_read_names, &own)) return null;
+    if (!object_proto.namedOwnDataValuesSnapshot(&dur_read_names, &inherited)) return null;
+
+    var raw: [dur_read_names.len]Value = undefined;
+    for (&raw, own, inherited) |*result, own_value, inherited_value| {
+        result.* = own_value orelse inherited_value orelse Value.undef();
+        if (!result.isUndefined() and !result.isNumber()) return null;
+    }
+
+    var out: [10]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var any = false;
+    for (dur_read_fields, raw) |field, property_value| {
+        if (property_value.isUndefined()) continue;
+        any = true;
+        out[field.idx] = try temporalIntegralArg(self, property_value, "duration component");
+    }
+    if (!any) return self.throwError("TypeError", "invalid duration");
+    if (!durSignOk(out)) return self.throwError("RangeError", "mixed-sign duration");
+    if (!durInRange(out)) return self.throwError("RangeError", "duration out of range");
+    return out;
 }
 
 // ---- Temporal.PlainTime ---------------------------------------------
