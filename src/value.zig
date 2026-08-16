@@ -1180,6 +1180,26 @@ pub const IntlDateTimeFormatData = struct {
                 .long_generic => "longGeneric",
             };
         }
+
+        /// ECMA-402 resolved component/style names are a closed set. Project
+        /// them through immutable cells so reflection does not manufacture a
+        /// managed copy of native enum state on every resolvedOptions call.
+        pub fn value(self: Field) ?Value {
+            return switch (self) {
+                .none => null,
+                .numeric => Value.str("numeric"),
+                .two_digit => Value.str("2-digit"),
+                .long => Value.str("long"),
+                .short => Value.str("short"),
+                .narrow => Value.str("narrow"),
+                .full => Value.str("full"),
+                .medium => Value.str("medium"),
+                .short_offset => Value.str("shortOffset"),
+                .long_offset => Value.str("longOffset"),
+                .short_generic => Value.str("shortGeneric"),
+                .long_generic => Value.str("longGeneric"),
+            };
+        }
     };
 
     locale: []const u8 = "en",

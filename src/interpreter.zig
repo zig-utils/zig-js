@@ -31304,24 +31304,24 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     try self.setProp(o, "hour12", Value.boolVal(data.hour12));
                 }
                 const put = struct {
-                    fn string(s: *Interpreter, target: *value.Object, name: []const u8, bytes: []const u8) EvalError!void {
-                        if (bytes.len > 0) try s.setProp(target, name, try Value.strAlloc(s.arena, bytes));
+                    fn field(s: *Interpreter, target: *value.Object, name: []const u8, resolved: value.IntlDateTimeFormatData.Field) EvalError!void {
+                        if (resolved.value()) |projected| try s.setProp(target, name, projected);
                     }
-                }.string;
-                try put(self, o, "weekday", data.resolved_weekday.string());
-                try put(self, o, "era", data.resolved_era.string());
-                try put(self, o, "year", data.resolved_year.string());
-                try put(self, o, "month", data.resolved_month.string());
-                try put(self, o, "day", data.resolved_day.string());
-                try put(self, o, "dayPeriod", data.resolved_day_period.string());
-                try put(self, o, "hour", data.resolved_hour.string());
-                try put(self, o, "minute", data.resolved_minute.string());
-                try put(self, o, "second", data.resolved_second.string());
+                }.field;
+                try put(self, o, "weekday", data.resolved_weekday);
+                try put(self, o, "era", data.resolved_era);
+                try put(self, o, "year", data.resolved_year);
+                try put(self, o, "month", data.resolved_month);
+                try put(self, o, "day", data.resolved_day);
+                try put(self, o, "dayPeriod", data.resolved_day_period);
+                try put(self, o, "hour", data.resolved_hour);
+                try put(self, o, "minute", data.resolved_minute);
+                try put(self, o, "second", data.resolved_second);
                 if (data.resolved_fractional_second_digits > 0)
                     try self.setProp(o, "fractionalSecondDigits", Value.num(@floatFromInt(data.resolved_fractional_second_digits)));
-                try put(self, o, "timeZoneName", data.resolved_time_zone_name.string());
-                try put(self, o, "dateStyle", data.date_style.string());
-                try put(self, o, "timeStyle", data.time_style.string());
+                try put(self, o, "timeZoneName", data.resolved_time_zone_name);
+                try put(self, o, "dateStyle", data.date_style);
+                try put(self, o, "timeStyle", data.time_style);
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
                 const data = this.asObj().intlRelativeTimeFormatData().?;
                 try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style.string()));

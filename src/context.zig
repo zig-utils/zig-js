@@ -13457,6 +13457,38 @@ test "Intl.DateTimeFormat uses only native resolved state and preserves legacy c
     )).asBool());
 }
 
+test "Intl.DateTimeFormat resolved field enums use exact unmanaged static cells" {
+    try std.testing.expect(value.IntlDateTimeFormatData.Field.none.value() == null);
+    const Case = struct { source: []const u8, expected: []const u8, cell: *const strcell.StringCell };
+    const cases = [_]Case{
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',year:'numeric'}).resolvedOptions().year", .expected = "numeric", .cell = strcell.staticCell("numeric") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',year:'2-digit'}).resolvedOptions().year", .expected = "2-digit", .cell = strcell.staticCell("2-digit") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',month:'long'}).resolvedOptions().month", .expected = "long", .cell = strcell.staticCell("long") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',weekday:'short'}).resolvedOptions().weekday", .expected = "short", .cell = strcell.staticCell("short") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',weekday:'narrow'}).resolvedOptions().weekday", .expected = "narrow", .cell = strcell.staticCell("narrow") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',dateStyle:'full'}).resolvedOptions().dateStyle", .expected = "full", .cell = strcell.staticCell("full") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',dateStyle:'medium'}).resolvedOptions().dateStyle", .expected = "medium", .cell = strcell.staticCell("medium") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',timeZoneName:'shortOffset'}).resolvedOptions().timeZoneName", .expected = "shortOffset", .cell = strcell.staticCell("shortOffset") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',timeZoneName:'longOffset'}).resolvedOptions().timeZoneName", .expected = "longOffset", .cell = strcell.staticCell("longOffset") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',timeZoneName:'shortGeneric'}).resolvedOptions().timeZoneName", .expected = "shortGeneric", .cell = strcell.staticCell("shortGeneric") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',timeZoneName:'longGeneric'}).resolvedOptions().timeZoneName", .expected = "longGeneric", .cell = strcell.staticCell("longGeneric") },
+    };
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    for (cases) |case| {
+        const result = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, result.asStr());
+        try std.testing.expectEqual(case.cell, result.asStringCell());
+        try std.testing.expect(!result.asStringCell().isGcManaged());
+        ctx.collectGarbage();
+        try std.testing.expectEqualStrings(case.expected, result.asStr());
+    }
+}
+
 test "Intl.DateTimeFormat resolved state is reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
