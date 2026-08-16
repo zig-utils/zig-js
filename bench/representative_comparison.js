@@ -1559,6 +1559,47 @@ function representativeIntlPluralRulesConsumer(jobs, lane, kind) {
   return total;
 }
 
+// DisplayNames steady consumers retain constructed formatters and fixed,
+// already-valid codes outside the timed boundary. The selected English
+// language/region/script/currency outputs are byte-for-byte equivalent across
+// zig-js and the system JSC; broader locale-data differences stay visible in
+// the separate correctness child rather than entering this performance row.
+var representativeIntlDisplayNamesFormatters = [
+  new Intl.DisplayNames("en", { type: "language" }),
+  new Intl.DisplayNames("en", { type: "language", languageDisplay: "standard", style: "short" }),
+  new Intl.DisplayNames("en", { type: "region" }),
+  new Intl.DisplayNames("en", { type: "region", style: "short" }),
+  new Intl.DisplayNames("en", { type: "script" }),
+  new Intl.DisplayNames("en", { type: "script", style: "short" }),
+  new Intl.DisplayNames("en", { type: "currency" }),
+  new Intl.DisplayNames("en", { type: "currency", fallback: "none" })
+];
+var representativeIntlDisplayNamesCodes = [
+  ["en", "de", "fr", "ja"],
+  ["en", "de", "fr", "ja"],
+  ["US", "DE", "FR", "419"],
+  ["US", "DE", "FR", "419"],
+  ["Latn", "Cyrl", "Arab", "Grek"],
+  ["Latn", "Cyrl", "Arab", "Grek"],
+  ["USD", "EUR", "JPY", "GBP"],
+  ["USD", "EUR", "JPY", "GBP"]
+];
+
+function representativeIntlDisplayNamesConsumer(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var call = 0; call < 4096; call = call + 1) {
+      var formatterIndex = (job + call + lane) & 7;
+      var codeIndex = (job * 3 + call + lane) & 3;
+      var output = representativeIntlDisplayNamesFormatters[formatterIndex].of(
+        representativeIntlDisplayNamesCodes[formatterIndex][codeIndex]
+      );
+      total = (total * 131 + representativeIntlDateTimeChecksum(output) + formatterIndex + codeIndex + lane) % 1000000007;
+    }
+  }
+  return total;
+}
+
 // Collator steady consumers retain only constructed formatters, their cached
 // bound compare functions, and fixed strings outside the timed boundary.
 // Direct results are normalized to sign (the ECMA-402 contract); sort hashes
@@ -2016,6 +2057,7 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_segmenter_containing_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "containing"); };
   if (name === "representative_intl_plural_rules_select") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "select"); };
   if (name === "representative_intl_plural_rules_resolved_categories") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "resolved"); };
+  if (name === "representative_intl_display_names_of") return representativeIntlDisplayNamesConsumer;
   if (name === "representative_intl_collator_compare") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "compare"); };
   if (name === "representative_intl_collator_sort") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "sort"); };
   if (name === "representative_intl_date_time_format_consumer_text") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "text"); };
