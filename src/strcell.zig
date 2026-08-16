@@ -25,18 +25,19 @@ pub fn hashBytes(bytes: []const u8) u64 {
     return std.hash.XxHash3.hash(0, bytes);
 }
 
-/// The top bit of a StringCell's cached `hash` word flags a pure-ASCII string
+/// The top bit of a StringCell's atomic hash-state word flags a pure-ASCII string
 /// (every byte < 0x80). For ASCII, the WTF-8 storage is already a flat
 /// 1-byte-per-code-unit image, so `byte offset == UTF-16 index`: charAt/indexOf/
 /// slice and regexp offset math become O(1) instead of walking the string. The
-/// low 62 bits remain the XXH3 content hash. Interning and `eql` stay exact
+/// lower bits carry the XXH3 content hash once bit 61 marks it ready. Interning
+/// and `eql` stay exact
 /// because ASCII-ness is a deterministic function of content — two equal strings
 /// classify identically and so carry an identical `hash` word — and the intern
 /// shard pick uses only low bits. This is the first brick of the flat-string
 /// model (Phase 1); later phases widen to true latin1/UTF-16 flat storage.
 pub const ascii_flag: u64 = @as(u64, 1) << 63;
 
-/// Bit 62 of a StringCell's cached `hash` word flags a **latin1 / is8Bit**
+/// Bit 62 of a StringCell's hash-state word flags a **latin1 / is8Bit**
 /// string: every UTF-16 code unit ≤ 0xFF. For well-formed WTF-8 this is exactly
 /// "every byte ≤ 0xC3" — a code unit > 0xFF is only ever encoded with a lead
 /// byte ≥ 0xC4 (2-byte C4–DF for U+0100–U+07FF, 3/4-byte E0–F4, or the
@@ -46,14 +47,20 @@ pub const ascii_flag: u64 = @as(u64, 1) << 63;
 /// storage flip keys on (a flat-latin1 cell is exactly an is8Bit, non-ASCII
 /// cell) and it makes the ABI `is8Bit` predicate an O(1) cell read. Same
 /// safety argument as `ascii_flag`: latin1-ness is a deterministic function of
-/// content, so equal strings classify identically and share one `hash` word;
+/// content, so equal strings classify identically and share one hash state;
 /// the low bits (intern shard pick, `eql` fast-reject) are unaffected.
 pub const latin1_flag: u64 = @as(u64, 1) << 62;
 
-/// The bits of `hash` that are the actual XXH3 content hash (the top two are
-/// the cached ASCII/latin1 classification flags). Compare masked when checking
-/// a cell's hash against a raw `hashBytes`.
-pub const content_hash_mask: u64 = ~(ascii_flag | latin1_flag);
+/// Bit 61 distinguishes a published content hash from classification-only
+/// state. Uninterned runtime strings begin without this bit and publish their
+/// deterministic hash on first equality; static and interned strings set it at
+/// construction because their consumers need the hash immediately.
+pub const hash_ready_flag: u64 = @as(u64, 1) << 61;
+
+pub const classification_mask: u64 = ascii_flag | latin1_flag;
+
+/// The bits that hold XXH3 content after `hash_ready_flag` is set.
+pub const content_hash_mask: u64 = ~(classification_mask | hash_ready_flag);
 
 /// Master switch for the flat-latin1 storage representation (the flat-string
 /// model). While **false** every cell stores canonical WTF-8, `isFlatLatin1` is
@@ -77,14 +84,13 @@ pub fn isFlatLatin1(h: u64) bool {
     return flat_storage_active and h & latin1_flag != 0 and h & ascii_flag == 0;
 }
 
-/// XXH3 content hash with the ASCII and latin1 classification folded into the
-/// top two bits. Classification is a separate dependency-free reduction so the
-/// compiler can vectorize it instead of extending a byte-serial hash recurrence:
+/// ASCII and latin1 classification as a separate dependency-free reduction so
+/// the compiler can vectorize it instead of extending a byte-serial recurrence:
 /// `high` accumulates the OR of every byte (no bit 0x80 ⇒ ASCII); `wide`
 /// accumulates whether any byte ≥ 0xC4 (none ⇒ every code unit ≤ 0xFF ⇒ latin1).
 /// Every StringCell construction path uses this so `isAscii()` / `isLatin1()`
-/// are O(1).
-pub fn contentHash(bytes: []const u8) u64 {
+/// are O(1), even before an uninterned cell needs its content hash.
+fn classificationBits(bytes: []const u8) u64 {
     var high: u8 = 0;
     var wide: u8 = 0;
     const ClassificationVector = @Vector(16, u8);
@@ -98,10 +104,27 @@ pub fn contentHash(bytes: []const u8) u64 {
         high |= b;
         wide |= @intFromBool(b >= 0xC4);
     }
-    var h = hashBytes(bytes) & content_hash_mask;
-    if (high & 0x80 == 0) h |= ascii_flag;
-    if (wide == 0) h |= latin1_flag;
-    return h;
+    var bits: u64 = 0;
+    if (high & 0x80 == 0) bits |= ascii_flag;
+    if (wide == 0) bits |= latin1_flag;
+    return bits;
+}
+
+/// XXH3 content hash with eager classification and a ready marker. Static
+/// literals and intern-table entries consume this during construction.
+pub fn contentHash(bytes: []const u8) u64 {
+    return classificationBits(bytes) | hash_ready_flag | (hashBytes(bytes) & content_hash_mask);
+}
+
+/// Initial state for an uninterned runtime cell. Flat-latin1 storage would
+/// transform the canonical bytes, so that representation keeps an eager hash;
+/// the current canonical WTF-8 representation can derive it from stored bytes
+/// on first equality.
+pub fn uninternedHashState(bytes: []const u8) u64 {
+    const classification = classificationBits(bytes);
+    if (isFlatLatin1(classification))
+        return classification | hash_ready_flag | (hashBytes(bytes) & content_hash_mask);
+    return classification;
 }
 
 pub const ExternalStringDeallocator = *const fn (
@@ -131,8 +154,9 @@ pub const ExternalStringOwner = struct {
 
 /// An immutable string cell: a single allocation the engine can point at with
 /// one 48-bit word. `bytes` is owned by whoever allocated the cell (the GC heap
-/// or an arena); `hash` is the cached XXH3 content hash. Immutable after
-/// creation, so it is safe to share read-only across threads.
+/// or an arena); `hash` atomically publishes a deterministic XXH3 cache on
+/// first equality. Bytes and classification are immutable after creation; the
+/// monotonic cache does not publish any other state and is safe across threads.
 pub const StringCell = struct {
     const gc_managed_mask: usize = 1;
 
@@ -174,11 +198,43 @@ pub const StringCell = struct {
 
     pub fn eql(self: *const StringCell, other: *const StringCell) bool {
         if (self == other) return true; // interned ⇒ pointer identity is enough
-        return self.hash == other.hash and std.mem.eql(u8, self.bytes, other.bytes);
+        var self_hash = self.hashState();
+        var other_hash = other.hashState();
+        if ((self_hash ^ other_hash) & classification_mask != 0 or self.bytes.len != other.bytes.len)
+            return false;
+        if (self_hash & hash_ready_flag == 0) self_hash = self.ensureContentHash(self_hash);
+        if (other_hash & hash_ready_flag == 0) other_hash = other.ensureContentHash(other_hash);
+        return (self_hash ^ other_hash) & content_hash_mask == 0 and
+            std.mem.eql(u8, self.bytes, other.bytes);
     }
 
     pub fn eqlBytes(self: *const StringCell, bytes: []const u8) bool {
         return std.mem.eql(u8, self.bytes, bytes);
+    }
+
+    pub inline fn hashState(self: *const StringCell) u64 {
+        return @atomicLoad(u64, &@constCast(self).hash, .monotonic);
+    }
+
+    pub inline fn hasCachedContentHash(self: *const StringCell) bool {
+        return self.hashState() & hash_ready_flag != 0;
+    }
+
+    fn ensureContentHash(self: *const StringCell, pending: u64) u64 {
+        std.debug.assert(pending & hash_ready_flag == 0);
+        // Flat storage changes the byte image, so those cells are deliberately
+        // eager in `uninternedHashState` and can never enter this path.
+        std.debug.assert(!isFlatLatin1(pending));
+        const computed = (pending & classification_mask) | hash_ready_flag |
+            (hashBytes(self.bytes) & content_hash_mask);
+        return @cmpxchgStrong(
+            u64,
+            &@constCast(self).hash,
+            pending,
+            computed,
+            .monotonic,
+            .monotonic,
+        ) orelse computed;
     }
 
     /// True when every code unit is ASCII (< 0x80), so the WTF-8 bytes are
@@ -186,14 +242,14 @@ pub const StringCell = struct {
     /// making indexOf/charAt/slice/regexp offset conversions O(1). Cached in
     /// `hash`'s top bit at construction — see `contentHash`.
     pub fn isAscii(self: *const StringCell) bool {
-        return self.hash & ascii_flag != 0;
+        return self.hashState() & ascii_flag != 0;
     }
 
     /// True when every UTF-16 code unit is ≤ 0xFF (latin1 / JSC `is8Bit`).
     /// O(1): cached in `hash`'s bit 62 at construction — see `latin1_flag`.
     /// ASCII ⇒ latin1, so this is a superset of `isAscii()`.
     pub fn isLatin1(self: *const StringCell) bool {
-        return self.hash & latin1_flag != 0;
+        return self.hashState() & latin1_flag != 0;
     }
 };
 
@@ -394,7 +450,7 @@ pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Alloc
         return factory.create(factory.context, allocator, bytes);
     const owned = try canonicalizeSurrogates(allocator, bytes);
     debugAssertWtf8(owned); // tripwire on the WTF-8 INPUT (catches a flat byte leaking in)
-    const h = contentHash(owned);
+    const h = uninternedHashState(owned);
     const stored = try storedImage(allocator, owned, h); // consumes owned
     errdefer allocator.free(stored);
     const cell = try allocator.create(StringCell);
@@ -419,7 +475,7 @@ pub fn createCellOwned(allocator: std.mem.Allocator, owned: []u8) std.mem.Alloca
     };
     owns_original = false; // ownership of `bytes` passes to storedImage
     debugAssertWtf8(bytes); // tripwire on the WTF-8 INPUT
-    const h = contentHash(bytes);
+    const h = uninternedHashState(bytes);
     const stored = try storedImage(allocator, bytes, h); // consumes bytes
     errdefer allocator.free(stored);
     const cell = try allocator.create(StringCell);
@@ -591,7 +647,7 @@ pub fn internActive(bytes: []const u8) ?*StringCell {
 // Tests
 // ---------------------------------------------------------------------------
 
-test "strcell: makeCell allocates from the active arena (no per-site allocator)" {
+test "strcell: makeCell allocates from the active arena and hashes on equality" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit(); // frees every cell — no leak
     const prev = setActiveArena(arena_state.allocator());
@@ -601,12 +657,14 @@ test "strcell: makeCell allocates from the active arena (no per-site allocator)"
     const c = makeCell(&buf); // no allocator argument
     buf[0] = 'Z'; // cell kept its own copy
     try std.testing.expectEqualStrings("abc", c.bytes);
-    try std.testing.expectEqual(contentHash("abc"), c.hash);
+    try std.testing.expect(!c.hasCachedContentHash());
     // Non-interned: two calls with equal bytes yield distinct cells (equality is
     // by bytes, so this is still correct for the NaN-box value).
     const d = makeCell("abc");
     try std.testing.expect(c != d);
     try std.testing.expect(c.eql(d));
+    try std.testing.expectEqual(contentHash("abc"), c.hashState());
+    try std.testing.expectEqual(contentHash("abc"), d.hashState());
 }
 
 test "strcell: threadlocal active table interns with no per-call allocator" {
@@ -634,7 +692,7 @@ test "strcell: threadlocal active table interns with no per-call allocator" {
     _ = setActiveTable(&t);
 }
 
-test "strcell: createCell owns its bytes and caches the hash" {
+test "strcell: createCell owns its bytes and defers the content hash" {
     const a = std.testing.allocator;
     var src = [_]u8{ 'h', 'i' };
     const cell = try createCell(a, &src);
@@ -644,7 +702,7 @@ test "strcell: createCell owns its bytes and caches the hash" {
     }
     src[0] = 'X'; // mutate the source: the cell kept its own copy
     try std.testing.expectEqualStrings("hi", cell.bytes);
-    try std.testing.expectEqual(contentHash("hi"), cell.hash);
+    try std.testing.expect(!cell.hasCachedContentHash());
     try std.testing.expect(cell.eqlBytes("hi"));
     try std.testing.expect(!cell.eqlBytes("hX"));
 }
@@ -659,14 +717,14 @@ test "strcell: staticCell needs no allocator and comptime-interns literals" {
     try std.testing.expectEqual(a, b);
     try std.testing.expect(a != c);
     try std.testing.expectEqualStrings("undefined", a.bytes);
-    try std.testing.expectEqual(contentHash("undefined"), a.hash);
+    try std.testing.expectEqual(contentHash("undefined"), a.hashState());
     // Its hash matches what the runtime intern path would compute for the same
     // bytes, so a literal cell and an interned cell of equal content agree on
     // hash (equality stays by-bytes; only identity differs across the boundary).
-    try std.testing.expectEqual(contentHash("null"), c.hash);
+    try std.testing.expectEqual(contentHash("null"), c.hashState());
 }
 
-test "strcell: isAscii is cached and reflects content, hash low bits unchanged" {
+test "strcell: classification is eager and content hash is first-use cached" {
     const a = std.testing.allocator;
     const ascii = try createCell(a, "hello world");
     defer {
@@ -684,10 +742,12 @@ test "strcell: isAscii is cached and reflects content, hash low bits unchanged" 
     // ASCII ⊂ latin1: an ASCII cell is also is8Bit; "café" is latin1 but not ASCII.
     try std.testing.expect(ascii.isLatin1());
     try std.testing.expect(latin1.isLatin1());
-    // The flags live in the top two bits; the low 62 bits still match the pure
-    // XXH3 content hash, so the shard pick (low bits) and hash agreement hold.
-    try std.testing.expectEqual(hashBytes("hello world") & content_hash_mask, ascii.hash & content_hash_mask);
-    try std.testing.expectEqual(hashBytes("caf\xc3\xa9") & content_hash_mask, latin1.hash & content_hash_mask);
+    try std.testing.expect(!ascii.hasCachedContentHash());
+    try std.testing.expect(!latin1.hasCachedContentHash());
+    try std.testing.expect(ascii.eql(staticCell("hello world")));
+    try std.testing.expect(latin1.eql(staticCell("caf\xc3\xa9")));
+    try std.testing.expectEqual(hashBytes("hello world") & content_hash_mask, ascii.hashState() & content_hash_mask);
+    try std.testing.expectEqual(hashBytes("caf\xc3\xa9") & content_hash_mask, latin1.hashState() & content_hash_mask);
 }
 
 test "strcell: isLatin1 tracks the is8Bit boundary (≤ 0xFF) at construction" {
@@ -714,7 +774,7 @@ test "strcell: isLatin1 tracks the is8Bit boundary (≤ 0xFF) at construction" {
     }
 }
 
-test "strcell: static and runtime classification agree and hash collisions stay exact" {
+test "strcell: static and runtime states converge and hash collisions stay exact" {
     const a = std.testing.allocator;
     const Case = struct { bytes: []const u8, static: *const StringCell };
     const cases = [_]Case{
@@ -730,16 +790,81 @@ test "strcell: static and runtime classification agree and hash collisions stay 
             a.free(runtime.bytes);
             a.destroy(runtime);
         }
-        try std.testing.expectEqual(case.static.hash, runtime.hash);
+        try std.testing.expect(case.static.hasCachedContentHash());
+        try std.testing.expect(!runtime.hasCachedContentHash());
         try std.testing.expectEqual(case.static.isAscii(), runtime.isAscii());
         try std.testing.expectEqual(case.static.isLatin1(), runtime.isLatin1());
         try std.testing.expect(case.static.eql(runtime));
+        try std.testing.expectEqual(case.static.hashState(), runtime.hashState());
     }
 
     const collision_hash = contentHash("first");
     const first = StringCell{ .bytes = "first", .hash = collision_hash };
     const second = StringCell{ .bytes = "other", .hash = collision_hash };
     try std.testing.expect(!first.eql(&second));
+}
+
+test "strcell: length and classification mismatches reject without hashing" {
+    const a = std.testing.allocator;
+    const short = try createCell(a, "a");
+    defer {
+        a.free(short.bytes);
+        a.destroy(short);
+    }
+    const long = try createCell(a, "longer");
+    defer {
+        a.free(long.bytes);
+        a.destroy(long);
+    }
+    const ascii = try createCell(a, "aa");
+    defer {
+        a.free(ascii.bytes);
+        a.destroy(ascii);
+    }
+    const wide = try createCell(a, "\xc4\x80");
+    defer {
+        a.free(wide.bytes);
+        a.destroy(wide);
+    }
+
+    try std.testing.expect(!short.eql(long));
+    try std.testing.expect(!ascii.eql(wide));
+    try std.testing.expect(!short.hasCachedContentHash());
+    try std.testing.expect(!long.hasCachedContentHash());
+    try std.testing.expect(!ascii.hasCachedContentHash());
+    try std.testing.expect(!wide.hasCachedContentHash());
+}
+
+test "strcell: concurrent first equality publishes one deterministic hash state" {
+    const a = std.testing.allocator;
+    const left = try createCell(a, "shared runtime string whose first hash is raced");
+    defer {
+        a.free(left.bytes);
+        a.destroy(left);
+    }
+    const right = try createCell(a, "shared runtime string whose first hash is raced");
+    defer {
+        a.free(right.bytes);
+        a.destroy(right);
+    }
+    try std.testing.expect(!left.hasCachedContentHash());
+    try std.testing.expect(!right.hasCachedContentHash());
+
+    const Worker = struct {
+        fn run(a_cell: *const StringCell, b_cell: *const StringCell) void {
+            var iteration: usize = 0;
+            while (iteration < 1_000) : (iteration += 1)
+                std.debug.assert(a_cell.eql(b_cell));
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*thread|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ left, right });
+    for (threads) |thread| thread.join();
+
+    const expected = contentHash(left.bytes);
+    try std.testing.expectEqual(expected, left.hashState());
+    try std.testing.expectEqual(expected, right.hashState());
 }
 
 test "strcell: intern dedups equal bytes to one cell, separates distinct" {

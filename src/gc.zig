@@ -4341,7 +4341,7 @@ pub fn setActiveMachineContext(machine: *interp.Interpreter) ActiveContextState 
 fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {
     const realm = active_realm_context orelse heap.ctx.context;
     strcell.debugAssertWtf8(bytes); // tripwire on the WTF-8 input
-    const h = strcell.contentHash(bytes);
+    const h = strcell.uninternedHashState(bytes);
     const stored = try strcell.storedImage(realm.gpa, bytes, h); // consumes bytes
     errdefer realm.gpa.free(stored);
     const cell = try heap.create(StringCell, .string);

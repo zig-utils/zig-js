@@ -21100,6 +21100,7 @@ test "moving nursery rewrites strings held only by suspended captured VM frames"
     const slot_index = captured_slot orelse return error.TestUnexpectedResult;
     const original_string = frame.slots[slot_index].asStringCell();
     const stable_id = heap.cellMetadata(@constCast(original_string)).?.id;
+    try std.testing.expect(!original_string.hasCachedContentHash());
 
     // The closure Function is the only owner of this arena frame while it is
     // suspended. Moving the string must therefore rewrite the Function.frame
@@ -21109,6 +21110,9 @@ test "moving nursery rewrites strings held only by suspended captured VM frames"
     const first_string = frame.slots[slot_index].asStringCell();
     try std.testing.expect(original_string != first_string);
     try std.testing.expectEqual(stable_id, heap.cellMetadata(@constCast(first_string)).?.id);
+    try std.testing.expect(!first_string.hasCachedContentHash());
+    try std.testing.expect(first_string.eql(strcell.staticCell("captured-11")));
+    try std.testing.expect(first_string.hasCachedContentHash());
     try std.testing.expectEqualStrings(
         "captured-11",
         (try ctx.evaluate("movingCapturedFrame()")).asStr(),
@@ -21119,6 +21123,11 @@ test "moving nursery rewrites strings held only by suspended captured VM frames"
     // fail the strict GC-header check from the shared/JIT benchmark path.
     const second = ctx.collectYoungAfterRootValidation(heap);
     try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, second.status);
+    const second_string = frame.slots[slot_index].asStringCell();
+    try std.testing.expect(first_string != second_string);
+    try std.testing.expectEqual(stable_id, heap.cellMetadata(@constCast(second_string)).?.id);
+    try std.testing.expect(second_string.hasCachedContentHash());
+    try std.testing.expect(second_string.eql(strcell.staticCell("captured-11")));
     try std.testing.expectEqualStrings(
         "captured-11",
         (try ctx.evaluate("movingCapturedFrame()")).asStr(),

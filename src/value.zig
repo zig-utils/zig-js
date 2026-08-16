@@ -6430,7 +6430,7 @@ pub const Value = struct {
     /// hashing) keep using `asStr()`. Caller has checked `isString()`.
     pub fn asWtf8(self: Value, arena: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
         const cell = self.asStringCell();
-        if (strcell.isFlatLatin1(cell.hash)) return strcell.latin1FlatToWtf8(arena, cell.bytes);
+        if (strcell.isFlatLatin1(cell.hashState())) return strcell.latin1FlatToWtf8(arena, cell.bytes);
         return cell.bytes;
     }
     /// True when this string is *stored* as a flat latin1 image (1 byte/unit).
@@ -6438,7 +6438,7 @@ pub const Value = struct {
     /// byte length) instead of re-encoding to WTF-8. Caller has checked
     /// `isString()`.
     pub inline fn strIsFlatLatin1(self: Value) bool {
-        return strcell.isFlatLatin1(self.asStringCell().hash);
+        return strcell.isFlatLatin1(self.asStringCell().hashState());
     }
     /// Like `asWtf8` but ALWAYS returns a freshly-allocated buffer the caller
     /// owns and must free. For ABI-boundary converters (c_api) whose ownership
@@ -6447,7 +6447,7 @@ pub const Value = struct {
     /// bytes need only outlive that call. Caller has checked `isString()`.
     pub fn asWtf8Owned(self: Value, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
         const cell = self.asStringCell();
-        if (strcell.isFlatLatin1(cell.hash)) return strcell.latin1FlatToWtf8(allocator, cell.bytes);
+        if (strcell.isFlatLatin1(cell.hashState())) return strcell.latin1FlatToWtf8(allocator, cell.bytes);
         return allocator.dupe(u8, cell.bytes);
     }
     pub inline fn asObj(self: Value) *Object {
