@@ -2,7 +2,8 @@
 import { checked, readText, removeTemporaryDirectory, run, sha256File, temporaryDirectory, writeText } from "./lib/home";
 import { DEFAULT_SCHEMA, loadSchema, measured, unavailableMetrics, validateArtifact } from "./performance-attribution";
 import { parseDarwinCounters, parseDarwinThermalState } from "./instrumentation-overhead";
-// Inventory-visible module edges: tools/performance-attribution.ts and tools/instrumentation-overhead.ts.
+import { competingEvidenceProcesses, MINIMUM_PROCESS_CPU_OCCUPANCY, processCpuOccupancy } from "./evidence-processes";
+// Inventory-visible module edges: tools/performance-attribution.ts, tools/instrumentation-overhead.ts, and tools/evidence-processes.ts.
 
 declare const __dirname: string;
 declare const __filename: string;
@@ -10,29 +11,6 @@ export const ROOT = __dirname === "tools" ? "." : __dirname.slice(0, __dirname.l
 const REVISION_RE = /^[0-9a-f]{40}$/;
 export type RunnerRow = { engine: string; mode: string; workload: string; lanes: number; jobs: number; elapsed_ns: number; checksum: number; process_wall_time_ns: number; process_cpu_user_ns: number; process_cpu_system_ns: number; process_cpu_occupancy: number; peak_rss_bytes: number; retained_rss_bytes: number | null; allocations: number | null; allocated_bytes: number | null; instructions: number; cycles: number; energy_joules: number; thermal_state: string };
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
-const MINIMUM_PROCESS_CPU_OCCUPANCY = 0.6;
-
-type ProcessRow = { pid: number; parent: number; command: string };
-function processRows(source: string): ProcessRow[] { return source.split("\n").map((line) => { const match = /^\s*([0-9]+)\s+([0-9]+)\s+(.+)$/.exec(line); return match ? { pid: Number(match[1]), parent: Number(match[2]), command: match[3].trim() } : null; }).filter(Boolean) as ProcessRow[]; }
-function processBasename(command: string): [string, string] { const executable = command.split(/\s+/, 1)[0], slash = executable.lastIndexOf("/"); return [executable, executable.slice(slash + 1)]; }
-function relatedProcesses(rows: ProcessRow[], selfPid: number): Set<number> {
-  const parents = new Map(rows.map((row) => [row.pid, row.parent])), related = new Set<number>(), descendants = new Set<number>([selfPid]);
-  for (let pid = selfPid; pid > 0 && !related.has(pid); pid = parents.get(pid) || 0) related.add(pid);
-  let changed = true;
-  while (changed) { changed = false; for (const row of rows) if (!descendants.has(row.pid) && descendants.has(row.parent)) { descendants.add(row.pid); changed = true; } }
-  for (const pid of descendants) related.add(pid);
-  return related;
-}
-export function competingEvidenceProcesses(source: string, selfPid: number): string[] {
-  const rows = processRows(source), related = relatedProcesses(rows, selfPid);
-  return rows.filter((row) => {
-    if (related.has(row.pid)) return false;
-    const [executable, basename] = processBasename(row.command);
-    if (basename === "zig" || basename === "maker") return true;
-    if (["home-url-final", "unit-test-parallel", "threads-test", "test262", "frontend-parse-benchmark"].includes(basename)) return true;
-    return basename === "test" && (executable.includes("/.zig-cache/") || executable.startsWith("/tmp/home-") || executable.startsWith("/private/tmp/home-"));
-  }).map((row) => `${row.pid} ${row.command}`);
-}
 function requireNoCompetingEvidenceProcess(phase: string, listing = commandOutput(["ps", "-axo", "pid=,ppid=,command="], ""), selfPid = process.pid): void {
   const competitors = competingEvidenceProcesses(listing, selfPid);
   requireValue(competitors.length === 0, `competing build/test process detected ${phase}:\n${competitors.join("\n")}`);
@@ -53,7 +31,6 @@ export function parseBenchmark(stdout: string, expectedMode: string, expectedWor
 }
 export function timeMetric(stderr: string, label: string): number { const match = new RegExp(`(?:^|\\s)([0-9.]+)\\s+${label}(?:\\s|$)`).exec(stderr); requireValue(Boolean(match), `missing ${label} from /usr/bin/time -l`); return Number(match![1]); }
 export function parsePeakRss(stderr: string): number { return Math.round(timeMetric(stderr, "maximum resident set size")); }
-export function processCpuOccupancy(processWallNs: number, userNs: number, systemNs: number): number { requireValue([processWallNs, userNs, systemNs].every((value) => Number.isFinite(value) && value >= 0), "invalid process occupancy input"); return processWallNs === 0 ? 1 : Math.min(1, (userNs + systemNs) / processWallNs); }
 export function runnerArguments(mode: string, workload: string, jobs: number, lanes: number): string[] { if (mode === "single" || mode === "single_observed") { requireValue(lanes === 1, `${mode} mode requires one lane`); return [mode, workload, String(jobs), "1", mode === "single_observed" ? "--native-observability-telemetry" : "--darwin-rusage"]; } requireValue(["independent_steady", "independent_cold", "shared", "module_cold"].includes(mode), `unsupported benchmark mode: ${mode}`); return [mode, workload, String(jobs), "1", String(lanes), "--darwin-rusage"]; }
 export function parseRetainedRss(stdout: string, mode: string, workload: string, jobs: number): number {
   const rows = stdout.split("\n").filter((line) => line.startsWith("zig-js-native-observability\t")); requireValue(rows.length === 1, `expected one native-observability row, got ${rows.length}`);

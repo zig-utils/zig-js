@@ -8,6 +8,12 @@ import {
   temporaryDirectory,
   writeText,
 } from "./lib/home";
+import {
+  competingEvidenceProcesses,
+  MINIMUM_PROCESS_CPU_OCCUPANCY,
+  processCpuOccupancy,
+} from "./evidence-processes";
+// Inventory-visible module edge: tools/evidence-processes.ts.
 
 declare const __filename: string;
 
@@ -40,6 +46,7 @@ type Sample = {
   wall_seconds: number;
   user_seconds: number;
   system_seconds: number;
+  process_cpu_occupancy?: number;
   peak_rss_bytes: number;
   build_summary: string[];
   stdout: string;
@@ -92,26 +99,21 @@ function commandOutput(argv: string[], fallback = "unavailable"): string {
     : fallback;
 }
 
-export function competingZigProcesses(source: string, selfPid: number): string[] {
-  const rows = source.split("\n").map((line) => {
-    const match = /^\s*([0-9]+)\s+([0-9]+)\s+(.+)$/.exec(line);
-    return match ? { pid: Number(match[1]), parent: Number(match[2]), command: match[3].trim() } : null;
-  }).filter(Boolean) as { pid: number; parent: number; command: string }[];
-  const parents = new Map(rows.map((row) => [row.pid, row.parent])), ancestors = new Set<number>();
-  for (let pid = selfPid; pid > 0 && !ancestors.has(pid); pid = parents.get(pid) || 0) ancestors.add(pid);
-  return rows.filter((row) => {
-    if (ancestors.has(row.pid)) return false;
-    const executable = row.command.split(/\s+/, 1)[0], basename = executable.slice(executable.lastIndexOf("/") + 1);
-    return basename === "zig" || basename === "maker";
-  }).map((row) => `${row.pid} ${row.command}`);
-}
-
-function requireNoCompetingZigProcess(): void {
-  const listing = commandOutput(["ps", "-axo", "pid=,ppid=,command="], "");
-  const competitors = competingZigProcesses(listing, process.pid);
+function requireNoCompetingEvidenceProcess(phase: string): void {
+  const listing = commandOutput(["ps", "-axo", "pid=,ppid=,command="], ""),
+    competitors = competingEvidenceProcesses(listing, process.pid);
   requireValue(
     competitors.length === 0,
-    `competing Zig build/test process detected before scenario:\n${competitors.join("\n")}`,
+    `competing build/test process detected ${phase}:\n${competitors.join("\n")}`,
+  );
+}
+
+function requireSampleQuality(sample: Sample): void {
+  requireValue(
+    sample.process_cpu_occupancy !== undefined &&
+      Number.isFinite(sample.process_cpu_occupancy) &&
+      sample.process_cpu_occupancy >= MINIMUM_PROCESS_CPU_OCCUPANCY,
+    `${sample.scenario}: process CPU occupancy ${((sample.process_cpu_occupancy || 0) * 100).toFixed(1)}% is below ${(MINIMUM_PROCESS_CPU_OCCUPANCY * 100).toFixed(0)}%; transient competing work overlapped the scenario`,
   );
 }
 
@@ -287,7 +289,12 @@ function runSample(
       env: environment,
       inheritEnv: true,
     }),
-    timing = parseTime(result.stderr);
+    timing = parseTime(result.stderr),
+    process_cpu_occupancy = processCpuOccupancy(
+      timing.wall_seconds,
+      timing.user_seconds,
+      timing.system_seconds,
+    );
   return {
     scenario: scenario.name,
     sample,
@@ -296,6 +303,7 @@ function runSample(
     exit_code: result.exitCode,
     timed_out: result.timedOut,
     ...timing,
+    process_cpu_occupancy,
     build_summary: buildSummary(result.stderr),
     stdout: result.stdout,
     stderr: result.stderr,
@@ -362,6 +370,7 @@ export function validate(artifact: Artifact): void {
       if (name.startsWith("full_unit_"))
         requireValue(Boolean(row.unit_plan?.startsWith("shard\testimated_ms\tname\n")), `${name}: missing unit plan`);
       if (artifact.schema === "zig-js-build-feedback-v2") {
+        requireSampleQuality(row);
         const group = scenario.cache_group!;
         requireValue(row.environment.ZIG_GLOBAL_CACHE_DIR.endsWith(`/${group}/global`), `${name}: global cache boundary drift`);
         const cacheIndex = row.command.indexOf("--cache-dir"), prefixIndex = row.command.indexOf("--prefix");
@@ -411,7 +420,10 @@ export function render(artifact: Artifact, rawName: string): string {
     `- power: ${artifact.identity.power.replace(/\n/g, " · ")}`,
     `- sampling: ${artifact.sample_count} sequential sample${artifact.sample_count === 1 ? "" : "s"} per phase; median; no outlier removal; isolated local/global caches per sample sequence`,
     ...(artifact.schema === "zig-js-build-feedback-v2"
-      ? ["- cache boundary: library, focused-engine, combined-unit, focused-engine TSan, and combined-unit TSan groups are isolated; only adjacent phases with the same named group reuse cache state"]
+      ? [
+        "- cache boundary: library, focused-engine, combined-unit, focused-engine TSan, and combined-unit TSan groups are isolated; only adjacent phases with the same named group reuse cache state",
+        `- process quality: every complete build used at least ${(MINIMUM_PROCESS_CPU_OCCUPANCY * 100).toFixed(0)}% CPU occupancy; before/after snapshots reject persistent competing build and test jobs`,
+      ]
       : []),
     "",
     "| phase | scope | median wall | wall range | median CPU (user + system) | median peak RSS |",
@@ -516,6 +528,7 @@ function selfTest(): void {
         exit_code: 0,
         timed_out: false,
         ...parsed,
+        process_cpu_occupancy: 1,
         build_summary: ["Build Summary: 2/2 steps succeeded"],
         stdout: output,
         stderr: "",
@@ -540,17 +553,27 @@ function selfTest(): void {
     "100 1 /usr/bin/outer",
     "110 100 /cache/maker build build-feedback",
     "120 110 /home/home-tool run tools/build-feedback.ts",
+    "121 120 /toolchain/zig build test-frontend",
     "200 1 /toolchain/zig test -Mroot=other.zig",
     "210 1 /cache/maker build test",
-    "220 1 /tmp/unrelated-test",
+    "220 1 /private/tmp/home-url-final",
+    "230 1 /tmp/home-ts-checker/o/test --listen=-",
+    "240 1 /repo/zig-out/bin/test262 --diag test/language",
+    "250 1 /tmp/unrelated-test",
   ].join("\n");
   requireValue(
-    JSON.stringify(competingZigProcesses(processFixture, 120)) === JSON.stringify([
+    JSON.stringify(competingEvidenceProcesses(processFixture, 120)) === JSON.stringify([
       "200 /toolchain/zig test -Mroot=other.zig",
       "210 /cache/maker build test",
+      "220 /private/tmp/home-url-final",
+      "230 /tmp/home-ts-checker/o/test --listen=-",
+      "240 /repo/zig-out/bin/test262 --diag test/language",
     ]),
-    "competing Zig process classification drift",
+    "competing evidence-process classification drift",
   );
+  requireValue(processCpuOccupancy(2.5, 3, 1.25) === 1, "process CPU occupancy clamp drift");
+  const lowOccupancy = { ...v2Samples[0], process_cpu_occupancy: 0.59 };
+  expectFailure(() => requireSampleQuality(lowOccupancy), "transient competing work overlapped the scenario");
   console.log("build-feedback self-test: ok");
 }
 
@@ -590,11 +613,12 @@ function main(): void {
       try {
         for (let scenarioIndex = 0; scenarioIndex < definitions.length; scenarioIndex += 1) {
           const scenario = definitions[scenarioIndex];
-          requireNoCompetingZigProcess();
+          requireNoCompetingEvidenceProcess("before scenario");
           console.log(`[${sample + 1}/${options.samples}] ${scenario.name}`);
           const row = runSample(options.zig, scenario, sample, cacheRoot);
           artifact.samples.push(row);
-          requireNoCompetingZigProcess();
+          requireNoCompetingEvidenceProcess("after scenario");
+          requireSampleQuality(row);
           console.log(
             `  exit=${row.exit_code} wall=${row.wall_seconds.toFixed(2)}s cpu=${(row.user_seconds + row.system_seconds).toFixed(2)}s rss=${formatBytes(row.peak_rss_bytes)}`,
           );
