@@ -4314,7 +4314,13 @@ pub const Interpreter = struct {
     }
 
     pub fn serviceDebugStatement(self: *Interpreter, node: *const Node) EvalError!void {
-        const location = self.debugStatementLocation(node);
+        // The parser registry contains only parseStatement roots. Avoid letting
+        // guaranteed-negative expression/Program probes evict real statements
+        // from the bounded interpreter-local debugger cache.
+        const location = if (parser_mod.canPublishStatementLocation(node))
+            self.debugStatementLocation(node)
+        else
+            null;
         if (location != null) self.serviceMutatorStopSafepoint();
         if (self.host_statement_hook) |hook| hook(self.host_statement_ctx.?, self);
         if (location) |statement_location| {
@@ -54307,6 +54313,50 @@ test "interpreter caches immutable absence of a debug location" {
     try std.testing.expectEqual(@as(u64, 1), stats.location_cache_misses);
     try std.testing.expectEqual(@as(u64, 1), stats.location_cache_hits);
     try std.testing.expectEqual(@as(u64, 1), stats.lock_acquires);
+}
+
+test "interpreter skips impossible debug probes without skipping host checkpoints" {
+    var expression = Node{ .number = 1 };
+    var statement = Node{ .expr_stmt = &expression };
+    const expected = DebugStatementLocation{
+        .script_id = 23,
+        .location = .{ .byte_offset = 7, .line = 2, .column = 3 },
+        .source_url = "statement.js",
+    };
+    var locations: std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = .empty;
+    defer locations.deinit(std.testing.allocator);
+    // Even a forged impossible entry must not churn the cache: the parser can
+    // publish only the statement root beside it.
+    try locations.put(std.testing.allocator, &expression, expected);
+    try locations.put(std.testing.allocator, &statement, expected);
+
+    const Host = struct {
+        fn checkpoint(ctx: *anyopaque, _: *Interpreter) void {
+            const count: *usize = @ptrCast(@alignCast(ctx));
+            count.* += 1;
+        }
+    };
+    var checkpoints: usize = 0;
+    var registry_stats = DebugRegistryStats{};
+    var machine = Interpreter{
+        .arena = std.testing.allocator,
+        .env = undefined,
+        .root_shape = undefined,
+        .debug_statement_locations = &locations,
+        .debug_registry_stats = &registry_stats,
+        .host_statement_ctx = &checkpoints,
+        .host_statement_hook = Host.checkpoint,
+    };
+
+    try machine.serviceDebugStatement(&expression);
+    try std.testing.expectEqual(@as(usize, 1), checkpoints);
+    try std.testing.expect(machine.debug_current_location == null);
+    try std.testing.expectEqual(@as(u64, 0), registry_stats.snapshot().location_cache_misses);
+
+    try machine.serviceDebugStatement(&statement);
+    try std.testing.expectEqual(@as(usize, 2), checkpoints);
+    try std.testing.expectEqual(expected, machine.debug_current_location.?);
+    try std.testing.expectEqual(@as(u64, 1), registry_stats.snapshot().location_cache_misses);
 }
 
 test "interpreter debug location cache retains four colliding statements with bounded eviction" {

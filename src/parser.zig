@@ -27,6 +27,39 @@ pub const StatementLocation = struct {
     debugger_statement: bool = false,
 };
 
+/// Whether `parseStatement` can publish `node` in `statement_locations`.
+/// Expression and synthetic Program nodes never enter that registry, so the
+/// evaluator can avoid a guaranteed-negative debugger lookup without weakening
+/// late debugger attachment or host statement checkpoints.
+pub inline fn canPublishStatementLocation(node: *const Node) bool {
+    return switch (node.*) {
+        .var_decl,
+        .destructure_decl,
+        .func_decl,
+        .return_stmt,
+        .throw_stmt,
+        .try_stmt,
+        .break_stmt,
+        .continue_stmt,
+        .labeled_stmt,
+        .expr_stmt,
+        .debugger_stmt,
+        .block,
+        .decl_group,
+        .if_stmt,
+        .while_stmt,
+        .do_while_stmt,
+        .for_stmt,
+        .for_in,
+        .switch_stmt,
+        .with_stmt,
+        .import_decl,
+        .export_decl,
+        => true,
+        else => false,
+    };
+}
+
 pub fn sourceLocationAt(source: []const u8, raw_offset: usize) SourceLocation {
     const offset = @min(raw_offset, source.len);
     var line: usize = 1;
@@ -4604,6 +4637,25 @@ test "parser indexes repeated statement locations across every line terminator" 
     var single = try Parser.init(arena.allocator(), "var one = [1, 2, 3];");
     _ = try single.parseProgram();
     try std.testing.expect(single.line_starts == null);
+}
+
+test "parser statement registry excludes expressions and synthetic program roots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try Parser.init(arena.allocator(),
+        \\let value = 1;
+        \\if (value) { value = 2; } else value = 3;
+        \\while (false) value++;
+        \\for (let index = 0; index < 1; index++) { continue; }
+        \\try { throw value; } catch (error) { debugger; }
+    );
+    const program = try parser.parseProgram();
+    try std.testing.expect(!canPublishStatementLocation(program));
+    for (parser.statement_locations.items) |entry|
+        try std.testing.expect(canPublishStatementLocation(entry.node));
+
+    var expression = Node{ .number = 1 };
+    try std.testing.expect(!canPublishStatementLocation(&expression));
 }
 
 test "parser statement location index propagates allocation failures" {
