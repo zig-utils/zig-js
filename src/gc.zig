@@ -184,6 +184,7 @@ inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
         flags.intl_display_names or
         flags.intl_relative_time_format or
         flags.intl_list_format or
+        flags.intl_segmenter or
         flags.arg_map_names or
         flags.arg_map_severed;
 }
@@ -394,6 +395,7 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
         .intl_display_names,
         .intl_relative_time_format,
         .intl_list_format,
+        .intl_segmenter,
         .temporal,
         .sparse_array,
         .regex,
@@ -900,6 +902,7 @@ pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
         .intl_display_names,
         .intl_relative_time_format,
         .intl_list_format,
+        .intl_segmenter,
         .temporal,
         .promise,
         .constructor,
@@ -1421,6 +1424,14 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
             data.deinit(a);
             a.destroy(data);
             o.clearIntlListFormatData();
+        }
+        released += 1;
+    }
+    if (flags.intl_segmenter) {
+        if (o.intlSegmenterData()) |data| {
+            data.deinit(a);
+            a.destroy(data);
+            o.clearIntlSegmenterData();
         }
         released += 1;
     }

@@ -1461,6 +1461,43 @@ pub const IntlListFormatData = struct {
     }
 };
 
+/// Fully resolved, immutable Intl.Segmenter formatter state. Per-input segment
+/// data and mutable iterator cursors remain separate object-owned records.
+pub const IntlSegmenterData = struct {
+    pub const Granularity = enum(u8) {
+        grapheme,
+        word,
+        sentence,
+
+        pub fn fromString(name: []const u8) Granularity {
+            if (std.mem.eql(u8, name, "word")) return .word;
+            if (std.mem.eql(u8, name, "sentence")) return .sentence;
+            return .grapheme;
+        }
+
+        pub fn string(self: Granularity) []const u8 {
+            return @tagName(self);
+        }
+
+        pub fn value(self: Granularity) Value {
+            return switch (self) {
+                .grapheme => Value.str("grapheme"),
+                .word => Value.str("word"),
+                .sentence => Value.str("sentence"),
+            };
+        }
+    };
+
+    locale: []const u8 = "en",
+    granularity: Granularity = .grapheme,
+    owned_locale: ?[]u8 = null,
+
+    pub fn deinit(self: *IntlSegmenterData, allocator: std.mem.Allocator) void {
+        if (self.owned_locale) |owned| allocator.free(owned);
+        self.owned_locale = null;
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1600,6 +1637,7 @@ pub const ObjectRareTag = enum(u8) {
     intl_display_names,
     intl_relative_time_format,
     intl_list_format,
+    intl_segmenter,
     temporal,
     promise,
     constructor,
@@ -1703,6 +1741,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     intl_display_names: struct { ptr: ?*IntlDisplayNamesData = null },
     intl_relative_time_format: struct { ptr: ?*IntlRelativeTimeFormatData = null },
     intl_list_format: struct { ptr: ?*IntlListFormatData = null },
+    intl_segmenter: struct { ptr: ?*IntlSegmenterData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -1945,6 +1984,7 @@ pub const ObjectBackingFlags = packed struct {
     intl_display_names: bool = false,
     intl_relative_time_format: bool = false,
     intl_list_format: bool = false,
+    intl_segmenter: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -3257,6 +3297,22 @@ pub const Object = struct {
         if (cold.hasRare(.intl_list_format)) cold.rare.intl_list_format.ptr = null;
     }
 
+    pub inline fn intlSegmenterData(self: *const Object) ?*IntlSegmenterData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_segmenter)) return null;
+        return cold.rare.intl_segmenter.ptr;
+    }
+
+    pub fn setIntlSegmenterData(self: *Object, fallback: std.mem.Allocator, data: *IntlSegmenterData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_segmenter, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlSegmenterData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_segmenter)) cold.rare.intl_segmenter.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3644,6 +3700,17 @@ pub const Object = struct {
         data.deinit(a);
         a.destroy(data);
         self.deactivateBacking("intl_list_format");
+    }
+
+    pub fn intlSegmenterAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_segmenter");
+    }
+
+    pub fn destroyUninstalledIntlSegmenter(self: *Object, fallback: std.mem.Allocator, data: *IntlSegmenterData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_segmenter");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {

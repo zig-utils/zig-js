@@ -26397,14 +26397,12 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
                 // BigInt, which are .object-tagged primitives) -> TypeError.
                 if (!raw.isUndefined() and !(raw.isObject() and !raw.asObj().is_symbol and !raw.asObj().is_bigint)) return self.throwError("TypeError", "options must be an object");
-                const ro = (try self.newObject()).asObj();
+                var granularity: []const u8 = "grapheme";
                 if (raw.isObject()) {
                     _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-                    if (try dtfGetStr(self, raw, "granularity", &.{ "grapheme", "word", "sentence" }, null)) |g|
-                        try self.setProp(ro, "granularity", SegmenterGranularity.fromString(g).value());
+                    granularity = (try dtfGetStr(self, raw, "granularity", &.{ "grapheme", "word", "sentence" }, "grapheme")).?;
                 }
-                try self.setProp(o, "\x00opts", Value.obj(ro));
-                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+                try installSegmenterData(self, o, resolved, granularity);
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const ro = (try self.newObject()).asObj();
@@ -27937,6 +27935,18 @@ fn installListFormatData(
     data.owned_locale = try allocator.dupe(u8, locale);
     data.locale = data.owned_locale.?;
     try formatter.setIntlListFormatData(self.arena, data);
+    installed = true;
+}
+
+fn installSegmenterData(self: *Interpreter, formatter: *value.Object, locale: []const u8, granularity: []const u8) EvalError!void {
+    const allocator = try formatter.intlSegmenterAllocator(self.arena);
+    const data = try allocator.create(value.IntlSegmenterData);
+    data.* = .{ .granularity = .fromString(granularity) };
+    var installed = false;
+    errdefer if (!installed) formatter.destroyUninstalledIntlSegmenter(self.arena, data);
+    data.owned_locale = try allocator.dupe(u8, locale);
+    data.locale = data.owned_locale.?;
+    try formatter.setIntlSegmenterData(self.arena, data);
     installed = true;
 }
 
@@ -30083,25 +30093,7 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
 
 // ---- Intl.Segmenter segmentation (byte-offset, code-point aware) -----------
 
-const SegmenterGranularity = enum {
-    grapheme,
-    word,
-    sentence,
-
-    fn fromString(name: []const u8) SegmenterGranularity {
-        if (std.mem.eql(u8, name, "word")) return .word;
-        if (std.mem.eql(u8, name, "sentence")) return .sentence;
-        return .grapheme;
-    }
-
-    fn value(self: SegmenterGranularity) Value {
-        return switch (self) {
-            .grapheme => Value.str("grapheme"),
-            .word => Value.str("word"),
-            .sentence => Value.str("sentence"),
-        };
-    }
-};
+const SegmenterGranularity = value.IntlSegmenterData.Granularity;
 
 /// One immutable Segmenter input. The retained Value is the observable `input`
 /// field and roots the bytes; representation-aware reads avoid rebuilding the
@@ -30439,14 +30431,10 @@ fn segmenterGranularity(seg_obj: *value.Object) SegmenterGranularity {
 /// `Intl.Segmenter.prototype.segment(string)` → a %Segments% object.
 fn intlSegmenterSegmentFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "Segmenter")) return self.throwError("TypeError", "Intl.Segmenter.prototype.segment on incompatible receiver");
+    if (!this.isObject() or this.asObj().intlSegmenterData() == null)
+        return self.throwError("TypeError", "Intl.Segmenter.prototype.segment on incompatible receiver");
     const input_value = try segmenterToStringValue(self, if (args.len > 0) args[0] else Value.undef());
-    var gran: SegmenterGranularity = .grapheme;
-    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-        if (ov.asObj().getOwn("granularity")) |g| if (g.isString()) {
-            gran = SegmenterGranularity.fromString(g.asStr());
-        };
-    };
+    const gran = this.asObj().intlSegmenterData().?.granularity;
     const o = (try self.newObject()).asObj();
     if (self.env.get("\x00SegmentsProto")) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
@@ -31090,6 +31078,9 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             } else if (comptime std.mem.eql(u8, service, "ListFormat")) blk: {
                 if (this_recv.isObject() and this_recv.asObj().intlListFormatData() != null) break :blk this_recv;
                 return self.throwError("TypeError", "Intl.ListFormat.prototype.resolvedOptions on incompatible receiver");
+            } else if (comptime std.mem.eql(u8, service, "Segmenter")) blk: {
+                if (this_recv.isObject() and this_recv.asObj().intlSegmenterData() != null) break :blk this_recv;
+                return self.throwError("TypeError", "Intl.Segmenter.prototype.resolvedOptions on incompatible receiver");
             } else (try unwrapIntlThis(self, this_recv, service)) orelse return self.throwError("TypeError", "Intl." ++ service ++ ".prototype.resolvedOptions on incompatible receiver");
             const o = (try self.newObject()).asObj();
             const loc = if (comptime std.mem.eql(u8, service, "DisplayNames"))
@@ -31098,6 +31089,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try Value.strAlloc(self.arena, this.asObj().intlRelativeTimeFormatData().?.locale)
             else if (comptime std.mem.eql(u8, service, "ListFormat"))
                 try Value.strAlloc(self.arena, this.asObj().intlListFormatData().?.locale)
+            else if (comptime std.mem.eql(u8, service, "Segmenter"))
+                try Value.strAlloc(self.arena, this.asObj().intlSegmenterData().?.locale)
             else
                 this.asObj().getOwn("\x00locale") orelse Value.str("en");
             try self.setProp(o, "locale", loc);
@@ -31270,11 +31263,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 if (data.kind == .language)
                     try self.setProp(o, "languageDisplay", try Value.strAlloc(self.arena, data.language_display.string()));
             } else if (comptime std.mem.eql(u8, service, "Segmenter")) {
-                var granularity: SegmenterGranularity = .grapheme;
-                if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
-                    if (ov.asObj().getOwn("granularity")) |g| granularity = SegmenterGranularity.fromString(g.asStr());
-                };
-                try self.setProp(o, "granularity", granularity.value());
+                const data = this.asObj().intlSegmenterData().?;
+                try self.setProp(o, "granularity", data.granularity.value());
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const ro: ?Value = this.asObj().getOwn("\x00opts");
                 const dget = struct {
@@ -51575,6 +51565,97 @@ test "Intl.ListFormat resolved state is immutable across native threads" {
                     return;
                 };
                 checksum +%= data.locale.len + data.kind.string().len + data.style.string().len + iteration + lane;
+            }
+            result.* = checksum;
+        }
+    };
+    var threads: [results.len]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane|
+        thread.* = try std.Thread.spawn(.{}, Lane.run, .{ &formatter, lane, &results[lane] });
+    for (&threads) |*thread| thread.join();
+    for (results, 0..) |result, lane| {
+        try std.testing.expect(result != std.math.maxInt(u64));
+        try std.testing.expectEqual(results[0] + lane * 4096, result);
+    }
+}
+
+test "Intl.Segmenter resolved-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{
+                .arena = allocator,
+                .env = undefined,
+                .root_shape = root_shape,
+            };
+            var formatter = value.Object{};
+
+            try installSegmenterData(&machine, &formatter, "en-US", "sentence");
+            const data = formatter.intlSegmenterData().?;
+            try std.testing.expectEqualStrings("en-US", data.locale);
+            try std.testing.expectEqual(value.IntlSegmenterData.Granularity.sentence, data.granularity);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.Segmenter consumes immutable normalized formatter state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\var log = [];
+        \\var values = { localeMatcher: "lookup", granularity: "word" };
+        \\var options = {};
+        \\["localeMatcher", "granularity"].forEach(function (key) {
+        \\  Object.defineProperty(options, key, { get: function () { log.push(key); return values[key]; } });
+        \\});
+        \\var segmenter = new Intl.Segmenter("en-US", options);
+        \\values.granularity = "sentence";
+        \\var resolved = segmenter.resolvedOptions();
+        \\var segments = segmenter.segment("alpha beta");
+        \\var fake = {};
+        \\fake["\\0intl"] = "Segmenter";
+        \\fake["\\0locale"] = "en-US";
+        \\fake["\\0opts"] = { granularity: "word" };
+        \\var segmentRejected = false;
+        \\var resolvedRejected = false;
+        \\try { Intl.Segmenter.prototype.segment.call(fake, "alpha"); } catch (error) { segmentRejected = error instanceof TypeError; }
+        \\try { Intl.Segmenter.prototype.resolvedOptions.call(fake); } catch (error) { resolvedRejected = error instanceof TypeError; }
+        \\log.join("|") === "localeMatcher|granularity" && resolved.locale === "en-US" &&
+        \\  resolved.granularity === "word" && segments.containing(7).segment === "beta" &&
+        \\  Object.getOwnPropertyNames(segmenter).indexOf("\\0opts") === -1 && segmentRejected && resolvedRejected
+    )).asBool());
+}
+
+test "Intl.Segmenter resolved state is immutable across native threads" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = undefined,
+        .root_shape = root_shape,
+    };
+    var formatter = value.Object{};
+    try installSegmenterData(&machine, &formatter, "en-US", "word");
+
+    var results: [4]u64 = .{ 0, 0, 0, 0 };
+    const Lane = struct {
+        fn run(shared: *const value.Object, lane: usize, result: *u64) void {
+            var checksum: u64 = 0;
+            for (0..4096) |iteration| {
+                const data = shared.intlSegmenterData() orelse {
+                    result.* = std.math.maxInt(u64);
+                    return;
+                };
+                checksum +%= data.locale.len + data.granularity.string().len + iteration + lane;
             }
             result.* = checksum;
         }
