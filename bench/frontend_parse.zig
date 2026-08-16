@@ -142,6 +142,15 @@ fn nowNs(io: std.Io) i96 {
 }
 
 fn workloadWidth(name: []const u8) !usize {
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_unique_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_unique_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_unique_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_var_only_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_shadowed_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_parameter_shadow_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_destructure_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_nested_control_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_forward_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_compile_class_frame_global_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_compile_class_frame_global_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_compile_class_frame_global_4096")) return 4096;
@@ -288,6 +297,7 @@ fn isUnicodeIdentifierWorkload(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "representative_frontend_unicode_identifiers_");
 }
 
+const BindingInventoryCompileShape = enum { unique, var_only, shadowed, parameter_shadow, destructure, nested_control, forward };
 const TdzCompileShape = enum { clear, unrelated, forward, self, declared, nested, class_field, class_static };
 
 const LoopCaptureCompileShape = enum { clear, unrelated, first, last, for_of_clear, for_of_last };
@@ -339,6 +349,21 @@ fn loopCaptureCompileShape(name: []const u8) ?LoopCaptureCompileShape {
     if (std.mem.eql(u8, shape, "last")) return .last;
     if (std.mem.eql(u8, shape, "for_of_clear")) return .for_of_clear;
     if (std.mem.eql(u8, shape, "for_of_last")) return .for_of_last;
+    return null;
+}
+
+fn bindingInventoryCompileShape(name: []const u8) ?BindingInventoryCompileShape {
+    const prefix = "representative_frontend_compile_binding_inventory_";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const shape_end = std.mem.lastIndexOfScalar(u8, name, '_') orelse return null;
+    const shape = name[prefix.len..shape_end];
+    if (std.mem.eql(u8, shape, "unique")) return .unique;
+    if (std.mem.eql(u8, shape, "var_only")) return .var_only;
+    if (std.mem.eql(u8, shape, "shadowed")) return .shadowed;
+    if (std.mem.eql(u8, shape, "parameter_shadow")) return .parameter_shadow;
+    if (std.mem.eql(u8, shape, "destructure")) return .destructure;
+    if (std.mem.eql(u8, shape, "nested_control")) return .nested_control;
+    if (std.mem.eql(u8, shape, "forward")) return .forward;
     return null;
 }
 
@@ -491,6 +516,53 @@ fn tdzCompileSource(allocator: std.mem.Allocator, width: usize, shape: TdzCompil
     }
     if (shape == .nested) try source.appendSlice(allocator, "return capture;");
     try source.append(allocator, '}');
+    return source.items;
+}
+
+fn bindingInventoryCompileSource(
+    allocator: std.mem.Allocator,
+    width: usize,
+    shape: BindingInventoryCompileShape,
+) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "function bindingInventory(");
+    if (shape == .parameter_shadow) for (0..width) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        try appendIndexedIdentifier(&source, allocator, "parameter", index);
+    };
+    try source.appendSlice(allocator, "){");
+    if (shape == .forward) {
+        try appendIndexedIdentifier(&source, allocator, "binding", width - 1);
+        try source.append(allocator, ';');
+    }
+    for (0..width) |index| switch (shape) {
+        .unique, .var_only, .forward => {
+            try source.appendSlice(allocator, if (shape == .var_only) "var " else "let ");
+            try appendIndexedIdentifier(&source, allocator, "binding", index);
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "={d};", .{index}));
+        },
+        .shadowed => {
+            try source.appendSlice(allocator, "{let shared=");
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{index}));
+            try source.appendSlice(allocator, ";}");
+        },
+        .parameter_shadow => {
+            try source.appendSlice(allocator, "{let ");
+            try appendIndexedIdentifier(&source, allocator, "parameter", index);
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "={d};}}", .{index}));
+        },
+        .destructure => {
+            try source.appendSlice(allocator, "let [");
+            try appendIndexedIdentifier(&source, allocator, "binding", index);
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "]=[{d}];", .{index}));
+        },
+        .nested_control => {
+            try source.appendSlice(allocator, "if(false){let ");
+            try appendIndexedIdentifier(&source, allocator, "binding", index);
+            try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "={d};}}", .{index}));
+        },
+    };
+    try source.appendSlice(allocator, "return 0;}");
     return source.items;
 }
 
@@ -1145,6 +1217,46 @@ fn chunkHasOp(chunk: anytype, target: js.bytecode.Op) bool {
     return false;
 }
 
+fn validateBindingInventoryCompileProgram(
+    allocator: std.mem.Allocator,
+    program: anytype,
+    source: []const u8,
+    width: usize,
+    shape: BindingInventoryCompileShape,
+) !usize {
+    if (program.* != .program or program.program.len != 1) return error.InvalidProgram;
+    const declaration = program.program[0];
+    if (declaration.* != .func_decl or
+        !std.mem.eql(u8, declaration.func_decl.name, "bindingInventory"))
+        return error.InvalidProgram;
+    const expected_params = if (shape == .parameter_shadow) width else 0;
+    if (declaration.func_decl.params.len != expected_params) return error.InvalidProgram;
+    const admission = try js.Compiler.admitPlainFunction(allocator, declaration.func_decl);
+    const expected_rejection = shape == .destructure;
+    const code = switch (admission) {
+        .compiled => |compiled| if (expected_rejection) return error.InvalidProgram else compiled,
+        .rejected => |reason| {
+            if (!expected_rejection or reason != .unsupported_lowering) return error.InvalidProgram;
+            var checksum = foldChecksum(source.len, width);
+            checksum = foldChecksum(checksum, @backingInt(shape));
+            return foldChecksum(checksum, @backingInt(reason));
+        },
+    };
+    const expected_locals = width + expected_params;
+    const checked_inventory = shape == .shadowed or shape == .parameter_shadow or shape == .forward;
+    if (code.local_count != expected_locals or
+        code.chunk.lexical_slots.len != (if (checked_inventory) width else 0) or
+        chunkHasOp(code.chunk, .init_local_lexical) != checked_inventory)
+        return error.InvalidProgram;
+    const has_checked_load = chunkHasOp(code.chunk, .load_local_lexical) or
+        chunkHasOp(code.chunk, .load_upval_lexical);
+    if (has_checked_load != (shape == .forward)) return error.InvalidProgram;
+    var checksum = foldChecksum(source.len, width);
+    checksum = foldChecksum(checksum, @backingInt(shape));
+    checksum = foldChecksum(checksum, code.local_count);
+    return foldChunk(checksum, code.chunk);
+}
+
 fn validateTdzCompileProgram(
     allocator: std.mem.Allocator,
     program: anytype,
@@ -1304,6 +1416,8 @@ fn parseOnce(
         return validateLoopCaptureCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (tdzCompileShape(workload)) |shape|
         return validateTdzCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
+    if (bindingInventoryCompileShape(workload)) |shape|
+        return validateBindingInventoryCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (isParamBodyDirectWorkload(workload) or isParamBodyNestedWorkload(workload)) {
         const width = try workloadWidth(workload);
         if (program.* != .program or program.program.len != 1) return error.InvalidProgram;
@@ -1674,6 +1788,7 @@ pub fn main(init: std.process.Init) !void {
     const repeated_body_compile_shape = repeatedBodyCompileShape(workload);
     const loop_capture_compile_shape = loopCaptureCompileShape(workload);
     const tdz_compile_shape = tdzCompileShape(workload);
+    const binding_inventory_compile_shape = bindingInventoryCompileShape(workload);
     var expected_radix_bigint: ?[]const u8 = null;
     const source = if (class_frame_compile_shape) |shape|
         try classFrameCompileSource(init.arena.allocator(), width, shape)
@@ -1683,6 +1798,8 @@ pub fn main(init: std.process.Init) !void {
         try loopCaptureCompileSource(init.arena.allocator(), width, shape)
     else if (tdz_compile_shape) |shape|
         try tdzCompileSource(init.arena.allocator(), width, shape)
+    else if (binding_inventory_compile_shape) |shape|
+        try bindingInventoryCompileSource(init.arena.allocator(), width, shape)
     else if (regex_literal_workload)
         try regexLiteralSource(
             init.arena.allocator(),
@@ -1764,7 +1881,7 @@ pub fn main(init: std.process.Init) !void {
     // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
     // complete untimed jobs settle process startup without turning repeated
     // attacker-sized classifier walks into an unreported timing boundary.
-    const workload_warmups: usize = if (tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
+    const workload_warmups: usize = if (binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
     for (0..workload_warmups) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;
