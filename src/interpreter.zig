@@ -28059,7 +28059,7 @@ fn collatorKey(allocator: std.mem.Allocator, s: []const u8, opts: CollatorOption
             i + 2 < nfd.len and (nfd[i] == 'A' or nfd[i] == 'a' or nfd[i] == 'O' or nfd[i] == 'o' or nfd[i] == 'U' or nfd[i] == 'u') and
             nfd[i + 1] == 0xcc and nfd[i + 2] == 0x88)
         {
-            const base = if (nfd[i] >= 'A' and nfd[i] <= 'Z') nfd[i] + 32 else nfd[i];
+            const base = if (keep_case) nfd[i] else if (nfd[i] >= 'A' and nfd[i] <= 'Z') nfd[i] + 32 else nfd[i];
             try out.append(allocator, base);
             try out.append(allocator, 'e');
             i += 3;
@@ -28192,9 +28192,12 @@ fn collatorCompareStringsWithAllocator(allocator: std.mem.Allocator, x: []const 
     // caseFirst:"upper" reverses the default (lowercase-first) tertiary order.
     const case_cmp = collatorCaseOrder(case_x, case_y) * @as(i32, if (opts.case_first == .upper) -1 else 1);
     if (opts.sensitivity == .case) return case_cmp;
-    if (opts.ignore_punctuation) return 0;
     if (accent != 0) return accent;
     if (case_cmp != 0) return case_cmp;
+    // Punctuation was removed from every collation key above. It participates
+    // in neither the primary nor later weights, but ignorePunctuation must not
+    // erase an accent or case difference which those keys already found.
+    if (opts.ignore_punctuation) return 0;
     return cmpBytes(try unicode_normalize.normalize(allocator, x, .nfd), try unicode_normalize.normalize(allocator, y, .nfd));
 }
 
@@ -51770,6 +51773,38 @@ test "Intl remaining conformance edge cases" {
         \\const nowMs = Number(Temporal.Now.instant().epochNanoseconds / 1000000n);
         \\const after = Date.now();
         \\ok && nowMs >= before && nowMs <= after
+    )).asBool());
+}
+
+test "Intl.Collator preserves locale weights while ignoring punctuation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\const phonebookExt = new Intl.Collator("de-DE-u-co-phonebk");
+        \\const phonebookOpt = new Intl.Collator("de-DE", { collation: "phonebk" });
+        \\const searchBase = new Intl.Collator("de-DE", { usage: "search", sensitivity: "base" });
+        \\const searchVariant = new Intl.Collator("de-DE", { usage: "search", sensitivity: "variant" });
+        \\let ok = phonebookExt.compare("Öl", "Oel") > 0 && phonebookExt.compare("Oel", "Öl") < 0;
+        \\ok &&= phonebookExt.compare("öl", "oel") > 0;
+        \\ok &&= phonebookExt.compare("Ärger", "Aerger") > 0 && phonebookExt.compare("Übel", "Uebel") > 0;
+        \\ok &&= phonebookOpt.compare("Öl", "Oel") > 0;
+        \\ok &&= searchBase.compare("Öl", "Oel") === 0 && searchVariant.compare("Öl", "Oel") > 0;
+        \\const thaiDefault = new Intl.Collator("th");
+        \\const thaiIgnore = new Intl.Collator("th", { ignorePunctuation: true });
+        \\const thaiKeep = new Intl.Collator("th", { ignorePunctuation: false });
+        \\ok &&= thaiDefault.compare("Alpha", "alpha") > 0 && thaiDefault.compare("resume", "résumé") < 0;
+        \\ok &&= thaiIgnore.compare("a-b", "ab") === 0 && thaiIgnore.compare("a b", "ab") === 0;
+        \\ok &&= thaiIgnore.compare("ก-ข", "กข") === 0 && thaiIgnore.compare("ก ข", "กข") === 0;
+        \\ok &&= thaiKeep.compare("a-b", "ab") < 0 && thaiKeep.compare("ก-ข", "กข") < 0;
+        \\const thaiBase = new Intl.Collator("th", { sensitivity: "base" });
+        \\const thaiAccent = new Intl.Collator("th", { sensitivity: "accent" });
+        \\const thaiCase = new Intl.Collator("th", { sensitivity: "case" });
+        \\const thaiVariant = new Intl.Collator("th", { sensitivity: "variant" });
+        \\ok &&= thaiBase.compare("Alpha", "alpha") === 0 && thaiBase.compare("resume", "résumé") === 0;
+        \\ok &&= thaiAccent.compare("Alpha", "alpha") === 0 && thaiAccent.compare("resume", "résumé") < 0;
+        \\ok &&= thaiCase.compare("Alpha", "alpha") > 0 && thaiCase.compare("resume", "résumé") === 0;
+        \\ok &&= thaiVariant.compare("Alpha", "alpha") > 0 && thaiVariant.compare("resume", "résumé") < 0;
+        \\ok
     )).asBool());
 }
 
