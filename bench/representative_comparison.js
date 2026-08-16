@@ -1650,6 +1650,30 @@ function representativeIntlDisplayNamesConsumer(jobs, lane) {
   return total;
 }
 
+// DisplayNames reflection keeps construction outside the timed boundary and
+// consumes every field from each fresh ordinary result. The formatter matrix
+// covers every style/type/fallback choice and conditional languageDisplay.
+var representativeIntlDisplayNamesResolvedKeys = [
+  "locale", "style", "type", "fallback", "languageDisplay"
+];
+
+function representativeIntlDisplayNamesResolvedConsumer(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var formatterIndex = (job + i + lane) & 7;
+      var options = representativeIntlDisplayNamesFormatters[formatterIndex].resolvedOptions();
+      total = (total + Object.keys(options).length + formatterIndex + i + lane) % 1000000007;
+      for (var keyIndex = 0; keyIndex < representativeIntlDisplayNamesResolvedKeys.length; keyIndex = keyIndex + 1) {
+        var reflected = options[representativeIntlDisplayNamesResolvedKeys[keyIndex]];
+        if (reflected !== undefined)
+          total = (total + representativeIntlDateTimeChecksum(reflected) + keyIndex) % 1000000007;
+      }
+    }
+  }
+  return total;
+}
+
 // Collator steady consumers retain only constructed formatters, their cached
 // bound compare functions, and fixed strings outside the timed boundary.
 // Direct results are normalized to sign (the ECMA-402 contract); sort hashes
@@ -2186,6 +2210,7 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_plural_rules_select") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "select"); };
   if (name === "representative_intl_plural_rules_resolved_categories") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "resolved"); };
   if (name === "representative_intl_display_names_of") return representativeIntlDisplayNamesConsumer;
+  if (name === "representative_intl_display_names_resolved") return representativeIntlDisplayNamesResolvedConsumer;
   if (name === "representative_intl_collator_compare") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "compare"); };
   if (name === "representative_intl_collator_sort") return function (jobs, lane) { return representativeIntlCollatorConsumer(jobs, lane, "sort"); };
   if (name === "representative_intl_collator_resolved") return representativeIntlCollatorResolvedConsumer;
