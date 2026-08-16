@@ -753,7 +753,12 @@ pub const Environment = struct {
         if (self.gc_managed)
             gc_mod.barrierValueFromManaged(self, v)
         else
-            gc_mod.barrierValueFrom(self, v);
+            // The realm root is embedded in Context, not in a GC cell. Passing
+            // its address as an owner makes the tolerant barrier exhaust the
+            // slab/index lookup on every root binding write. The ownerless path
+            // retains the exact young target and shades it during incremental
+            // marking, which is the required barrier for an external root.
+            gc_mod.barrierValue(v);
     }
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
@@ -1015,6 +1020,34 @@ pub const Environment = struct {
         }
     }
 };
+
+test "Environment barriers distinguish embedded roots from managed owners" {
+    const Provider = struct {
+        calls: usize = 0,
+        last_owner: ?*anyopaque = undefined,
+
+        fn barrier(raw: *anyopaque, owner: ?*anyopaque, _: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.last_owner = owner;
+        }
+    };
+
+    var provider: Provider = .{};
+    const previous = gc_runtime.setBarrier(&provider, Provider.barrier, null, null);
+    defer _ = gc_runtime.setBarrier(previous[0], previous[1], previous[2], previous[3]);
+
+    var child = value.Object{};
+    var embedded = Environment{ .arena = std.testing.allocator };
+    embedded.barrierStoredValue(Value.obj(&child));
+    try std.testing.expectEqual(@as(usize, 1), provider.calls);
+    try std.testing.expect(provider.last_owner == null);
+
+    var managed = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    managed.barrierStoredValue(Value.obj(&child));
+    try std.testing.expectEqual(@as(usize, 2), provider.calls);
+    try std.testing.expectEqual(@intFromPtr(&managed), @intFromPtr(provider.last_owner.?));
+}
 
 test "Environment private activation reads elide locks until capture" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

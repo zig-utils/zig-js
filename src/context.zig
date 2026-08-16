@@ -26265,6 +26265,31 @@ test "enable_gc incremental: insertion write barrier keeps a reparented object a
     try std.testing.expectEqual(@as(f64, 777), tag.asNum());
 }
 
+test "enable_gc incremental: embedded root Environment shades a late child" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const heap = ctx.gc.?;
+    const child = try gc_mod.allocObj(ctx.arena());
+    child.* = .{};
+    try child.setOwn(ctx.gpa, ctx.root_shape, "marker", Value.num(42));
+
+    // Drain the initial root snapshot before publishing the previously-white
+    // child through the Context-embedded Environment. This root has no managed
+    // owner header, so its ownerless barrier must shade the child directly.
+    heap.startMarking();
+    _ = heap.markStep(0);
+    try ctx.env.put("lateRootChild", Value.obj(child));
+    heap.finishMarking();
+
+    try std.testing.expect(heap.cellMetadata(child) != null);
+    const retained = ctx.env.get("lateRootChild") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 42), retained.asObj().getOwn("marker").?.asNum());
+}
+
 test "enable_gc concurrent (M3): a marker thread races a mutator appending into a rooted array" {
     // Phase 7 / M3, the GC half: prove the collector can mark *concurrently with
     // a live mutator* against real engine `Object` graphs — the WebKit-Riptide
