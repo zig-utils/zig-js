@@ -13015,6 +13015,47 @@ test "parallel_js: Intl.NumberFormat resolved state is read-only after publicati
     try std.testing.expectEqual(@as(f64, 4), result.asNum());
 }
 
+test "resolved Intl services publish only native state and reject forged ordinary brands" {
+    try std.testing.expect((try evalIn(
+        \\var instances = [
+        \\  new Intl.PluralRules("en-US", { type:"ordinal" }),
+        \\  new Intl.ListFormat("en-US", { type:"disjunction", style:"short" }),
+        \\  new Intl.RelativeTimeFormat("en-US", { numeric:"auto", style:"narrow" }),
+        \\  new Intl.DisplayNames("en-US", { type:"region", style:"short" }),
+        \\  new Intl.Segmenter("en-US", { granularity:"word" }),
+        \\  new Intl.DurationFormat("en-US", { style:"short" })
+        \\];
+        \\var prototypes = [Intl.PluralRules.prototype, Intl.ListFormat.prototype, Intl.RelativeTimeFormat.prototype, Intl.DisplayNames.prototype, Intl.Segmenter.prototype, Intl.DurationFormat.prototype];
+        \\var names = ["PluralRules", "ListFormat", "RelativeTimeFormat", "DisplayNames", "Segmenter", "DurationFormat"];
+        \\var forgedReads = 0;
+        \\var rejected = 0;
+        \\for (var index = 0; index < instances.length; index++) {
+        \\  if (!Object.getOwnPropertyNames(instances[index]).every(function (name) { return name.charCodeAt(0) !== 0; })) break;
+        \\  var fake = {};
+        \\  fake["\\0intl"] = names[index];
+        \\  Object.defineProperty(fake, "\\0locale", { get:function () { forgedReads++; return "de-DE"; } });
+        \\  Object.defineProperty(fake, "\\0opts", { get:function () { forgedReads++; return {}; } });
+        \\  try { prototypes[index].resolvedOptions.call(fake); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\  try {
+        \\    if (index === 0) prototypes[index].select.call(fake, 1);
+        \\    else if (index === 1) prototypes[index].format.call(fake, ["a", "b"]);
+        \\    else if (index === 2) prototypes[index].format.call(fake, -1, "day");
+        \\    else if (index === 3) prototypes[index].of.call(fake, "US");
+        \\    else if (index === 4) prototypes[index].segment.call(fake, "word");
+        \\    else prototypes[index].format.call(fake, { days:1 });
+        \\  } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\}
+        \\instances.length === 6 && rejected === 12 && forgedReads === 0 &&
+        \\  instances[0].resolvedOptions().type === "ordinal" &&
+        \\  instances[1].resolvedOptions().type === "disjunction" &&
+        \\  instances[2].resolvedOptions().numeric === "auto" &&
+        \\  instances[3].resolvedOptions().type === "region" &&
+        \\  instances[4].resolvedOptions().granularity === "word" &&
+        \\  instances[5].resolvedOptions().style === "short" &&
+        \\  typeof new Temporal.Duration(0, 0, 0, 1).toLocaleString("en-US", { style:"short" }) === "string"
+    )).asBool());
+}
+
 test "Intl.PluralRules category results stay bounded under repeated reflection" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

@@ -26440,19 +26440,9 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 localeListFirstDisplayNamesOr(locs, "en")
             else
                 localeListFirstSupportedOr(locs, "en");
-            // Collator, NumberFormat, and DateTimeFormat are branded and
-            // configured entirely by native sidecars. The formatters' legacy
-            // callable chaining retains the genuine inner object under the
-            // fallback symbol; none needs forgeable NUL-led state there.
-            if (comptime !std.mem.eql(u8, service, "Collator") and !std.mem.eql(u8, service, "NumberFormat") and !std.mem.eql(u8, service, "DateTimeFormat")) {
-                try self.setProp(o, "\x00intl", try Value.strAlloc(self.arena, service));
-                try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
-                try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
-                try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
-            }
-            // DateTimeFormat validates and normalizes its options eagerly (so
-            // bad values throw at construction and resolvedOptions can reflect
-            // canonical values); other services keep the raw options bag.
+            // Every installed service below validates and normalizes its
+            // options before publishing one typed native sidecar. No parallel
+            // ordinary brand, locale, or raw-options record is authoritative.
             if (comptime std.mem.eql(u8, service, "DateTimeFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const r = try dtfProcessOptions(self, raw);
@@ -26543,10 +26533,6 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 const ro = try prProcessOptions(self, raw);
                 try installPluralRulesData(self, o, resolved, ro);
-            } else if (args.len > 1 and args[1].isObject()) {
-                // Keep the options object (if any) for resolvedOptions.
-                try self.setProp(o, "\x00opts", args[1]);
-                try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
             }
             if (chain_this) |ct| {
                 // DefinePropertyOrThrow(this, [[FallbackSymbol]], { value: o,
@@ -26571,10 +26557,10 @@ fn intlBrandOk(this: Value, service: []const u8) bool {
         return this.isObject() and this.asObj().intlNumberFormatData() != null;
     if (std.mem.eql(u8, service, "DateTimeFormat"))
         return this.isObject() and this.asObj().intlDateTimeFormatData() != null;
-    return this.isObject() and this.asObj().getOwn("\x00intl") != null and std.mem.eql(u8, this.asObj().getOwn("\x00intl").?.asStr(), service);
+    return false;
 }
 
-/// UnwrapNumberFormat/DateTimeFormat/Collator: the branded receiver, or — for a
+/// UnwrapNumberFormat/DateTimeFormat: the branded receiver, or — for a
 /// legacy receiver that carries the instance under %Intl%.[[FallbackSymbol]] —
 /// that instance (the Get is proxy-aware). Null if neither resolves.
 fn unwrapIntlThis(self: *Interpreter, recv: Value, comptime service: []const u8) value.HostError!?Value {
@@ -28531,24 +28517,6 @@ fn nfResolvedCompactPattern(locale: []const u8, compact_display: []const u8, mag
     const exact_one = std.mem.eql(u8, integer, "1") and fraction.len == 0;
     const category = nfPluralCategoryExact(locale, integer, fraction, fallback.exponent);
     return nfCompactPattern(locale, compact_display, magnitude, category, exact_one);
-}
-
-/// Resolve the numbering system for an Intl formatter: the `numberingSystem`
-/// option wins, else the locale's `-u-nu-` extension, else its CLDR default —
-/// but only a system we have digit data for.
-fn resolveNumberingSystem(this: Value) []const u8 {
-    if (this.asObj().intlNumberFormatData()) |data| return data.numbering_system;
-    if (this.asObj().intlDateTimeFormatData()) |data| return data.numbering_system;
-    if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) if (ov.asObj().getOwn("numberingSystem")) |ns| if (ns.isString()) {
-        if (numbering_systems.digits(ns.asStr()) != null) return ns.asStr();
-    };
-    if (this.asObj().getOwn("\x00locale")) |lv| if (lv.isString()) {
-        if (localeUValue(lv.asStr(), "nu")) |ns| {
-            if (numbering_systems.digits(ns) != null) return ns;
-        }
-        return localeDefaultNumberingSystem(lv.asStr());
-    };
-    return "latn";
 }
 
 /// Translate the ASCII digits in `s` to numbering system `ds` (digits()).
@@ -31165,7 +31133,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             else if (comptime std.mem.eql(u8, service, "DateTimeFormat"))
                 try Value.strAlloc(self.arena, this.asObj().intlDateTimeFormatData().?.resolved_locale)
             else
-                this.asObj().getOwn("\x00locale") orelse Value.str("en");
+                unreachable;
             try self.setProp(o, "locale", loc);
             // The spec resolvedOptions field set (with default values) per
             // service. `numberingSystem` belongs to the number/date/plural
@@ -41065,13 +41033,8 @@ fn temporalValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 
 fn makeDurationFormatForLocaleString(self: *Interpreter, locales: Value, options: Value) value.HostError!*value.Object {
     const o = (try self.newObject()).asObj();
-    try self.setProp(o, "\x00intl", Value.str("DurationFormat"));
-    try o.setAttr(self.arena, "\x00intl", .{ .writable = false, .enumerable = false, .configurable = false });
     const locs = try canonicalizeLocaleList(self, locales);
     const resolved = localeListFirstSupportedOr(locs, "en");
-    try self.setProp(o, "\x00locale", try Value.strAlloc(self.arena, resolved));
-    try o.setAttr(self.arena, "\x00locale", .{ .writable = false, .enumerable = false, .configurable = false });
-
     const normalized = try durationFormatProcessOptions(self, options);
     try installDurationFormatData(self, o, resolved, &normalized);
     return o;
