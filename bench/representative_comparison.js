@@ -1472,6 +1472,56 @@ function representativeIntlStructuralService(jobs, lane, service) {
   return total;
 }
 
+// DurationFormat resolved-state consumers keep construction outside the timed
+// boundary and consume every reflected field from each fresh result. The
+// matrix covers the four base styles, the unit-style cascade, display choices,
+// numbering-system resolution, and optional fractionalDigits.
+var representativeIntlDurationResolvedFormatters = [
+  new Intl.DurationFormat("en-US"),
+  new Intl.DurationFormat("en-US", { style: "long" }),
+  new Intl.DurationFormat("en-US", { style: "narrow" }),
+  new Intl.DurationFormat("en-US", { style: "digital" }),
+  new Intl.DurationFormat("en-US", {
+    style: "long", years: "short", months: "narrow", weeks: "long", days: "short"
+  }),
+  new Intl.DurationFormat("en-US", {
+    style: "digital", hours: "2-digit", minutes: "numeric", seconds: "2-digit", fractionalDigits: 3
+  }),
+  new Intl.DurationFormat("en-US", {
+    style: "short", seconds: "numeric", milliseconds: "numeric",
+    microseconds: "numeric", nanoseconds: "numeric", fractionalDigits: 6
+  }),
+  new Intl.DurationFormat("en-US", {
+    numberingSystem: "latn", style: "long", daysDisplay: "always", hoursDisplay: "auto"
+  })
+];
+var representativeIntlDurationResolvedKeys = [
+  "locale", "numberingSystem", "style",
+  "years", "yearsDisplay", "months", "monthsDisplay",
+  "weeks", "weeksDisplay", "days", "daysDisplay",
+  "hours", "hoursDisplay", "minutes", "minutesDisplay",
+  "seconds", "secondsDisplay", "milliseconds", "millisecondsDisplay",
+  "microseconds", "microsecondsDisplay", "nanoseconds", "nanosecondsDisplay",
+  "fractionalDigits"
+];
+
+function representativeIntlDurationResolvedConsumer(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var formatterIndex = (job + i + lane) & 7;
+      var options = representativeIntlDurationResolvedFormatters[formatterIndex].resolvedOptions();
+      total = (total + Object.keys(options).length + formatterIndex + i + lane) % 1000000007;
+      for (var keyIndex = 0; keyIndex < representativeIntlDurationResolvedKeys.length; keyIndex = keyIndex + 1) {
+        var reflected = options[representativeIntlDurationResolvedKeys[keyIndex]];
+        if (reflected !== undefined)
+          total = (total + representativeIntlDateTimeChecksum("" + reflected) + keyIndex) % 1000000007;
+      }
+    }
+  }
+  return total;
+}
+
 // Segmenter consumers keep only the immutable formatter and source fixtures
 // outside the timed boundary. Each scored Segments object performs its own
 // segment() coercion, then consumes every observable record field.
@@ -2053,6 +2103,7 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_list_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "list"); };
   if (name === "representative_intl_relative_time_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "relative"); };
   if (name === "representative_intl_duration_format_parts") return function (jobs, lane) { return representativeIntlStructuralService(jobs, lane, "duration"); };
+  if (name === "representative_intl_duration_format_resolved") return representativeIntlDurationResolvedConsumer;
   if (name === "representative_intl_segmenter_iterate_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "iterate"); };
   if (name === "representative_intl_segmenter_containing_word") return function (jobs, lane) { return representativeIntlSegmenterConsumer(jobs, lane, "containing"); };
   if (name === "representative_intl_plural_rules_select") return function (jobs, lane) { return representativeIntlPluralRulesConsumer(jobs, lane, "select"); };
