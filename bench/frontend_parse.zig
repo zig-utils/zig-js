@@ -142,6 +142,16 @@ fn nowNs(io: std.Io) i96 {
 }
 
 fn workloadWidth(name: []const u8) !usize {
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_clear_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_clear_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_clear_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_unrelated_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_first_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_last_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_destructure_last_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_catch_last_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_switch_last_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_repeated_body_nested_clear_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_clear_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_clear_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_compile_loop_capture_clear_4096")) return 4096;
@@ -271,6 +281,24 @@ fn isUnicodeIdentifierWorkload(name: []const u8) bool {
 const TdzCompileShape = enum { clear, unrelated, forward, self, declared, nested, class_field, class_static };
 
 const LoopCaptureCompileShape = enum { clear, unrelated, first, last, for_of_clear, for_of_last };
+
+const RepeatedBodyCompileShape = enum { clear, unrelated, first, last, destructure_last, catch_last, switch_last, nested_clear };
+
+fn repeatedBodyCompileShape(name: []const u8) ?RepeatedBodyCompileShape {
+    const prefix = "representative_frontend_compile_repeated_body_";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const shape_end = std.mem.lastIndexOfScalar(u8, name, '_') orelse return null;
+    const shape = name[prefix.len..shape_end];
+    if (std.mem.eql(u8, shape, "clear")) return .clear;
+    if (std.mem.eql(u8, shape, "unrelated")) return .unrelated;
+    if (std.mem.eql(u8, shape, "first")) return .first;
+    if (std.mem.eql(u8, shape, "last")) return .last;
+    if (std.mem.eql(u8, shape, "destructure_last")) return .destructure_last;
+    if (std.mem.eql(u8, shape, "catch_last")) return .catch_last;
+    if (std.mem.eql(u8, shape, "switch_last")) return .switch_last;
+    if (std.mem.eql(u8, shape, "nested_clear")) return .nested_clear;
+    return null;
+}
 
 fn loopCaptureCompileShape(name: []const u8) ?LoopCaptureCompileShape {
     const prefix = "representative_frontend_compile_loop_capture_";
@@ -435,6 +463,77 @@ fn tdzCompileSource(allocator: std.mem.Allocator, width: usize, shape: TdzCompil
     }
     if (shape == .nested) try source.appendSlice(allocator, "return capture;");
     try source.append(allocator, '}');
+    return source.items;
+}
+
+fn appendRepeatedBodyNames(source: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, width: usize) !void {
+    for (0..width) |index| {
+        if (index != 0) try source.append(allocator, ',');
+        try appendIndexedIdentifier(source, allocator, "bodyBinding", index);
+    }
+}
+
+fn appendRepeatedBodyDeclarations(source: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, width: usize) !void {
+    for (0..width) |index| {
+        try source.appendSlice(allocator, "let ");
+        try appendIndexedIdentifier(source, allocator, "bodyBinding", index);
+        try source.append(allocator, '=');
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d};", .{index}));
+    }
+}
+
+fn appendRepeatedBodyCapture(source: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, index: usize) !void {
+    try source.appendSlice(allocator, "(function(){return ");
+    try appendIndexedIdentifier(source, allocator, "bodyBinding", index);
+    try source.appendSlice(allocator, ";});");
+}
+
+fn repeatedBodyCompileSource(allocator: std.mem.Allocator, width: usize, shape: RepeatedBodyCompileShape) ![]const u8 {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "function repeatedBodyWidth(){while(false){");
+    switch (shape) {
+        .destructure_last => {
+            try source.appendSlice(allocator, "let [");
+            try appendRepeatedBodyNames(&source, allocator, width);
+            try source.appendSlice(allocator, "]=[];");
+            try appendRepeatedBodyCapture(&source, allocator, width - 1);
+        },
+        .catch_last => {
+            try source.appendSlice(allocator, "try{throw [];}catch([");
+            try appendRepeatedBodyNames(&source, allocator, width);
+            try source.appendSlice(allocator, "]){");
+            try appendRepeatedBodyCapture(&source, allocator, width - 1);
+            try source.append(allocator, '}');
+        },
+        .switch_last => {
+            try source.appendSlice(allocator, "switch(0){case 0:");
+            try appendRepeatedBodyDeclarations(&source, allocator, width);
+            try appendRepeatedBodyCapture(&source, allocator, width - 1);
+            try source.append(allocator, '}');
+        },
+        .nested_clear => {
+            try source.appendSlice(allocator, "while(false){");
+            try appendRepeatedBodyDeclarations(&source, allocator, width);
+            try source.append(allocator, '}');
+        },
+        .clear, .unrelated, .first, .last => {
+            try appendRepeatedBodyDeclarations(&source, allocator, width);
+            switch (shape) {
+                .unrelated => {
+                    try source.appendSlice(allocator, "(function(){return [");
+                    for (0..width) |index| {
+                        if (index != 0) try source.append(allocator, ',');
+                        try appendIndexedIdentifier(&source, allocator, "unrelated", index);
+                    }
+                    try source.appendSlice(allocator, "];});");
+                },
+                .first, .last => try appendRepeatedBodyCapture(&source, allocator, if (shape == .first) 0 else width - 1),
+                .clear => {},
+                else => unreachable,
+            }
+        },
+    }
+    try source.appendSlice(allocator, "}return 7;}");
     return source.items;
 }
 
@@ -1031,6 +1130,33 @@ fn validateLoopCaptureCompileProgram(
     return foldChunk(checksum, code.chunk);
 }
 
+fn validateRepeatedBodyCompileProgram(
+    allocator: std.mem.Allocator,
+    program: anytype,
+    source: []const u8,
+    width: usize,
+    shape: RepeatedBodyCompileShape,
+) !usize {
+    if (program.* != .program or program.program.len != 1) return error.InvalidProgram;
+    const declaration = program.program[0];
+    if (declaration.* != .func_decl or !std.mem.eql(u8, declaration.func_decl.name, "repeatedBodyWidth"))
+        return error.InvalidProgram;
+    const admission = try js.Compiler.admitPlainFunction(allocator, declaration.func_decl);
+    const code = switch (admission) {
+        .rejected => return error.InvalidProgram,
+        .compiled => |compiled| compiled,
+    };
+    const captured = shape == .first or shape == .last or shape == .destructure_last or
+        shape == .catch_last or shape == .switch_last;
+    const has_environment = chunkHasOp(code.chunk, .enter_block) and
+        chunkHasOp(code.chunk, .exit_block) and chunkHasOp(code.chunk, .def_lex);
+    if (has_environment != captured or (!captured and code.local_count < width)) return error.InvalidProgram;
+    var checksum = foldChecksum(source.len, width);
+    checksum = foldChecksum(checksum, @backingInt(shape));
+    checksum = foldChecksum(checksum, code.local_count);
+    return foldChunk(checksum, code.chunk);
+}
+
 fn parseOnce(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -1051,6 +1177,8 @@ fn parseOnce(
     const scratch_allocator = if (observation != null) scratch_measured.allocator() else allocator;
     var parser = try js.Parser.initWithScratch(parser_allocator, scratch_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (repeatedBodyCompileShape(workload)) |shape|
+        return validateRepeatedBodyCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (loopCaptureCompileShape(workload)) |shape|
         return validateLoopCaptureCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (tdzCompileShape(workload)) |shape|
@@ -1421,10 +1549,13 @@ pub fn main(init: std.process.Init) !void {
     const nested_function_workload = isNestedFunctionWorkload(workload);
     const nested_arrow_workload = isNestedArrowArgumentsWorkload(workload);
     const regex_literal_workload = isRegexLiteralWorkload(workload);
+    const repeated_body_compile_shape = repeatedBodyCompileShape(workload);
     const loop_capture_compile_shape = loopCaptureCompileShape(workload);
     const tdz_compile_shape = tdzCompileShape(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (loop_capture_compile_shape) |shape|
+    const source = if (repeated_body_compile_shape) |shape|
+        try repeatedBodyCompileSource(init.arena.allocator(), width, shape)
+    else if (loop_capture_compile_shape) |shape|
         try loopCaptureCompileSource(init.arena.allocator(), width, shape)
     else if (tdz_compile_shape) |shape|
         try tdzCompileSource(init.arena.allocator(), width, shape)
@@ -1509,7 +1640,7 @@ pub fn main(init: std.process.Init) !void {
     // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
     // complete untimed jobs settle process startup without turning repeated
     // attacker-sized classifier walks into an unreported timing boundary.
-    const workload_warmups: usize = if (tdz_compile_shape != null or loop_capture_compile_shape != null) 2 else warmup_calls;
+    const workload_warmups: usize = if (tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null) 2 else warmup_calls;
     for (0..workload_warmups) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;
