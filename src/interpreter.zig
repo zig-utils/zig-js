@@ -31155,6 +31155,16 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
     return Value.obj(arr);
 }
 
+/// Project a constructor-validated ECMA-402 string choice without allocating.
+/// Each call site supplies its complete finite set; reaching the tail means
+/// immutable engine state escaped its validation boundary, so fail closed.
+fn intlValidatedChoiceValue(bytes: []const u8, comptime choices: []const []const u8) Value {
+    inline for (choices) |choice| {
+        if (std.mem.eql(u8, bytes, choice)) return Value.str(choice);
+    }
+    std.debug.panic("unvalidated Intl option reached resolved state: {s}", .{bytes});
+}
+
 fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this_recv: Value, args: []const Value) value.HostError!Value {
@@ -31210,15 +31220,15 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, service, "NumberFormat")) {
                 const data = try numberFormatDataFor(self, this.asObj());
                 try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
-                try self.setProp(o, "style", try Value.strAlloc(self.arena, data.style));
+                try self.setProp(o, "style", intlValidatedChoiceValue(data.style, &.{ "decimal", "percent", "currency", "unit" }));
                 if (data.currency) |c| {
                     try self.setProp(o, "currency", try Value.strAlloc(self.arena, c));
-                    try self.setProp(o, "currencyDisplay", try Value.strAlloc(self.arena, data.currency_display));
-                    try self.setProp(o, "currencySign", try Value.strAlloc(self.arena, data.currency_sign));
+                    try self.setProp(o, "currencyDisplay", intlValidatedChoiceValue(data.currency_display, &.{ "code", "symbol", "narrowSymbol", "name" }));
+                    try self.setProp(o, "currencySign", intlValidatedChoiceValue(data.currency_sign, &.{ "standard", "accounting" }));
                 }
                 if (data.unit) |unit| {
                     try self.setProp(o, "unit", try Value.strAlloc(self.arena, unit));
-                    try self.setProp(o, "unitDisplay", try Value.strAlloc(self.arena, data.unit_display));
+                    try self.setProp(o, "unitDisplay", intlValidatedChoiceValue(data.unit_display, &.{ "short", "long", "narrow" }));
                 }
                 try self.setProp(o, "minimumIntegerDigits", Value.num(@floatFromInt(data.minimum_integer_digits)));
                 // Significant-digits resolution: with the default ("auto") rounding
@@ -31243,13 +31253,13 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     .always => Value.str("always"),
                 };
                 try self.setProp(o, "useGrouping", grouping);
-                try self.setProp(o, "notation", try Value.strAlloc(self.arena, data.notation));
-                if (std.mem.eql(u8, data.notation, "compact")) try self.setProp(o, "compactDisplay", try Value.strAlloc(self.arena, data.compact_display));
-                try self.setProp(o, "signDisplay", try Value.strAlloc(self.arena, data.sign_display));
+                try self.setProp(o, "notation", intlValidatedChoiceValue(data.notation, &.{ "standard", "scientific", "engineering", "compact" }));
+                if (std.mem.eql(u8, data.notation, "compact")) try self.setProp(o, "compactDisplay", intlValidatedChoiceValue(data.compact_display, &.{ "short", "long" }));
+                try self.setProp(o, "signDisplay", intlValidatedChoiceValue(data.sign_display, &.{ "auto", "never", "always", "exceptZero", "negative" }));
                 try self.setProp(o, "roundingIncrement", Value.num(@floatFromInt(data.rounding_increment)));
-                try self.setProp(o, "roundingMode", try Value.strAlloc(self.arena, data.rounding_mode));
-                try self.setProp(o, "roundingPriority", try Value.strAlloc(self.arena, data.rounding_priority));
-                try self.setProp(o, "trailingZeroDisplay", try Value.strAlloc(self.arena, data.trailing_zero_display));
+                try self.setProp(o, "roundingMode", intlValidatedChoiceValue(data.rounding_mode, &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }));
+                try self.setProp(o, "roundingPriority", intlValidatedChoiceValue(data.rounding_priority, &.{ "auto", "morePrecision", "lessPrecision" }));
+                try self.setProp(o, "trailingZeroDisplay", intlValidatedChoiceValue(data.trailing_zero_display, &.{ "auto", "stripIfInteger" }));
             } else if (comptime std.mem.eql(u8, service, "Collator")) {
                 const data = this.asObj().intlCollatorData().?;
                 try self.setProp(o, "usage", data.usage.value());

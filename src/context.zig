@@ -12974,6 +12974,67 @@ test "Intl.NumberFormat uses only native resolved state and preserves legacy cha
     )).asBool());
 }
 
+test "Intl.NumberFormat validated resolved options use exact unmanaged static cells" {
+    const Case = struct { source: []const u8, expected: []const u8, cell: *const strcell.StringCell };
+    const cases = [_]Case{
+        .{ .source = "new Intl.NumberFormat('en').resolvedOptions().style", .expected = "decimal", .cell = strcell.staticCell("decimal") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'percent'}).resolvedOptions().style", .expected = "percent", .cell = strcell.staticCell("percent") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'currency',currency:'USD'}).resolvedOptions().style", .expected = "currency", .cell = strcell.staticCell("currency") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'unit',unit:'meter'}).resolvedOptions().style", .expected = "unit", .cell = strcell.staticCell("unit") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'currency',currency:'USD',currencyDisplay:'code'}).resolvedOptions().currencyDisplay", .expected = "code", .cell = strcell.staticCell("code") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'currency',currency:'USD',currencyDisplay:'symbol'}).resolvedOptions().currencyDisplay", .expected = "symbol", .cell = strcell.staticCell("symbol") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'currency',currency:'USD',currencyDisplay:'narrowSymbol'}).resolvedOptions().currencyDisplay", .expected = "narrowSymbol", .cell = strcell.staticCell("narrowSymbol") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'currency',currency:'USD',currencyDisplay:'name'}).resolvedOptions().currencyDisplay", .expected = "name", .cell = strcell.staticCell("name") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'currency',currency:'USD',currencySign:'standard'}).resolvedOptions().currencySign", .expected = "standard", .cell = strcell.staticCell("standard") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'currency',currency:'USD',currencySign:'accounting'}).resolvedOptions().currencySign", .expected = "accounting", .cell = strcell.staticCell("accounting") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'unit',unit:'meter',unitDisplay:'short'}).resolvedOptions().unitDisplay", .expected = "short", .cell = strcell.staticCell("short") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'unit',unit:'meter',unitDisplay:'long'}).resolvedOptions().unitDisplay", .expected = "long", .cell = strcell.staticCell("long") },
+        .{ .source = "new Intl.NumberFormat('en',{style:'unit',unit:'meter',unitDisplay:'narrow'}).resolvedOptions().unitDisplay", .expected = "narrow", .cell = strcell.staticCell("narrow") },
+        .{ .source = "new Intl.NumberFormat('en',{notation:'standard'}).resolvedOptions().notation", .expected = "standard", .cell = strcell.staticCell("standard") },
+        .{ .source = "new Intl.NumberFormat('en',{notation:'scientific'}).resolvedOptions().notation", .expected = "scientific", .cell = strcell.staticCell("scientific") },
+        .{ .source = "new Intl.NumberFormat('en',{notation:'engineering'}).resolvedOptions().notation", .expected = "engineering", .cell = strcell.staticCell("engineering") },
+        .{ .source = "new Intl.NumberFormat('en',{notation:'compact'}).resolvedOptions().notation", .expected = "compact", .cell = strcell.staticCell("compact") },
+        .{ .source = "new Intl.NumberFormat('en',{notation:'compact',compactDisplay:'short'}).resolvedOptions().compactDisplay", .expected = "short", .cell = strcell.staticCell("short") },
+        .{ .source = "new Intl.NumberFormat('en',{notation:'compact',compactDisplay:'long'}).resolvedOptions().compactDisplay", .expected = "long", .cell = strcell.staticCell("long") },
+        .{ .source = "new Intl.NumberFormat('en',{signDisplay:'auto'}).resolvedOptions().signDisplay", .expected = "auto", .cell = strcell.staticCell("auto") },
+        .{ .source = "new Intl.NumberFormat('en',{signDisplay:'never'}).resolvedOptions().signDisplay", .expected = "never", .cell = strcell.staticCell("never") },
+        .{ .source = "new Intl.NumberFormat('en',{signDisplay:'always'}).resolvedOptions().signDisplay", .expected = "always", .cell = strcell.staticCell("always") },
+        .{ .source = "new Intl.NumberFormat('en',{signDisplay:'exceptZero'}).resolvedOptions().signDisplay", .expected = "exceptZero", .cell = strcell.staticCell("exceptZero") },
+        .{ .source = "new Intl.NumberFormat('en',{signDisplay:'negative'}).resolvedOptions().signDisplay", .expected = "negative", .cell = strcell.staticCell("negative") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'ceil'}).resolvedOptions().roundingMode", .expected = "ceil", .cell = strcell.staticCell("ceil") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'floor'}).resolvedOptions().roundingMode", .expected = "floor", .cell = strcell.staticCell("floor") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'expand'}).resolvedOptions().roundingMode", .expected = "expand", .cell = strcell.staticCell("expand") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'trunc'}).resolvedOptions().roundingMode", .expected = "trunc", .cell = strcell.staticCell("trunc") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'halfCeil'}).resolvedOptions().roundingMode", .expected = "halfCeil", .cell = strcell.staticCell("halfCeil") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'halfFloor'}).resolvedOptions().roundingMode", .expected = "halfFloor", .cell = strcell.staticCell("halfFloor") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'halfExpand'}).resolvedOptions().roundingMode", .expected = "halfExpand", .cell = strcell.staticCell("halfExpand") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'halfTrunc'}).resolvedOptions().roundingMode", .expected = "halfTrunc", .cell = strcell.staticCell("halfTrunc") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingMode:'halfEven'}).resolvedOptions().roundingMode", .expected = "halfEven", .cell = strcell.staticCell("halfEven") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingPriority:'auto'}).resolvedOptions().roundingPriority", .expected = "auto", .cell = strcell.staticCell("auto") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingPriority:'morePrecision'}).resolvedOptions().roundingPriority", .expected = "morePrecision", .cell = strcell.staticCell("morePrecision") },
+        .{ .source = "new Intl.NumberFormat('en',{roundingPriority:'lessPrecision'}).resolvedOptions().roundingPriority", .expected = "lessPrecision", .cell = strcell.staticCell("lessPrecision") },
+        .{ .source = "new Intl.NumberFormat('en',{trailingZeroDisplay:'auto'}).resolvedOptions().trailingZeroDisplay", .expected = "auto", .cell = strcell.staticCell("auto") },
+        .{ .source = "new Intl.NumberFormat('en',{trailingZeroDisplay:'stripIfInteger'}).resolvedOptions().trailingZeroDisplay", .expected = "stripIfInteger", .cell = strcell.staticCell("stripIfInteger") },
+    };
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    var last: Value = Value.undef();
+    for (cases) |case| {
+        last = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, last.asStr());
+        try std.testing.expectEqual(case.cell, last.asStringCell());
+        try std.testing.expect(!last.asStringCell().isGcManaged());
+    }
+    const dynamic_locale = try ctx.evaluate("new Intl.NumberFormat('de-DE').resolvedOptions().locale");
+    try std.testing.expect(dynamic_locale.asStringCell().isGcManaged());
+    ctx.collectGarbage();
+    try std.testing.expectEqualStrings("stripIfInteger", last.asStr());
+}
+
 test "Intl.NumberFormat resolved state is reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
