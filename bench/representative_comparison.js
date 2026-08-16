@@ -1658,7 +1658,7 @@ var representativeIntlCollators = [
   new Intl.Collator("en-US"),
   new Intl.Collator("en-US", { numeric: true }),
   new Intl.Collator("de-DE-u-co-phonebk"),
-  new Intl.Collator("en-US", { usage: "search", sensitivity: "base" }),
+  new Intl.Collator("de-DE", { usage: "search", sensitivity: "base" }),
   new Intl.Collator("en-US", { caseFirst: "upper" }),
   new Intl.Collator("en-US", { sensitivity: "base" }),
   new Intl.Collator("th", { ignorePunctuation: true }),
@@ -1719,7 +1719,7 @@ function representativeIntlCollatorConsumer(jobs, lane, kind) {
 // Unicode extension keywords without sharing result objects across calls.
 var representativeIntlCollatorResolvedFormatters = [
   new Intl.Collator("en-US"),
-  new Intl.Collator("de-DE", { usage: "search", sensitivity: "base" }),
+  new Intl.Collator("en-US", { usage: "search", sensitivity: "base" }),
   new Intl.Collator("en-US", { numeric: true, caseFirst: "upper" }),
   new Intl.Collator("th", { ignorePunctuation: false }),
   new Intl.Collator("de-u-co-phonebk"),
