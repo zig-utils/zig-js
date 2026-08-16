@@ -292,33 +292,37 @@ pub const Lexer = struct {
         return regex.unicode.isIdentifierContinue(cp);
     }
 
-    /// True when an IdentifierStart begins at `self.i`: an ASCII ident-start, a
-    /// `\u` escape, or a non-ASCII Unicode ID-start code point.
-    fn identStartHere(self: *Lexer) bool {
+    /// The byte length of the validated IdentifierStart at `self.i`. Zero is an
+    /// explicit sentinel for a `\u` escape, whose decoded length is known only
+    /// after the failure-propagating owned path consumes it.
+    fn identStartLen(self: *Lexer) ?usize {
         const c = self.src[self.i];
-        if (isIdentStart(c)) return true;
-        if (c == '\\' and self.peek2() == 'u') return true;
-        if (c < 0x80) return false;
-        const len = std.unicode.utf8ByteSequenceLength(c) catch return false;
-        if (self.i + len > self.src.len) return false;
-        const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch return false;
-        return isIdStartCp(cp);
+        if (isIdentStart(c)) return 1;
+        if (c == '\\' and self.peek2() == 'u') return 0;
+        if (c < 0x80) return null;
+        const len = std.unicode.utf8ByteSequenceLength(c) catch return null;
+        if (self.i + len > self.src.len) return null;
+        const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch return null;
+        return if (isIdStartCp(cp)) len else null;
     }
 
     /// Scan an IdentifierName from `self.i`, returning its *decoded* text: `\u`
     /// escapes resolved to UTF-8 and raw Unicode letters copied through. Fast
     /// path — a pure-ASCII name with no escape — returns a zero-copy source
     /// slice, so the common case allocates nothing.
-    fn lexIdentName(self: *Lexer) LexError![]const u8 {
-        return self.lexIdentNameWithOwnedPrefix("");
+    fn lexIdentName(self: *Lexer, validated_start_len: usize) LexError![]const u8 {
+        return self.lexIdentNameWithOwnedPrefix("", validated_start_len);
     }
 
     /// `owned_prefix` participates only when an escape requires owned storage.
     /// Private names pass `#` so their decoder builds the complete token once;
     /// the ordinary source-backed path still returns only the identifier span.
-    fn lexIdentNameWithOwnedPrefix(self: *Lexer, owned_prefix: []const u8) LexError![]const u8 {
+    /// A non-zero `validated_start_len` consumes the already checked ASCII or
+    /// Unicode start exactly once; zero leaves the leading escape for decoding.
+    fn lexIdentNameWithOwnedPrefix(self: *Lexer, owned_prefix: []const u8, validated_start_len: usize) LexError![]const u8 {
         const start = self.i;
-        var first = true;
+        var first = validated_start_len == 0;
+        self.i += validated_start_len;
         while (self.i < self.src.len) {
             const c = self.src[self.i];
             if (c == '\\') return self.lexEscapedIdentName(start, first, owned_prefix);
@@ -478,20 +482,20 @@ pub const Lexer = struct {
             // A numeric literal may not be immediately followed by an
             // IdentifierStart (a digit is already consumed): `3in`, `3abc`,
             // `3.toString()` are SyntaxErrors.
-            if (self.i < self.src.len and self.identStartHere()) return LexError.UnexpectedCharacter;
+            if (self.i < self.src.len and self.identStartLen() != null) return LexError.UnexpectedCharacter;
             return num;
         }
         // Identifiers / keywords — ASCII, Unicode letters, or `\u` escapes.
-        if (self.identStartHere()) {
-            const name = try self.lexIdentName();
+        if (self.identStartLen()) |start_len| {
+            const name = try self.lexIdentName(start_len);
             return .{ .kind = .identifier, .text = name, .pos = start, .escaped_identifier = self.last_identifier_escaped };
         }
         // Private names (#ident) for class private members; the name after the
         // `#` may itself use Unicode letters or `\u` escapes.
         if (c == '#') {
             self.i += 1; // '#'
-            if (!self.identStartHere()) return LexError.UnexpectedCharacter;
-            const name = try self.lexIdentNameWithOwnedPrefix("#");
+            const start_len = self.identStartLen() orelse return LexError.UnexpectedCharacter;
+            const name = try self.lexIdentNameWithOwnedPrefix("#", start_len);
             // The token's complete unescaped spelling is already stable source.
             // Escapes seed their one owned decoded buffer with `#` directly.
             const text = if (self.last_identifier_escaped) name else self.src[start..self.i];
@@ -1844,6 +1848,15 @@ test "lexer enforces Unicode 17 identifier start and continue properties" {
         var lexer = Lexer.init(arena.allocator(), source);
         const prefix = try lexer.next();
         try std.testing.expectEqualStrings("a", prefix.text);
+        try std.testing.expectError(LexError.UnexpectedCharacter, lexer.next());
+    }
+
+    // NumericLiteral cannot be followed immediately by any IdentifierStart;
+    // exercise every start representation consumed by `identStartLen`.
+    for ([_][]const u8{ "3alpha", "3π", "3\\u0061" }) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), source);
         try std.testing.expectError(LexError.UnexpectedCharacter, lexer.next());
     }
 }
