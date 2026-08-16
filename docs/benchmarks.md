@@ -958,7 +958,11 @@ not invented compiler-internal phase counters. Samples run sequentially and no
 outlier is discarded. V2 additionally rejects any cache-group drift, any
 focused-engine denominator other than 12 for the cold run or one for the cached
 and TSan runs, and any combined focused run that does not select exactly one
-test from a positive linked inventory with zero skips, failures, or leaks.
+test from a positive linked inventory with zero skips, failures, or leaks. A
+preflight before every phase rejects another active Zig compiler/build-driver
+process outside the collector's own ancestor chain. Any command, preflight, or
+final-validation failure preserves the collected rows in an explicitly
+incomplete raw artifact rather than publishing a partial report.
 
 ```sh
 zig build build-feedback-test

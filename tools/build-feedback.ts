@@ -92,6 +92,29 @@ function commandOutput(argv: string[], fallback = "unavailable"): string {
     : fallback;
 }
 
+export function competingZigProcesses(source: string, selfPid: number): string[] {
+  const rows = source.split("\n").map((line) => {
+    const match = /^\s*([0-9]+)\s+([0-9]+)\s+(.+)$/.exec(line);
+    return match ? { pid: Number(match[1]), parent: Number(match[2]), command: match[3].trim() } : null;
+  }).filter(Boolean) as { pid: number; parent: number; command: string }[];
+  const parents = new Map(rows.map((row) => [row.pid, row.parent])), ancestors = new Set<number>();
+  for (let pid = selfPid; pid > 0 && !ancestors.has(pid); pid = parents.get(pid) || 0) ancestors.add(pid);
+  return rows.filter((row) => {
+    if (ancestors.has(row.pid)) return false;
+    const executable = row.command.split(/\s+/, 1)[0], basename = executable.slice(executable.lastIndexOf("/") + 1);
+    return basename === "zig" || basename === "maker";
+  }).map((row) => `${row.pid} ${row.command}`);
+}
+
+function requireNoCompetingZigProcess(): void {
+  const listing = commandOutput(["ps", "-axo", "pid=,ppid=,command="], "");
+  const competitors = competingZigProcesses(listing, process.pid);
+  requireValue(
+    competitors.length === 0,
+    `competing Zig build/test process detected before scenario:\n${competitors.join("\n")}`,
+  );
+}
+
 function metric(stderr: string, pattern: RegExp, label: string): number {
   const match = pattern.exec(stderr);
   requireValue(Boolean(match), `missing ${label} from /usr/bin/time -lp`);
@@ -513,6 +536,21 @@ function selfTest(): void {
   brokenDenominator.samples.find((row) => row.scenario === "focused_engine_cached")!.stdout =
     "focused engine frontend: 0 cases passed\n";
   expectFailure(() => validate(brokenDenominator), "exact denominator drift");
+  const processFixture = [
+    "100 1 /usr/bin/outer",
+    "110 100 /cache/maker build build-feedback",
+    "120 110 /home/home-tool run tools/build-feedback.ts",
+    "200 1 /toolchain/zig test -Mroot=other.zig",
+    "210 1 /cache/maker build test",
+    "220 1 /tmp/unrelated-test",
+  ].join("\n");
+  requireValue(
+    JSON.stringify(competingZigProcesses(processFixture, 120)) === JSON.stringify([
+      "200 /toolchain/zig test -Mroot=other.zig",
+      "210 /cache/maker build test",
+    ]),
+    "competing Zig process classification drift",
+  );
   console.log("build-feedback self-test: ok");
 }
 
@@ -546,28 +584,32 @@ function main(): void {
       scenarios: definitions,
       samples: [],
     };
-  for (let sample = 0; sample < options.samples; sample += 1) {
-    const cacheRoot = temporaryDirectory("zig-js-build-feedback");
-    try {
-      for (let scenarioIndex = 0; scenarioIndex < definitions.length; scenarioIndex += 1) {
-        const scenario = definitions[scenarioIndex];
-        console.log(`[${sample + 1}/${options.samples}] ${scenario.name}`);
-        const row = runSample(options.zig, scenario, sample, cacheRoot);
-        artifact.samples.push(row);
-        console.log(
-          `  exit=${row.exit_code} wall=${row.wall_seconds.toFixed(2)}s cpu=${(row.user_seconds + row.system_seconds).toFixed(2)}s rss=${formatBytes(row.peak_rss_bytes)}`,
-        );
-        if (row.exit_code !== 0 || row.timed_out) {
-          writeText(options.rawOut, JSON.stringify(artifact, null, 2) + "\n");
-          throw new Error(`${scenario.name} failed; incomplete raw artifact preserved at ${options.rawOut}`);
+  try {
+    for (let sample = 0; sample < options.samples; sample += 1) {
+      const cacheRoot = temporaryDirectory("zig-js-build-feedback");
+      try {
+        for (let scenarioIndex = 0; scenarioIndex < definitions.length; scenarioIndex += 1) {
+          const scenario = definitions[scenarioIndex];
+          requireNoCompetingZigProcess();
+          console.log(`[${sample + 1}/${options.samples}] ${scenario.name}`);
+          const row = runSample(options.zig, scenario, sample, cacheRoot);
+          artifact.samples.push(row);
+          console.log(
+            `  exit=${row.exit_code} wall=${row.wall_seconds.toFixed(2)}s cpu=${(row.user_seconds + row.system_seconds).toFixed(2)}s rss=${formatBytes(row.peak_rss_bytes)}`,
+          );
+          if (row.exit_code !== 0 || row.timed_out)
+            throw new Error(`${scenario.name} failed or timed out`);
+          const next = definitions[scenarioIndex + 1];
+          if (!next || next.cache_group !== scenario.cache_group)
+            removeTemporaryDirectory(`${cacheRoot}/${scenario.cache_group}`);
         }
-        const next = definitions[scenarioIndex + 1];
-        if (!next || next.cache_group !== scenario.cache_group)
-          removeTemporaryDirectory(`${cacheRoot}/${scenario.cache_group}`);
+      } finally {
+        removeTemporaryDirectory(cacheRoot);
       }
-    } finally {
-      removeTemporaryDirectory(cacheRoot);
     }
+  } catch (error) {
+    writeText(options.rawOut, JSON.stringify(artifact, null, 2) + "\n");
+    throw new Error(`${String(error)}; incomplete raw artifact preserved at ${options.rawOut}`);
   }
   artifact.complete = true;
   try {
