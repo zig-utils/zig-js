@@ -663,6 +663,11 @@ pub const Environment = struct {
     /// because only their owning mutator changes the tables. The uncontended
     /// shared path is a single atomic CAS.
     binding_lock: std.atomic.Mutex = .unlocked,
+    /// Immutable publication ruling for this Environment. Context-embedded
+    /// roots in single-owner realms are traced only at quiescent checkpoints
+    /// and never need the mutex; roots exposed to peer mutators or a concurrent
+    /// marker set this before bootstrap and retain it for their whole lifetime.
+    binding_lock_required: bool = true,
 
     /// Binding locks are only needed when a context runs the GC marker
     /// concurrently (`concurrent_gc`) or multiple mutators in parallel
@@ -674,7 +679,7 @@ pub const Environment = struct {
     pub var binding_locks_enabled: std.atomic.Value(bool) = .init(true);
 
     pub fn lockBindings(self: *Environment) void {
-        if (!binding_locks_enabled.load(.acquire)) return;
+        if (!self.binding_lock_required or !binding_locks_enabled.load(.acquire)) return;
         var spins: usize = 0;
         while (!self.binding_lock.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
@@ -683,7 +688,7 @@ pub const Environment = struct {
         gc_runtime.enterTraceSensitiveLock();
     }
     pub fn unlockBindings(self: *Environment) void {
-        if (!binding_locks_enabled.load(.acquire)) return;
+        if (!self.binding_lock_required or !binding_locks_enabled.load(.acquire)) return;
         gc_runtime.leaveTraceSensitiveLock();
         self.binding_lock.unlock();
     }
@@ -691,6 +696,7 @@ pub const Environment = struct {
     /// Acquire the binding lock for a table read unless this is an uncaptured,
     /// mutator-private activation. Returns whether the caller must unlock.
     pub fn lockBindingsForRead(self: *Environment) bool {
+        if (!self.binding_lock_required) return false;
         if (self.private_activation and !self.captured) return false;
         self.lockBindings();
         jsthread.recordEnvReadLockAcquire(if (self.parent == null)
@@ -712,6 +718,10 @@ pub const Environment = struct {
     /// when the caller owns `binding_lock`, false when it owns the private-write
     /// guard. Allocation recovery treats both as trace-sensitive regions.
     pub fn lockBindingsForWrite(self: *Environment) bool {
+        // Preserve the existing boolean guard contract for callers: `true`
+        // takes the ordinary unlock branch, whose immutable policy check is a
+        // no-op for this single-owner Environment.
+        if (!self.binding_lock_required) return true;
         if (self.private_activation and !self.captured and
             gc_mod.tryEnterPrivateEnvironmentWrite())
         {
@@ -732,6 +742,7 @@ pub const Environment = struct {
     }
 
     pub fn unlockBindingsForWrite(self: *Environment, locked: bool) void {
+        if (!self.binding_lock_required) return;
         if (locked) {
             self.unlockBindings();
         } else {
@@ -741,11 +752,13 @@ pub const Environment = struct {
     }
 
     pub fn lockBindingsForTrace(self: *Environment) void {
+        if (!self.binding_lock_required) return;
         self.lockBindings();
         jsthread.recordEnvTraceLockAcquire();
     }
 
     pub fn unlockBindingsForTrace(self: *Environment) void {
+        if (!self.binding_lock_required) return;
         self.unlockBindings();
     }
 
@@ -1047,6 +1060,29 @@ test "Environment barriers distinguish embedded roots from managed owners" {
     managed.barrierStoredValue(Value.obj(&child));
     try std.testing.expectEqual(@as(usize, 2), provider.calls);
     try std.testing.expectEqual(@intFromPtr(&managed), @intFromPtr(provider.last_owner.?));
+}
+
+test "Environment immutable lock ruling keeps only shared roots synchronized" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    jsthread.resetContentionStats();
+    defer jsthread.disableContentionStats();
+    var single_owner = Environment{
+        .arena = arena.allocator(),
+        .binding_lock_required = false,
+    };
+    try single_owner.put("value", Value.num(1));
+    try std.testing.expectEqual(@as(?Value, Value.num(1)), single_owner.get("value"));
+    try std.testing.expect(single_owner.assignLocal("value", Value.num(2)));
+    try std.testing.expectEqual(@as(u64, 0), jsthread.contentionStats().env_lock_acquires);
+
+    var shared = Environment{ .arena = arena.allocator() };
+    try shared.put("value", Value.num(1));
+    try std.testing.expectEqual(@as(?Value, Value.num(1)), shared.get("value"));
+    try std.testing.expectEqual(@as(u64, 2), jsthread.contentionStats().env_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), jsthread.contentionStats().env_read_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 1), jsthread.contentionStats().env_write_lock_acquires);
 }
 
 test "Environment private activation reads elide locks until capture" {

@@ -3275,6 +3275,29 @@ pub fn enableParallelSync() void {
     @import("bytecode.zig").ic_seqlock_enabled.store(true, .release);
 }
 
+fn rootEnvironmentBindingLockRequired(options: Context.TestingOptions) bool {
+    // This is fixed before installGlobals publishes the Environment. Do not
+    // derive it from a process-global mode that can change while a lock pair is
+    // active: independent single-owner realms and shared/concurrent realms may
+    // be created simultaneously.
+    return options.enable_threads or options.concurrent_gc or
+        options.parallel_gc or options.parallel_js;
+}
+
+test "root Environment lock policy is immutable from Context concurrency options" {
+    try std.testing.expect(!rootEnvironmentBindingLockRequired(.{}));
+    try std.testing.expect(!rootEnvironmentBindingLockRequired(.{ .enable_gc = true }));
+    try std.testing.expect(rootEnvironmentBindingLockRequired(.{ .enable_threads = true }));
+    try std.testing.expect(rootEnvironmentBindingLockRequired(.{ .enable_gc = true, .concurrent_gc = true }));
+    try std.testing.expect(rootEnvironmentBindingLockRequired(.{ .enable_gc = true, .parallel_gc = true }));
+    try std.testing.expect(rootEnvironmentBindingLockRequired(.{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    }));
+}
+
 /// One native WebAssembly allocation owned by a Context's wasm store (issue
 /// #141). The payload is type-erased per tag: `*wasm/types.Module`,
 /// `*wasm/exec.Instance`, or API-owned Memory/Table/Global records that carry
@@ -4517,7 +4540,7 @@ pub const Context = struct {
             .profile_execution_tiers = primary.profile_execution_tiers,
             .owner_thread = primary.owner_thread,
             .sab_retains = .{ .gpa = allocator },
-            .env = .{ .arena = a, .fn_scope = true },
+            .env = .{ .arena = a, .fn_scope = true, .binding_lock_required = false },
             .global_object = undefined,
             .root_shape = try Shape.createRoot(a),
             .tdz_marker = undefined,
@@ -4698,7 +4721,11 @@ pub const Context = struct {
             .profile_execution_tiers = options.profile_execution_tiers,
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = context_gpa },
-            .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
+            .env = .{
+                .arena = a,
+                .fn_scope = true,
+                .binding_lock_required = rootEnvironmentBindingLockRequired(options),
+            }, // global is a variable scope
             .global_object = undefined, // set below, once the heap exists
             .root_shape = try Shape.createRoot(a),
             .tdz_marker = undefined, // set below
