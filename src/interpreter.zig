@@ -9946,6 +9946,70 @@ pub const Interpreter = struct {
         return last;
     }
 
+    /// All non-overlapping StringIndexOf results, in ascending UTF-16 order.
+    /// ECMA-262 replaceAll collects this list before invoking any replacer, and
+    /// split consumes the same sequence. `max_matches` lets split stop once its
+    /// result limit makes later matches unobservable.
+    fn stringMatchPositionsUtf16(
+        self: *Interpreter,
+        haystack: []const u8,
+        needle: []const u8,
+        haystack_len: usize,
+        haystack_ascii: bool,
+        max_matches: ?usize,
+    ) EvalError!std.ArrayListUnmanaged(u32) {
+        const scratch = self.scratch_allocator orelse self.arena;
+        var positions: std.ArrayListUnmanaged(u32) = .empty;
+        errdefer positions.deinit(scratch);
+        const limit = max_matches orelse std.math.maxInt(usize);
+        if (limit == 0) return positions;
+
+        if (needle.len == 0) {
+            // Constructed strings are capped far below u32; fail closed for an
+            // oversized external slice instead of overflowing compact scratch.
+            if (haystack_len >= std.math.maxInt(u32)) return error.OutOfMemory;
+            const count = @min(haystack_len + 1, limit);
+            try positions.ensureTotalCapacity(scratch, count);
+            for (0..count) |position| positions.appendAssumeCapacity(@intCast(position));
+            return positions;
+        }
+
+        const needle_ascii = stringBytesAreAscii(needle);
+        if (haystack_ascii) {
+            if (!needle_ascii or needle.len > haystack.len) return positions;
+            var from: usize = 0;
+            while (positions.items.len < limit) {
+                const position = std.mem.indexOfPos(u8, haystack, from, needle) orelse break;
+                if (position > std.math.maxInt(u32)) return error.OutOfMemory;
+                try positions.append(scratch, @intCast(position));
+                from = position + needle.len;
+            }
+            return positions;
+        }
+
+        const needle_len = utf16LenOfString(needle);
+        if (needle_len == 0 or needle_len > haystack_len) return positions;
+        var pattern = try Utf16KmpPattern.init(scratch, needle, needle_len);
+        defer pattern.deinit();
+
+        var haystack_it = Utf16CodeUnits{ .s = haystack };
+        var index: usize = 0;
+        var matched: usize = 0;
+        while (haystack_it.next()) |unit| {
+            index += 1;
+            if (!pattern.accepts(&matched, unit)) continue;
+            const position = index - needle_len;
+            if (position > std.math.maxInt(u32)) return error.OutOfMemory;
+            try positions.append(scratch, @intCast(position));
+            if (positions.items.len == limit) break;
+            // replaceAll/split resume after the complete match, so overlapping
+            // candidates are not admissible even though indexOf/lastIndexOf do
+            // retain the KMP suffix-prefix state.
+            matched = 0;
+        }
+        return positions;
+    }
+
     /// Private-ABI contains operation. Unlike String.prototype.includes this
     /// has no position argument, but it shares the exact, bounded matcher and
     /// must surface scratch-allocation failure to the embedding exception path.
@@ -16138,11 +16202,37 @@ pub const Interpreter = struct {
                 }
                 return result;
             }
-            var it = std.mem.splitSequence(u8, s, sep);
-            while (it.next()) |part| {
-                if (out.items.len >= lim) return result;
-                try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, part)));
+            if (s_ascii and stringBytesAreAscii(sep)) {
+                // One byte is exactly one UTF-16 code unit for both operands,
+                // so the standard iterator is the allocation-free fast path.
+                var it = std.mem.splitSequence(u8, s, sep);
+                while (it.next()) |part| {
+                    if (out.items.len >= lim) return result;
+                    try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, part)));
+                }
+                return result;
             }
+            // ECMA-262 split steps 14–15 repeatedly apply StringIndexOf and
+            // form substrings in UTF-16 code-unit space. A byte split cannot
+            // observe a surrogate half inside an astral scalar.
+            const s_len = utf16LenOfStringA(s, s_ascii);
+            const sep_len = utf16LenOfString(sep);
+            const scratch = self.scratch_allocator orelse self.arena;
+            var positions = try self.stringMatchPositionsUtf16(s, sep, s_len, s_ascii, lim);
+            defer positions.deinit(scratch);
+            var search_start: usize = 0;
+            var slice_cursor = RxCursor{ .ascii = s_ascii };
+            for (positions.items) |compact_position| {
+                const position: usize = compact_position;
+                var part: std.ArrayListUnmanaged(u8) = .empty;
+                try appendUtf16SliceFrom(&part, self.arena, s, &slice_cursor, search_start, position);
+                try out.append(self.arena, try Value.strOwned(self.arena, try part.toOwnedSlice(self.arena)));
+                if (out.items.len >= lim) return result;
+                search_start = position + sep_len;
+            }
+            var tail: std.ArrayListUnmanaged(u8) = .empty;
+            try appendUtf16SliceFrom(&tail, self.arena, s, &slice_cursor, search_start, s_len);
+            try out.append(self.arena, try Value.strOwned(self.arena, try tail.toOwnedSlice(self.arena)));
             return result;
         }
         if (eq(name, "at")) {
@@ -16263,30 +16353,42 @@ pub const Interpreter = struct {
             // String pattern: replace the first occurrence (or all for replaceAll).
             const pat = try self.toStringWtf8(arg0(args));
             const template: []const u8 = if (is_func) "" else try self.toStringWtf8(repl_val);
-            var from: usize = 0;
-            while (from <= s.len) { // `from` stays in-bounds so the search never reads past the end
-                const idx = std.mem.indexOfPos(u8, s, from, pat) orelse break;
-                try buf.appendSlice(a, s[from..idx]);
-                const position = utf16IndexFromByteOffset(s, idx);
+            const s_len = utf16LenOfStringA(s, s_ascii);
+            const pat_len = utf16LenOfString(pat);
+            const scratch = self.scratch_allocator orelse self.arena;
+            var positions: std.ArrayListUnmanaged(u32) = .empty;
+            defer positions.deinit(scratch);
+            var first_position: [1]u32 = undefined;
+            const match_positions: []const u32 = if (all) blk: {
+                // ECMA-262 replaceAll steps 10–12 freeze every match position
+                // before any user replacer is called.
+                positions = try self.stringMatchPositionsUtf16(s, pat, s_len, s_ascii, null);
+                break :blk positions.items;
+            } else blk: {
+                if (try self.stringIndexOfUtf16(s, pat, 0, s_len, s_ascii)) |position| {
+                    if (position > std.math.maxInt(u32)) return error.OutOfMemory;
+                    first_position[0] = @intCast(position);
+                    break :blk first_position[0..];
+                }
+                break :blk &.{};
+            };
+
+            var end_of_last_match: usize = 0;
+            var slice_cursor = RxCursor{ .ascii = s_ascii };
+            const matched_value = if (is_func and match_positions.len != 0) try Value.strAlloc(self.arena, pat) else Value.undef();
+            const source_value = if (is_func and match_positions.len != 0) try Value.strAlloc(self.arena, s) else Value.undef();
+            for (match_positions) |compact_position| {
+                const position: usize = compact_position;
+                try appendUtf16SliceFrom(&buf, a, s, &slice_cursor, end_of_last_match, position);
                 if (is_func) {
-                    const r = try self.callValue(repl_val, &.{ try Value.strAlloc(self.arena, pat), Value.num(@floatFromInt(position)), try Value.strAlloc(self.arena, s) });
+                    const r = try self.callValue(repl_val, &.{ matched_value, Value.num(@floatFromInt(position)), source_value });
                     try buf.appendSlice(a, try self.toStringWtf8(r));
                 } else {
                     try self.getSubstitutionValues(&buf, template, pat, s, position, &.{}, Value.undef());
                 }
-                from = idx + pat.len;
-                if (pat.len == 0) { // empty pattern: copy one char and step past it
-                    if (from < s.len) {
-                        const n = utf8SeqLen(s, from);
-                        try buf.appendSlice(a, s[from..@min(from + n, s.len)]);
-                        from += n;
-                    } else {
-                        from += 1;
-                    }
-                }
-                if (!all) break;
+                end_of_last_match = position + pat_len;
             }
-            if (from <= s.len) try buf.appendSlice(a, s[from..]);
+            try appendUtf16SliceFrom(&buf, a, s, &slice_cursor, end_of_last_match, s_len);
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(a));
         }
         if (eq(name, "codePointAt")) {
@@ -51279,6 +51381,72 @@ test "interpreter String index search uses UTF-16 code units" {
         \\text.lastIndexOf(prefix, 2047) === 2047 &&
         \\"aaaaa".lastIndexOf("aaa") === 2
     )).asBool());
+}
+
+test "interpreter String replace and split use UTF-16 code units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\let astral = "💩";
+        \\astral.replace("\uD83D", "H") === "H\uDCA9" &&
+        \\astral.replace("\uDCA9", "L") === "\uD83DL" &&
+        \\("x" + astral + "y" + astral).replaceAll("\uDCA9", "L") === "x\uD83DLy\uD83DL" &&
+        \\astral.replaceAll("", "-") === "-\uD83D-\uDCA9-" &&
+        \\"aaaaa".replaceAll("aaa", "X") === "Xaa"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let astral = "💩";
+        \\let source = "x" + astral + "y" + astral;
+        \\let calls = [];
+        \\let result = source.replaceAll("\uDCA9", function (match, position, whole) {
+        \\  calls.push(match.charCodeAt(0), position, whole === source);
+        \\  return "L";
+        \\});
+        \\result === "x\uD83DLy\uD83DL" &&
+        \\calls.join(",") === "56489,2,true,56489,5,true"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let astral = "💩";
+        \\astral.replace("\uDCA9", "$`|$&|$'") === "\uD83D\uD83D|\uDCA9|" &&
+        \\"\uD83Dx\uDCA9".replace("\uDCA9", "L") === "\uD83DxL"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let astral = "💩";
+        \\let high = ("A" + astral + "B").split("\uD83D");
+        \\let low = ("A" + astral + "B").split("\uDCA9");
+        \\let limited = ("A" + astral + "B").split("\uD83D", 1);
+        \\high.length === 2 && high[0] === "A" && high[1] === "\uDCA9B" &&
+        \\low.length === 2 && low[0] === "A\uD83D" && low[1] === "B" &&
+        \\limited.length === 1 && limited[0] === "A" &&
+        \\"aaaaa".split("aaa").join("|") === "|aa"
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let prefix = "a".repeat(2048);
+        \\let text = prefix + prefix + "b";
+        \\text.replaceAll(prefix + "b", "X") === prefix + "X" &&
+        \\text.split(prefix + "b").join("|") === prefix + "|"
+    )).asBool());
+}
+
+test "UTF-16 replacement match collection releases scratch on allocation failure" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var machine = Interpreter{
+                .arena = backing,
+                .scratch_allocator = backing,
+                .env = undefined,
+                .root_shape = undefined,
+            };
+            const haystack = "💩a💩a";
+            const needle = "\xED\xB2\xA9a"; // WTF-8 U+DCA9 followed by "a".
+            var positions = try machine.stringMatchPositionsUtf16(haystack, needle, 6, false, null);
+            defer positions.deinit(backing);
+            try std.testing.expectEqualSlices(u32, &.{ 1, 4 }, positions.items);
+        }
+    }.check;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
 }
 
 test "interpreter numeric literals (separators, binary/octal) and optional chaining" {
