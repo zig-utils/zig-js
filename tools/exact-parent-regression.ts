@@ -11,6 +11,32 @@ const REVISION_RE = /^[0-9a-f]{40}$/;
 export type RunnerRow = { engine: string; mode: string; workload: string; lanes: number; jobs: number; elapsed_ns: number; checksum: number; process_cpu_user_ns: number; process_cpu_system_ns: number; peak_rss_bytes: number; retained_rss_bytes: number | null; allocations: number | null; allocated_bytes: number | null; instructions: number; cycles: number; energy_joules: number; thermal_state: string };
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 
+type ProcessRow = { pid: number; parent: number; command: string };
+function processRows(source: string): ProcessRow[] { return source.split("\n").map((line) => { const match = /^\s*([0-9]+)\s+([0-9]+)\s+(.+)$/.exec(line); return match ? { pid: Number(match[1]), parent: Number(match[2]), command: match[3].trim() } : null; }).filter(Boolean) as ProcessRow[]; }
+function processBasename(command: string): [string, string] { const executable = command.split(/\s+/, 1)[0], slash = executable.lastIndexOf("/"); return [executable, executable.slice(slash + 1)]; }
+function relatedProcesses(rows: ProcessRow[], selfPid: number): Set<number> {
+  const parents = new Map(rows.map((row) => [row.pid, row.parent])), related = new Set<number>(), descendants = new Set<number>([selfPid]);
+  for (let pid = selfPid; pid > 0 && !related.has(pid); pid = parents.get(pid) || 0) related.add(pid);
+  let changed = true;
+  while (changed) { changed = false; for (const row of rows) if (!descendants.has(row.pid) && descendants.has(row.parent)) { descendants.add(row.pid); changed = true; } }
+  for (const pid of descendants) related.add(pid);
+  return related;
+}
+export function competingEvidenceProcesses(source: string, selfPid: number): string[] {
+  const rows = processRows(source), related = relatedProcesses(rows, selfPid);
+  return rows.filter((row) => {
+    if (related.has(row.pid)) return false;
+    const [executable, basename] = processBasename(row.command);
+    if (basename === "zig" || basename === "maker") return true;
+    if (["home-url-final", "unit-test-parallel", "threads-test", "test262", "frontend-parse-benchmark"].includes(basename)) return true;
+    return basename === "test" && (executable.includes("/.zig-cache/") || executable.startsWith("/tmp/home-") || executable.startsWith("/private/tmp/home-"));
+  }).map((row) => `${row.pid} ${row.command}`);
+}
+function requireNoCompetingEvidenceProcess(phase: string, listing = commandOutput(["ps", "-axo", "pid=,ppid=,command="], ""), selfPid = process.pid): void {
+  const competitors = competingEvidenceProcesses(listing, selfPid);
+  requireValue(competitors.length === 0, `competing build/test process detected ${phase}:\n${competitors.join("\n")}`);
+}
+
 export function commandOutput(arguments_: string[], defaultValue = "unknown"): string { const result = run(arguments_); return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : defaultValue; }
 export function resolveRevision(revision: string, repository = ROOT): string { const resolved = commandOutput(["git", "-C", repository, "rev-parse", `${revision}^{commit}`], ""); requireValue(REVISION_RE.test(resolved), `cannot resolve commit: ${revision}`); return resolved; }
 export function validateExactParent(parent: string, candidate: string, repository = ROOT): [string, string] { const parentRevision = resolveRevision(parent, repository), candidateRevision = resolveRevision(candidate, repository), candidateParent = resolveRevision(`${candidateRevision}^1`, repository); requireValue(candidateParent === parentRevision, `candidate first parent is ${candidateParent}, not requested exact parent ${parentRevision}`); return [parentRevision, candidateRevision]; }
@@ -43,8 +69,10 @@ export function parseFrontendAllocations(stdout: string, mode: string, workload:
   return [allocations, allocatedBytes];
 }
 export function runOne(binary: string, mode: string, workload: string, jobs: number, lanes: number): RunnerRow {
+  requireNoCompetingEvidenceProcess("before benchmark invocation");
   const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", binary, ...runnerArguments(mode, workload, jobs, lanes)]; console.error(`+ ${command.join(" ")}`);
   const completed = run(command); requireValue(completed.exitCode === 0, completed.stderr || `benchmark exited ${completed.exitCode}`);
+  requireNoCompetingEvidenceProcess("after benchmark invocation");
   const [engine, elapsed_ns, checksum] = parseBenchmark(completed.stdout, mode, workload, lanes, jobs);
   const counters: any = parseDarwinCounters(completed.stdout, mode, workload, jobs), thermal: any = parseDarwinThermalState(completed.stdout, mode, workload, jobs);
   requireValue(counters.instructions.status === "measured" && counters.cycles.status === "measured" && counters.process_energy_nj.status === "measured", "exact-parent Darwin counters are unavailable");
@@ -110,7 +138,15 @@ export function selfTest(): void {
   const cacheRequired = summarize(syntheticSamples([100, 101], [99, 100], schema), schema, "quiet_reference", ["cache_traffic"]); requireValue(cacheRequired.status === "blocked_efficiency_evidence" && JSON.stringify(cacheRequired.efficiency.unmet_metrics) === '["cache_misses"]', "unavailable cache evidence must block a cache-traffic publication");
   const samples = syntheticSamples([100, 101], [99, 100], schema), metadata: any = {}; for (const field of schema.required_metadata) metadata[field] = "test"; Object.assign(metadata, { parent_revision: "a".repeat(40), candidate_revision: "b".repeat(40), candidate_first_parent: "a".repeat(40), zig_gc_revision: "c".repeat(40), zig_regex_revision: "d".repeat(40), workload_source_sha256: "1".repeat(64), parent_binary_sha256: "2".repeat(64), candidate_binary_sha256: "3".repeat(64), host_class: "diagnostic", material_change_categories: ["cpu_work"], mode: "single", workload: "representative_json", lanes: 1, jobs: 2200, expected_checksum: 324952086, samples: 2, timed_boundary: "test boundary" }); validateArtifact({ schema_version: schema.schema_version, profile_id: schema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarize(samples, schema, "diagnostic") }, schema);
   const directory = temporaryDirectory("zig-js-exact-parent"); try { checked(["git", "init", "-q", directory], "initialize clean-worktree fixture"); checked(["git", "-C", directory, "config", "user.name", "Test"], "configure fixture name"); checked(["git", "-C", directory, "config", "user.email", "test@example.com"], "configure fixture email"); const tracked = `${directory}/tracked.txt`; for (let commit = 0; commit < 3; commit += 1) { writeText(tracked, `fixture ${commit}\n`); checked(["git", "-C", directory, "add", "tracked.txt"], "stage fixture"); checked(["git", "-C", directory, "commit", "-qm", `fixture ${commit}`], "commit fixture"); } const head = resolveRevision("HEAD", directory), parent = resolveRevision("HEAD^1", directory); requireValue(JSON.stringify(validateExactParent(parent, head, directory)) === JSON.stringify([parent, head]), "fixture exact parent did not validate"); expectFailure(() => validateExactParent(resolveRevision("HEAD~2", directory), head, directory), "not requested exact parent"); requireClean(directory); writeText(tracked, "dirty\n"); expectFailure(() => requireClean(directory), "dirty tracked worktree"); } finally { removeTemporaryDirectory(directory); }
-  console.log("OK exact-parent self-test: identity, pairing, regression, and cleanliness gates verified");
+  const processFixture = [
+    "100 1 /Applications/Host/app", "110 100 /Applications/Host/codex", "120 110 /tool/home-tool run exact-parent", "121 120 /usr/bin/time runner", "122 121 /repo/zig-out/bin/frontend-parse-benchmark single row 1 1",
+    "200 100 /opt/zig build test", "210 100 /cache/maker build test", "220 100 /private/tmp/home-url-final", "230 100 /tmp/home-ts-checker/o/test --listen=-", "240 100 /repo/.zig-cache/o/hash/test --listen=-", "250 100 /repo/zig-out/bin/test262 --diag test/language", "260 100 /repo/zig-out/bin/unit-test-parallel", "270 100 /repo/zig-out/bin/threads-test", "280 100 /other/frontend-parse-benchmark single row 1 1", "290 100 /usr/bin/python3 unrelated.py",
+  ].join("\n");
+  const expectedCompetitors = ["200 /opt/zig build test", "210 /cache/maker build test", "220 /private/tmp/home-url-final", "230 /tmp/home-ts-checker/o/test --listen=-", "240 /repo/.zig-cache/o/hash/test --listen=-", "250 /repo/zig-out/bin/test262 --diag test/language", "260 /repo/zig-out/bin/unit-test-parallel", "270 /repo/zig-out/bin/threads-test", "280 /other/frontend-parse-benchmark single row 1 1"];
+  requireValue(JSON.stringify(competingEvidenceProcesses(processFixture, 120)) === JSON.stringify(expectedCompetitors), "competing evidence-process classification drift");
+  expectFailure(() => requireNoCompetingEvidenceProcess("before fixture", processFixture, 120), "competing build/test process detected before fixture");
+  requireNoCompetingEvidenceProcess("clean fixture", processFixture.split("\n").filter((line) => !/^(200|210|220|230|240|250|260|270|280) /.test(line)).join("\n"), 120);
+  console.log("OK exact-parent self-test: identity, pairing, regression, cleanliness, and competing-job gates verified");
 }
 
 function main(): void {
