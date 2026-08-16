@@ -314,6 +314,32 @@ pub const Lexer = struct {
         return self.lexIdentNameWithOwnedPrefix("", validated_start_len);
     }
 
+    /// Advance across complete ASCII IdentifierPart blocks only when every lane
+    /// is valid. A mixed block stays untouched so the caller can distinguish an
+    /// escape, non-ASCII scalar, malformed byte, or exact token delimiter at the
+    /// original boundary. The scalar tail also covers short identifiers.
+    inline fn consumeAsciiIdentPart(self: *Lexer) void {
+        const Block = @Vector(8, u8);
+        const lower_a: Block = @splat('a');
+        const lower_z: Block = @splat('z');
+        const upper_a: Block = @splat('A');
+        const upper_z: Block = @splat('Z');
+        const digit_0: Block = @splat('0');
+        const digit_9: Block = @splat('9');
+        const underscore: Block = @splat('_');
+        const dollar: Block = @splat('$');
+        while (self.src.len - self.i >= @sizeOf(Block)) {
+            const bytes: Block = self.src[self.i..][0..@sizeOf(Block)].*;
+            const valid = ((bytes >= lower_a) & (bytes <= lower_z)) |
+                ((bytes >= upper_a) & (bytes <= upper_z)) |
+                ((bytes >= digit_0) & (bytes <= digit_9)) |
+                (bytes == underscore) | (bytes == dollar);
+            if (!@reduce(.And, valid)) break;
+            self.i += @sizeOf(Block);
+        }
+        while (self.i < self.src.len and isIdentPart(self.src[self.i])) self.i += 1;
+    }
+
     /// `owned_prefix` participates only when an escape requires owned storage.
     /// Private names pass `#` so their decoder builds the complete token once;
     /// the ordinary source-backed path still returns only the identifier span.
@@ -321,22 +347,28 @@ pub const Lexer = struct {
     /// Unicode start exactly once; zero leaves the leading escape for decoding.
     fn lexIdentNameWithOwnedPrefix(self: *Lexer, owned_prefix: []const u8, validated_start_len: usize) LexError![]const u8 {
         const start = self.i;
-        var first = validated_start_len == 0;
+        if (validated_start_len == 0) {
+            // identStartLen uses zero only for a leading `\u` escape. Entering
+            // the owned decoder directly removes first-vs-part work from every
+            // raw continuation byte while preserving its failure path.
+            if (self.src[self.i] != '\\') return LexError.UnexpectedCharacter;
+            return self.lexEscapedIdentName(start, true, owned_prefix);
+        }
         self.i += validated_start_len;
         while (self.i < self.src.len) {
             const c = self.src[self.i];
-            if (c == '\\') return self.lexEscapedIdentName(start, first, owned_prefix);
+            if (c == '\\') return self.lexEscapedIdentName(start, false, owned_prefix);
             if (c < 0x80) {
-                if (!(if (first) isIdentStart(c) else isIdentPart(c))) break;
-                self.i += 1;
+                const before = self.i;
+                self.consumeAsciiIdentPart();
+                if (self.i == before) break;
             } else {
                 const len = std.unicode.utf8ByteSequenceLength(c) catch break;
                 if (self.i + len > self.src.len) break;
                 const cp = std.unicode.utf8Decode(self.src[self.i .. self.i + len]) catch break;
-                if (!(if (first) isIdStartCp(cp) else isIdContinueCp(cp))) break;
+                if (!isIdContinueCp(cp)) break;
                 self.i += len;
             }
-            first = false;
         }
         self.last_identifier_escaped = false;
         return self.src[start..self.i];
@@ -1780,6 +1812,76 @@ test "lexer borrows ordinary identifiers and owns escaped decoding" {
         var invalid_private = Lexer.init(invalid_arena.allocator(), invalid_private_source);
         try std.testing.expectError(LexError.UnexpectedCharacter, invalid_private.next());
     }
+}
+
+test "lexer ASCII identifier blocks preserve exact token boundaries" {
+    const raw_cases = [_][]const u8{
+        "abcdefgh+", // scalar tail ends immediately before one full block
+        "abcdefghi+", // one complete continuation block
+        "abcdefghij+", // one block plus a one-byte tail
+        "abcdefghijklmnop+", // one block plus a seven-byte tail
+        "abcdefghijklmnopq+", // two complete continuation blocks
+        "abcdefghijklmnopqr+", // two blocks plus a one-byte tail
+        "abcdefgh_01234567$rest+", // all ASCII IdentifierPart classes
+        "abcdefghiπrest+", // Unicode continuation after a complete block
+    };
+    for (raw_cases) |source| {
+        var no_memory: [0]u8 = .{};
+        var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+        var lexer = Lexer.init(failing.allocator(), source);
+        const identifier = try lexer.next();
+        try std.testing.expectEqual(TokenKind.identifier, identifier.kind);
+        try std.testing.expectEqualStrings(source[0 .. source.len - 1], identifier.text);
+        try std.testing.expectEqual(@as(usize, 0), identifier.pos);
+        try std.testing.expectEqual(source.len - 1, identifier.end);
+        try std.testing.expect(!identifier.escaped_identifier);
+        try std.testing.expectEqual(TokenKind.plus, (try lexer.next()).kind);
+        try std.testing.expectEqual(TokenKind.eof, (try lexer.next()).kind);
+    }
+
+    const escaped_cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "\\u0061bcdefgh+", .expected = "abcdefgh" },
+        .{ .source = "abcdefg\\u0068ij+", .expected = "abcdefghij" },
+        .{ .source = "abcdefgh\\u0069j+", .expected = "abcdefghij" },
+        .{ .source = "abcdefghi\\u006aklmnopqr+", .expected = "abcdefghijklmnopqr" },
+    };
+    for (escaped_cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), case.source);
+        const identifier = try lexer.next();
+        try std.testing.expectEqual(TokenKind.identifier, identifier.kind);
+        try std.testing.expectEqualStrings(case.expected, identifier.text);
+        try std.testing.expectEqual(@as(usize, 0), identifier.pos);
+        try std.testing.expectEqual(case.source.len - 1, identifier.end);
+        try std.testing.expect(identifier.escaped_identifier);
+        try std.testing.expectEqual(TokenKind.plus, (try lexer.next()).kind);
+        try std.testing.expectEqual(TokenKind.eof, (try lexer.next()).kind);
+    }
+
+    const private_cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "#abcdefghijklmnopq+", .expected = "#abcdefghijklmnopq" },
+        .{ .source = "#abcdefghi\\u006aklmnopqr+", .expected = "#abcdefghijklmnopqr" },
+    };
+    for (private_cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var lexer = Lexer.init(arena.allocator(), case.source);
+        const private_name = try lexer.next();
+        try std.testing.expectEqual(TokenKind.private_name, private_name.kind);
+        try std.testing.expectEqualStrings(case.expected, private_name.text);
+        try std.testing.expectEqual(@as(usize, 0), private_name.pos);
+        try std.testing.expectEqual(case.source.len - 1, private_name.end);
+        try std.testing.expectEqual(TokenKind.plus, (try lexer.next()).kind);
+        try std.testing.expectEqual(TokenKind.eof, (try lexer.next()).kind);
+    }
+
+    const malformed_source = "abcdefghi\xff";
+    var malformed = Lexer.init(std.testing.allocator, malformed_source);
+    const prefix = try malformed.next();
+    try std.testing.expectEqualStrings("abcdefghi", prefix.text);
+    try std.testing.expectEqual(@as(usize, 9), prefix.end);
+    try std.testing.expectError(LexError.UnexpectedCharacter, malformed.next());
 }
 
 test "lexer enforces Unicode 17 identifier start and continue properties" {
