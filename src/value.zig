@@ -1195,6 +1195,90 @@ pub const IntlDateTimeFormatData = struct {
     }
 };
 
+/// Fully resolved, immutable Intl.Collator state. Constructor option
+/// observation completes before publication; the locale is copied into
+/// object-owned backing while every other field is a closed native enum.
+pub const IntlCollatorData = struct {
+    pub const Usage = enum(u8) {
+        sort,
+        search,
+
+        pub fn fromString(name: []const u8) Usage {
+            return if (std.mem.eql(u8, name, "search")) .search else .sort;
+        }
+
+        pub fn string(self: Usage) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    pub const Collation = enum(u8) {
+        default,
+        emoji,
+        eor,
+        phonebk,
+
+        pub fn fromString(name: []const u8) Collation {
+            if (std.mem.eql(u8, name, "emoji")) return .emoji;
+            if (std.mem.eql(u8, name, "eor")) return .eor;
+            if (std.mem.eql(u8, name, "phonebk")) return .phonebk;
+            return .default;
+        }
+
+        pub fn string(self: Collation) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    pub const Sensitivity = enum(u8) {
+        base,
+        accent,
+        case,
+        variant,
+
+        pub fn fromString(name: []const u8) Sensitivity {
+            if (std.mem.eql(u8, name, "base")) return .base;
+            if (std.mem.eql(u8, name, "accent")) return .accent;
+            if (std.mem.eql(u8, name, "case")) return .case;
+            return .variant;
+        }
+
+        pub fn string(self: Sensitivity) []const u8 {
+            return @tagName(self);
+        }
+    };
+
+    pub const CaseFirst = enum(u8) {
+        upper,
+        lower,
+        off,
+
+        pub fn fromString(name: []const u8) CaseFirst {
+            if (std.mem.eql(u8, name, "upper")) return .upper;
+            if (std.mem.eql(u8, name, "lower")) return .lower;
+            return .off;
+        }
+
+        pub fn string(self: CaseFirst) []const u8 {
+            return if (self == .off) "false" else @tagName(self);
+        }
+    };
+
+    locale: []const u8 = "en",
+    usage: Usage = .sort,
+    collation: Collation = .default,
+    sensitivity: Sensitivity = .variant,
+    case_first: CaseFirst = .off,
+    ignore_punctuation: bool = false,
+    numeric: bool = false,
+    owned_locale: ?[]u8 = null,
+
+    pub fn deinit(self: *IntlCollatorData, allocator: std.mem.Allocator) void {
+        if (self.owned_locale) |owned| allocator.free(owned);
+        self.owned_locale = null;
+    }
+};
+
 /// State for a lazy Iterator Helper (the object returned by `map`/`filter`/…).
 pub const IterHelper = struct {
     pub const Kind = enum(u8) { map, filter, take, drop, flat_map, wrap, concat, zip, zip_keyed };
@@ -1330,6 +1414,7 @@ pub const ObjectRareTag = enum(u8) {
     buffer_view,
     intl_number_format,
     intl_date_time_format,
+    intl_collator,
     temporal,
     promise,
     constructor,
@@ -1429,6 +1514,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     },
     intl_number_format: struct { ptr: ?*IntlNumberFormatData = null },
     intl_date_time_format: struct { ptr: ?*IntlDateTimeFormatData = null },
+    intl_collator: struct { ptr: ?*IntlCollatorData = null },
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
@@ -1667,6 +1753,7 @@ pub const ObjectBackingFlags = packed struct {
     temporal: bool = false,
     intl_number_format: bool = false,
     intl_date_time_format: bool = false,
+    intl_collator: bool = false,
     arg_map_names: bool = false,
     arg_map_severed: bool = false,
 };
@@ -2915,6 +3002,22 @@ pub const Object = struct {
         if (cold.hasRare(.intl_date_time_format)) cold.rare.intl_date_time_format.ptr = null;
     }
 
+    pub inline fn intlCollatorData(self: *const Object) ?*IntlCollatorData {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.intl_collator)) return null;
+        return cold.rare.intl_collator.ptr;
+    }
+
+    pub fn setIntlCollatorData(self: *Object, fallback: std.mem.Allocator, data: *IntlCollatorData) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .intl_collator, .{});
+        state.ptr = data;
+    }
+
+    pub fn clearIntlCollatorData(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.intl_collator)) cold.rare.intl_collator.ptr = null;
+    }
+
     pub fn setTemporalData(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .temporal, .{});
         state.ptr = data;
@@ -3258,6 +3361,17 @@ pub const Object = struct {
         data.deinit(a);
         a.destroy(data);
         self.deactivateBacking("intl_date_time_format");
+    }
+
+    pub fn intlCollatorAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "intl_collator");
+    }
+
+    pub fn destroyUninstalledIntlCollator(self: *Object, fallback: std.mem.Allocator, data: *IntlCollatorData) void {
+        const a = self.backingAllocatorIfActive() orelse fallback;
+        data.deinit(a);
+        a.destroy(data);
+        self.deactivateBacking("intl_collator");
     }
 
     pub fn destroyUninstalledTemporal(self: *Object, fallback: std.mem.Allocator, data: *TemporalData) void {

@@ -18402,6 +18402,40 @@ test "Context heap_limit_bytes fails closed on allocation pressure" {
     try std.testing.expectEqual(failed_stats.limit_bytes - failed_stats.used_bytes, failed_stats.remaining_bytes);
 }
 
+test "Intl.Collator compare reclaims adversarial sort keys under a heap limit" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 32 * 1024 * 1024,
+        .step_budget = std.math.maxInt(u64),
+    });
+    defer ctx.destroy();
+    const before = ctx.heapBudgetStats().?.used_bytes;
+
+    const result = try ctx.evaluate(
+        \\const collator = new Intl.Collator("en-u-kn", {
+        \\  numeric: true,
+        \\  sensitivity: "variant",
+        \\  ignorePunctuation: true
+        \\});
+        \\const stem = "A-\u00e9.z_09".repeat(64);
+        \\const values = [];
+        \\for (let index = 0; index < 16; index++)
+        \\  values.push(stem + String((index * 17) % 97));
+        \\let checksum = 0;
+        \\for (let round = 0; round < 40; round++) {
+        \\  values.reverse();
+        \\  values.sort(collator.compare);
+        \\  checksum = (checksum + values[round % values.length].length) % 1000003;
+        \\}
+        \\checksum > 0 && values.length === 16;
+    );
+    try std.testing.expect(result.asBool());
+    const stats = ctx.heapBudgetStats().?;
+    try std.testing.expect(stats.used_bytes -| before < 4 * 1024 * 1024);
+    try std.testing.expect(stats.used_bytes < stats.limit_bytes);
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+}
+
 test "Context step_budget keeps the default runaway guard and honours an override" {
     // The guard still fires for an ordinary embedding: `evaluate` must return
     // rather than spin forever on a runaway script.

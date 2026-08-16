@@ -26417,6 +26417,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                 }
                 try self.setProp(o, "\x00opts", Value.obj(ro));
                 try o.setAttr(self.arena, "\x00opts", .{ .writable = false, .enumerable = false, .configurable = false });
+                try installCollatorData(self, o, resolved, ro);
             } else if (comptime std.mem.eql(u8, service, "DurationFormat")) {
                 const raw = if (args.len > 1) args[1] else Value.undef();
                 // GetOptionsObject: undefined -> none; a non-Object (incl. Symbol/
@@ -27919,19 +27920,7 @@ fn collatorResolveLocale(self: *Interpreter, out: *value.Object, tag: []const u8
     return .{ .numeric = numeric, .case_first = case_first, .collation = collation };
 }
 
-const CollatorOptions = struct {
-    locale: []const u8 = "en",
-    usage: []const u8 = "sort",
-    collation: []const u8 = "default",
-    sensitivity: []const u8 = "variant",
-    ignore_punctuation: bool = false,
-    /// `numeric` collation (the `kn` extension / `numeric` option): digit runs
-    /// compare by numeric value, so "a2" < "a10".
-    numeric: bool = false,
-    /// `caseFirst` ("upper"/"lower"/"false"): "upper" sorts uppercase before
-    /// lowercase at the tertiary (case) level.
-    case_first: []const u8 = "false",
-};
+const CollatorOptions = value.IntlCollatorData;
 
 fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalError!CollatorOptions {
     const locs = try canonicalizeLocaleList(self, locales);
@@ -27941,30 +27930,78 @@ fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalE
         .ignore_punctuation = std.mem.eql(u8, parseTriple(locale).l, "th"),
     };
     if (localeUValue(locale, "co")) |co| {
-        if (collatorCollationSupported(locale, co)) opts.collation = co;
+        if (collatorCollationSupported(locale, co)) opts.collation = .fromString(co);
     }
     // The `-u-kn` locale extension turns on numeric collation ("kn" or "kn-true";
     // "kn-false" turns it off). The `numeric` option below overrides it.
     if (localeUValue(locale, "kn")) |kn| opts.numeric = !std.mem.eql(u8, kn, "false");
-    if (localeUValue(locale, "kf")) |kf| opts.case_first = kf;
+    if (localeUValue(locale, "kf")) |kf| opts.case_first = .fromString(kf);
     if (!options.isUndefined()) {
         const raw = Value.obj(try self.toObject(options));
-        if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| opts.usage = u;
+        if (try dtfGetStr(self, raw, "usage", &.{ "sort", "search" }, null)) |u| opts.usage = .fromString(u);
         _ = try dtfGetStr(self, raw, "localeMatcher", &.{ "lookup", "best fit" }, "best fit");
-        if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| opts.case_first = cf;
-        if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |s| opts.sensitivity = s;
+        if (try dtfGetStr(self, raw, "caseFirst", &.{ "upper", "lower", "false" }, null)) |cf| opts.case_first = .fromString(cf);
+        if (try dtfGetStr(self, raw, "sensitivity", &.{ "base", "accent", "case", "variant" }, null)) |s| opts.sensitivity = .fromString(s);
         const ip = try self.getProperty(raw, "ignorePunctuation");
         if (!ip.isUndefined()) opts.ignore_punctuation = ip.toBoolean();
         const collation = try self.getProperty(raw, "collation");
         if (!collation.isUndefined()) {
             const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(collation));
             if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
-            if (collatorCollationSupported(locale, cstr)) opts.collation = cstr;
+            if (collatorCollationSupported(locale, cstr)) opts.collation = .fromString(cstr);
         }
         const num = try self.getProperty(raw, "numeric");
         if (!num.isUndefined()) opts.numeric = num.toBoolean();
     }
     return opts;
+}
+
+/// Resolve the already-observed constructor state into a closed native record.
+/// This reads only the engine-owned normalized options object, never the user's
+/// options bag, and runs once before the Collator is published.
+fn collatorDataFromNormalized(locale: []const u8, record: *value.Object) CollatorOptions {
+    var opts = CollatorOptions{
+        .locale = locale,
+        .ignore_punctuation = std.mem.eql(u8, parseTriple(locale).l, "th"),
+    };
+    if (localeUValue(locale, "co")) |collation| {
+        if (collatorCollationSupported(locale, collation)) opts.collation = .fromString(collation);
+    }
+    if (localeUValue(locale, "kn")) |numeric| opts.numeric = !std.mem.eql(u8, numeric, "false");
+    if (localeUValue(locale, "kf")) |case_first| opts.case_first = .fromString(case_first);
+    if (record.getOwn("usage")) |usage| {
+        if (usage.isString()) opts.usage = .fromString(usage.asStr());
+    }
+    if (record.getOwn("caseFirst")) |case_first| {
+        if (case_first.isString()) opts.case_first = .fromString(case_first.asStr());
+    }
+    if (record.getOwn("sensitivity")) |sensitivity| {
+        if (sensitivity.isString()) opts.sensitivity = .fromString(sensitivity.asStr());
+    }
+    if (record.getOwn("ignorePunctuation")) |ignore_punctuation| {
+        opts.ignore_punctuation = ignore_punctuation.toBoolean();
+    }
+    if (record.getOwn("collation")) |collation| {
+        if (collation.isString() and collatorCollationSupported(locale, collation.asStr()))
+            opts.collation = .fromString(collation.asStr());
+    }
+    if (record.getOwn("numeric")) |numeric| {
+        opts.numeric = numeric.toBoolean();
+    }
+    return opts;
+}
+
+fn installCollatorData(self: *Interpreter, collator: *value.Object, locale: []const u8, record: *value.Object) EvalError!void {
+    const resolved = collatorDataFromNormalized(locale, record);
+    const allocator = try collator.intlCollatorAllocator(self.arena);
+    const data = try allocator.create(value.IntlCollatorData);
+    var installed = false;
+    errdefer if (!installed) collator.destroyUninstalledIntlCollator(self.arena, data);
+    data.* = resolved;
+    data.owned_locale = try allocator.dupe(u8, resolved.locale);
+    data.locale = data.owned_locale.?;
+    try collator.setIntlCollatorData(self.arena, data);
+    installed = true;
 }
 
 fn isCombiningMarkStart(s: []const u8, i: usize) ?usize {
@@ -27976,8 +28013,8 @@ fn appendLowerAscii(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, b: u
     try buf.append(a, if (b >= 'A' and b <= 'Z') b + 32 else b);
 }
 
-fn collatorKey(self: *Interpreter, s: []const u8, opts: CollatorOptions, comptime keep_accents: bool, comptime keep_case: bool) EvalError![]const u8 {
-    const nfd = try unicode_normalize.normalize(self.arena, s, .nfd);
+fn collatorKey(allocator: std.mem.Allocator, s: []const u8, opts: CollatorOptions, comptime keep_accents: bool, comptime keep_case: bool) EvalError![]const u8 {
+    const nfd = try unicode_normalize.normalize(allocator, s, .nfd);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     while (i < nfd.len) {
@@ -27997,11 +28034,11 @@ fn collatorKey(self: *Interpreter, s: []const u8, opts: CollatorOptions, comptim
             var matched = false;
             for (accents) |a| if (std.mem.eql(u8, two, a.s)) {
                 const ch = if (keep_case and a.upper) std.ascii.toUpper(a.base) else a.base;
-                try out.append(self.arena, ch);
+                try out.append(allocator, ch);
                 if (a.umlaut and std.mem.eql(u8, parseTriple(opts.locale).l, "de") and
-                    (std.mem.eql(u8, opts.usage, "search") or std.mem.eql(u8, opts.collation, "phonebk")))
-                    try out.append(self.arena, 'e');
-                if (keep_accents) try out.appendSlice(self.arena, a.mark);
+                    (opts.usage == .search or opts.collation == .phonebk))
+                    try out.append(allocator, 'e');
+                if (keep_accents) try out.appendSlice(allocator, a.mark);
                 i += 2;
                 matched = true;
                 break;
@@ -28009,7 +28046,7 @@ fn collatorKey(self: *Interpreter, s: []const u8, opts: CollatorOptions, comptim
             if (matched) continue;
         }
         if (isCombiningMarkStart(nfd, i)) |n| {
-            if (keep_accents) try out.appendSlice(self.arena, nfd[i .. i + n]);
+            if (keep_accents) try out.appendSlice(allocator, nfd[i .. i + n]);
             i += n;
             continue;
         }
@@ -28018,31 +28055,31 @@ fn collatorKey(self: *Interpreter, s: []const u8, opts: CollatorOptions, comptim
             continue;
         }
         if (std.mem.eql(u8, parseTriple(opts.locale).l, "de") and
-            (std.mem.eql(u8, opts.usage, "search") or std.mem.eql(u8, opts.collation, "phonebk")) and
+            (opts.usage == .search or opts.collation == .phonebk) and
             i + 2 < nfd.len and (nfd[i] == 'A' or nfd[i] == 'a' or nfd[i] == 'O' or nfd[i] == 'o' or nfd[i] == 'U' or nfd[i] == 'u') and
             nfd[i + 1] == 0xcc and nfd[i + 2] == 0x88)
         {
             const base = if (nfd[i] >= 'A' and nfd[i] <= 'Z') nfd[i] + 32 else nfd[i];
-            try out.append(self.arena, base);
-            try out.append(self.arena, 'e');
+            try out.append(allocator, base);
+            try out.append(allocator, 'e');
             i += 3;
             continue;
         }
         if (keep_case) {
-            try out.append(self.arena, nfd[i]);
+            try out.append(allocator, nfd[i]);
         } else if (nfd[i] < 0x80) {
-            try appendLowerAscii(&out, self.arena, nfd[i]);
+            try appendLowerAscii(&out, allocator, nfd[i]);
         } else {
             const seq_len: usize = std.unicode.utf8ByteSequenceLength(nfd[i]) catch 1;
             const j = i + seq_len;
-            const lowered = try unicode_case.toLower(self.arena, nfd[i..@min(j, nfd.len)]);
-            try out.appendSlice(self.arena, lowered);
+            const lowered = try unicode_case.toLower(allocator, nfd[i..@min(j, nfd.len)]);
+            try out.appendSlice(allocator, lowered);
             i = j;
             continue;
         }
         i += 1;
     }
-    return out.toOwnedSlice(self.arena);
+    return out.toOwnedSlice(allocator);
 }
 
 fn collatorCaseOrder(a: []const u8, b: []const u8) i32 {
@@ -28070,7 +28107,7 @@ fn cmpBytes(a: []const u8, b: []const u8) i32 {
 }
 
 fn collatorGermanSearchAeVsAUmlaut(x: []const u8, y: []const u8, opts: CollatorOptions) ?i32 {
-    if (!std.mem.eql(u8, opts.usage, "search") or !std.mem.eql(u8, parseTriple(opts.locale).l, "de")) return null;
+    if (opts.usage != .search or !std.mem.eql(u8, parseTriple(opts.locale).l, "de")) return null;
     const x_ae = std.mem.eql(u8, x, "AE") or std.mem.eql(u8, x, "Ae") or std.mem.eql(u8, x, "ae");
     const y_ae = std.mem.eql(u8, y, "AE") or std.mem.eql(u8, y, "Ae") or std.mem.eql(u8, y, "ae");
     const x_umlaut = std.mem.eql(u8, x, "\xc3\x84") or std.mem.eql(u8, x, "\xc3\xa4");
@@ -28103,7 +28140,7 @@ fn collatorDigitRunCmp(a: []const u8, b: []const u8) i32 {
 
 /// Numeric collation: walk both strings, comparing maximal ASCII-digit runs by
 /// value and the intervening non-digit segments with the ordinary collator.
-fn collatorNumericCompare(self: *Interpreter, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
+fn collatorNumericCompare(allocator: std.mem.Allocator, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
     var plain = opts;
     plain.numeric = false;
     var i: usize = 0;
@@ -28121,7 +28158,7 @@ fn collatorNumericCompare(self: *Interpreter, x: []const u8, y: []const u8, opts
             while (i < x.len and !std.ascii.isDigit(x[i])) i += 1;
             const ys = j;
             while (j < y.len and !std.ascii.isDigit(y[j])) j += 1;
-            const c = try collatorCompareStrings(self, x[xs..i], y[ys..j], plain);
+            const c = try collatorCompareStringsWithAllocator(allocator, x[xs..i], y[ys..j], plain);
             if (c != 0) return c;
         }
     }
@@ -28130,8 +28167,8 @@ fn collatorNumericCompare(self: *Interpreter, x: []const u8, y: []const u8, opts
     return 0;
 }
 
-fn collatorCompareStrings(self: *Interpreter, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
-    if (opts.numeric) return collatorNumericCompare(self, x, y, opts);
+fn collatorCompareStringsWithAllocator(allocator: std.mem.Allocator, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
+    if (opts.numeric) return collatorNumericCompare(allocator, x, y, opts);
     if (collatorGermanSearchAeVsAUmlaut(x, y, opts)) |cmp| return cmp;
     if ((std.mem.eql(u8, x, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, y, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")) or
         (std.mem.eql(u8, y, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, x, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")))
@@ -28139,26 +28176,37 @@ fn collatorCompareStrings(self: *Interpreter, x: []const u8, y: []const u8, opts
     if ((std.mem.eql(u8, x, "\xf0\xaf\xa0\xab") and std.mem.eql(u8, y, "\xe5\x8c\x97")) or
         (std.mem.eql(u8, y, "\xf0\xaf\xa0\xab") and std.mem.eql(u8, x, "\xe5\x8c\x97")))
         return 0;
-    const primary_x = try collatorKey(self, x, opts, false, false);
-    const primary_y = try collatorKey(self, y, opts, false, false);
+    const primary_x = try collatorKey(allocator, x, opts, false, false);
+    const primary_y = try collatorKey(allocator, y, opts, false, false);
     const primary = cmpBytes(primary_x, primary_y);
     if (primary != 0) return primary;
-    if (std.mem.eql(u8, opts.sensitivity, "base")) return 0;
+    if (opts.sensitivity == .base) return 0;
 
-    const accent_x = try collatorKey(self, x, opts, true, false);
-    const accent_y = try collatorKey(self, y, opts, true, false);
+    const accent_x = try collatorKey(allocator, x, opts, true, false);
+    const accent_y = try collatorKey(allocator, y, opts, true, false);
     const accent = cmpBytes(accent_x, accent_y);
-    if (std.mem.eql(u8, opts.sensitivity, "accent")) return accent;
+    if (opts.sensitivity == .accent) return accent;
 
-    const case_x = try collatorKey(self, x, opts, false, true);
-    const case_y = try collatorKey(self, y, opts, false, true);
+    const case_x = try collatorKey(allocator, x, opts, false, true);
+    const case_y = try collatorKey(allocator, y, opts, false, true);
     // caseFirst:"upper" reverses the default (lowercase-first) tertiary order.
-    const case_cmp = collatorCaseOrder(case_x, case_y) * @as(i32, if (std.mem.eql(u8, opts.case_first, "upper")) -1 else 1);
-    if (std.mem.eql(u8, opts.sensitivity, "case")) return case_cmp;
+    const case_cmp = collatorCaseOrder(case_x, case_y) * @as(i32, if (opts.case_first == .upper) -1 else 1);
+    if (opts.sensitivity == .case) return case_cmp;
     if (opts.ignore_punctuation) return 0;
     if (accent != 0) return accent;
     if (case_cmp != 0) return case_cmp;
-    return cmpBytes(try unicode_normalize.normalize(self.arena, x, .nfd), try unicode_normalize.normalize(self.arena, y, .nfd));
+    return cmpBytes(try unicode_normalize.normalize(allocator, x, .nfd), try unicode_normalize.normalize(allocator, y, .nfd));
+}
+
+fn collatorCompareStrings(self: *Interpreter, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
+    // Collation keys are invocation-local. A Context supplies its freeable,
+    // budget-accounted backing allocator; the one arena teardown releases all
+    // normalization and case-folding buffers, including recursive numeric
+    // segment comparisons. Standalone arena interpreters preserve their
+    // established lifetime fallback.
+    var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer scratch.deinit();
+    return collatorCompareStringsWithAllocator(scratch.allocator(), x, y, opts);
 }
 
 /// Whether a locale uses the South-Asian (lakh/crore) digit grouping
@@ -29662,13 +29710,11 @@ fn installIntlCompare(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, im
 
 fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!intlBrandOk(this, "Collator")) return self.throwError("TypeError", "Intl.Collator.prototype.compare on incompatible receiver");
+    if (!this.isObject()) return self.throwError("TypeError", "Intl.Collator.prototype.compare on incompatible receiver");
+    const data = this.asObj().intlCollatorData() orelse return self.throwError("TypeError", "Intl.Collator.prototype.compare on incompatible receiver");
     const x = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const y = try self.toStringWtf8(if (args.len > 1) args[1] else Value.undef());
-    const loc = if (this.asObj().getOwn("\x00locale")) |v| if (v.isString()) v.asStr() else "en" else "en";
-    const ro = if (this.asObj().getOwn("\x00opts")) |v| v else Value.undef();
-    const opts = try collatorOptionsFrom(self, try Value.strAlloc(self.arena, loc), ro);
-    return Value.num(try collatorCompareStrings(self, x, y, opts));
+    return Value.num(try collatorCompareStrings(self, x, y, data.*));
 }
 
 /// ECMA-402 plural categories are a closed vocabulary. Keep them native while
@@ -51100,6 +51146,43 @@ test "Intl.NumberFormat resolved-state publication is OOM-safe" {
             try std.testing.expectEqualStrings("deva", data.numbering_system);
             try std.testing.expectEqual(@as(?u8, 3), data.minimum_significant_digits);
             try std.testing.expectEqual(@as(?u8, 5), data.maximum_significant_digits);
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl.Collator resolved-state publication is OOM-safe" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{
+                .arena = allocator,
+                .env = undefined,
+                .root_shape = root_shape,
+            };
+            var collator = value.Object{};
+            var options = value.Object{};
+            try options.setOwn(allocator, root_shape, "usage", Value.str("search"));
+            try options.setOwn(allocator, root_shape, "collation", Value.str("phonebk"));
+            try options.setOwn(allocator, root_shape, "numeric", Value.boolVal(true));
+            try options.setOwn(allocator, root_shape, "caseFirst", Value.str("upper"));
+            try options.setOwn(allocator, root_shape, "sensitivity", Value.str("accent"));
+            try options.setOwn(allocator, root_shape, "ignorePunctuation", Value.boolVal(true));
+
+            try installCollatorData(&machine, &collator, "de-DE-u-kn-kf-lower", &options);
+            const data = collator.intlCollatorData().?;
+            try std.testing.expectEqualStrings("de-DE-u-kn-kf-lower", data.locale);
+            try std.testing.expectEqual(value.IntlCollatorData.Usage.search, data.usage);
+            try std.testing.expectEqual(value.IntlCollatorData.Collation.phonebk, data.collation);
+            try std.testing.expectEqual(value.IntlCollatorData.CaseFirst.upper, data.case_first);
+            try std.testing.expectEqual(value.IntlCollatorData.Sensitivity.accent, data.sensitivity);
+            try std.testing.expect(data.numeric);
+            try std.testing.expect(data.ignore_punctuation);
         }
     }.check;
     const previous_heap = gc_mod.setActiveHeap(null);
