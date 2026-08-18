@@ -320,6 +320,13 @@ pub const Lexer = struct {
     /// original boundary. The scalar tail also covers short identifiers.
     inline fn consumeAsciiIdentPart(self: *Lexer) void {
         const Block = @Vector(8, u8);
+        // Lane count, taken from the type so the two cannot drift. Deliberately
+        // not the vector's byte size: a vector is padded up to its alignment,
+        // so that is 16 on x86_64 and 8 on aarch64. Sizing the loop by it
+        // happened to match the lane count on one target and not the other,
+        // where it does not even compile — slicing 16 bytes to coerce into an
+        // 8-lane vector is `expected type '@Vector(8, u8)', found '[16]u8'`.
+        const lanes = @typeInfo(Block).vector.len;
         const lower_a: Block = @splat('a');
         const lower_z: Block = @splat('z');
         const upper_a: Block = @splat('A');
@@ -328,14 +335,14 @@ pub const Lexer = struct {
         const digit_9: Block = @splat('9');
         const underscore: Block = @splat('_');
         const dollar: Block = @splat('$');
-        while (self.src.len - self.i >= @sizeOf(Block)) {
-            const bytes: Block = self.src[self.i..][0..@sizeOf(Block)].*;
+        while (self.src.len - self.i >= lanes) {
+            const bytes: Block = self.src[self.i..][0..lanes].*;
             const valid = ((bytes >= lower_a) & (bytes <= lower_z)) |
                 ((bytes >= upper_a) & (bytes <= upper_z)) |
                 ((bytes >= digit_0) & (bytes <= digit_9)) |
                 (bytes == underscore) | (bytes == dollar);
             if (!@reduce(.And, valid)) break;
-            self.i += @sizeOf(Block);
+            self.i += lanes;
         }
         while (self.i < self.src.len and isIdentPart(self.src[self.i])) self.i += 1;
     }
