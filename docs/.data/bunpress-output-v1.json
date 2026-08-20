@@ -165,8 +165,8 @@
     },
     {
       "path": "platforms/index.html",
-      "bytes": 212729,
-      "sha256": "95a00214bcc34a6150773dff0c2ec6096c1d8b462a02a2345454d7891ba3cbf6"
+      "bytes": 216335,
+      "sha256": "6607bb923acafce3b20562e9f29475a42e87a2884cbd98ecd050fdaceaf7385c"
     },
     {
       "path": "robots.txt",
@@ -175,8 +175,8 @@
     },
     {
       "path": "search-index.json",
-      "bytes": 254740,
-      "sha256": "323b8cbcd43a3604d58a902a0b494478b899a230abf7e371e96ec04db1fe17e8"
+      "bytes": 255949,
+      "sha256": "7ca42db8d73cbee7de6305a5690eebdd2603245753c705965fcaf32cf19c6685"
     },
     {
       "path": "sitemap.xml",
@@ -269,5 +269,5 @@
       "sha256": "c08b66f5315fb31e8adbd70e372ad0895adc21f70ae2212a6b848ffeabb974ea"
     }
   ],
-  "tree_sha256": "2245e1aae414d2113f4003cf7bdf1bb272e5ce574a873c1e05f97c47a71cd594"
+  "tree_sha256": "85d216da5251e6dfa2237add0de3667426f61ffdc95e47146bf9df6359692c29"
 }

@@ -10,11 +10,25 @@ It records what is gated or published; it does not imply broader OS or architect
 | Linux x86_64 (`ubuntu-latest`) | gated (39 CI matrix entries) | gated (TSan unit/fuzz/corpus legs) | not claimed | [workflow](../.github/workflows/ci.yml) |
 | macOS arm64 (`Apple M3 Pro`) | not release-gated | not release-gated | published (1540 samples) | [report](.data/benchmark-comparison-2026-07-29-precise-nursery.md) · [raw](.data/benchmark-comparison-2026-07-29-precise-nursery.tsv) |
 
+## Planned and restricted profiles
+
+These rows are explicit unsupported boundaries, not release claims. A null minimum OS version means that no version is declared before a real-hardware gate exists.
+
+| profile | ABI | execution mode | executable-memory policy | sanitizer / CI | blockers |
+| --- | --- | --- | --- | --- | --- |
+| `windows-x86_64` | `windows-x64` | `unsupported_pending_native_or_fast_vm` | `unimplemented` | `unverified` / `none` | #483, #484, #498, #499 |
+| `windows-arm64` | `windows-arm64` | `unsupported_pending_native_or_fast_vm` | `unimplemented` | `unverified` / `none` | #483, #484, #498, #499 |
+| `ios-arm64-restricted` | `darwin-aarch64` | `unsupported_pending_fast_vm_or_aot` | `forbidden_by_profile` | `unverified` / `none` | #498, #499 |
+| `tvos-arm64-restricted` | `darwin-aarch64` | `unsupported_pending_fast_vm_or_aot` | `forbidden_by_profile` | `unverified` / `none` | #498, #499 |
+| `visionos-arm64-restricted` | `darwin-aarch64` | `unsupported_pending_fast_vm_or_aot` | `forbidden_by_profile` | `unverified` / `none` | #498, #499 |
+| `macos-arm64-no-jit` | `darwin-aarch64` | `unsupported_pending_fast_vm_or_aot` | `forbidden_by_profile` | `unverified` / `none` | #498, #499 |
+
 ## Unclaimed
 
-- No Windows release platform is claimed.
+- Windows x86-64 and ARM64 remain unsupported pending owned native or fast-VM/AOT paths and real-hardware gates.
+- Restricted-Darwin profiles forbid executable mapping by project policy and remain unsupported pending #498/#499.
 - No Linux throughput artifact is claimed.
 - No macOS release CI correctness or sanitizer gate is claimed by this matrix.
 - No architecture-specific WebAssembly or JIT fast path is claimed beyond the artifacts cited by their own gates.
 
-The machine-readable matrix is checked in at [`platform-release-matrix-2026-07-28.json`](.data/platform-release-matrix-2026-07-28.json).
+The current machine-readable matrix is checked in at [`platform-release-matrix-2026-08-20.json`](.data/platform-release-matrix-2026-08-20.json). The accepted [V1 artifact](.data/platform-release-matrix-2026-07-28.json) remains available as historical evidence.

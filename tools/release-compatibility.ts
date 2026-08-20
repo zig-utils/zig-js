@@ -118,6 +118,10 @@ function main(): void {
     "platform matrix validation",
   );
   checked(
+    [HOME_TOOL, "run", "tools/platform-release-matrix.ts", "--self-test"],
+    "platform profile fail-closed validation",
+  );
+  checked(
     [HOME_TOOL, "run", "tools/pr249-terminal-execution.ts", "--check"],
     "PR-249 terminal validation",
   );

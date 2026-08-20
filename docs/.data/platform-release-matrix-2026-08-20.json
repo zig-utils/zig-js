@@ -1,0 +1,326 @@
+{
+  "generated_at": "2026-08-20",
+  "inputs": {
+    ".github/workflows/ci.yml": "4be3750e365b0aaca576857a17b5faf0cbcafc394ed237fae1ace977529786a2",
+    "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md": "b57fda6a0d69537a7fb8d4f6398654990a636a6e91ce08bfb39bab693f7a52ef",
+    "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv": "2cb69ec0559748664ae78cf9035a5882c874a4711ed13f00cb7e09da2f2e1547",
+    "docs/.data/optimizer-release-inventory.json": "8f08ef2d89508d288539066cd1b8a88414cf38cb6ed75ff233cdaf92a140e5ae",
+    "src/jit/executable_memory.zig": "9cdb000eb80c88af1063933f10b8af9c93fbb8565ada409b85264bdd9063efad"
+  },
+  "kind": "zig_js_platform_release_matrix",
+  "platforms": [
+    {
+      "abi": "system-v-amd64",
+      "architecture": "x86_64",
+      "blocking_dependencies": [
+        "#484",
+        "#485"
+      ],
+      "ci_status": "github_ubuntu_latest",
+      "correctness": {
+        "evidence": [
+          ".github/workflows/ci.yml"
+        ],
+        "jobs": [
+          "benchmark-comparison-harness",
+          "dependency-audit",
+          "executable-memory-wx",
+          "focused-engine-tests",
+          "releasesafe-threadfuzz",
+          "threadfuzz",
+          "threadfuzz-amplified",
+          "threadfuzz-broad",
+          "threadfuzz-lifecycle",
+          "threadfuzz-midgc",
+          "threadfuzz-verify",
+          "threads-execution-inventory-witness",
+          "threads-gil (shard 0/4)",
+          "threads-gil (shard 1/4)",
+          "threads-gil (shard 2/4)",
+          "threads-gil (shard 3/4)",
+          "threads-nogil-witness",
+          "threads-reference-audit",
+          "unit (shard 0/4)",
+          "unit (shard 1/4)",
+          "unit (shard 2/4)",
+          "unit (shard 3/4)",
+          "wasm-core-2-structural-smoke",
+          "wasm-core-3-memory64-gc-smoke",
+          "wasm-feature-profiles",
+          "wasm-mvp-smoke",
+          "wasm-post-mvp-smoke",
+          "wasm-simd-smoke",
+          "wasm-threads-smoke"
+        ],
+        "status": "gated"
+      },
+      "evidence_host": "github-hosted-ubuntu-latest",
+      "executable_memory_policy": "rw_to_rx_available_native_tier_unpublished",
+      "execution_mode": "interpreter_bytecode",
+      "id": "linux-x86_64-ci",
+      "minimum_os_version": null,
+      "os": "linux",
+      "performance": {
+        "reason": "No checked release throughput artifact is published for Linux x86_64.",
+        "status": "not_claimed"
+      },
+      "runner": "ubuntu-latest",
+      "sanitizer_status": "tsan_gated",
+      "sanitizers": {
+        "evidence": [
+          ".github/workflows/ci.yml"
+        ],
+        "jobs": [
+          "nightly-threadfuzz-tsan",
+          "private-abi-boundary",
+          "tsan-nogil-corpus",
+          "tsan-parallel-js",
+          "tsan-threadfuzz",
+          "tsan-threadfuzz-lifecycle",
+          "tsan-threadfuzz-midgc",
+          "tsan-threadfuzz-watchdog-cleanup",
+          "tsan-unit (shard 0/4)",
+          "tsan-unit (shard 1/4)",
+          "tsan-unit (shard 2/4)",
+          "tsan-unit (shard 3/4)"
+        ],
+        "status": "gated"
+      },
+      "support_status": "release_gated"
+    },
+    {
+      "abi": "darwin-aarch64",
+      "architecture": "arm64",
+      "blocking_dependencies": [],
+      "ci_status": "local_evidence_only",
+      "correctness": {
+        "reason": "macOS correctness exists in host-specific build/test steps but is not the final release CI correctness matrix.",
+        "status": "not_release_gated"
+      },
+      "evidence_host": "Apple M3 Pro; 11 physical / 11 logical CPUs; 18.0 GiB",
+      "executable_memory_policy": "darwin_map_jit_thread_write_protect",
+      "execution_mode": "native_jit",
+      "id": "macos-arm64-performance",
+      "minimum_os_version": null,
+      "os": "macos",
+      "performance": {
+        "evidence": [
+          "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md",
+          "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv"
+        ],
+        "host": "Apple M3 Pro; 11 physical / 11 logical CPUs; 18.0 GiB",
+        "os": "macOS 27.0 (26A5388g)",
+        "samples": 1540,
+        "status": "published"
+      },
+      "runner": "local-Apple-M3-Pro",
+      "sanitizer_status": "not_release_gated",
+      "sanitizers": {
+        "reason": "macOS sanitizer coverage is host-specific and not the final release CI sanitizer matrix.",
+        "status": "not_release_gated"
+      },
+      "support_status": "performance_evidence_only"
+    },
+    {
+      "abi": "windows-x64",
+      "architecture": "x86_64",
+      "blocking_dependencies": [
+        "#483",
+        "#484",
+        "#498",
+        "#499"
+      ],
+      "ci_status": "none",
+      "correctness": {
+        "reason": "No release correctness gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "evidence_host": null,
+      "executable_memory_policy": "unimplemented",
+      "execution_mode": "unsupported_pending_native_or_fast_vm",
+      "id": "windows-x86_64",
+      "minimum_os_version": null,
+      "os": "windows",
+      "performance": {
+        "reason": "No real-hardware performance evidence exists for this profile.",
+        "status": "unsupported"
+      },
+      "sanitizer_status": "unverified",
+      "sanitizers": {
+        "reason": "No sanitizer gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "support_status": "planned_unsupported"
+    },
+    {
+      "abi": "windows-arm64",
+      "architecture": "arm64",
+      "blocking_dependencies": [
+        "#483",
+        "#484",
+        "#498",
+        "#499"
+      ],
+      "ci_status": "none",
+      "correctness": {
+        "reason": "No release correctness gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "evidence_host": null,
+      "executable_memory_policy": "unimplemented",
+      "execution_mode": "unsupported_pending_native_or_fast_vm",
+      "id": "windows-arm64",
+      "minimum_os_version": null,
+      "os": "windows",
+      "performance": {
+        "reason": "No real-hardware performance evidence exists for this profile.",
+        "status": "unsupported"
+      },
+      "sanitizer_status": "unverified",
+      "sanitizers": {
+        "reason": "No sanitizer gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "support_status": "planned_unsupported"
+    },
+    {
+      "abi": "darwin-aarch64",
+      "architecture": "arm64",
+      "blocking_dependencies": [
+        "#498",
+        "#499"
+      ],
+      "ci_status": "none",
+      "correctness": {
+        "reason": "No release correctness gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "evidence_host": null,
+      "executable_memory_policy": "forbidden_by_profile",
+      "execution_mode": "unsupported_pending_fast_vm_or_aot",
+      "id": "ios-arm64-restricted",
+      "minimum_os_version": null,
+      "os": "ios",
+      "performance": {
+        "reason": "No real-hardware performance evidence exists for this profile.",
+        "status": "unsupported"
+      },
+      "sanitizer_status": "unverified",
+      "sanitizers": {
+        "reason": "No sanitizer gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "support_status": "planned_unsupported"
+    },
+    {
+      "abi": "darwin-aarch64",
+      "architecture": "arm64",
+      "blocking_dependencies": [
+        "#498",
+        "#499"
+      ],
+      "ci_status": "none",
+      "correctness": {
+        "reason": "No release correctness gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "evidence_host": null,
+      "executable_memory_policy": "forbidden_by_profile",
+      "execution_mode": "unsupported_pending_fast_vm_or_aot",
+      "id": "tvos-arm64-restricted",
+      "minimum_os_version": null,
+      "os": "tvos",
+      "performance": {
+        "reason": "No real-hardware performance evidence exists for this profile.",
+        "status": "unsupported"
+      },
+      "sanitizer_status": "unverified",
+      "sanitizers": {
+        "reason": "No sanitizer gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "support_status": "planned_unsupported"
+    },
+    {
+      "abi": "darwin-aarch64",
+      "architecture": "arm64",
+      "blocking_dependencies": [
+        "#498",
+        "#499"
+      ],
+      "ci_status": "none",
+      "correctness": {
+        "reason": "No release correctness gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "evidence_host": null,
+      "executable_memory_policy": "forbidden_by_profile",
+      "execution_mode": "unsupported_pending_fast_vm_or_aot",
+      "id": "visionos-arm64-restricted",
+      "minimum_os_version": null,
+      "os": "visionos",
+      "performance": {
+        "reason": "No real-hardware performance evidence exists for this profile.",
+        "status": "unsupported"
+      },
+      "sanitizer_status": "unverified",
+      "sanitizers": {
+        "reason": "No sanitizer gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "support_status": "planned_unsupported"
+    },
+    {
+      "abi": "darwin-aarch64",
+      "architecture": "arm64",
+      "blocking_dependencies": [
+        "#498",
+        "#499"
+      ],
+      "ci_status": "none",
+      "correctness": {
+        "reason": "No release correctness gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "evidence_host": null,
+      "executable_memory_policy": "forbidden_by_profile",
+      "execution_mode": "unsupported_pending_fast_vm_or_aot",
+      "id": "macos-arm64-no-jit",
+      "minimum_os_version": null,
+      "os": "macos",
+      "performance": {
+        "reason": "No real-hardware performance evidence exists for this profile.",
+        "status": "unsupported"
+      },
+      "sanitizer_status": "unverified",
+      "sanitizers": {
+        "reason": "No sanitizer gate exists for this profile.",
+        "status": "unsupported"
+      },
+      "support_status": "planned_unsupported"
+    }
+  ],
+  "schema_version": 2,
+  "status": "published",
+  "summary": {
+    "benchmark_samples": 1540,
+    "correctness_gated_platforms": 1,
+    "explicit_planned_profiles": 6,
+    "linux_gate_matrix_entries": 39,
+    "performance_published_platforms": 1,
+    "sanitizer_gated_platforms": 1
+  },
+  "triggers": [
+    "pull_request",
+    "push:main",
+    "workflow_dispatch",
+    "nightly:schedule"
+  ],
+  "unclaimed": [
+    "Windows x86-64 and ARM64 remain unsupported pending owned native or fast-VM/AOT paths and real-hardware gates.",
+    "Restricted-Darwin profiles forbid executable mapping by project policy and remain unsupported pending #498/#499.",
+    "No Linux throughput artifact is claimed.",
+    "No macOS release CI correctness or sanitizer gate is claimed by this matrix.",
+    "No architecture-specific WebAssembly or JIT fast path is claimed beyond the artifacts cited by their own gates."
+  ]
+}
