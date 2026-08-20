@@ -51308,12 +51308,21 @@ test "String value methods return the exact StringData cell" {
     const root_shape = try Shape.createRoot(a);
     var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
 
+    const ascii = try Value.strAlloc(a, "ascii");
+    try std.testing.expect(ascii.strIsAscii());
     const latin1 = try Value.strAlloc(a, "\xC3\xA9\xC3\xA9");
     try std.testing.expect(latin1.strIsLatin1() and !latin1.strIsAscii());
-    const wtf8 = try Value.strAlloc(a, "\xF0\x9F\x92\xA9\xED\xA0\xBD");
-    try std.testing.expect(!wtf8.strIsFlatLatin1());
+    try std.testing.expectEqual(strcell.flat_storage_active, latin1.strIsFlatLatin1());
+    const bmp = try Value.strAlloc(a, "\xE2\x82\xAC");
+    try std.testing.expect(!bmp.strIsLatin1());
+    const astral = try Value.strAlloc(a, "\xF0\x9F\x92\xA9");
+    try std.testing.expect(!astral.strIsFlatLatin1());
+    const lone_surrogate = try Value.strAlloc(a, "\xED\xA0\xBD");
+    try std.testing.expect(!lone_surrogate.strIsFlatLatin1());
 
-    const primitives = [_]Value{ latin1, wtf8 };
+    // This becomes a physical flat-latin1 cell automatically when the storage
+    // master switch flips, so the same identity witness guards both layouts.
+    const primitives = [_]Value{ ascii, latin1, bmp, astral, lone_surrogate };
     var wrappers: [primitives.len]Value = undefined;
     for (primitives, 0..) |primitive, i| wrappers[i] = try machine.makeWrapper(primitive);
 
