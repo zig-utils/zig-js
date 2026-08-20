@@ -217,13 +217,13 @@
     ],
     "system_commands": [
       { "name": "xcrun", "count": 4, "edge": "macos-sdk-foundation" },
-      { "name": "/usr/bin/env", "count": 53, "edge": "home-tool-runtime" },
+      { "name": "/usr/bin/env", "count": 55, "edge": "home-tool-runtime" },
       { "name": "/usr/bin/lldb", "count": 1, "edge": "macos-lldb-debugger" },
       { "name": "env", "count": 2, "edge": "macos-sdk-foundation" },
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".ts", "count": 66, "edge": "home-tool-runtime" }
+      { "extension": ".ts", "count": 67, "edge": "home-tool-runtime" }
     ],
     "network_capable_scripts": [
       { "path": "tools/wasm-spec/fetch.ts", "edge": "pinned-conformance-corpora" }
