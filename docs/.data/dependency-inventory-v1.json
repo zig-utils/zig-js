@@ -139,7 +139,7 @@
       "status": "allowed",
       "scope": "documentation build and preview",
       "locator": "../../Tools/bunpress/packages/bunpress with its frozen Bun lockfile",
-      "pin": "stacksjs/bunpress c0907f46685f0cede0556982feb44fc5133e96c7 (v0.2.6); transitive renderer packages are integrity-pinned by that revision's bun.lock",
+      "pin": "stacksjs/bunpress d248efd3a92957217bc32cc2de63f20199ccdafe (v0.2.13 + deterministic search-index fix); transitive renderer packages are integrity-pinned by that revision's bun.lock",
       "license": "MIT",
       "affects_runtime_semantics": false,
       "runtime_semantics": "Owned documentation rendering only; never part of libzig-js. Fixes land in the BunPress source repository."
@@ -189,7 +189,7 @@
       { "repository": "home-lang/home", "path": "Home/lang", "revision": "d01469e9dd90e84cf9434b056390dcb4667b18bc", "occurrences": 4, "edge": "home-tool-runtime" },
       { "repository": "zig-utils/zig-regex", "path": "Libraries/zig-regex", "revision": "87e9ca28fa14194dd1e8b4cae7461e179331efca", "occurrences": 1, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "Libraries/zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 1, "edge": "zig-gc" },
-      { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "c0907f46685f0cede0556982feb44fc5133e96c7", "occurrences": 1, "edge": "bunpress-docs-toolchain" }
+      { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "d248efd3a92957217bc32cc2de63f20199ccdafe", "occurrences": 1, "edge": "bunpress-docs-toolchain" }
     ],
     "production_imports": [
       { "name": "std", "external": true, "edge": "zig-toolchain" },
@@ -223,7 +223,7 @@
       { "path": "wasm-spec-wg3", "url": "https://github.com/WebAssembly/spec.git", "gitlink": "9d36019973201a19f9c9ebb0f10828b2fe2374aa", "edge": "pinned-conformance-corpora" }
     ],
     "package_dependencies": [
-      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "file:../../Tools/bunpress/packages/bunpress", "lockfile": "bun.lock", "locked_version": "file:../../Tools/bunpress/packages/bunpress", "integrity": "owned-revision:c0907f46685f0cede0556982feb44fc5133e96c7", "source_repository": "stacksjs/bunpress", "edge": "bunpress-docs-toolchain" }
+      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "file:../../Tools/bunpress/packages/bunpress", "lockfile": "bun.lock", "locked_version": "file:../../Tools/bunpress/packages/bunpress", "integrity": "owned-revision:d248efd3a92957217bc32cc2de63f20199ccdafe", "source_repository": "stacksjs/bunpress", "edge": "bunpress-docs-toolchain" }
     ],
     "package_scripts": [
       { "manifest": "package.json", "name": "docs:dev", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts dev", "edge": "bunpress-docs-toolchain" },

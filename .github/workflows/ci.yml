@@ -778,7 +778,7 @@ jobs:
         with:
           repository: stacksjs/bunpress
           path: Tools/bunpress
-          ref: c0907f46685f0cede0556982feb44fc5133e96c7
+          ref: d248efd3a92957217bc32cc2de63f20199ccdafe
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           version: 0.11.12

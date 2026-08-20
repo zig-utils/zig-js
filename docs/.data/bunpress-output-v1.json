@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generator": "bunpress",
-  "generator_version": "0.2.6",
+  "generator_version": "0.2.13",
   "outputs": [
     {
       "path": "404.html",
@@ -176,7 +176,7 @@
     {
       "path": "search-index.json",
       "bytes": 254740,
-      "sha256": "0aee1a5d9372b0661aa78ed1bdfaaf4f0de6871d418f780de8e619ac91ec9dbc"
+      "sha256": "89836ff2b9cf1e23cb25dc381fcebe832172ad906d8a837a01e86255a3e68805"
     },
     {
       "path": "sitemap.xml",
@@ -269,5 +269,5 @@
       "sha256": "c08b66f5315fb31e8adbd70e372ad0895adc21f70ae2212a6b848ffeabb974ea"
     }
   ],
-  "tree_sha256": "053b569c514c743b5964296ba4f404c55fac2c751ad2f78fe9859a5d5af34f1e"
+  "tree_sha256": "b6886c89931deebd65ef98e9440087604b7a1fd7d5a3ee7ab99f3b0345a9230c"
 }
