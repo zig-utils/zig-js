@@ -9472,7 +9472,7 @@ pub const Interpreter = struct {
             const start = byteOffsetForUtf16IndexA(search_input, start_units, ascii);
             const re = try self.compileRegex(o);
             const matcher = try self.regexMatcher(re);
-            const found = matcher.*.findFrom(search_input, start) catch null;
+            const found = regex.Regex.Matcher.findFrom(matcher, search_input, start) catch null;
             if (found) |match| {
                 var m = match;
                 defer m.deinit(self.arena);
@@ -9528,7 +9528,7 @@ pub const Interpreter = struct {
         const start = byteOffsetForUtf16IndexA(search_input, start_units, ascii);
         const re = try self.compileRegex(o);
         const matcher = try self.regexMatcher(re);
-        const found = matcher.*.findFrom(search_input, start) catch null;
+        const found = regex.Regex.Matcher.findFrom(matcher, search_input, start) catch null;
         if (found) |match| {
             var m = match;
             defer m.deinit(self.arena);
@@ -10130,7 +10130,7 @@ pub const Interpreter = struct {
         const start = cursor.byteForUtf16(search_input, start_units);
         const re = try self.compileRegex(o);
         const matcher = try self.regexMatcher(re);
-        const found = matcher.*.findFrom(search_input, start) catch null;
+        const found = regex.Regex.Matcher.findFrom(matcher, search_input, start) catch null;
         if (found) |match| {
             var m = match;
             defer m.deinit(self.arena);

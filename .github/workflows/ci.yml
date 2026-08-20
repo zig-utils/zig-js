@@ -343,7 +343,7 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
-          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
+          ref: 87e9ca28fa14194dd1e8b4cae7461e179331efca
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
@@ -503,7 +503,7 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
-          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
+          ref: 87e9ca28fa14194dd1e8b4cae7461e179331efca
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
@@ -568,7 +568,7 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
-          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
+          ref: 87e9ca28fa14194dd1e8b4cae7461e179331efca
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
@@ -624,7 +624,7 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
-          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
+          ref: 87e9ca28fa14194dd1e8b4cae7461e179331efca
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
@@ -677,7 +677,7 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
-          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
+          ref: 87e9ca28fa14194dd1e8b4cae7461e179331efca
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
@@ -721,7 +721,7 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
-          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
+          ref: 87e9ca28fa14194dd1e8b4cae7461e179331efca
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
@@ -768,7 +768,7 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: Libraries/zig-regex
-          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
+          ref: 87e9ca28fa14194dd1e8b4cae7461e179331efca
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: zig-utils/zig-gc
