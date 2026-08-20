@@ -30044,7 +30044,7 @@ fn durNumberingOption(data: *const value.IntlDurationFormatData) ?[]const u8 {
 /// exact fractional value (integer arithmetic, no f64 precision loss), formatted
 /// as a digit string truncated to `max_f` fraction digits then trimmed to
 /// `min_f`. A leading "-" is added only when this is the sign-bearing unit.
-fn durCombineFrac(self: *Interpreter, vals: [10]f64, unit: []const u8, max_f: usize, min_f: usize, sign_never: bool, min_int: usize) value.HostError![]const u8 {
+fn durCombineFrac(allocator: std.mem.Allocator, vals: [10]f64, unit: []const u8, max_f: usize, min_f: usize, sign_never: bool, min_int: usize) value.HostError![]const u8 {
     const sec: i128 = @intFromFloat(vals[6]);
     const ms: i128 = @intFromFloat(vals[7]);
     const us: i128 = @intFromFloat(vals[8]);
@@ -30068,20 +30068,20 @@ fn durCombineFrac(self: *Interpreter, vals: [10]f64, unit: []const u8, max_f: us
     const q = @divTrunc(at, e10);
     const fr = @rem(at, e10);
     // Fraction digits: `fr` left-padded to `exp`, truncated to max_f, trimmed to min_f.
-    var fdig = try std.fmt.allocPrint(self.arena, "{d}", .{fr});
-    while (fdig.len < exp) fdig = try std.fmt.allocPrint(self.arena, "0{s}", .{fdig});
+    var fdig = try std.fmt.allocPrint(allocator, "{d}", .{fr});
+    while (fdig.len < exp) fdig = try std.fmt.allocPrint(allocator, "0{s}", .{fdig});
     var flen: usize = @min(fdig.len, max_f); // trunc rounding
     while (flen > min_f and fdig[flen - 1] == '0') flen -= 1;
-    var idig = try std.fmt.allocPrint(self.arena, "{d}", .{q});
-    while (idig.len < min_int) idig = try std.fmt.allocPrint(self.arena, "0{s}", .{idig});
+    var idig = try std.fmt.allocPrint(allocator, "{d}", .{q});
+    while (idig.len < min_int) idig = try std.fmt.allocPrint(allocator, "0{s}", .{idig});
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    if (neg and !sign_never) try buf.append(self.arena, '-');
-    try buf.appendSlice(self.arena, idig);
+    if (neg and !sign_never) try buf.append(allocator, '-');
+    try buf.appendSlice(allocator, idig);
     if (flen > 0) {
-        try buf.append(self.arena, '.');
-        try buf.appendSlice(self.arena, fdig[0..flen]);
+        try buf.append(allocator, '.');
+        try buf.appendSlice(allocator, fdig[0..flen]);
     }
-    return buf.toOwnedSlice(self.arena);
+    return buf.toOwnedSlice(allocator);
 }
 
 fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -30124,7 +30124,7 @@ fn intlDurationFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
             const numeric = unit_style.isNumeric();
             const s = if (combine) blk: {
                 const fd: ?usize = if (data.fractional_digits) |digits| digits else null;
-                const dec = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
+                const dec = try durCombineFrac(self.arena, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
                 // A standalone-styled combine unit renders the fractional value
                 // with its unit name ("444.055006 millisecond"); numeric/2-digit
                 // units stay bare digits for the ":"-joined run.
@@ -30173,6 +30173,9 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
     const number_symbols = localeNumberSymbols(locale, data.numbering_system);
 
     // Each group is one ListFormat "element" (a unit, or a ":"-joined numeric run).
+    var scratch_arena = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer scratch_arena.deinit();
+    const scratch = scratch_arena.allocator();
     var groups: std.ArrayListUnmanaged(std.ArrayListUnmanaged(DurPart)) = .empty;
     var need_sep = false;
     var first = true;
@@ -30198,9 +30201,9 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
             var grp: *std.ArrayListUnmanaged(DurPart) = undefined;
             if (need_sep and groups.items.len > 0) {
                 grp = &groups.items[groups.items.len - 1];
-                try grp.append(self.arena, .{ .typ = .literal, .value = ":", .unit = null });
+                try grp.append(scratch, .{ .typ = .literal, .value = ":", .unit = null });
             } else {
-                try groups.append(self.arena, .empty);
+                try groups.append(scratch, .empty);
                 grp = &groups.items[groups.items.len - 1];
                 if (numeric) need_sep = true;
             }
@@ -30208,21 +30211,21 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
                 // Parse the exact "[-]int[.frac]" combine string into typed parts.
                 const fd: ?usize = if (data.fractional_digits) |digits| digits else null;
                 const min_int: usize = if (unit_style == .two_digit) 2 else 1;
-                var s = try durCombineFrac(self, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
+                var s = try durCombineFrac(scratch, vals, u, fd orelse 9, fd orelse 0, sign_never, min_int);
                 if (s.len > 0 and s[0] == '-') {
-                    try grp.append(self.arena, .{ .typ = .minus_sign, .value = "-", .unit = sing });
+                    try grp.append(scratch, .{ .typ = .minus_sign, .value = "-", .unit = sing });
                     s = s[1..];
                 }
                 if (std.mem.indexOfScalar(u8, s, '.')) |dot| {
-                    try grp.append(self.arena, .{ .typ = .integer, .value = try rtfTranslateNumber(self, s[0..dot], data.numbering_system), .unit = sing });
-                    try grp.append(self.arena, .{ .typ = .decimal, .value = number_symbols.decimal, .unit = sing });
-                    try grp.append(self.arena, .{ .typ = .fraction, .value = try rtfTranslateNumber(self, s[dot + 1 ..], data.numbering_system), .unit = sing });
+                    try grp.append(scratch, .{ .typ = .integer, .value = try rtfTranslateNumberAlloc(scratch, s[0..dot], data.numbering_system), .unit = sing });
+                    try grp.append(scratch, .{ .typ = .decimal, .value = number_symbols.decimal, .unit = sing });
+                    try grp.append(scratch, .{ .typ = .fraction, .value = try rtfTranslateNumberAlloc(scratch, s[dot + 1 ..], data.numbering_system), .unit = sing });
                 } else {
-                    try grp.append(self.arena, .{ .typ = .integer, .value = try rtfTranslateNumber(self, s, data.numbering_system), .unit = sing });
+                    try grp.append(scratch, .{ .typ = .integer, .value = try rtfTranslateNumberAlloc(scratch, s, data.numbering_system), .unit = sing });
                 }
             } else {
-                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, numbering_system, style, sing, sign_never), &.{Value.num(fnum)}, self.arena);
-                for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
+                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, numbering_system, style, sing, sign_never), &.{Value.num(fnum)}, scratch);
+                for (nf_parts.items) |p| try grp.append(scratch, .{ .typ = p.typ, .value = p.value, .unit = sing });
             }
         }
         if (combine and shown) break;
@@ -31521,8 +31524,12 @@ fn rtfGroup(self: *Interpreter, int_str: []const u8, group: []const u8, min_grou
 }
 
 fn rtfTranslateNumber(self: *Interpreter, s: []const u8, numbering: []const u8) EvalError![]const u8 {
+    return rtfTranslateNumberAlloc(self.arena, s, numbering);
+}
+
+fn rtfTranslateNumberAlloc(allocator: std.mem.Allocator, s: []const u8, numbering: []const u8) EvalError![]const u8 {
     if (std.mem.eql(u8, numbering, "latn")) return s;
-    return if (numbering_systems.digits(numbering)) |ds| try translateDigits(self, s, ds) else s;
+    return if (numbering_systems.digits(numbering)) |ds| try translateDigitsAlloc(allocator, s, ds) else s;
 }
 
 fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
