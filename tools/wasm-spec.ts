@@ -87,6 +87,239 @@ function converterCommand(
       ]
     : [converter, ...args, source, "-o", output];
 }
+type SExpr = {
+  start: number;
+  end: number;
+  line: number;
+  items: Array<SExpr | string>;
+  head: string | null;
+};
+function parseWastForms(source: string): SExpr[] {
+  const length = source.length;
+  function stringEnd(start: number): number {
+    let index = start + 1;
+    while (index < length) {
+      if (source[index] === "\\") index += 2;
+      else if (source[index] === '"') return index + 1;
+      else index++;
+    }
+    fail("unterminated WAST string");
+  }
+  function skip(start: number): number {
+    let index = start;
+    while (index < length) {
+      if (/\s/.test(source[index])) index++;
+      else if (source.startsWith(";;", index)) {
+        const newline = source.indexOf("\n", index + 2);
+        index = newline < 0 ? length : newline + 1;
+      } else if (source.startsWith("(;", index)) {
+        let depth = 1;
+        index += 2;
+        while (index < length && depth > 0) {
+          if (source.startsWith("(;", index)) {
+            depth++;
+            index += 2;
+          } else if (source.startsWith(";)", index)) {
+            depth--;
+            index += 2;
+          } else if (source[index] === '"') index = stringEnd(index);
+          else index++;
+        }
+        if (depth !== 0) fail("unterminated WAST block comment");
+      } else break;
+    }
+    return index;
+  }
+  function expression(start: number): [SExpr, number] {
+    if (source[start] !== "(") fail("expected WAST expression");
+    const line = source.slice(0, start).split("\n").length;
+    let index = start + 1;
+    const items: Array<SExpr | string> = [];
+    while (true) {
+      index = skip(index);
+      if (index >= length) fail(`unterminated WAST expression at line ${line}`);
+      if (source[index] === ")") {
+        const head = typeof items[0] === "string" ? items[0] : null;
+        return [{ start, end: index + 1, line, items, head }, index + 1];
+      }
+      if (source[index] === "(") {
+        const [child, next] = expression(index);
+        items.push(child);
+        index = next;
+        continue;
+      }
+      const atomStart = index;
+      if (source[index] === '"') index = stringEnd(index);
+      else
+        while (
+          index < length &&
+          !/\s/.test(source[index]) &&
+          source[index] !== "(" &&
+          source[index] !== ")"
+        )
+          index++;
+      items.push(source.slice(atomStart, index));
+    }
+  }
+  const forms: SExpr[] = [];
+  let index = 0;
+  while (true) {
+    index = skip(index);
+    if (index >= length) return forms;
+    if (source[index] !== "(")
+      fail(`unexpected WAST token at line ${source.slice(0, index).split("\n").length}`);
+    const [form, next] = expression(index);
+    forms.push(form);
+    index = next;
+  }
+}
+function namedModule(form: SExpr): string | null {
+  if (form.head !== "module" || typeof form.items[1] !== "string") return null;
+  return form.items[1].startsWith("$") ? form.items[1] : null;
+}
+function threadParts(form: SExpr): {
+  name: string;
+  shared: string[];
+  body: SExpr[];
+} {
+  if (form.head !== "thread" || typeof form.items[1] !== "string")
+    fail(`malformed thread at line ${form.line}`);
+  const shared: string[] = [],
+    body: SExpr[] = [];
+  for (const item of form.items.slice(2)) {
+    if (typeof item === "string") fail(`malformed thread item at line ${form.line}`);
+    if (item.head !== "shared") {
+      body.push(item);
+      continue;
+    }
+    const module = item.items[1];
+    if (
+      item.items.length !== 2 ||
+      typeof module === "string" ||
+      module?.head !== "module" ||
+      module.items.length !== 2 ||
+      typeof module.items[1] !== "string"
+    )
+      fail(`malformed shared module at line ${item.line}`);
+    shared.push(module.items[1]);
+  }
+  return { name: form.items[1], shared, body };
+}
+function maskedScopeSource(source: string, forms: SExpr[]): string {
+  const mask = (text: string) => text.replace(/[^\n]/g, " ");
+  let output = "",
+    cursor = 0;
+  for (const form of forms) {
+    output += mask(source.slice(cursor, form.start));
+    const text = source.slice(form.start, form.end);
+    output += form.head === "thread" || form.head === "wait" ? mask(text) : text;
+    cursor = form.end;
+  }
+  return output + mask(source.slice(cursor));
+}
+function rewriteBinaryPaths(document: Item, directory: string): void {
+  for (const command of document.commands || [])
+    if (command.filename && !String(command.filename).startsWith("/"))
+      command.filename = `${directory}/${command.filename}`;
+}
+function compileThreadScope(
+  source: string,
+  forms: SExpr[],
+  inheritedModules: Map<string, string>,
+  profile: Item,
+  converter: string,
+  directory: string,
+  scopeId: { value: number },
+): Item {
+  const localModules = new Map(inheritedModules);
+  for (const form of forms) {
+    const name = namedModule(form);
+    if (name) localModules.set(name, source.slice(form.start, form.end));
+  }
+  const injected = Array.from(inheritedModules.entries()),
+    prefix = injected.map((entry) => `${entry[1]}\n`).join(""),
+    prefixLines = (prefix.match(/\n/g) || []).length,
+    scopeDirectory = `${directory}/scope-${scopeId.value++}`,
+    wastPath = `${scopeDirectory}/scope.wast`,
+    jsonPath = `${scopeDirectory}/scope.json`;
+  mkdir(scopeDirectory);
+  writeText(wastPath, prefix + maskedScopeSource(source, forms));
+  const converted = run(converterCommand(profile, converter, wastPath, jsonPath));
+  if (converted.exitCode !== 0)
+    fail(converted.stderr.trim() || converted.stdout.trim() || "thread scope conversion failed");
+  const document = JSON.parse(readText(jsonPath)),
+    convertedCommands: Item[] = document.commands || [];
+  if (
+    convertedCommands.length < injected.length ||
+    convertedCommands.slice(0, injected.length).some((command) => command.type !== "module")
+  )
+    fail("injected shared module prefix did not convert canonically");
+  const commands = convertedCommands.slice(injected.length);
+  for (const command of commands)
+    command.line = Math.max(0, Number(command.line || 0) - prefixLines);
+  document.commands = commands;
+  rewriteBinaryPaths(document, scopeDirectory);
+
+  const specials: Item[] = [];
+  forms.forEach((form, ordinal) => {
+    if (form.head === "thread") {
+      const parts = threadParts(form),
+        missing = parts.shared.filter((name) => !localModules.has(name));
+      if (missing.length)
+        fail(`unknown shared module(s) at line ${form.line}: ${missing.join(", ")}`);
+      const nestedModules = new Map<string, string>();
+      for (const name of parts.shared) nestedModules.set(name, localModules.get(name)!);
+      specials.push({
+        type: "thread",
+        line: form.line,
+        name: parts.name,
+        shared: parts.shared,
+        document: compileThreadScope(
+          source,
+          parts.body,
+          nestedModules,
+          profile,
+          converter,
+          directory,
+          scopeId,
+        ),
+        _ordinal: ordinal,
+      });
+    } else if (form.head === "wait") {
+      if (form.items.length !== 2 || typeof form.items[1] !== "string")
+        fail(`malformed wait at line ${form.line}`);
+      specials.push({ type: "wait", line: form.line, name: form.items[1], _ordinal: ordinal });
+    }
+  });
+  const merged = [...commands, ...specials];
+  merged.forEach((command, ordinal) => {
+    if (command._ordinal == null) command._ordinal = forms.length + ordinal;
+  });
+  merged.sort(
+    (left, right) =>
+      Number(left.line || 0) - Number(right.line || 0) ||
+      Number(left._ordinal) - Number(right._ordinal),
+  );
+  for (const command of merged) delete command._ordinal;
+  document.commands = merged;
+  return document;
+}
+function compileThreadScript(
+  source: string,
+  profile: Item,
+  converter: string,
+  directory: string,
+): Item {
+  return compileThreadScope(
+    source,
+    parseWastForms(source),
+    new Map(),
+    profile,
+    converter,
+    directory,
+    { value: 0 },
+  );
+}
 function valueExpression(value: Item): string {
   const raw = JSON.stringify(String(value.value));
   if (value.type === "i32") return `(Number(${raw})|0)`;
@@ -186,6 +419,9 @@ function binaryExpression(path: string): string {
     bytes.push(String(parseInt(hex.slice(index, index + 2), 16)));
   return `new Uint8Array([${bytes.join(",")}])`;
 }
+function binaryPath(directory: string, filename: string): string {
+  return filename.startsWith("/") ? filename : `${directory}/${filename}`;
+}
 function record(
   index: number,
   command: Item,
@@ -210,9 +446,32 @@ function generateCommand(
 ): string {
   const kind = command.type;
   try {
+    if (kind === "thread") {
+      const shared: string[] = command.shared || [],
+        sharedValues = shared
+          .map((name) => `__modules[${JSON.stringify(name)}]`)
+          .join(","),
+        sharedInit = shared
+          .map(
+            (name, position) =>
+              `__modules[${JSON.stringify(name)}]=__shared[${position}];`,
+          )
+          .join(""),
+        body = (command.document.commands || [])
+          .map((nested: Item, nestedIndex: number) =>
+            generateCommand(nestedIndex, nested, directory),
+          )
+          .join("\n"),
+        passed = record(index, command, "pass", "", "proposal_thread");
+      return `{try{__threads[${JSON.stringify(command.name)}]=new Thread((__shared)=>{const __report={commands:[]},__modules=Object.create(null),__moduleDefinitions=Object.create(null),__registry=Object.create(null),__threads=Object.create(null);let __last=null;__registry.spectest=__spectest;function __record(index,line,type,status,detail,mode){const e={index,line,type,status,mode:mode||'javascript_api'};if(detail)e.detail=detail;__report.commands.push(e)}${sharedInit}${body}return __report.commands;},[${sharedValues}]);${passed}}catch(e){__record(${index},${Number(command.line || 0)},'thread','fail',__message(e),'proposal_thread');}}`;
+    }
+    if (kind === "wait") {
+      const passed = record(index, command, "pass", "", "proposal_wait");
+      return `{try{const c=__threads[${JSON.stringify(command.name)}];if(!c)throw new Error('unknown thread');const r=c.join();if(!Array.isArray(r))throw new Error('invalid thread report');for(const e of r)__report.commands.push(e);${passed}}catch(e){__record(${index},${Number(command.line || 0)},'wait','fail',__message(e),'proposal_wait');}}`;
+    }
     if (kind === "module" || kind === "module_definition") {
       const binary = binaryExpression(
-          `${directory}/${command.binary_filename || command.filename}`,
+          binaryPath(directory, command.binary_filename || command.filename),
         ),
         name = command.name;
       if (kind === "module_definition")
@@ -306,7 +565,7 @@ function generateCommand(
       return expectedException(
         index,
         command,
-        `new WebAssembly.Module(${binaryExpression(`${directory}/${command.filename}`)})`,
+        `new WebAssembly.Module(${binaryExpression(binaryPath(directory, command.filename))})`,
         "WebAssembly.CompileError",
       );
     }
@@ -314,14 +573,14 @@ function generateCommand(
       return expectedException(
         index,
         command,
-        `new WebAssembly.Instance(new WebAssembly.Module(${binaryExpression(`${directory}/${command.filename}`)}),__registry)`,
+        `new WebAssembly.Instance(new WebAssembly.Module(${binaryExpression(binaryPath(directory, command.filename))}),__registry)`,
         "WebAssembly.LinkError",
       );
     if (kind === "assert_uninstantiable")
       return expectedException(
         index,
         command,
-        `new WebAssembly.Instance(new WebAssembly.Module(${binaryExpression(`${directory}/${command.filename}`)}),__registry)`,
+        `new WebAssembly.Instance(new WebAssembly.Module(${binaryExpression(binaryPath(directory, command.filename))}),__registry)`,
         "WebAssembly.RuntimeError",
       );
   } catch (error) {
@@ -333,7 +592,7 @@ function generateCommand(
 // value; `nullexnref`/`refnull` are separate bottom-type spellings. Match that
 // value before requiring the host object used for a non-null exception.
 const PRELUDE = `
-const __report={commands:[]},__modules=Object.create(null),__moduleDefinitions=Object.create(null),__registry=Object.create(null),__externrefs=new Map();let __last=null;
+const __report={commands:[]},__modules=Object.create(null),__moduleDefinitions=Object.create(null),__registry=Object.create(null),__threads=Object.create(null),__externrefs=new Map();let __last=null;
 const __scratch=new ArrayBuffer(8),__view=new DataView(__scratch);
 function __f32(x){__view.setUint32(0,Number(x),true);return __view.getFloat32(0,true)}
 function __f64(x){__view.setBigUint64(0,BigInt(x),true);return __view.getFloat64(0,true)}
@@ -354,6 +613,27 @@ function counts(commands: Item[]): Item {
     out[command.status] = (out[command.status] || 0) + 1;
   out.total = commands.length;
   return out;
+}
+function normalizeCommandIndexes(commands: Item[]): Item[] {
+  return commands.map((command, index) => ({ ...command, index }));
+}
+function runnerErrorDetails(
+  commands: Item[],
+  limit = 3,
+  maxLength = 2000,
+): string[] {
+  const details: string[] = [],
+    seen = new Set<string>();
+  for (const command of commands) {
+    if (command.status !== "runner_error") continue;
+    let detail = String(command.detail || "runner failed without detail").trim();
+    if (seen.has(detail)) continue;
+    seen.add(detail);
+    if (detail.length > maxLength) detail = `${detail.slice(0, maxLength - 1)}…`;
+    details.push(detail);
+    if (details.length === limit) break;
+  }
+  return details;
 }
 function featureArea(profile: string, path: string): string {
   if (profile === "mvp") return "mvp";
@@ -425,19 +705,71 @@ function parseArgs(): Item {
   return out;
 }
 function selfTest(): void {
+  let rejected = 0;
+  try {
+    parseWastForms("(; never closed");
+  } catch {
+    rejected++;
+  }
+  try {
+    threadParts(parseWastForms("(thread $T (shared (module)))")[0]);
+  } catch {
+    rejected++;
+  }
   const command = {
     type: "assert_return",
     line: 1,
     action: { type: "invoke", field: "f" },
     expected: [{ type: "i32", value: "1" }],
   };
-  const generated = generateCommand(0, command, ".");
+  const generated = generateCommand(0, command, "."),
+    threadSource =
+      ';; lead\n(module $M (func (export "(; text ;)")))\n' +
+      "(; outer (; nested ;) ;)\n" +
+      "(thread $T (shared (module $M)) (wait $Inner))\n(wait $T)\n",
+    forms = parseWastForms(threadSource),
+    parts = threadParts(forms[1]),
+    masked = maskedScopeSource(threadSource, forms),
+    thread = generateCommand(
+      1,
+      {
+        type: "thread",
+        line: 4,
+        name: "$T",
+        shared: ["$M"],
+        document: { commands: [] },
+      },
+      ".",
+    ),
+    wait = generateCommand(
+      2,
+      { type: "wait", line: 5, name: "$T" },
+      ".",
+    ),
+    details = runnerErrorDetails([
+      { status: "runner_error", detail: "engine exited 1" },
+      { status: "runner_error", detail: "engine exited 1" },
+    ]);
   if (
     !generated.includes("__same") ||
     featureArea("core-3", "test/core/gc/i31.wast") !== "gc" ||
     !PRELUDE.includes(
       "Object.prototype.hasOwnProperty.call(e,'value')&&e.value==='null'?a===null",
-    )
+    ) ||
+    forms.map((form) => form.head).join(",") !== "module,thread,wait" ||
+    forms.map((form) => form.line).join(",") !== "2,4,5" ||
+    parts.name !== "$T" ||
+    parts.shared.join(",") !== "$M" ||
+    parts.body[0]?.head !== "wait" ||
+    masked.includes("thread") ||
+    !masked.includes("(module $M") ||
+    !thread.includes("proposal_thread") ||
+    !thread.includes('__modules["$M"]=__shared[0]') ||
+    !wait.includes("proposal_wait") ||
+    !wait.includes(".join()") ||
+    details.length !== 1 ||
+    details[0] !== "engine exited 1" ||
+    rejected !== 2
   )
     fail("self-test failed");
   console.log("WebAssembly corpus driver self-test: PASS");
@@ -531,10 +863,29 @@ function main(): void {
       relative = wast.slice(specRoot.length + 1),
       directory = `${work}/${relative.slice(0, -5)}`;
     mkdir(directory);
-    const jsonPath = `${directory}/${stem(wast)}.json`,
-      converted = run(converterCommand(template, converter, wast, jsonPath));
+    const jsonPath = `${directory}/${stem(wast)}.json`;
     let commands: Item[] = [];
-    if (converted.exitCode !== 0)
+    let document: Item | null = null,
+      conversionDetail = "";
+    const source = readText(wast),
+      proposalScript =
+        args.profile === "threads" &&
+        (source.includes("(thread") || source.includes("(wait"));
+    if (proposalScript) {
+      try {
+        document = compileThreadScript(source, template, converter, directory);
+      } catch (error) {
+        conversionDetail = String(error);
+      }
+    } else {
+      const converted = run(
+        converterCommand(template, converter, wast, jsonPath),
+      );
+      if (converted.exitCode !== 0)
+        conversionDetail = converted.stderr.trim() || converted.stdout.trim();
+      else document = JSON.parse(readText(jsonPath));
+    }
+    if (conversionDetail)
       commands = [
         {
           index: 0,
@@ -542,11 +893,10 @@ function main(): void {
           type: "conversion",
           status: "runner_error",
           mode: "javascript_api",
-          detail: converted.stderr.trim(),
+          detail: conversionDetail,
         },
       ];
-    else {
-      const document = JSON.parse(readText(jsonPath));
+    else if (document) {
       const script = `${PRELUDE}\n${document.commands.map((command: Item, index: number) => generateCommand(index, command, directory)).join("\n")}\nJSON.stringify(__report);`;
       const scriptPath = `${directory}/${stem(wast)}.js`;
       writeText(scriptPath, script);
@@ -593,7 +943,9 @@ function main(): void {
         }));
       else
         try {
-          commands = JSON.parse(evaluated.stdout).commands;
+          commands = normalizeCommandIndexes(
+            JSON.parse(evaluated.stdout).commands,
+          );
         } catch (e) {
           commands = document.commands.map((c: Item, index: number) => ({
             index,
@@ -617,6 +969,8 @@ function main(): void {
     console.log(
       `[${n + 1}/${selected.length}] ${basename(wast)}: ${entry.counts.pass} pass, ${entry.counts.fail} fail, ${entry.counts.not_applicable} n/a, ${entry.counts.runner_error} runner`,
     );
+    for (const detail of runnerErrorDetails(commands))
+      console.error(`  runner error: ${detail}`);
   }
   const all = files.flatMap((entry) => entry.commands),
     totals = counts(all),
