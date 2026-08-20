@@ -357,7 +357,10 @@ jobs:
           ref: d01469e9dd90e84cf9434b056390dcb4667b18bc
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
-          packages: zig@0.17.0-dev
+          # Home repository tools invoke ripgrep for source-backed benchmark
+          # inventories. Keep that executable explicit and version-pinned on
+          # exactly the matrix legs that build the Home runtime (#635).
+          packages: zig@0.17.0-dev ${{ matrix.home_tool == true && 'rg@15.1.0' || '' }}
       - name: Build zig-js public C API for Home
         if: matrix.home_tool == true
         working-directory: zig-js
