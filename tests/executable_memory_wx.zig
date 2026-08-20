@@ -13,9 +13,16 @@ fn machineCode() []const u8 {
         // mov w0, #42; ret
         .aarch64 => &.{ 0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6 },
         // mov eax, 42; ret
-        .x86_64 => &.{ 0xb8, 0x2a, 0x00, 0x00, 0x00, 0x00, 0xc3 },
+        .x86_64 => &.{ 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3 },
         else => unreachable,
     };
+}
+comptime {
+    switch (builtin.cpu.arch) {
+        .aarch64 => std.debug.assert(machineCode().len == 8),
+        .x86_64 => std.debug.assert(machineCode().len == 6),
+        else => {},
+    }
 }
 
 fn preparedMemory() !js.jit.CodeMemory {
