@@ -21848,6 +21848,38 @@ test "block scope: uncaptured lexical environments reuse bounded owned storage" 
     try std.testing.expect(allocations_after - allocations_before < 64);
 }
 
+test "function calls: completed private activations reuse bounded owned storage" {
+    // #653: a completed tree-walker call activation is observable only through
+    // a closure or mapped arguments object. Reuse the uncaptured hot-call cell,
+    // while retaining distinct bindings for both observable controls. The
+    // try/finally keeps `hot` on the tree walker without allocating arguments.
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer ctx.destroy();
+    const allocations_before = ctx.tierAttributionSnapshot().execution.count(.environment_allocations);
+    const result = try ctx.evaluate(
+        \\function hot(i) { try { return (i * 7 + 13) & 255; } finally {} }
+        \\var sum = 0;
+        \\for (var i = 0; i < 2000; ++i) sum += hot(i);
+        \\function mapped(x) { return arguments; }
+        \\var firstArgs = mapped(3), secondArgs = mapped(7);
+        \\function capture(x) { return () => x; }
+        \\var firstClosure = capture(5), secondClosure = capture(9);
+        \\sum + "|" + firstArgs[0] + "," + secondArgs[0] + "|" + firstClosure() + "," + secondClosure();
+    );
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("254136|3,7|5,9", result.asStr());
+    const snapshot = ctx.tierAttributionSnapshot();
+    try std.testing.expect(snapshot.execution.count(.tree_walker_entries) > 2000);
+    const allocations_after = snapshot.execution.count(.environment_allocations);
+    // The 2,000 uncaptured calls share one completed activation. Captured and
+    // mapped-arguments controls deliberately retain their own cells.
+    try std.testing.expect(allocations_after - allocations_before < 32);
+}
+
 test "catch scope: optional catch binding skips the catch-scope env, params still bind" {
     // Perf (allocation-elision family): `evalTry` allocates a dedicated catch
     // environment only when a catch parameter is present. An ES2019 optional

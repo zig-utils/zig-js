@@ -1236,6 +1236,34 @@ pub const Environment = struct {
         self.with_object = null;
     }
 
+    /// Clear a completed private activation while retaining its static binding
+    /// layout for the next call of the same AST. Values are overwritten with
+    /// `undefined` under the trace lock so the cache retains no user object
+    /// graph. Dynamic eval bindings (`deletable`) and live aliases are excluded
+    /// by releaseCallEnvironment; only bounded parameter/declaration spelling
+    /// tables survive.
+    pub fn resetForCallReuse(self: *Environment) void {
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
+        var values = self.vars.valueIterator();
+        while (values.next()) |slot| slot.* = Value.undef();
+        if (self.bindings_allocator) |a| {
+            self.disposables.deinit(a);
+            self.disposables = .empty;
+        } else {
+            self.disposables.clearRetainingCapacity();
+        }
+        self.dispose_pending = null;
+        self.parent = null;
+        self.object_proto_intrinsic = null;
+        self.captured = false;
+        self.fn_scope = false;
+        self.private_activation = false;
+        self.fn_body = false;
+        self.is_catch_param = false;
+        self.with_object = null;
+    }
+
     pub fn finalizeOwnedBindingStorage(self: *Environment) void {
         self.deinitOwnedBindingStorage();
     }
@@ -1810,6 +1838,11 @@ pub const Function = struct {
     /// Strict-mode function (see `ast.FunctionNode.is_strict`). Gates sloppy-only
     /// behaviors — currently `this`-substitution on a null/undefined receiver.
     is_strict: bool = false,
+    /// Whether this function's statement tree can contain an Annex B B.3.3
+    /// block-function candidate. Computed once at function creation; synthetic
+    /// functions default conservative. A false value skips the otherwise
+    /// invocation-local maps and parameter-name stack entirely.
+    annex_b_possible: bool = true,
     /// A concise method (object/class method, get/set) — has no [[Construct]], so
     /// it is not a constructor (e.g. `%TypedArray%.from.call(method)` is a TypeError).
     is_method: bool = false,
@@ -2208,6 +2241,17 @@ pub const Interpreter = struct {
     /// preserving distinct environments for every captured entry. The precise
     /// tracer and relocator treat this optional pointer as an ordinary root.
     reusable_block_env: ?*Environment = null,
+    /// One fully-cleared, uncaptured function activation retained by this
+    /// interpreter. A completed private activation has no observable identity;
+    /// closures and mapped arguments mark it captured before either can escape,
+    /// so only the unobservable common path enters this cache. Recursive calls
+    /// still allocate distinct live environments. The precise tracer and
+    /// relocator treat this optional pointer as an ordinary root.
+    reusable_call_env: ?*Environment = null,
+    /// AST identity whose static binding layout is retained in
+    /// `reusable_call_env`. AST storage is arena-stable and non-moving; matching
+    /// it avoids rooting another GC cell merely to identify the cache owner.
+    reusable_call_body: ?*const Node = null,
     /// Context-owned serial used to mint per-class private-name storage keys.
     /// Null only in isolated interpreter unit helpers.
     private_name_serial: ?*std.atomic.Value(u64) = null,
@@ -2256,6 +2300,11 @@ pub const Interpreter = struct {
     /// Names are used to pre-create var bindings; nodes decide whether a
     /// particular same-named declaration updates that binding at runtime.
     annexb_legacy_nodes: ?*std.AutoHashMapUnmanaged(*const Node, void) = null,
+    /// One-shot proof for the next function-body statement list. The function's
+    /// static AST scan found no Annex B candidate, so evalStatements can skip
+    /// building empty invocation-local maps. It is consumed before any nested
+    /// eval or call can execute.
+    skip_next_annex_b_scan: bool = false,
     /// The formal-parameter names of the current function activation (used by the
     /// Annex B B.3.3 eligibility analysis to exclude parameter-shadowing names).
     cur_func_params: []const ast.Param = &.{},
@@ -3347,6 +3396,41 @@ pub const Interpreter = struct {
         return env;
     }
 
+    fn acquireCallEnvironment(self: *Interpreter, func: *Function) EvalError!*Environment {
+        if (self.reusable_call_env) |env| {
+            // Different functions can have different static binding layouts.
+            // Reclaim the retained side tables before reusing the cell for a
+            // different AST; identical bodies keep their bounded layout and
+            // overwrite values without allocator traffic.
+            if (self.reusable_call_body != func.body) {
+                env.resetForBlockReuse();
+                self.reusable_call_body = null;
+            }
+            // Keep the cache pointer published until callPlain installs this as
+            // the active environment. A concurrent marker can therefore never
+            // miss the cell between its two interpreter-owned roots.
+            env.lockBindings();
+            defer env.unlockBindings();
+            env.arena = self.arena;
+            env.bindings_allocator = self.gc_side_storage;
+            env.gc_name_bytes_live = self.gc_environment_name_bytes_live;
+            env.parent = func.closure;
+            env.gc_managed = gc_mod.allocationsAreManaged();
+            env.fn_scope = true;
+            env.private_activation = true;
+            // A cached activation can be tenured while its new closure parent
+            // is young. Publish that managed edge exactly before execution.
+            if (env.gc_managed and func.closure.gc_managed)
+                if (!gc_mod.barrierExactManagedCellFrom(env, func.closure))
+                    gc_mod.barrierCellFrom(env, func.closure);
+            return env;
+        }
+        const env = try gc_mod.allocEnv(self.arena);
+        self.initEnvironment(env, func.closure, true);
+        env.private_activation = true;
+        return env;
+    }
+
     fn releaseBlockEnvironment(self: *Interpreter, env: *Environment) void {
         // Arena environments cannot release their side storage, function-body
         // environments retain special declaration-instantiation state, and a
@@ -3360,6 +3444,21 @@ pub const Interpreter = struct {
         // inner environment. Reclaim this environment's side storage anyway and
         // let its empty cell die; one retained cell is sufficient.
         if (self.reusable_block_env == null) self.reusable_block_env = env;
+    }
+
+    fn releaseCallEnvironment(self: *Interpreter, env: *Environment, func: *Function) void {
+        // A closure or mapped arguments object makes activation identity and
+        // bindings observable. Allocation failures can leave a partial table;
+        // callPlain deliberately invokes this helper only for normal completion.
+        if (env.bindings_allocator == null or env.captured or env.aliases.count() != 0 or
+            env.deletable.count() != 0 or
+            env.disposables.items.len != 0 or env.dispose_pending != null)
+            return;
+        env.resetForCallReuse();
+        if (self.reusable_call_env == null) {
+            self.reusable_call_env = env;
+            self.reusable_call_body = func.body;
+        }
     }
 
     /// Evaluate a `{…}` block in its own lexical scope, disposing any `using`
@@ -3391,10 +3490,18 @@ pub const Interpreter = struct {
         _ = self.takeLabels();
         // A block that binds nothing at its own scope needs no environment — run its
         // statements in the current scope, skipping the per-entry GC-cell allocation
-        // (common in hot loop bodies like `{ acc += x; }`). A function-body block
-        // keeps the slow path: its env carries the `fn_body` marker used by
-        // declaration hoisting / Annex B analysis.
-        if (!self.mark_fn_body and !blockNeedsOwnScope(stmts)) return self.evalStatements(stmts);
+        // (common in hot loop bodies like `{ acc += x; }`). A function body needs
+        // a distinct `fn_body` environment only when it owns lexical declarations;
+        // its call environment is already the variable-scope marker otherwise.
+        if (!blockNeedsOwnScope(stmts)) {
+            // A binding-free function body can execute directly in its call
+            // environment. That environment is already the variable scope, so
+            // evalStatements still performs function-top hoisting and Annex B
+            // analysis for nested constructs without allocating an empty body
+            // cell on every invocation.
+            if (self.mark_fn_body) self.mark_fn_body = false;
+            return self.evalStatements(stmts);
+        }
         const block_env = try self.acquireBlockEnvironment(self.env);
         if (self.mark_fn_body) {
             block_env.fn_body = true;
@@ -5521,6 +5628,55 @@ pub const Interpreter = struct {
         return false;
     }
 
+    fn annexbListMayNeedScan(stmts: []const *Node, depth: u32) bool {
+        if (depth >= 1) for (stmts) |s| switch (s.*) {
+            .func_decl => |f| if (!f.is_generator and !f.is_async) return true,
+            .labeled_stmt => if (labeledFunctionDeclNode(s) != null) return true,
+            else => {},
+        };
+        for (stmts) |s| if (annexbStmtMayNeedScan(s, depth)) return true;
+        return false;
+    }
+
+    fn annexbBranchMayNeedScan(node: *const Node, depth: u32) bool {
+        return switch (node.*) {
+            .block => |b| annexbListMayNeedScan(b, depth + 1),
+            .func_decl => |f| !f.is_generator and !f.is_async,
+            else => annexbStmtMayNeedScan(node, depth),
+        };
+    }
+
+    /// Allocation-free structural pre-scan for the exact statement forms the
+    /// Annex B collector traverses. Nested function bodies are intentionally not
+    /// entered: each invocation owns its own cached decision.
+    fn annexbStmtMayNeedScan(s: *const Node, depth: u32) bool {
+        return switch (s.*) {
+            .block => |b| annexbListMayNeedScan(b, depth + 1),
+            .if_stmt => |i| annexbBranchMayNeedScan(i.consequent, depth) or
+                (i.alternate != null and annexbBranchMayNeedScan(i.alternate.?, depth)),
+            .while_stmt => |w| annexbBranchMayNeedScan(w.body, depth),
+            .do_while_stmt => |w| annexbBranchMayNeedScan(w.body, depth),
+            .with_stmt => |w| annexbBranchMayNeedScan(w.body, depth),
+            .for_stmt => |f| annexbBranchMayNeedScan(f.body, depth),
+            .for_in => |f| annexbBranchMayNeedScan(f.body, depth),
+            .labeled_stmt => |l| annexbBranchMayNeedScan(l.body, depth),
+            .switch_stmt => |sw| blk: {
+                for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
+                    .func_decl => |f| if (!f.is_generator and !f.is_async) break :blk true,
+                    .labeled_stmt => if (labeledFunctionDeclNode(cs) != null) break :blk true,
+                    else => {},
+                };
+                for (sw.cases) |c| for (c.body) |cs|
+                    if (annexbStmtMayNeedScan(cs, depth + 1)) break :blk true;
+                break :blk false;
+            },
+            .try_stmt => |t| annexbBranchMayNeedScan(t.block, depth) or
+                (t.catch_block != null and annexbBranchMayNeedScan(t.catch_block.?, depth)) or
+                (t.finally_block != null and annexbBranchMayNeedScan(t.finally_block.?, depth)),
+            else => false,
+        };
+    }
+
     fn appendPatternNames(arena: std.mem.Allocator, pat: *Node, list: *NameStack) EvalError!void {
         switch (pat.*) {
             .identifier => |nm| try list.append(arena, nm),
@@ -5700,6 +5856,8 @@ pub const Interpreter = struct {
         // script / eval top level) is var-scoped; one inside a nested block is
         // block-scoped, with an additional legacy var binding under Annex B B.3.3.
         const at_fn_top = self.env.fn_body or self.env == self.env.varScope();
+        const skip_annex_b_scan = self.skip_next_annex_b_scan;
+        self.skip_next_annex_b_scan = false;
         // Annex B B.3.3: at the variable scope, work out which block-nested
         // function names get a legacy var binding, and pre-create those bindings
         // as `undefined`. Sloppy code only (strict block functions stay purely
@@ -5715,7 +5873,7 @@ pub const Interpreter = struct {
             annexb_set.deinit(annexb_scratch);
             annexb_nodes.deinit(annexb_scratch);
         }
-        if (at_fn_top and !self.strict) {
+        if (at_fn_top and !self.strict and !skip_annex_b_scan) {
             try self.collectAnnexBLegacy(stmts, 0, &annexb_set, &annexb_nodes);
             self.annexb_legacy = &annexb_set;
             self.annexb_legacy_nodes = &annexb_nodes;
@@ -5882,6 +6040,10 @@ pub const Interpreter = struct {
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
             .is_strict = fnode.is_strict,
+            .annex_b_possible = !fnode.is_strict and switch (fnode.body.*) {
+                .block => |stmts| annexbListMayNeedScan(stmts, 0),
+                else => false,
+            },
             .is_method = fnode.is_method,
             .import_meta_slot = self.import_meta_slot,
             .module_referrer = self.cur_module,
@@ -7535,12 +7697,14 @@ pub const Interpreter = struct {
         self.depth += 1;
         defer self.depth -= 1;
 
-        const call_env = try gc_mod.allocEnv(self.arena);
-        self.initEnvironment(call_env, func.closure, true);
-        // A fresh call Environment is reachable only by this activation and the
-        // concurrent marker. `makeFunction`/`markCaptured` revokes the proof
-        // before any closure carrying it can escape.
-        call_env.private_activation = true;
+        const call_env = try self.acquireCallEnvironment(func);
+        // On normal completion the activation is fully instantiated and safe to
+        // clear. Any error can interrupt a binding insertion, so preserve that
+        // cell for the GC finalizer rather than caching a potentially partial
+        // table; caught JavaScript throws complete normally at this boundary.
+        var call_failed = false;
+        defer if (!call_failed) self.releaseCallEnvironment(call_env, func);
+        errdefer call_failed = true;
 
         const saved_env = self.env;
         const saved_signal = self.signal;
@@ -7604,6 +7768,10 @@ pub const Interpreter = struct {
         self.pending_field_inits = func.field_inits;
         self.pending_brand_names = if (func.is_derived_constructor) func.private_brand_names else &.{};
         self.env = call_env;
+        if (self.reusable_call_env == call_env) {
+            self.reusable_call_env = null;
+            self.reusable_call_body = null;
+        }
         self.signal = .none;
         self.strict = func.is_strict;
         self.tree_tail_allowed = func.is_strict and new_target.isUndefined() and
@@ -7808,6 +7976,9 @@ pub const Interpreter = struct {
             self.cur_func_params = saved_params;
             self.cur_func_args_needed = saved_args_needed;
         }
+        const saved_skip_annex_b_scan = self.skip_next_annex_b_scan;
+        defer self.skip_next_annex_b_scan = saved_skip_annex_b_scan;
+        self.skip_next_annex_b_scan = !func.annex_b_possible;
         self.mark_fn_body = true;
         _ = try self.eval(func.body);
         self.mark_fn_body = false;
@@ -7934,6 +8105,11 @@ pub const Interpreter = struct {
                     break;
                 };
             }
+            // A mapped arguments object may outlive the call and continues to
+            // alias parameter bindings. Its environment therefore has the same
+            // observable identity as a closure-captured activation and must
+            // never enter the completed-call cache.
+            call_env.markCaptured();
             cold.arg_map_env = @ptrCast(call_env);
             cold.arg_map_names = names;
             cold.arg_map_severed = severed;

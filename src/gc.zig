@@ -2457,6 +2457,10 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         markManaged(v, env);
         traceEnv(env, v);
     }
+    if (machine.reusable_call_env) |env| {
+        markManaged(v, env);
+        traceEnv(env, v);
+    }
     for (machine.gc_temp_roots.items) |root| markValue(v, root);
     for (machine.gc_temp_promise_roots.items) |root| markManaged(v, root);
     for (machine.gc_object_reserve.items) |object| v.mark(object);
@@ -2538,6 +2542,10 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         gc_relocation.rewriteOptionalSlot(v, Environment, &machine.reusable_block_env);
         relocateEnv(machine.reusable_block_env.?, v);
     }
+    if (machine.reusable_call_env != null) {
+        gc_relocation.rewriteOptionalSlot(v, Environment, &machine.reusable_call_env);
+        relocateEnv(machine.reusable_call_env.?, v);
+    }
     for (machine.gc_temp_roots.items) |*root| gc_relocation.rewriteValueSlot(v, root);
     for (machine.gc_temp_promise_roots.items) |*root|
         gc_relocation.rewriteRequiredSlot(v, promise.Promise, root);
@@ -2594,6 +2602,8 @@ test "realm root relocation rewrites active interpreter containers" {
     var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
     var old_cached_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
     var new_cached_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var old_cached_call_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var new_cached_call_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
 
     machine.ret_value = Value.obj(&old_objects[0]);
     machine.this_value = Value.obj(&old_objects[1]);
@@ -2628,6 +2638,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try machine.gc_execs.append(machine.arena, &execution);
     try machine.gc_env_roots.append(machine.arena, &old_environment);
     machine.reusable_block_env = &old_cached_environment;
+    machine.reusable_call_env = &old_cached_call_environment;
     var debug_frame = interp.DebugCallFrame{
         .function_name = "debug",
         .environment = &old_environment,
@@ -2666,6 +2677,8 @@ test "realm root relocation rewrites active interpreter containers" {
         new_environment: *Environment,
         old_cached_environment: *Environment,
         new_cached_environment: *Environment,
+        old_cached_call_environment: *Environment,
+        new_cached_call_environment: *Environment,
         old_promise: *promise.Promise,
         new_promise: *promise.Promise,
 
@@ -2677,6 +2690,8 @@ test "realm root relocation rewrites active interpreter containers" {
                 return @ptrCast(self.new_environment);
             if (old == @as(*anyopaque, @ptrCast(self.old_cached_environment)))
                 return @ptrCast(self.new_cached_environment);
+            if (old == @as(*anyopaque, @ptrCast(self.old_cached_call_environment)))
+                return @ptrCast(self.new_cached_call_environment);
             if (old == @as(*anyopaque, @ptrCast(self.old_promise)))
                 return @ptrCast(self.new_promise);
             return old;
@@ -2689,6 +2704,8 @@ test "realm root relocation rewrites active interpreter containers" {
         .new_environment = &new_environment,
         .old_cached_environment = &old_cached_environment,
         .new_cached_environment = &new_cached_environment,
+        .old_cached_call_environment = &old_cached_call_environment,
+        .new_cached_call_environment = &new_cached_call_environment,
         .old_promise = &old_promise,
         .new_promise = &new_promise,
     };
@@ -2719,6 +2736,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[26], execution.saved_super_ctor.?);
     try std.testing.expectEqual(&new_environment, machine.gc_env_roots.items[0]);
     try std.testing.expectEqual(&new_cached_environment, machine.reusable_block_env.?);
+    try std.testing.expectEqual(&new_cached_call_environment, machine.reusable_call_env.?);
     try std.testing.expectEqual(&new_environment, debug_frame.environment);
     try std.testing.expectEqual(&new_objects[20], debug_frame.this_value.asObj());
     try std.testing.expectEqual(&new_environment, machine.debug_top_level_environment.?);
