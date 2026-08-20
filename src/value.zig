@@ -7494,9 +7494,12 @@ test "ownKeys releases its membership index without changing result ownership" {
 
     var result_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer result_arena.deinit();
-    var scratch_storage: [4096]u8 = undefined;
-    var scratch = std.heap.FixedBufferAllocator.init(&scratch_storage);
-    const keys = try object.ownKeysWithScratch(result_arena.allocator(), scratch.allocator());
+    // Keep transient storage on the leak-checking test allocator, distinct from
+    // the result arena. FixedBufferAllocator may retain alignment padding after
+    // a correctly freed hash table, so its byte cursor is not a deallocation
+    // oracle; the test allocator reports any live membership allocation at the
+    // end of this test instead.
+    const keys = try object.ownKeysWithScratch(result_arena.allocator(), std.testing.allocator);
 
     // A concurrent key-order compaction can reclaim every source spelling as
     // soon as ownKeys releases property_lock. Model that exact lifetime edge:
@@ -7507,7 +7510,6 @@ test "ownKeys releases its membership index without changing result ownership" {
 
     // The last alpha occurrence defines its creation position, and result
     // storage remains live after the invocation-local index is released.
-    try std.testing.expectEqual(@as(usize, 0), scratch.end_index);
     try std.testing.expectEqual(@as(usize, 2), keys.len);
     try std.testing.expectEqualStrings("beta", keys[0]);
     try std.testing.expectEqualStrings("alpha", keys[1]);
