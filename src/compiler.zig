@@ -105,14 +105,19 @@ const FnScope = struct {
         _ = self.lexical_scopes.pop();
     }
 
+    fn currentLexicalScope(self: *FnScope) *std.StringHashMapUnmanaged(SlotBinding) {
+        std.debug.assert(self.lexical_scopes.items.len != 0);
+        return self.lexical_scopes.items[self.lexical_scopes.items.len - 1];
+    }
+
     fn addLexical(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!u32 {
-        const bindings = self.lexical_scopes.getLast().?;
+        const bindings = self.currentLexicalScope();
         if (bindings.get(name)) |binding| return binding.slot;
         return self.addBinding(arena, bindings, name, true, immutable);
     }
 
     fn addLexicalChecked(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!u32 {
-        const bindings = self.lexical_scopes.getLast().?;
+        const bindings = self.currentLexicalScope();
         const slot = try self.addLexical(arena, name, immutable);
         const binding = bindings.getPtr(name).?;
         if (!binding.tdz_checked) {
@@ -123,7 +128,7 @@ const FnScope = struct {
     }
 
     fn addEnvironmentLexical(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!void {
-        const bindings = self.lexical_scopes.getLast().?;
+        const bindings = self.currentLexicalScope();
         if (bindings.contains(name)) return;
         try bindings.put(arena, name, .{
             .slot = 0,
