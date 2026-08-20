@@ -6,6 +6,7 @@
 const std = @import("std");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
+const strcell = @import("strcell.zig");
 const interpreter = @import("interpreter.zig");
 const Interpreter = interpreter.Interpreter;
 const parser_mod = @import("parser.zig");
@@ -2691,8 +2692,20 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
             st.gap = sp;
         },
         .string => {
-            const sp = try space.asWtf8(a);
-            st.gap = sp[0..@min(sp.len, 10)];
+            // ECMA-262 JSON.stringify step 8: `gap` is the first ten UTF-16
+            // code units, not ten WTF-8 bytes or ten Unicode scalar values.
+            // Keep the overwhelmingly common ASCII prefix borrowed; the
+            // representation-aware path also preserves a lone surrogate when
+            // the tenth code unit bisects an astral scalar.
+            if (space.strIsAscii()) {
+                const sp = space.asStr();
+                st.gap = sp[0..@min(sp.len, 10)];
+            } else if (space.strIsFlatLatin1()) {
+                const flat = space.asStr();
+                st.gap = try strcell.latin1FlatToWtf8(a, flat[0..@min(flat.len, 10)]);
+            } else {
+                st.gap = try self.stringPrefixUtf16(space.asStr(), 10);
+            }
         },
         else => {},
     }

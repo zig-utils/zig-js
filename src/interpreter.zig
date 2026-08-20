@@ -10303,6 +10303,26 @@ pub const Interpreter = struct {
         return buf.toOwnedSlice(self.arena);
     }
 
+    /// Return at most `max_units` UTF-16 code units from canonical WTF-8.
+    /// A boundary between an astral scalar's surrogate pair must materialize
+    /// the exact lone high surrogate; every complete-sequence boundary can
+    /// borrow the existing immutable prefix.
+    pub fn stringPrefixUtf16(self: *Interpreter, s: []const u8, max_units: usize) EvalError![]const u8 {
+        if (max_units == 0) return s[0..0];
+        var units: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) {
+            const seq_len = jsStringSeqLen(s, i);
+            const seq_units = utf16LenOfSeq(s, i);
+            if (seq_units > max_units - units)
+                return self.stringSliceUtf16(s, 0, max_units);
+            units += seq_units;
+            i += seq_len;
+            if (units == max_units) return s[0..i];
+        }
+        return s;
+    }
+
     fn stringPosition(self: *Interpreter, s: []const u8, v: Value, ascii: bool) EvalError!?usize {
         const n = try self.toNumberV(v);
         const pos = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
@@ -54728,6 +54748,28 @@ test "JSON stringify promotes deep active paths without rejecting aliases" {
         \\encoded.includes('"marker":7') &&
         \\  encoded.endsWith('"aliases":[{"marker":7},{"marker":7}]}')
     )).asBool());
+}
+
+test "JSON stringify truncates gap by UTF-16 code units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings(
+        "{\n0123456789\"a\": 1\n}",
+        (try evalSource(arena.allocator(), "JSON.stringify({ a: 1 }, null, '0123456789tail')")).asStr(),
+    );
+    try std.testing.expectEqualStrings("true,true,true,true,true", (try evalSource(arena.allocator(),
+        \\let value = { a: 1 };
+        \\let astral = String.fromCodePoint(0x1F4A9);
+        \\let high = String.fromCharCode(0xD83D);
+        \\let expected = gap => "{\n" + gap + '"a": 1\n}';
+        \\[
+        \\  JSON.stringify(value, null, "\u00E9".repeat(12)) === expected("\u00E9".repeat(10)),
+        \\  JSON.stringify(value, null, astral.repeat(6)) === expected(astral.repeat(5)),
+        \\  JSON.stringify(value, null, "x".repeat(9) + astral + "tail") === expected("x".repeat(9) + high),
+        \\  JSON.stringify(value, null, "x".repeat(9) + high + "tail") === expected("x".repeat(9) + high),
+        \\  JSON.stringify(value, null, new String("\u00E9".repeat(12))) === expected("\u00E9".repeat(10))
+        \\].join(",")
+    )).asStr());
 }
 
 test "interpreter builtins: Math, Object, Array, globals" {
