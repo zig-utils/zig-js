@@ -207,12 +207,8 @@ fn ConcurrentStringSkipList(comptime ValueType: type) type {
             return links;
         }
 
-        pub fn createHead(arena: std.mem.Allocator) std.mem.Allocator.Error!*Head {
+        pub fn createHead(arena: std.mem.Allocator, seed: [SipHash.key_length]u8) std.mem.Allocator.Error!*Head {
             const head = try arena.create(Head);
-            var seed: [SipHash.key_length]u8 = undefined;
-            // Algorithmic-complexity protection fails closed when the host has
-            // no secure entropy, matching attacker-controlled collection hashes.
-            agent.engineIo().randomSecure(&seed) catch return error.OutOfMemory;
             head.* = .{ .next = emptyLinks(), .seed = seed };
             return head;
         }
@@ -321,6 +317,55 @@ fn ConcurrentStringSkipList(comptime ValueType: type) type {
     };
 }
 
+/// One secure root secret feeds independently domain-separated transition-map
+/// keys for this realm. Calling the host entropy source for every Shape fanout
+/// made builtin installation spend material time in the OS CSPRNG. SipHash is
+/// already the keyed map primitive; using it as the derivation PRF retains an
+/// undisclosed 128-bit key per map while reducing secure entropy to one request
+/// for the complete realm-owned Shape tree.
+const TransitionKeySource = struct {
+    const SipHash = std.crypto.auth.siphash.SipHash64(2, 4);
+
+    root_secret: [SipHash.key_length]u8,
+    next_domain: std.atomic.Value(u64) = .init(0),
+
+    fn claimDomain(self: *TransitionKeySource) std.mem.Allocator.Error!u64 {
+        var current = self.next_domain.load(.monotonic);
+        while (current != std.math.maxInt(u64)) {
+            if (self.next_domain.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return current;
+        }
+        // Reusing a domain would repeat a transition-map key. No real realm can
+        // allocate 2^64 maps, but the security invariant still fails closed.
+        return error.OutOfMemory;
+    }
+
+    fn derive(self: *TransitionKeySource) std.mem.Allocator.Error![SipHash.key_length]u8 {
+        const domain = try self.claimDomain();
+        var input: [9]u8 = undefined;
+        std.mem.writeInt(u64, input[0..8], domain, .little);
+
+        var derived: [SipHash.key_length]u8 = undefined;
+        input[8] = 0;
+        std.mem.writeInt(u64, derived[0..8], SipHash.toInt(&input, &self.root_secret), .little);
+        input[8] = 1;
+        std.mem.writeInt(u64, derived[8..16], SipHash.toInt(&input, &self.root_secret), .little);
+        return derived;
+    }
+};
+
+/// Shape allocation and transition-key ownership have the same arena lifetime.
+/// Keeping the allocator here lets every Shape carry one owner pointer instead
+/// of growing each immutable Shape with both an allocator and a key-source
+/// pointer.
+const ShapeOwner = struct {
+    arena: std.mem.Allocator,
+    transition_keys: TransitionKeySource,
+};
+
 pub const Shape = struct {
     /// The shape this one extends (null for the root/empty shape).
     parent: ?*Shape,
@@ -349,7 +394,7 @@ pub const Shape = struct {
     transition_head: std.atomic.Value(?*TransitionList.Head) = .init(null),
     transition_count: std.atomic.Value(usize) = .init(0),
     transition_lock: std.atomic.Mutex = .unlocked,
-    arena: std.mem.Allocator,
+    owner: *ShapeOwner,
 
     const lookup_index_threshold: u32 = 32;
 
@@ -360,8 +405,22 @@ pub const Shape = struct {
 
     /// Create the empty root shape for a Context.
     pub fn createRoot(arena: std.mem.Allocator) std.mem.Allocator.Error!*Shape {
+        var root_secret: [TransitionKeySource.SipHash.key_length]u8 = undefined;
+        // Algorithmic-complexity protection fails closed when the host has no
+        // secure entropy, matching attacker-controlled collection hashes.
+        agent.engineIo().randomSecure(&root_secret) catch return error.OutOfMemory;
+        return createRootWithSeed(arena, root_secret);
+    }
+
+    fn createRootWithSeed(arena: std.mem.Allocator, root_secret: [TransitionKeySource.SipHash.key_length]u8) std.mem.Allocator.Error!*Shape {
+        const owner = try arena.create(ShapeOwner);
+        errdefer arena.destroy(owner);
+        owner.* = .{
+            .arena = arena,
+            .transition_keys = .{ .root_secret = root_secret },
+        };
         const root = try arena.create(Shape);
-        root.* = .{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .arena = arena };
+        root.* = .{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .owner = owner };
         return root;
     }
 
@@ -462,8 +521,9 @@ pub const Shape = struct {
             return child;
         }
         bumpShapeStat("transition_misses");
-        const owned = try self.arena.dupe(u8, name);
-        const child = try self.arena.create(Shape);
+        const arena = self.owner.arena;
+        const owned = try arena.dupe(u8, name);
+        const child = try arena.create(Shape);
         const slot = switch (state) {
             .deleted => |deleted_slot| deleted_slot,
             .absent => self.count,
@@ -479,7 +539,7 @@ pub const Shape = struct {
             .live_count = self.live_count + 1,
             .depth = self.depth + 1,
             .lookup_root = lookup_root,
-            .arena = self.arena,
+            .owner = self.owner,
         };
         try self.publishTransition(child);
         return child;
@@ -504,8 +564,9 @@ pub const Shape = struct {
         defer self.transition_lock.unlock();
         if (self.findTransitionCached(name)) |child| return child;
 
-        const owned = try self.arena.dupe(u8, name);
-        const child = try self.arena.create(Shape);
+        const arena = self.owner.arena;
+        const owned = try arena.dupe(u8, name);
+        const child = try arena.create(Shape);
         const lookup_root = try self.nextLookupRoot(owned, slot, true);
         child.* = .{
             .parent = self,
@@ -516,7 +577,7 @@ pub const Shape = struct {
             .live_count = self.live_count - 1,
             .depth = self.depth + 1,
             .lookup_root = lookup_root,
-            .arena = self.arena,
+            .owner = self.owner,
         };
         try self.publishTransition(child);
         return child;
@@ -527,9 +588,10 @@ pub const Shape = struct {
     }
 
     fn publishTransition(self: *Shape, child: *Shape) std.mem.Allocator.Error!void {
+        const arena = self.owner.arena;
         const existing = self.transition_head.load(.monotonic);
-        const head = existing orelse try TransitionList.createHead(self.arena);
-        try TransitionList.put(self.arena, head, child.name.?, child);
+        const head = existing orelse try TransitionList.createHead(arena, try self.owner.transition_keys.derive());
+        try TransitionList.put(arena, head, child.name.?, child);
         if (existing == null) self.transition_head.store(head, .release);
         _ = self.transition_count.fetchAdd(1, .release);
     }
@@ -552,7 +614,7 @@ pub const Shape = struct {
         if (child_depth < lookup_index_threshold) return null;
         const next_state: LookupState = if (deleted) .{ .deleted = slot } else .{ .present = slot };
         if (child_depth > lookup_index_threshold)
-            return try LookupTree.put(self.arena, self.lookup_root.?, owned_name, next_state);
+            return try LookupTree.put(self.owner.arena, self.lookup_root.?, owned_name, next_state);
 
         var operations: [lookup_index_threshold - 1]*Shape = undefined;
         var count: usize = 0;
@@ -568,9 +630,9 @@ pub const Shape = struct {
         while (count > 0) {
             count -= 1;
             const operation = operations[count];
-            root = try LookupTree.put(self.arena, root, operation.name.?, stateForOperation(operation));
+            root = try LookupTree.put(self.owner.arena, root, operation.name.?, stateForOperation(operation));
         }
-        return try LookupTree.put(self.arena, root, owned_name, next_state);
+        return try LookupTree.put(self.owner.arena, root, owned_name, next_state);
     }
 
     pub fn lookupComparisonCountForTesting(self: *const Shape, name: []const u8) usize {
@@ -629,6 +691,45 @@ test "shape transitions share structure and assign sequential slots" {
     const sa2 = try root.transition("a");
     const sab2 = try sa2.transition("b");
     try std.testing.expectEqual(sab, sab2);
+}
+
+test "transition map keys are deterministic and domain separated for a fixed realm seed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const seed = [_]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff };
+
+    const first_root = try Shape.createRootWithSeed(arena.allocator(), seed);
+    const first_zero = try first_root.owner.transition_keys.derive();
+    const first_one = try first_root.owner.transition_keys.derive();
+    try std.testing.expect(!std.mem.eql(u8, &first_zero, &first_one));
+
+    const second_root = try Shape.createRootWithSeed(arena.allocator(), seed);
+    try std.testing.expectEqualSlices(u8, &first_zero, &(try second_root.owner.transition_keys.derive()));
+    try std.testing.expectEqualSlices(u8, &first_one, &(try second_root.owner.transition_keys.derive()));
+}
+
+test "transition map domains remain unique under concurrent allocation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const seed: [TransitionKeySource.SipHash.key_length]u8 = @splat(0x5a);
+    const root = try Shape.createRootWithSeed(arena.allocator(), seed);
+
+    const Worker = struct {
+        fn run(source: *TransitionKeySource, out: *[TransitionKeySource.SipHash.key_length]u8) void {
+            out.* = source.derive() catch @panic("transition key derivation failed");
+        }
+    };
+    var keys: [16][TransitionKeySource.SipHash.key_length]u8 = undefined;
+    var threads: [keys.len]std.Thread = undefined;
+    for (&threads, &keys) |*thread, *key|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ &root.owner.transition_keys, key });
+    for (threads) |thread| thread.join();
+
+    for (keys, 0..) |key, index| {
+        for (keys[index + 1 ..]) |other|
+            try std.testing.expect(!std.mem.eql(u8, &key, &other));
+    }
+    try std.testing.expectEqual(@as(u64, keys.len), root.owner.transition_keys.next_domain.load(.monotonic));
 }
 
 test "shape deletion transitions preserve slots and undo immediate re-adds" {
@@ -757,7 +858,7 @@ test "shape transition lock wait observes published cache" {
         .count = 1,
         .live_count = 1,
         .depth = 1,
-        .arena = a,
+        .owner = root.owner,
     };
     try root.publishTransition(child);
 

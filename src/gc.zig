@@ -465,7 +465,7 @@ test "Object property relocation covers inline external accessor and dense stora
         .count = 2,
         .live_count = 2,
         .depth = 2,
-        .arena = allocator,
+        .owner = root_shape.owner,
     };
     var inline_object = Object{
         .shape = &inline_shape,
@@ -4635,6 +4635,9 @@ const TestEngine = struct {
 
 test "gc binding: real Object graph — proto/slots/accessors survive, garbage swept" {
     const a = std.testing.allocator;
+    var shape_arena = std.heap.ArenaAllocator.init(a);
+    defer shape_arena.deinit();
+    const shape_root = try Shape.createRoot(shape_arena.allocator());
     var eng = TestEngine{ .gpa = a };
     defer eng.roots.deinit(a);
 
@@ -4659,7 +4662,7 @@ test "gc binding: real Object graph — proto/slots/accessors survive, garbage s
         .count = 1,
         .live_count = 1,
         .depth = 1,
-        .arena = a,
+        .owner = shape_root.owner,
     };
     root.shape = &occupied_shape;
     root.inline_slots[0] = Value.obj(child);

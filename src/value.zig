@@ -7344,6 +7344,9 @@ test "Temporal hot private spill preserves state on allocation failure" {
 }
 
 fn exerciseExternalSlotsOomRollback(allocator: std.mem.Allocator) !void {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const shape_root = try Shape.createRoot(shape_arena.allocator());
     var four_slot_shape = Shape{
         .parent = null,
         .name = "d",
@@ -7352,7 +7355,7 @@ fn exerciseExternalSlotsOomRollback(allocator: std.mem.Allocator) !void {
         .count = Object.inline_slot_capacity,
         .live_count = Object.inline_slot_capacity,
         .depth = Object.inline_slot_capacity,
-        .arena = allocator,
+        .owner = shape_root.owner,
     };
     var object = Object{ .shape = &four_slot_shape };
     for (&object.inline_slots, 0..) |*slot, i| slot.* = Value.num(@floatFromInt(i));
@@ -7439,10 +7442,12 @@ test "Object storage wrapper converges across concurrent slot and element instal
 }
 
 fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
-    var root = Shape{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .arena = allocator };
-    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .arena = allocator };
-    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .arena = allocator };
-    var gamma = Shape{ .parent = &beta, .name = "gamma", .slot = 2, .deleted = false, .count = 3, .live_count = 3, .depth = 3, .arena = allocator };
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root = try Shape.createRoot(shape_arena.allocator());
+    var alpha = Shape{ .parent = root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .owner = root.owner };
+    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .owner = root.owner };
+    var gamma = Shape{ .parent = &beta, .name = "gamma", .slot = 2, .deleted = false, .count = 3, .live_count = 3, .depth = 3, .owner = root.owner };
     var object = Object{ .shape = &gamma };
     object.initInlineSlots();
     defer if (object.storageState()) |storage| allocator.destroy(storage);
@@ -7471,9 +7476,11 @@ test "object key-order construction rolls back every allocation failure" {
 }
 
 test "ownKeys releases its membership index without changing result ownership" {
-    var root = Shape{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .arena = std.testing.allocator };
-    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .arena = std.testing.allocator };
-    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .arena = std.testing.allocator };
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root = try Shape.createRoot(shape_arena.allocator());
+    var alpha = Shape{ .parent = root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .owner = root.owner };
+    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .owner = root.owner };
     var order = std.ArrayListUnmanaged(KeyOrderEntry).empty;
     defer {
         for (order.items) |entry| std.testing.allocator.free(entry.key);
@@ -7652,9 +7659,12 @@ test "named deletion OOM leaves shape slots and order exact" {
     var no_memory: [0]u8 = .{};
     var failing = std.heap.FixedBufferAllocator.init(&no_memory);
     const fail = failing.allocator();
-    var root = Shape{ .parent = null, .name = null, .slot = 0, .deleted = false, .count = 0, .live_count = 0, .depth = 0, .arena = fail };
-    var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .arena = fail };
-    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .arena = fail };
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root = try Shape.createRoot(shape_arena.allocator());
+    root.owner.arena = fail;
+    var alpha = Shape{ .parent = root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .owner = root.owner };
+    var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .owner = root.owner };
     var order = std.ArrayListUnmanaged(KeyOrderEntry).empty;
     try order.appendSlice(std.testing.allocator, &.{ .{ .key = "alpha" }, .{ .key = "beta" } });
     defer order.deinit(std.testing.allocator);
@@ -7666,7 +7676,7 @@ test "named deletion OOM leaves shape slots and order exact" {
     object.inline_slots[0] = Value.num(1);
     object.inline_slots[1] = Value.num(2);
 
-    try std.testing.expectError(error.OutOfMemory, object.deleteOrdinaryNamedOwn(std.testing.allocator, &root, "alpha"));
+    try std.testing.expectError(error.OutOfMemory, object.deleteOrdinaryNamedOwn(std.testing.allocator, root, "alpha"));
     try std.testing.expectEqual(&beta, object.shape.?);
     try std.testing.expectEqual(@as(f64, 1), object.getOwn("alpha").?.asNum());
     try std.testing.expectEqual(@as(f64, 2), object.getOwn("beta").?.asNum());
