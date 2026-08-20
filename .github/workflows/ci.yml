@@ -778,25 +778,15 @@ jobs:
         with:
           repository: stacksjs/bunpress
           path: Tools/bunpress
-          ref: 1262895355142cb57ae7850dec7bf31cc5f5999d
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          repository: stacksjs/stx
-          path: Tools/stx
-          ref: c215f1b82bdb40b983cf54f0182c7d959587f31d
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          repository: stacksjs/ts-syntax-highlighter
-          path: Libraries/ts-syntax-highlighter
-          ref: 38ea140aa4b5c404f5b4e8450a04eb8195293271
+          ref: c0907f46685f0cede0556982feb44fc5133e96c7
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           version: 0.11.12
           packages: bun.sh@1.3.14
           install: 'false'
-      - name: Prepare owned documentation source graph
+      - name: Install pinned documentation dependencies
         working-directory: Tools/bunpress
-        run: bun run deps:owned
+        run: bun install --frozen-lockfile
       # bunpress renders whatever it is given, so a link to a page that no
       # longer exists builds cleanly. This catches that, plus sidebar entries
       # pointing at renamed files.

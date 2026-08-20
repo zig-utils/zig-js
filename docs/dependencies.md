@@ -37,12 +37,11 @@ command. CI checks out those siblings at the exact revisions recorded in the
 inventory, using the same adjacent paths as a local build.
 
 Documentation deliberately uses the owner-maintained BunPress source checkout
-at `../../Tools/bunpress`. BunPress, STX, and ts-syntax-highlighter are each
-resolved from their owner-maintained sibling checkout, and all three exact
-revisions are recorded in the inventory. CI uses the same `Libraries/` plus
-`Tools/` layout, builds those owned sources, and verifies the workspace links
-before rendering. Missing behavior is fixed in the owning repository and then
-consumed here; zig-js does not carry substitutes.
+at `../../Tools/bunpress`. Its exact source revision is recorded in the
+inventory, and that revision's frozen Bun lockfile integrity-pins the renderer's
+transitive packages. CI installs that lockfile without updating it before
+rendering. Missing behavior is fixed in the owning repository and then consumed
+here; zig-js does not carry substitutes.
 
 Home's repository-tool runtime is bootstrapped without a dependency cycle.
 `zig build home-tool-bootstrap` installs the unbridged public C archive that

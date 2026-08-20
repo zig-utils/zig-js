@@ -138,8 +138,8 @@
       "class": "owner_maintained_local",
       "status": "allowed",
       "scope": "documentation build and preview",
-      "locator": "../../Tools/bunpress/packages/bunpress with owned STX and ts-syntax-highlighter sibling workspaces",
-      "pin": "stacksjs/bunpress 1262895355142cb57ae7850dec7bf31cc5f5999d; stacksjs/stx c215f1b82bdb40b983cf54f0182c7d959587f31d; stacksjs/ts-syntax-highlighter 38ea140aa4b5c404f5b4e8450a04eb8195293271",
+      "locator": "../../Tools/bunpress/packages/bunpress with its frozen Bun lockfile",
+      "pin": "stacksjs/bunpress c0907f46685f0cede0556982feb44fc5133e96c7 (v0.2.6); transitive renderer packages are integrity-pinned by that revision's bun.lock",
       "license": "MIT",
       "affects_runtime_semantics": false,
       "runtime_semantics": "Owned documentation rendering only; never part of libzig-js. Fixes land in the BunPress source repository."
@@ -189,9 +189,7 @@
       { "repository": "home-lang/home", "path": "Home/lang", "revision": "d01469e9dd90e84cf9434b056390dcb4667b18bc", "occurrences": 4, "edge": "home-tool-runtime" },
       { "repository": "zig-utils/zig-regex", "path": "Libraries/zig-regex", "revision": "87e9ca28fa14194dd1e8b4cae7461e179331efca", "occurrences": 1, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "Libraries/zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 1, "edge": "zig-gc" },
-      { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "1262895355142cb57ae7850dec7bf31cc5f5999d", "occurrences": 1, "edge": "bunpress-docs-toolchain" },
-      { "repository": "stacksjs/stx", "path": "Tools/stx", "revision": "c215f1b82bdb40b983cf54f0182c7d959587f31d", "occurrences": 1, "edge": "bunpress-docs-toolchain" },
-      { "repository": "stacksjs/ts-syntax-highlighter", "path": "Libraries/ts-syntax-highlighter", "revision": "38ea140aa4b5c404f5b4e8450a04eb8195293271", "occurrences": 1, "edge": "bunpress-docs-toolchain" }
+      { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "c0907f46685f0cede0556982feb44fc5133e96c7", "occurrences": 1, "edge": "bunpress-docs-toolchain" }
     ],
     "production_imports": [
       { "name": "std", "external": true, "edge": "zig-toolchain" },
@@ -225,7 +223,7 @@
       { "path": "wasm-spec-wg3", "url": "https://github.com/WebAssembly/spec.git", "gitlink": "9d36019973201a19f9c9ebb0f10828b2fe2374aa", "edge": "pinned-conformance-corpora" }
     ],
     "package_dependencies": [
-      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "file:../../Tools/bunpress/packages/bunpress", "lockfile": "bun.lock", "locked_version": "file:../../Tools/bunpress/packages/bunpress", "integrity": "owned-revision:1262895355142cb57ae7850dec7bf31cc5f5999d", "source_repository": "stacksjs/bunpress", "edge": "bunpress-docs-toolchain" }
+      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "file:../../Tools/bunpress/packages/bunpress", "lockfile": "bun.lock", "locked_version": "file:../../Tools/bunpress/packages/bunpress", "integrity": "owned-revision:c0907f46685f0cede0556982feb44fc5133e96c7", "source_repository": "stacksjs/bunpress", "edge": "bunpress-docs-toolchain" }
     ],
     "package_scripts": [
       { "manifest": "package.json", "name": "docs:dev", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts dev", "edge": "bunpress-docs-toolchain" },
@@ -235,7 +233,7 @@
       { "manifest": "package.json", "name": "docs:data", "command": "~/Code/Home/lang/zig-out/bin/home-tool run scripts/gen-test262-data.ts", "edge": "home-tool-runtime" }
     ],
     "ci_actions": [
-      { "name": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", "count": 32, "edge": "ci-bootstrap-actions" },
+      { "name": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", "count": 30, "edge": "ci-bootstrap-actions" },
       { "name": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "count": 1, "edge": "ci-bootstrap-actions" },
       { "name": "stacksjs/action-releaser@e925e292fd97978624d41cb513d7b1a5e120d693", "count": 1, "edge": "ci-bootstrap-actions" },
       { "name": "pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9", "count": 8, "edge": "pantry-docs-bootstrap" },
