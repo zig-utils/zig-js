@@ -19133,24 +19133,33 @@ test "Context heap_limit_bytes never publishes a torn object under recovery pres
     defer ctx.destroy();
 
     // A live hoard drives the budget through allocation-failure recovery. Hold
-    // an exact-shape reserve live across that boundary, then release it before
-    // the publication probe. This guarantees a bounded reclamation window under
-    // the unchanged 4 MiB cap: shard scheduling may change when collections run,
-    // but cannot turn the witness into "the live set consumed every byte". An
-    // allocation that survives that boundary must be complete: the PR-249 OOM
-    // witness fails outright on a successfully returned but torn object (#100).
-    // The counts stay small deliberately; this is a correctness witness, not a
-    // stress run.
+    // an exact-shape reserve live across that boundary, then release it from a
+    // separate evaluation and collect only after that native frame returns.
+    // Collecting inside the creation frame is not an exact release boundary:
+    // conservative stack scanning may legally retain stale reserve pointers
+    // even after its JS binding becomes null (#657). The quiescent host boundary
+    // guarantees a reclamation window under the unchanged 4 MiB cap without
+    // weakening stack soundness. An allocation that survives that boundary must
+    // be complete: the PR-249 OOM witness fails outright on a successfully
+    // returned but torn object (#100). The counts stay small deliberately; this
+    // is a correctness witness, not a stress run.
     const full_collections_before = ctx.runtimeHeapAccounting().full_collections;
-    const result = try ctx.evaluate(
-        \\let recoveryReserve = [];
+    const pressure_result = try ctx.evaluate(
+        \\globalThis.recoveryReserve = [];
         \\for (let i = 0; i < 128; ++i)
         \\  recoveryReserve.push({ idx: -i, arr: new Array(64).fill(i), s: "reserve_" + i });
-        \\const hoard = [];
+        \\globalThis.recoveryHoard = [];
         \\let pressureOoms = 0;
-        \\try { for (let i = 0; i < 50000; ++i) hoard.push({ i: i, j: i + 1 }); } catch (e) { ++pressureOoms; }
-        \\recoveryReserve = null;
-        \\gc();
+        \\try { for (let i = 0; i < 50000; ++i) recoveryHoard.push({ i: i, j: i + 1 }); } catch (e) { ++pressureOoms; }
+        \\pressureOoms;
+    );
+    const pressure_ooms: usize = @intFromFloat(pressure_result.asNum());
+    try std.testing.expect(pressure_ooms > 0); // the cap actually bit
+
+    _ = try ctx.evaluate("globalThis.recoveryReserve = null; 0;");
+    ctx.collectGarbage();
+
+    const result = try ctx.evaluate(
         \\let torn = 0, made = 0, ooms = 0;
         // Keep the recovery probe's loop control predeclared: the body `try`
         // deliberately scores complete Object publication, not an unrelated
@@ -19163,12 +19172,10 @@ test "Context heap_limit_bytes never publishes a torn object under recovery pres
         \\  } catch (e) { ++ooms; }
         \\}
         \\if (torn !== 0) throw new Error("torn " + torn + " of " + made + " (ooms " + ooms + ")");
-        \\pressureOoms * 1000000 + made * 1000 + ooms;
+        \\made * 1000 + ooms;
     );
     const encoded: usize = @intFromFloat(result.asNum());
-    const pressure_ooms = encoded / 1_000_000;
-    const made = (encoded / 1_000) % 1_000;
-    try std.testing.expect(pressure_ooms > 0); // the cap actually bit
+    const made = encoded / 1_000;
     try std.testing.expect(made > 0); // at least one post-recovery object was validated
     try std.testing.expect(ctx.runtimeHeapAccounting().full_collections > full_collections_before);
 }
