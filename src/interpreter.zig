@@ -19892,8 +19892,7 @@ fn errorStackSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 /// Give `proto` a `constructor` own property pointing back to `ctor`
 /// (non-enumerable, writable, configurable — the spec default for built-ins).
 pub fn setConstructor(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, ctor: *value.Object) EvalError!void {
-    try proto.setOwn(a, rs, "constructor", Value.obj(ctor));
-    try proto.setAttr(a, "constructor", .{ .enumerable = false, .configurable = true, .writable = true });
+    try proto.setOwnWithAttr(a, rs, "constructor", Value.obj(ctor), .{ .enumerable = false, .configurable = true, .writable = true });
 }
 
 /// `Boolean.prototype.toString` / `valueOf` for a primitive boolean `this`.
@@ -22966,22 +22965,17 @@ fn installOneFunctionKind(
     const ctor = try gc_mod.allocObj(a);
     ctor.* = .{ .native = native_fn, .native_ctor = true, .proto = func_ctor, .private_data = @ptrCast(env) };
     try installNativeProps(a, rs, ctor, name, 1);
-    try ctor.setOwn(a, rs, "prototype", Value.obj(kproto));
-    try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    try ctor.setOwnWithAttr(a, rs, "prototype", Value.obj(kproto), .{ .writable = false, .enumerable = false, .configurable = false });
     // %XFunction.prototype%.constructor === %XFunction% ({ !w, !e, c }).
-    try kproto.setOwn(a, rs, "constructor", Value.obj(ctor));
-    try kproto.setAttr(a, "constructor", .{ .writable = false, .enumerable = false, .configurable = true });
+    try kproto.setOwnWithAttr(a, rs, "constructor", Value.obj(ctor), .{ .writable = false, .enumerable = false, .configurable = true });
     if (sym_tag) |k| {
-        try kproto.setOwn(a, rs, k, try Value.strAlloc(a, name));
-        try kproto.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
+        try kproto.setOwnWithAttr(a, rs, k, try Value.strAlloc(a, name), .{ .writable = false, .enumerable = false, .configurable = true });
     }
     if (instance_proto) |gp| {
         // %XFunction.prototype%.prototype === %XPrototype% ({ !w, !e, c }), and
         // %XPrototype%.constructor === %XFunction.prototype% ({ !w, !e, c }).
-        try kproto.setOwn(a, rs, "prototype", Value.obj(gp));
-        try kproto.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = true });
-        try gp.setOwn(a, rs, "constructor", Value.obj(kproto));
-        try gp.setAttr(a, "constructor", .{ .writable = false, .enumerable = false, .configurable = true });
+        try kproto.setOwnWithAttr(a, rs, "prototype", Value.obj(gp), .{ .writable = false, .enumerable = false, .configurable = true });
+        try gp.setOwnWithAttr(a, rs, "constructor", Value.obj(kproto), .{ .writable = false, .enumerable = false, .configurable = true });
     }
     return kproto;
 }
@@ -33578,15 +33572,11 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
             p.* = .{ .proto = error_proto };
             break :blk p;
         };
-        try proto.setOwn(a, root_shape, "name", try Value.strAlloc(a, ename));
-        try proto.setAttr(a, "name", ro);
-        try proto.setOwn(a, root_shape, "message", Value.str(""));
-        try proto.setAttr(a, "message", ro);
-        try proto.setOwn(a, root_shape, "constructor", ctor_v);
-        try proto.setAttr(a, "constructor", ro);
+        try proto.setOwnWithAttr(a, root_shape, "name", try Value.strAlloc(a, ename), ro);
+        try proto.setOwnWithAttr(a, root_shape, "message", Value.str(""), ro);
+        try proto.setOwnWithAttr(a, root_shape, "constructor", ctor_v, ro);
         if (is_base) {
-            try ctor.setOwn(a, root_shape, "stackTraceLimit", Value.num(10));
-            try ctor.setAttr(a, "stackTraceLimit", ro);
+            try ctor.setOwnWithAttr(a, root_shape, "stackTraceLimit", Value.num(10), ro);
             try setNative(a, root_shape, proto, "toString", 0, errorToStringFn);
             // `Error.prototype.stack` is a V8-style accessor (get brand-checks an
             // Error receiver; set installs an own data property), inherited by all
@@ -33769,8 +33759,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     symbol_proto.* = .{ .proto = object_proto };
     try setNative(a, root_shape, symbol_proto, "toString", 0, symbolToStringFn);
     try setNative(a, root_shape, symbol_proto, "valueOf", 0, symbolValueOfFn);
-    try symbol_proto.setOwn(a, root_shape, "constructor", Value.obj(symbol_ns));
-    try symbol_proto.setAttr(a, "constructor", .{ .enumerable = false, .configurable = true, .writable = true });
+    try symbol_proto.setOwnWithAttr(a, root_shape, "constructor", Value.obj(symbol_ns), .{ .enumerable = false, .configurable = true, .writable = true });
     // `Symbol.prototype.description` — a configurable getter-only accessor.
     {
         const get = try gc_mod.allocObj(a);
@@ -34714,10 +34703,8 @@ pub fn installFunctionProps(
         len += 1;
     }
     const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-    try obj.setOwn(arena, root_shape, "length", Value.num(@floatFromInt(len)));
-    try obj.setAttr(arena, "length", ro_attr);
-    try obj.setOwn(arena, root_shape, "name", try Value.strAlloc(arena, name));
-    try obj.setAttr(arena, "name", ro_attr);
+    try obj.setOwnWithAttr(arena, root_shape, "length", Value.num(@floatFromInt(len)), ro_attr);
+    try obj.setOwnWithAttr(arena, root_shape, "name", try Value.strAlloc(arena, name), ro_attr);
 }
 
 /// Install the `name` and `length` own properties on a *native* (built-in)
@@ -34728,10 +34715,8 @@ pub fn installFunctionProps(
 /// `name.js` / `length.js` for essentially every built-in method.
 pub fn installNativeProps(a: std.mem.Allocator, rs: *Shape, obj: *value.Object, name: []const u8, len: usize) EvalError!void {
     const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-    try obj.setOwn(a, rs, "length", Value.num(@floatFromInt(len)));
-    try obj.setAttr(a, "length", ro_attr);
-    try obj.setOwn(a, rs, "name", try Value.strAlloc(a, name));
-    try obj.setAttr(a, "name", ro_attr);
+    try obj.setOwnWithAttr(a, rs, "length", Value.num(@floatFromInt(len)), ro_attr);
+    try obj.setOwnWithAttr(a, rs, "name", try Value.strAlloc(a, name), ro_attr);
 }
 
 fn defineGlobalFn(env: *Environment, rs: *Shape, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
@@ -34750,8 +34735,7 @@ fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, 
         const proto = try gc_mod.allocObj(env.arena);
         proto.* = .{};
         try setConstructor(env.arena, rs, proto, o);
-        try o.setOwn(env.arena, rs, "prototype", Value.obj(proto));
-        try o.setAttr(env.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+        try o.setOwnWithAttr(env.arena, rs, "prototype", Value.obj(proto), .{ .writable = false, .enumerable = false, .configurable = false });
     }
     try env.put(name, Value.obj(o));
 }
@@ -34760,10 +34744,9 @@ fn setNativeWithData(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Objec
     const m = try gc_mod.allocObj(a);
     m.* = .{ .native = f, .private_data = data };
     try installNativeProps(a, root_shape, m, name, len);
-    try obj.setOwn(a, root_shape, name, Value.obj(m));
     // Built-in methods/statics are non-enumerable (writable + configurable), per
     // spec — so `Object.keys`/`for-in` skip them and verifyProperty is satisfied.
-    try obj.setAttr(a, name, .{ .enumerable = false, .configurable = true, .writable = true });
+    try obj.setOwnWithAttr(a, root_shape, name, Value.obj(m), .{ .enumerable = false, .configurable = true, .writable = true });
 }
 
 pub fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {

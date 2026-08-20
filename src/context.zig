@@ -4689,10 +4689,9 @@ pub const Context = struct {
         var it = self.env.vars.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
-            try global_obj.setOwn(a, self.root_shape, name, entry.value_ptr.*);
             const frozen = std.mem.eql(u8, name, "undefined") or
                 std.mem.eql(u8, name, "NaN") or std.mem.eql(u8, name, "Infinity");
-            try global_obj.setAttr(a, name, if (frozen)
+            try global_obj.setOwnWithAttr(a, self.root_shape, name, entry.value_ptr.*, if (frozen)
                 .{ .writable = false, .enumerable = false, .configurable = false }
             else
                 .{ .writable = true, .enumerable = false, .configurable = true });
@@ -4960,10 +4959,9 @@ pub const Context = struct {
         var it = self.env.vars.iterator();
         while (it.next()) |e| {
             const name = e.key_ptr.*;
-            try global_obj.setOwn(a, self.root_shape, name, e.value_ptr.*);
             const frozen = std.mem.eql(u8, name, "undefined") or
                 std.mem.eql(u8, name, "NaN") or std.mem.eql(u8, name, "Infinity");
-            try global_obj.setAttr(a, name, if (frozen)
+            try global_obj.setOwnWithAttr(a, self.root_shape, name, e.value_ptr.*, if (frozen)
                 .{ .writable = false, .enumerable = false, .configurable = false }
             else
                 .{ .writable = true, .enumerable = false, .configurable = true });
@@ -5041,8 +5039,7 @@ pub const Context = struct {
         var machine = self.interpreter();
         const err = try machine.makeError("OutOfMemoryError", "Context heap limit exceeded");
         const obj = err.asObj();
-        try obj.setOwn(self.arena(), self.root_shape, "name", Value.str("OutOfMemoryError"));
-        try obj.setAttr(self.arena(), "name", .{ .writable = false, .enumerable = false, .configurable = false });
+        try obj.setOwnWithAttr(self.arena(), self.root_shape, "name", Value.str("OutOfMemoryError"), .{ .writable = false, .enumerable = false, .configurable = false });
         try obj.setAttr(self.arena(), "message", .{ .writable = false, .enumerable = false, .configurable = false });
         obj.setExtensible(false);
         return err;

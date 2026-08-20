@@ -159,8 +159,7 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     // closure — and thus [[Realm]] — is that realm).
     const fn_v = try self.eval(prog);
     if (fn_v.isObject() and fn_v.asObj().jsFunction() != null) {
-        try fn_v.asObj().setOwn(self.arena, self.root_shape, "name", Value.str("anonymous"));
-        try fn_v.asObj().setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
+        try fn_v.asObj().setOwnWithAttr(self.arena, self.root_shape, "name", Value.str("anonymous"), .{ .writable = false, .enumerable = false, .configurable = true });
         if (Interpreter.funcOf(fn_v)) |f| {
             f.name = "anonymous";
             f.source = try std.fmt.allocPrint(self.arena, "function anonymous({s}\n) {{\n{s}\n}}", .{ params.items, body });
@@ -3092,8 +3091,7 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
         return self.throwError("SyntaxError", "JSON.rawJSON text must be a primitive JSON value");
     const o = try gc_mod.allocObj(self.arena);
     o.* = .{ .proto = null, .behavior = .{ .is_raw_json = true } };
-    try o.setOwn(self.arena, self.root_shape, "rawJSON", try Value.strAlloc(self.arena, s));
-    try o.setAttr(self.arena, "rawJSON", .{ .writable = false, .enumerable = true, .configurable = false });
+    try o.setOwnWithAttr(self.arena, self.root_shape, "rawJSON", try Value.strAlloc(self.arena, s), .{ .writable = false, .enumerable = true, .configurable = false });
     o.setExtensible(false); // SetIntegrityLevel(frozen)
     return Value.obj(o);
 }

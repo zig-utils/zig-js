@@ -5519,6 +5519,14 @@ pub const Object = struct {
     }
 
     fn setAttrUnlocked(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!void {
+        _ = try self.setAttrUnlockedTracked(arena, name, a);
+    }
+
+    /// Install an attribute entry and return its previous value from the same
+    /// exact hash lookup. Transactional descriptor publication uses this to
+    /// restore OOM state without paying a second membership probe on every
+    /// successful built-in installation.
+    fn setAttrUnlockedTracked(self: *Object, arena: std.mem.Allocator, name: []const u8, a: PropAttr) std.mem.Allocator.Error!?PropAttr {
         const cold = try self.ensureCold(arena);
         const alloc = try self.attrsAllocator(arena);
         if (self.attrsMap() == null) {
@@ -5530,8 +5538,9 @@ pub const Object = struct {
         }
         const attrs = self.attrsMap().?;
         if (attrs.getPtr(name)) |value_ptr| {
+            const previous = value_ptr.*;
             value_ptr.* = a;
-            return;
+            return previous;
         }
         const owned_name = try alloc.dupe(u8, name);
         errdefer alloc.free(owned_name);
@@ -5539,6 +5548,7 @@ pub const Object = struct {
         std.debug.assert(!gop.found_existing); // property_lock excludes a competing insert
         gop.key_ptr.* = owned_name;
         gop.value_ptr.* = a;
+        return null;
     }
 
     fn deleteAttrUnlocked(self: *Object, name: []const u8) void {
@@ -5923,6 +5933,33 @@ pub const Object = struct {
     pub fn setOwn(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
         self.lockProperties();
         defer self.unlockProperties();
+        try self.setOwnUnlocked(arena, root, name, v);
+    }
+
+    /// Publish one low-level data value and its final attributes as a single
+    /// named-property transaction. This deliberately mirrors `setOwn` followed
+    /// by `setAttr`; it is not OrdinarySet or DefineOwnProperty and therefore
+    /// preserves the existing accessor/data coexistence behavior of those
+    /// primitives. Attribute metadata is complete before the Shape release
+    /// store makes a new data property visible. If Shape/slot preparation fails,
+    /// restore the exact previous attribute entry before releasing the lock.
+    pub fn setOwnWithAttr(
+        self: *Object,
+        arena: std.mem.Allocator,
+        root: *Shape,
+        name: []const u8,
+        v: Value,
+        attr: PropAttr,
+    ) std.mem.Allocator.Error!void {
+        self.lockProperties();
+        defer self.unlockProperties();
+
+        const previous_attr = try self.setAttrUnlockedTracked(arena, name, attr);
+        errdefer if (previous_attr) |previous| {
+            self.attrsMap().?.getPtr(name).?.* = previous;
+        } else {
+            self.deleteAttrUnlocked(name);
+        };
         try self.setOwnUnlocked(arena, root, name, v);
     }
 
@@ -7106,6 +7143,132 @@ test "ordinary named descriptor snapshots are coherent across representations" {
     }
     try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
+}
+
+test "initialized data descriptors publish with one lock and preserve low-level state" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const root = try Shape.createRoot(arena);
+    var object = Object{};
+    const frozen = PropAttr{ .writable = false, .enumerable = false, .configurable = true };
+
+    object_profile.reset();
+    defer object_profile.disable();
+    try object.setOwnWithAttr(arena, root, "field", Value.num(17), frozen);
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+    switch (object.namedOwnPropertySnapshot("field")) {
+        .data => |own| {
+            try std.testing.expectEqual(@as(f64, 17), own.value.asNum());
+            try std.testing.expectEqual(frozen, own.attr);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const replacement = PropAttr{ .writable = true, .enumerable = false, .configurable = false };
+    object_profile.reset();
+    try object.setOwnWithAttr(arena, root, "field", Value.num(23), replacement);
+    try std.testing.expectEqual(@as(u64, 1), object_profile.snapshot().object_property_lock_acquires);
+    switch (object.namedOwnPropertySnapshot("field")) {
+        .data => |own| {
+            try std.testing.expectEqual(@as(f64, 23), own.value.asNum());
+            try std.testing.expectEqual(replacement, own.attr);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // This primitive intentionally mirrors low-level setOwn + setAttr: an
+    // existing accessor remains authoritative while the data representation
+    // coexists until the higher-level DefineOwnProperty path converts it.
+    try object.setAccessor(arena, "field", Value.num(31), null);
+    try object.setOwnWithAttr(arena, root, "field", Value.num(47), frozen);
+    try std.testing.expectEqual(@as(f64, 47), object.getOwn("field").?.asNum());
+    switch (object.namedOwnPropertySnapshot("field")) {
+        .accessor => |own| try std.testing.expectEqual(@as(f64, 31), own.get.?.asNum()),
+        else => return error.TestUnexpectedResult,
+    }
+    const keys = try object.ownKeys(arena);
+    try std.testing.expectEqual(@as(usize, 1), keys.len);
+    try std.testing.expectEqualStrings("field", keys[0]);
+}
+
+test "initialized data descriptor restores prior attributes on shape OOM" {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root = try Shape.createRoot(shape_arena.allocator());
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    root.owner.arena = failing.allocator();
+
+    const previous = PropAttr{ .writable = true, .enumerable = false, .configurable = true };
+    var attrs: std.StringHashMapUnmanaged(PropAttr) = .empty;
+    defer attrs.deinit(std.testing.allocator);
+    try attrs.put(std.testing.allocator, "field", previous);
+    var cold = ObjectColdState{ .attrs = &attrs };
+    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator };
+    storage.cold.store(&cold, .monotonic);
+    var object = Object{};
+    object.storage.store(&storage, .monotonic);
+
+    const requested = PropAttr{ .writable = false, .enumerable = false, .configurable = false };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        object.setOwnWithAttr(std.testing.allocator, root, "field", Value.num(1), requested),
+    );
+    try std.testing.expect(object.namedOwnPropertySnapshot("field") == .absent);
+    try std.testing.expectEqual(previous, object.getAttr("field"));
+    try std.testing.expectEqual(@as(usize, 1), attrs.count());
+}
+
+test "initialized data descriptor publication is race safe" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const root = try Shape.createRoot(std.heap.page_allocator);
+    var object = Object{};
+    var start = std.atomic.Value(bool).init(false);
+    var done = std.atomic.Value(bool).init(false);
+    const final_attr = PropAttr{ .writable = false, .enumerable = false, .configurable = true };
+
+    const Worker = struct {
+        fn assertComplete(target: *Object, attr: PropAttr) void {
+            switch (target.namedOwnPropertySnapshot("field")) {
+                .data => |own| {
+                    std.debug.assert(own.value.isNumber());
+                    std.debug.assert(own.value.asNum() == 91);
+                    std.debug.assert(std.meta.eql(own.attr, attr));
+                },
+                .absent => {},
+                .accessor => @panic("unexpected accessor"),
+            }
+        }
+
+        fn read(target: *Object, start_flag: *std.atomic.Value(bool), done_flag: *std.atomic.Value(bool), attr: PropAttr) void {
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            while (!done_flag.load(.acquire)) assertComplete(target, attr);
+            // Every reader observes the final published descriptor even if the
+            // writer completed before its first loop iteration.
+            switch (target.namedOwnPropertySnapshot("field")) {
+                .data => |own| {
+                    std.debug.assert(own.value.asNum() == 91);
+                    std.debug.assert(std.meta.eql(own.attr, attr));
+                },
+                else => @panic("missing final descriptor"),
+            }
+        }
+
+        fn write(target: *Object, root_shape: *Shape, start_flag: *std.atomic.Value(bool), done_flag: *std.atomic.Value(bool), attr: PropAttr) void {
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            target.setOwnWithAttr(std.heap.page_allocator, root_shape, "field", Value.num(91), attr) catch @panic("descriptor publication failed");
+            done_flag.store(true, .release);
+        }
+    };
+
+    var readers: [4]std.Thread = undefined;
+    for (&readers) |*thread|
+        thread.* = try std.Thread.spawn(.{}, Worker.read, .{ &object, &start, &done, final_attr });
+    const writer = try std.Thread.spawn(.{}, Worker.write, .{ &object, root, &start, &done, final_attr });
+    start.store(true, .release);
+    writer.join();
+    for (readers) |thread| thread.join();
 }
 
 test "absent named descriptor snapshots use immutable shape publication" {
