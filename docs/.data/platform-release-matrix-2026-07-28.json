@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-07-28",
   "inputs": {
-    ".github/workflows/ci.yml": "cfdd900b58771dc05258fc6f60f732a96bc03cddd292ec4e0ed2485b2f1c5cfb",
+    ".github/workflows/ci.yml": "562af87c808f47f568d4839fc4b4a6bb036a1a84548fede340973e12bd882c93",
     "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md": "b57fda6a0d69537a7fb8d4f6398654990a636a6e91ce08bfb39bab693f7a52ef",
     "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv": "2cb69ec0559748664ae78cf9035a5882c874a4711ed13f00cb7e09da2f2e1547"
   },

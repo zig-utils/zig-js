@@ -39,6 +39,8 @@ permissions:
 
 env:
   ZIG_VERSION: 0.17.0-dev.1818+7051f8e73
+  RIPGREP_VERSION: 15.1.0
+  RIPGREP_LINUX_X86_64_SHA256: 1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -365,11 +367,19 @@ jobs:
           packages: zig@${{ env.ZIG_VERSION }}
       - name: Install pinned Home repository-tool dependencies
         if: matrix.home_tool == true
-        # The action's bootstrap SDK intentionally covers a small runtime set;
-        # use Pantry's native recipe resolver for the canonical ripgrep package.
+        # Home's repository tools require ripgrep. Fetch the exact upstream
+        # static binary instead of depending on Pantry's mutable recipe index or
+        # the runner image's ambient version.
         run: |
-          pantry install crates.io/ripgrep@15.1.0 --no-save
-          rg --version
+          ripgrep_archive="$RUNNER_TEMP/ripgrep-$RIPGREP_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          ripgrep_dir="$RUNNER_TEMP/ripgrep-$RIPGREP_VERSION-x86_64-unknown-linux-musl"
+          curl --fail --location --silent --show-error \
+            "https://github.com/BurntSushi/ripgrep/releases/download/$RIPGREP_VERSION/ripgrep-$RIPGREP_VERSION-x86_64-unknown-linux-musl.tar.gz" \
+            --output "$ripgrep_archive"
+          echo "$RIPGREP_LINUX_X86_64_SHA256  $ripgrep_archive" | sha256sum --check
+          tar --extract --gzip --file "$ripgrep_archive" --directory "$RUNNER_TEMP"
+          echo "$ripgrep_dir" >> "$GITHUB_PATH"
+          "$ripgrep_dir/rg" --version
       - name: Build zig-js public C API for Home
         if: matrix.home_tool == true
         working-directory: zig-js
