@@ -5253,18 +5253,19 @@ pub const Interpreter = struct {
 
     /// Push the lexically-declared (let/const/class) names of one statement.
     fn annexbPushLexical(self: *Interpreter, s: *Node, stack: *NameStack) EvalError!void {
+        const scratch = self.scratch_allocator orelse self.arena;
         switch (s.*) {
-            .var_decl => |d| if (d.kind != .@"var") try stack.append(self.arena, d.name),
+            .var_decl => |d| if (d.kind != .@"var") try stack.append(scratch, d.name),
             .decl_group => |g| for (g) |gs| {
-                if (gs.* == .var_decl and gs.var_decl.kind != .@"var") try stack.append(self.arena, gs.var_decl.name);
+                if (gs.* == .var_decl and gs.var_decl.kind != .@"var") try stack.append(scratch, gs.var_decl.name);
             },
-            .destructure_decl => |d| if (d.kind != .@"var") try appendPatternNames(self.arena, d.pattern, stack),
-            .class_expr => |c| if (c.name.len > 0) try stack.append(self.arena, c.name),
+            .destructure_decl => |d| if (d.kind != .@"var") try appendPatternNames(scratch, d.pattern, stack),
+            .class_expr => |c| if (c.name.len > 0) try stack.append(scratch, c.name),
             // An async/generator/async-generator function declaration is an
             // ordinary lexical (block-scoped) binding, never an Annex B B.3.3
             // legacy candidate — so it shadows like let/const/class. (A *plain*
             // function declaration is handled by the candidate loops below.)
-            .func_decl => |f| if (f.is_generator or f.is_async) try stack.append(self.arena, f.name),
+            .func_decl => |f| if (f.is_generator or f.is_async) try stack.append(scratch, f.name),
             else => {},
         }
     }
@@ -5273,14 +5274,17 @@ pub const Interpreter = struct {
     /// variable scope's statement list. `stack` is seeded with parameter names,
     /// which block the legacy binding.
     fn annexbAddCandidate(self: *Interpreter, node: *const Node, name: []const u8, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
-        try out.put(self.arena, name, {});
-        try nodes.put(self.arena, node, {});
+        const scratch = self.scratch_allocator orelse self.arena;
+        try out.put(scratch, name, {});
+        try nodes.put(scratch, node, {});
     }
 
     fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+        const scratch = self.scratch_allocator orelse self.arena;
         var stack: NameStack = .empty;
+        defer stack.deinit(scratch);
         if (!self.eval_decl_deletable)
-            try appendParameterNames(self.arena, self.cur_func_params, self.cur_func_args_needed, &stack);
+            try appendParameterNames(scratch, self.cur_func_params, self.cur_func_args_needed, &stack);
         try self.annexbScanList(stmts, &stack, depth, out, nodes);
     }
 
@@ -5304,10 +5308,10 @@ pub const Interpreter = struct {
                 else => {},
             };
             for (stmts) |s| switch (s.*) {
-                .func_decl => |f| if (!f.is_generator and !f.is_async) try stack.append(self.arena, f.name),
+                .func_decl => |f| if (!f.is_generator and !f.is_async) try stack.append(self.scratch_allocator orelse self.arena, f.name),
                 .labeled_stmt => if (labeledFunctionDeclNode(s)) |fn_node| {
                     const f = fn_node.func_decl;
-                    if (!f.is_generator and !f.is_async) try stack.append(self.arena, f.name);
+                    if (!f.is_generator and !f.is_async) try stack.append(self.scratch_allocator orelse self.arena, f.name);
                 },
                 else => {},
             };
@@ -5344,7 +5348,7 @@ pub const Interpreter = struct {
             },
             .for_in => |f| {
                 const base = stack.items.len;
-                if (f.decl_kind) |k| if (k != .@"var") try appendPatternNames(self.arena, f.target, stack);
+                if (f.decl_kind) |k| if (k != .@"var") try appendPatternNames(self.scratch_allocator orelse self.arena, f.target, stack);
                 try self.annexbScanBranch(f.body, stack, depth, out, nodes);
                 stack.shrinkRetainingCapacity(base);
             },
@@ -5362,10 +5366,10 @@ pub const Interpreter = struct {
                     else => {},
                 };
                 for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
-                    .func_decl => |fd| if (!fd.is_generator and !fd.is_async) try stack.append(self.arena, fd.name),
+                    .func_decl => |fd| if (!fd.is_generator and !fd.is_async) try stack.append(self.scratch_allocator orelse self.arena, fd.name),
                     .labeled_stmt => if (labeledFunctionDeclNode(cs)) |fn_node| {
                         const fd = fn_node.func_decl;
-                        if (!fd.is_generator and !fd.is_async) try stack.append(self.arena, fd.name);
+                        if (!fd.is_generator and !fd.is_async) try stack.append(self.scratch_allocator orelse self.arena, fd.name);
                     },
                     else => {},
                 };
@@ -5379,7 +5383,7 @@ pub const Interpreter = struct {
                     // A *simple* (identifier) catch parameter does not block the
                     // legacy binding (Annex B B.3.5 allows `catch(e){var e}`); a
                     // destructuring catch parameter does.
-                    if (t.catch_param) |cp| if (cp.* != .identifier) try appendPatternNames(self.arena, cp, stack);
+                    if (t.catch_param) |cp| if (cp.* != .identifier) try appendPatternNames(self.scratch_allocator orelse self.arena, cp, stack);
                     try self.annexbScanBranch(cb, stack, depth, out, nodes);
                     stack.shrinkRetainingCapacity(cbase);
                 }
@@ -5402,8 +5406,13 @@ pub const Interpreter = struct {
         var annexb_nodes: std.AutoHashMapUnmanaged(*const Node, void) = .empty;
         const saved_annexb = self.annexb_legacy;
         const saved_annexb_nodes = self.annexb_legacy_nodes;
-        defer self.annexb_legacy = saved_annexb;
-        defer self.annexb_legacy_nodes = saved_annexb_nodes;
+        const annexb_scratch = self.scratch_allocator orelse self.arena;
+        defer {
+            self.annexb_legacy = saved_annexb;
+            self.annexb_legacy_nodes = saved_annexb_nodes;
+            annexb_set.deinit(annexb_scratch);
+            annexb_nodes.deinit(annexb_scratch);
+        }
         if (at_fn_top and !self.strict) {
             try self.collectAnnexBLegacy(stmts, 0, &annexb_set, &annexb_nodes);
             self.annexb_legacy = &annexb_set;
