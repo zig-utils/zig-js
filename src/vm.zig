@@ -1595,21 +1595,7 @@ inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interp
     };
 }
 
-fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter, name: []const u8) void {
-    if (chunk.quick_global_bindings.len == 0) {
-        const caches = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return;
-        @memset(caches, null);
-        chunk.quick_global_bindings = caches;
-    }
-    if (instruction >= chunk.quick_global_bindings.len) return;
-    const cache: *QuickGlobalBinding = if (chunk.quick_global_bindings[instruction]) |raw|
-        @ptrCast(@alignCast(raw))
-    else cache: {
-        const created = chunk.arena.create(QuickGlobalBinding) catch return;
-        chunk.quick_global_bindings[instruction] = created;
-        break :cache created;
-    };
-
+fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8) ?QuickGlobalBinding {
     const start = vm.env;
     // Evaluated scripts may put a transparent declarative environment between
     // a function closure and the realm root. Cache the exact environment record
@@ -1621,30 +1607,51 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
     // another environment.
     var cursor: ?*Environment = start;
     while (cursor) |env| : (cursor = env.parent) {
-        if (env.with_object != null) return;
+        if (env.with_object != null) return null;
         const locked = env.lockBindingsForRead();
         const alias = env.aliases.contains(name);
         const found = env.vars.contains(name);
         const root_global_data = found and env.parent == null and
             !env.consts.contains(name) and !env.lexicals.contains(name);
         env.unlockBindingsForRead(locked);
-        if (alias) return;
+        if (alias) return null;
         if (found) {
             if (root_global_data) {
-                const object = vm.global_object orelse return;
-                if (object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null) return;
-                const shape = object.shape orelse return;
-                const slot = shape.lookup(name) orelse return;
-                if (slot >= object.slotsItems().len) return;
-                cache.* = .{ .object = .{ .env = start, .object = object, .shape = shape, .slot = slot } };
-                return;
+                const object = vm.global_object orelse return null;
+                if (object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null) return null;
+                const shape = object.shape orelse return null;
+                const slot = shape.lookup(name) orelse return null;
+                if (slot >= object.slotsItems().len) return null;
+                return .{ .object = .{ .env = start, .object = object, .shape = shape, .slot = slot } };
             }
-            cache.* = .{ .environment = .{ .start = start, .binding = env, .name = name } };
-            return;
+            return .{ .environment = .{ .start = start, .binding = env, .name = name } };
         }
     }
-    // Leave the allocated cache unreachable if this binding cannot be guarded.
-    chunk.quick_global_bindings[instruction] = null;
+    return null;
+}
+
+fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter, name: []const u8) void {
+    if (chunk.quick_global_bindings.len == 0) {
+        const caches = chunk.arena.alloc(?*anyopaque, chunk.code.items.len) catch return;
+        @memset(caches, null);
+        chunk.quick_global_bindings = caches;
+    }
+    if (instruction >= chunk.quick_global_bindings.len) return;
+    const resolved = resolveQuickGlobalBinding(vm, name) orelse {
+        chunk.quick_global_bindings[instruction] = null;
+        return;
+    };
+    if (chunk.quick_global_bindings[instruction]) |raw| {
+        const cache: *QuickGlobalBinding = @ptrCast(@alignCast(raw));
+        cache.* = resolved;
+        return;
+    }
+
+    // Keep the type-erased table's fully-initialized publication contract:
+    // readers must never observe arena poison as a QuickGlobalBinding tag (#629).
+    const created = chunk.arena.create(QuickGlobalBinding) catch return;
+    created.* = resolved;
+    chunk.quick_global_bindings[instruction] = created;
 }
 
 fn quickCallLoopBound(chunk: *Chunk, instruction: usize) ?QuickArrayBound {
