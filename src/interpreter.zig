@@ -15223,6 +15223,7 @@ pub const Interpreter = struct {
                 // names both share (slice/indexOf/lastIndexOf/includes/concat/at).
                 if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString() and o.getOwn(name) == null) {
                     const bp = o.boxedPrimitive().?;
+                    if (eq(name, "valueOf") or eq(name, "toString")) return bp;
                     if (try self.stringMethod(try bp.asWtf8(self.arena), name, args, true, bp.strIsAscii())) |r| return r;
                 }
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
@@ -15250,7 +15251,10 @@ pub const Interpreter = struct {
                     }
                 }
             },
-            .string => return try self.stringMethod(try recv.asWtf8(self.arena), name, args, true, recv.strIsAscii()),
+            .string => {
+                if (eq(name, "valueOf") or eq(name, "toString")) return recv;
+                return try self.stringMethod(try recv.asWtf8(self.arena), name, args, true, recv.strIsAscii());
+            },
             .number => {
                 if (try self.numberMethod(recv.asNum(), name, args)) |r| return r;
                 if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, false);
@@ -16629,7 +16633,6 @@ pub const Interpreter = struct {
     // WTF-8 bytes are a flat 1-byte-per-unit image so UTF-16↔byte offset
     // conversions are O(1) — used by indexOf/lastIndexOf to stay O(n) in a loop.
     fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool, s_ascii: bool) EvalError!?Value {
-        if (eq(name, "valueOf") or eq(name, "toString")) return try Value.strAlloc(self.arena, s);
         if (check_protocol and eq(name, "replaceAll"))
             if (try self.replaceAllProtocolDispatch(try Value.strAlloc(self.arena, s), args)) |r| return r;
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
@@ -34921,12 +34924,15 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
 fn stringValueMethod(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const s: []const u8 = switch (this.kind()) {
-        .string => this.asStr(),
-        .object => if (this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isString()) this.asObj().boxedPrimitive().?.asStr() else return throwStringValueTypeError(self),
+    return switch (this.kind()) {
+        .string => this,
+        .object => blk: {
+            const primitive = this.asObj().boxedPrimitive() orelse return throwStringValueTypeError(self);
+            if (!primitive.isString()) return throwStringValueTypeError(self);
+            break :blk primitive;
+        },
         else => return throwStringValueTypeError(self),
     };
-    return try Value.strAlloc(self.arena, s);
 }
 
 fn throwStringValueTypeError(self: *Interpreter) EvalError {
@@ -51292,6 +51298,38 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     interp.tdz_marker = tdz;
     interp.strict = parser.strict;
     return interp.eval(prog);
+}
+
+test "String value methods return the exact StringData cell" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    const latin1 = try Value.strAlloc(a, "\xC3\xA9\xC3\xA9");
+    try std.testing.expect(latin1.strIsLatin1() and !latin1.strIsAscii());
+    const wtf8 = try Value.strAlloc(a, "\xF0\x9F\x92\xA9\xED\xA0\xBD");
+    try std.testing.expect(!wtf8.strIsFlatLatin1());
+
+    const primitives = [_]Value{ latin1, wtf8 };
+    var wrappers: [primitives.len]Value = undefined;
+    for (primitives, 0..) |primitive, i| wrappers[i] = try machine.makeWrapper(primitive);
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    for (primitives, wrappers) |primitive, wrapper| {
+        for ([_]Value{ primitive, wrapper }) |receiver| {
+            const native_result = try stringValueMethod(@ptrCast(&machine), receiver, &.{});
+            try std.testing.expectEqual(primitive.rawBits(), native_result.rawBits());
+            for ([_][]const u8{ "toString", "valueOf" }) |name| {
+                const fast_result = (try machine.builtinMethod(receiver, name, &.{})).?;
+                try std.testing.expectEqual(primitive.rawBits(), fast_result.rawBits());
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
 }
 
 fn failureAtomicOwnedEnvironmentNames(backing: std.mem.Allocator) !void {
