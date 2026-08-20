@@ -338,6 +338,10 @@ pub const BudgetAllocator = struct {
     peak: std.atomic.Value(usize) = .init(0),
     recover_ctx: ?*anyopaque = null,
     recover_fn: ?RecoveryFn = null,
+    /// A quota miss under an allocator/GC lock cannot collect synchronously.
+    /// Preserve that miss until the JavaScript throw-to-catch unwind reaches a
+    /// boundary where every trace-sensitive lock has been released.
+    deferred_recovery_pending: std.atomic.Value(bool) = .init(false),
 
     threadlocal var recovery_depth: usize = 0;
 
@@ -367,12 +371,17 @@ pub const BudgetAllocator = struct {
 
     fn tryRecover(self: *BudgetAllocator) bool {
         if (recovery_depth != 0) return false;
-        if (gc_runtime.allocationRecoveryBlocked()) return false;
-        const f = self.recover_fn orelse return false;
         const ctx = self.recover_ctx orelse return false;
+        if (gc_runtime.allocationRecoveryBlocked()) {
+            self.deferred_recovery_pending.store(true, .release);
+            return false;
+        }
+        const f = self.recover_fn orelse return false;
         recovery_depth += 1;
         defer recovery_depth -= 1;
-        return f(ctx);
+        const recovered = f(ctx);
+        if (recovered) self.deferred_recovery_pending.store(false, .release);
+        return recovered;
     }
 
     fn reserveWithRecovery(self: *BudgetAllocator, amount: usize) ?usize {
@@ -1025,10 +1034,12 @@ test "BudgetAllocator does not recover inside allocator-internal critical sectio
         try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 32));
     }
     try std.testing.expectEqual(@as(usize, 0), state.calls);
+    try std.testing.expect(budget.deferred_recovery_pending.load(.acquire));
     try std.testing.expect(state.held != null);
 
     const second = try a.alloc(u8, 32);
     try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(!budget.deferred_recovery_pending.load(.acquire));
     try std.testing.expect(state.held == null);
     try std.testing.expectEqual(@as(usize, 32), budget.used.load(.acquire));
     a.free(second);
@@ -5102,6 +5113,7 @@ pub const Context = struct {
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
             .gc_recover_allocation_fn = recoverAllocationFailure,
+            .gc_deferred_allocation_recovery = if (self.budget_allocator) |ba| &ba.deferred_recovery_pending else null,
             // Mid-script collection hook: wired only when the GC is on, so the
             // arena engine pays nothing (the VM/tree-walker skip on a null fn).
             .gc_safepoint_ctx = if (self.gc != null) self else null,

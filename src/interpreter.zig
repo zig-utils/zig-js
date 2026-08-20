@@ -2093,6 +2093,10 @@ pub const Interpreter = struct {
     gc_checkpoint_ctx: ?*anyopaque = null,
     gc_checkpoint_fn: ?*const fn (ctx: *anyopaque) void = null,
     gc_recover_allocation_fn: ?*const fn (ctx: *anyopaque) bool = null,
+    /// Set by the quota allocator when synchronous collection was refused
+    /// inside a trace-sensitive lock. A catchable OOM services it only after
+    /// unwinding that lock and while this interpreter's roots remain published.
+    gc_deferred_allocation_recovery: ?*std.atomic.Value(bool) = null,
     /// Opaque owning `Context` for the WebAssembly JS API store (issue #141):
     /// wasm natives register and look up context-owned native wasm allocations
     /// through it. Null in isolated interpreter unit helpers — the wasm API
@@ -3639,10 +3643,19 @@ pub const Interpreter = struct {
 
     pub fn catchableOutOfMemory(self: *Interpreter, err: EvalError) EvalError {
         if (err == error.OutOfMemory and !self.out_of_memory_exception.isUndefined()) {
+            self.serviceDeferredAllocationRecovery();
             self.exception = self.out_of_memory_exception;
             return error.Throw;
         }
         return err;
+    }
+
+    fn serviceDeferredAllocationRecovery(self: *Interpreter) void {
+        const pending = self.gc_deferred_allocation_recovery orelse return;
+        if (!pending.load(.acquire)) return;
+        const recover = self.gc_recover_allocation_fn orelse return;
+        const ctx = self.gc_checkpoint_ctx orelse return;
+        if (recover(ctx)) pending.store(false, .release);
     }
 
     /// Raise a SyntaxError for parser failures with a best-effort source
@@ -55389,6 +55402,39 @@ test "interpreter skips impossible debug probes without skipping host checkpoint
     try std.testing.expectEqual(@as(usize, 2), checkpoints);
     try std.testing.expectEqual(expected, machine.debug_current_location.?);
     try std.testing.expectEqual(@as(u64, 1), registry_stats.snapshot().location_cache_misses);
+}
+
+test "catchable OOM services deferred allocation recovery after lock unwind" {
+    const State = struct {
+        pending: std.atomic.Value(bool) = .init(true),
+        calls: usize = 0,
+
+        fn recover(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return true;
+        }
+    };
+
+    var state = State{};
+    var machine = Interpreter{
+        .arena = std.testing.allocator,
+        .env = undefined,
+        .root_shape = undefined,
+        .out_of_memory_exception = Value.num(7),
+        .gc_checkpoint_ctx = &state,
+        .gc_recover_allocation_fn = State.recover,
+        .gc_deferred_allocation_recovery = &state.pending,
+    };
+
+    try std.testing.expectEqual(error.Throw, machine.catchableOutOfMemory(error.Throw));
+    try std.testing.expectEqual(@as(usize, 0), state.calls);
+    try std.testing.expect(state.pending.load(.acquire));
+
+    try std.testing.expectEqual(error.Throw, machine.catchableOutOfMemory(error.OutOfMemory));
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(!state.pending.load(.acquire));
+    try std.testing.expectEqual(@as(f64, 7), machine.exception.asNum());
 }
 
 test "interpreter debug location cache retains four colliding statements with bounded eviction" {
