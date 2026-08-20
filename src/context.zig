@@ -21686,6 +21686,41 @@ test "block scope: no env allocated when a block binds nothing at its own scope"
     try std.testing.expectEqualStrings("3,number,20,10,42,99,4950", v.asStr());
 }
 
+test "block scope: uncaptured lexical environments reuse bounded owned storage" {
+    // #634: a fresh block Environment is semantically observable only when a
+    // closure captures it. Keep uncaptured repeated blocks allocation-bounded,
+    // but retain distinct cells for captured entries. The explicit gc() request
+    // sits between two reusable blocks; gc.zig's root-container test directly
+    // witnesses moving relocation of the cached pointer.
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .profile_execution_tiers = true,
+    });
+    defer ctx.destroy();
+    const allocations_before = ctx.tierAttributionSnapshot().execution.count(.environment_allocations);
+    const result = try ctx.evaluate(
+        \\function run() {
+        \\  var _tw = arguments.length;
+        \\  var sum = 0;
+        \\  for (let i = 0; i < 2000; ++i) { let x = i; const y = x + 1; sum += y; }
+        \\  { let beforeMove = 7; sum += beforeMove; }
+        \\  gc();
+        \\  { let afterMove = 11; sum += afterMove; }
+        \\  var captured = [];
+        \\  for (let i = 0; i < 3; ++i) { let x = i; captured.push(() => x); }
+        \\  return sum + "|" + captured.map(f => f()).join(",");
+        \\}
+        \\run();
+    );
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("2001018|0,1,2", result.asStr());
+    const allocations_after = ctx.tierAttributionSnapshot().execution.count(.environment_allocations);
+    // Without reuse the first loop alone allocates 2,000 block environments.
+    // Captured iterations deliberately retain distinct cells, so use a generous
+    // constant ceiling rather than coupling the witness to bootstrap details.
+    try std.testing.expect(allocations_after - allocations_before < 64);
+}
+
 test "catch scope: optional catch binding skips the catch-scope env, params still bind" {
     // Perf (allocation-elision family): `evalTry` allocates a dedicated catch
     // environment only when a catch parameter is present. An ES2019 optional
@@ -23550,21 +23585,22 @@ test "enable_gc: mid-script safepoints collect nursery before old heap" {
 
     const result = try ctx.evaluate(
         \\let acc = 0;
-        \\for (let i = 0; i < 20000; i++) {
+        \\for (let i = 0; i < 40000; i++) {
         \\  const value = { a: i, nested: { b: i + 1 }, values: [i, i + 2] };
         \\  acc += value.a + value.nested.b + value.values[1];
         \\}
         \\acc;
     );
-    // sum(3*i + 3), i=0..19999.
-    try std.testing.expectEqual(@as(f64, 600030000), result.asNum());
+    // sum(3*i + 3), i=0..39999. Keep enough object-cell pressure to cross a
+    // running-loop nursery boundary even when block environments are reused.
+    try std.testing.expectEqual(@as(f64, 2400060000), result.asNum());
     // More than the one possible exit-boundary cycle proves the running loop
     // entered the nursery collector at VM safepoints.
-    try std.testing.expect(heap.minor_collections - minor_before > 2);
+    try std.testing.expect(heap.minor_collections - minor_before > 1);
     try std.testing.expectEqual(full_before, heap.full_collections);
     try std.testing.expect(ctx.gc_minor_pause_ns_total.load(.monotonic) > 0);
     try std.testing.expect(ctx.gc_minor_pause_ns_max.load(.monotonic) > 0);
-    try std.testing.expect(heap.live_cells < 20000);
+    try std.testing.expect(heap.live_cells < 40000);
 }
 
 test "enable_gc concurrent (M3): the production driver marks on a thread while JS runs" {

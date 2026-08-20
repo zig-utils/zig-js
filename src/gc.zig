@@ -1124,8 +1124,10 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     // `vars`/`disposables`/`aliases` are mutated by binding writes. Concurrent
     // tracing arms the Context handshake before reaching here: pre-existing
     // private writes have drained and later writers take this same lock, so a
-    // `put` rehash or append cannot tear iteration. `parent`/`with_object` are
-    // set at env creation and never rewritten, so they need no lock.
+    // `put` rehash or append cannot tear iteration. A cached uncaptured block
+    // Environment can replace its parent while a concurrent marker is active,
+    // so that edge is read under the same lock; `with_object` remains immutable
+    // after its one-shot environment creation.
     const concurrent = v.concurrent();
     if (concurrent) e.lockBindingsForTrace();
     var vit = e.vars.iterator();
@@ -1138,8 +1140,8 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     var ait = e.aliases.valueIterator();
     while (ait.next()) |a| markManaged(v, a.env);
     if (e.object_proto_intrinsic) |o| v.mark(o);
-    if (concurrent) e.unlockBindingsForTrace();
     if (e.parent) |p| markManaged(v, p);
+    if (concurrent) e.unlockBindingsForTrace();
     if (e.with_object) |o| v.mark(o);
 }
 
@@ -1233,37 +1235,7 @@ test "Environment relocation rewrites every managed binding slot" {
 }
 
 fn finalizeEnv(e: *Environment) void {
-    const a = e.bindings_allocator orelse return;
-    var vit = e.vars.keyIterator();
-    while (vit.next()) |key| e.freeBindingName(key.*);
-    e.vars.deinit(a);
-    e.vars = .{};
-
-    var cit = e.consts.keyIterator();
-    while (cit.next()) |key| e.freeBindingName(key.*);
-    e.consts.deinit(a);
-    e.consts = .{};
-
-    var fit = e.fn_names.keyIterator();
-    while (fit.next()) |key| e.freeBindingName(key.*);
-    e.fn_names.deinit(a);
-    e.fn_names = .{};
-
-    var dit = e.deletable.keyIterator();
-    while (dit.next()) |key| e.freeBindingName(key.*);
-    e.deletable.deinit(a);
-    e.deletable = .{};
-
-    var ait = e.aliases.iterator();
-    while (ait.next()) |entry| {
-        e.freeBindingName(entry.key_ptr.*);
-        e.freeBindingName(entry.value_ptr.name);
-    }
-    e.aliases.deinit(a);
-    e.aliases = .{};
-
-    e.disposables.deinit(a);
-    e.disposables = .empty;
+    e.finalizeOwnedBindingStorage();
 }
 
 fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
@@ -2482,6 +2454,10 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         markManaged(v, env);
         traceEnv(env, v);
     }
+    if (machine.reusable_block_env) |env| {
+        markManaged(v, env);
+        traceEnv(env, v);
+    }
     for (machine.gc_temp_roots.items) |root| markValue(v, root);
     for (machine.gc_temp_promise_roots.items) |root| markManaged(v, root);
     for (machine.gc_object_reserve.items) |object| v.mark(object);
@@ -2559,6 +2535,10 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         gc_relocation.rewriteRequiredSlot(v, Environment, environment);
         relocateEnv(environment.*, v);
     }
+    if (machine.reusable_block_env != null) {
+        gc_relocation.rewriteOptionalSlot(v, Environment, &machine.reusable_block_env);
+        relocateEnv(machine.reusable_block_env.?, v);
+    }
     for (machine.gc_temp_roots.items) |*root| gc_relocation.rewriteValueSlot(v, root);
     for (machine.gc_temp_promise_roots.items) |*root|
         gc_relocation.rewriteRequiredSlot(v, promise.Promise, root);
@@ -2613,6 +2593,8 @@ test "realm root relocation rewrites active interpreter containers" {
     var new_promise = promise.Promise{ .gc_owned = true };
     var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
     var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var old_cached_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var new_cached_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
 
     machine.ret_value = Value.obj(&old_objects[0]);
     machine.this_value = Value.obj(&old_objects[1]);
@@ -2646,6 +2628,7 @@ test "realm root relocation rewrites active interpreter containers" {
     };
     try machine.gc_execs.append(machine.arena, &execution);
     try machine.gc_env_roots.append(machine.arena, &old_environment);
+    machine.reusable_block_env = &old_cached_environment;
     var debug_frame = interp.DebugCallFrame{
         .function_name = "debug",
         .environment = &old_environment,
@@ -2682,6 +2665,8 @@ test "realm root relocation rewrites active interpreter containers" {
         new_objects: *[27]Object,
         old_environment: *Environment,
         new_environment: *Environment,
+        old_cached_environment: *Environment,
+        new_cached_environment: *Environment,
         old_promise: *promise.Promise,
         new_promise: *promise.Promise,
 
@@ -2691,6 +2676,8 @@ test "realm root relocation rewrites active interpreter containers" {
                     return @ptrCast(&self.new_objects[index]);
             if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
                 return @ptrCast(self.new_environment);
+            if (old == @as(*anyopaque, @ptrCast(self.old_cached_environment)))
+                return @ptrCast(self.new_cached_environment);
             if (old == @as(*anyopaque, @ptrCast(self.old_promise)))
                 return @ptrCast(self.new_promise);
             return old;
@@ -2701,6 +2688,8 @@ test "realm root relocation rewrites active interpreter containers" {
         .new_objects = &new_objects,
         .old_environment = &old_environment,
         .new_environment = &new_environment,
+        .old_cached_environment = &old_cached_environment,
+        .new_cached_environment = &new_cached_environment,
         .old_promise = &old_promise,
         .new_promise = &new_promise,
     };
@@ -2730,6 +2719,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[25], execution.saved_home_object.?);
     try std.testing.expectEqual(&new_objects[26], execution.saved_super_ctor.?);
     try std.testing.expectEqual(&new_environment, machine.gc_env_roots.items[0]);
+    try std.testing.expectEqual(&new_cached_environment, machine.reusable_block_env.?);
     try std.testing.expectEqual(&new_environment, debug_frame.environment);
     try std.testing.expectEqual(&new_objects[20], debug_frame.this_value.asObj());
     try std.testing.expectEqual(&new_environment, machine.debug_top_level_environment.?);

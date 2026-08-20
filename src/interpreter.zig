@@ -1024,6 +1024,73 @@ pub const Environment = struct {
         return copy;
     }
 
+    fn deinitOwnedBindingStorage(self: *Environment) void {
+        const a = self.bindings_allocator orelse return;
+
+        var vit = self.vars.keyIterator();
+        while (vit.next()) |key| self.freeBindingName(key.*);
+        self.vars.deinit(a);
+        self.vars = .{};
+
+        var cit = self.consts.keyIterator();
+        while (cit.next()) |key| self.freeBindingName(key.*);
+        self.consts.deinit(a);
+        self.consts = .{};
+
+        var lit = self.lexicals.keyIterator();
+        while (lit.next()) |key| self.freeBindingName(key.*);
+        self.lexicals.deinit(a);
+        self.lexicals = .{};
+
+        var fit = self.fn_names.keyIterator();
+        while (fit.next()) |key| self.freeBindingName(key.*);
+        self.fn_names.deinit(a);
+        self.fn_names = .{};
+
+        var dit = self.deletable.keyIterator();
+        while (dit.next()) |key| self.freeBindingName(key.*);
+        self.deletable.deinit(a);
+        self.deletable = .{};
+
+        var ait = self.aliases.iterator();
+        while (ait.next()) |entry| {
+            self.freeBindingName(entry.key_ptr.*);
+            self.freeBindingName(entry.value_ptr.name);
+        }
+        self.aliases.deinit(a);
+        self.aliases = .{};
+
+        self.disposables.deinit(a);
+        self.disposables = .empty;
+        self.dispose_pending = null;
+    }
+
+    /// Drop every allocator-owned side store before an uncaptured lexical
+    /// environment is reused. The environment is still an active interpreter
+    /// root here, so coordinate with a concurrent marker exactly like a binding
+    /// write; the GC finalizer uses the unlocked companion after the cell is
+    /// already known dead.
+    pub fn resetForBlockReuse(self: *Environment) void {
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
+        self.deinitOwnedBindingStorage();
+        // A concurrent tracer reads the reusable cell under this same
+        // Environment lock. Clear every mutable graph/ownership field before
+        // publishing it in the interpreter cache.
+        self.parent = null;
+        self.object_proto_intrinsic = null;
+        self.captured = false;
+        self.fn_scope = false;
+        self.private_activation = false;
+        self.fn_body = false;
+        self.is_catch_param = false;
+        self.with_object = null;
+    }
+
+    pub fn finalizeOwnedBindingStorage(self: *Environment) void {
+        self.deinitOwnedBindingStorage();
+    }
+
     pub fn freeBindingName(self: *Environment, name: []const u8) void {
         if (self.bindings_allocator) |a| {
             a.free(name);
@@ -1979,6 +2046,12 @@ pub const Interpreter = struct {
     /// longer reachable through `self.env`'s parent chain, such as a `for` head
     /// environment that keeps `using` resources until loop exit.
     gc_env_roots: std.ArrayListUnmanaged(*Environment) = .empty,
+    /// One fully-cleared, uncaptured block Environment retained by this
+    /// interpreter. Fresh block identity is observable only through capture;
+    /// keeping the empty cell here avoids repeating a GC-cell allocation while
+    /// preserving distinct environments for every captured entry. The precise
+    /// tracer and relocator treat this optional pointer as an ordinary root.
+    reusable_block_env: ?*Environment = null,
     /// Context-owned serial used to mint per-class private-name storage keys.
     /// Null only in isolated interpreter unit helpers.
     private_name_serial: ?*std.atomic.Value(u64) = null,
@@ -3088,6 +3161,51 @@ pub const Interpreter = struct {
         };
     }
 
+    fn acquireBlockEnvironment(self: *Interpreter, parent: *Environment) EvalError!*Environment {
+        if (self.reusable_block_env) |env| {
+            // Unlike a fresh nursery cell, the cache can be observed by a
+            // concurrent marker and can already be tenured. Preserve its mutex,
+            // reinitialize the empty payload under that mutex, and barrier the
+            // newly installed parent edge. The cache pointer remains published
+            // until evalBlockScope installs this cell as the active environment,
+            // so a concurrent root snapshot can never miss it between owners.
+            env.lockBindings();
+            defer env.unlockBindings();
+            env.arena = self.arena;
+            env.bindings_allocator = self.gc_side_storage;
+            env.gc_name_bytes_live = self.gc_environment_name_bytes_live;
+            env.parent = parent;
+            env.gc_managed = gc_mod.allocationsAreManaged();
+            env.fn_scope = false;
+            env.private_activation = parent.private_activation and !parent.captured;
+            // The cached cell can have survived long enough to tenure. Reusing
+            // it under a young lexical parent creates a new managed edge, unlike
+            // initialization of a freshly allocated nursery environment.
+            if (env.gc_managed and parent.gc_managed)
+                if (!gc_mod.barrierExactManagedCellFrom(env, parent))
+                    gc_mod.barrierCellFrom(env, parent);
+            return env;
+        }
+        const env = try gc_mod.allocEnv(self.arena);
+        self.initEnvironment(env, parent, false);
+        return env;
+    }
+
+    fn releaseBlockEnvironment(self: *Interpreter, env: *Environment) void {
+        // Arena environments cannot release their side storage, function-body
+        // environments retain special declaration-instantiation state, and a
+        // captured environment has observable identity. All three keep their
+        // existing one-shot lifetime.
+        if (env.bindings_allocator == null or env.fn_body or env.captured or
+            env.disposables.items.len != 0 or env.dispose_pending != null)
+            return;
+        env.resetForBlockReuse();
+        // Nested block exit can find the slot occupied by an already-cleared
+        // inner environment. Reclaim this environment's side storage anyway and
+        // let its empty cell die; one retained cell is sufficient.
+        if (self.reusable_block_env == null) self.reusable_block_env = env;
+    }
+
     /// Evaluate a `{…}` block in its own lexical scope, disposing any `using`
     /// resources declared in it when it exits (normally or abruptly).
     /// Whether a block statement list binds anything at its OWN scope and so needs
@@ -3121,17 +3239,30 @@ pub const Interpreter = struct {
         // keeps the slow path: its env carries the `fn_body` marker used by
         // declaration hoisting / Annex B analysis.
         if (!self.mark_fn_body and !blockNeedsOwnScope(stmts)) return self.evalStatements(stmts);
-        const block_env = try gc_mod.allocEnv(self.arena);
-        self.initEnvironment(block_env, self.env, false);
+        const block_env = try self.acquireBlockEnvironment(self.env);
         if (self.mark_fn_body) {
             block_env.fn_body = true;
             self.mark_fn_body = false;
         }
         const saved_env = self.env;
         self.env = block_env;
+        if (self.reusable_block_env == block_env) self.reusable_block_env = null;
         defer self.env = saved_env;
         const result = self.evalStatements(stmts);
-        if (block_env.disposables.items.len == 0) return result;
+        if (block_env.disposables.items.len == 0) {
+            if (result) |val| {
+                self.releaseBlockEnvironment(block_env);
+                return val;
+            } else |err| {
+                // A JavaScript throw has a fully-instantiated environment and
+                // its escaping value/closures have already marked capture.
+                // Allocator failures can interrupt a binding insertion, so leave
+                // those environments to the GC finalizer instead of recycling a
+                // possibly partial table.
+                if (err == error.Throw) self.releaseBlockEnvironment(block_env);
+                return err;
+            }
+        }
         var body_err: ?Value = null;
         const val: Value = result catch |e| blk: {
             if (e != error.Throw) return e;
@@ -3140,8 +3271,10 @@ pub const Interpreter = struct {
         };
         if (try self.disposeScope(block_env, body_err)) |err| {
             self.exception = err;
+            self.releaseBlockEnvironment(block_env);
             return error.Throw;
         }
+        self.releaseBlockEnvironment(block_env);
         return val;
     }
 
