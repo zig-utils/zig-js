@@ -7,7 +7,7 @@ It records what is gated or published; it does not imply broader OS or architect
 
 | platform | correctness | sanitizer | performance | evidence |
 | --- | --- | --- | --- | --- |
-| Linux x86_64 (`ubuntu-latest`) | gated (38 CI matrix entries) | gated (TSan unit/fuzz/corpus legs) | not claimed | [workflow](../.github/workflows/ci.yml) |
+| Linux x86_64 (`ubuntu-latest`) | gated (39 CI matrix entries) | gated (TSan unit/fuzz/corpus legs) | not claimed | [workflow](../.github/workflows/ci.yml) |
 | macOS arm64 (`Apple M3 Pro`) | not release-gated | not release-gated | published (1540 samples) | [report](.data/benchmark-comparison-2026-07-29-precise-nursery.md) · [raw](.data/benchmark-comparison-2026-07-29-precise-nursery.tsv) |
 
 ## Unclaimed

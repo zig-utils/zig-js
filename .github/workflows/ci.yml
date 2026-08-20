@@ -2,13 +2,13 @@ name: CI
 
 # Runs the docs/threads/testing.md "Required Checks" — crucially the
 # ThreadSanitizer gates that surface the no-GIL races blocking the execution-path
-# GIL drop. The toolchain comes from pantry's own action (`zig@0.17.0-dev`),
-# which resolves the current 0.17.0-dev master (≥0.17.0-dev.956) from
-# ziglang.org/download/index.json — so the pin tracks upstream automatically
-# instead of going stale. At ≥dev.956 TSan now builds on macOS too; CI keeps
-# running it on Linux as the shared gate. (The older dev.131 pin could not build
-# TSan on darwin — bundled libcxx failed with `undeclared identifier 'INFINITY'`
-# — which is why this was Linux-only before.)
+# GIL drop. Pantry installs the exact compiler validated by the tree and its
+# pinned dependency revisions. Keep this one workflow-level pin synchronized
+# with the repository prerequisite instead of letting a moving development
+# alias change compiler behavior between otherwise identical pushes. TSan runs
+# on Linux as the shared gate. (The older dev.131 pin could not build TSan on
+# darwin — bundled libcxx failed with `undeclared identifier 'INFINITY'` — which
+# is why this was Linux-only before.)
 #
 # Triggers: pull_request + push-to-main + manual dispatch + nightly schedule. The
 # no-GIL TSan corpus gate and test262-parallel leg now run on
@@ -36,6 +36,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  ZIG_VERSION: 0.17.0-dev.1818+7051f8e73
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -357,7 +360,7 @@ jobs:
           ref: d01469e9dd90e84cf9434b056390dcb4667b18bc
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
-          packages: zig@0.17.0-dev
+          packages: zig@${{ env.ZIG_VERSION }}
       - name: Install pinned Home repository-tool dependencies
         if: matrix.home_tool == true
         # The action's bootstrap SDK intentionally covers a small runtime set;
@@ -518,7 +521,7 @@ jobs:
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
-          packages: zig@0.17.0-dev
+          packages: zig@${{ env.ZIG_VERSION }}
       - name: Build the TSan-instrumented threads-test binary
         working-directory: zig-js
         run: zig build threads-test-bin -Dtsan=true
@@ -588,7 +591,7 @@ jobs:
           ref: d01469e9dd90e84cf9434b056390dcb4667b18bc
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
-          packages: zig@0.17.0-dev
+          packages: zig@${{ env.ZIG_VERSION }}
       - name: Build the threads-test binary
         working-directory: zig-js
         run: zig build threads-test-bin
@@ -644,7 +647,7 @@ jobs:
           ref: d01469e9dd90e84cf9434b056390dcb4667b18bc
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
-          packages: zig@0.17.0-dev
+          packages: zig@${{ env.ZIG_VERSION }}
       - name: Build the threads-test binary (ReleaseSafe)
         working-directory: zig-js
         run: zig build threads-test-bin -Doptimize=ReleaseSafe
@@ -692,7 +695,7 @@ jobs:
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
-          packages: zig@0.17.0-dev
+          packages: zig@${{ env.ZIG_VERSION }}
       - name: ${{ matrix.name }}
         working-directory: zig-js
         env:
@@ -736,7 +739,7 @@ jobs:
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
-          packages: zig@0.17.0-dev
+          packages: zig@${{ env.ZIG_VERSION }}
       - name: Parallel test262 introduces no new failures
         working-directory: zig-js
         run: |

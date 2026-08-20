@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-07-28",
   "inputs": {
-    ".github/workflows/ci.yml": "7c0f44068eb5c75f0c5684b5a2cb13a9812a8f746c1ed2edadf3921221bbf1b7",
+    ".github/workflows/ci.yml": "d4695384ec8cc4c35be3f914c4cb426189efcbfcaea2df65cef0583c0b53324d",
     "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.md": "b57fda6a0d69537a7fb8d4f6398654990a636a6e91ce08bfb39bab693f7a52ef",
     "docs/.data/benchmark-comparison-2026-07-29-precise-nursery.tsv": "2cb69ec0559748664ae78cf9035a5882c874a4711ed13f00cb7e09da2f2e1547"
   },
@@ -16,6 +16,7 @@
         "jobs": [
           "benchmark-comparison-harness",
           "dependency-audit",
+          "executable-memory-wx",
           "focused-engine-tests",
           "releasesafe-threadfuzz",
           "threadfuzz",
@@ -103,7 +104,7 @@
   "summary": {
     "benchmark_samples": 1540,
     "correctness_gated_platforms": 1,
-    "linux_gate_matrix_entries": 38,
+    "linux_gate_matrix_entries": 39,
     "performance_published_platforms": 1,
     "sanitizer_gated_platforms": 1
   },
