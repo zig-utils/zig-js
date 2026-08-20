@@ -1371,19 +1371,46 @@ pub const GcCellBacking = struct {
         return true;
     }
 
+    const ChunkStorage = struct {
+        bytes: []align(16) u8,
+        realm_ids: []RealmId,
+    };
+
+    /// Prefer the throughput-sized slab, but do not strand a bounded Context's
+    /// remaining budget merely because less than one full 64/256/384 KiB chunk
+    /// fits. The inner lock intentionally blocks recursive GC recovery, so failed
+    /// probes are cheap quota checks; halve to the first slot-aligned subdivision
+    /// whose bytes and matching ownership metadata can be acquired atomically.
+    fn allocateChunkStorageLocked(self: *GcCellBacking, slot_size: usize, preferred_slots: usize) ?ChunkStorage {
+        var slots = preferred_slots;
+        while (true) {
+            const chunk_len = slots * slot_size;
+            const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch null;
+            if (chunk) |bytes| {
+                const realm_ids = self.inner.alloc(RealmId, slots) catch {
+                    self.inner.free(bytes);
+                    if (slots == 1) return null;
+                    slots = @max(@as(usize, 1), slots / 2);
+                    continue;
+                };
+                @memset(realm_ids, no_realm);
+                return .{ .bytes = bytes, .realm_ids = realm_ids };
+            }
+            if (slots == 1) return null;
+            slots = @max(@as(usize, 1), slots / 2);
+        }
+    }
+
     fn addChunk(self: *GcCellBacking, idx: usize) bool {
         self.acquireInner();
         defer self.unlockInner();
         const slot_size = bucket_sizes[idx];
-        const slots = @max(@as(usize, 1), self.bucketChunkBytes(idx) / slot_size);
-        const chunk_len = slots * slot_size;
+        const preferred_slots = @max(@as(usize, 1), self.bucketChunkBytes(idx) / slot_size);
         if (!self.reserveChunkMetadataLocked(idx, 1)) return false;
-        const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
-        const realm_ids = self.inner.alloc(RealmId, slots) catch {
-            self.inner.free(chunk);
-            return false;
-        };
-        @memset(realm_ids, no_realm);
+        const storage = self.allocateChunkStorageLocked(slot_size, preferred_slots) orelse return false;
+        const chunk = storage.bytes;
+        const realm_ids = storage.realm_ids;
+        const slots = realm_ids.len;
         const chunk_idx = self.bucket_chunks[idx].items.len;
         self.bucket_chunks[idx].appendAssumeCapacity(chunk);
         self.bucket_next_offsets[idx].appendAssumeCapacity(0);
@@ -1398,7 +1425,7 @@ pub const GcCellBacking = struct {
         self.bucket_addr_min[idx] = @min(self.bucket_addr_min[idx], start);
         self.bucket_addr_max[idx] = @max(self.bucket_addr_max[idx], end);
         self.bucket_chunk_counts[idx] += 1;
-        self.bucket_capacity_bytes[idx] += chunk_len;
+        self.bucket_capacity_bytes[idx] += chunk.len;
         self.bucket_capacity_slots[idx] += slots;
         self.bucket_owns_hint[idx] = chunk_idx;
         self.bucket_bump_hint[idx] = chunk_idx;
@@ -2398,6 +2425,36 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     try std.testing.expectEqual(@as(u64, 4), snapshot.cell_slab_lock.size_64_acquires);
     try std.testing.expectEqual(@as(u64, 4), snapshot.cell_slab_lock.size_256_acquires);
     try std.testing.expectEqual(@as(u64, 4), snapshot.cell_slab_lock.size_2048_acquires);
+}
+
+test "GC cell backing adapts its slot-aligned chunk to a bounded heap" {
+    // #637: the normal Object-class slab is 64 KiB. Keep the hard 32 KiB
+    // Context budget intact and prove the backing publishes a smaller owned
+    // chunk instead of stranding usable headroom or delegating the cell.
+    var budget = BudgetAllocator{
+        .inner = std.testing.allocator,
+        .limit = 32 * 1024,
+    };
+    {
+        var backing = GcCellBacking{ .inner = budget.allocator() };
+        defer backing.deinit();
+        const a = backing.allocator();
+        const len = 120;
+        const idx = GcCellBacking.bucketIndex(len, .@"16").?;
+
+        const cell = try a.alignedAlloc(u8, .@"16", len);
+        backing.publishCellAllocation(cell.ptr, len);
+        try std.testing.expect(backing.ownsCellAllocation(cell.ptr));
+        try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
+        const actual_chunk_bytes = backing.bucket_chunks[idx].items[0].len;
+        try std.testing.expect(actual_chunk_bytes < GcCellBacking.chunk_bytes);
+        try std.testing.expect(actual_chunk_bytes >= GcCellBacking.bucket_sizes[idx]);
+        try std.testing.expectEqual(@as(usize, 0), actual_chunk_bytes % GcCellBacking.bucket_sizes[idx]);
+        try std.testing.expect(budget.stats().used_bytes <= budget.limit);
+        backing.unpublishCellAllocation(cell.ptr, len);
+        a.free(cell);
+    }
+    try std.testing.expectEqual(@as(usize, 0), budget.stats().used_bytes);
 }
 
 test "GC cell backing lazily bumps fresh chunk slots before using reuse bitmaps" {
