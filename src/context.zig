@@ -8303,6 +8303,13 @@ pub const Context = struct {
         defer self.popActiveInterpreter(&machine);
         const ai_saved = gc_mod.setActiveInterpreter(&machine);
         defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        // Reserve the successful completion root before any host checkpoint or
+        // attacker-controlled script can exhaust the bounded realm. Nested
+        // helpers stack above this placeholder; replacing it after evaluation
+        // is allocation-free, so a completed script cannot lose its result at
+        // the host boundary (#645).
+        const result_root_mark = try machine.pushTempRoot(Value.undef());
+        defer machine.restoreTempRoots(result_root_mark);
         // A later host entry is a timer checkpoint. Poll before executing the
         // new script so elapsed unrefed timeouts are already observable to it.
         try machine.pollAbortSignalTimeouts();
@@ -8363,13 +8370,10 @@ pub const Context = struct {
         // Once script execution completes, its result is no longer present in
         // the interpreter's operand stack. Child Threads can still elect a
         // parallel collection while the host drains microtasks and waits for
-        // their completion, so keep a successful result in the precise root set
-        // for that whole interval rather than relying on a native local/register.
-        const result_root_mark = if (outcome) |result|
-            try machine.pushTempRoot(result)
-        else |_|
-            null;
-        defer if (result_root_mark) |mark| machine.restoreTempRoots(mark);
+        // their completion, so fill the pre-reserved precise root for that
+        // whole interval rather than allocating here or relying on a native
+        // local/register.
+        if (outcome) |result| machine.setTempRoot(result_root_mark, result) else |_| {}
         const top_level_failed = if (outcome) |_| false else |_| true;
         if (outcome) |_| {} else |err| {
             if (err == error.Throw) {
@@ -8487,7 +8491,7 @@ pub const Context = struct {
             // the host, while this interpreter and its result root are still
             // registered as precise root sources.
             self.collectRequestedGarbage();
-            return result;
+            return machine.tempRoot(result_root_mark, result);
         } else |err| {
             self.collectRequestedGarbage();
             if (err == error.Throw) self.exception = machine.exception;

@@ -8843,9 +8843,35 @@ pub const Interpreter = struct {
         self.gc_temp_roots.shrinkRetainingCapacity(mark);
     }
 
+    pub fn setTempRoot(self: *Interpreter, mark: usize, v: Value) void {
+        if (self.gc == null) return;
+        std.debug.assert(mark < self.gc_temp_roots.items.len);
+        self.gc_temp_roots.items[mark] = v;
+    }
+
     pub fn tempRoot(self: *Interpreter, mark: usize, fallback: Value) Value {
         if (self.gc == null) return fallback;
         return self.gc_temp_roots.items[mark];
+    }
+
+    test "Interpreter publishes into a reserved completion root without allocating" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var gc_sentinel: u8 = 0;
+        var machine = Interpreter{
+            .arena = arena.allocator(),
+            .env = undefined,
+            .root_shape = undefined,
+            .gc = &gc_sentinel,
+        };
+        const mark = try machine.pushTempRoot(Value.undef());
+        defer machine.restoreTempRoots(mark);
+
+        var no_memory: [0]u8 = .{};
+        var exhausted = std.heap.FixedBufferAllocator.init(&no_memory);
+        machine.arena = exhausted.allocator();
+        machine.setTempRoot(mark, Value.num(42));
+        try std.testing.expectEqual(@as(f64, 42), machine.tempRoot(mark, Value.undef()).asNum());
     }
 
     pub fn pushTempPromiseRoot(self: *Interpreter, p: *promise.Promise) EvalError!usize {
