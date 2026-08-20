@@ -10447,8 +10447,8 @@ pub const Interpreter = struct {
             if (needle_len > std.math.maxInt(u32)) return error.OutOfMemory;
             const units = try scratch.alloc(u16, needle_len);
             errdefer scratch.free(units);
-            var needle_it = Utf16CodeUnits{ .s = needle };
-            for (units) |*unit| unit.* = needle_it.next().?;
+            var needle_it = StringCodeUnitIterator.initWtf8(needle);
+            for (units) |*unit| unit.* = needle_it.next().?.unit;
 
             // Ordinary constructed strings are capped at `max_string_bytes`
             // (2^26); the explicit guard above also covers larger external
@@ -10505,13 +10505,13 @@ pub const Interpreter = struct {
         var pattern = try Utf16KmpPattern.init(scratch, needle, needle_len);
         defer pattern.deinit();
 
-        var haystack_it = Utf16CodeUnits{ .s = haystack };
+        var haystack_it = StringCodeUnitIterator.initWtf8(haystack);
         var index: usize = 0;
         while (index < start) : (index += 1) _ = haystack_it.next() orelse return null;
         var matched: usize = 0;
-        while (haystack_it.next()) |unit| {
+        while (haystack_it.next()) |code_unit| {
             index += 1;
-            if (pattern.accepts(&matched, unit)) return index - needle_len;
+            if (pattern.accepts(&matched, code_unit.unit)) return index - needle_len;
         }
         return null;
     }
@@ -10538,12 +10538,12 @@ pub const Interpreter = struct {
         var pattern = try Utf16KmpPattern.init(scratch, needle, needle_len);
         defer pattern.deinit();
 
-        var haystack_it = Utf16CodeUnits{ .s = haystack };
+        var haystack_it = StringCodeUnitIterator.initWtf8(haystack);
         var index: usize = 0;
         var matched: usize = 0;
         var last: ?usize = null;
         while (index < scan_units) {
-            const unit = haystack_it.next() orelse break;
+            const unit = (haystack_it.next() orelse break).unit;
             index += 1;
             if (pattern.accepts(&matched, unit)) last = index - needle_len;
         }
@@ -10596,12 +10596,12 @@ pub const Interpreter = struct {
         var pattern = try Utf16KmpPattern.init(scratch, needle, needle_len);
         defer pattern.deinit();
 
-        var haystack_it = Utf16CodeUnits{ .s = haystack };
+        var haystack_it = StringCodeUnitIterator.initWtf8(haystack);
         var index: usize = 0;
         var matched: usize = 0;
-        while (haystack_it.next()) |unit| {
+        while (haystack_it.next()) |code_unit| {
             index += 1;
-            if (!pattern.accepts(&matched, unit)) continue;
+            if (!pattern.accepts(&matched, code_unit.unit)) continue;
             const position = index - needle_len;
             if (position > std.math.maxInt(u32)) return error.OutOfMemory;
             try positions.append(scratch, @intCast(position));
@@ -10634,13 +10634,13 @@ pub const Interpreter = struct {
             return std.mem.startsWith(u8, haystack[start..], needle);
         }
 
-        var haystack_it = Utf16CodeUnits{ .s = haystack };
+        var haystack_it = StringCodeUnitIterator.initWtf8(haystack);
         var skipped: usize = 0;
         while (skipped < start) : (skipped += 1) _ = haystack_it.next() orelse return false;
-        var needle_it = Utf16CodeUnits{ .s = needle };
+        var needle_it = StringCodeUnitIterator.initWtf8(needle);
         while (needle_it.next()) |expected| {
             const actual = haystack_it.next() orelse return false;
-            if (actual != expected) return false;
+            if (actual.unit != expected.unit) return false;
         }
         return true;
     }
@@ -50738,62 +50738,30 @@ fn symbolKeyForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
 }
 
 /// Abstract Relational Comparison (subset): string<string is lexicographic,
-/// everything else compares as numbers.
-/// Streams a code-point-stored (WTF-8) JS string as its UTF-16 code units, so
-/// strings compare by code unit — an astral scalar yields its high then low
-/// surrogate — as the language's `IsLessThan` requires. Raw UTF-8 byte order
-/// disagrees: an astral char's 4-byte form sorts after a BMP char in
-/// U+E000..U+FFFF, but its leading surrogate (0xD800..) sorts before it.
-const Utf16CodeUnits = struct {
-    s: []const u8,
-    i: usize = 0,
-    low: ?u16 = null, // the trailing surrogate of an astral scalar, pending
-
-    fn next(self: *Utf16CodeUnits) ?u16 {
-        if (self.low) |l| {
-            self.low = null;
-            return l;
-        }
-        if (self.i >= self.s.len) return null;
-        if (wtf8SurrogateAt(self.s, self.i)) |cp| {
-            self.i += 3;
-            return @intCast(cp);
-        }
-        const seq_len = utf8SeqLen(self.s, self.i);
-        const end = @min(self.i + seq_len, self.s.len);
-        const cp = std.unicode.utf8Decode(self.s[self.i..end]) catch {
-            const b = self.s[self.i]; // invalid byte: take its value, advance one
-            self.i += 1;
-            return b;
-        };
-        self.i = end;
-        if (cp > 0xFFFF) {
-            const u = cp - 0x10000;
-            self.low = @intCast(0xDC00 + (u & 0x3FF));
-            return @intCast(0xD800 + (u >> 10));
-        }
-        return @intCast(cp);
-    }
-};
-
-/// Lexicographic order of two JS strings by UTF-16 code unit.
-fn compareStringsUtf16(a: []const u8, b: []const u8) std.math.Order {
-    // Identical bytes are equal under any encoding — the common fast path.
-    if (std.mem.eql(u8, a, b)) return .eq;
-    var ai = Utf16CodeUnits{ .s = a };
-    var bi = Utf16CodeUnits{ .s = b };
+/// everything else compares as numbers. String ordering is defined over UTF-16
+/// code units, so consume the StringCell through the same representation-aware
+/// iterator as String exotic indexing. In particular, two adjacent raw bytes
+/// in a flat-latin1 cell are two units even when they form valid UTF-8.
+fn compareStringsUtf16(a: Value, b: Value) std.math.Order {
+    std.debug.assert(a.isString() and b.isString());
+    // Identical physical images are equal only when their representation is
+    // identical. This retains the common no-walk path without conflating a
+    // future mixed canonical/flat pair.
+    if (a.strIsFlatLatin1() == b.strIsFlatLatin1() and std.mem.eql(u8, a.asStr(), b.asStr())) return .eq;
+    var ai = Interpreter.StringCodeUnitIterator.initValue(a);
+    var bi = Interpreter.StringCodeUnitIterator.initValue(b);
     while (true) {
         const ca = ai.next();
         const cb = bi.next();
         if (ca == null) return if (cb == null) .eq else .lt;
         if (cb == null) return .gt;
-        if (ca.? != cb.?) return if (ca.? < cb.?) .lt else .gt;
+        if (ca.?.unit != cb.?.unit) return if (ca.?.unit < cb.?.unit) .lt else .gt;
     }
 }
 
 fn lessThan(self: *Interpreter, a: Value, b: Value) EvalError!bool {
     if (a.isString() and b.isString()) {
-        return compareStringsUtf16(a.asStr(), b.asStr()) == .lt;
+        return compareStringsUtf16(a, b) == .lt;
     }
     if ((a.isObject() and a.asObj().is_symbol) or (b.isObject() and b.asObj().is_symbol))
         return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
@@ -51643,6 +51611,34 @@ test "interpreter comparisons and logical ops" {
     try std.testing.expect(!(try evalSource(arena.allocator(), "1 == '2'")).asBool());
     try std.testing.expect((try evalSource(arena.allocator(), "1 == '1'")).asBool());
     try std.testing.expect((try evalSource(arena.allocator(), "typeof 'x' === 'string'")).asBool());
+}
+
+test "String relational comparison streams representation-aware UTF-16 units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let pair = "\u00c3\u00a9";
+        \\let single = "\u00e9";
+        \\("a" < "b") && pair < single && pair <= single && single > pair && single >= pair &&
+        \\  "\u20ac" < "\ue000" && "\ud83d" < "💩" && "💩" < "\ue000"
+    )).asBool());
+
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    const pair = try Value.strAlloc(a, "\xC3\x83\xC2\xA9");
+    const single = try Value.strAlloc(a, "\xC3\xA9");
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    const Case = struct { op: ast.BinaryOp, left: Value, right: Value };
+    for ([_]Case{
+        .{ .op = .lt, .left = pair, .right = single },
+        .{ .op = .le, .left = pair, .right = single },
+        .{ .op = .gt, .left = single, .right = pair },
+        .{ .op = .ge, .left = single, .right = pair },
+    }) |case| try std.testing.expect((try machine.applyBinary(case.op, case.left, case.right)).asBool());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
 }
 
 test "interpreter ternary" {

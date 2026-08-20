@@ -9125,6 +9125,17 @@ test "vm: arithmetic, precedence, comparison, logical" {
     try std.testing.expectEqualStrings("ab1", (try vmRun(a, "'a' + 'b' + 1")).asStr());
 }
 
+test "vm: String relational comparison streams representation-aware UTF-16 units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\let pair = "\u00c3\u00a9";
+        \\let single = "\u00e9";
+        \\("a" < "b") && pair < single && pair <= single && single > pair && single >= pair &&
+        \\  "\u20ac" < "\ue000" && "\ud83d" < "💩" && "💩" < "\ue000"
+    )).asBool());
+}
+
 test "vm: number bitwise dispatch preserves conversions and coercion fallbacks" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
