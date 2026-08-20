@@ -21,7 +21,7 @@ tools, and gated in CI.
 | GC relocation coverage | `gc-relocation-inventory.json` | `zig build gc-relocation-inventory-check` |
 | Performance | dated `.md` report **plus** its raw `.tsv` samples | `benchmark-comparison`, `tools/benchmark-publication.ts` |
 | Platform support | `docs/platforms.md` | `tools/platform-release-matrix.ts` |
-| Release readiness | `release-compatibility-matrix.json` | `zig build release-compatibility` |
+| Release readiness | `release-compatibility-matrix.json` | `zig build release-compatibility-check` |
 
 Public prose in `README.md` and status pages is **generated from these
 artifacts** between HTML markers. Editing the rendered text by hand is reverted
@@ -88,7 +88,7 @@ When you add a capability, add its gate in the same change:
    rather than editing prose.
 5. If it closes a roadmap item, update
    `docs/.data/release-compatibility-matrix.json` and re-run
-   `zig build release-compatibility`.
+   `zig build release-compatibility-check`.
 
 ## Reading the release matrix
 
@@ -99,7 +99,7 @@ bridge, inspector, private ABI profiles, and the remaining engine gates
 optimizing-JIT backend/differential evidence).
 
 ```bash
-zig build release-compatibility                       # validate the matrix
+zig build release-compatibility-check                 # validate the matrix
 home-tool run tools/release-compatibility.ts --release      # fail unless every gate is green
 home-tool run tools/release-compatibility.ts --update-readme
 ```

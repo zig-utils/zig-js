@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "profile_id": "zig-js-context-lifecycle-v1",
+  "status": "frozen",
+  "frozen_date": "2026-08-20",
+  "owner_issue": 661,
+  "runner": "bench/comparison_zig_js.zig",
+  "mode": "context_lifecycle",
+  "lanes": 1,
+  "sample_boundary": "One un-warmed sample performs every requested Context create, first-work action, and Context destroy in process order. Phase timers exclude only the adjacent telemetry reads; the fresh-process wall/CPU counters retain that instrumentation cost.",
+  "scenarios": [
+    {
+      "id": "context_no_evaluation",
+      "context_options_profile": "gc_default",
+      "work": "No source or module evaluation after full Context and builtin installation.",
+      "expected_checksum_per_iteration": 0
+    },
+    {
+      "id": "context_first_source",
+      "context_options_profile": "gc_default",
+      "work": "First script parse, compile, and evaluation of the frozen expression 21 + 21.",
+      "expected_checksum_per_iteration": 42
+    },
+    {
+      "id": "context_first_module",
+      "context_options_profile": "gc_default",
+      "work": "First dependency-free module parse, link, and evaluation followed by one global checksum read.",
+      "expected_checksum_per_iteration": 42
+    },
+    {
+      "id": "context_full_feature",
+      "context_options_profile": "gc_full_wasm",
+      "work": "Full WebAssembly feature configuration plus first class, typed-array, JSON, and RegExp script evaluation; Thread, Worker, Promise, and queue work are outside this profile.",
+      "expected_checksum_per_iteration": 42
+    }
+  ],
+  "context_options_profiles": {
+    "gc_default": "enable_gc=true; enable_jit=true; public default WebAssembly feature set; no threads",
+    "gc_full_wasm": "enable_gc=true; enable_jit=true; every dependency-valid WebAssembly feature flag enabled; no threads"
+  },
+  "required_phase_fields": [
+    "create_ns",
+    "work_ns",
+    "destroy_ns",
+    "phase_total_ns",
+    "cpu_user_ns",
+    "cpu_system_ns"
+  ],
+  "required_memory_fields": [
+    "baseline_rss_bytes",
+    "max_live_rss_bytes",
+    "post_destroy_rss_bytes",
+    "retained_delta_bytes",
+    "peak_rss_bytes",
+    "rss_checkpoints"
+  ],
+  "finalizer_kind_fields": [
+    "objects",
+    "strings",
+    "environments",
+    "functions",
+    "bound_functions",
+    "promises",
+    "generators",
+    "iter_helpers",
+    "module_namespaces"
+  ],
+  "required_finalizer_fields": [
+    "cells",
+    "bulk_cell_frees_skipped",
+    "objects",
+    "strings",
+    "environments",
+    "functions",
+    "bound_functions",
+    "promises",
+    "generators",
+    "iter_helpers",
+    "module_namespaces",
+    "object_backing_releases",
+    "array_buffers",
+    "shared_array_buffers",
+    "promise_reactions"
+  ],
+  "soak_policy": {
+    "minimum_iterations": 8,
+    "checkpoint_fractions": [0.25, 0.5, 0.75, 1.0],
+    "maximum_post_destroy_growth_bytes": 8388608,
+    "maximum_post_destroy_growth_fraction": 0.05,
+    "reject_material_monotonic_growth": true
+  },
+  "publication_guards": [
+    "exact first-parent revisions and clean tracked zig-js, zig-gc, and zig-regex worktrees",
+    "alternating parent/candidate order with no discarded samples",
+    "exact scenario, options profile, iteration count, checksum, runner, and source identities",
+    "same-domain task_vm_info current and peak RSS on the declared macOS reference host",
+    "measured wall, CPU, instructions, cycles, energy, power, and nominal thermal state",
+    "no competing build, test, corpus, or benchmark process before or after an invocation"
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "schema_version": 19,
+  "matrix_id": "zig-js-representative-v19",
+  "status": "frozen",
+  "frozen_date": "2026-08-20",
+  "owner_issue": 661,
+  "history_policy": "This version hash-inherits every V18 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance decision, attribution metric, external-suite boundary, and publication boundary. It adds a separate zig-js-only cold Context lifecycle evidence profile; that profile is not a scored representative family and does not enter any cross-engine or aggregate result. Any later workload, Context option, boundary, checksum, telemetry field, retention policy, runner, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v18",
+    "path": "docs/.data/representative-benchmark-matrix-v18.json",
+    "sha256": "22611f86fea7d683e8b1a34dbfc6c409b175b3714a25e14b3999a62ab21c524e",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels"
+    ]
+  },
+  "change": "Adds a frozen, non-scored cold Context lifecycle profile and teaches the exact-parent collector to preserve its phase, RSS, soak, and finalizer telemetry without changing any inherited representative row.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "579785e150e1bfa81e8233cba1eb79d4db7fd6ec8365880f70feddce591b0533",
+    "measured_metrics": [
+      "instructions",
+      "cycles",
+      "energy_joules",
+      "thermal_state"
+    ],
+    "material_change_categories": [
+      "cpu_work",
+      "threads",
+      "generated_code",
+      "cache_traffic"
+    ],
+    "contract_changes": [
+      "frontend compiler counters are retained with every sample",
+      "competing long-running jobs reject collection before sampling",
+      "transient overlap rejects the affected exact pair",
+      "contaminated build-feedback evidence is unavailable",
+      "structural self-test JSON fixtures are cloned without a host convenience global",
+      "context_lifecycle samples preserve and validate their frozen auxiliary telemetry row"
+    ],
+    "publication_boundary": "Only an explicitly selected quiet-reference host on AC power may support an efficiency or lifecycle claim. Required counters must be measured and stable at at most 5% RSD, every thermal observation must remain nominal, generated-code/cache claims additionally require their exact category metric, and every raw sample remains visible. Context lifecycle collection additionally requires the frozen options/checksum profile, exact phase and finalizer reconciliation, and bounded post-destroy RSS checkpoints. Diagnostic hosts never gate or support a public ratio."
+  },
+  "context_lifecycle_integration": {
+    "issue": 661,
+    "status": "integrated_non_scored_profile",
+    "mode": "context_lifecycle",
+    "engines": [
+      "zig-js"
+    ],
+    "lanes": [
+      1
+    ],
+    "scenarios": [
+      "context_no_evaluation",
+      "context_first_source",
+      "context_first_module",
+      "context_full_feature"
+    ],
+    "profile": {
+      "path": "docs/.data/context-lifecycle-profile-v1.json",
+      "sha256": "3286810faef598fc62ce68f8a56825de48d749a7ae4778df270afd890780c6f2"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "7a1a5bef70620d09dd7788fe46c0ccb1856fb093fcf2017eeaaca44d927025c6"
+    },
+    "telemetry": [
+      "create_ns",
+      "work_ns",
+      "destroy_ns",
+      "cpu_user_ns",
+      "cpu_system_ns",
+      "baseline_rss_bytes",
+      "max_live_rss_bytes",
+      "post_destroy_rss_bytes",
+      "retained_delta_bytes",
+      "peak_rss_bytes",
+      "rss_checkpoints",
+      "gc_finalizer_stats"
+    ],
+    "publication_boundary": "This is a zig-js-only causal evidence profile, never a JavaScriptCore ratio or representative aggregate. A speed or retention claim requires a dated exact-parent raw artifact from the declared quiet macOS reference host; structural fixtures and diagnostic local runs establish only schema and runner correctness."
+  }
+}

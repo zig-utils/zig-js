@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v18.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v19.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -23,7 +23,7 @@ function validatePinnedFile(entry: any, label: string, root: string): void {
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT, supersedingExactParent: any = null): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 18, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 19, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -44,6 +44,27 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT, supersedingEx
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 19) {
+    requireValue(child.tier_attribution === undefined, "v19 must inherit the attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v19 must not change scored workload coverage");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v19 must inherit completed panel inventory unchanged");
+    requireValue(child.exact_parent_integration && typeof child.exact_parent_integration === "object", "v19 must replace the exact-parent integration contract");
+    requireValue(child.context_lifecycle_integration && typeof child.context_lifecycle_integration === "object", "v19 must add the context lifecycle integration");
+    const exactParent = supersedingExactParent || child.exact_parent_integration;
+    const merged = {
+      ...inherited,
+      ...child,
+      completed_metric_panels: {
+        ...inherited.completed_metric_panels,
+        efficiency_thermal: {
+          ...inherited.completed_metric_panels.efficiency_thermal,
+          scored_integration: exactParent,
+        },
+      },
+    };
+    validate(merged, root);
+    return merged;
   }
   if (child.schema_version === 17 || child.schema_version === 18) {
     const version = `v${child.schema_version}`;
@@ -102,7 +123,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT, supersedingEx
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 18, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 19, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -260,6 +281,16 @@ export function validate(manifest: any, root = ROOT): void {
         typeof independent.publication_boundary === "string" && independent.publication_boundary.length > 0,
       `${version} independent-suite publication ruling is incomplete`,
     );
+    if (manifest.schema_version >= 19) {
+      const lifecycle = manifest.context_lifecycle_integration;
+      requireValue(lifecycle && lifecycle.issue === 661 && lifecycle.status === "integrated_non_scored_profile" && lifecycle.mode === "context_lifecycle", "V19 context lifecycle identity drift");
+      requireValue(same(lifecycle.engines || [], ["zig-js"]) && same(lifecycle.lanes || [], [1]), "V19 context lifecycle engine/lane boundary drift");
+      requireValue(same(lifecycle.scenarios || [], ["context_no_evaluation", "context_first_source", "context_first_module", "context_full_feature"]), "V19 context lifecycle scenario inventory drift");
+      validatePinnedFile(lifecycle.profile, "V19 context lifecycle profile", root);
+      validatePinnedFile(lifecycle.runner, "V19 context lifecycle runner", root);
+      requireValue(same(lifecycle.telemetry || [], ["create_ns", "work_ns", "destroy_ns", "cpu_user_ns", "cpu_system_ns", "baseline_rss_bytes", "max_live_rss_bytes", "post_destroy_rss_bytes", "retained_delta_bytes", "peak_rss_bytes", "rss_checkpoints", "gc_finalizer_stats"]), "V19 context lifecycle telemetry inventory drift");
+      requireValue(typeof lifecycle.publication_boundary === "string" && lifecycle.publication_boundary.length > 0, "V19 context lifecycle publication boundary is missing");
+    }
   } else if (manifest.schema_version >= 13) {
     const pending = manifest.pending_metric_panels;
     requireValue(

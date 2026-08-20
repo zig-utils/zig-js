@@ -40,8 +40,8 @@
     },
     {
       "path": "advanced/verification/index.html",
-      "bytes": 222701,
-      "sha256": "c54644e96562b15e651d4b844dff2f2843133098bed0440d6e0b7c4b3826d8a6"
+      "bytes": 222809,
+      "sha256": "1d6825831f44d18ad3b3f4c248c2a4e45481d8998933442445b3e367e8306d76"
     },
     {
       "path": "advanced/vm-quickening/index.html",
@@ -65,8 +65,8 @@
     },
     {
       "path": "benchmarks/index.html",
-      "bytes": 388949,
-      "sha256": "36162daccc10620b3fc7fec474b0b2a10a28e75f728b3626653169fde494bb5b"
+      "bytes": 391165,
+      "sha256": "5f727b5ec485aeb94c55ac78bfe0dc84b7489055232c09b57503f5a0cc65c1b1"
     },
     {
       "path": "c-api/README/index.html",
@@ -180,8 +180,8 @@
     },
     {
       "path": "search-index.json",
-      "bytes": 259593,
-      "sha256": "d47446915337c40e570678c04e40cf249265c3c298842335680048dcdd41f0ac"
+      "bytes": 260547,
+      "sha256": "d2c3aae61555f96c31dad6054ed1e6dfdd6b4f63e847be4c75a13f13979ac5e8"
     },
     {
       "path": "sitemap.xml",
@@ -274,5 +274,5 @@
       "sha256": "c08b66f5315fb31e8adbd70e372ad0895adc21f70ae2212a6b848ffeabb974ea"
     }
   ],
-  "tree_sha256": "2706286d360be319c65efcd70a9d25ab07557b57429aa97e19b13c2fe31e8984"
+  "tree_sha256": "fb998963be47e0f1574dd9f765d6a0999975198ccaae4ac0d9819980099a26d0"
 }

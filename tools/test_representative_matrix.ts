@@ -30,4 +30,7 @@ rejects("restored pending panel", value => value.pending_metric_panels.push({ is
 rejects("missing completed panel", value => { delete value.completed_metric_panels.independent_suite; }, "completed panel inventory drift");
 rejects("efficiency source drift", value => { value.completed_metric_panels.efficiency_thermal.scored_integration.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
 rejects("independent adapter drift", value => value.completed_metric_panels.independent_suite.adapters.pop(), "adapter inventory drift");
-console.log("representative matrix structural tests: 22/22 passed");
+rejects("lifecycle scenario drift", value => value.context_lifecycle_integration.scenarios.pop(), "scenario inventory drift");
+rejects("lifecycle telemetry drift", value => value.context_lifecycle_integration.telemetry.pop(), "telemetry inventory drift");
+rejects("lifecycle runner drift", value => { value.context_lifecycle_integration.runner.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+console.log("representative matrix structural tests: 25/25 passed");

@@ -59,7 +59,7 @@ const shared_harness =
     \\};
 ;
 
-const Mode = enum { single, single_profiled, single_observed, independent_steady, independent_cold, shared, attribution, shared_attribution, module_cold, module_attribution };
+const Mode = enum { single, single_profiled, single_observed, independent_steady, independent_cold, shared, attribution, shared_attribution, module_cold, module_attribution, context_lifecycle };
 
 const SteadyLane = struct {
     io: std.Io,
@@ -95,6 +95,24 @@ const ProcessResourceSnapshot = struct {
     cpu_system_ns: u64,
     peak_rss_bytes: u64,
     retained_rss_bytes: u64,
+};
+
+const LifecycleScenario = enum {
+    no_evaluation,
+    first_source,
+    first_module,
+    full_feature,
+};
+
+const LifecycleTotals = struct {
+    create_ns: u64 = 0,
+    work_ns: u64 = 0,
+    destroy_ns: u64 = 0,
+    checksum: f64 = 0,
+    max_live_rss_bytes: u64 = 0,
+    post_destroy_rss_bytes: u64 = 0,
+    rss_checkpoints: [4]u64 = @splat(0),
+    finalizers: js.Context.GcFinalizerStats = .{},
 };
 
 // Darwin's public proc_pid_rusage RUSAGE_INFO_V6 layout. Keep the public field
@@ -910,6 +928,188 @@ fn runIndependentCold(
     }
 }
 
+fn parseLifecycleScenario(workload: []const u8) !LifecycleScenario {
+    if (std.mem.eql(u8, workload, "context_no_evaluation")) return .no_evaluation;
+    if (std.mem.eql(u8, workload, "context_first_source")) return .first_source;
+    if (std.mem.eql(u8, workload, "context_first_module")) return .first_module;
+    if (std.mem.eql(u8, workload, "context_full_feature")) return .full_feature;
+    return error.InvalidWorkload;
+}
+
+fn lifecycleOptions(scenario: LifecycleScenario) js.Context.Options {
+    if (scenario != .full_feature) return .{ .enable_gc = true };
+    return .{
+        .enable_gc = true,
+        .wasm_features = .{
+            .sign_extension_ops = true,
+            .nontrapping_float_to_int = true,
+            .multi_value = true,
+            .reference_types = true,
+            .bulk_memory = true,
+            .fixed_width_simd = true,
+            .relaxed_simd = true,
+            .threads = true,
+            .tail_calls = true,
+            .typed_function_references = true,
+            .gc = true,
+            .exception_handling = true,
+            .memory64 = true,
+            .multi_memory = true,
+        },
+    };
+}
+
+fn lifecycleWork(ctx: *js.Context, scenario: LifecycleScenario) !f64 {
+    return switch (scenario) {
+        .no_evaluation => 0,
+        .first_source => (try ctx.evaluate("21 + 21")).toNumber(),
+        .first_module => module: {
+            const Host = struct {
+                fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+                    return null;
+                }
+            };
+            var token: u8 = 0;
+            _ = try ctx.evaluateModule(
+                "context-lifecycle-entry.js",
+                "export const answer = 42; globalThis.__contextLifecycleChecksum = answer;",
+                .{ .ctx = &token, .load = Host.load },
+            );
+            break :module (try ctx.evaluate("globalThis.__contextLifecycleChecksum")).toNumber();
+        },
+        .full_feature => (try ctx.evaluate(
+            \\(function () {
+            \\  class Box { constructor(value) { this.value = value; } }
+            \\  var bytes = new Uint8Array([3, 5, 8, 13]);
+            \\  var text = JSON.stringify({ label: "cold-context", value: bytes[3] });
+            \\  var matched = /cold-context/.test(text);
+            \\  return new Box(bytes[0] + bytes[1] + bytes[2] + bytes[3] + (matched ? 13 : 0)).value;
+            \\})()
+        )).toNumber(),
+    };
+}
+
+fn addFinalizerStats(total: *js.Context.GcFinalizerStats, sample: js.Context.GcFinalizerStats) void {
+    inline for (@typeInfo(js.Context.GcFinalizerStats).@"struct".field_names) |name|
+        @field(total, name) += @field(sample, name);
+}
+
+fn printLifecycleTelemetry(
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+    sample: usize,
+    baseline: ProcessResourceSnapshot,
+    after: ProcessResourceSnapshot,
+    totals: LifecycleTotals,
+) !void {
+    const retained_delta: i128 = @as(i128, after.retained_rss_bytes) - @as(i128, baseline.retained_rss_bytes);
+    const finalizers = totals.finalizers;
+    const options_profile = if (std.mem.eql(u8, workload, "context_full_feature")) "gc_full_wasm" else "gc_default";
+    try writer.print(
+        "zig-js-context-lifecycle\t{{\"schema_version\":1,\"scenario\":\"{s}\",\"context_options_profile\":\"{s}\",\"iterations\":{d},\"sample\":{d},\"create_ns\":{d},\"work_ns\":{d},\"destroy_ns\":{d},\"phase_total_ns\":{d},\"cpu_user_ns\":{d},\"cpu_system_ns\":{d},\"baseline_rss_bytes\":{d},\"max_live_rss_bytes\":{d},\"post_destroy_rss_bytes\":{d},\"retained_delta_bytes\":{d},\"peak_rss_bytes\":{d},\"rss_checkpoints\":[{d},{d},{d},{d}],\"finalizers\":{{",
+        .{
+            workload,
+            options_profile,
+            jobs,
+            sample,
+            totals.create_ns,
+            totals.work_ns,
+            totals.destroy_ns,
+            totals.create_ns + totals.work_ns + totals.destroy_ns,
+            after.cpu_user_ns -| baseline.cpu_user_ns,
+            after.cpu_system_ns -| baseline.cpu_system_ns,
+            baseline.retained_rss_bytes,
+            totals.max_live_rss_bytes,
+            totals.post_destroy_rss_bytes,
+            retained_delta,
+            after.peak_rss_bytes,
+            totals.rss_checkpoints[0],
+            totals.rss_checkpoints[1],
+            totals.rss_checkpoints[2],
+            totals.rss_checkpoints[3],
+        },
+    );
+    try writer.print(
+        "\"cells\":{d},\"bulk_cell_frees_skipped\":{d},\"objects\":{d},\"strings\":{d},\"environments\":{d},\"functions\":{d},\"bound_functions\":{d},\"promises\":{d},\"generators\":{d},\"iter_helpers\":{d},\"module_namespaces\":{d},\"object_backing_releases\":{d},\"array_buffers\":{d},\"shared_array_buffers\":{d},\"promise_reactions\":{d}}}}}\n",
+        .{
+            finalizers.cells,
+            finalizers.bulk_cell_frees_skipped,
+            finalizers.objects,
+            finalizers.strings,
+            finalizers.environments,
+            finalizers.functions,
+            finalizers.bound_functions,
+            finalizers.promises,
+            finalizers.generators,
+            finalizers.iter_helpers,
+            finalizers.module_namespaces,
+            finalizers.object_backing_releases,
+            finalizers.array_buffers,
+            finalizers.shared_array_buffers,
+            finalizers.promise_reactions,
+        },
+    );
+}
+
+fn runContextLifecycle(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    jobs: usize,
+    samples: usize,
+) !void {
+    const scenario = try parseLifecycleScenario(workload);
+    const checkpoint_targets = [4]usize{
+        std.math.divCeil(usize, jobs, 4) catch unreachable,
+        std.math.divCeil(usize, jobs *| 2, 4) catch unreachable,
+        std.math.divCeil(usize, jobs *| 3, 4) catch unreachable,
+        jobs,
+    };
+    for (0..samples) |sample| {
+        const thermal_before = try darwinThermalState();
+        const counters_before = try darwinCounterSnapshot();
+        const baseline = try processResourceSnapshot();
+        var totals: LifecycleTotals = .{};
+        var checkpoint_index: usize = 0;
+        for (0..jobs) |iteration| {
+            const create_started = nowNs(io);
+            const ctx = try js.Context.createWith(allocator, lifecycleOptions(scenario));
+            totals.create_ns += @intCast(nowNs(io) - create_started);
+            var finalizers: js.Context.GcFinalizerStats = .{};
+            ctx.gc_finalizer_stats_out = &finalizers;
+            const after_create = try processResourceSnapshot();
+            totals.max_live_rss_bytes = @max(totals.max_live_rss_bytes, after_create.retained_rss_bytes);
+
+            const work_started = nowNs(io);
+            totals.checksum += lifecycleWork(ctx, scenario) catch |err| {
+                ctx.destroy();
+                return err;
+            };
+            totals.work_ns += @intCast(nowNs(io) - work_started);
+            const after_work = try processResourceSnapshot();
+            totals.max_live_rss_bytes = @max(totals.max_live_rss_bytes, after_work.retained_rss_bytes);
+
+            const destroy_started = nowNs(io);
+            ctx.destroy();
+            totals.destroy_ns += @intCast(nowNs(io) - destroy_started);
+            addFinalizerStats(&totals.finalizers, finalizers);
+            const after_destroy = try processResourceSnapshot();
+            totals.post_destroy_rss_bytes = after_destroy.retained_rss_bytes;
+            while (checkpoint_index < checkpoint_targets.len and iteration + 1 >= checkpoint_targets[checkpoint_index]) : (checkpoint_index += 1)
+                totals.rss_checkpoints[checkpoint_index] = after_destroy.retained_rss_bytes;
+        }
+        const after = try processResourceSnapshot();
+        const counters_after = try darwinCounterSnapshot();
+        const thermal_after = try darwinThermalState();
+        const phase_total = totals.create_ns + totals.work_ns + totals.destroy_ns;
+        try printRow(writer, .context_lifecycle, workload, 1, jobs, sample, phase_total, totals.checksum);
+        try printDarwinCounterRow(writer, .context_lifecycle, workload, jobs, sample, counters_before, counters_after, thermal_before, thermal_after);
+        try printLifecycleTelemetry(writer, workload, jobs, sample, baseline, after, totals);
+    }
+}
+
 fn configureModuleGlobals(ctx: *js.Context, jobs: usize, lane: usize) !void {
     const source = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d}; globalThis.__representativeModuleChecksum = 0;", .{ jobs, lane });
     _ = try ctx.evaluate(source);
@@ -1168,6 +1368,7 @@ pub fn main(init: std.process.Init) !void {
     if (native_observability_telemetry and mode != .single and mode != .single_observed) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
     if (promise_profile_enabled and mode != .independent_steady) return error.InvalidArguments;
+    if (mode == .context_lifecycle and !darwin_rusage) return error.InvalidArguments;
     if ((mode == .attribution or mode == .shared_attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
     if (std.mem.eql(u8, workload, "wasm_threads_wait_notify") and
@@ -1185,6 +1386,7 @@ pub fn main(init: std.process.Init) !void {
         .shared_attribution => try runSharedAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs, lanes),
         .module_cold => try runModuleCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
         .module_attribution => try runModuleAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
+        .context_lifecycle => try runContextLifecycle(benchmark_context_allocator, init.io, stdout, workload, jobs, samples),
     }
     try stdout.flush();
 }

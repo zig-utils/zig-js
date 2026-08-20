@@ -9,12 +9,42 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v18.json`. V18 hash-inherits every V17 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, and external-suite boundary unchanged. It re-pins only the exact-parent self-test after removing an unsupported host-global dependency; the production collector contract remains unchanged. Accepted historical reports are not rewritten, capability boundaries remain explicit, external-suite scores never enter repository-owned aggregates, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v19.json`. V19 hash-inherits every V18 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, and external-suite boundary unchanged. It adds the separate non-scored cold Context lifecycle profile below and re-pins the exact-parent collector that preserves that telemetry. Accepted historical reports are not rewritten, capability boundaries remain explicit, lifecycle/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
+
+## Cold context lifecycle evidence
+
+The frozen [`context-lifecycle-profile-v1.json`](.data/context-lifecycle-profile-v1.json)
+defines four zig-js-only cold rows: a fully installed context with no evaluation,
+first script evaluation, first dependency-free module evaluation, and a
+full-WebAssembly-feature context whose first script exercises classes, typed
+arrays, JSON, and RegExp. `Thread`, Worker, Promise, and queue work are outside
+this profile. Every iteration creates a new GC-enabled Context and destroys it;
+there is no pre-created realm, cold warmup, forced collection, delayed finalizer,
+or retained context pool.
+
+`context_lifecycle` emits the ordinary exact-parent row plus a versioned
+telemetry row. The latter retains create/work/destroy phase nanoseconds, total
+process user/system CPU, same-domain Mach peak/current RSS, post-destroy RSS at
+the 25/50/75/100% soak checkpoints, and every `Context.GcFinalizerStats` field.
+The phase sum deliberately excludes adjacent telemetry reads, while the
+fresh-process `/usr/bin/time` wall/CPU metrics include that instrumentation;
+neither boundary is presented as the other. Cell-kind totals must reconcile to
+the once-only bulk-teardown count. A soak of at least eight contexts rejects
+material monotonically increasing post-destroy RSS and any final retained
+growth above both the frozen absolute/fractional bound.
+
+Collection uses the exact-parent driver with `--mode context_lifecycle`, one
+lane, at least eight cold iterations per fresh process, the frozen per-iteration
+scenario checksum, and the normal clean-worktree, exact-first-
+parent, alternating-order, competing-process, CPU-occupancy, power, thermal,
+and hardware-counter guards. The profile is a measurement contract, not a
+published speedup. A dated raw artifact from a declared quiet reference host is
+still required before #479 can claim a lifecycle improvement.
 
 ## Representative WebAssembly rows
 
