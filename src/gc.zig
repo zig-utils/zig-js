@@ -1126,8 +1126,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     // private writes have drained and later writers take this same lock, so a
     // `put` rehash or append cannot tear iteration. A cached uncaptured block
     // Environment can replace its parent while a concurrent marker is active,
-    // so that edge is read under the same lock; `with_object` remains immutable
-    // after its one-shot environment creation.
+    // so every edge reset before reuse is read under the same lock.
     const concurrent = v.concurrent();
     if (concurrent) e.lockBindingsForTrace();
     var vit = e.vars.iterator();
@@ -1141,8 +1140,8 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     while (ait.next()) |a| markManaged(v, a.env);
     if (e.object_proto_intrinsic) |o| v.mark(o);
     if (e.parent) |p| markManaged(v, p);
-    if (concurrent) e.unlockBindingsForTrace();
     if (e.with_object) |o| v.mark(o);
+    if (concurrent) e.unlockBindingsForTrace();
 }
 
 /// Relocation is committed only while every mutator is stopped, so the

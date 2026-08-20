@@ -19016,7 +19016,10 @@ test "Context heap_limit_bytes never publishes a torn object under recovery pres
         \\let pressureOoms = 0;
         \\try { for (let i = 0; i < 50000; ++i) hoard.push({ i: i, j: i + 1 }); } catch (e) { ++pressureOoms; }
         \\let torn = 0, made = 0, ooms = 0;
-        \\for (let r = 0; r < 500; ++r) {
+        // Keep the recovery probe's loop control predeclared: the body `try`
+        // deliberately scores complete Object publication, not an unrelated
+        // per-iteration lexical-key allocation outside that catch boundary.
+        \\for (var r = 0; r < 500; ++r) {
         \\  try {
         \\    const o = { idx: r, arr: new Array(64).fill(r), s: "small_" + r };
         \\    if (o.idx !== r || o.arr[63] !== r || o.s.length < 7) ++torn;
@@ -23551,9 +23554,11 @@ test "enable_gc: mid-script collection reclaims garbage during a running loop (b
     // Collection ran repeatedly mid-loop — far more than the single quiescent
     // collect at the top of `evaluate`.
     try std.testing.expect(ctx.gc.?.collections > 2);
-    // The heap stayed bounded: nothing like the ~150k object graphs a leak would
-    // accumulate over 50k iterations survived.
-    try std.testing.expect(ctx.gc.?.live_cells < 20000);
+    // The heap stayed bounded in the collector's byte currency. A raw cell-count
+    // limit changes when an optimization removes larger Environment cells while
+    // leaving more 128-byte Objects in the final nursery tranche (#634).
+    const accounting = ctx.gc.?.accounting();
+    try std.testing.expect(accounting.live_bytes < 2 * ctx.gc.?.nursery_threshold_bytes);
 }
 
 test "enable_gc: precise checkpoints reclaim a cache-local nursery batch" {
@@ -24908,8 +24913,9 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
         .parallel_js = true,
     });
     defer ctx.destroy();
-    // Preserve the original allocation-count pressure after Object cells moved
-    // from the 256-byte to the 128-byte slab class.
+    // Keep the production tranche unchanged. The two lanes below create more
+    // than 512 KiB of 128-byte Object-class cells by themselves, so removing
+    // per-iteration block Environment cells cannot disable the rendezvous.
     ctx.gc_cooperative_tranche_bytes = 512 * 1024;
     try std.testing.expect(ctx.beginCooperativeGcProfile());
 
@@ -24917,7 +24923,7 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
         \\function cooperativeChurn(lane) {
         \\  const ring = [];
         \\  for (let i = 0; i < 64; i++) ring.push({ value: i, lane: lane, prior: 0 });
-        \\  for (let i = 0; i < 1200; i++) {
+        \\  for (let i = 0; i < 2400; i++) {
         \\    const index = i & 63;
         \\    const old = ring[index];
         \\    ring[index] = { value: old.value + i + lane, lane: lane, prior: old.value };
