@@ -21620,14 +21620,16 @@ test "for(let) per-iteration binding: reuse fast path preserves closure-capture 
         \\  var captured = caps.map(function(f){ return f(); }).join(",");
         \\  var sum = 0;
         \\  for (let j = 0; j < 1000; j++) sum += j; // uncaptured: reuse fast path
+        \\  var fromInit;
+        \\  for (let head = (fromInit = function(){ return head; }, 7); head < 8; head++) {} // captured initializer: copy before condition
         \\  var nested = [];
         \\  for (let k = 0; k < 3; k++) { { nested.push(() => k); } } // capture through a nested block
-        \\  return captured + "|" + sum + "|" + nested.map(g => g()).join(",");
+        \\  return captured + "|" + sum + "|" + fromInit() + "|" + nested.map(g => g()).join(",");
         \\}
         \\run();
     );
     try std.testing.expect(v.isString());
-    try std.testing.expectEqualStrings("0,1,2,3,4|499500|0,1,2", v.asStr());
+    try std.testing.expectEqualStrings("0,1,2,3,4|499500|7|0,1,2", v.asStr());
 }
 
 test "for-of/for-in per-iteration binding: reuse fast path preserves closure-capture semantics" {

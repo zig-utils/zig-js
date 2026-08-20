@@ -4838,7 +4838,11 @@ pub const Interpreter = struct {
             };
         }
         // CreatePerIterationEnvironment (initial copy, before the first test).
-        if (lexical) self.env = try self.perIterEnv(outer, names.items, self.env);
+        // As with later iterations, the copy is observable only when initializer
+        // evaluation captured the head environment. Reuse an uncaptured head in
+        // place instead of allocating a redundant second environment before its
+        // condition.
+        if (lexical and self.env.captured) self.env = try self.perIterEnv(outer, names.items, self.env);
         if (loop_env) |le| {
             if (le.disposables.items.len == 0) {
                 loop_env = null;
