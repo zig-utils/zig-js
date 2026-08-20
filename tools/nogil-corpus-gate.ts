@@ -2,18 +2,124 @@
 import { readText, run } from "./lib/home";
 declare const __filename: string;
 type Entry = Record<string, any>;
+type Regression = {
+  name: string;
+  elapsed: number;
+  exitCode: number | null;
+  timedOut: boolean;
+  diagnostics: string;
+};
+const FAILURE_DIAGNOSTIC_LIMIT = 8192;
 function requireValue(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
+
+function escapedDiagnosticText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, (value) =>
+      `\\x${value.charCodeAt(0).toString(16).padStart(2, "0")}`,
+    );
+}
+
+function labelledDiagnosticTail(
+  label: "stdout" | "stderr",
+  text: string,
+  limit: number,
+): string {
+  const prefix = `runner ${label} | `,
+    safe = escapedDiagnosticText(text || "<empty>"),
+    prefixed = safe
+      .split("\n")
+      .map((line) => `${prefix}${line}`)
+      .join("\n");
+  if (prefixed.length <= limit) return prefixed;
+  const marker = `${prefix}[... leading characters omitted]`,
+    tailLength = limit - marker.length - 1 - prefix.length;
+  return `${marker}\n${prefix}${prefixed.slice(-tailLength)}`;
+}
+
+export function failureDiagnostics(
+  stdout: string,
+  stderr: string,
+  limit = FAILURE_DIAGNOSTIC_LIMIT,
+): string {
+  requireValue(limit >= 256, "failure diagnostic limit is too small");
+  const streamLimit = Math.floor((limit - 1) / 2);
+  return `${labelledDiagnosticTail(
+    "stdout",
+    stdout,
+    streamLimit,
+  )}\n${labelledDiagnosticTail("stderr", stderr, streamLimit)}`;
+}
+
+function regressionAnnotation(item: Regression): string {
+  const status = item.timedOut ? "timed out" : `exit ${item.exitCode}`;
+  return `::error::no-GIL regression in ${item.name} (${status}; after ${item.elapsed}s)`;
+}
+
+function selfTest(): void {
+  const labelled = failureDiagnostics(
+    "first\r\n::error::not-a-workflow-command\u001b",
+    "panic\u0000tail",
+  );
+  requireValue(
+    labelled.includes("runner stdout |") &&
+      labelled.includes("runner stderr |") &&
+      labelled.includes("\\x1b") &&
+      labelled.includes("\\x00"),
+    "failure diagnostics lost labels or control escaping",
+  );
+  requireValue(
+    labelled.split("\n").every((line) => line.startsWith("runner ")),
+    "failure diagnostic line can inject a workflow command",
+  );
+  const bounded = failureDiagnostics(
+    "::error::spoof\n".repeat(2_000),
+    "x".repeat(20_000),
+    512,
+  );
+  requireValue(
+    bounded.length <= 512 &&
+      bounded.includes("leading characters omitted") &&
+      bounded.split("\n").every((line) => line.startsWith("runner ")),
+    "failure diagnostic truncation is not bounded",
+  );
+  const empty = failureDiagnostics("", "");
+  requireValue(
+    empty.includes("runner stdout | <empty>") &&
+      empty.includes("runner stderr | <empty>"),
+    "empty failure diagnostics are ambiguous",
+  );
+  const fixture: Regression = {
+    name: "fixture.js",
+    elapsed: 3,
+    exitCode: 7,
+    timedOut: false,
+    diagnostics: empty,
+  };
+  requireValue(
+    regressionAnnotation(fixture).includes("exit 7; after 3s") &&
+      regressionAnnotation({ ...fixture, exitCode: null, timedOut: true }).includes(
+        "timed out; after 3s",
+      ),
+    "failure exit/timeout metadata is ambiguous",
+  );
+  console.log(
+    "OK no-GIL corpus gate self-test: bounded, labelled, workflow-safe diagnostics",
+  );
+}
+
 function main(): void {
-  const args = process.argv.slice(2),
-    options: any = {
-      shard: 0,
-      shards: 1,
-      deadline: 600,
-      binary: "./zig-out/bin/threads-test",
-      buildMode: "debug",
-    };
+  const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--self-test") return selfTest();
+  const options: any = {
+    shard: 0,
+    shards: 1,
+    deadline: 600,
+    binary: "./zig-out/bin/threads-test",
+    buildMode: "debug",
+  };
   for (let index = 0; index < args.length; index += 1) {
     const name = args[index],
       value = args[++index];
@@ -67,7 +173,7 @@ function main(): void {
   console.log(
     `shard ${options.shard}/${options.shards}: ${mine.length} of ${cases.length} cases, ${options.deadline}s deadline, ${options.buildMode} expectations`,
   );
-  const regressions: any[][] = [],
+  const regressions: Regression[] = [],
     known: string[] = [],
     improved: string[] = [];
   let passed = 0;
@@ -82,7 +188,14 @@ function main(): void {
     if (ok) {
       passed += 1;
       if (!expected) improved.push(name);
-    } else if (expected) regressions.push([name, elapsed]);
+    } else if (expected)
+      regressions.push({
+        name,
+        elapsed,
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        diagnostics: failureDiagnostics(result.stdout, result.stderr),
+      });
     else known.push(name);
   }
   console.log(`\npassed ${passed}/${mine.length}`);
@@ -97,9 +210,11 @@ function main(): void {
   improved.forEach((name) =>
     console.log(`::notice::now passes, baseline is stale: ${name}`),
   );
-  regressions.forEach((item) =>
-    console.log(`::error::no-GIL regression in ${item[0]} (after ${item[1]}s)`),
-  );
+  for (const item of regressions) {
+    console.log(regressionAnnotation(item));
+    console.log(`runner diagnostics for ${item.name}:`);
+    console.log(item.diagnostics);
+  }
   requireValue(
     regressions.length === 0,
     `${regressions.length} regression(s) against ${baselinePath}`,

@@ -78,7 +78,9 @@ jobs:
           # the bounded terminal-premise probes against the installed runner.
           - name: threads-reference-audit
             home_tool: true
-            cmd: zig build threads-reference-audit threads-reference-probes -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
+            cmd: |
+              zig build threads-reference-audit threads-reference-probes -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/nogil-corpus-gate.ts --self-test
           # Bounded witness for the #430 execution inventory. The complete
           # artifact is a deliberate hours-long reproduction; this keeps the
           # tooling that produces it from rotting silently, on every push.
