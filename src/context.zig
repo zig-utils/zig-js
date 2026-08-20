@@ -19012,18 +19012,25 @@ test "Context heap_limit_bytes never publishes a torn object under recovery pres
     });
     defer ctx.destroy();
 
-    // A live hoard drives the budget through allocation-failure recovery. An
+    // A live hoard drives the budget through allocation-failure recovery. Hold
+    // an exact-shape reserve live across that boundary, then release it before
+    // the publication probe. This guarantees a bounded reclamation window under
+    // the unchanged 4 MiB cap: shard scheduling may change when collections run,
+    // but cannot turn the witness into "the live set consumed every byte". An
     // allocation that survives that boundary must be complete: the PR-249 OOM
     // witness fails outright on a successfully returned but torn object (#100).
-    // Record the fill's OOM explicitly instead of requiring a second OOM after
-    // recovery: the amount reclaimed at the boundary legitimately changes with
-    // object/shape representation size. The counts stay small deliberately;
-    // this is a correctness witness, not a stress run.
+    // The counts stay small deliberately; this is a correctness witness, not a
+    // stress run.
     const full_collections_before = ctx.runtimeHeapAccounting().full_collections;
     const result = try ctx.evaluate(
+        \\let recoveryReserve = [];
+        \\for (let i = 0; i < 128; ++i)
+        \\  recoveryReserve.push({ idx: -i, arr: new Array(64).fill(i), s: "reserve_" + i });
         \\const hoard = [];
         \\let pressureOoms = 0;
         \\try { for (let i = 0; i < 50000; ++i) hoard.push({ i: i, j: i + 1 }); } catch (e) { ++pressureOoms; }
+        \\recoveryReserve = null;
+        \\gc();
         \\let torn = 0, made = 0, ooms = 0;
         // Keep the recovery probe's loop control predeclared: the body `try`
         // deliberately scores complete Object publication, not an unrelated
