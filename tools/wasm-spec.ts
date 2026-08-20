@@ -329,6 +329,9 @@ function generateCommand(
   }
   return record(index, command, "runner_error", "unsupported command kind");
 }
+// wasm-tools encodes `(ref.null exn)` as an `exnref` with an explicit `"null"`
+// value; `nullexnref`/`refnull` are separate bottom-type spellings. Match that
+// value before requiring the host object used for a non-null exception.
 const PRELUDE = `
 const __report={commands:[]},__modules=Object.create(null),__moduleDefinitions=Object.create(null),__registry=Object.create(null),__externrefs=new Map();let __last=null;
 const __scratch=new ArrayBuffer(8),__view=new DataView(__scratch);
@@ -340,7 +343,7 @@ function __externref(x){if(x==='null')return null;if(!__externrefs.has(x))__exte
 function __record(index,line,type,status,detail,mode){const e={index,line,type,status,mode:mode||'javascript_api'};if(detail)e.detail=detail;__report.commands.push(e)}
 function __message(e){try{return String(e)}catch(_){return '<unprintable>'}}
 function __get(i,f){const v=i.exports[f];return v instanceof WebAssembly.Global?v.value:v}
-function __sameOne(a,e){if(e.type==='i32')return(a|0)===(Number(e.value)|0);if(e.type==='i64')return a===BigInt.asIntN(64,BigInt(e.value));if(e.type==='f32')return String(e.value).startsWith('nan:')?Number.isNaN(a):__f32bits(a)===Number(e.value);if(e.type==='f64')return String(e.value).startsWith('nan:')?Number.isNaN(a):__f64bits(a)===BigInt(e.value);if(e.type==='externref'||e.type==='anyref')return Object.prototype.hasOwnProperty.call(e,'value')?a===__externref(e.value):a!=null;if(e.type==='i31ref')return typeof a==='number';if(e.type==='eqref'||e.type==='structref'||e.type==='arrayref'||e.type==='exnref')return a!==null&&typeof a==='object';if(e.type==='funcref')return e.value==='null'?a===null:typeof a==='function';if(e.type==='refnull'||String(e.type).startsWith('null'))return a===null;return false}
+function __sameOne(a,e){if(e.type==='i32')return(a|0)===(Number(e.value)|0);if(e.type==='i64')return a===BigInt.asIntN(64,BigInt(e.value));if(e.type==='f32')return String(e.value).startsWith('nan:')?Number.isNaN(a):__f32bits(a)===Number(e.value);if(e.type==='f64')return String(e.value).startsWith('nan:')?Number.isNaN(a):__f64bits(a)===BigInt(e.value);if(e.type==='externref'||e.type==='anyref')return Object.prototype.hasOwnProperty.call(e,'value')?a===__externref(e.value):a!=null;if(e.type==='i31ref')return typeof a==='number';if(e.type==='eqref'||e.type==='structref'||e.type==='arrayref'||e.type==='exnref')return Object.prototype.hasOwnProperty.call(e,'value')&&e.value==='null'?a===null:a!==null&&typeof a==='object';if(e.type==='funcref')return e.value==='null'?a===null:typeof a==='function';if(e.type==='refnull'||String(e.type).startsWith('null'))return a===null;return false}
 function __same(a,e){if(e.length===0)return a===undefined;const v=e.length===1?[a]:a;if(!Array.isArray(v)||v.length!==e.length)return false;return e.every((x,i)=>__sameOne(v[i],x))}
 function __sameV128Bits(actual,laneType,expected){const widths={i8:8n,i16:16n,i32:32n,i64:64n,f32:32n,f64:64n},width=widths[laneType];if(!width)return false;let bits;try{bits=BigInt(actual)}catch(_){return false}const mask=(1n<<width)-1n;for(let i=0;i<expected.length;i++){const lane=(bits>>(BigInt(i)*width))&mask,value=expected[i];if(value==='nan:canonical'){const magnitude=lane&(laneType==='f32'?0x7fffffffn:0x7fffffffffffffffn),canonical=laneType==='f32'?0x7fc00000n:0x7ff8000000000000n;if(magnitude!==canonical)return false}else if(value==='nan:arithmetic'){const quiet=laneType==='f32'?0x7fc00000n:0x7ff8000000000000n;if((lane&quiet)!==quiet)return false}else if(lane!==(BigInt(value)&mask))return false}return true}
 const __spectest={print(){},print_i32(){},print_i64(){},print_f32(){},print_f64(){},print_i32_f32(){},print_f64_f64(){},global_i32:666,global_i64:666n,global_f32:666.6,global_f64:666.6,table:new WebAssembly.Table({initial:10,maximum:20,element:'anyfunc'}),memory:new WebAssembly.Memory({initial:1,maximum:2})};__registry.spectest=__spectest;
@@ -431,7 +434,10 @@ function selfTest(): void {
   const generated = generateCommand(0, command, ".");
   if (
     !generated.includes("__same") ||
-    featureArea("core-3", "test/core/gc/i31.wast") !== "gc"
+    featureArea("core-3", "test/core/gc/i31.wast") !== "gc" ||
+    !PRELUDE.includes(
+      "Object.prototype.hasOwnProperty.call(e,'value')&&e.value==='null'?a===null",
+    )
   )
     fail("self-test failed");
   console.log("WebAssembly corpus driver self-test: PASS");
