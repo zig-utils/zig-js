@@ -6983,7 +6983,7 @@ pub const Context = struct {
         h.collect();
         self.noteQuiescentFullCollection(h);
         wasm_api.collectWasmGarbage(self);
-        self.trimCollectedCellBacking();
+        self.trimCollectedCellBacking(.ordinary_collection);
         self.gc_requested.store(false, .monotonic);
     }
 
@@ -7126,21 +7126,26 @@ pub const Context = struct {
     /// directly with result side storage and complete object publication. At
     /// that boundary return every fully empty tail; the next allocation can
     /// still grow a slot-aligned adaptive chunk through #637.
-    fn shouldReleaseEmptyCellTails(stats: HeapBudgetStats) bool {
+    const CellTailTrimCause = enum {
+        ordinary_collection,
+        allocation_failure,
+    };
+
+    fn shouldReleaseEmptyCellTails(stats: ?HeapBudgetStats, cause: CellTailTrimCause) bool {
+        if (cause == .allocation_failure) return true;
+        const bounded = stats orelse return false;
         const protected_headroom = @max(
-            stats.limit_bytes / 16,
+            bounded.limit_bytes / 16,
             2 * GcCellBacking.chunk_bytes,
         );
-        return stats.remaining_bytes < protected_headroom;
+        return bounded.remaining_bytes < protected_headroom;
     }
 
-    fn trimCollectedCellBacking(self: *Context) void {
+    fn trimCollectedCellBacking(self: *Context, cause: CellTailTrimCause) void {
         const backing = self.gc_cell_backing orelse return;
-        if (self.heapBudgetStats()) |stats| {
-            if (shouldReleaseEmptyCellTails(stats)) {
-                _ = backing.trimEmptyTailChunksUnderPressure();
-                return;
-            }
+        if (shouldReleaseEmptyCellTails(self.heapBudgetStats(), cause)) {
+            _ = backing.trimEmptyTailChunksUnderPressure();
+            return;
         }
         _ = backing.trimEmptyTailChunks();
     }
@@ -7233,7 +7238,7 @@ pub const Context = struct {
             return;
         }
         wasm_api.collectWasmGarbage(self);
-        self.trimCollectedCellBacking();
+        self.trimCollectedCellBacking(.ordinary_collection);
         const scheduled_auto_compaction =
             full_collection and self.scheduleAutomaticCompactionIfNeeded();
         if (scheduled_auto_compaction) self.runAutomaticCompactionWithConductor();
@@ -7270,7 +7275,9 @@ pub const Context = struct {
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
         h.collect();
-        self.trimCollectedCellBacking();
+        // The failed request may itself be larger than the ordinary headroom
+        // threshold, so recovery gives up every eligible empty suffix.
+        self.trimCollectedCellBacking(.allocation_failure);
         self.gc_requested.store(false, .monotonic);
         return true;
     }
@@ -7292,7 +7299,7 @@ pub const Context = struct {
         // cannot be proven.
         const swept = self.driveParallelCollection(h, machine, 100 * std.time.ns_per_ms);
         if (!swept) return false;
-        self.trimCollectedCellBacking();
+        self.trimCollectedCellBacking(.allocation_failure);
         self.gc_requested.store(false, .monotonic);
         return true;
     }
@@ -19099,6 +19106,8 @@ test "Context heap_limit_bytes names an escaping top-level OOM" {
 }
 
 test "Context bounded collection preserves reuse tails only with refill headroom" {
+    try std.testing.expect(!Context.shouldReleaseEmptyCellTails(null, .ordinary_collection));
+    try std.testing.expect(Context.shouldReleaseEmptyCellTails(null, .allocation_failure));
     const limit = 4 * 1024 * 1024;
     const protected = limit / 16;
     const healthy_used = limit - protected;
@@ -19107,13 +19116,13 @@ test "Context bounded collection preserves reuse tails only with refill headroom
         .used_bytes = healthy_used,
         .peak_bytes = healthy_used,
         .remaining_bytes = protected,
-    }));
+    }, .ordinary_collection));
     try std.testing.expect(Context.shouldReleaseEmptyCellTails(.{
         .limit_bytes = limit,
         .used_bytes = healthy_used + 1,
         .peak_bytes = healthy_used + 1,
         .remaining_bytes = protected - 1,
-    }));
+    }, .ordinary_collection));
 }
 
 test "Context heap_limit_bytes never publishes a torn object under recovery pressure" {
