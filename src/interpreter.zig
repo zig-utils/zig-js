@@ -9744,8 +9744,11 @@ pub const Interpreter = struct {
                     try self.setMember(target, k, try self.getProperty(src, k));
                 }
             },
-            .string => for (try src.asWtf8(self.arena), 0..) |ch, i| {
-                try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), try Value.strOwned(self.arena, try self.arena.dupe(u8, &.{ch})));
+            .string => {
+                var code_units = StringCodeUnitIterator.initValue(src);
+                var i: usize = 0;
+                while (code_units.next()) |cu| : (i += 1)
+                    try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), try self.stringValueFromCodeUnit(cu.unit));
             },
             else => {}, // null/undefined/number/boolean spread → no own enumerable props
         }
@@ -10184,39 +10187,64 @@ pub const Interpreter = struct {
         astral: ?u21 = null,
     };
 
-    fn stringCodeUnitAt(s: []const u8, index: usize) ?StringCodeUnit {
-        var units: usize = 0;
-        var i: usize = 0;
-        while (i < s.len) {
-            if (wtf8SurrogateAt(s, i)) |cp| {
-                if (units == index) return .{ .unit = @intCast(cp) };
-                units += 1;
-                i += 3;
-                continue;
+    const StringCodeUnitIterator = struct {
+        bytes: []const u8,
+        flat_latin1: bool,
+        byte_index: usize = 0,
+        pending_low: ?u16 = null,
+
+        fn initValue(v: Value) StringCodeUnitIterator {
+            std.debug.assert(v.isString());
+            return .{ .bytes = v.asStr(), .flat_latin1 = v.strIsFlatLatin1() };
+        }
+
+        fn initWtf8(bytes: []const u8) StringCodeUnitIterator {
+            return .{ .bytes = bytes, .flat_latin1 = false };
+        }
+
+        fn next(self: *StringCodeUnitIterator) ?StringCodeUnit {
+            if (self.pending_low) |unit| {
+                self.pending_low = null;
+                return .{ .unit = unit };
+            }
+            if (self.byte_index >= self.bytes.len) return null;
+            if (self.flat_latin1) {
+                const unit = self.bytes[self.byte_index];
+                self.byte_index += 1;
+                return .{ .unit = unit };
             }
 
-            const seq_len = utf8SeqLen(s, i);
-            if (seq_len == 4 and i + seq_len <= s.len) {
-                if (std.unicode.utf8Decode(s[i .. i + seq_len])) |cp| {
+            const i = self.byte_index;
+            if (wtf8SurrogateAt(self.bytes, i)) |cp| {
+                self.byte_index += 3;
+                return .{ .unit = @intCast(cp) };
+            }
+
+            const seq_len = utf8SeqLen(self.bytes, i);
+            if (seq_len == 4 and i + seq_len <= self.bytes.len) {
+                if (std.unicode.utf8Decode(self.bytes[i .. i + seq_len])) |cp| {
                     if (cp > 0xFFFF) {
                         const u = cp - 0x10000;
-                        if (units == index) return .{ .unit = @intCast(0xD800 + (u >> 10)), .astral = cp };
-                        if (units + 1 == index) return .{ .unit = @intCast(0xDC00 + (u & 0x3FF)) };
-                        units += 2;
-                        i += seq_len;
-                        continue;
+                        self.byte_index += seq_len;
+                        self.pending_low = @intCast(0xDC00 + (u & 0x3FF));
+                        return .{ .unit = @intCast(0xD800 + (u >> 10)), .astral = cp };
                     }
                 } else |_| {}
             }
 
-            const cp = if (seq_len > 1 and i + seq_len <= s.len)
-                std.unicode.utf8Decode(s[i .. i + seq_len]) catch @as(u21, s[i])
+            const cp = if (seq_len > 1 and i + seq_len <= self.bytes.len)
+                std.unicode.utf8Decode(self.bytes[i .. i + seq_len]) catch @as(u21, self.bytes[i])
             else
-                @as(u21, s[i]);
-            if (units == index) return .{ .unit = @intCast(cp & 0xFFFF) };
-            units += 1;
-            i += seq_len;
+                @as(u21, self.bytes[i]);
+            self.byte_index += seq_len;
+            return .{ .unit = @intCast(cp & 0xFFFF) };
         }
+    };
+
+    fn stringCodeUnitAt(s: []const u8, index: usize) ?StringCodeUnit {
+        var iter = StringCodeUnitIterator.initWtf8(s);
+        var units: usize = 0;
+        while (iter.next()) |cu| : (units += 1) if (units == index) return cu;
         return null;
     }
 
@@ -10238,7 +10266,24 @@ pub const Interpreter = struct {
 
     fn stringIndexValue(self: *Interpreter, s: []const u8, index: usize) EvalError!?Value {
         const cu = stringCodeUnitAt(s, index) orelse return null;
-        return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
+        return try self.stringValueFromCodeUnit(cu.unit);
+    }
+
+    fn stringValueFromCodeUnit(self: *Interpreter, unit: u16) EvalError!Value {
+        return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(unit));
+    }
+
+    /// Read one UTF-16 code unit without confusing the StringCell's physical
+    /// representation for its ECMAScript index space. Flat latin1 is one raw
+    /// byte per unit and stays O(1); every other cell contains canonical WTF-8.
+    pub fn stringIndexValueOf(self: *Interpreter, v: Value, index: usize) EvalError!?Value {
+        std.debug.assert(v.isString());
+        if (v.strIsFlatLatin1()) {
+            const flat = v.asStr();
+            if (index >= flat.len) return null;
+            return try self.stringValueFromCodeUnit(flat[index]);
+        }
+        return self.stringIndexValue(v.asStr(), index);
     }
 
     fn ensureStringAppend(self: *Interpreter, buf: *const std.ArrayListUnmanaged(u8), add_len: usize) EvalError!void {
@@ -12923,7 +12968,7 @@ pub const Interpreter = struct {
                     if (p.isString()) {
                         if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfValue(p)));
                         if (arrayIndex(key)) |i| {
-                            if (try self.stringIndexValue(try p.asWtf8(self.arena), i)) |v| return v;
+                            if (try self.stringIndexValueOf(p, i)) |v| return v;
                         }
                     }
                 }
@@ -12979,7 +13024,7 @@ pub const Interpreter = struct {
                         if (p.isString()) {
                             if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfValue(p)));
                             if (arrayIndex(key)) |i| {
-                                if (try self.stringIndexValue(try p.asWtf8(self.arena), i)) |v| return v;
+                                if (try self.stringIndexValueOf(p, i)) |v| return v;
                             }
                         }
                     }
@@ -13228,14 +13273,14 @@ pub const Interpreter = struct {
             // r = {0:"f",1:"o",2:"o"}; `length` is non-enumerable). Other
             // primitives (number/boolean/symbol/bigint) have no own enumerable
             // properties, so their rest object is correctly empty.
-            const n = utf16LenOfString(val.asStr());
+            var code_units = StringCodeUnitIterator.initValue(val);
             var i: usize = 0;
-            outer_str: while (i < n) : (i += 1) {
+            outer_str: while (code_units.next()) |cu| : (i += 1) {
                 const k = try std.fmt.allocPrint(self.arena, "{d}", .{i});
                 for (excluded) |excluded_key| {
                     if (std.mem.eql(u8, excluded_key, k)) continue :outer_str;
                 }
-                try self.setProp(rest_obj.asObj(), k, try self.elementAt(val, i));
+                try self.setProp(rest_obj.asObj(), k, try self.stringValueFromCodeUnit(cu.unit));
             }
         }
         return rest_obj;

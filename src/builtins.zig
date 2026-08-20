@@ -1649,12 +1649,11 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
         if (p.isString()) {
             if (std.mem.eql(u8, key, "length")) {
                 const attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = false };
-                return compatibleRedefine(attr, Value.num(@floatFromInt(p.asStr().len)), null, d);
+                return compatibleRedefine(attr, Value.num(@floatFromInt(Interpreter.utf16LenOfValue(p))), null, d);
             }
             if (arrayIndexOf(key)) |i| {
-                if (i < p.asStr().len) {
+                if (try self.stringIndexValueOf(p, i)) |ch| {
                     const attr: value.PropAttr = .{ .writable = false, .enumerable = true, .configurable = false };
-                    const ch: Value = try Value.strOwned(self.arena, try self.arena.dupe(u8, (try p.asWtf8(self.arena))[i .. i + 1]));
                     return compatibleRedefine(attr, ch, null, d);
                 }
             }
@@ -2387,11 +2386,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     if (o.boxedPrimitive()) |p| {
         if (p.isString()) {
             if (std.mem.eql(u8, key, "length"))
-                return dataDescriptor(self, Value.num(@floatFromInt(p.asStr().len)), .{ .writable = false, .enumerable = false, .configurable = false });
-            if (arrayIndexOf(key)) |i| {
-                if (i < p.asStr().len)
-                    return dataDescriptor(self, try Value.strOwned(self.arena, try self.arena.dupe(u8, (try p.asWtf8(self.arena))[i .. i + 1])), .{ .writable = false, .enumerable = true, .configurable = false });
-            }
+                return dataDescriptor(self, Value.num(@floatFromInt(Interpreter.utf16LenOfValue(p))), .{ .writable = false, .enumerable = false, .configurable = false });
+            if (arrayIndexOf(key)) |i| if (try self.stringIndexValueOf(p, i)) |ch|
+                return dataDescriptor(self, ch, .{ .writable = false, .enumerable = true, .configurable = false });
         }
     }
     if (o.hostClassHooks()) |hooks| if (hooks.get) |get| {

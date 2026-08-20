@@ -16688,6 +16688,36 @@ test "String exotic wrappers expose immutable indices and length" {
     )).asBool());
 }
 
+test "String exotic reflection uses UTF-16 code units across representations" {
+    try std.testing.expect((try evalIn(
+        \\var astral = String.fromCodePoint(0x1F4A9);
+        \\var high = String.fromCharCode(0xD83D);
+        \\var low = String.fromCharCode(0xDCA9);
+        \\var primitive = "\u00E9" + astral + high;
+        \\var boxed = new String(primitive);
+        \\var d0 = Object.getOwnPropertyDescriptor(boxed, "0");
+        \\var d1 = Object.getOwnPropertyDescriptor(boxed, "1");
+        \\var d2 = Object.getOwnPropertyDescriptor(boxed, "2");
+        \\var d3 = Object.getOwnPropertyDescriptor(boxed, "3");
+        \\var dl = Object.getOwnPropertyDescriptor(boxed, "length");
+        \\var primitiveD2 = Object.getOwnPropertyDescriptor(primitive, "2");
+        \\var flat = "\u00E9".repeat(20);
+        \\var flatLast = Object.getOwnPropertyDescriptor(flat, "19");
+        \\var flatSpread = { ...flat };
+        \\var spread = { ...primitive };
+        \\var { ...rest } = primitive;
+        \\d0.value === "\u00E9" && d1.value === high && d2.value === low && d3.value === high &&
+        \\d0.enumerable === true && d0.writable === false && d0.configurable === false &&
+        \\dl.value === 4 && dl.enumerable === false && dl.writable === false && dl.configurable === false &&
+        \\primitiveD2.value === low && flatLast.value === "\u00E9" && flatSpread[19] === "\u00E9" &&
+        \\Object.getOwnPropertyDescriptor(flat, "length").value === 20 &&
+        \\Reflect.defineProperty(boxed, "1", { value: boxed[1] }) === true &&
+        \\Reflect.defineProperty(boxed, "1", { value: "x" }) === false &&
+        \\spread[0] === "\u00E9" && spread[1] === high && spread[2] === low && spread[3] === high &&
+        \\rest[0] === "\u00E9" && rest[1] === high && rest[2] === low && rest[3] === high
+    )).asBool());
+}
+
 test "borrowed Array mutators throw on String exotic length writes" {
     try std.testing.expect((try evalIn(
         \\function throws(fn) {
