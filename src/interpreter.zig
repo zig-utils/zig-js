@@ -27271,15 +27271,22 @@ const DtfPartType = enum {
 };
 
 /// One element of a DateTimeFormat formatToParts result: an immutable field
-/// `type` and its formatter-owned `value` bytes.
+/// `type` and its invocation-owned `value` bytes.
 const DtfPart = struct { typ: DtfPartType, value: []const u8 };
 
 const DtfOutput = struct {
     mode: enum { text, parts },
     text: std.ArrayListUnmanaged(u8) = .empty,
     parts: std.ArrayListUnmanaged(DtfPart) = .empty,
+    /// Structural output is invocation-local. Callers keep this allocator alive
+    /// through range comparison and managed result materialization.
+    scratch: ?std.mem.Allocator = null,
     numbering_system: []const u8 = "latn",
     part_count: usize = 0,
+
+    fn storageAllocator(self: *const DtfOutput, interpreter: *Interpreter) std.mem.Allocator {
+        return self.scratch orelse interpreter.arena;
+    }
 
     fn push(self: *DtfOutput, interpreter: *Interpreter, typ: DtfPartType, bytes: []const u8) EvalError!void {
         const digit_set = if (typ.isNumeric() and !std.mem.eql(u8, self.numbering_system, "latn"))
@@ -27297,9 +27304,9 @@ const DtfOutput = struct {
             } else {
                 try self.text.appendSlice(interpreter.arena, bytes);
             },
-            .parts => try self.parts.append(interpreter.arena, .{
+            .parts => try self.parts.append(self.storageAllocator(interpreter), .{
                 .typ = typ,
-                .value = if (digit_set) |digits| try translateDigits(interpreter, bytes, digits) else bytes,
+                .value = if (digit_set) |digits| try translateDigitsAlloc(self.storageAllocator(interpreter), bytes, digits) else bytes,
             }),
         }
         self.part_count += 1;
@@ -27311,7 +27318,7 @@ const DtfOutput = struct {
         const translates = typ.isNumeric() and !std.mem.eql(u8, self.numbering_system, "latn") and
             numbering_systems.digits(self.numbering_system) != null;
         if (self.mode == .parts and !translates)
-            return self.push(interpreter, typ, try interpreter.arena.dupe(u8, bytes));
+            return self.push(interpreter, typ, try self.storageAllocator(interpreter).dupe(u8, bytes));
         return self.push(interpreter, typ, bytes);
     }
 
@@ -27373,22 +27380,22 @@ fn dtfMonthName(cal: []const u8, month: u8, width: []const u8) ?[]const u8 {
     return if (eq(width, "narrow")) en_months_narrow[idx] else if (eq(width, "short")) en_months_short[idx] else en_months_long[idx];
 }
 
-fn dtfOffsetZoneName(self: *Interpreter, off_ns: i64) EvalError![]const u8 {
+fn dtfOffsetZoneName(allocator: std.mem.Allocator, off_ns: i64) EvalError![]const u8 {
     if (off_ns == 0) return "GMT";
     const neg = off_ns < 0;
     var v: u64 = @intCast(if (neg) -off_ns else off_ns);
     const hh = v / 3_600_000_000_000;
     v %= 3_600_000_000_000;
     const mm = v / 60_000_000_000;
-    if (mm == 0) return std.fmt.allocPrint(self.arena, "GMT{s}{d}", .{ if (neg) "-" else "+", hh });
-    return std.fmt.allocPrint(self.arena, "GMT{s}{d}:{d:0>2}", .{ if (neg) "-" else "+", hh, mm });
+    if (mm == 0) return std.fmt.allocPrint(allocator, "GMT{s}{d}", .{ if (neg) "-" else "+", hh });
+    return std.fmt.allocPrint(allocator, "GMT{s}{d}:{d:0>2}", .{ if (neg) "-" else "+", hh, mm });
 }
 
-fn dtfTimeZoneName(self: *Interpreter, name: []const u8, off_ns: i64, width: []const u8) EvalError![]const u8 {
+fn dtfTimeZoneName(allocator: std.mem.Allocator, name: []const u8, off_ns: i64, width: []const u8) EvalError![]const u8 {
     if (std.mem.eql(u8, name, "UTC")) {
         return if (eq(width, "long") or eq(width, "longGeneric")) "Coordinated Universal Time" else "UTC";
     }
-    if (name.len > 0 and (name[0] == '+' or name[0] == '-')) return dtfOffsetZoneName(self, off_ns);
+    if (name.len > 0 and (name[0] == '+' or name[0] == '-')) return dtfOffsetZoneName(allocator, off_ns);
     if (std.mem.eql(u8, name, "Europe/Vienna")) {
         return if (eq(width, "long") or eq(width, "longGeneric")) "Central European Standard Time" else "GMT+1";
     }
@@ -27398,11 +27405,11 @@ fn dtfTimeZoneName(self: *Interpreter, name: []const u8, off_ns: i64, width: []c
     return if (eq(width, "long") or eq(width, "longGeneric")) "Coordinated Universal Time" else "UTC";
 }
 
-fn dtfChineseYearName(self: *Interpreter, year: i64) EvalError![]const u8 {
+fn dtfChineseYearName(allocator: std.mem.Allocator, year: i64) EvalError![]const u8 {
     const stems = [_][]const u8{ "\u{7532}", "\u{4e59}", "\u{4e19}", "\u{4e01}", "\u{620a}", "\u{5df1}", "\u{5e9a}", "\u{8f9b}", "\u{58ec}", "\u{7678}" };
     const branches = [_][]const u8{ "\u{5b50}", "\u{4e11}", "\u{5bc5}", "\u{536f}", "\u{8fb0}", "\u{5df3}", "\u{5348}", "\u{672a}", "\u{7533}", "\u{9149}", "\u{620c}", "\u{4ea5}" };
     const offset = year - 4;
-    return std.fmt.allocPrint(self.arena, "{s}{s}", .{ stems[@intCast(@mod(offset, 10))], branches[@intCast(@mod(offset, 12))] });
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ stems[@intCast(@mod(offset, 10))], branches[@intCast(@mod(offset, 12))] });
 }
 
 fn dtfAppendYearPart(self: *Interpreter, output: *DtfOutput, cal: []const u8, display_year: i64, fmt: []const u8) EvalError!void {
@@ -27412,7 +27419,7 @@ fn dtfAppendYearPart(self: *Interpreter, output: *DtfOutput, cal: []const u8, di
             try output.pushInt(self, .related_year, @as(u8, @intCast(@mod(display_year, 100))), true)
         else
             try output.pushInt(self, .related_year, display_year, false);
-        try output.push(self, .year_name, try dtfChineseYearName(self, display_year));
+        try output.push(self, .year_name, try dtfChineseYearName(output.storageAllocator(self), display_year));
         try output.push(self, .literal, "\u{5e74}");
         return;
     }
@@ -27791,7 +27798,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
         }
         if (o_tzname.len > 0) {
             const tzn: []const u8 = if (temporal_kind != null and temporal_kind.? == .zoned_date_time)
-                try dtfTimeZoneName(self, temporal_tz_name, temporal_tz_offset_ns, o_tzname)
+                try dtfTimeZoneName(output.storageAllocator(self), temporal_tz_name, temporal_tz_offset_ns, o_tzname)
             else if (eq(o_tzname, "long"))
                 "Coordinated Universal Time"
             else if (eq(o_tzname, "longOffset") or eq(o_tzname, "shortOffset"))
@@ -27806,8 +27813,8 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
     }
 }
 
-fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(DtfPart) {
-    var output = DtfOutput{ .mode = .parts };
+fn dtfBuildParts(self: *Interpreter, this: Value, args: []const Value, scratch: std.mem.Allocator) value.HostError!std.ArrayListUnmanaged(DtfPart) {
+    var output = DtfOutput{ .mode = .parts, .scratch = scratch };
     try dtfBuildOutput(self, this, args, &output);
     return output.parts;
 }
@@ -27838,7 +27845,9 @@ fn intlDateTimeFormatFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn intlDateTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DateTimeFormat")) return self.throwError("TypeError", "Intl.DateTimeFormat.prototype.formatToParts on incompatible receiver");
-    const parts = try dtfBuildParts(self, this, args);
+    var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer scratch.deinit();
+    const parts = try dtfBuildParts(self, this, args, scratch.allocator());
     const arr = (try self.newArray()).asObj();
     for (parts.items) |p| {
         const o = (try self.newObject()).asObj();
@@ -27996,8 +28005,10 @@ fn intlDateTimeFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) 
     try dtfRangeCheckKinds(self, start, end);
     if (dtfFormattableSame(start, end))
         return try Value.strOwned(self.arena, try dtfBuildText(self, this, &.{start}));
-    const xp = try dtfBuildParts(self, this, &.{start}); // dtfBuildParts TimeClips (RangeError on bad value)
-    const yp = try dtfBuildParts(self, this, &.{end});
+    var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer scratch.deinit();
+    const xp = try dtfBuildParts(self, this, &.{start}, scratch.allocator()); // dtfBuildParts TimeClips (RangeError on bad value)
+    const yp = try dtfBuildParts(self, this, &.{end}, scratch.allocator());
     return try Value.strAlloc(self.arena, try dtfFormatRangePartsText(self, xp.items, yp.items));
 }
 
@@ -28008,8 +28019,10 @@ fn intlDateTimeFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const 
     const start = try dtfToDateTimeFormattable(self, args[0]);
     const end = try dtfToDateTimeFormattable(self, args[1]);
     try dtfRangeCheckKinds(self, start, end);
-    const xp = try dtfBuildParts(self, this, &.{start});
-    const yp = if (dtfFormattableSame(start, end)) xp else try dtfBuildParts(self, this, &.{end});
+    var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer scratch.deinit();
+    const xp = try dtfBuildParts(self, this, &.{start}, scratch.allocator());
+    const yp = if (dtfFormattableSame(start, end)) xp else try dtfBuildParts(self, this, &.{end}, scratch.allocator());
     const arr = (try self.newArray()).asObj();
     const emit = struct {
         fn part(s: *Interpreter, a: *value.Object, p: DtfPart, src: IntlRangeSource) value.HostError!void {
@@ -53103,6 +53116,27 @@ test "Intl.DateTimeFormat resolved-state publication is OOM-safe" {
             try std.testing.expectEqualStrings("latn", data.numbering_system);
             try std.testing.expectEqualStrings("h23", data.hour_cycle);
             try std.testing.expectEqualStrings("long", data.month.string());
+
+            var structural_scratch = std.heap.ArenaAllocator.init(backing);
+            defer structural_scratch.deinit();
+            const scratch = structural_scratch.allocator();
+
+            // Latin numeric fields must copy stack formatting into invocation
+            // storage; translated fields additionally own their expanded UTF-8.
+            var latin = DtfOutput{ .mode = .parts, .scratch = scratch };
+            try latin.pushInt(&machine, .year, 2024, false);
+            try latin.pushCopied(&machine, .month, "06bis");
+            try std.testing.expectEqualStrings("2024", latin.parts.items[0].value);
+            try std.testing.expectEqualStrings("06bis", latin.parts.items[1].value);
+
+            var translated = DtfOutput{ .mode = .parts, .scratch = scratch, .numbering_system = "deva" };
+            try translated.pushInt(&machine, .day, 9, true);
+            try translated.pushCopied(&machine, .fractional_second, "789");
+            try std.testing.expectEqualStrings("०९", translated.parts.items[0].value);
+            try std.testing.expectEqualStrings("७८९", translated.parts.items[1].value);
+
+            try std.testing.expectEqualStrings("甲辰", try dtfChineseYearName(scratch, 2024));
+            try std.testing.expectEqualStrings("GMT+5:30", try dtfOffsetZoneName(scratch, 19_800_000_000_000));
         }
     }.check;
     const previous_heap = gc_mod.setActiveHeap(null);

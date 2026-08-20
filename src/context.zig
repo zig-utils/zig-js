@@ -13658,13 +13658,18 @@ test "Intl.DateTimeFormat resolved state is reclaimed under a bounded precise he
         \\var dateTimeFormatChecksum = 0;
         \\for (var round = 0; round < 64; round++) {
         \\  for (var i = 0; i < 8; i++) {
-        \\    var formatter = new Intl.DateTimeFormat("de-DE-u-nu-latn", {
-        \\      timeZone: "UTC", calendar: "gregory", weekday: "short",
+        \\    var formatter = new Intl.DateTimeFormat("hi-IN-u-ca-chinese-nu-deva", {
+        \\      timeZone: "UTC", calendar: "chinese", numberingSystem: "deva", weekday: "short",
         \\      year: "numeric", month: "long", day: "2-digit",
-        \\      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+        \\      hour: "2-digit", minute: "2-digit", second: "2-digit",
+        \\      fractionalSecondDigits: 3, hourCycle: "h23"
         \\    });
         \\    var options = formatter.resolvedOptions();
-        \\    dateTimeFormatChecksum += formatter.format(1704067200000 + (round * 8 + i) * 86400000).length +
+        \\    var timestamp = 1704067200000 + (round * 8 + i) * 86400000;
+        \\    var parts = formatter.formatToParts(timestamp);
+        \\    var rangeParts = formatter.formatRangeToParts(timestamp, timestamp + 86400000);
+        \\    dateTimeFormatChecksum += formatter.format(timestamp).length + parts.length + rangeParts.length +
+        \\      parts[0].value.length + rangeParts[rangeParts.length - 1].value.length +
         \\      options.locale.length + options.calendar.length + options.numberingSystem.length;
         \\  }
         \\  gc();
