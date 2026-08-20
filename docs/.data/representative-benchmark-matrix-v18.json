@@ -1,0 +1,53 @@
+{
+  "schema_version": 18,
+  "matrix_id": "zig-js-representative-v18",
+  "status": "frozen",
+  "frozen_date": "2026-08-20",
+  "owner_issue": 660,
+  "history_policy": "This version hash-inherits every V17 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance decision, attribution metric, external-suite boundary, exact-parent metric, collection guard, and publication boundary. It changes no scored row and no production collector behavior. It re-pins only the exact-parent integration after its structural self-test replaced an unavailable host structuredClone global with an owned JSON-fixture copy. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v17",
+    "path": "docs/.data/representative-benchmark-matrix-v17.json",
+    "sha256": "544311403c8631fd92615ba781548f729d4d3a028019b284f2976ffd95243ecf",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels"
+    ]
+  },
+  "change": "Re-freezes the completed exact-parent integration after its JSON-shaped structural self-test stopped depending on the host structuredClone global. The collector, evidence schema, metrics, guards, publication policy, and every scored workload remain inherited unchanged.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "87c3451d55f70edd20dbf71a4f5af923ae44b151d76bf5cbd4a4154540437253",
+    "measured_metrics": [
+      "instructions",
+      "cycles",
+      "energy_joules",
+      "thermal_state"
+    ],
+    "material_change_categories": [
+      "cpu_work",
+      "threads",
+      "generated_code",
+      "cache_traffic"
+    ],
+    "contract_changes": [
+      "frontend compiler counters are retained with every sample",
+      "competing long-running jobs reject collection before sampling",
+      "transient overlap rejects the affected exact pair",
+      "contaminated build-feedback evidence is unavailable",
+      "structural self-test JSON fixtures are cloned without a host convenience global"
+    ],
+    "publication_boundary": "Only an explicitly selected quiet-reference host on AC power may support an efficiency claim. Required counters must be measured and stable at at most 5% RSD, every thermal observation must remain nominal, generated-code/cache claims additionally require their exact category metric, and every raw sample remains visible. Diagnostic hosts never gate or support a public ratio. Collection also fails closed before or during sampling when competing work or contaminated build feedback invalidates the exact-parent comparison."
+  }
+}

@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v17.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v18.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -20,27 +20,38 @@ function validatePinnedFile(entry: any, label: string, root: string): void {
   requireValue(Home.fileExists(path), `${label} path does not exist: ${entry.path}`);
   requireValue(digest(path) === entry.sha256, `${label} changed without a matrix version bump: ${entry.path}`);
 }
-export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
+export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT, supersedingExactParent: any = null): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 17, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 18, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
   requireValue(Home.fileExists(parentPath), "representative parent manifest does not exist");
   requireValue(digest(parentPath) === parent.sha256, `representative parent manifest changed after v${child.schema_version} froze`);
-  const inherited = loadManifest(parentPath, root);
+  // A newer matrix may supersede the exact-parent source pin while retaining
+  // every other historical field. Thread that one replacement through the
+  // parent load so the parent is still fully validated against the current
+  // tree without requiring a historical source checkout.
+  const inherited = loadManifest(
+    parentPath,
+    root,
+    supersedingExactParent ||
+      (child.schema_version >= 17 ? child.exact_parent_integration : null),
+  );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
-  if (child.schema_version === 17) {
-    requireValue(child.tier_attribution === undefined, "v17 must inherit the attribution contract unchanged");
-    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v17 changes exact-parent integration only");
-    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v17 must inherit completed panel inventory unchanged");
-    requireValue(child.exact_parent_integration && typeof child.exact_parent_integration === "object", "v17 must replace the exact-parent integration contract");
+  if (child.schema_version === 17 || child.schema_version === 18) {
+    const version = `v${child.schema_version}`;
+    requireValue(child.tier_attribution === undefined, `${version} must inherit the attribution contract unchanged`);
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, `${version} changes exact-parent integration only`);
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, `${version} must inherit completed panel inventory unchanged`);
+    requireValue(child.exact_parent_integration && typeof child.exact_parent_integration === "object", `${version} must replace the exact-parent integration contract`);
+    const exactParent = supersedingExactParent || child.exact_parent_integration;
     const merged = {
       ...inherited,
       ...child,
@@ -48,11 +59,11 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
         ...inherited.completed_metric_panels,
         efficiency_thermal: {
           ...inherited.completed_metric_panels.efficiency_thermal,
-          scored_integration: child.exact_parent_integration,
+          scored_integration: exactParent,
         },
       },
     };
-    // V16's exact-parent pin is the one field V17 deliberately supersedes.
+    // V17/V18 each supersede only their parent's exact-parent source pin.
     // Validate the fully merged child so every other inherited hash remains
     // fail-closed without requiring a historical source checkout (#632).
     validate(merged, root);
@@ -91,7 +102,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 17, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 18, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
