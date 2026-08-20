@@ -28981,12 +28981,17 @@ fn nfResolvedCompactPattern(locale: []const u8, compact_display: []const u8, mag
 }
 
 /// Translate the ASCII digits in `s` to numbering system `ds` (digits()).
-fn translateDigits(self: *Interpreter, s: []const u8, ds: []const u8) EvalError![]const u8 {
+fn translateDigitsAlloc(allocator: std.mem.Allocator, s: []const u8, ds: []const u8) EvalError![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
     for (s) |c| {
-        if (c >= '0' and c <= '9') try buf.appendSlice(self.arena, numbering_systems.nth(ds, c - '0')) else try buf.append(self.arena, c);
+        if (c >= '0' and c <= '9') try buf.appendSlice(allocator, numbering_systems.nth(ds, c - '0')) else try buf.append(allocator, c);
     }
-    return buf.toOwnedSlice(self.arena);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn translateDigits(self: *Interpreter, s: []const u8, ds: []const u8) EvalError![]const u8 {
+    return translateDigitsAlloc(self.arena, s, ds);
 }
 
 /// Closed metadata set for NumberFormat structural output. Dynamic formatted
@@ -29043,9 +29048,16 @@ const NfOutput = struct {
     mode: enum { text, parts },
     text: std.ArrayListUnmanaged(u8) = .empty,
     parts: std.ArrayListUnmanaged(NfPart) = .empty,
+    /// Structural output is invocation-local. Callers keep this allocator alive
+    /// until every part value has been copied into its managed JS result.
+    scratch: ?std.mem.Allocator = null,
     numbering_system: []const u8 = "latn",
     currency_plural_category: []const u8 = "other",
     currency_display: ?cldr_numbers.CurrencyDisplay = null,
+
+    fn storageAllocator(self: *const NfOutput, interpreter: *Interpreter) std.mem.Allocator {
+        return self.scratch orelse interpreter.arena;
+    }
 
     fn push(self: *NfOutput, interpreter: *Interpreter, typ: NfPartType, bytes: []const u8) EvalError!void {
         const digit_set = if (typ.isNumeric() and !std.mem.eql(u8, self.numbering_system, "latn"))
@@ -29063,9 +29075,9 @@ const NfOutput = struct {
             } else {
                 try self.text.appendSlice(interpreter.arena, bytes);
             },
-            .parts => try self.parts.append(interpreter.arena, .{
+            .parts => try self.parts.append(self.storageAllocator(interpreter), .{
                 .typ = typ,
-                .value = if (digit_set) |digits| try translateDigits(interpreter, bytes, digits) else bytes,
+                .value = if (digit_set) |digits| try translateDigitsAlloc(self.storageAllocator(interpreter), bytes, digits) else bytes,
             }),
         }
     }
@@ -29115,7 +29127,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
     var big_digits: []const u8 = "";
     var big_neg = false;
     if (big) |object| {
-        var source = try value.bigIntToString(object, self.arena);
+        var source = try value.bigIntToString(object, output.storageAllocator(self));
         big_neg = source.len > 0 and source[0] == '-';
         if (big_neg) source = source[1..];
         big_digits = source;
@@ -29154,7 +29166,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         const ds = data.currency_display;
         if (std.mem.eql(u8, ds, "code")) {
             // "USD 1.00"
-            cur_prefix = try std.fmt.allocPrint(self.arena, "{s}\u{00a0}", .{code});
+            cur_prefix = try std.fmt.allocPrint(output.storageAllocator(self), "{s}\u{00a0}", .{code});
         } else if (std.mem.eql(u8, ds, "name")) {
             // Resolved to a plural long name ("US dollar"/"US dollars") once
             // the fraction count (hence the plural category) is known.
@@ -29338,8 +29350,8 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
     // Structural results outlive this call; retain only scratch-backed numeric
     // components. Text consumes the same slices synchronously into its result.
     if (output.mode == .parts) {
-        if (decimal_scratch.owns(digits)) digits = try self.arena.dupe(u8, digits);
-        if (decimal_scratch.owns(frac_str)) frac_str = try self.arena.dupe(u8, frac_str);
+        if (decimal_scratch.owns(digits)) digits = try output.storageAllocator(self).dupe(u8, digits);
+        if (decimal_scratch.owns(frac_str)) frac_str = try output.storageAllocator(self).dupe(u8, frac_str);
     }
 
     // SignDisplay: decide whether a negative or positive indicator shows.
@@ -29392,7 +29404,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
             if (!std.mem.eql(u8, category, "other")) display = cldr_numbers.currency(locale, cur_name_code, category);
         }
         output.currency_plural_category = category;
-        display.name = try nfCurrencyDisplayName(self, display);
+        display.name = try nfCurrencyDisplayName(output.storageAllocator(self), display);
         output.currency_display = display;
         break :blk display;
     } else null;
@@ -29461,7 +29473,7 @@ fn nfBuildOutputResolved(self: *Interpreter, input: Value, data: *const value.In
         if (exponent < 0) try output.push(self, .exponent_minus_sign, "-");
         const eabs: u64 = @intCast(@abs(exponent));
         const scratch_exponent = decimal_scratch.exponentDigits(eabs);
-        const exponent_digits = if (output.mode == .parts) try self.arena.dupe(u8, scratch_exponent) else scratch_exponent;
+        const exponent_digits = if (output.mode == .parts) try output.storageAllocator(self).dupe(u8, scratch_exponent) else scratch_exponent;
         try output.push(self, .exponent_integer, exponent_digits);
     }
     if (compact_pattern.suffix_literal.len > 0) try output.push(self, .literal, compact_pattern.suffix_literal);
@@ -29503,15 +29515,15 @@ fn nfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: *
     return nfBuildOutputResolved(self, if (args.len > 0) args[0] else Value.undef(), data, output, null);
 }
 
-fn nfBuildPartsMeta(self: *Interpreter, this: Value, input: Value, currency_plural_override: ?[]const u8) value.HostError!NfOutput {
-    var output = NfOutput{ .mode = .parts };
+fn nfBuildPartsMeta(self: *Interpreter, this: Value, input: Value, currency_plural_override: ?[]const u8, scratch: std.mem.Allocator) value.HostError!NfOutput {
+    var output = NfOutput{ .mode = .parts, .scratch = scratch };
     const data = try numberFormatDataFor(self, this.asObj());
     try nfBuildOutputResolved(self, input, data, &output, currency_plural_override);
     return output;
 }
 
-fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.HostError!std.ArrayListUnmanaged(NfPart) {
-    const output = try nfBuildPartsMeta(self, this, if (args.len > 0) args[0] else Value.undef(), null);
+fn nfBuildParts(self: *Interpreter, this: Value, args: []const Value, scratch: std.mem.Allocator) value.HostError!std.ArrayListUnmanaged(NfPart) {
+    const output = try nfBuildPartsMeta(self, this, if (args.len > 0) args[0] else Value.undef(), null, scratch);
     return output.parts;
 }
 
@@ -29703,9 +29715,9 @@ fn nfCurrencyPatternEqual(x: cldr_numbers.CurrencyDisplay, y: cldr_numbers.Curre
         std.mem.eql(u8, x.name_suffix, y.name_suffix);
 }
 
-fn nfCurrencyDisplayName(self: *Interpreter, display: cldr_numbers.CurrencyDisplay) value.HostError![]const u8 {
+fn nfCurrencyDisplayName(allocator: std.mem.Allocator, display: cldr_numbers.CurrencyDisplay) value.HostError![]const u8 {
     if (display.name_prefix.len == 0 and display.name_suffix.len == 0) return display.name;
-    return std.fmt.allocPrint(self.arena, "{s}{s}{s}", .{ display.name_prefix, display.name, display.name_suffix });
+    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ display.name_prefix, display.name, display.name_suffix });
 }
 
 fn nfReplaceCurrencyName(parts: []NfPart, name: []const u8) void {
@@ -29720,9 +29732,9 @@ const NfRangeOutputs = struct { start: NfOutput, end: NfOutput, data: *const val
 /// endpoint categories independently. Reuse the already-built numeric parts
 /// when the range category keeps the same unit pattern; only the rare locale
 /// whose plural unit pattern changes order/literals needs a structural rebuild.
-fn nfBuildRangeOutputs(self: *Interpreter, this: Value, start: Value, end: Value) value.HostError!NfRangeOutputs {
+fn nfBuildRangeOutputs(self: *Interpreter, this: Value, start: Value, end: Value, scratch: std.mem.Allocator) value.HostError!NfRangeOutputs {
     const data = try numberFormatDataFor(self, this.asObj());
-    var result = NfRangeOutputs{ .start = .{ .mode = .parts }, .end = .{ .mode = .parts }, .data = data };
+    var result = NfRangeOutputs{ .start = .{ .mode = .parts, .scratch = scratch }, .end = .{ .mode = .parts, .scratch = scratch }, .data = data };
     try nfBuildOutputResolved(self, start, data, &result.start, null);
     try nfBuildOutputResolved(self, end, data, &result.end, null);
     if (nfPartValuesEqual(result.start.parts.items, result.end.parts.items)) return result;
@@ -29731,7 +29743,7 @@ fn nfBuildRangeOutputs(self: *Interpreter, this: Value, start: Value, end: Value
     const category = cldr_plurals.range(localeLanguage(data.locale), result.start.currency_plural_category, result.end.currency_plural_category);
     if (std.mem.eql(u8, category, result.start.currency_plural_category) and std.mem.eql(u8, category, result.end.currency_plural_category)) return result;
     var display = cldr_numbers.currency(data.locale, data.currency orelse "USD", category);
-    display.name = try nfCurrencyDisplayName(self, display);
+    display.name = try nfCurrencyDisplayName(scratch, display);
     if (result.start.currency_display != null and result.end.currency_display != null and
         nfCurrencyPatternEqual(result.start.currency_display.?, display) and nfCurrencyPatternEqual(result.end.currency_display.?, display))
     {
@@ -29744,8 +29756,8 @@ fn nfBuildRangeOutputs(self: *Interpreter, this: Value, start: Value, end: Value
         return result;
     }
 
-    result.start = .{ .mode = .parts };
-    result.end = .{ .mode = .parts };
+    result.start = .{ .mode = .parts, .scratch = scratch };
+    result.end = .{ .mode = .parts, .scratch = scratch };
     try nfBuildOutputResolved(self, start, data, &result.start, category);
     try nfBuildOutputResolved(self, end, data, &result.end, category);
     return result;
@@ -29759,7 +29771,9 @@ fn intlNumberFormatRangeFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const yv = try nfMathematicalArg(self, args[1]);
     if ((xv.isNumber() and std.math.isNan(xv.asNum())) or (yv.isNumber() and std.math.isNan(yv.asNum())))
         return self.throwError("RangeError", "formatRange arguments must not be NaN");
-    const outputs = try nfBuildRangeOutputs(self, this, xv, yv);
+    var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer scratch.deinit();
+    const outputs = try nfBuildRangeOutputs(self, this, xv, yv, scratch.allocator());
     const xp = outputs.start.parts;
     const yp = outputs.end.parts;
     const pattern = cldr_numbers.numberRange(outputs.data.locale, outputs.data.numbering_system);
@@ -29795,7 +29809,9 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
             for (prts) |p| try part(s, a, p.typ, p.value, src);
         }
     };
-    const outputs = try nfBuildRangeOutputs(self, this, xv, yv);
+    var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer scratch.deinit();
+    const outputs = try nfBuildRangeOutputs(self, this, xv, yv, scratch.allocator());
     const xp = outputs.start.parts;
     const yp = outputs.end.parts;
     const pattern = cldr_numbers.numberRange(outputs.data.locale, outputs.data.numbering_system);
@@ -29827,7 +29843,9 @@ fn intlNumberFormatRangeToPartsFn(ctx: *anyopaque, this: Value, args: []const Va
 fn intlNumberFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "NumberFormat")) return self.throwError("TypeError", "Intl.NumberFormat.prototype.formatToParts on incompatible receiver");
-    const parts = try nfBuildParts(self, this, args);
+    var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+    defer scratch.deinit();
+    const parts = try nfBuildParts(self, this, args, scratch.allocator());
     const arr = (try self.newArray()).asObj();
     for (parts.items) |p| {
         const o = (try self.newObject()).asObj();
@@ -30203,7 +30221,7 @@ fn intlDurationFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const Value
                     try grp.append(self.arena, .{ .typ = .integer, .value = try rtfTranslateNumber(self, s, data.numbering_system), .unit = sing });
                 }
             } else {
-                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, numbering_system, style, sing, sign_never), &.{Value.num(fnum)});
+                const nf_parts = try nfBuildParts(self, try durUnitNf(self, locale, numbering_system, style, sing, sign_never), &.{Value.num(fnum)}, self.arena);
                 for (nf_parts.items) |p| try grp.append(self.arena, .{ .typ = p.typ, .value = p.value, .unit = sing });
             }
         }
@@ -53115,7 +53133,9 @@ test "Intl.NumberFormat sink emission is OOM-safe" {
             try text.push(&machine, .fraction, "89");
             try std.testing.expectEqualStrings("१२३४५६७.८९", text.text.items);
 
-            var parts = NfOutput{ .mode = .parts, .numbering_system = "deva" };
+            var structural_scratch = std.heap.ArenaAllocator.init(backing);
+            defer structural_scratch.deinit();
+            var parts = NfOutput{ .mode = .parts, .scratch = structural_scratch.allocator(), .numbering_system = "deva" };
             try parts.push(&machine, .integer, "1234567");
             try parts.push(&machine, .decimal, ".");
             try parts.push(&machine, .fraction, "89");
@@ -53128,7 +53148,7 @@ test "Intl.NumberFormat sink emission is OOM-safe" {
             try std.testing.expectEqualStrings("1", exact.int_str);
             try std.testing.expectEqualStrings("235", exact.frac_str);
             const currency = cldr_numbers.currency("ro", "RON", "other");
-            try std.testing.expectEqualStrings("de lei românești", try nfCurrencyDisplayName(&machine, currency));
+            try std.testing.expectEqualStrings("de lei românești", try nfCurrencyDisplayName(machine.arena, currency));
 
             const interval = cldr_numbers.numberRange("ja-JP", "latn");
             const start = [_]NfPart{ .{ .typ = .integer, .value = "1235" }, .{ .typ = .compact, .value = "万" } };
