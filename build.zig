@@ -1641,6 +1641,26 @@ pub fn build(b: *std.Build) void {
     );
     gc_relocation_inventory_step.dependOn(&gc_relocation_inventory_cmd.step);
 
+    const vm_quickening_inventory_cmd = b.addSystemCommand(&.{
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/vm-quickening-inventory.ts",
+    });
+    const vm_quickening_inventory_self_test = b.addSystemCommand(&.{
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/vm-quickening-inventory.ts",
+        "--self-test",
+    });
+    const vm_quickening_inventory_step = b.step(
+        "vm-quickening-inventory-check",
+        "Validate the guarded VM quickening and legacy-kernel inventory",
+    );
+    vm_quickening_inventory_step.dependOn(&vm_quickening_inventory_cmd.step);
+    vm_quickening_inventory_step.dependOn(&vm_quickening_inventory_self_test.step);
+
     const release_ready_cmd = b.addSystemCommand(&.{
         "/usr/bin/env",
         home_tool,
@@ -2210,6 +2230,8 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&independent_suite_collector_self_test.step);
     comparison_harness_test_step.dependOn(&independent_suite_recognizer_self_test.step);
     comparison_harness_test_step.dependOn(independent_suite_jsc_self_test_step);
+    comparison_harness_test_step.dependOn(&vm_quickening_inventory_cmd.step);
+    comparison_harness_test_step.dependOn(&vm_quickening_inventory_self_test.step);
     const optimizer_release_inventory_step = b.step("optimizer-release-inventory-check", "Validate the optimizer backend, correctness, sanitizer, and performance evidence");
     optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);
 

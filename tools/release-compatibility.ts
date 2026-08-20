@@ -122,6 +122,14 @@ function main(): void {
     "platform profile fail-closed validation",
   );
   checked(
+    [HOME_TOOL, "run", "tools/vm-quickening-inventory.ts"],
+    "VM quickening inventory validation",
+  );
+  checked(
+    [HOME_TOOL, "run", "tools/vm-quickening-inventory.ts", "--self-test"],
+    "VM quickening inventory fail-closed validation",
+  );
+  checked(
     [HOME_TOOL, "run", "tools/pr249-terminal-execution.ts", "--check"],
     "PR-249 terminal validation",
   );

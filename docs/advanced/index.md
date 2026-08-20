@@ -17,6 +17,7 @@ its claims are verified.
 | [Embedding](/advanced/embedding) | The Zig `Context` API, options, module hosts, termination, and how it relates to the C and Objective-C surfaces. |
 | [Memory & GC](/advanced/memory-and-gc) | Arena vs. precise GC, heap budgets, generational collection, compaction, weak references, and root safety. |
 | [Execution tiers](/advanced/execution-tiers) | Tree-walker → bytecode VM → baseline native → optimizing tier, and how to keep them in agreement. |
+| [VM quickening inventory](/advanced/vm-quickening) | Guarded VM caches and bounded traces, with narrow legacy kernels separated from general no-JIT coverage. |
 | [Debugging & tooling](/advanced/debugging) | Inspector protocol, corpus diagnostics, profiles, sanitizers, and the build cache. |
 | [Verification & evidence](/advanced/verification) | How every published claim is gated, and how to add a gate. |
 

@@ -1,0 +1,465 @@
+{
+  "schema_version": 1,
+  "kind": "zig_js_vm_quickening_inventory",
+  "issue": 659,
+  "parent_issue": 498,
+  "date": "2026-08-20",
+  "status": "inventory_only_no_performance_claim",
+  "entries": [
+    {
+      "id": "property-inline-cache",
+      "title": "Four-entry property inline cache",
+      "classification": "general_adaptive",
+      "implementation_kind": "adaptive_inline_cache",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["get_prop own-data reads", "set_prop existing own-data writes", "one-hop inherited observations"],
+      "guards": ["exact receiver or holder Shape identity", "plain non-array receiver for own slots", "no accessor or attribute override", "slot remains inside live storage"],
+      "miss_behavior": ["perform the complete property operation", "record only a valid shape-slot observation", "replace secondary shapes round-robin after four identities"],
+      "metadata_lifetime": "One InlineCache per bytecode instruction in the owning Chunk arena; observations remain warm for the Chunk lifetime and are advisory.",
+      "no_gil_synchronization": "Shared realms hold the object property lock around shape/slot use and publish cache fields with the InlineCache seqlock; a torn or contended snapshot is a miss.",
+      "observable_steps_debugger": "The shortcut stays inside one already-counted get_prop or set_prop dispatch; property quick kernels are disabled while statement debugging is active.",
+      "source_anchors": [
+        {"path": "src/bytecode.zig", "text": "pub const InlineCache = struct {"},
+        {"path": "src/vm.zig", "text": "const ic = &chunk.ics[ip - 1];"}
+      ],
+      "test_anchors": [
+        {"path": "src/bytecode.zig", "text": "test \"InlineCache retains four polymorphic shape-slot pairs\""},
+        {"path": "src/bytecode.zig", "text": "test \"InlineCache seqlock: concurrent writers never tear shape-slot pairs\""}
+      ],
+      "metrics": []
+    },
+    {
+      "id": "quick-global-binding",
+      "title": "Live global/environment binding cache",
+      "classification": "general_adaptive",
+      "implementation_kind": "adaptive_site_cache",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["load_var in an isolated VM execution"],
+      "guards": ["exact starting Environment", "no with-object or alias", "exact global object and Shape for object-backed globals", "live declarative binding lookup for environment-backed globals"],
+      "miss_behavior": ["run lookupIdent/globalProp", "replace the site cache only after complete resolution", "decline caching for with and aliases"],
+      "metadata_lifetime": "A lazily allocated instruction-indexed pointer table and QuickGlobalBinding records live in the Chunk arena.",
+      "no_gil_synchronization": "The cache is disabled when parallel_sync is true; shared execution performs locked Environment/property lookup instead of reading mutable cache records.",
+      "observable_steps_debugger": "A hit replaces only the load_var lookup inside its existing dispatch and preserves TDZ checks on the ordinary path.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickGlobalBinding = union(enum) {"},
+        {"path": "src/vm.zig", "text": "fn recordQuickGlobalBinding("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: caches live global function bindings\""}
+      ],
+      "metrics": ["quick_global_binding_hits"]
+    },
+    {
+      "id": "literal-shape-transition",
+      "title": "Object-literal shape-transition cache",
+      "classification": "general_adaptive",
+      "implementation_kind": "adaptive_inline_cache",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["fixed-name init_prop CreateDataPropertyOrThrow transitions"],
+      "guards": ["exact predecessor Shape", "cached child parent/name/slot relation", "applyLiteralTransition validates the destination object"],
+      "miss_behavior": ["run defineLiteralDataProp", "record only the resulting direct child transition", "computed/spread/accessor literal members stay generic"],
+      "metadata_lifetime": "The literal-transition observation reuses the instruction InlineCache and lives with the Chunk arena.",
+      "no_gil_synchronization": "Shared lookups use the InlineCache seqlock and applyLiteralTransition performs the destination property synchronization.",
+      "observable_steps_debugger": "The cached transition implements the same single init_prop bytecode and method home-object setup remains outside the shortcut.",
+      "source_anchors": [
+        {"path": "src/bytecode.zig", "text": "pub inline fn lookupLiteralTransitionMode("},
+        {"path": "src/vm.zig", "text": "if (cache.lookupLiteralTransitionMode(base_shape, parallel_sync)) |transition| {"}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: fixed-name object literals cache shape transitions across realms\""}
+      ],
+      "metrics": ["quick_literal_transition_hits"]
+    },
+    {
+      "id": "property-update-trace",
+      "title": "Bounded numeric property-update trace",
+      "classification": "bounded_structural",
+      "implementation_kind": "bounded_trace_plan",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["up to twenty bytecodes and eight numeric operations ending in set_prop", "optional canonical counted-loop tail"],
+      "guards": ["numeric constants/locals/property slots", "fixed stack-depth bounds", "exact Shape and cached read/write slots", "plain non-array target without proxy/accessor/attribute behavior"],
+      "miss_behavior": ["resume ordinary bytecode at the same load_local", "cache an unsupported sentinel only in isolated execution", "a tail mismatch keeps the assignment-only trace"],
+      "metadata_lifetime": "QuickPropertyPlan records are lazily arena allocated and instruction indexed; resolved slots are isolated-mode advisory state.",
+      "no_gil_synchronization": "Ordinary property traces are refused in parallel mode; the separate four-property kernel owns the shared publication/locking contract.",
+      "observable_steps_debugger": "The plan records its exact executed bytecodes and advances the VM step budget; entry is disabled during debug execution and stops before checkpoints/budget exhaustion.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickPropertyPlan = struct {"},
+        {"path": "src/vm.zig", "text": "fn compileQuickPropertyPlan("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: quickens warmed numeric property update traces\""},
+        {"path": "src/vm.zig", "text": "test \"vm: caches unsupported isolated property quickening plans\""}
+      ],
+      "metrics": ["quick_property_update_hits", "quick_property_loop_tail_hits", "quick_property_specialized_hits", "quick_property_plan_decode_attempts"]
+    },
+    {
+      "id": "four-property-loop",
+      "title": "Four-property counted-loop kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["one exact 38-bytecode numeric loop over four named properties"],
+      "guards": ["exact opcode sequence/constants/jump target", "plain non-array object", "ten exact IC-resolved slots with required alias relations", "numeric property values and loop counter"],
+      "miss_behavior": ["return to the ordinary bytecode loop head without mutation", "cache an explicit unsupported plan for nonmatching bytecode"],
+      "metadata_lifetime": "One instruction-indexed QuickPropertyKernelPlan is arena allocated, including an explicit unsupported variant.",
+      "no_gil_synchronization": "The plan pointer is acquire/release published; execution locks frame slots and object properties for the guarded batch.",
+      "observable_steps_debugger": "Each fused iteration accounts for exactly 42 bytecode steps, remains below the next checkpoint/budget, and is disabled during debug execution.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickPropertyKernelPlan = union(enum) {"},
+        {"path": "src/vm.zig", "text": "fn tryQuickPropertyKernel("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: fuses warmed four-property loops with exact bytecode steps\""}
+      ],
+      "metrics": ["quick_property_kernel_hits"]
+    },
+    {
+      "id": "array-opcode-fast-paths",
+      "title": "Guarded array opcode fast paths",
+      "classification": "general_adaptive",
+      "implementation_kind": "opcode_fast_path",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["present dense get_index", "existing dense set_index", "Array length read", "Array.prototype data read", "intrinsic Array.prototype.push call"],
+      "guards": ["real non-arguments Array", "no proxy/revocation/accessor/attribute/indexed override", "present packed/dense storage as required", "clean prototype chain for append", "exact intrinsic push identity"],
+      "miss_behavior": ["run ToPropertyKey and generic property/index semantics", "dispatch the ordinary callable", "never treat a hole or inherited indexed property as dense data"],
+      "metadata_lifetime": "Dense index/length/push checks allocate no plan; prototype data reads use the instruction InlineCache for the Chunk lifetime.",
+      "no_gil_synchronization": "Shared reads use element/property snapshots, stores and appends use object synchronization, and prototype observations use the IC seqlock.",
+      "observable_steps_debugger": "Each shortcut remains within its already-counted opcode/call dispatch; observable coercion, proxy, accessor, and overridden-call cases miss before effects.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "inline fn quickDenseArrayStore("},
+        {"path": "src/vm.zig", "text": "if (quickArrayIndex(key)) |index| {"},
+        {"path": "src/interpreter.zig", "text": "pub fn tryFastArrayPush("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: quickens packed dense numeric array reads\""},
+        {"path": "src/vm.zig", "text": "test \"vm: shared array fast paths retain observable overrides\""}
+      ],
+      "metrics": ["quick_dense_array_index_hits", "quick_dense_array_store_hits", "quick_array_length_hits", "quick_array_prototype_data_hits", "quick_array_push_hits"]
+    },
+    {
+      "id": "packed-array-sum-loop",
+      "title": "Packed-array sum loop kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["one exact eighteen-bytecode counted loop summing dense numeric elements"],
+      "guards": ["exact opcode sequence and backedge", "numeric index/total/increment", "present dense numeric elements", "loop remains inside step/checkpoint allowance"],
+      "miss_behavior": ["resume at the ordinary loop head", "unsupported structural plans remain explicit"],
+      "metadata_lifetime": "An instruction-indexed QuickArrayPlan allocated in the Chunk arena stores the decoded loop or unsupported tag.",
+      "no_gil_synchronization": "The plan pointer is acquire/release published; frame slots and shared array elements use their owned synchronization during execution.",
+      "observable_steps_debugger": "Fused iterations reproduce the exact bytecode step count, stop at budget/checkpoint boundaries, and do not enter while debugging.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickPackedArraySumLoop = struct {"},
+        {"path": "src/vm.zig", "text": "fn compileQuickArrayPlan("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: packed array sum quickening preserves bytecode steps\""}
+      ],
+      "metrics": ["quick_packed_array_sum_loop_hits"]
+    },
+    {
+      "id": "packed-array-push-loop",
+      "title": "Packed-array push loop kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["one exact counted loop pushing a bounded numeric expression", "one add-three-and-bitmask expression specialization"],
+      "guards": ["exact loop/opcode shape", "at most sixteen accepted numeric expression ops", "numeric locals/constants", "intrinsic push identity and packed extensible Array"],
+      "miss_behavior": ["resume ordinary bytecode at the loop head", "generic bounded expression evaluation remains distinct from the add3_bit_and specialization"],
+      "metadata_lifetime": "The decoded QuickArrayPlan and expression specialization live in the Chunk arena and unsupported shapes retain an explicit tag.",
+      "no_gil_synchronization": "The plan pointer is acquire/release published; frame and array mutation follow their structure locks and append contract.",
+      "observable_steps_debugger": "The helper accounts exact per-iteration bytecodes, services boundary work through ordinary VM checkpoints, and is disabled with statement debugging.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickPackedArrayPushLoop = struct {"},
+        {"path": "src/vm.zig", "text": "fn compileQuickPackedArrayPushLoop("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: quickens packed dense numeric array reads\""}
+      ],
+      "metrics": ["quick_packed_array_push_loop_hits", "quick_packed_array_specialized_expression_hits"]
+    },
+    {
+      "id": "polymorphic-property-loop",
+      "title": "Polymorphic property loop kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["one exact indexed-selector loop reading and writing named own data properties"],
+      "guards": ["exact opcode/constants/backedge", "packed selector array", "plain selected object", "exact IC slots", "numeric selected/checksum values"],
+      "miss_behavior": ["resume ordinary loop bytecode before any fused mutation", "nonmatching bytecode uses the explicit unsupported array plan"],
+      "metadata_lifetime": "The QuickPolymorphicPropertyLoop variant lives in the instruction-indexed Chunk-arena QuickArrayPlan.",
+      "no_gil_synchronization": "The plan is safely published, but the kernel currently requires isolated execution and therefore does not claim shared-realm coverage.",
+      "observable_steps_debugger": "The kernel advances exact bytecode steps within checkpoint/budget limits and is disabled for debug execution.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickPolymorphicPropertyLoop = struct {"},
+        {"path": "src/vm.zig", "text": "fn compileQuickPolymorphicPropertyLoop("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: quickens isolated polymorphic own-data property loops with exact steps\""}
+      ],
+      "metrics": ["quick_polymorphic_property_loop_hits"]
+    },
+    {
+      "id": "fixed-shape-object-allocation-loop",
+      "title": "Fixed-shape object-allocation loop kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["one exact selector/replacement loop allocating a three-property literal"],
+      "guards": ["exact opcode/constants/backedge", "packed array and selected object state", "three exact literal shape transitions", "restricted receiver check", "managed allocation reserve and GC checkpoint contract"],
+      "miss_behavior": ["return to the loop head before fused mutation", "fall back after materializing state at GC/checkpoint boundaries", "invalidate prepared shape state when the realm root Shape differs"],
+      "metadata_lifetime": "The QuickArrayPlan lives in the Chunk arena; isolated prepared literal descriptors are keyed by the exact realm root Shape.",
+      "no_gil_synchronization": "Plan publication is atomic; shared execution locks frame/object/array state and crosses GC only from registered precise storage with the declared moving-safepoint protocol.",
+      "observable_steps_debugger": "The kernel preserves exact steps, termination checks, allocation failures, restricted-object errors, GC barriers, and statement-debugger exclusion.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickObjectAllocationLoop = struct {"},
+        {"path": "src/vm.zig", "text": "fn tryQuickObjectAllocationLoopMode("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: quickens fixed-shape object allocation loops with exact steps and guarded fallback\""},
+        {"path": "src/context.zig", "text": "test \"parallel_js: fixed-shape object allocation quickens across shared Thread workers\""}
+      ],
+      "metrics": ["quick_object_allocation_loop_hits", "quick_object_allocation_checkpoint_crossings", "quick_object_allocation_first_entry_steps", "quick_object_literal_shape_preparations", "quick_object_allocation_reserve_refills"]
+    },
+    {
+      "id": "numeric-leaf-call",
+      "title": "Bounded numeric leaf-call specialization",
+      "classification": "bounded_structural",
+      "implementation_kind": "bounded_trace_plan",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["straight-line numeric bytecode leaves", "non-arrow static arguments[index] numeric expressions", "captured scalar and receiver-property variants"],
+      "guards": ["at most sixteen ops/eight stack values", "accepted numeric operations only", "exact arity/parameter layout", "numeric argument/capture/property values", "no observable arguments mutation or escape"],
+      "miss_behavior": ["perform the ordinary JS call", "cache unsupported bytecode leaves explicitly", "AST arguments leaves are revalidated for each exact call arity"],
+      "metadata_lifetime": "QuickLeafPlan is lazily arena allocated per callee Chunk; the arguments-AST leaf is a bounded stack-local plan for one call.",
+      "no_gil_synchronization": "Callee plan publication uses acquire/release compare-exchange; captured frames and receiver properties use their owned synchronization.",
+      "observable_steps_debugger": "Leaf evaluation is disabled under statement hooks and advanceQuickObservableSteps preserves AST/bytecode steps, termination, GC, and GIL checkpoints.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickLeafPlan = union(enum) {"},
+        {"path": "src/vm.zig", "text": "fn tryQuickArgumentsCall("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: numeric call-loop quickening preserves guards and exact steps\""}
+      ],
+      "metrics": ["quick_numeric_arguments_direct_call_hits"]
+    },
+    {
+      "id": "numeric-call-loop",
+      "title": "Numeric leaf counted-call loop kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["exact counted loops calling a direct, method, closure-template, or arguments numeric leaf"],
+      "guards": ["finalized structural candidate bit", "exact loop/call sequence", "immutable or exactly guarded callee identity", "numeric leaf plan and values", "bounded step window"],
+      "miss_behavior": ["resume ordinary bytecode at the loop head", "publish an explicit unsupported call-loop plan"],
+      "metadata_lifetime": "Instruction-indexed QuickCallLoopPlan and per-callee QuickLeafPlan records live in their owning Chunk arenas.",
+      "no_gil_synchronization": "Both plans use acquire/release publication; frame, environment, receiver, and IC observations use their structure synchronization.",
+      "observable_steps_debugger": "The kernel calculates exact caller and callee steps, stops before checkpoints/budget, and is disabled when statement debugging is active.",
+      "source_anchors": [
+        {"path": "src/bytecode.zig", "text": "fn mayStartQuickCallLoop("},
+        {"path": "src/vm.zig", "text": "fn tryQuickNumericCallLoop("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: numeric call-loop quickening preserves guards and exact steps\""}
+      ],
+      "metrics": ["quick_numeric_call_loop_hits", "quick_numeric_arguments_call_loop_hits", "quick_numeric_closure_call_loop_hits", "quick_numeric_method_call_loop_hits"]
+    },
+    {
+      "id": "reusable-immediate-closure",
+      "title": "Immediate-call closure reuse kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["checkpoint-spanning fallback iterations of the exact closure-template numeric call loop"],
+      "guards": ["same structural call-loop plan/template", "single captured scalar leaf", "closure stored in the exact frame slot", "same captured frame and callee Chunk"],
+      "miss_behavior": ["allocate a fresh closure through makeClosure", "never reuse when identity could escape or be observed"],
+      "metadata_lifetime": "No additional metadata; it consumes the Chunk-arena call-loop and leaf plans plus the live frame slot.",
+      "no_gil_synchronization": "Plan publication is atomic and the candidate frame slot is read while holding the frame lock in shared execution.",
+      "observable_steps_debugger": "Reuse occurs only where the exact immediate-call pattern proves closure identity unobservable; all other make_closure dispatches remain ordinary.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "fn quickReusableImmediateClosure("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: numeric call-loop quickening preserves guards and exact steps\""}
+      ],
+      "metrics": ["quick_reusable_immediate_closure_hits"]
+    },
+    {
+      "id": "numeric-recurrence",
+      "title": "Pure additive recurrence kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["one exact pure two-branch additive self-recurrence bytecode body"],
+      "guards": ["exact chunk length/opcodes", "two parameters/two locals", "u16 threshold/deltas", "exact self callee binding", "numeric input"],
+      "miss_behavior": ["perform the ordinary recursive JS call", "cache an explicit unsupported recurrence plan"],
+      "metadata_lifetime": "One QuickRecurrencePlan lives in the callee Chunk arena for the Chunk lifetime.",
+      "no_gil_synchronization": "Plan publication uses acquire/release compare-exchange; exact binding lookup follows Environment synchronization.",
+      "observable_steps_debugger": "A saturated recurrence step table enforces the same budget/checkpoint boundary; debugger/host statement hooks refuse entry.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickAddRecurrence = struct {"},
+        {"path": "src/vm.zig", "text": "fn tryQuickNumericRecurrence("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: quickens guarded pure numeric recurrence\""}
+      ],
+      "metrics": ["quick_numeric_recurrence_hits"]
+    },
+    {
+      "id": "observable-numeric-recurrence",
+      "title": "Observable additive recurrence kernel",
+      "classification": "legacy_narrow",
+      "implementation_kind": "legacy_pattern_kernel",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["one exact additive self-recurrence with an observable counter property update"],
+      "guards": ["exact 28-bytecode body", "u16 thresholds/deltas", "exact recursive binding observations", "plain counter state and numeric value"],
+      "miss_behavior": ["perform ordinary recursive calls/property operations", "unsupported shapes use the explicit recurrence-plan tag"],
+      "metadata_lifetime": "The observable variant shares the callee Chunk-arena QuickRecurrencePlan lifetime.",
+      "no_gil_synchronization": "Plan publication is atomic; shared execution resolves/locks the observable counter property instead of reusing isolated raw slots.",
+      "observable_steps_debugger": "Recursive calls are not elided from the semantic accounting: each property/call/branch step advances through checkpoint-aware helpers; statement hooks refuse the kernel.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "const QuickObservableAddRecurrence = struct {"},
+        {"path": "src/vm.zig", "text": "fn runQuickObservableRecurrenceParallel("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: compiles observable numeric recurrence without eliding calls\""}
+      ],
+      "metrics": ["quick_observable_recurrence_hits"]
+    },
+    {
+      "id": "native-direct-call",
+      "title": "Guarded native numeric-leaf call entry",
+      "classification": "general_adaptive",
+      "implementation_kind": "native_tier_entry",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["ordinary call of a ready baseline/optimizing numeric leaf without heap activation construction"],
+      "guards": ["native execution permitted", "no class constructor or arguments object", "no lexical slots", "at most 64 exact frame slots", "published artifact has matching frame layout and no side exits"],
+      "miss_behavior": ["build/run the ordinary VM activation or generic call", "a managed native miss/deoptimization never becomes a completed direct call"],
+      "metadata_lifetime": "It consumes the callee Chunk native-tier artifacts; the temporary bounded slot array lives only for the call.",
+      "no_gil_synchronization": "Native tier artifacts use their own atomic publication/invalidation contract; the call copies arguments into private stack storage and rechecks execution permission.",
+      "observable_steps_debugger": "Statement hooks forbid direct entry; managed artifacts own exact step/trap accounting and unmanaged artifacts are admitted only under the existing native observability contract.",
+      "source_anchors": [
+        {"path": "src/vm.zig", "text": "fn tryRunNativeDirectCall("}
+      ],
+      "test_anchors": [
+        {"path": "src/vm.zig", "text": "test \"vm: numeric call-loop quickening preserves guards and exact steps\""}
+      ],
+      "metrics": ["quick_native_direct_call_hits"]
+    }
+  ],
+  "unsupported_families": [
+    {
+      "id": "property-dispatch",
+      "status": "unsupported",
+      "covered_by": [],
+      "remaining": ["general megamorphic named access", "arbitrary prototype depth", "accessor/proxy/exotic get and set", "general compound/update operations"],
+      "fallback": "ordinary get_prop/set_prop bytecode and the full interpreter property algorithms"
+    },
+    {
+      "id": "index-dispatch",
+      "status": "unsupported",
+      "covered_by": [],
+      "remaining": ["sparse and holey arrays", "prototype-indexed properties", "typed arrays and arguments objects", "dynamic ToPropertyKey and proxy/accessor cases"],
+      "fallback": "ordinary get_index/set_index bytecode with full ToPropertyKey and property semantics"
+    },
+    {
+      "id": "call-dispatch",
+      "status": "unsupported",
+      "covered_by": [],
+      "remaining": ["general JS call and construct specialization", "variadic/spread calls", "async/generator calls", "polymorphic call-site linking across arbitrary callees"],
+      "fallback": "ordinary activation/trampoline, callValue, invokeMethod, or construct dispatch"
+    },
+    {
+      "id": "arithmetic-dispatch",
+      "status": "unsupported",
+      "covered_by": [],
+      "remaining": ["general opcode quickening across Number/BigInt/string coercions", "site rewriting or adaptive specialized arithmetic opcodes", "dequickening after representation changes"],
+      "fallback": "ordinary arithmetic bytecodes and canonical ECMAScript coercion helpers"
+    },
+    {
+      "id": "control-dispatch",
+      "status": "unsupported",
+      "covered_by": [],
+      "remaining": ["general superinstructions", "adaptive branch/control-flow fusion", "exception/finally-aware trace formation", "debugger-safe dequickening at every statement boundary"],
+      "fallback": "ordinary branch, completion, handler, and checkpoint bytecodes"
+    },
+    {
+      "id": "allocation-dispatch",
+      "status": "unsupported",
+      "covered_by": [],
+      "remaining": ["general object/array/closure allocation specialization", "arbitrary literal layouts", "escape analysis and scalar replacement", "general GC-safe allocation sinking"],
+      "fallback": "ordinary new_object/new_array/make_closure/literal bytecodes and allocator/GC paths"
+    }
+  ],
+  "runtime_contract": {
+    "plan_types": [
+      "QuickPropertyPlan",
+      "QuickPropertyKernelPlan",
+      "QuickArrayPlan",
+      "QuickLeafPlan",
+      "QuickCallLoopPlan",
+      "QuickRecurrencePlan"
+    ],
+    "tagged_types": {
+      "QuickNumericOp": ["constant", "local", "property", "add", "sub", "mul", "div", "mod"],
+      "QuickPropertySpecialization": ["generic", "property_local_add_mod", "property_add_constant", "property_pair_add", "property_pair_sub"],
+      "QuickPropertyKernelPlan": ["unsupported", "four_property_loop"],
+      "QuickArrayNumericOp": ["constant", "local", "add", "sub", "mul", "div", "mod", "bit_and"],
+      "QuickArrayBound": ["constant", "local"],
+      "QuickArrayExpressionSpecialization": ["generic", "add3_bit_and"],
+      "QuickArrayPlan": ["unsupported", "packed_sum", "packed_push", "polymorphic_property", "object_allocation"],
+      "QuickLeafOp": ["argument", "constant", "captured_local", "receiver_property", "add", "sub", "mul", "div", "mod"],
+      "QuickLeafSpecialization": ["generic", "add_mod", "captured_add_mod", "receiver_add_mod"],
+      "QuickLeafPlan": ["unsupported", "numeric"],
+      "QuickCallCallee": ["global_instruction", "local", "method", "closure_template"],
+      "QuickCallLoopPlan": ["unsupported", "numeric_leaf"],
+      "QuickGlobalBinding": ["object", "environment"],
+      "QuickRecurrencePlan": ["unsupported", "add", "observable_add"]
+    },
+    "chunk_metadata_fields": [
+      "quick_property_plans",
+      "quick_property_kernel_plans",
+      "quick_array_plans",
+      "quick_call_plans",
+      "quick_loop_candidates",
+      "quick_global_bindings",
+      "quick_recurrence_plan",
+      "quick_leaf_plan"
+    ],
+    "structural_candidate_flags": [
+      "quick_call_loop_candidate",
+      "quick_array_loop_candidate"
+    ],
+    "observability_counters": [
+      "quick_property_update_hits",
+      "quick_property_loop_tail_hits",
+      "quick_property_specialized_hits",
+      "quick_property_kernel_hits",
+      "quick_property_plan_decode_attempts",
+      "quick_dense_array_index_hits",
+      "quick_dense_array_store_hits",
+      "quick_array_length_hits",
+      "quick_array_prototype_data_hits",
+      "quick_array_push_hits",
+      "quick_packed_array_sum_loop_hits",
+      "quick_packed_array_push_loop_hits",
+      "quick_packed_array_specialized_expression_hits",
+      "quick_polymorphic_property_loop_hits",
+      "quick_object_allocation_loop_hits",
+      "quick_object_allocation_checkpoint_crossings",
+      "quick_object_allocation_first_entry_steps",
+      "quick_object_literal_shape_preparations",
+      "quick_object_allocation_reserve_refills",
+      "quick_global_binding_hits",
+      "quick_literal_transition_hits",
+      "quick_native_direct_call_hits",
+      "quick_numeric_call_loop_hits",
+      "quick_numeric_arguments_call_loop_hits",
+      "quick_numeric_arguments_direct_call_hits",
+      "quick_numeric_closure_call_loop_hits",
+      "quick_reusable_immediate_closure_hits",
+      "quick_numeric_method_call_loop_hits",
+      "quick_numeric_recurrence_hits",
+      "quick_observable_recurrence_hits"
+    ]
+  }
+}

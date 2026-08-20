@@ -14,7 +14,7 @@ zig-js runs JavaScript through a tree-walking interpreter and a suspendable byte
 | **Tree-walk** | A direct AST evaluator (`interpreter.zig`). | The correctness baseline and the default path for nearly all code. |
 | **Bytecode VM** | AST lowered to a linear instruction stream (`compiler.zig`) run on a stack machine (`vm.zig`). | Suspend/resume for generators, async functions, and async generators; and a heap-allocated activation stack (`vm.runDriver`) so deep recursion and proper tail calls are bounded by the logical call-depth cap, not the native OS stack. Not a general speedup. |
 | **Slots & closures** | Slot-allocated locals and frame-linked closures. | Removes hash lookups for locals and captured variables on the VM path. |
-| **Shapes & inline caches** | Hidden classes (`shape.zig`), collision-free persistent indexes for deep shapes, and monomorphic property-access caches. | Compact shallow objects with logarithmically bounded deep lookup. |
+| **Shapes & inline caches** | Hidden classes (`shape.zig`), collision-free persistent indexes for deep shapes, and four-entry polymorphic property-access caches. | Compact shallow objects with logarithmically bounded deep lookup. |
 | **Baseline native tier** | AArch64 code compiled at a chunk entry from proven-hot bytecode (`jit.zig`, `jit/aarch64.zig`). | General native throughput, with an exact bytecode fallback for anything the tier cannot represent. |
 | **Optimizing tier** | Speculative compilation over an exact documented subset (`jit/optimizer*.zig`). | Profile-driven specialization, with deoptimization back to a precise interpreter state. |
 
@@ -29,6 +29,12 @@ Because the VM buys capability rather than speed, tiering is deliberately narrow
 Because most code tree-walks, the VM path is comparatively under-exercised, so VM/tree-walker semantic divergences are a known bug surface (see the block-scoping note below).
 
 `zig build bench` currently shows VM/tree-walk parity on the saved microbenchmarks, not a broad VM speedup claim. See `docs/.data/bench-2026-07-04.txt` and the README performance table for the current numbers.
+
+The VM also contains guarded opcode fast paths, bounded numeric traces, and
+several exact bytecode-pattern kernels. The generated [VM quickening
+inventory](/advanced/vm-quickening) records their guards, miss behavior,
+metadata lifetime, no-GIL synchronization, and debugger/step boundary. Its
+legacy kernels are explicitly not evidence of general no-JIT dispatch coverage.
 
 ## Lexical scoping and the slot model
 
