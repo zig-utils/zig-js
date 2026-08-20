@@ -2330,7 +2330,11 @@ pub const GcCellBacking = struct {
         return trimmed;
     }
 
-    pub fn trimCompactedTailChunks(self: *GcCellBacking) usize {
+    /// A hard allocator cap needs the bytes owned by every fully empty suffix,
+    /// not a warm cache of reusable slabs. Live chunks and holes inside their
+    /// prefix remain untouched; only the same tail ranges eligible for ordinary
+    /// post-collection trimming lose their bounded reuse allowance.
+    pub fn trimEmptyTailChunksUnderPressure(self: *GcCellBacking) usize {
         if (self.bulk_teardown) return 0;
         var trimmed: usize = 0;
         inline for (0..bucket_count) |idx| {
@@ -2339,6 +2343,10 @@ pub const GcCellBacking = struct {
             self.unlockBucket(idx);
         }
         return trimmed;
+    }
+
+    pub fn trimCompactedTailChunks(self: *GcCellBacking) usize {
+        return self.trimEmptyTailChunksUnderPressure();
     }
 
     pub fn deinit(self: *GcCellBacking) void {
@@ -2985,6 +2993,15 @@ test "GC cell backing trims excess empty tail chunks after collection" {
     a.free(next);
     try std.testing.expectEqual(GcCellBacking.reusable_tail_chunks + 1, backing.bucket_chunks[idx].items.len);
     try std.testing.expectEqual(@as(usize, 0), backing.trimEmptyTailChunks());
+
+    // A hard-cap collection gives up the warm tail but keeps the non-empty
+    // prefix and its stable ownership range exactly intact.
+    try std.testing.expectEqual(GcCellBacking.reusable_tail_chunks, backing.trimEmptyTailChunksUnderPressure());
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
+    try std.testing.expectEqual(slots, backing.bucket_issued_slots[idx]);
+    try std.testing.expectEqual(slots, backing.bucket_capacity_slots[idx]);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_addr_index[idx].items.len);
 }
 
 test "GC cell backing drops all reuse bitmaps when trimming its whole bucket" {
@@ -6966,7 +6983,7 @@ pub const Context = struct {
         h.collect();
         self.noteQuiescentFullCollection(h);
         wasm_api.collectWasmGarbage(self);
-        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        self.trimCollectedCellBacking();
         self.gc_requested.store(false, .monotonic);
     }
 
@@ -7103,6 +7120,31 @@ pub const Context = struct {
         return result;
     }
 
+    /// Keep the normal eight-chunk reuse tail while allocator headroom is
+    /// healthy. Once a hard Context cap is within either one sixteenth of its
+    /// limit or two base slab refills (whichever is larger), empty slabs compete
+    /// directly with result side storage and complete object publication. At
+    /// that boundary return every fully empty tail; the next allocation can
+    /// still grow a slot-aligned adaptive chunk through #637.
+    fn shouldReleaseEmptyCellTails(stats: HeapBudgetStats) bool {
+        const protected_headroom = @max(
+            stats.limit_bytes / 16,
+            2 * GcCellBacking.chunk_bytes,
+        );
+        return stats.remaining_bytes < protected_headroom;
+    }
+
+    fn trimCollectedCellBacking(self: *Context) void {
+        const backing = self.gc_cell_backing orelse return;
+        if (self.heapBudgetStats()) |stats| {
+            if (shouldReleaseEmptyCellTails(stats)) {
+                _ = backing.trimEmptyTailChunksUnderPressure();
+                return;
+            }
+        }
+        _ = backing.trimEmptyTailChunks();
+    }
+
     fn shouldAutoCompactAfterCollection(self: *Context) bool {
         const backing = self.gc_cell_backing orelse return false;
         const pressure = backing.compactionPressure();
@@ -7191,7 +7233,7 @@ pub const Context = struct {
             return;
         }
         wasm_api.collectWasmGarbage(self);
-        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        self.trimCollectedCellBacking();
         const scheduled_auto_compaction =
             full_collection and self.scheduleAutomaticCompactionIfNeeded();
         if (scheduled_auto_compaction) self.runAutomaticCompactionWithConductor();
@@ -7228,7 +7270,7 @@ pub const Context = struct {
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
         h.collect();
-        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        self.trimCollectedCellBacking();
         self.gc_requested.store(false, .monotonic);
         return true;
     }
@@ -7250,7 +7292,7 @@ pub const Context = struct {
         // cannot be proven.
         const swept = self.driveParallelCollection(h, machine, 100 * std.time.ns_per_ms);
         if (!swept) return false;
-        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        self.trimCollectedCellBacking();
         self.gc_requested.store(false, .monotonic);
         return true;
     }
@@ -19054,6 +19096,24 @@ test "Context heap_limit_bytes names an escaping top-level OOM" {
     // The reserved bootstrap object itself, not a fresh one: the failed path
     // cannot allocate, which is the whole reason it is prebuilt.
     try std.testing.expectEqual(ctx.reserved_thread_oom_error.?.bits, exception.bits);
+}
+
+test "Context bounded collection preserves reuse tails only with refill headroom" {
+    const limit = 4 * 1024 * 1024;
+    const protected = limit / 16;
+    const healthy_used = limit - protected;
+    try std.testing.expect(!Context.shouldReleaseEmptyCellTails(.{
+        .limit_bytes = limit,
+        .used_bytes = healthy_used,
+        .peak_bytes = healthy_used,
+        .remaining_bytes = protected,
+    }));
+    try std.testing.expect(Context.shouldReleaseEmptyCellTails(.{
+        .limit_bytes = limit,
+        .used_bytes = healthy_used + 1,
+        .peak_bytes = healthy_used + 1,
+        .remaining_bytes = protected - 1,
+    }));
 }
 
 test "Context heap_limit_bytes never publishes a torn object under recovery pressure" {
