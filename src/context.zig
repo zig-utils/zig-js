@@ -3751,6 +3751,11 @@ pub const Context = struct {
     gc_concurrent: bool = false,
     gc_marker: ?std.Thread = null,
     gc_marker_stop: std.atomic.Value(bool) = .init(false),
+    /// A single-mutator concurrent sweep completed at a VM safepoint, but its
+    /// Context-owned post-sweep maintenance has not yet reached a quiescent
+    /// boundary. Only the owner mutator reads or writes this field;
+    /// `concurrent_gc` is refused when engine Threads are enabled.
+    gc_concurrent_post_sweep_pending: bool = false,
     /// Phase 7 / M3: mid-script collection under *parallel* mutators (no GIL).
     /// Opt-in (`parallel_midscript_gc`, requires `parallel_js`). The driver is
     /// abort-safe: it sweeps only on confirmed root-handshake stability and
@@ -5453,7 +5458,7 @@ pub const Context = struct {
         // arena. Keep `sab_retains` alive until after finalizers run: live
         // SharedArrayBuffer wrapper cells release their tracked storage refs
         // there when GC is enabled.
-        self.finishConcurrentGCIfActive(); // join any marker before heap teardown
+        _ = self.finishConcurrentGCIfActive(); // join any marker before heap teardown
         if (self.gc) |h| {
             if (self.gc_cell_backing) |backing| {
                 backing.beginBulkTeardown();
@@ -6979,7 +6984,11 @@ pub const Context = struct {
         self.enterJitGcConductor();
         defer self.leaveJitGcConductor();
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null) return;
-        self.finishConcurrentGCIfActive(); // close or abort any in-flight mark first
+        _ = self.finishConcurrentGCIfActive(); // close or abort any in-flight mark first
+        if (self.drainConcurrentPostSweepMaintenance(.ordinary_collection, false)) {
+            self.gc_requested.store(false, .monotonic);
+            return;
+        }
         h.collect();
         self.noteQuiescentFullCollection(h);
         wasm_api.collectWasmGarbage(self);
@@ -7078,7 +7087,10 @@ pub const Context = struct {
     /// can have its precise slots rewritten. The conductor is held throughout.
     fn compactGarbageAfterRootValidation(self: *Context, moving_safepoint: bool) GcHeap.CompactionResult {
         const h = self.gc orelse return .{ .status = .unsupported };
-        if (!moving_safepoint) self.finishConcurrentGCIfActive();
+        if (!moving_safepoint) {
+            _ = self.finishConcurrentGCIfActive();
+            _ = self.drainConcurrentPostSweepMaintenance(.ordinary_collection, false);
+        }
         if (h.marking.load(.acquire) or h.concurrent.load(.acquire))
             return .{ .status = .unsupported };
 
@@ -7180,12 +7192,13 @@ pub const Context = struct {
         }
     }
 
-    fn runAutomaticCompactionWithConductor(self: *Context) void {
+    fn runAutomaticCompactionWithConductor(self: *Context) GcHeap.CompactionResult {
         _ = self.gc_auto_compaction_attempts.fetchAdd(1, .monotonic);
         const result = self.compactGarbageWithConductor(null);
         self.recordAutomaticCompactionResult(result);
         if (result.status != .unsupported)
             self.gc_auto_compaction_pending.store(false, .release);
+        return result;
     }
 
     fn noteQuiescentFullCollection(self: *Context, h: *GcHeap) void {
@@ -7222,10 +7235,17 @@ pub const Context = struct {
         self.enterJitGcConductor();
         defer self.leaveJitGcConductor();
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null) return;
-        const full_before_finish = h.full_collections;
-        self.finishConcurrentGCIfActive();
-        if (h.full_collections != full_before_finish)
-            self.noteQuiescentFullCollection(h);
+        _ = self.finishConcurrentGCIfActive();
+        const finished_concurrent = self.drainConcurrentPostSweepMaintenance(.ordinary_collection, true);
+        if (finished_concurrent) {
+            if (self.gc_auto_compaction_pending.load(.acquire))
+                _ = self.runAutomaticCompactionWithConductor();
+            return;
+        }
+        if (self.gc_auto_compaction_pending.load(.acquire)) {
+            const result = self.runAutomaticCompactionWithConductor();
+            if (result.status != .unsupported) return;
+        }
         var full_collection = false;
         if (h.shouldCollectOld() or self.hasQuiescentPromotionDebt(h)) {
             h.collect();
@@ -7241,7 +7261,7 @@ pub const Context = struct {
         self.trimCollectedCellBacking(.ordinary_collection);
         const scheduled_auto_compaction =
             full_collection and self.scheduleAutomaticCompactionIfNeeded();
-        if (scheduled_auto_compaction) self.runAutomaticCompactionWithConductor();
+        if (scheduled_auto_compaction) _ = self.runAutomaticCompactionWithConductor();
     }
 
     fn collectRequestedGarbage(self: *Context) void {
@@ -7271,7 +7291,11 @@ pub const Context = struct {
         self.enterJitGcConductor();
         defer self.leaveJitGcConductor();
         if (self.gc_par_collector.load(.acquire) != null) return false;
-        self.finishConcurrentGCIfActive();
+        _ = self.finishConcurrentGCIfActive();
+        if (self.drainConcurrentPostSweepMaintenance(.allocation_failure, false)) {
+            self.gc_requested.store(false, .monotonic);
+            return true;
+        }
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
         h.collect();
@@ -7334,11 +7358,25 @@ pub const Context = struct {
         }
     }
 
+    const ConcurrentGcFinishResult = enum {
+        inactive,
+        finished,
+        aborted,
+        deferred,
+    };
+
     /// Stop+join the marker and close any in-flight concurrent cycle
     /// (world-stopped: fold born cells, re-scan roots, sweep). Called at the
-    /// finish safepoint and every quiescent boundary so a marker never outlives it.
-    fn finishConcurrentGCIfActive(self: *Context) void {
-        const h = self.gc orelse return;
+    /// finish safepoint and every quiescent boundary so a marker never outlives
+    /// it. The conductor also makes embedder callbacks drained by the sweep see
+    /// an in-flight collection and decline reentrant GC. Context-owned
+    /// reclamation is deliberately deferred until a caller reaches a boundary
+    /// with no registered interpreter roots.
+    fn finishConcurrentGCIfActive(self: *Context) ConcurrentGcFinishResult {
+        const h = self.gc orelse return .inactive;
+        const entered_conductor = !self.holdsJitGcConductor();
+        if (entered_conductor) self.enterJitGcConductor();
+        defer if (entered_conductor) self.leaveJitGcConductor();
         if (self.gc_marker) |t| {
             self.gc_marker_stop.store(true, .release);
             t.join();
@@ -7350,15 +7388,43 @@ pub const Context = struct {
                 // driver after its root-publication handshake. A quiescent
                 // boundary can safely discard leftover mark state, then run a
                 // fresh precise collection if the caller still wants one.
-                if (self.gc_par_collector.load(.acquire) != null) return;
+                if (self.gc_par_collector.load(.acquire) != null) return .deferred;
                 h.abortConcurrentMarkParallel();
-                return;
+                return .aborted;
             }
             self.gc_scan_native_stack = true;
             defer self.gc_scan_native_stack = false;
             h.finishConcurrentMark();
             self.endConcurrentEnvironmentTrace();
+            self.gc_concurrent_post_sweep_pending = true;
+            return .finished;
         }
+        return .inactive;
+    }
+
+    /// Complete the Context half of a concurrent full sweep at a quiescent
+    /// boundary. Several mid-script cycles may coalesce behind one pending bit;
+    /// their heap finalizers already ran independently, while Wasm reclamation,
+    /// slab trimming, and compaction policy depend only on the latest survivor
+    /// state and must not be repeated through a counter guess.
+    fn drainConcurrentPostSweepMaintenance(
+        self: *Context,
+        trim_cause: CellTailTrimCause,
+        schedule_compaction: bool,
+    ) bool {
+        if (!self.gc_concurrent_post_sweep_pending) return false;
+        self.gc_concurrent_post_sweep_pending = false;
+        const h = self.gc orelse return false;
+        self.noteQuiescentFullCollection(h);
+        wasm_api.collectWasmGarbage(self);
+        self.trimCollectedCellBacking(trim_cause);
+        if (schedule_compaction) _ = self.scheduleAutomaticCompactionIfNeeded();
+        return true;
+    }
+
+    fn finishConcurrentGCAtEvaluationBoundary(self: *Context) void {
+        _ = self.finishConcurrentGCIfActive();
+        _ = self.drainConcurrentPostSweepMaintenance(.ordinary_collection, true);
     }
 
     /// Reclaim a nursery batch at a safe single-mutator VM checkpoint. This is
@@ -7737,7 +7803,7 @@ pub const Context = struct {
         // snapshot the native stack at the safepoint, and finish re-scans roots.
         if (self.gc_concurrent) {
             if (h.concurrent.load(.acquire)) {
-                self.finishConcurrentGCIfActive();
+                _ = self.finishConcurrentGCIfActive();
             } else if (h.shouldCollectOld()) {
                 self.beginConcurrentEnvironmentTrace();
                 self.gc_scan_native_stack = true;
@@ -8320,7 +8386,7 @@ pub const Context = struct {
         defer stack_scan.leave(ss_saved);
         // Close any concurrent mark before returning (runs first at exit, LIFO,
         // so the stack boundary above is still valid for its re-scan).
-        defer self.finishConcurrentGCIfActive();
+        defer self.finishConcurrentGCAtEvaluationBoundary();
         // Quiescent point: reclaim garbage from prior evaluations on this
         // context before running (nothing is executing yet, so the Context
         // roots are complete).
@@ -8666,7 +8732,7 @@ pub const Context = struct {
         // collection during module execution.
         const ss_saved = stack_scan.enter(@frameAddress());
         defer stack_scan.leave(ss_saved);
-        defer self.finishConcurrentGCIfActive(); // close any concurrent mark (see evaluate)
+        defer self.finishConcurrentGCAtEvaluationBoundary(); // close any concurrent mark (see evaluate)
         // Quiescent point before module execution; a prior shell `gc()` request
         // can be serviced before the live module graph is installed.
         self.collectQuiescentGarbage();
@@ -8789,7 +8855,7 @@ pub const Context = struct {
         defer _ = strcell.setActiveArena(sa_saved);
         const ss_saved = stack_scan.enter(@frameAddress());
         defer stack_scan.leave(ss_saved);
-        defer self.finishConcurrentGCIfActive();
+        defer self.finishConcurrentGCAtEvaluationBoundary();
         self.collectQuiescentGarbage();
         self.collectRequestedGarbage();
         self.installPrivateModuleLoader();
@@ -23840,6 +23906,54 @@ test "enable_gc: mid-script safepoints collect nursery before old heap" {
     try std.testing.expect(heap.live_cells < 40000);
 }
 
+test "enable_gc concurrent finish drains post-sweep slab maintenance once" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .concurrent_gc = true,
+    });
+    defer ctx.destroy();
+    const heap = ctx.gc.?;
+    const backing = ctx.gc_cell_backing.?;
+    const idx = GcCellBacking.bucketIndex(1536, .@"16").?;
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_chunks[idx].items.len);
+    const backing_allocator = backing.allocator();
+    const live_prefix = try backing_allocator.alignedAlloc(u8, .@"16", 1536);
+    defer backing_allocator.free(live_prefix);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_chunks[idx].items.len);
+
+    const empty_chunks = GcCellBacking.reusable_tail_chunks + 2;
+    for (0..empty_chunks) |_| try std.testing.expect(backing.addChunk(idx));
+    try std.testing.expectEqual(empty_chunks + 1, backing.bucket_chunks[idx].items.len);
+
+    // Reproduce the production begin/finish boundary without a marker thread:
+    // finish drains the grey set synchronously, records exact completion, and
+    // leaves Context-owned reclamation pending for this quiescent host frame.
+    ctx.beginConcurrentEnvironmentTrace();
+    ctx.gc_scan_native_stack = true;
+    heap.beginConcurrentMark();
+    ctx.gc_scan_native_stack = false;
+    try std.testing.expect(heap.concurrent.load(.acquire));
+    try std.testing.expectEqual(
+        Context.ConcurrentGcFinishResult.finished,
+        ctx.finishConcurrentGCIfActive(),
+    );
+    try std.testing.expect(ctx.gc_concurrent_post_sweep_pending);
+    try std.testing.expectEqual(
+        Context.ConcurrentGcFinishResult.inactive,
+        ctx.finishConcurrentGCIfActive(),
+    );
+
+    try std.testing.expect(ctx.drainConcurrentPostSweepMaintenance(.ordinary_collection, false));
+    try std.testing.expect(!ctx.gc_concurrent_post_sweep_pending);
+    try std.testing.expectEqual(
+        GcCellBacking.reusable_tail_chunks + 1,
+        backing.bucket_chunks[idx].items.len,
+    );
+    try std.testing.expect(!ctx.drainConcurrentPostSweepMaintenance(.ordinary_collection, false));
+}
+
 test "enable_gc concurrent (M3): the production driver marks on a thread while JS runs" {
     // Phase 7 / M3: with `concurrent_gc`, `collectMidScript` marks on a dedicated
     // thread *concurrently* with the mutator between safepoints. Same workload
@@ -23877,6 +23991,7 @@ test "enable_gc concurrent (M3): the production driver marks on a thread while J
     try std.testing.expect(ctx.gc.?.live_cells < 20000); // heap stayed bounded
     try std.testing.expect(ctx.gc_marker == null); // no marker outlived the run
     try std.testing.expect(!ctx.gc.?.concurrent.load(.acquire));
+    try std.testing.expect(!ctx.gc_concurrent_post_sweep_pending);
 
     // A retained graph built + repeatedly assigned (env writes) under concurrent
     // marking is intact afterward.
