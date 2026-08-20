@@ -22,7 +22,7 @@ function escapedDiagnosticText(text: string): string {
     );
 }
 
-function labelledDiagnosticTail(
+function labelledDiagnosticExcerpt(
   label: "stdout" | "stderr",
   text: string,
   limit: number,
@@ -34,9 +34,18 @@ function labelledDiagnosticTail(
       .map((line) => `${prefix}${line}`)
       .join("\n");
   if (prefixed.length <= limit) return prefixed;
-  const marker = `${prefix}[... leading characters omitted]`,
-    tailLength = limit - marker.length - 1 - prefix.length;
-  return `${marker}\n${prefix}${prefixed.slice(-tailLength)}`;
+  const marker = `${prefix}[... middle characters omitted]`,
+    payloadLength = limit - marker.length - 2 - prefix.length,
+    headLength = Math.floor(payloadLength / 2),
+    tailLength = payloadLength - headLength;
+  let head = prefixed.slice(0, headLength);
+  if (head.endsWith("\n")) head = head.slice(0, -1);
+  else {
+    const lastNewline = head.lastIndexOf("\n");
+    if (lastNewline >= 0 && !head.slice(lastNewline + 1).startsWith(prefix))
+      head = head.slice(0, lastNewline);
+  }
+  return `${head}\n${marker}\n${prefix}${prefixed.slice(-tailLength)}`;
 }
 
 export function failureDiagnostics(
@@ -46,11 +55,11 @@ export function failureDiagnostics(
 ): string {
   requireValue(limit >= 256, "failure diagnostic limit is too small");
   const streamLimit = Math.floor((limit - 1) / 2);
-  return `${labelledDiagnosticTail(
+  return `${labelledDiagnosticExcerpt(
     "stdout",
     stdout,
     streamLimit,
-  )}\n${labelledDiagnosticTail("stderr", stderr, streamLimit)}`;
+  )}\n${labelledDiagnosticExcerpt("stderr", stderr, streamLimit)}`;
 }
 
 function regressionAnnotation(item: Regression): string {
@@ -75,15 +84,19 @@ function selfTest(): void {
     "failure diagnostic line can inject a workflow command",
   );
   const bounded = failureDiagnostics(
-    "::error::spoof\n".repeat(2_000),
-    "x".repeat(20_000),
+    `STDOUT_HEAD\n${"::error::spoof\n".repeat(2_000)}STDOUT_TAIL`,
+    `STDERR_HEAD\n${"x".repeat(20_000)}\nSTDERR_TAIL`,
     512,
   );
   requireValue(
     bounded.length <= 512 &&
-      bounded.includes("leading characters omitted") &&
+      bounded.includes("middle characters omitted") &&
+      bounded.includes("STDOUT_HEAD") &&
+      bounded.includes("STDOUT_TAIL") &&
+      bounded.includes("STDERR_HEAD") &&
+      bounded.includes("STDERR_TAIL") &&
       bounded.split("\n").every((line) => line.startsWith("runner ")),
-    "failure diagnostic truncation is not bounded",
+    "failure diagnostic head/tail truncation is not bounded",
   );
   const empty = failureDiagnostics("", "");
   requireValue(
@@ -106,7 +119,7 @@ function selfTest(): void {
     "failure exit/timeout metadata is ambiguous",
   );
   console.log(
-    "OK no-GIL corpus gate self-test: bounded, labelled, workflow-safe diagnostics",
+    "OK no-GIL corpus gate self-test: bounded, labelled, workflow-safe head/tail diagnostics",
   );
 }
 
