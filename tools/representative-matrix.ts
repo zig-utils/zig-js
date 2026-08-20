@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v16.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v17.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -23,7 +23,7 @@ function validatePinnedFile(entry: any, label: string, root: string): void {
 export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 16, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 17, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -31,12 +31,34 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   requireValue(digest(parentPath) === parent.sha256, `representative parent manifest changed after v${child.schema_version} froze`);
   const inherited = loadManifest(parentPath, root);
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
-  validate(inherited, root);
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
+  if (child.schema_version === 17) {
+    requireValue(child.tier_attribution === undefined, "v17 must inherit the attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v17 changes exact-parent integration only");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v17 must inherit completed panel inventory unchanged");
+    requireValue(child.exact_parent_integration && typeof child.exact_parent_integration === "object", "v17 must replace the exact-parent integration contract");
+    const merged = {
+      ...inherited,
+      ...child,
+      completed_metric_panels: {
+        ...inherited.completed_metric_panels,
+        efficiency_thermal: {
+          ...inherited.completed_metric_panels.efficiency_thermal,
+          scored_integration: child.exact_parent_integration,
+        },
+      },
+    };
+    // V16's exact-parent pin is the one field V17 deliberately supersedes.
+    // Validate the fully merged child so every other inherited hash remains
+    // fail-closed without requiring a historical source checkout (#632).
+    validate(merged, root);
+    return merged;
+  }
+  validate(inherited, root);
   if (child.schema_version === 2) return { ...inherited, ...child };
   if (child.schema_version === 16) {
     requireValue(child.tier_attribution === undefined, "v16 must inherit the attribution contract unchanged");
@@ -69,7 +91,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT): any {
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 16, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 17, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -176,55 +198,56 @@ export function validate(manifest: any, root = ROOT): void {
   requireValue(same(modes.shared.engines, ["zig-js"]), "shared mode must not construct a JSC ratio");
   requireValue(Array.isArray(manifest.pending_metric_panels), "pending metric inventory must remain explicit");
   if (manifest.schema_version >= 16) {
-    requireValue(manifest.pending_metric_panels.length === 0, "V16 completed pending metric inventory must be empty");
+    const version = `V${manifest.schema_version}`;
+    requireValue(manifest.pending_metric_panels.length === 0, `${version} completed pending metric inventory must be empty`);
     const completed = manifest.completed_metric_panels;
     requireValue(
       completed && same(Object.keys(completed).sort(), ["efficiency_thermal", "independent_suite"]),
-      "V16 completed panel inventory drift",
+      `${version} completed panel inventory drift`,
     );
     const efficiency = completed.efficiency_thermal;
-    requireValue(efficiency.issue === 503 && efficiency.status === "integrated", "V16 efficiency panel identity drift");
-    validatePinnedFile(efficiency.scored_integration, "V16 exact-parent integration", root);
-    validatePinnedFile(efficiency.disabled_path_fixture, "V16 instrumentation fixture", root);
-    validatePinnedFile(efficiency.disabled_path_fixture.raw_evidence, "V16 instrumentation raw evidence", root);
-    validatePinnedFile(efficiency.disabled_path_fixture.report, "V16 instrumentation report", root);
+    requireValue(efficiency.issue === 503 && efficiency.status === "integrated", `${version} efficiency panel identity drift`);
+    validatePinnedFile(efficiency.scored_integration, `${version} exact-parent integration`, root);
+    validatePinnedFile(efficiency.disabled_path_fixture, `${version} instrumentation fixture`, root);
+    validatePinnedFile(efficiency.disabled_path_fixture.raw_evidence, `${version} instrumentation raw evidence`, root);
+    validatePinnedFile(efficiency.disabled_path_fixture.report, `${version} instrumentation report`, root);
     requireValue(
       same(efficiency.scored_integration.measured_metrics || [], ["instructions", "cycles", "energy_joules", "thermal_state"]),
-      "V16 measured efficiency metric inventory drift",
+      `${version} measured efficiency metric inventory drift`,
     );
     requireValue(
       same(efficiency.scored_integration.material_change_categories || [], ["cpu_work", "threads", "generated_code", "cache_traffic"]),
-      "V16 material-change category inventory drift",
+      `${version} material-change category inventory drift`,
     );
     requireValue(
       same(efficiency.explicitly_unavailable || [], ["cpu_cache_misses", "tlb_misses", "branches_and_misses", "migrations", "scheduler_wait", "frequency", "package_energy", "peak_power"]),
-      "V16 unavailable efficiency metric inventory drift",
+      `${version} unavailable efficiency metric inventory drift`,
     );
     requireValue(
       typeof efficiency.scored_integration.publication_boundary === "string" && efficiency.scored_integration.publication_boundary.length > 0 &&
         typeof efficiency.disabled_path_fixture.evidence_ruling === "string" && efficiency.disabled_path_fixture.evidence_ruling.length > 0,
-      "V16 efficiency publication ruling is incomplete",
+      `${version} efficiency publication ruling is incomplete`,
     );
 
     const independent = completed.independent_suite;
-    requireValue(independent.issue === 504 && independent.status === "integrated", "V16 independent-suite panel identity drift");
-    validatePinnedFile(independent.inventory, "V16 independent-suite inventory", root);
-    validatePinnedFile(independent.offline_verifier, "V16 independent-suite verifier", root);
+    requireValue(independent.issue === 504 && independent.status === "integrated", `${version} independent-suite panel identity drift`);
+    validatePinnedFile(independent.inventory, `${version} independent-suite inventory`, root);
+    validatePinnedFile(independent.offline_verifier, `${version} independent-suite verifier`, root);
     requireValue(
       Array.isArray(independent.adapters) && same(independent.adapters.map((entry: any) => entry.engine), ["zig-js", "system-jsc", "node-v8"]),
-      "V16 independent engine adapter inventory drift",
+      `${version} independent engine adapter inventory drift`,
     );
-    for (const adapter of independent.adapters) validatePinnedFile(adapter, `V16 ${adapter.engine} adapter`, root);
-    validatePinnedFile(independent.collector, "V16 independent-suite collector", root);
-    validatePinnedFile(independent.recognizer, "V16 independent-suite recognizer", root);
+    for (const adapter of independent.adapters) validatePinnedFile(adapter, `${version} ${adapter.engine} adapter`, root);
+    validatePinnedFile(independent.collector, `${version} independent-suite collector`, root);
+    validatePinnedFile(independent.recognizer, `${version} independent-suite recognizer`, root);
     requireValue(
       same(independent.unavailable_optional_engines || [], ["standalone-v8", "spidermonkey", "quickjs"]),
-      "V16 unavailable optional-engine inventory drift",
+      `${version} unavailable optional-engine inventory drift`,
     );
     requireValue(
       typeof independent.recognizer.required_equivalence === "string" && independent.recognizer.required_equivalence.length > 0 &&
         typeof independent.publication_boundary === "string" && independent.publication_boundary.length > 0,
-      "V16 independent-suite publication ruling is incomplete",
+      `${version} independent-suite publication ruling is incomplete`,
     );
   } else if (manifest.schema_version >= 13) {
     const pending = manifest.pending_metric_panels;

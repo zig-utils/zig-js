@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v16.json`. V16 hash-inherits every V15 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, and attribution metric unchanged. It hash-pins the completed #503 efficiency/thermal publication guard and #504 independent-suite/additional-engine boundary as external corroboration panels, then empties the former pending-panel inventory. Accepted historical reports are not rewritten, capability boundaries remain explicit, external-suite scores never enter repository-owned aggregates, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v17.json`. V17 hash-inherits every V16 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, and external-suite boundary unchanged. It re-pins the completed #503 exact-parent integration after its frontend counters and fail-closed collection guards changed; accepted historical reports are not rewritten, capability boundaries remain explicit, external-suite scores never enter repository-owned aggregates, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -303,11 +303,14 @@ the harness and frozen checksums but is not publication evidence.
 
 ## Instrumentation overhead
 
-The V16 representative contract integrates this completed #503 panel by
+The V16 representative contract integrated this completed #503 panel by
 hash-pinning both the opt-in exact-parent publication guard and the disabled-path
-fixture below. This does not copy diagnostic timing numbers into representative
-rows: unavailable counters remain unavailable, and only a stable nominal
-quiet-reference run can support an efficiency claim.
+fixture below. V17 inherits the panel and re-pins only the exact-parent
+integration after it gained frontend counters and fail-closed competing-job,
+transient-overlap, and contaminated-build rejection. This does not copy
+diagnostic timing numbers into representative rows: unavailable counters remain
+unavailable, and only a stable nominal quiet-reference run can support an
+efficiency claim.
 
 [`tools/instrumentation-overhead.ts`](../tools/instrumentation-overhead.ts),
 exposed as `zig build instrumentation-overhead`, alternates fresh-process
@@ -402,11 +405,12 @@ claim.
 
 ## Independent suites and additional engines
 
-The V16 representative contract integrates this completed #504 panel by
+The V16 representative contract integrated this completed #504 panel by
 hash-pinning its inventory, offline verifier, three available engine adapters,
-lossless collector, and source-hash recognizer. The panel remains external
-corroboration by design: it adds no ordinary dependency and contributes no
-numeric value to the repository-owned representative aggregate.
+lossless collector, and source-hash recognizer. V17 inherits that contract
+unchanged. The panel remains external corroboration by design: it adds no
+ordinary dependency and contributes no numeric value to the repository-owned
+representative aggregate.
 
 The frozen [independent-suite inventory](./.data/independent-suite-inventory-v1.json)
 keeps external benchmark candidates outside this repository and outside ordinary

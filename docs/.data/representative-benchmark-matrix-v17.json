@@ -1,0 +1,52 @@
+{
+  "schema_version": 17,
+  "matrix_id": "zig-js-representative-v17",
+  "status": "frozen",
+  "frozen_date": "2026-08-19",
+  "owner_issue": 632,
+  "history_policy": "This version hash-inherits every V16 workload, scored mode, job count, checksum, timing boundary, engine-availability ruling, acceptance decision, attribution metric, external-suite boundary, and unavailable metric. It changes no scored row. It re-pins only the exact-parent integration after its frontend counters and fail-closed collection guards changed. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v16",
+    "path": "docs/.data/representative-benchmark-matrix-v16.json",
+    "sha256": "edd0e58c096c252722b01e1811575d315398ccbe511f7c51095afce78df52d00",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels"
+    ]
+  },
+  "change": "Re-freezes the completed efficiency/thermal panel after exact-parent collection gained frontend compiler counters plus fail-closed competing-job, transient-overlap, and contaminated-build rejection. Every scored workload and result contract remains inherited unchanged.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "17e110358724b5c77202a93efda2c42635b56cbe54d722b9b90e8221fa54f1a5",
+    "measured_metrics": [
+      "instructions",
+      "cycles",
+      "energy_joules",
+      "thermal_state"
+    ],
+    "material_change_categories": [
+      "cpu_work",
+      "threads",
+      "generated_code",
+      "cache_traffic"
+    ],
+    "contract_changes": [
+      "frontend compiler counters are retained with every sample",
+      "competing long-running jobs reject collection before sampling",
+      "transient overlap rejects the affected exact pair",
+      "contaminated build-feedback evidence is unavailable"
+    ],
+    "publication_boundary": "Only an explicitly selected quiet-reference host on AC power may support an efficiency claim. Required counters must be measured and stable at at most 5% RSD, every thermal observation must remain nominal, generated-code/cache claims additionally require their exact category metric, and every raw sample remains visible. Diagnostic hosts never gate or support a public ratio. Collection also fails closed before or during sampling when competing work or contaminated build feedback invalidates the exact-parent comparison."
+  }
+}
