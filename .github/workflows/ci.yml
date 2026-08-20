@@ -75,7 +75,7 @@ jobs:
           # the bounded terminal-premise probes against the installed runner.
           - name: threads-reference-audit
             home_tool: true
-            cmd: zig build threads-reference-audit threads-reference-probes
+            cmd: zig build threads-reference-audit threads-reference-probes -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
           # Bounded witness for the #430 execution inventory. The complete
           # artifact is a deliberate hours-long reproduction; this keeps the
           # tooling that produces it from rotting silently, on every push.
@@ -87,7 +87,7 @@ jobs:
               "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/pr249-terminal-execution.ts --check
           - name: benchmark-comparison-harness
             home_tool: true
-            cmd: zig build benchmark-comparison-test
+            cmd: zig build benchmark-comparison-test -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
           - name: dependency-audit
             cmd: zig build dependency-audit
           - name: wasm-feature-profiles
@@ -182,7 +182,7 @@ jobs:
           - name: focused-engine-tests
             home_tool: true
             cmd: |
-              zig build test-jit test-vm test-runtime test-concurrency gc-relocation-inventory-check optimizer-release-inventory-check
+              zig build test-jit test-vm test-runtime test-concurrency gc-relocation-inventory-check optimizer-release-inventory-check -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
               zig build test-runtime -Dtsan=true
           # Execute real generated instructions and require both sides of W^X:
           # unpublished pages fault on execute, and published pages fault on
@@ -199,7 +199,7 @@ jobs:
             cmd: |
               "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/private-abi.ts --self-test
               "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/private-abi-tsan.ts
-              zig build c-api-audit home-private-abi-audit test-home-private-abi
+              zig build c-api-audit home-private-abi-audit test-home-private-abi -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
               zig build test-home-private-abi -Doptimize=ReleaseSafe
               zig build test-home-private-abi -Dtsan=true
               zig build test-private-consumer-providers
