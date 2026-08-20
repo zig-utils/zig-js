@@ -204,56 +204,63 @@ jobs:
           - name: private-abi-boundary
             home_tool: true
             cmd: |
-              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/private-abi.ts --self-test
-              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/private-abi-tsan.ts
-              zig build c-api-audit home-private-abi-audit test-home-private-abi -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
-              zig build test-home-private-abi -Doptimize=ReleaseSafe
-              zig build test-home-private-abi -Dtsan=true
-              zig build test-private-consumer-providers
-              zig build test-private-consumer-providers -Doptimize=ReleaseSafe
-              zig build test-private-consumer-providers -Dtsan=true
-              zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun
-              zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun -Doptimize=ReleaseSafe
-              zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun -Dtsan=true
-              zig build test-private-global-lifecycle
-              zig build test-private-global-lifecycle -Doptimize=ReleaseSafe
-              zig build test-private-global-lifecycle -Dtsan=true
-              zig build test-private-process-initialization
-              zig build test-private-process-initialization -Doptimize=ReleaseSafe
-              zig build test-private-process-initialization -Dtsan=true
-              zig build test-bun-private-abort-signal -Dprivate-abi-consumer=bun
-              zig build test-bun-private-cached-bytecode -Dprivate-abi-consumer=bun
-              zig build test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun
-              zig build test-private-hot-reload
-              zig build test-private-process-signal
-              zig build test-home-private-script-execution-context
-              zig build test-private-module-registry-shims
-              zig build test-private-heap-snapshot
-              zig build test-private-heap-snapshot -Doptimize=ReleaseSafe
-              zig build test-private-heap-snapshot -Dtsan=true
-              zig build test-private-cpu-profile
-              zig build test-private-cpu-profile -Doptimize=ReleaseSafe
-              zig build test-private-cpu-profile -Dtsan=true
-              zig build test-private-readable-stream
-              zig build test-private-readable-stream -Doptimize=ReleaseSafe
-              zig build test-private-readable-stream -Dtsan=true
-              zig build test -Dtest-filter='Fetch Body'
-              zig build test -Dtest-filter='Fetch Body' -Doptimize=ReleaseSafe
-              zig build test -Dtest-filter='Fetch Body' -Dtsan=true
-              zig build test -Dtest-filter='streaming compilation'
-              zig build test -Dtest-filter='streaming compilation' -Doptimize=ReleaseSafe
-              zig build test -Dtest-filter='streaming compilation' -Dtsan=true
-              zig build test-private-wasm-streaming-compiler
-              zig build test-private-wasm-streaming-compiler -Doptimize=ReleaseSafe
-              zig build test-private-wasm-streaming-compiler -Dtsan=true
-              zig build test-private-error-code
-              zig build test-private-inspector-agents
-              zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
-              zig build test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
-              zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
-              zig build test-bun-private-dom-form-data -Dprivate-abi-consumer=bun
-              zig build test-bun-private-fetch-headers -Dprivate-abi-consumer=bun
-              zig build test-private-abi-mixed-profiles -Dprivate-abi-consumer=bun
+              home_tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
+              # home-tool-bootstrap configures build.zig before this runtime
+              # exists. Keep the pinned path in every later build-graph identity
+              # so a cached $HOME fallback can never reach an ABI fixture.
+              zig_with_home_tool() {
+                zig build "$@" -Dhome-tool="$home_tool"
+              }
+              "$home_tool" run tools/private-abi.ts --self-test
+              "$home_tool" run tools/private-abi-tsan.ts
+              zig_with_home_tool c-api-audit home-private-abi-audit test-home-private-abi
+              zig_with_home_tool test-home-private-abi -Doptimize=ReleaseSafe
+              zig_with_home_tool test-home-private-abi -Dtsan=true
+              zig_with_home_tool test-private-consumer-providers
+              zig_with_home_tool test-private-consumer-providers -Doptimize=ReleaseSafe
+              zig_with_home_tool test-private-consumer-providers -Dtsan=true
+              zig_with_home_tool test-bun-private-sql-structure -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-bun-private-sql-structure -Dprivate-abi-consumer=bun -Doptimize=ReleaseSafe
+              zig_with_home_tool test-bun-private-sql-structure -Dprivate-abi-consumer=bun -Dtsan=true
+              zig_with_home_tool test-private-global-lifecycle
+              zig_with_home_tool test-private-global-lifecycle -Doptimize=ReleaseSafe
+              zig_with_home_tool test-private-global-lifecycle -Dtsan=true
+              zig_with_home_tool test-private-process-initialization
+              zig_with_home_tool test-private-process-initialization -Doptimize=ReleaseSafe
+              zig_with_home_tool test-private-process-initialization -Dtsan=true
+              zig_with_home_tool test-bun-private-abort-signal -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-bun-private-cached-bytecode -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-private-hot-reload
+              zig_with_home_tool test-private-process-signal
+              zig_with_home_tool test-home-private-script-execution-context
+              zig_with_home_tool test-private-module-registry-shims
+              zig_with_home_tool test-private-heap-snapshot
+              zig_with_home_tool test-private-heap-snapshot -Doptimize=ReleaseSafe
+              zig_with_home_tool test-private-heap-snapshot -Dtsan=true
+              zig_with_home_tool test-private-cpu-profile
+              zig_with_home_tool test-private-cpu-profile -Doptimize=ReleaseSafe
+              zig_with_home_tool test-private-cpu-profile -Dtsan=true
+              zig_with_home_tool test-private-readable-stream
+              zig_with_home_tool test-private-readable-stream -Doptimize=ReleaseSafe
+              zig_with_home_tool test-private-readable-stream -Dtsan=true
+              zig_with_home_tool test -Dtest-filter='Fetch Body'
+              zig_with_home_tool test -Dtest-filter='Fetch Body' -Doptimize=ReleaseSafe
+              zig_with_home_tool test -Dtest-filter='Fetch Body' -Dtsan=true
+              zig_with_home_tool test -Dtest-filter='streaming compilation'
+              zig_with_home_tool test -Dtest-filter='streaming compilation' -Doptimize=ReleaseSafe
+              zig_with_home_tool test -Dtest-filter='streaming compilation' -Dtsan=true
+              zig_with_home_tool test-private-wasm-streaming-compiler
+              zig_with_home_tool test-private-wasm-streaming-compiler -Doptimize=ReleaseSafe
+              zig_with_home_tool test-private-wasm-streaming-compiler -Dtsan=true
+              zig_with_home_tool test-private-error-code
+              zig_with_home_tool test-private-inspector-agents
+              zig_with_home_tool test-bun-private-property-iterator -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-bun-private-array-buffer -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-bun-private-dom-form-data -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-bun-private-fetch-headers -Dprivate-abi-consumer=bun
+              zig_with_home_tool test-private-abi-mixed-profiles -Dprivate-abi-consumer=bun
           - name: tsan-unit (shard 0/4)
             cmd: zig build test -Dtsan=true -Dunit-shard-index=0 -Dunit-shard-count=4
           - name: tsan-unit (shard 1/4)
