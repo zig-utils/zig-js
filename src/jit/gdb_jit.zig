@@ -121,7 +121,17 @@ fn publish(
     allocator: std.mem.Allocator,
     artifact: observability.Artifact,
 ) observability.PublishError!?*anyopaque {
-    if (!supportsMachOObject()) return null;
+    // Keep the Mach-O implementation lazily analyzed. An ordinary runtime
+    // early return still leaves its unwind-provider references link-visible in
+    // Debug builds on Zig dev.1818, even though this publisher is unsupported.
+    if (comptime supportsMachOObject()) return publishMachO(allocator, artifact);
+    return null;
+}
+
+fn publishMachO(
+    allocator: std.mem.Allocator,
+    artifact: observability.Artifact,
+) observability.PublishError!?*anyopaque {
     if (artifact.code.len == 0 or artifact.pc_start != @intFromPtr(artifact.code.ptr))
         return error.NativeCodePublicationFailed;
 
@@ -164,6 +174,11 @@ fn publish(
 }
 
 fn unpublish(_: ?*anyopaque, opaque_registration: *anyopaque) void {
+    if (comptime supportsMachOObject()) return unpublishMachO(opaque_registration);
+    unreachable;
+}
+
+fn unpublishMachO(opaque_registration: *anyopaque) void {
     const registration: *Registration = @ptrCast(@alignCast(opaque_registration));
     lockProtocol();
     const entry = &registration.entry;
