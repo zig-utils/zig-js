@@ -5370,7 +5370,8 @@ pub const Object = struct {
 
     fn ownKeysUnlockedWithScratch(self: *const Object, arena: std.mem.Allocator, scratch: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         var insertion: std.ArrayListUnmanaged([]const u8) = .empty;
-        if (self.keyOrder()) |ord| {
+        const key_order = self.keyOrder();
+        if (key_order) |ord| {
             // Creation order across data + accessor keys. Keep each present key's
             // LAST occurrence (a deleted-then-re-added key sorts to its new spot).
             // Index current liveness from the shape/accessor stores once. Walking
@@ -5452,12 +5453,19 @@ pub const Object = struct {
         var strings: std.ArrayListUnmanaged([]const u8) = .empty;
         var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
         for (insertion.items) |k| {
-            if (canonicalIndex(k) != null) {
-                try indices.append(arena, k);
-            } else if (isRealSymbolKey(k)) {
-                try symbols.append(arena, k);
+            // Shape names are Context-arena immutable, but key_order/accessor
+            // names use individually reclaimable backing. A writer may compact
+            // that history immediately after property_lock is released, so an
+            // externally returned snapshot must own those bytes. This is the
+            // same lock-scoped copy required by EnumerateObjectProperties; keep
+            // the ordinary shape-only path zero-copy.
+            const snapshot_key = if (key_order != null) try arena.dupe(u8, k) else k;
+            if (canonicalIndex(snapshot_key) != null) {
+                try indices.append(arena, snapshot_key);
+            } else if (isRealSymbolKey(snapshot_key)) {
+                try symbols.append(arena, snapshot_key);
             } else {
-                try strings.append(arena, k);
+                try strings.append(arena, snapshot_key);
             }
         }
         std.mem.sort([]const u8, indices.items, {}, struct {
@@ -7467,12 +7475,13 @@ test "ownKeys releases its membership index without changing result ownership" {
     var alpha = Shape{ .parent = &root, .name = "alpha", .slot = 0, .deleted = false, .count = 1, .live_count = 1, .depth = 1, .arena = std.testing.allocator };
     var beta = Shape{ .parent = &alpha, .name = "beta", .slot = 1, .deleted = false, .count = 2, .live_count = 2, .depth = 2, .arena = std.testing.allocator };
     var order = std.ArrayListUnmanaged(KeyOrderEntry).empty;
-    try order.appendSlice(std.testing.allocator, &.{
-        .{ .key = "alpha" },
-        .{ .key = "beta" },
-        .{ .key = "alpha" },
-    });
-    defer order.deinit(std.testing.allocator);
+    defer {
+        for (order.items) |entry| std.testing.allocator.free(entry.key);
+        order.deinit(std.testing.allocator);
+    }
+    try appendOwnedKeyOrder(&order, std.testing.allocator, "alpha", false);
+    try appendOwnedKeyOrder(&order, std.testing.allocator, "beta", false);
+    try appendOwnedKeyOrder(&order, std.testing.allocator, "alpha", false);
 
     var cold = ObjectColdState{ .key_order = .init(&order) };
     var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator };
@@ -7488,6 +7497,13 @@ test "ownKeys releases its membership index without changing result ownership" {
     var scratch_storage: [4096]u8 = undefined;
     var scratch = std.heap.FixedBufferAllocator.init(&scratch_storage);
     const keys = try object.ownKeysWithScratch(result_arena.allocator(), scratch.allocator());
+
+    // A concurrent key-order compaction can reclaim every source spelling as
+    // soon as ownKeys releases property_lock. Model that exact lifetime edge:
+    // the returned snapshot must retain its own bytes, not merely its slice
+    // headers.
+    for (order.items) |entry| std.testing.allocator.free(entry.key);
+    order.items.len = 0;
 
     // The last alpha occurrence defines its creation position, and result
     // storage remains live after the invocation-local index is released.
