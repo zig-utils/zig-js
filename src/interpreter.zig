@@ -31529,16 +31529,15 @@ fn intlRelativeTimeFormatToPartsFn(ctx: *anyopaque, this: Value, args: []const V
     if (r.prefix.len > 0) try addPart(self, arr, .literal, r.prefix, null);
     // Number, split into integer/group parts, each tagged with the unit.
     const first_group = r.int_str.len % 3;
-    var run: std.ArrayListUnmanaged(u8) = .empty;
-    for (r.int_str, 0..) |c, i| {
+    var run_start: usize = 0;
+    for (r.int_str, 0..) |_, i| {
         if (r.int_str.len >= r.min_group_digits and i != 0 and (i % 3) == first_group) {
-            try addPart(self, arr, .integer, try rtfTranslateNumber(self, try run.toOwnedSlice(self.arena), r.numbering), r.unit);
+            try addPart(self, arr, .integer, try rtfTranslateNumber(self, r.int_str[run_start..i], r.numbering), r.unit);
             try addPart(self, arr, .group, r.group, r.unit);
-            run = .empty;
+            run_start = i;
         }
-        try run.append(self.arena, c);
     }
-    try addPart(self, arr, .integer, try rtfTranslateNumber(self, try run.toOwnedSlice(self.arena), r.numbering), r.unit);
+    try addPart(self, arr, .integer, try rtfTranslateNumber(self, r.int_str[run_start..], r.numbering), r.unit);
     if (r.frac_str.len > 0) {
         try addPart(self, arr, .decimal, r.decimal, r.unit);
         try addPart(self, arr, .fraction, try rtfTranslateNumber(self, r.frac_str, r.numbering), r.unit);
