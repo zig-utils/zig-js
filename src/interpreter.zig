@@ -774,25 +774,158 @@ pub const Environment = struct {
             gc_mod.barrierValue(v);
     }
 
+    inline fn barrierStoredEnvironment(self: *Environment, target: *Environment) void {
+        if (!target.gc_managed) return;
+        if (self.gc_managed) {
+            if (!gc_mod.barrierExactManagedCellFrom(self, target))
+                gc_mod.barrierCellFrom(self, target);
+        } else {
+            // Context-embedded roots are external precise roots rather than GC
+            // cells; retain and shade a newly published managed module target.
+            gc_mod.barrierCell(target);
+        }
+    }
+
+    inline fn bindingsHaveSingleWriter(self: *const Environment) bool {
+        return !self.binding_lock_required or (self.private_activation and !self.captured);
+    }
+
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
         self.barrierStoredValue(v);
-        const a = self.bindingAllocator();
-        const locked = self.lockBindingsForWrite();
+        if (self.bindingsHaveSingleWriter()) {
+            // The owning mutator is the only structural writer. Snapshot before
+            // allocating so a private activation retains one collector handshake
+            // and an existing-value update never performs a fallible key copy.
+            if (self.vars.contains(name)) {
+                const locked = self.lockBindingsForWrite();
+                defer self.unlockBindingsForWrite(locked);
+                self.vars.getPtr(name).?.* = v;
+                return;
+            }
+            var owned: ?[]u8 = try self.dupeBindingName(name);
+            defer if (owned) |key| self.freeBindingName(key);
+            const locked = self.lockBindingsForWrite();
+            defer self.unlockBindingsForWrite(locked);
+            try self.vars.ensureUnusedCapacity(self.bindingAllocator(), 1);
+            self.vars.putAssumeCapacity(owned.?, v);
+            owned = null;
+            return;
+        }
+
+        var locked = self.lockBindingsForWrite();
+        if (self.vars.getPtr(name)) |slot| {
+            slot.* = v;
+            self.unlockBindingsForWrite(locked);
+            return;
+        }
+        self.unlockBindingsForWrite(locked);
+
+        // The caller's name commonly borrows parser/source storage. Take
+        // ownership outside the trace-sensitive Environment lock so heap-limit
+        // recovery can collect an unreachable prior scope. Then recheck under
+        // the lock: a no-GIL peer may have inserted the binding meanwhile.
+        var owned: ?[]u8 = try self.dupeBindingName(name);
+        defer if (owned) |key| self.freeBindingName(key);
+        locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
-        const gop = try self.vars.getOrPut(a, name);
-        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
-        gop.value_ptr.* = v;
+        if (self.vars.getPtr(name)) |slot| {
+            slot.* = v;
+            return;
+        }
+        try self.vars.ensureUnusedCapacity(self.bindingAllocator(), 1);
+        self.vars.putAssumeCapacity(owned.?, v);
+        owned = null;
+    }
+
+    fn putTaggedBinding(
+        self: *Environment,
+        tag: *std.StringHashMapUnmanaged(void),
+        name: []const u8,
+        v: Value,
+    ) EvalError!void {
+        while (true) {
+            const single_writer = self.bindingsHaveSingleWriter();
+            var locked = if (single_writer) false else self.lockBindingsForWrite();
+            const needs_value_key = !self.vars.contains(name);
+            const needs_tag_key = !tag.contains(name);
+            if (!needs_value_key and !needs_tag_key) {
+                if (single_writer) locked = self.lockBindingsForWrite();
+                defer self.unlockBindingsForWrite(locked);
+                self.vars.getPtr(name).?.* = v;
+                return;
+            }
+            if (!single_writer) self.unlockBindingsForWrite(locked);
+
+            // Allocate only the keys absent in the optimistic snapshot. The
+            // ordinary lexical-declaration path already has its value binding
+            // and must not require a second temporary copy under heap pressure.
+            // A no-GIL DeleteBinding can invalidate that snapshot; retry outside
+            // the lock if the final state needs a key we did not prepare.
+            var value_key: ?[]u8 = null;
+            defer if (value_key) |key| self.freeBindingName(key);
+            if (needs_value_key) value_key = try self.dupeBindingName(name);
+            var tag_key: ?[]u8 = null;
+            defer if (tag_key) |key| self.freeBindingName(key);
+            if (needs_tag_key) tag_key = try self.dupeBindingName(name);
+
+            locked = self.lockBindingsForWrite();
+            const value_slot = self.vars.getPtr(name);
+            const has_tag = tag.contains(name);
+            if ((value_slot == null and value_key == null) or (!has_tag and tag_key == null)) {
+                self.unlockBindingsForWrite(locked);
+                continue;
+            }
+            defer self.unlockBindingsForWrite(locked);
+
+            // Capacity growth is the last fallible phase. It may retain an empty
+            // allocation when the second table fails, but no binding or side-table
+            // state becomes semantically visible until both reservations succeed.
+            const a = self.bindingAllocator();
+            if (value_slot == null) try self.vars.ensureUnusedCapacity(a, 1);
+            if (!has_tag) try tag.ensureUnusedCapacity(a, 1);
+
+            if (value_slot == null) {
+                self.vars.putAssumeCapacity(value_key.?, v);
+                value_key = null;
+            } else {
+                value_slot.?.* = v;
+            }
+            if (!has_tag) {
+                tag.putAssumeCapacity(tag_key.?, {});
+                tag_key = null;
+            }
+            return;
+        }
     }
 
     /// Define a `const` binding in this scope (marks it immutable for `assign`).
     pub fn putConst(self: *Environment, name: []const u8, v: Value) EvalError!void {
-        try self.put(name, v);
-        const a = self.bindingAllocator();
-        const locked = self.lockBindingsForWrite(); // serialize the consts table vs a concurrent isConst read
+        self.barrierStoredValue(v);
+        try self.putTaggedBinding(&self.consts, name, v);
+    }
+
+    fn markOwnedName(
+        self: *Environment,
+        set: *std.StringHashMapUnmanaged(void),
+        name: []const u8,
+    ) EvalError!void {
+        const single_writer = self.bindingsHaveSingleWriter();
+        var locked = if (single_writer) false else self.lockBindingsForWrite();
+        if (set.contains(name)) {
+            if (!single_writer) self.unlockBindingsForWrite(locked);
+            return;
+        }
+        if (!single_writer) self.unlockBindingsForWrite(locked);
+
+        var owned: ?[]u8 = try self.dupeBindingName(name);
+        defer if (owned) |key| self.freeBindingName(key);
+        locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
-        const gop = try self.consts.getOrPut(a, name);
-        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
+        if (set.contains(name)) return;
+        try set.ensureUnusedCapacity(self.bindingAllocator(), 1);
+        set.putAssumeCapacity(owned.?, {});
+        owned = null;
     }
 
     /// Record `name` as a global lexical declaration (see `lexicals`). The binding
@@ -800,30 +933,18 @@ pub const Environment = struct {
     /// an identifier read resolves the declarative binding, not a shadowed
     /// global-object property.
     pub fn markLexical(self: *Environment, name: []const u8) EvalError!void {
-        const a = self.bindingAllocator();
-        const locked = self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite(locked);
-        const gop = try self.lexicals.getOrPut(a, name);
-        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
+        try self.markOwnedName(&self.lexicals, name);
     }
 
     /// Bind a named function expression's own name (immutable, non-strict).
     pub fn putFnName(self: *Environment, name: []const u8, v: Value) EvalError!void {
-        try self.put(name, v);
-        const a = self.bindingAllocator();
-        const locked = self.lockBindingsForWrite(); // serialize the fn_names table vs a concurrent isFnName read
-        defer self.unlockBindingsForWrite(locked);
-        const gop = try self.fn_names.getOrPut(a, name);
-        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
+        self.barrierStoredValue(v);
+        try self.putTaggedBinding(&self.fn_names, name, v);
     }
 
     /// Mark a binding in *this* scope as deletable (a sloppy eval-created var/fn).
     pub fn markDeletable(self: *Environment, name: []const u8) EvalError!void {
-        const a = self.bindingAllocator();
-        const locked = self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite(locked);
-        const gop = try self.deletable.getOrPut(a, name);
-        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(name);
+        try self.markOwnedName(&self.deletable, name);
     }
 
     /// Remove a binding from *this* scope entirely (DeleteBinding for a deletable
@@ -832,10 +953,13 @@ pub const Environment = struct {
     pub fn removeVar(self: *Environment, name: []const u8) bool {
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
-        const removed = self.vars.remove(name);
-        _ = self.consts.remove(name);
-        _ = self.fn_names.remove(name);
-        _ = self.deletable.remove(name);
+        const removed = if (self.vars.fetchRemove(name)) |entry| blk: {
+            self.freeBindingName(entry.key);
+            break :blk true;
+        } else false;
+        if (self.consts.fetchRemove(name)) |entry| self.freeBindingName(entry.key);
+        if (self.fn_names.fetchRemove(name)) |entry| self.freeBindingName(entry.key);
+        if (self.deletable.fetchRemove(name)) |entry| self.freeBindingName(entry.key);
         return removed;
     }
 
@@ -934,12 +1058,37 @@ pub const Environment = struct {
 
     /// Install an indirect binding `local` → `target.name` (a module import).
     pub fn putAlias(self: *Environment, local: []const u8, target: *Environment, name: []const u8) EvalError!void {
-        const a = self.bindingAllocator();
+        self.barrierStoredEnvironment(target);
+        // Both caller-provided names are owned before the Environment lock is
+        // taken. Allocation recovery is prohibited inside that trace-sensitive
+        // region, and a concurrent insert can make the local copy unnecessary.
+        const optimistic_lock = self.lockBindingsForRead();
+        const needs_local_key = !self.aliases.contains(local);
+        self.unlockBindingsForRead(optimistic_lock);
+        var local_key: ?[]u8 = if (needs_local_key) try self.dupeBindingName(local) else null;
+        defer if (local_key) |key| self.freeBindingName(key);
+        var target_key: ?[]u8 = try self.dupeBindingName(name);
+        defer if (target_key) |key| self.freeBindingName(key);
+
         const locked = self.lockBindingsForWrite(); // traceEnv reads `aliases`; serialize the structural write
         defer self.unlockBindingsForWrite(locked);
-        const gop = try self.aliases.getOrPut(a, local);
-        if (!gop.found_existing) gop.key_ptr.* = try self.dupeBindingName(local);
-        gop.value_ptr.* = .{ .env = target, .name = try self.dupeBindingName(name) };
+        const existing = self.aliases.getPtr(local);
+        // Alias bindings are module-instantiation state and are never deleted.
+        // A peer may only have inserted one since the optimistic read, in which
+        // case the unused local copy is released after unlocking.
+        std.debug.assert(existing != null or local_key != null);
+        if (existing == null) try self.aliases.ensureUnusedCapacity(self.bindingAllocator(), 1);
+
+        const replacement = Alias{ .env = target, .name = target_key.? };
+        target_key = null;
+        if (existing) |slot| {
+            const old_name = slot.name;
+            slot.* = replacement;
+            self.freeBindingName(old_name);
+        } else {
+            self.aliases.putAssumeCapacity(local_key.?, replacement);
+            local_key = null;
+        }
     }
 
     /// Whether `name` resolves (in the nearest scope that binds it) to a module
@@ -1147,9 +1296,12 @@ test "Environment immutable lock ruling keeps only shared roots synchronized" {
     var shared = Environment{ .arena = arena.allocator() };
     try shared.put("value", Value.num(1));
     try std.testing.expectEqual(@as(?Value, Value.num(1)), shared.get("value"));
-    try std.testing.expectEqual(@as(u64, 2), jsthread.contentionStats().env_lock_acquires);
+    // A shared insertion snapshots under one lock, allocates outside the
+    // trace-sensitive region, then publishes under a second lock. The read is
+    // the third acquisition; private/single-owner environments still write once.
+    try std.testing.expectEqual(@as(u64, 3), jsthread.contentionStats().env_lock_acquires);
     try std.testing.expectEqual(@as(u64, 1), jsthread.contentionStats().env_read_lock_acquires);
-    try std.testing.expectEqual(@as(u64, 1), jsthread.contentionStats().env_write_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 2), jsthread.contentionStats().env_write_lock_acquires);
 }
 
 test "Environment private activation reads elide locks until capture" {
@@ -50765,6 +50917,164 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     interp.tdz_marker = tdz;
     interp.strict = parser.strict;
     return interp.eval(prog);
+}
+
+fn failureAtomicOwnedEnvironmentNames(backing: std.mem.Allocator) !void {
+    var live_name_bytes: usize = 0;
+    var env = Environment{
+        .arena = backing,
+        .bindings_allocator = backing,
+        .gc_name_bytes_live = &live_name_bytes,
+    };
+    {
+        defer env.finalizeOwnedBindingStorage();
+
+        env.put("plain", Value.num(1)) catch |err| {
+            try std.testing.expectEqual(@as(usize, 0), env.vars.count());
+            try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+            return err;
+        };
+        try std.testing.expectEqual(@as(f64, 1), env.vars.get("plain").?.asNum());
+
+        env.markLexical("lexical") catch |err| {
+            try std.testing.expect(!env.lexicals.contains("lexical"));
+            try std.testing.expectEqual(@as(usize, "plain".len), live_name_bytes);
+            return err;
+        };
+        env.markDeletable("plain") catch |err| {
+            try std.testing.expect(!env.deletable.contains("plain"));
+            try std.testing.expectEqual(@as(usize, "plain".len + "lexical".len), live_name_bytes);
+            return err;
+        };
+        try std.testing.expect(env.lexicals.contains("lexical"));
+        try std.testing.expect(env.deletable.contains("plain"));
+        try std.testing.expectEqual(
+            @as(usize, 2 * "plain".len + "lexical".len),
+            live_name_bytes,
+        );
+        try std.testing.expect(env.removeVar("plain"));
+        try std.testing.expect(!env.vars.contains("plain"));
+        try std.testing.expect(!env.deletable.contains("plain"));
+        try std.testing.expectEqual(@as(usize, "lexical".len), live_name_bytes);
+    }
+    try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+}
+
+fn failureAtomicFreshConstBinding(backing: std.mem.Allocator) !void {
+    var live_name_bytes: usize = 0;
+    var env = Environment{
+        .arena = backing,
+        .bindings_allocator = backing,
+        .gc_name_bytes_live = &live_name_bytes,
+    };
+    {
+        defer env.finalizeOwnedBindingStorage();
+        env.putConst("immutable", Value.num(7)) catch |err| {
+            try std.testing.expectEqual(@as(usize, 0), env.vars.count());
+            try std.testing.expectEqual(@as(usize, 0), env.consts.count());
+            try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+            return err;
+        };
+        try std.testing.expectEqual(@as(f64, 7), env.vars.get("immutable").?.asNum());
+        try std.testing.expect(env.consts.contains("immutable"));
+        try std.testing.expectEqual(@as(usize, 2 * "immutable".len), live_name_bytes);
+    }
+    try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+}
+
+fn failureAtomicConstUpgrade(backing: std.mem.Allocator) !void {
+    var live_name_bytes: usize = 0;
+    var env = Environment{
+        .arena = backing,
+        .bindings_allocator = backing,
+        .gc_name_bytes_live = &live_name_bytes,
+    };
+    {
+        defer env.finalizeOwnedBindingStorage();
+        env.put("upgrade", Value.num(1)) catch |err| {
+            try std.testing.expectEqual(@as(usize, 0), env.vars.count());
+            try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+            return err;
+        };
+        env.putConst("upgrade", Value.num(2)) catch |err| {
+            try std.testing.expectEqual(@as(f64, 1), env.vars.get("upgrade").?.asNum());
+            try std.testing.expect(!env.consts.contains("upgrade"));
+            try std.testing.expectEqual(@as(usize, "upgrade".len), live_name_bytes);
+            return err;
+        };
+        try std.testing.expectEqual(@as(f64, 2), env.vars.get("upgrade").?.asNum());
+        try std.testing.expect(env.consts.contains("upgrade"));
+        try std.testing.expectEqual(@as(usize, 2 * "upgrade".len), live_name_bytes);
+    }
+    try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+}
+
+fn failureAtomicFunctionNameBinding(backing: std.mem.Allocator) !void {
+    var live_name_bytes: usize = 0;
+    var env = Environment{
+        .arena = backing,
+        .bindings_allocator = backing,
+        .gc_name_bytes_live = &live_name_bytes,
+    };
+    {
+        defer env.finalizeOwnedBindingStorage();
+        env.putFnName("named", Value.num(3)) catch |err| {
+            try std.testing.expectEqual(@as(usize, 0), env.vars.count());
+            try std.testing.expectEqual(@as(usize, 0), env.fn_names.count());
+            try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+            return err;
+        };
+        try std.testing.expectEqual(@as(f64, 3), env.vars.get("named").?.asNum());
+        try std.testing.expect(env.fn_names.contains("named"));
+        try std.testing.expectEqual(@as(usize, 2 * "named".len), live_name_bytes);
+    }
+    try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+}
+
+fn failureAtomicAliasPublication(backing: std.mem.Allocator) !void {
+    var live_name_bytes: usize = 0;
+    var env = Environment{
+        .arena = backing,
+        .bindings_allocator = backing,
+        .gc_name_bytes_live = &live_name_bytes,
+    };
+    var first_target = Environment{ .arena = backing };
+    var replacement_target = Environment{ .arena = backing };
+    {
+        defer env.finalizeOwnedBindingStorage();
+        env.putAlias("local", &first_target, "first") catch |err| {
+            try std.testing.expectEqual(@as(usize, 0), env.aliases.count());
+            try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+            return err;
+        };
+        env.putAlias("local", &replacement_target, "replacement") catch |err| {
+            const retained = env.aliases.get("local").?;
+            try std.testing.expectEqual(&first_target, retained.env);
+            try std.testing.expectEqualStrings("first", retained.name);
+            try std.testing.expectEqual(@as(usize, "local".len + "first".len), live_name_bytes);
+            return err;
+        };
+        const replaced = env.aliases.get("local").?;
+        try std.testing.expectEqual(&replacement_target, replaced.env);
+        try std.testing.expectEqualStrings("replacement", replaced.name);
+        try std.testing.expectEqual(@as(usize, "local".len + "replacement".len), live_name_bytes);
+    }
+    try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
+}
+
+test "Environment binding publication is failure-atomic and owns every key" {
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+
+    inline for (.{
+        failureAtomicOwnedEnvironmentNames,
+        failureAtomicFreshConstBinding,
+        failureAtomicConstUpgrade,
+        failureAtomicFunctionNameBinding,
+        failureAtomicAliasPublication,
+    }) |probe| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, probe, .{});
+    }
 }
 
 test "Date ISO result ownership is failure-atomic" {
