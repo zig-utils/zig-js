@@ -907,6 +907,28 @@ fn printHeapBudget(ctx: *js.Context) void {
     });
 }
 
+/// Stable, allocation-free completion snapshot for a top-level failure. A
+/// join rethrows the worker's exact exception, so the scalar record state is
+/// the only reliable way to distinguish that path from a main-thread failure
+/// when an exhausted heap cannot materialize more JS diagnostics.
+fn printThreadFailureState(ctx: *js.Context) void {
+    if (ctx.print_buffer.items.len != 0) {
+        std.debug.print("  buffered output:\n{s}", .{ctx.print_buffer.items});
+        if (ctx.print_buffer.items[ctx.print_buffer.items.len - 1] != '\n') std.debug.print("\n", .{});
+    }
+    if (ctx.js_threads.items.len == 0) return;
+    std.debug.print("  thread completion state:\n", .{});
+    const io = js.agent.engineIo();
+    for (ctx.js_threads.items) |rec| {
+        rec.join_mutex.lockUncancelable(io);
+        std.debug.print(
+            "    id={d} done={} exited={} threw={} joins-settled={}\n",
+            .{ rec.id, rec.done, rec.exited, rec.threw, rec.joins_settled },
+        );
+        rec.join_mutex.unlock(io);
+    }
+}
+
 fn printParallelGcEvidence(ctx: *js.Context) void {
     if (ctx.parallelGcStats()) |stats| {
         if (stats.attempts != 0) std.debug.print(
@@ -1545,6 +1567,7 @@ pub fn main(init: std.process.Init) !void {
                     });
                 }
                 printHeapBudget(ctx);
+                printThreadFailureState(ctx);
                 printParallelGcEvidence(ctx);
             }
         }
