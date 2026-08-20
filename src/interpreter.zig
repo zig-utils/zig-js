@@ -7262,7 +7262,7 @@ pub const Interpreter = struct {
         return buf;
     }
 
-    fn makeBound(self: *Interpreter, target: *value.Object, this: Value, bound_args: []const Value) EvalError!Value {
+    fn createBound(self: *Interpreter, target: *value.Object, this: Value, bound_args: []const Value) EvalError!*value.Object {
         const bf = try gc_mod.allocBoundFn(self.arena);
         bf.* = .{ .target = Value.obj(target), .this = this, .args = try self.arena.dupe(Value, bound_args) };
         const obj = try gc_mod.allocObj(self.arena);
@@ -7273,10 +7273,30 @@ pub const Interpreter = struct {
         obj.* = .{ .proto = target_proto };
         try obj.setBoundFunction(self.arena, @ptrCast(bf));
         obj.setProtoExplicitNull(target_proto == null);
+        return obj;
+    }
+
+    fn installBoundMetadata(self: *Interpreter, obj: *value.Object, bound_len: f64, bound_name: Value) EvalError!void {
+        const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
+        try obj.setOwn(self.arena, self.root_shape, "length", Value.num(bound_len));
+        try obj.setAttr(self.arena, "length", ro_attr);
+        try obj.setOwn(self.arena, self.root_shape, "name", bound_name);
+        try obj.setAttr(self.arena, "name", ro_attr);
+    }
+
+    fn makeBoundExact(self: *Interpreter, target: *value.Object, this: Value, bound_args: []const Value, bound_len: f64, bound_name: Value) EvalError!Value {
+        const obj = try self.createBound(target, this, bound_args);
+        try self.installBoundMetadata(obj, bound_len, bound_name);
+        return Value.obj(obj);
+    }
+
+    fn makeBound(self: *Interpreter, target: *value.Object, this: Value, bound_args: []const Value) EvalError!Value {
+        // BoundFunctionCreate precedes the observable target length/name reads
+        // in Function.prototype.bind. Keep that ordering exact for proxies.
+        const obj = try self.createBound(target, this, bound_args);
         // Per spec: a bound function's `length` is max(0, target.length - args)
         // and its `name` is "bound " + target.name. Both are
         // { writable: false, enumerable: false, configurable: true }.
-        const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
         const bound_len: f64 = if (try self.objectProtoHasOwn(target, "length")) blk: {
             const tgt_len_v = try self.getProperty(Value.obj(target), "length");
             if (!tgt_len_v.isNumber()) break :blk 0;
@@ -7284,11 +7304,17 @@ pub const Interpreter = struct {
             const bound_count: f64 = @floatFromInt(bound_args.len);
             break :blk if (len_int <= bound_count) 0 else len_int - bound_count;
         } else 0;
+        const ro_attr: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
+        // SetFunctionLength precedes Get(target, "name"). Besides the proxy
+        // access order, preserve the failure boundary: an OOM while publishing
+        // length must not run a user-defined name getter.
         try obj.setOwn(self.arena, self.root_shape, "length", Value.num(bound_len));
         try obj.setAttr(self.arena, "length", ro_attr);
         const tgt_name = try self.getProperty(Value.obj(target), "name");
         const base_name = if (tgt_name.isString()) tgt_name.asStr() else "";
-        const bound_name = try std.fmt.allocPrint(self.arena, "bound {s}", .{base_name});
+        var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
+        defer scratch.deinit();
+        const bound_name = try std.fmt.allocPrint(scratch.allocator(), "bound {s}", .{base_name});
         try obj.setOwn(self.arena, self.root_shape, "name", try Value.strAlloc(self.arena, bound_name));
         try obj.setAttr(self.arena, "name", ro_attr);
         return Value.obj(obj);
@@ -30467,15 +30493,18 @@ fn intlBoundAccessorFn(comptime service: []const u8, comptime prop: []const u8, 
             if (target.asObj().getOwn(cache_key)) |b| return b;
             const impl = try self.getProperty(target, impl_key);
             if (!impl.isObject()) return self.throwError("TypeError", "missing " ++ prop ++ " implementation");
-            const bound = try self.makeBound(impl.asObj(), target, &.{});
-            const ro: value.PropAttr = .{ .writable = false, .enumerable = false, .configurable = true };
-            try bound.asObj().setOwn(self.arena, self.root_shape, "name", Value.str(""));
-            try bound.asObj().setAttr(self.arena, "name", ro);
-            try bound.asObj().setOwn(self.arena, self.root_shape, "length", Value.num(length));
-            try bound.asObj().setAttr(self.arena, "length", ro);
-            try self.setProp(target.asObj(), cache_key, bound);
-            try target.asObj().setAttr(self.arena, cache_key, .{ .writable = false, .enumerable = false, .configurable = false });
-            return bound;
+            // ECMA-402 Get*Format constructs the cached callable with exact
+            // metadata; generic bind name/length discovery is neither required
+            // nor observable here. Publish once under the formatter property
+            // lock so concurrent first reads share one identity.
+            const bound = try self.makeBoundExact(impl.asObj(), target, &.{}, length, Value.str(""));
+            return (try target.asObj().setOwnIfAbsentWithAttr(
+                self.arena,
+                self.root_shape,
+                cache_key,
+                bound,
+                .{ .writable = false, .enumerable = false, .configurable = false },
+            )) orelse bound;
         }
     }.call;
 }
@@ -53137,6 +53166,60 @@ test "Intl.DateTimeFormat resolved-state publication is OOM-safe" {
 
             try std.testing.expectEqualStrings("甲辰", try dtfChineseYearName(scratch, 2024));
             try std.testing.expectEqualStrings("GMT+5:30", try dtfOffsetZoneName(scratch, 19_800_000_000_000));
+        }
+    }.check;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
+}
+
+test "Intl cached bound accessor publication is failure-atomic" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = Interpreter{
+                .arena = allocator,
+                .scratch_allocator = allocator,
+                .env = undefined,
+                .root_shape = root_shape,
+            };
+            var implementation = value.Object{};
+            var formatter = value.Object{};
+
+            const first = machine.makeBoundExact(&implementation, Value.obj(&formatter), &.{}, 1, Value.str("")) catch |err| {
+                try std.testing.expect(formatter.getOwn("\x00boundFormat") == null);
+                return err;
+            };
+            const published = formatter.setOwnIfAbsentWithAttr(
+                allocator,
+                root_shape,
+                "\x00boundFormat",
+                first,
+                .{ .writable = false, .enumerable = false, .configurable = false },
+            ) catch |err| {
+                try std.testing.expect(formatter.getOwn("\x00boundFormat") == null);
+                return err;
+            } orelse first;
+            try std.testing.expectEqual(first, published);
+            try std.testing.expectEqualStrings("", published.asObj().getOwn("name").?.asStr());
+            try std.testing.expectEqual(@as(f64, 1), published.asObj().getOwn("length").?.asNum());
+
+            const competing = machine.makeBoundExact(&implementation, Value.obj(&formatter), &.{}, 1, Value.str("")) catch |err| {
+                try std.testing.expectEqual(published, formatter.getOwn("\x00boundFormat").?);
+                return err;
+            };
+            const winner = (try formatter.setOwnIfAbsentWithAttr(
+                allocator,
+                root_shape,
+                "\x00boundFormat",
+                competing,
+                .{ .writable = false, .enumerable = false, .configurable = false },
+            )) orelse competing;
+            try std.testing.expectEqual(published, winner);
+            try std.testing.expectEqual(value.PropAttr{ .writable = false, .enumerable = false, .configurable = false }, formatter.getAttr("\x00boundFormat"));
         }
     }.check;
     const previous_heap = gc_mod.setActiveHeap(null);

@@ -5918,6 +5918,27 @@ pub const Object = struct {
         try self.setOwnUnlocked(arena, root, name, v);
     }
 
+    /// Publish one lazily-created internal data property, including its final
+    /// attributes, under a single property snapshot. A racing creator receives
+    /// the already-published value instead of replacing it. Attribute storage
+    /// is prepared before the shape makes the property visible, so OOM can
+    /// leave only an unobservable attribute entry for a still-absent key.
+    pub fn setOwnIfAbsentWithAttr(
+        self: *Object,
+        arena: std.mem.Allocator,
+        root: *Shape,
+        name: []const u8,
+        v: Value,
+        attr: PropAttr,
+    ) std.mem.Allocator.Error!?Value {
+        self.lockProperties();
+        defer self.unlockProperties();
+        if (self.getOwnUnlocked(name)) |existing| return existing;
+        try self.setAttrUnlocked(arena, name, attr);
+        try self.setOwnUnlocked(arena, root, name, v);
+        return null;
+    }
+
     pub fn setOwnUnlocked(self: *Object, arena: std.mem.Allocator, root: *Shape, name: []const u8, v: Value) std.mem.Allocator.Error!void {
         gcBarrier(self, v); // stored into this cell's slots on either path below
         const base = self.shape orelse root;

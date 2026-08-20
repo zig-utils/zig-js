@@ -13615,6 +13615,45 @@ test "Intl.DateTimeFormat uses only native resolved state and preserves legacy c
     )).asBool());
 }
 
+test "parallel_js: Intl bound accessors publish one exact cached callable" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var numberFormatter = new Intl.NumberFormat("en-US");
+        \\var dateFormatter = new Intl.DateTimeFormat("en-US", { timeZone:"UTC" });
+        \\var collator = new Intl.Collator("en-US", { numeric:true });
+        \\function exactMetadata(fn, length) {
+        \\  var name = Object.getOwnPropertyDescriptor(fn, "name");
+        \\  var arity = Object.getOwnPropertyDescriptor(fn, "length");
+        \\  return fn.name === "" && fn.length === length &&
+        \\    name.writable === false && name.enumerable === false && name.configurable === true &&
+        \\    arity.writable === false && arity.enumerable === false && arity.configurable === true;
+        \\}
+        \\var numberFormat = numberFormatter.format;
+        \\var compare = collator.compare;
+        \\var workers = [];
+        \\for (var i = 0; i < 8; i++) workers.push(new Thread(function () { return dateFormatter.format; }));
+        \\var winner = workers[0].join();
+        \\var dateFormat = dateFormatter.format;
+        \\var oneIdentity = winner === dateFormat;
+        \\for (var i = 1; i < workers.length; i++) oneIdentity = oneIdentity && workers[i].join() === winner;
+        \\exactMetadata(numberFormat, 1) && exactMetadata(dateFormat, 1) && exactMetadata(compare, 2) &&
+        \\  numberFormatter.format === numberFormat && dateFormatter.format === dateFormat && collator.compare === compare &&
+        \\  oneIdentity && typeof numberFormat(1234) === "string" && typeof dateFormat(0) === "string" && compare("2", "10") < 0 &&
+        \\  Object.getOwnPropertyNames(numberFormatter).every(function (name) { return name.charCodeAt(0) !== 0; }) &&
+        \\  Object.getOwnPropertyNames(dateFormatter).every(function (name) { return name.charCodeAt(0) !== 0; }) &&
+        \\  Object.getOwnPropertyNames(collator).every(function (name) { return name.charCodeAt(0) !== 0; });
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "Intl.DateTimeFormat resolved field enums use exact unmanaged static cells" {
     try std.testing.expect(value.IntlDateTimeFormatData.Field.none.value() == null);
     const Case = struct { source: []const u8, expected: []const u8, cell: *const strcell.StringCell };
