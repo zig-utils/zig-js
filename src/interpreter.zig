@@ -21678,7 +21678,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             var k: usize = 0;
             const result_len = results.elementsLen();
             while (k < keys.len and k < result_len) : (k += 1) {
-                try self.setProp(obj, keys[k].asStr(), results.elementAt(k) orelse Value.undef());
+                try self.setProp(obj, try keys[k].asWtf8(self.arena), results.elementAt(k) orelse Value.undef());
             }
             return self.iterResultObj(Value.obj(obj), false);
         },
@@ -22235,7 +22235,11 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         const pads = (try self.newArray()).asObj();
         for (keys.elementsItems()) |kv| {
             if (padding.isObject()) {
-                const pv = self.getProperty(padding, kv.asStr()) catch {
+                const key = kv.asWtf8(self.arena) catch |err| {
+                    self.closeListKeepingThrow(iters.elementsItems());
+                    return err;
+                };
+                const pv = self.getProperty(padding, key) catch {
                     self.closeListKeepingThrow(iters.elementsItems());
                     return error.Throw;
                 };

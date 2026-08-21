@@ -16000,13 +16000,19 @@ test "Iterator concat and zip helpers produce expected records" {
         \\const concat = Iterator.concat([1, 2], new Set([3])).toArray();
         \\const zip = Iterator.zip([[1, 2], ["a", "b"]]).toArray();
         \\const keyed = Iterator.zipKeyed({ left: [10, 20], right: ["x", "y"] }).toArray();
+        \\const latin1 = Iterator.zipKeyed(
+        \\  { "caf\u00e9": [30], tail: [50, 60] },
+        \\  { mode: "longest", padding: { "caf\u00e9": 40, tail: 0 } }
+        \\).toArray();
         \\concat.join(",") === "1,2,3" &&
         \\zip.length === 2 &&
         \\zip[0][0] === 1 && zip[0][1] === "a" &&
         \\zip[1][0] === 2 && zip[1][1] === "b" &&
         \\keyed.length === 2 &&
         \\keyed[0].left === 10 && keyed[0].right === "x" &&
-        \\keyed[1].left === 20 && keyed[1].right === "y"
+        \\keyed[1].left === 20 && keyed[1].right === "y" &&
+        \\latin1.length === 2 && Object.keys(latin1[0])[0] === "caf\u00e9" &&
+        \\latin1[0]["caf\u00e9"] === 30 && latin1[1]["caf\u00e9"] === 40 && latin1[1].tail === 60
     )).asBool());
 }
 
