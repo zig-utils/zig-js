@@ -6307,7 +6307,14 @@ pub const Interpreter = struct {
         }
         // Bound function exotics have a public `.name` like "bound f", but their
         // NativeFunction source form is anonymous (`function () { [native code] }`).
-        const raw_name: []const u8 = if (o.boundFunction() != null) "" else if (o.getOwn("name")) |n| (if (n.isString()) n.asStr() else "") else "";
+        // The source form consumes semantic StringData, never its physical cell
+        // image, so a flat Latin-1 name must cross the canonical byte boundary.
+        const raw_name: []const u8 = if (o.boundFunction() != null)
+            ""
+        else if (o.getOwn("name")) |n|
+            (if (n.isString()) try n.asWtf8(self.arena) else "")
+        else
+            "";
         const nm: []const u8 = if (raw_name.len > 0 and raw_name[0] == 0) "" else raw_name;
         return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "function ", nm, "() { [native code] }" }));
     }
@@ -7492,7 +7499,9 @@ pub const Interpreter = struct {
         try obj.setOwn(self.arena, self.root_shape, "length", Value.num(bound_len));
         try obj.setAttr(self.arena, "length", ro_attr);
         const tgt_name = try self.getProperty(Value.obj(target), "name");
-        const base_name = if (tgt_name.isString()) tgt_name.asStr() else "";
+        // SetFunctionName prefixes the target's String value, not the backing
+        // bytes used by a particular StringCell representation.
+        const base_name = if (tgt_name.isString()) try tgt_name.asWtf8(self.arena) else "";
         var scratch = std.heap.ArenaAllocator.init(self.scratch_allocator orelse gc_mod.temporaryAllocator(self.arena));
         defer scratch.deinit();
         const bound_name = try std.fmt.allocPrint(scratch.allocator(), "bound {s}", .{base_name});
@@ -55242,6 +55251,27 @@ test "interpreter JSON, Object, Number builtins" {
         \\proto.writable === true && proto.enumerable === false &&
         \\proto.configurable === false
     )).asBool());
+}
+
+test "Function metadata canonicalizes physical StringData names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try evalSource(
+        allocator,
+        "let reads = ''; " ++
+            "function target(a, b) {} " ++
+            "Object.defineProperty(target, 'name', { configurable: true, get() { reads += 'n'; return 'caf\xc3\xa9'; } }); " ++
+            "let bound = target.bind(null, 1); " ++
+            "let native = Object.prototype.valueOf; " ++
+            "Object.defineProperty(native, 'name', { configurable: true, value: 'caf\xc3\xa9' }); " ++
+            "bound.name + '|' + bound.length + '|' + reads + '|' + native.toString()",
+    );
+    try std.testing.expectEqualStrings(
+        "bound caf\xc3\xa9|1|n|function caf\xc3\xa9() { [native code] }",
+        try result.asWtf8(allocator),
+    );
 }
 
 test "JSON stringify promotes deep active paths without rejecting aliases" {
