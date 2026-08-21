@@ -23088,6 +23088,80 @@ test "generator and async bytecode preserve super tagged template references" {
     try std.testing.expectEqual(before.count(.async_compiled) + 1, after.count(.async_compiled));
 }
 
+test "plain and generator bytecode preserve super method call references" {
+    const source =
+        \\var superCallLog = "";
+        \\var superCallMode = "";
+        \\function superArgument(value) { superCallLog = superCallLog + "a"; if (superCallMode === "argument") throw 7102; return value; }
+        \\function superKey() { superCallLog = superCallLog + "k"; if (superCallMode === "key") throw 7100; return "method"; }
+        \\class TailBase {}
+        \\Object.defineProperty(TailBase.prototype, "method", {
+        \\  get() {
+        \\    superCallLog = superCallLog + "g";
+        \\    if (superCallMode === "get") throw 7101;
+        \\    return function(value) { superCallLog = superCallLog + "c"; if (superCallMode === "call") throw 7103; return this.marker + ":" + value; };
+        \\  }
+        \\});
+        \\class TailDerived extends TailBase {
+        \\  constructor() { super(); this.marker = "tail"; }
+        \\  named(value) { return super.method(superArgument(value)); }
+        \\  computed(value) { return super[superKey()](superArgument(value)); }
+        \\  *spread(args) { var value = super["method"](...args); yield value; }
+        \\  *suspended() { var value = super[yield "key"](yield "argument"); return value; }
+        \\}
+        \\var tailDerived = new TailDerived();
+        \\var superNamedResult = tailDerived.named(3);
+        \\var superComputedResult = tailDerived.computed(4);
+        \\var superOrderedLog = superCallLog;
+        \\function observeSuperCall(mode) {
+        \\  superCallMode = mode; superCallLog = "";
+        \\  try { tailDerived.computed(1); } catch (error) { return error + ":" + superCallLog; }
+        \\  return "missing";
+        \\}
+        \\var superAbrupt = observeSuperCall("key") + "|" + observeSuperCall("get") + "|" + observeSuperCall("argument") + "|" + observeSuperCall("call");
+        \\superCallMode = ""; superCallLog = "";
+        \\var superSpreadIterator = tailDerived.spread([5]);
+        \\var superSpreadResult = superSpreadIterator.next();
+        \\var superSuspendedIterator = tailDerived.suspended();
+        \\var superSuspendedFirst = superSuspendedIterator.next();
+        \\var superSuspendedSecond = superSuspendedIterator.next("method");
+        \\var superSuspendedThird = superSuspendedIterator.next(11);
+        \\class RecursiveBase { step(value) { return this.step(value); } }
+        \\class RecursiveDerived extends RecursiveBase {
+        \\  constructor() { super(); this.marker = "recursive"; }
+        \\  step(value) { if (value === 0) return this.marker; return super.step(value - 1); }
+        \\}
+    ;
+    const assertion =
+        \\superNamedResult === "tail:3" && superComputedResult === "tail:4" &&
+        \\superSpreadResult.value === "tail:5" && superSpreadResult.done === false &&
+        \\superSuspendedFirst.value === "key" && superSuspendedFirst.done === false &&
+        \\superSuspendedSecond.value === "argument" && superSuspendedSecond.done === false &&
+        \\superSuspendedThird.value === "tail:11" && superSuspendedThird.done === true &&
+        \\superRecursiveResult === "recursive" && superOrderedLog === "gackgac" &&
+        \\superAbrupt === "7100:k|7101:kg|7102:kga|7103:kgac" && superCallLog === "gcgc"
+    ;
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_jit = false });
+    defer ctx.destroy();
+    const before = ctx.bytecodeAdmissionSnapshot();
+    _ = try ctx.evaluate(source);
+    _ = try ctx.evaluate("var superRecursiveResult = new RecursiveDerived().step(2000);");
+    try std.testing.expect((try ctx.evaluate(assertion)).asBool());
+    const after = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(before.count(.generator_compiled) + 2, after.count(.generator_compiled));
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    _ = try tree_ctx.evaluate(source);
+    _ = try tree_ctx.evaluate("var superRecursiveResult = new RecursiveDerived().step(20);");
+    try std.testing.expect((try tree_ctx.evaluate(assertion)).asBool());
+    try std.testing.expect(tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker) > 0);
+}
+
 test "parser-derived arguments use preserves forced execution tiers" {
     const source =
         \\function scopeOwner(box) {

@@ -3032,6 +3032,10 @@ pub const Compiler = struct {
     fn compileTailCall(self: *Compiler, c: anytype) CompileError!void {
         const spread = hasSpread(c.args);
         if (spread) return error.Unsupported;
+        if (c.callee.* == .super_member) {
+            try self.compileSuperCall(c, true);
+            return;
+        }
         if (c.callee.* == .member and c.callee.member.computed == null) {
             // Fetch the method (RequireObjectCoercible on the receiver) BEFORE the
             // args, per spec order, then tail-call with this = recv.
@@ -3057,11 +3061,33 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
             return;
         }
-        if (c.callee.* == .super_member) return error.Unsupported;
         const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
         try self.compileExpr(c.callee);
         for (c.args) |arg| try self.compileExpr(arg);
         _ = try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len));
+    }
+
+    fn compileSuperCall(self: *Compiler, call: anytype, is_tail: bool) CompileError!void {
+        const member = call.callee.super_member;
+        // SuperProperty obtains the current this binding before evaluating a
+        // computed key. Retain that exact receiver below the lookup result so
+        // inherited getters and the eventual call both observe it.
+        _ = try self.chunk.emit(.load_this, 0);
+        if (member.computed) |key| {
+            try self.compileExpr(key);
+            _ = try self.chunk.emit(.super_get_index, 0);
+        } else {
+            _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, member.property)));
+        }
+        _ = try self.chunk.emit(.swap, 0); // [method, this]
+        if (hasSpread(call.args)) {
+            if (is_tail) return error.Unsupported;
+            try self.compileArgsArray(call.args);
+            _ = try self.chunk.emit(.call_with_this_spread, 0);
+            return;
+        }
+        for (call.args) |arg| try self.compileExpr(arg);
+        _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, @intCast(call.args.len));
     }
 
     /// `tag`a${x}b`` → `tag(strings, x)`. The `template_object` opcode pushes the
@@ -3309,20 +3335,8 @@ pub const Compiler = struct {
             .call => |c| {
                 const spread = hasSpread(c.args);
                 if (spread and !self.in_generator) return error.Unsupported; // non-generator spread → tree-walk
-                if (c.callee.* == .super_member and !spread) {
-                    // `super.m(args)`: resolve `m` on the super base, then invoke it
-                    // with `this` = the current `this` (NOT the super base) via
-                    // call_with_this. (`yield super.m()` in a generator method.)
-                    const sm = c.callee.super_member;
-                    if (sm.computed) |ce| {
-                        try self.compileExpr(ce);
-                        _ = try self.chunk.emit(.super_get_index, 0);
-                    } else {
-                        _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, sm.property)));
-                    }
-                    _ = try self.chunk.emit(.load_this, 0);
-                    for (c.args) |arg| try self.compileExpr(arg);
-                    _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
+                if (c.callee.* == .super_member) {
+                    try self.compileSuperCall(c, false);
                 } else if (c.callee.* == .member and c.callee.member.computed == null) {
                     // `recv.name(args)`: bind `this = recv` at the call site.
                     const m = c.callee.member;
@@ -4540,6 +4554,58 @@ test "compiler admits computed and super tagged template references" {
     switch (try Compiler.admitAsync(arena.allocator(), awaited.function, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
         .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler lowers super calls in tail and receiver-aware spread positions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "class Derived extends Base { named(value){ return super.method(value); } computed(key, value){ return super[key](value); } *spread(args){ var value = super[\"method\"](...args); yield value; } *suspended(){ var value = super[yield \"key\"](yield \"argument\"); return value; } tailSpread(args){ return super.method(...args); } }",
+    );
+    const program = try parser.parseProgram();
+    const declaration = program.program[0];
+    if (declaration.* != .var_decl or declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const class = declaration.var_decl.init.?;
+    if (class.* != .class_expr or class.class_expr.members.len != 5)
+        return error.TestUnexpectedResult;
+
+    for (class.class_expr.members[0..2]) |member| {
+        const method = member.func orelse return error.TestUnexpectedResult;
+        const chunk = switch (try Compiler.admitPlainFunction(arena.allocator(), method.function)) {
+            .compiled => |compiled| compiled.chunk,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        var saw_super_tail = false;
+        for (chunk.code.items) |inst| if (inst.op == .tail_call_with_this) {
+            saw_super_tail = true;
+        };
+        try std.testing.expect(saw_super_tail);
+    }
+
+    const spread = class.class_expr.members[2].func orelse return error.TestUnexpectedResult;
+    const spread_chunk = switch (try Compiler.admitGenerator(arena.allocator(), spread.function, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_receiver_spread = false;
+    for (spread_chunk.code.items) |inst| if (inst.op == .call_with_this_spread) {
+        saw_receiver_spread = true;
+    };
+    try std.testing.expect(saw_receiver_spread);
+
+    const suspended = class.class_expr.members[3].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitGenerator(arena.allocator(), suspended.function, true)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    const tail_spread = class.class_expr.members[4].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitPlainFunction(arena.allocator(), tail_spread.function)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
     }
 }
 
