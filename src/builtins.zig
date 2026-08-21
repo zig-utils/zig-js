@@ -2642,12 +2642,12 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
                 // String/Number wrappers unwrapped; anything else is ignored.
                 var k: ?[]const u8 = null;
                 switch (item.kind()) {
-                    .string => k = item.asStr(),
+                    .string => k = try item.asWtf8(a),
                     .number => k = try value.numberToString(a, item.asNum()),
                     // A String/Number wrapper is ToString'd (invoking its own
                     // toString, e.g. an overridden one), not unwrapped raw.
                     .object => if (item.asObj().boxedPrimitive()) |p| switch (p.kind()) {
-                        .string, .number => k = try self.toStringV(item),
+                        .string, .number => k = try self.toStringWtf8(item),
                         else => {},
                     },
                     else => {},
@@ -2674,7 +2674,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
                 space = Value.num(n);
             },
             .string => {
-                const s = try self.toStringV(space);
+                const s = try self.toStringWtf8(space);
                 space = try Value.strAlloc(self.arena, s);
             },
             else => space = p,
@@ -2753,7 +2753,7 @@ const Stringifier = struct {
             v = try self.callValueWithThis(rf, &.{ try Value.strAlloc(self.arena, value.decodeStringKey(key)), v }, holder);
         // A JSON.rawJSON object emits its validated text verbatim.
         if (v.isObject() and v.asObj().behavior.is_raw_json) {
-            const raw = (v.asObj().getOwn("rawJSON") orelse Value.str("")).asStr();
+            const raw = try (v.asObj().getOwn("rawJSON") orelse Value.str("")).asWtf8(a);
             try buf.appendSlice(output_allocator, raw);
             return true;
         }
@@ -3077,7 +3077,7 @@ pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!
     defer if (saved_env) |env| {
         self.env = env;
     };
-    const s = try self.toStringV(arg(args, 0));
+    const s = try self.toStringWtf8(arg(args, 0));
     const isJsonWs = struct {
         fn f(c: u8) bool {
             return c == ' ' or c == '\t' or c == '\n' or c == '\r';
