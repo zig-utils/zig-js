@@ -45030,7 +45030,7 @@ fn textEncoderEncodeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
 fn textEncoderEncodeIntoFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const s = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "";
+    const s = if (args.len > 0 and !args[0].isUndefined()) try self.toStringWtf8(args[0]) else "";
     const dv = if (args.len > 1) args[1] else Value.undef();
     if (!dv.isObject() or dv.asObj().typedArray() == null or dv.asObj().typedArray().?.kind != .u8)
         return self.throwError("TypeError", "TextEncoder.encodeInto destination must be a Uint8Array");

@@ -15201,6 +15201,21 @@ test "TextEncoder emits valid UTF-8 for scalar, paired, and lone-surrogate input
     )).asBool());
 }
 
+test "TextEncoder encodeInto canonicalizes physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const text = "caf\u00e9\u00ff";
+        \\let calls = 0;
+        \\const source = { toString() { calls++; return text; } };
+        \\const encoder = new TextEncoder();
+        \\const expected = encoder.encode(text);
+        \\const destination = new Uint8Array(16);
+        \\const result = encoder.encodeInto(source, destination);
+        \\let equal = result.read === 5 && result.written === 7 && calls === 1;
+        \\for (let i = 0; i < expected.length; i++) equal = equal && destination[i] === expected[i];
+        \\equal && expected.join(",") === "99,97,102,195,169,195,191"
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
