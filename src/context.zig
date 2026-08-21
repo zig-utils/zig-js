@@ -15291,6 +15291,34 @@ test "Error stack canonicalizes stored physical StringData" {
     )).asBool());
 }
 
+test "computed property display names canonicalize physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const text = "caf\u00e9\u00ff";
+        \\let calls = 0;
+        \\const key = { toString() { calls++; return text; } };
+        \\const object = {
+        \\  [key]: function() {},
+        \\  get [text + "g"]() {},
+        \\  set [text + "s"](value) {}
+        \\};
+        \\class Example {
+        \\  [key]() {}
+        \\  [text + "f"] = function() {};
+        \\  get [text + "g"]() {}
+        \\  set [text + "s"](value) {}
+        \\}
+        \\const instance = new Example();
+        \\const objectGet = Object.getOwnPropertyDescriptor(object, text + "g").get;
+        \\const objectSet = Object.getOwnPropertyDescriptor(object, text + "s").set;
+        \\const classGet = Object.getOwnPropertyDescriptor(Example.prototype, text + "g").get;
+        \\const classSet = Object.getOwnPropertyDescriptor(Example.prototype, text + "s").set;
+        \\object[text].name === text && objectGet.name === "get " + text + "g" &&
+        \\  objectSet.name === "set " + text + "s" && Example.prototype[text].name === text &&
+        \\  instance[text + "f"].name === text + "f" && classGet.name === "get " + text + "g" &&
+        \\  classSet.name === "set " + text + "s" && calls === 2
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;

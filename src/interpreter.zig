@@ -6342,8 +6342,8 @@ pub const Interpreter = struct {
     fn keyDisplayName(self: *Interpreter, kv: Value) EvalError![]const u8 {
         if (kv.isObject() and kv.asObj().is_symbol)
             return if (kv.asObj().symbolDescription()) |d| try std.fmt.allocPrint(self.arena, "[{s}]", .{d}) else "";
-        if (kv.isString()) return kv.asStr();
-        return self.toStringV(kv);
+        if (kv.isString()) return kv.asWtf8(self.arena);
+        return self.toStringWtf8(kv);
     }
 
     pub fn maybeNameAnon(self: *Interpreter, val: Value, init_node: *Node, name: []const u8) EvalError!void {
