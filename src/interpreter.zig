@@ -51650,6 +51650,20 @@ test "String value methods return the exact StringData cell" {
     try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
 }
 
+test "ToString canonicalizes object-produced StringData" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try evalSource(
+        allocator,
+        "let log = ''; " ++
+            "let key = { toString() { log += 's'; return 'caf\xc3\xa9'; }, valueOf() { log += 'v'; return 1; } }; " ++
+            "let object = { [key]: 693 }; object['caf\xc3\xa9'] + '|' + log",
+    );
+    try std.testing.expectEqualStrings("693|s", try result.asWtf8(allocator));
+}
+
 fn failureAtomicOwnedEnvironmentNames(backing: std.mem.Allocator) !void {
     var live_name_bytes: usize = 0;
     var env = Environment{

@@ -6739,11 +6739,31 @@ pub const Value = struct {
             .null => "null",
             .boolean => if (self.asBool()) "true" else "false",
             .number => try numberToString(arena, self.asNum()),
-            .string => self.asStr(),
+            .string => try self.asWtf8(arena),
             .object => if (self.asObj().is_bigint) try bigIntToString(self.asObj(), arena) else try objectToString(self.asObj(), arena),
         };
     }
 };
+
+test "Value.toString canonicalizes StringData bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const previous = strcell.setActiveArena(allocator);
+    defer _ = strcell.setActiveArena(previous);
+
+    const canonical = "caf\xc3\xa9";
+    const string = try Value.strAlloc(allocator, canonical);
+    try std.testing.expectEqualStrings(canonical, try string.toString(allocator));
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    if (strcell.flat_storage_active) {
+        try std.testing.expectError(error.OutOfMemory, string.toString(unavailable.allocator()));
+    } else {
+        try std.testing.expectEqualStrings(canonical, try string.toString(unavailable.allocator()));
+        try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+    }
+}
 
 test "Value is an engine-wide 8-byte NaN-boxed word" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(Value));
