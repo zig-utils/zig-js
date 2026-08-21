@@ -15280,6 +15280,17 @@ test "Array default sort compares representation-aware UTF-16 code units" {
     )).asBool());
 }
 
+test "Error stack canonicalizes stored physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const text = "caf\u00e9\u00ff";
+        \\let calls = 0;
+        \\const error = new Error({ toString() { calls++; return text; } });
+        \\error.sourceURL = text + ".js";
+        \\error.startingLineNumber = 7;
+        \\error.stack === "Error: " + text + "\n    at <eval> (" + text + ".js:7)" && calls === 1
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;

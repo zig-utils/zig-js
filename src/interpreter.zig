@@ -19873,10 +19873,8 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     if (!obj.behavior.is_error) return Value.undef();
     obj.markErrorInfoMaterialized();
     const name = if (obj.errorName().len == 0) "Error" else obj.errorName();
-    const message = if (obj.getOwn("message")) |v|
-        (if (v.isString()) v.asStr() else "")
-    else
-        "";
+    const message_value = obj.getOwn("message") orelse Value.undef();
+    const message = if (message_value.isString()) try message_value.asWtf8(self.arena) else "";
     const first_line = if (message.len == 0)
         name
     else
@@ -19889,9 +19887,10 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
                 if (line_v.isNumber()) {
                     const line = line_v.asNum();
                     if (!std.math.isNan(line) and !std.math.isInf(line) and line >= 1) {
+                        const source_url = try source_v.asWtf8(self.arena);
                         return try Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{s}\n    at <eval> ({s}:{d})", .{
                             first_line,
-                            source_v.asStr(),
+                            source_url,
                             @as(usize, @intFromFloat(@trunc(line))),
                         }));
                     }
