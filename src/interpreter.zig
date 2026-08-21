@@ -7186,35 +7186,66 @@ pub const Interpreter = struct {
     fn deleteMemberExpression(self: *Interpreter, m: anytype) EvalError!Value {
         const obj = self.eval(m.object) catch |e|
             if (e == error.OptShortCircuit) return Value.boolVal(true) else return e;
-        if (obj.isNull() or obj.isUndefined()) {
-            // `delete a?.b` with a nullish base short-circuits to true; otherwise
-            // `delete null.x` / `delete undefined[e]` performs ToObject on the base,
-            // which throws a TypeError (the key expression is still evaluated
-            // first, for its side effects).
-            if (m.optional) return Value.boolVal(true);
-            if (m.computed) |ce| _ = try self.eval(ce);
-            return self.throwError("TypeError", "Cannot convert undefined or null to object");
+        // Optional property access decides before evaluating a computed key.
+        // Ordinary access evaluates that expression once, but [[Delete]] checks
+        // the base before ToPropertyKey (observable for object-valued keys).
+        if (m.optional and (obj.isNull() or obj.isUndefined())) return Value.boolVal(true);
+        const computed_key: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
+        const key = if (computed_key) |raw| DeletePropertyKey{ .computed = raw } else DeletePropertyKey{ .named = try value.encodeStringKey(self.arena, m.property) };
+        return Value.boolVal(try self.deletePropertyValue(obj, key, self.strict));
+    }
+
+    const DeletePropertyKey = union(enum) {
+        named: []const u8,
+        computed: Value,
+
+        fn resolve(self: @This(), interpreter: *Interpreter) EvalError![]const u8 {
+            return switch (self) {
+                .named => |name| name,
+                .computed => |raw| interpreter.keyOf(raw),
+            };
         }
+    };
+
+    /// Apply DeletePropertyOrThrow/[[Delete]] to an already-evaluated property
+    /// reference. Computed-key evaluation belongs to the caller; ToPropertyKey
+    /// deliberately stays here, after RequireObjectCoercible, matching ECMA-262
+    /// Delete Operator Evaluation and preserving proxy/Symbol behavior.
+    pub fn deleteNamedProperty(self: *Interpreter, obj: Value, key: []const u8, strict: bool) EvalError!bool {
+        return self.deletePropertyValue(obj, .{ .named = key }, strict);
+    }
+
+    pub fn deleteComputedProperty(self: *Interpreter, obj: Value, key: Value, strict: bool) EvalError!bool {
+        return self.deletePropertyValue(obj, .{ .computed = key }, strict);
+    }
+
+    fn deletePropertyValue(self: *Interpreter, obj: Value, key_ref: DeletePropertyKey, strict: bool) EvalError!bool {
+        if (obj.isNull() or obj.isUndefined())
+            return self.throwError("TypeError", "Cannot convert undefined or null to object");
         if (!obj.isObject()) {
+            // ToObject succeeds for every remaining primitive. Its ordinary
+            // [[Delete]] still receives a PropertyKey even when the wrapper has
+            // no own properties, so object-key coercion remains observable for
+            // Number/Boolean as well as String values.
+            const key = try key_ref.resolve(self);
             if (obj.isString()) {
-                if (std.mem.eql(u8, m.property, "length") and m.computed == null) {
-                    if (self.strict) return self.throwError("TypeError", "Cannot delete property");
-                    return Value.boolVal(false);
+                if (std.mem.eql(u8, key, "length")) {
+                    if (strict) return self.throwError("TypeError", "Cannot delete property");
+                    return false;
                 }
-                const key = try self.memberKey(m.property, m.computed);
                 if (arrayIndex(key)) |i| if (i < utf16LenOfValue(obj)) {
-                    if (self.strict) return self.throwError("TypeError", "Cannot delete property");
-                    return Value.boolVal(false);
+                    if (strict) return self.throwError("TypeError", "Cannot delete property");
+                    return false;
                 };
             }
-            return Value.boolVal(true);
+            return true;
         }
-        const key = try self.memberKey(m.property, m.computed);
+        const key = try key_ref.resolve(self);
         const ok = try self.deleteOwn(obj.asObj(), key);
         // Strict mode: a failed delete (a non-configurable property) is a
         // TypeError rather than a `false` result.
-        if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
-        return Value.boolVal(ok);
+        if (!ok and strict) return self.throwError("TypeError", "Cannot delete property");
+        return ok;
     }
 
     fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool) EvalError!Value {

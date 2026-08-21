@@ -398,6 +398,8 @@ pub const Op = enum(u8) {
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
     set_index, // pop value, pop key, pop object -> push value (after set)
+    delete_prop, // operands a: name index, b: strict; pop object -> push [[Delete]] result
+    delete_index, // operand a: strict; pop key, pop object -> push [[Delete]] result
     instance_of, // pop rhs, pop lhs -> push (lhs instanceof rhs)
     private_in, // operand a: private-name index; pop rhs object -> push (#name in rhs)
 
@@ -452,8 +454,8 @@ pub const Op = enum(u8) {
 };
 
 /// A single instruction. `a` is the primary operand (const/name/fn index, jump
-/// target, or argc); `b` is a secondary operand used only by `call_method`
-/// (which needs both a method-name index and an argument count).
+/// target, or argc); `b` is a secondary operand for operations such as
+/// `call_method` (name + argument count) and `delete_prop` (name + strictness).
 pub const Inst = struct {
     op: Op,
     a: u32 = 0,
@@ -751,7 +753,7 @@ pub const Chunk = struct {
         return idx;
     }
 
-    /// Emit an instruction with both operands (only `call_method` needs `b`).
+    /// Emit an instruction with both operands.
     pub fn emitAB(self: *Chunk, op: Op, a: u32, b: u32) std.mem.Allocator.Error!usize {
         const idx = self.code.items.len;
         try self.code.append(self.arena, .{ .op = op, .a = a, .b = b });

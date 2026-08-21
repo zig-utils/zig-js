@@ -22978,6 +22978,173 @@ test "forced tree-walker and required bytecode agree on optional chains" {
     try std.testing.expect(bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled) > 0);
 }
 
+test "forced tree-walker and required bytecode agree on property deletion" {
+    const source =
+        \\var deleteLog = "";
+        \\var deleteKeyEvaluations = 0;
+        \\var deleteKeyCoercions = 0;
+        \\var deleteTrapCalls = 0;
+        \\var deleteSymbolTrap = false;
+        \\function deleteKey(label) {
+        \\  deleteKeyEvaluations = deleteKeyEvaluations + 1;
+        \\  deleteLog = deleteLog + label;
+        \\  return { toString: function() { deleteKeyCoercions = deleteKeyCoercions + 1; deleteLog = deleteLog + "k"; return "value"; } };
+        \\}
+        \\var deleteSymbol = Symbol("delete-symbol");
+        \\var deleteTarget = { value: 1, keep: 2 };
+        \\deleteTarget[deleteSymbol] = 3;
+        \\var deleteProxy = new Proxy(deleteTarget, {
+        \\  deleteProperty: function(target, key) { deleteTrapCalls = deleteTrapCalls + 1; if (key === deleteSymbol) deleteSymbolTrap = true; deleteLog = deleteLog + "p"; return Reflect.deleteProperty(target, key); }
+        \\});
+        \\function deleteDifferential(base) {
+        \\  var optional = delete base?.[deleteKey("o")];
+        \\  var live = delete deleteProxy[deleteKey("l")];
+        \\  var absent = delete deleteProxy.missing;
+        \\  var side = delete (deleteLog = deleteLog + "s", 42);
+        \\  var primitive = delete "abc"[0];
+        \\  var nullError = false;
+        \\  try { delete null[deleteKey("n")]; } catch (error) { nullError = error.name === "TypeError"; }
+        \\  return optional && live && absent && side && !primitive && nullError;
+        \\}
+        \\var deleteLocked = {};
+        \\Object.defineProperty(deleteLocked, "value", { value: 1, configurable: false });
+        \\var deleteSloppyLocked = delete deleteLocked.value;
+        \\function deleteStrict() { "use strict"; try { delete deleteLocked.value; } catch (error) { return error.name; } return "none"; }
+        \\function deleteNumericKey() { return delete 1[deleteKey("r")]; }
+        \\var deleteArray = [1, 2];
+        \\var deleteArrayResult = delete deleteArray[0];
+        \\function deleteSymbolic() { return delete deleteProxy[deleteSymbol]; }
+        \\var deleteInvariantTarget = {};
+        \\Object.defineProperty(deleteInvariantTarget, "locked", { value: 1, configurable: false });
+        \\var deleteInvariantProxy = new Proxy(deleteInvariantTarget, { deleteProperty: function() { return true; } });
+        \\function deleteInvariant() { try { delete deleteInvariantProxy.locked; } catch (error) { return error.name; } return "none"; }
+        \\var deleteNonextensibleTarget = { present: 1 };
+        \\Object.preventExtensions(deleteNonextensibleTarget);
+        \\var deleteNonextensibleProxy = new Proxy(deleteNonextensibleTarget, { deleteProperty: function() { return true; } });
+        \\function deleteNonextensibleInvariant() { try { delete deleteNonextensibleProxy.present; } catch (error) { return error.name; } return "none"; }
+        \\var deleteRevocable = Proxy.revocable({ value: 1 }, {});
+        \\deleteRevocable.revoke();
+        \\function deleteRevoked() { try { delete deleteRevocable.proxy.value; } catch (error) { return error.name; } return "none"; }
+        \\function deleteTerminated() { try { delete (null?.value).nested; } catch (error) { return error.name; } return "none"; }
+        \\function deleteAbrupt() {
+        \\  var target = { value: 1 };
+        \\  try { delete target[{ toString: function() { throw "key-error"; } }]; }
+        \\  catch (error) { return error === "key-error" && target.value === 1; }
+        \\  return false;
+        \\}
+        \\deleteDifferential(null) && deleteDifferential({ value: 3 }) &&
+        \\  deleteSloppyLocked === false && deleteStrict() === "TypeError" && deleteNumericKey() &&
+        \\  deleteArrayResult && !(0 in deleteArray) && deleteArray.length === 2 &&
+        \\  deleteSymbolic() && deleteSymbolTrap && !(deleteSymbol in deleteTarget) &&
+        \\  deleteInvariant() === "TypeError" && deleteNonextensibleInvariant() === "TypeError" &&
+        \\  deleteRevoked() === "TypeError" && deleteTerminated() === "TypeError" && deleteAbrupt() &&
+        \\  deleteKeyEvaluations === 6 && deleteKeyCoercions === 4 && deleteTrapCalls === 5 &&
+        \\  deleteLog === "lkppsnoklkppsnrkp" && !("value" in deleteTarget);
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    const tree_result = try tree_ctx.evaluate(source);
+    const bytecode_result = try bytecode_ctx.evaluate(source);
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    try std.testing.expectEqualStrings(
+        (try tree_ctx.evaluate("deleteLog + '|' + deleteKeyEvaluations + '|' + deleteKeyCoercions + '|' + deleteTrapCalls")).asStr(),
+        (try bytecode_ctx.evaluate("deleteLog + '|' + deleteKeyEvaluations + '|' + deleteKeyCoercions + '|' + deleteTrapCalls")).asStr(),
+    );
+    const finally_source =
+        \\var deleteFinallyHolder = { value: 1 };
+        \\try { "preserved"; } finally { delete deleteFinallyHolder.value; }
+    ;
+    try std.testing.expectEqualStrings("preserved", (try tree_ctx.evaluate(finally_source)).asStr());
+    try std.testing.expectEqualStrings("preserved", (try bytecode_ctx.evaluate(finally_source)).asStr());
+    try std.testing.expect(tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker) > 0);
+    try std.testing.expect(bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled) > 0);
+
+    // Delete is an interpreter-owned effect for both native compilers. A hot
+    // function must remain on exact VM dispatch, with rejection cached rather
+    // than partially compiling or repeating the mutation around a side exit.
+    const automatic_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = true,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic_ctx.destroy();
+    const automatic = try automatic_ctx.evaluate(
+        \\function hotDelete(holder) {
+        \\  var deleted = delete holder.value;
+        \\  holder.value = 1;
+        \\  return deleted && holder.keep === 2;
+        \\}
+        \\var hotDeleteHolder = { value: 1, keep: 2 };
+        \\var hotDeleteCount = 0;
+        \\for (var hotDeleteIndex = 0; hotDeleteIndex < 64; hotDeleteIndex = hotDeleteIndex + 1)
+        \\  if (hotDelete(hotDeleteHolder)) hotDeleteCount = hotDeleteCount + 1;
+        \\hotDeleteCount;
+    );
+    try std.testing.expectEqual(@as(f64, 64), automatic.asNum());
+    try std.testing.expect(automatic_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled) > 0);
+    try std.testing.expectEqual(@as(u64, 0), automatic_ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
+test "required bytecode deletion survives generator and async suspension plus moving GC" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    // Establish the old generation first. Everything created by the suspended
+    // workload below is then a deterministic nursery relocation candidate.
+    ctx.collectGarbage();
+
+    const suspended = try ctx.evaluate(
+        \\globalThis.deleteSuspendedHolder = { value: 1 };
+        \\function* deleteSuspended(holder) {
+        \\  "use strict";
+        \\  var deleted = delete holder[yield "key"];
+        \\  return deleted + ":" + ("value" in holder);
+        \\}
+        \\globalThis.deleteSuspendedGenerator = deleteSuspended(deleteSuspendedHolder);
+        \\deleteSuspendedHolder = null;
+        \\deleteSuspendedGenerator.next().value;
+    );
+    try std.testing.expectEqualStrings("key", suspended.asStr());
+    const compacted = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+    try std.testing.expect(compacted.moved_cells > 0);
+
+    const resumed = try ctx.evaluate(
+        \\var resumedDelete = deleteSuspendedGenerator.next("value");
+        \\resumedDelete.done && resumedDelete.value === "true:false";
+    );
+    try std.testing.expect(resumed.asBool());
+
+    _ = try ctx.evaluate(
+        \\globalThis.deleteAwaitedHolder = { value: 2 };
+        \\globalThis.deleteAwaitedResult = "pending";
+        \\async function deleteAwaited(holder) { "use strict"; return delete holder[await Promise.resolve("value")]; }
+        \\deleteAwaited(deleteAwaitedHolder).then(function(result) {
+        \\  deleteAwaitedResult = result + ":" + ("value" in deleteAwaitedHolder);
+        \\});
+    );
+    const awaited = try ctx.evaluate("drainMicrotasks(); deleteAwaitedResult;");
+    try std.testing.expectEqualStrings("true:false", awaited.asStr());
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(inventory.count(.template_generator_compiled) > 0);
+    try std.testing.expect(inventory.count(.template_async_compiled) > 0);
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_generator_fallback));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_async_fallback));
+}
+
 test "forced tree-walker and required bytecode agree on member logical assignment" {
     const source =
         \\var logicalHolder = { value: null };

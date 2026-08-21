@@ -984,6 +984,14 @@ pub const Compiler = struct {
         };
     }
 
+    fn programIsStrict(statements: []*Node) bool {
+        for (statements) |statement| {
+            if (statement.* != .expr_stmt or statement.expr_stmt.* != .string) return false;
+            if (std.mem.eql(u8, statement.expr_stmt.string, "use strict")) return true;
+        }
+        return false;
+    }
+
     fn compileProgramInner(arena: std.mem.Allocator, program: *Node, rejection: *?ProgramRejection) CompileError!*Chunk {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
@@ -996,6 +1004,11 @@ pub const Compiler = struct {
             rejection.* = .invalid_root;
             return error.Unsupported;
         }
+        // The parser's program-level strict flag is represented by the leading
+        // Directive Prologue in this AST. Carry it into effectful bytecodes so
+        // strict DeletePropertyOrThrow behavior does not depend on the caller's
+        // mutable interpreter mode.
+        c.is_strict = programIsStrict(program.program);
         try c.compileStmtList(program.program);
         _ = try chunk.emit(.halt, 0);
         try chunk.finalize();
@@ -1049,7 +1062,7 @@ pub const Compiler = struct {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         // An async generator body may also `await` (in_async enables await_op).
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true, .in_async = fnode.is_async, .debug_checkpoints = debug_checkpoints };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true, .in_async = fnode.is_async, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
         try c.compileStmt(fnode.body); // body is a block
         _ = try chunk.emit(.ret_undef, 0);
         try chunk.finalize();
@@ -1093,7 +1106,7 @@ pub const Compiler = struct {
         }
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_async = true, .debug_checkpoints = debug_checkpoints };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_async = true, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
         if (fnode.is_expr_body) {
             try c.compileExpr(fnode.body);
             _ = try chunk.emit(.ret, 0);
@@ -1987,7 +2000,11 @@ pub const Compiler = struct {
                     _ = try self.chunk.emit(.load_undefined, 0)
                 else
                     try self.compileExpr(e);
-                _ = try self.chunk.emit(if (self.mode == .program) .set_acc else .pop, 0);
+                // TryStatement evaluation keeps the try/catch completion when a
+                // finally completes normally; the finally body's own statement
+                // values are discarded. `active_finally` is compile-time region
+                // state, so no runtime completion scratch is introduced here.
+                _ = try self.chunk.emit(if (self.mode == .program and self.active_finally == 0) .set_acc else .pop, 0);
             },
             .debugger_stmt => _ = try self.chunk.emit(.nop, 0),
             .block => |stmts| {
@@ -3120,6 +3137,68 @@ pub const Compiler = struct {
         for (joins) |join| if (join) |instruction| self.chunk.patchToHere(instruction);
     }
 
+    /// A nullish optional property reference is considered successfully
+    /// deleted. Keep this distinct from ordinary optional-chain value lowering,
+    /// whose short path synthesizes `undefined`.
+    fn finishOptionalDeleteRegion(self: *Compiler, exits: []const OptionalExit) CompileError!void {
+        if (exits.len == 0) return;
+
+        const skip_cleanup = try self.chunk.emit(.jump, 0);
+        var targets: [3]?usize = .{ null, null, null };
+        var joins: [3]?usize = .{ null, null, null };
+        for (exits) |exit| {
+            std.debug.assert(exit.cleanup > 0 and exit.cleanup < targets.len);
+            if (targets[exit.cleanup] != null) continue;
+            targets[exit.cleanup] = self.chunk.here();
+            for (0..exit.cleanup) |_| _ = try self.chunk.emit(.pop, 0);
+            _ = try self.chunk.emit(.load_true, 0);
+            joins[exit.cleanup] = try self.chunk.emit(.jump, 0);
+        }
+        self.chunk.patchToHere(skip_cleanup);
+        for (exits) |exit| self.chunk.patchTo(exit.instruction, targets[exit.cleanup].?);
+        for (joins) |join| if (join) |instruction| self.chunk.patchToHere(instruction);
+    }
+
+    fn compileDeleteMember(self: *Compiler, member: anytype, optional_chain: bool) CompileError!void {
+        var exits: std.ArrayListUnmanaged(OptionalExit) = .empty;
+        if (optional_chain) {
+            try self.compileOptionalValue(member.object, &exits);
+            if (member.optional) try self.emitOptionalExit(&exits, 1);
+        } else {
+            try self.compileExpr(member.object);
+        }
+        if (member.computed) |key| {
+            try self.compileExpr(key);
+            _ = try self.chunk.emit(.delete_index, @intFromBool(self.is_strict));
+        } else {
+            _ = try self.chunk.emitAB(.delete_prop, try self.addMemberName(member.property), @intFromBool(self.is_strict));
+        }
+        if (optional_chain) try self.finishOptionalDeleteRegion(exits.items);
+    }
+
+    fn compileDelete(self: *Compiler, target: *Node) CompileError!void {
+        switch (target.*) {
+            .member => |member| try self.compileDeleteMember(member, false),
+            .optional_chain => |inner| if (inner.* == .member)
+                try self.compileDeleteMember(inner.member, true)
+            else {
+                // A non-reference is evaluated exactly once for side effects;
+                // the Delete Operator result is unconditionally true.
+                try self.compileExpr(target);
+                _ = try self.chunk.emit(.pop, 0);
+                _ = try self.chunk.emit(.load_true, 0);
+            },
+            // Identifier and SuperReference deletion depend on environment and
+            // GetThisBinding rules not represented by these property opcodes.
+            .identifier, .super_member => return error.Unsupported,
+            else => {
+                try self.compileExpr(target);
+                _ = try self.chunk.emit(.pop, 0);
+                _ = try self.chunk.emit(.load_true, 0);
+            },
+        }
+    }
+
     fn finishOptionalTailRegion(self: *Compiler, exits: []const OptionalExit) CompileError!void {
         var targets: [3]?usize = .{ null, null, null };
         for (exits) |exit| {
@@ -3392,6 +3471,7 @@ pub const Compiler = struct {
                     .to_string => .to_string,
                 }, 0);
             },
+            .delete_expr => |target| try self.compileDelete(target),
             .binary => |b| {
                 const op: bc.Op = switch (b.op) {
                     .add => .add,
@@ -4985,6 +5065,89 @@ test "compiler lowers optional chains across bytecode tiers" {
     const optional_program = try program_parser.parseProgram();
     switch (try Compiler.admitProgram(arena.allocator(), optional_program)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler lowers property deletion across bytecode tiers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function plain(holder, key){ var named = delete holder.value; var computed = delete holder[key]; var optional = delete holder?.[key]?.value; var terminated = delete (holder?.value).nested; var nonref = delete sideEffect(); return named && computed && optional && terminated && nonref; } function* generated(holder){ \"use strict\"; return delete holder?.[yield \"key\"]; } async function awaited(holder){ \"use strict\"; return delete holder?.[await getKey()]; } function binding(name){ return delete name; } class Derived extends Base { method(){ return delete super.value; } }",
+    );
+    const program = try parser.parseProgram();
+    if (program.program.len != 5) return error.TestUnexpectedResult;
+
+    const plain = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var named_deletes: usize = 0;
+    var computed_deletes: usize = 0;
+    var optional_exits: usize = 0;
+    for (plain.code.items) |inst| switch (inst.op) {
+        .delete_prop => named_deletes += 1,
+        .delete_index => computed_deletes += 1,
+        .jump_if_nullish_peek => optional_exits += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 3), named_deletes);
+    try std.testing.expectEqual(@as(usize, 1), computed_deletes);
+    try std.testing.expect(optional_exits >= 2);
+
+    const generated = switch (try Compiler.admitGenerator(arena.allocator(), program.program[1].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_generator_delete = false;
+    for (generated.code.items) |inst| if (inst.op == .delete_index) {
+        saw_generator_delete = true;
+        try std.testing.expectEqual(@as(u32, 1), inst.a);
+    };
+    try std.testing.expect(saw_generator_delete);
+
+    const awaited = switch (try Compiler.admitAsync(arena.allocator(), program.program[2].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_async_delete = false;
+    for (awaited.code.items) |inst| if (inst.op == .delete_index) {
+        saw_async_delete = true;
+        try std.testing.expectEqual(@as(u32, 1), inst.a);
+    };
+    try std.testing.expect(saw_async_delete);
+
+    switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[3].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    }
+    const declaration = program.program[4];
+    if (declaration.* != .var_decl or declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const class = declaration.var_decl.init.?;
+    if (class.* != .class_expr or class.class_expr.members.len != 1)
+        return error.TestUnexpectedResult;
+    const method = class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitPlainFunction(arena.allocator(), method.function)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    }
+
+    var program_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "\"use strict\"; var deleteProgramHolder = { value: 1 }; var deleteProgramResult = delete deleteProgramHolder.value;",
+    );
+    const delete_program = try program_parser.parseProgram();
+    switch (try Compiler.admitProgram(arena.allocator(), delete_program)) {
+        .compiled => |chunk| {
+            var saw_program_delete = false;
+            for (chunk.code.items) |inst| if (inst.op == .delete_prop) {
+                saw_program_delete = true;
+                try std.testing.expectEqual(@as(u32, 1), inst.b);
+            };
+            try std.testing.expect(saw_program_delete);
+        },
         .rejected => return error.TestUnexpectedResult,
     }
 }

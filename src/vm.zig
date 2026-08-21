@@ -6808,6 +6808,17 @@ fn runChunk(
                 try vm.setMember(obj, try propKey(vm, key), v);
                 try stack.append(stack_alloc, v);
             },
+            .delete_prop => {
+                const obj = stack.pop().?;
+                const deleted = try vm.deleteNamedProperty(obj, chunk.names.items[inst.a], inst.b != 0);
+                try stack.append(stack_alloc, Value.boolVal(deleted));
+            },
+            .delete_index => {
+                const key = stack.pop().?;
+                const obj = stack.pop().?;
+                const deleted = try vm.deleteComputedProperty(obj, key, inst.a != 0);
+                try stack.append(stack_alloc, Value.boolVal(deleted));
+            },
             .instance_of => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
