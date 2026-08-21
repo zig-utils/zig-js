@@ -15241,7 +15241,11 @@ test "Response canonicalizes persistent and parsed physical StringData" {
         \\const redirect = Response.redirect({
         \\  toString() { calls++; return "https://example.com/" + text; }
         \\});
-        \\response.statusText === text && json.statusText === text && calls === 3 &&
+        \\const clone = response.clone();
+        \\response.statusText === text && clone.statusText === text && json.statusText === text && calls === 3 &&
+        \\  clone.status === response.status && clone.headers !== response.headers &&
+        \\  clone.body === null && !clone.bodyUsed && clone.type === "default" &&
+        \\  clone.url === "" && !clone.redirected &&
         \\  redirect.headers.get("location") === "https://example.com/caf%C3%A9%C3%BF"
     )).asBool());
 }

@@ -49915,7 +49915,7 @@ fn responseCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     return Value.obj(try responseMake(
         self,
         status,
-        if (status_text.isString()) status_text.asStr() else "",
+        if (status_text.isString()) try status_text.asWtf8(self.arena) else "",
         headers,
         try fetchCloneBody(self, source),
         if (response_type.isString()) response_type.asStr() else "default",
