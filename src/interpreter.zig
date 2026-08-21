@@ -7228,8 +7228,11 @@ pub const Interpreter = struct {
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
                 return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
             }
+            // Evaluate the MemberExpression's Get before its Arguments. Keep the
+            // resolved value so an accessor/proxy is observed exactly once.
+            const method = try self.getProperty(recv, key);
             const args = try self.evalArgs(arg_nodes);
-            return self.callMethod(recv, key, args);
+            return self.callResolvedMethod(recv, key, method, args);
         }
         // Method call `obj.m(...)`: evaluate the receiver once so it can both
         // resolve the method and bind `this`. Array/string builtins (push,
@@ -7256,8 +7259,12 @@ pub const Interpreter = struct {
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
                 return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
             }
+            // Evaluate the MemberExpression's Get before its Arguments (ECMA-262
+            // EvaluateCall), then retain that exact reference through argument
+            // expansion. Re-reading here would duplicate getters/proxy traps.
+            const method = try self.getProperty(recv, key);
             const args = try self.evalArgs(arg_nodes);
-            return self.callMethod(recv, key, args);
+            return self.callResolvedMethod(recv, key, method, args);
         }
         // `super.m(args)`: look the method up on the home object's prototype,
         // but invoke it with the current `this`.
@@ -14271,6 +14278,10 @@ pub const Interpreter = struct {
         // the unshadowed intrinsics and the fallback for method names that aren't
         // installed as real own properties (synthesized push/getDay/etc.).
         const method = try self.getProperty(recv, name);
+        return self.callResolvedMethod(recv, name, method, args);
+    }
+
+    fn callResolvedMethod(self: *Interpreter, recv: Value, name: []const u8, method: Value, args: []const Value) EvalError!Value {
         if (method.isObject() and method.asObj().isCallableObject())
             return self.callValueWithThis(method, args, recv);
         if (try self.builtinMethod(recv, name, args)) |result| return result;

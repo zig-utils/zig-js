@@ -3334,7 +3334,7 @@ pub const Compiler = struct {
             },
             .call => |c| {
                 const spread = hasSpread(c.args);
-                if (spread and !self.in_generator) return error.Unsupported; // non-generator spread → tree-walk
+                if (spread and c.optional) return error.Unsupported;
                 if (c.callee.* == .super_member) {
                     try self.compileSuperCall(c, false);
                 } else if (c.callee.* == .member and c.callee.member.computed == null) {
@@ -3342,6 +3342,7 @@ pub const Compiler = struct {
                     const m = c.callee.member;
                     const ni = try self.addMemberName(m.property);
                     if (spread) {
+                        if (m.optional) return error.Unsupported;
                         try self.compileExpr(m.object);
                         _ = try self.chunk.emit(.dup, 0);
                         _ = try self.chunk.emit(.get_prop, ni);
@@ -3361,7 +3362,6 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
                     }
                 } else if (c.callee.* == .member) {
-                    if (spread) return error.Unsupported;
                     const m = c.callee.member;
                     if (m.optional or m.computed == null) return error.Unsupported;
                     try self.compileExpr(m.object);
@@ -3369,8 +3369,13 @@ pub const Compiler = struct {
                     try self.compileExpr(m.computed.?);
                     _ = try self.chunk.emit(.get_index, 0);
                     _ = try self.chunk.emit(.swap, 0);
-                    for (c.args) |arg| try self.compileExpr(arg);
-                    _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
+                    if (spread) {
+                        try self.compileArgsArray(c.args);
+                        _ = try self.chunk.emit(.call_with_this_spread, 0);
+                    } else {
+                        for (c.args) |arg| try self.compileExpr(arg);
+                        _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
+                    }
                 } else {
                     // A direct `eval(...)` inside a slot-based function must see the
                     // function's locals (and correct `this`/private names), which
@@ -3415,7 +3420,6 @@ pub const Compiler = struct {
                 }
             },
             .new_expr => |n| {
-                if (hasSpread(n.args) and !self.in_generator) return error.Unsupported;
                 try self.compileExpr(n.callee);
                 if (hasSpread(n.args)) {
                     try self.compileArgsArray(n.args);
@@ -4607,6 +4611,103 @@ test "compiler lowers super calls in tail and receiver-aware spread positions" {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
     }
+}
+
+test "compiler lowers ordinary spread calls and constructors across tiers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function plain(fn, holder, key, args){ var direct = fn(0, ...args, 3); var named = holder.method(...args); var computed = holder[key](...args); var constructed = new fn(...args); return direct + named + computed + constructed.value; } async function awaited(fn, holder, key, args){ var direct = fn(...await Promise.resolve(args)); var computed = holder[await Promise.resolve(key)](...args); var constructed = new fn(...args); return direct + computed + constructed.value; } function tail(args){ \"use strict\"; return tail(...args); } function evalBarrier(args){ var value = eval(...args); return value; } function optional(holder, args){ var value = holder.method?.(...args); return value; } class Derived extends Base { spread(args){ var value = super.method(...args); return value; } async awaited(args){ var value = super[await Promise.resolve(\"method\")](...args); return value; } }",
+    );
+    const program = try parser.parseProgram();
+    if (program.program.len != 6) return error.TestUnexpectedResult;
+
+    const plain = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var calls: usize = 0;
+    var receiver_calls: usize = 0;
+    var constructors: usize = 0;
+    for (plain.code.items) |inst| switch (inst.op) {
+        .call_spread => calls += 1,
+        .call_with_this_spread => receiver_calls += 1,
+        .new_spread => constructors += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expectEqual(@as(usize, 2), receiver_calls);
+    try std.testing.expectEqual(@as(usize, 1), constructors);
+
+    const awaited = switch (try Compiler.admitAsync(arena.allocator(), program.program[1].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    calls = 0;
+    receiver_calls = 0;
+    constructors = 0;
+    for (awaited.code.items) |inst| switch (inst.op) {
+        .call_spread => calls += 1,
+        .call_with_this_spread => receiver_calls += 1,
+        .new_spread => constructors += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expectEqual(@as(usize, 1), receiver_calls);
+    try std.testing.expectEqual(@as(usize, 1), constructors);
+
+    for (program.program[2..5]) |declaration| switch (try Compiler.admitPlainFunction(arena.allocator(), declaration.func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    };
+
+    const declaration = program.program[5];
+    if (declaration.* != .var_decl or declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const class = declaration.var_decl.init.?;
+    if (class.* != .class_expr or class.class_expr.members.len != 2)
+        return error.TestUnexpectedResult;
+    const super_plain = class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
+    const super_plain_chunk = switch (try Compiler.admitPlainFunction(arena.allocator(), super_plain.function)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_plain_super_spread = false;
+    for (super_plain_chunk.code.items) |inst| if (inst.op == .call_with_this_spread) {
+        saw_plain_super_spread = true;
+    };
+    try std.testing.expect(saw_plain_super_spread);
+    const super_async = class.class_expr.members[1].func orelse return error.TestUnexpectedResult;
+    const super_async_chunk = switch (try Compiler.admitAsync(arena.allocator(), super_async.function, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_async_super_spread = false;
+    for (super_async_chunk.code.items) |inst| if (inst.op == .call_with_this_spread) {
+        saw_async_super_spread = true;
+    };
+    try std.testing.expect(saw_async_super_spread);
+
+    var program_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "var spreadProgramResult = spreadProgramFn(1, ...spreadProgramArgs, 3); var spreadProgramConstructed = new spreadProgramFn(...spreadProgramArgs); var spreadProgramEval = eval(...spreadProgramEvalArgs);",
+    );
+    const spread_program = try program_parser.parseProgram();
+    const program_chunk = switch (try Compiler.admitProgram(arena.allocator(), spread_program)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_program_call = false;
+    var saw_program_eval = false;
+    var saw_program_constructor = false;
+    for (program_chunk.code.items) |inst| switch (inst.op) {
+        .call_spread => saw_program_call = true,
+        .call_eval_spread => saw_program_eval = true,
+        .new_spread => saw_program_constructor = true,
+        else => {},
+    };
+    try std.testing.expect(saw_program_call and saw_program_eval and saw_program_constructor);
 }
 
 test "compiler reports stable program admission reasons" {

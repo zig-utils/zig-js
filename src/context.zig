@@ -23162,6 +23162,113 @@ test "plain and generator bytecode preserve super method call references" {
     try std.testing.expect(tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker) > 0);
 }
 
+test "ordinary spread calls and constructors preserve references across tiers" {
+    const source =
+        \\var spreadLog = "";
+        \\function spreadArgs(label) { spreadLog = spreadLog + label + "s"; return [1, 2]; }
+        \\function spreadDirect(a, b, c, d) { spreadLog = spreadLog + "d"; return "direct:" + a + "," + b + "," + c + "," + d; }
+        \\var spreadHolder = { marker: "receiver" };
+        \\Object.defineProperty(spreadHolder, "method", {
+        \\  configurable: true,
+        \\  get: function() {
+        \\    spreadLog = spreadLog + "g";
+        \\    return function(a, b, c, d) { spreadLog = spreadLog + "m"; return this.marker + ":" + a + "," + b + "," + c + "," + d; };
+        \\  }
+        \\});
+        \\function spreadBase(value) { spreadLog = spreadLog + "b"; return value; }
+        \\function spreadKey() { spreadLog = spreadLog + "k"; return "method"; }
+        \\function SpreadCtor(a, b, c, d) { spreadLog = spreadLog + "t"; this.value = a + "," + b + "," + c + "," + d + ":" + (new.target === SpreadCtor); }
+        \\function spreadPlain(fn, holder) {
+        \\  var direct = fn(0, ...spreadArgs("d"), 3);
+        \\  var named = holder.method(0, ...spreadArgs("n"), 3);
+        \\  var computed = spreadBase(holder)[spreadKey()](0, ...spreadArgs("c"), 3);
+        \\  var constructed = new SpreadCtor(0, ...spreadArgs("x"), 3);
+        \\  return direct + "|" + named + "|" + computed + "|" + constructed.value;
+        \\}
+        \\function* spreadGenerated(holder) { var result = holder[yield "key"](0, ...(yield "spread"), 3); return result; }
+        \\var spreadPlainResult = spreadPlain(spreadDirect, spreadHolder);
+        \\var spreadProgramResult = spreadDirect(0, ...spreadArgs("p"), 3);
+        \\var spreadEvalResult = eval(...["1 + 2"]);
+        \\var spreadOrderedLog = spreadLog;
+        \\var spreadIterSteps = 0;
+        \\var spreadIterable = {};
+        \\spreadIterable[Symbol.iterator] = function() {
+        \\  return { next: function() { spreadIterSteps = spreadIterSteps + 1; return spreadIterSteps < 3 ? { value: spreadIterSteps + 3, done: false } : { done: true }; } };
+        \\};
+        \\function spreadPair(a, b) { return a * 10 + b; }
+        \\function spreadPlainIterable(iterable) { return spreadPair(...iterable); }
+        \\var spreadIterableResult = spreadPlainIterable(spreadIterable);
+        \\var spreadAbruptCalled = false;
+        \\var spreadAbruptReturns = 0;
+        \\var spreadAbruptIterable = {};
+        \\spreadAbruptIterable[Symbol.iterator] = function() {
+        \\  var record = { done: false };
+        \\  Object.defineProperty(record, "value", { get: function() { throw "spread-stop"; } });
+        \\  return { next: function() { return record; }, return: function() { spreadAbruptReturns = spreadAbruptReturns + 1; return {}; } };
+        \\};
+        \\function spreadPlainAbrupt(fn, iterable) { return fn(...iterable); }
+        \\var spreadAbruptResult = "";
+        \\try { spreadPlainAbrupt(function() { spreadAbruptCalled = true; }, spreadAbruptIterable); } catch (error) { spreadAbruptResult = error; }
+        \\var spreadProxyGets = 0;
+        \\var spreadProxy = new Proxy({ marker: "proxy", method: function(a, b) { return this.marker + ":" + a + "," + b; } }, {
+        \\  get: function(target, key) { spreadProxyGets = spreadProxyGets + 1; return target[key]; }
+        \\});
+        \\function spreadProxyCall(holder, args) { return holder.method(...args); }
+        \\var spreadProxyResult = spreadProxyCall(spreadProxy, [7, 8]);
+        \\function spreadRecursive(n, args) { if (n === 0) return args[0]; return 1 + spreadRecursive(...[n - 1, args]); }
+        \\var spreadRecursiveResult = spreadRecursive(32, [10]);
+        \\spreadLog = "";
+        \\var spreadIterator = spreadGenerated(spreadHolder);
+        \\var spreadFirst = spreadIterator.next();
+        \\var spreadSecond = spreadIterator.next("method");
+        \\var spreadThird = spreadIterator.next([5, 6]);
+    ;
+    const Witness = struct {
+        fn expect(ctx: *Context) !void {
+            try std.testing.expect((try ctx.evaluate(
+                \\spreadPlainResult === "direct:0,1,2,3|receiver:0,1,2,3|receiver:0,1,2,3|0,1,2,3:true"
+            )).asBool());
+            try std.testing.expect((try ctx.evaluate(
+                \\spreadProgramResult === "direct:0,1,2,3" && spreadEvalResult === 3 && spreadOrderedLog === "dsdgnsmbkgcsmxstpsd"
+            )).asBool());
+            try std.testing.expect((try ctx.evaluate(
+                \\spreadIterableResult === 45 && spreadIterSteps === 3
+            )).asBool());
+            try std.testing.expect((try ctx.evaluate(
+                \\spreadAbruptResult === "spread-stop" && spreadAbruptCalled === false && spreadAbruptReturns === 0
+            )).asBool());
+            try std.testing.expect((try ctx.evaluate(
+                \\spreadProxyResult === "proxy:7,8" && spreadProxyGets === 2 && spreadRecursiveResult === 42
+            )).asBool());
+            try std.testing.expect((try ctx.evaluate(
+                \\spreadFirst.value === "key" && spreadFirst.done === false &&
+                \\spreadSecond.value === "spread" && spreadSecond.done === false &&
+                \\spreadThird.value === "receiver:0,5,6,3" && spreadThird.done === true && spreadLog === "gm"
+            )).asBool());
+        }
+    };
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    _ = try tree_ctx.evaluate(source);
+    try Witness.expect(tree_ctx);
+    try std.testing.expect(tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker) > 0);
+
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+    _ = try bytecode_ctx.evaluate(source);
+    try Witness.expect(bytecode_ctx);
+    const bytecode = bytecode_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(bytecode.count(.program_compiled) > 0);
+    try std.testing.expect(bytecode.count(.template_plain_compiled) > 0);
+}
+
 test "parser-derived arguments use preserves forced execution tiers" {
     const source =
         \\function scopeOwner(box) {
