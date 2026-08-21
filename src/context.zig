@@ -15246,6 +15246,24 @@ test "Response canonicalizes persistent and parsed physical StringData" {
     )).asBool());
 }
 
+test "Events canonicalize persistent and compared physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const type = "caf\u00e9\u00ff";
+        \\let calls = 0;
+        \\const value = { toString() { calls++; return type; } };
+        \\const event = new Event(value);
+        \\const custom = new CustomEvent(value);
+        \\const target = new EventTarget();
+        \\let fired = 0;
+        \\const listener = () => { fired++; };
+        \\target.addEventListener(value, listener);
+        \\target.dispatchEvent(new Event(type));
+        \\target.removeEventListener(value, listener);
+        \\target.dispatchEvent(new Event(type));
+        \\event.type === type && custom.type === type && fired === 1 && calls === 4
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;

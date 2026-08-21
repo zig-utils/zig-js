@@ -46445,12 +46445,16 @@ fn evBool(o: *value.Object, k: []const u8) bool {
 fn evIsEvent(v: Value) bool {
     return v.isObject() and v.asObj().getOwn("\x00Et") != null;
 }
+fn eventTypeEquals(self: *Interpreter, stored: Value, canonical: []const u8) EvalError!bool {
+    if (!stored.isString()) return false;
+    return std.mem.eql(u8, try stored.asWtf8(self.arena), canonical);
+}
 fn eventConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'Event': Please use the 'new' operator");
     if (args.len == 0) return self.throwError("TypeError", "Failed to construct 'Event': 1 argument required, but only 0 present.");
-    const ty = try self.toStringV(args[0]);
+    const ty = try self.toStringWtf8(args[0]);
     var bubbles = false;
     var cancelable = false;
     var composed = false;
@@ -46480,7 +46484,7 @@ fn customEventConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'CustomEvent': Please use the 'new' operator");
     if (args.len == 0) return self.throwError("TypeError", "Failed to construct 'CustomEvent': 1 argument required, but only 0 present.");
-    const ty = try self.toStringV(args[0]);
+    const ty = try self.toStringWtf8(args[0]);
     var bubbles = false;
     var cancelable = false;
     var composed = false;
@@ -46601,7 +46605,7 @@ fn eventTargetConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
 fn etAddListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
-    const ty = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const ty = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const cb = if (args.len > 1) args[1] else Value.undef();
     if (cb.isNull() or cb.isUndefined()) return Value.undef(); // no-op
     if (!cb.isObject()) return self.throwError("TypeError", "The \"listener\" argument must be an object or function");
@@ -46626,7 +46630,7 @@ fn etAddListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
         if (!rec.isObject()) continue;
         const ro = rec.asObj();
         const rt = ro.getOwn("\x00Lt") orelse continue;
-        if (!rt.isString() or !std.mem.eql(u8, rt.asStr(), ty)) continue;
+        if (!try eventTypeEquals(self, rt, ty)) continue;
         if (evBool(ro, "\x00Lcap") != capture) continue;
         const rc = ro.getOwn("\x00Lc") orelse continue;
         if (rc.isObject() and cb.isObject() and rc.asObj() == cb.asObj()) return Value.undef();
@@ -46672,7 +46676,7 @@ fn etRemoveRecord(self: *Interpreter, target: *value.Object, rec: *value.Object)
 fn etRemoveListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
-    const ty = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const ty = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const cb = if (args.len > 1) args[1] else Value.undef();
     if (!cb.isObject()) return Value.undef();
     var capture = false;
@@ -46688,7 +46692,8 @@ fn etRemoveListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
             const ro = rec.asObj();
             const rt = ro.getOwn("\x00Lt");
             const rc = ro.getOwn("\x00Lc");
-            if (rt != null and rt.?.isString() and std.mem.eql(u8, rt.?.asStr(), ty) and
+            const same_type = if (rt) |stored| try eventTypeEquals(self, stored, ty) else false;
+            if (same_type and
                 evBool(ro, "\x00Lcap") == capture and rc != null and rc.?.isObject() and cb.isObject() and rc.?.asObj() == cb.asObj())
             {
                 drop = true;
@@ -46714,14 +46719,15 @@ fn etDispatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     try ev.setOwn(self.arena, rs, "\x00Esi", Value.boolVal(false));
     try ev.setOwn(self.arena, rs, "\x00Etg", this);
     try ev.setOwn(self.arena, rs, "\x00Ect", this);
-    const ty = (ev.getOwn("\x00Et") orelse Value.str("")).asStr();
+    const ty_value = ev.getOwn("\x00Et") orelse Value.str("");
+    const ty = try ty_value.asWtf8(self.arena);
     const list = try etListeners(self, this.asObj());
     const snapshot = try list.internalElementsSnapshot(self.arena);
     for (snapshot) |rec| {
         if (!rec.isObject()) continue;
         const ro = rec.asObj();
         const rt = ro.getOwn("\x00Lt") orelse continue;
-        if (!rt.isString() or !std.mem.eql(u8, rt.asStr(), ty)) continue;
+        if (!try eventTypeEquals(self, rt, ty)) continue;
         // Skip listeners removed since the snapshot was taken. removeEventListener
         // swaps in a fresh \x00etl array, so re-read the live list, not `list`.
         var still_present = false;
@@ -46851,7 +46857,7 @@ fn abortSignalHasJsObservation(self: *Interpreter, sig: *value.Object) EvalError
         if (!record.isObject()) continue;
         const item = record.asObj();
         const event_type = item.getOwn("\x00Lt") orelse continue;
-        if (!event_type.isString() or !std.mem.eql(u8, event_type.asStr(), "abort")) continue;
+        if (!try eventTypeEquals(self, event_type, "abort")) continue;
         const callback = item.getOwn("\x00Lc") orelse continue;
         if (!callback.isObject()) continue;
         if (callback.asObj().native == abortOnabortDispatchFn) continue;
