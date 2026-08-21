@@ -28789,6 +28789,21 @@ test "enable_gc: runtime StringCells are traced and finalized" {
     try std.testing.expectEqual(@as(usize, 3), stats.strings);
 }
 
+test "enable_gc: Object.prototype.toString publishes managed affixed strings" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const value = {};
+        \\value[Symbol.toStringTag] = "café";
+        \\Object.prototype.toString.call(value)
+    );
+    try std.testing.expect(result.asStringCell().isGcManaged());
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    try std.testing.expectEqualStrings("[object café]", try result.asWtf8(scratch.allocator()));
+}
+
 test "enable_gc: FinalizationRegistry automatic cleanup delivers collected holdings" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

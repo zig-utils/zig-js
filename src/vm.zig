@@ -9144,6 +9144,16 @@ test "vm: dynamic code parser ingress canonicalizes physical StringData" {
     )).asBool());
 }
 
+test "vm: Object.prototype.toString composes physical custom tags once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\let value = {};
+        \\value[Symbol.toStringTag] = "café";
+        \\Object.prototype.toString.call(value) === "[object café]"
+    )).asBool());
+}
+
 test "vm: number bitwise dispatch preserves conversions and coercion fallbacks" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

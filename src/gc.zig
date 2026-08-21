@@ -4280,6 +4280,7 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
             .context = raw,
             .create = allocManagedString,
             .create_owned = allocManagedStringOwned,
+            .create_ascii_affixes = allocManagedStringAsciiAffixes,
         });
         _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk, managedBarrierThunk);
         _ = gc_runtime.setStableIdentity(raw, stableIdentityThunk, stableIdentityEpochThunk);
@@ -4345,17 +4346,22 @@ pub fn setActiveMachineContext(machine: *interp.Interpreter) ActiveContextState 
     return setActiveContext(realm);
 }
 
+fn finishManagedStoredString(heap: *Heap, stored: []u8, hash: u64) std.mem.Allocator.Error!*StringCell {
+    const realm = active_realm_context orelse heap.ctx.context;
+    errdefer realm.gpa.free(stored);
+    const cell = try heap.create(StringCell, .string);
+    cell.* = .{ .bytes = stored, .hash = hash };
+    cell.setGcManaged(true);
+    _ = @atomicRmw(usize, &realm.gc_string_bytes_live, .Add, stored.len, .monotonic);
+    return cell;
+}
+
 fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {
     const realm = active_realm_context orelse heap.ctx.context;
     strcell.debugAssertWtf8(bytes); // tripwire on the WTF-8 input
     const h = strcell.uninternedHashState(bytes);
     const stored = try strcell.storedImage(realm.gpa, bytes, h); // consumes bytes
-    errdefer realm.gpa.free(stored);
-    const cell = try heap.create(StringCell, .string);
-    cell.* = .{ .bytes = stored, .hash = h };
-    cell.setGcManaged(true);
-    _ = @atomicRmw(usize, &realm.gc_string_bytes_live, .Add, stored.len, .monotonic);
-    return cell;
+    return finishManagedStoredString(heap, stored, h);
 }
 
 fn allocManagedString(
@@ -4386,6 +4392,20 @@ fn allocManagedStringOwned(
     defer source_allocator.free(source);
     const bytes = try strcell.canonicalizeSurrogates(target_allocator, source);
     return finishManagedString(heap, bytes);
+}
+
+fn allocManagedStringAsciiAffixes(
+    raw: *anyopaque,
+    _: std.mem.Allocator,
+    prefix: []const u8,
+    middle: []const u8,
+    middle_flat_latin1: bool,
+    suffix: []const u8,
+) std.mem.Allocator.Error!*StringCell {
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    const realm = active_realm_context orelse heap.ctx.context;
+    const prepared = try strcell.prepareAsciiAffixedString(realm.gpa, prefix, middle, middle_flat_latin1, suffix);
+    return finishManagedStoredString(heap, prepared.stored, prepared.hash);
 }
 
 /// Whether the current thread's cell-allocation funnels target the GC heap.

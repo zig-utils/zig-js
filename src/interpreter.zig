@@ -10273,6 +10273,22 @@ pub const Interpreter = struct {
         return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(unit));
     }
 
+    /// Build `prefix + middle + suffix` with ASCII affixes directly in the
+    /// StringCell's final physical representation. This avoids a flat-latin1
+    /// conversion scratch allocation before the already-required result cell.
+    fn stringValueWithAsciiAffixes(self: *Interpreter, prefix: []const u8, middle: Value, suffix: []const u8) EvalError!Value {
+        std.debug.assert(middle.isString());
+        const canonical_len = try strcell.asciiAffixedCanonicalLength(prefix, middle.asStr(), middle.strIsFlatLatin1(), suffix);
+        if (canonical_len > max_string_bytes) return self.throwError("RangeError", "Invalid string length");
+        return Value.strCell(try strcell.createCellWithAsciiAffixes(
+            self.arena,
+            prefix,
+            middle.asStr(),
+            middle.strIsFlatLatin1(),
+            suffix,
+        ));
+    }
+
     /// Read one UTF-16 code unit without confusing the StringCell's physical
     /// representation for its ECMAScript index space. Flat latin1 is one raw
     /// byte per unit and stays O(1); every other cell contains canonical WTF-8.
@@ -19730,14 +19746,15 @@ fn objectProtoToStringFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         else => "Object",
     };
     // `Symbol.toStringTag` (a string) wins over the builtin tag.
-    var tag = builtin_tag;
+    var custom_tag: ?Value = null;
     if (tag_obj) |o| {
         if (symbolToStringTagKey(self)) |tk| {
             const tv = try self.getProperty(Value.obj(o), tk);
-            if (tv.isString()) tag = tv.asStr();
+            if (tv.isString()) custom_tag = tv;
         }
     }
-    return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "[object ", tag, "]" }));
+    if (custom_tag) |tag| return self.stringValueWithAsciiAffixes("[object ", tag, "]");
+    return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "[object ", builtin_tag, "]" }));
 }
 
 pub fn objectToStringIsArray(self: *Interpreter, o: *value.Object) EvalError!bool {
@@ -51787,6 +51804,31 @@ test "dynamic code parser ingress canonicalizes physical StringData" {
         try std.testing.expect(unavailable.has_induced_failure);
         try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
     }
+}
+
+test "Object.prototype.toString composes physical custom tags once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\function exact(receiver, tag) {
+        \\  receiver[Symbol.toStringTag] = tag;
+        \\  return Object.prototype.toString.call(receiver) === "[object " + tag + "]";
+        \\}
+        \\let tags = ["ASCII", "café", "水", "💩", "\ud800"];
+        \\let all = true;
+        \\for (let i = 0; i < tags.length; i++) all = all && exact({}, tags[i]);
+        \\let boxed = new String("value");
+        \\let boxedExact = exact(boxed, "café");
+        \\let reads = 0;
+        \\let proxy = new Proxy({}, { get(target, key, receiver) {
+        \\  if (key === Symbol.toStringTag) { reads++; return "café"; }
+        \\  return Reflect.get(target, key, receiver);
+        \\} });
+        \\let proxyExact = Object.prototype.toString.call(proxy) === "[object café]" && reads === 1;
+        \\let alien = $262.createRealm().global;
+        \\let realmExact = exact(alien, "café");
+        \\all && boxedExact && proxyExact && realmExact
+    )).asBool());
 }
 
 test "interpreter direct eval super early errors run before side effects" {

@@ -441,6 +441,142 @@ pub fn debugAssertWtf8(bytes: []const u8) void {
     }
 }
 
+fn allAscii(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte >= 0x80) return false;
+    return true;
+}
+
+/// Canonical WTF-8 length of `prefix + middle + suffix`, where both affixes are
+/// ASCII and `middle` is either canonical WTF-8 or a physical flat-latin1 image.
+/// Keeping this public lets the interpreter enforce its JS string-size ceiling
+/// before any backing allocation is attempted.
+pub fn asciiAffixedCanonicalLength(prefix: []const u8, middle: []const u8, middle_flat_latin1: bool, suffix: []const u8) std.mem.Allocator.Error!usize {
+    std.debug.assert(allAscii(prefix) and allAscii(suffix));
+    var middle_len = middle.len;
+    if (middle_flat_latin1) {
+        for (middle) |byte| {
+            if (byte >= 0x80)
+                middle_len = std.math.add(usize, middle_len, 1) catch return error.OutOfMemory;
+        }
+    } else {
+        debugAssertWtf8(middle);
+    }
+    const with_prefix = std.math.add(usize, prefix.len, middle_len) catch return error.OutOfMemory;
+    return std.math.add(usize, with_prefix, suffix.len) catch error.OutOfMemory;
+}
+
+pub const PreparedAsciiAffixedString = struct {
+    stored: []u8,
+    hash: u64,
+};
+
+/// Materialize an ASCII-affixed String directly in its final physical image.
+/// A flat-latin1 middle is encoded into the final canonical destination when
+/// canonical storage is active; when flat storage is active, a canonical
+/// latin1 middle is decoded directly into the final flat destination. No
+/// intermediate transcode buffer exists in either direction.
+pub fn prepareAsciiAffixedString(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    middle: []const u8,
+    middle_flat_latin1: bool,
+    suffix: []const u8,
+) std.mem.Allocator.Error!PreparedAsciiAffixedString {
+    std.debug.assert(allAscii(prefix) and allAscii(suffix));
+    const canonical_len = try asciiAffixedCanonicalLength(prefix, middle, middle_flat_latin1, suffix);
+    const classification = if (middle_flat_latin1) blk: {
+        var flags = latin1_flag;
+        if (allAscii(middle)) flags |= ascii_flag;
+        break :blk flags;
+    } else classificationBits(middle);
+    const store_flat = isFlatLatin1(classification);
+    const middle_suffix_len = std.math.add(usize, middle.len, suffix.len) catch return error.OutOfMemory;
+    const stored_len = if (store_flat)
+        std.math.add(usize, prefix.len, middle_suffix_len) catch return error.OutOfMemory
+    else
+        canonical_len;
+    const stored = try allocator.alloc(u8, stored_len);
+    errdefer allocator.free(stored);
+
+    var out: usize = 0;
+    @memcpy(stored[out..][0..prefix.len], prefix);
+    out += prefix.len;
+    var hash = classification;
+    if (store_flat) {
+        var hasher = std.hash.XxHash3.init(0);
+        hasher.update(prefix);
+        if (middle_flat_latin1) {
+            @memcpy(stored[out..][0..middle.len], middle);
+            out += middle.len;
+            for (middle) |byte| {
+                if (byte < 0x80) {
+                    const one = [1]u8{byte};
+                    hasher.update(&one);
+                } else {
+                    const encoded = [2]u8{
+                        @intCast(0xC0 | (byte >> 6)),
+                        @intCast(0x80 | (byte & 0x3F)),
+                    };
+                    hasher.update(&encoded);
+                }
+            }
+        } else {
+            hasher.update(middle);
+            var i: usize = 0;
+            while (i < middle.len) {
+                const byte = middle[i];
+                if (byte < 0x80) {
+                    stored[out] = byte;
+                    out += 1;
+                    i += 1;
+                } else {
+                    std.debug.assert(byte == 0xC2 or byte == 0xC3);
+                    stored[out] = (@as(u8, byte & 0x1F) << 6) | (middle[i + 1] & 0x3F);
+                    out += 1;
+                    i += 2;
+                }
+            }
+        }
+        hasher.update(suffix);
+        hash |= hash_ready_flag | (hasher.final() & content_hash_mask);
+    } else if (middle_flat_latin1) {
+        for (middle) |byte| {
+            if (byte < 0x80) {
+                stored[out] = byte;
+                out += 1;
+            } else {
+                stored[out] = @intCast(0xC0 | (byte >> 6));
+                stored[out + 1] = @intCast(0x80 | (byte & 0x3F));
+                out += 2;
+            }
+        }
+    } else {
+        @memcpy(stored[out..][0..middle.len], middle);
+        out += middle.len;
+    }
+    @memcpy(stored[out..][0..suffix.len], suffix);
+    out += suffix.len;
+    std.debug.assert(out == stored.len);
+    if (!store_flat) debugAssertWtf8(stored);
+    return .{ .stored = stored, .hash = hash };
+}
+
+pub fn createCellWithAsciiAffixes(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    middle: []const u8,
+    middle_flat_latin1: bool,
+    suffix: []const u8,
+) std.mem.Allocator.Error!*StringCell {
+    if (active_managed_factory) |factory|
+        return factory.create_ascii_affixes(factory.context, allocator, prefix, middle, middle_flat_latin1, suffix);
+    const prepared = try prepareAsciiAffixedString(allocator, prefix, middle, middle_flat_latin1, suffix);
+    errdefer allocator.free(prepared.stored);
+    const cell = try allocator.create(StringCell);
+    cell.* = .{ .bytes = prepared.stored, .hash = prepared.hash };
+    return cell;
+}
+
 /// Allocate a fresh (un-interned) cell that owns a (surrogate-canonicalized) copy
 /// of `bytes`. This is the minimal constructor the NaN-box `Value` representation
 /// needs; interning is optional (below). `allocator` owns both the cell and the
@@ -491,6 +627,7 @@ pub const ManagedFactory = struct {
     context: *anyopaque,
     create: *const fn (*anyopaque, std.mem.Allocator, []const u8) std.mem.Allocator.Error!*StringCell,
     create_owned: *const fn (*anyopaque, std.mem.Allocator, []u8) std.mem.Allocator.Error!*StringCell,
+    create_ascii_affixes: *const fn (*anyopaque, std.mem.Allocator, []const u8, []const u8, bool, []const u8) std.mem.Allocator.Error!*StringCell,
 };
 
 threadlocal var active_managed_factory: ?ManagedFactory = null;
@@ -939,6 +1076,47 @@ test "strcell: concurrent interning converges to one cell per string" {
         for (1..n_threads) |ti| try std.testing.expectEqual(canonical, results[ti][wi]);
         try std.testing.expect(canonical.eqlBytes(words[wi]));
     }
+}
+
+test "strcell: ASCII affixes materialize one final backing image" {
+    const canonical = "[object caf\xC3\xA9]";
+    const middle = if (flat_storage_active) "caf\xE9" else "caf\xC3\xA9";
+    var measured: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    const allocator = measured.allocator();
+    const cell = try createCellWithAsciiAffixes(allocator, "[object ", middle, flat_storage_active, "]");
+    defer {
+        allocator.free(@constCast(cell.bytes));
+        allocator.destroy(cell);
+    }
+    // Exactly one byte backing plus the StringCell itself; no conversion
+    // scratch allocation appears in either storage mode.
+    try std.testing.expectEqual(@as(usize, 2), measured.allocations);
+    if (flat_storage_active) {
+        try std.testing.expectEqualStrings("[object caf\xE9]", cell.bytes);
+        try std.testing.expectEqual(contentHash(canonical), cell.hashState());
+    } else {
+        try std.testing.expectEqualStrings(canonical, cell.bytes);
+        try std.testing.expectEqual(uninternedHashState(canonical), cell.hashState());
+    }
+
+    var fail_backing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        createCellWithAsciiAffixes(fail_backing.allocator(), "[object ", middle, flat_storage_active, "]"),
+    );
+    try std.testing.expect(fail_backing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), fail_backing.allocations);
+    try std.testing.expectEqual(@as(usize, 0), fail_backing.deallocations);
+
+    var fail_cell: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        createCellWithAsciiAffixes(fail_cell.allocator(), "[object ", middle, flat_storage_active, "]"),
+    );
+    try std.testing.expect(fail_cell.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), fail_cell.allocations);
+    try std.testing.expectEqual(@as(usize, 1), fail_cell.deallocations);
+    try std.testing.expectEqual(fail_cell.allocated_bytes, fail_cell.freed_bytes);
 }
 
 test "strcell: StringCell stays a compact NaN-box payload target" {
