@@ -1180,7 +1180,6 @@ const PrivateHeapSnapshotNode = struct {
     id: u64,
     size: usize,
     external_size: usize,
-    name: []const u8,
     kind: gc_mod.CellKind,
     pointer: *anyopaque,
 };
@@ -1231,13 +1230,20 @@ fn privateHeapSnapshotObjectName(object: *const Object) []const u8 {
     return "Object";
 }
 
-fn privateHeapSnapshotNodeName(cell: ReachabilityCell) []const u8 {
-    return switch (cell.kind) {
-        .object => privateHeapSnapshotObjectName(@ptrCast(@alignCast(cell.pointer))),
-        .string => @as(*strcell.StringCell, @ptrCast(@alignCast(cell.pointer))).bytes,
+fn privateHeapSnapshotNodeName(node: PrivateHeapSnapshotNode, allocator: std.mem.Allocator) ![]const u8 {
+    return switch (node.kind) {
+        .object => privateHeapSnapshotObjectName(@ptrCast(@alignCast(node.pointer))),
+        // Snapshot outputs expose each string cell's semantic contents as its
+        // node name.
+        // A flat Latin-1 StringData cell stores a representation-native byte
+        // image, so route it through the canonical WTF-8 boundary before JSON
+        // string-table interning. The snapshot-scoped allocator keeps that
+        // converted view alive through serialization and releases it as one
+        // bounded transaction.
+        .string => Value.strCell(@ptrCast(@alignCast(node.pointer))).asWtf8(allocator),
         .environment => "Environment",
         .function => blk: {
-            const function: *interp.Function = @ptrCast(@alignCast(cell.pointer));
+            const function: *interp.Function = @ptrCast(@alignCast(node.pointer));
             break :blk if (function.name.len == 0) "Function" else function.name;
         },
         .bound_fn => "BoundFunction",
@@ -1344,7 +1350,6 @@ fn privateHeapSnapshotNodes(
             .id = try privateHeapSnapshotCellId(group, cell.pointer),
             .size = size.shallow,
             .external_size = size.external,
-            .name = privateHeapSnapshotNodeName(cell),
             .kind = cell.kind,
             .pointer = cell.pointer,
         };
@@ -1510,6 +1515,8 @@ fn privateGenerateHeapSnapshotV8(group: *CContextGroup, allocator: std.mem.Alloc
     const snapshot_nodes = try privateHeapSnapshotNodes(group, &visitor, allocator);
     defer allocator.free(snapshot_nodes);
 
+    var node_name_arena = std.heap.ArenaAllocator.init(allocator);
+    defer node_name_arena.deinit();
     var strings = PrivateHeapSnapshotStrings{ .allocator = allocator };
     defer strings.deinit();
     const root_name = try strings.intern("(root)");
@@ -1524,7 +1531,8 @@ fn privateGenerateHeapSnapshotV8(group: *CContextGroup, allocator: std.mem.Alloc
 
     try nodes.appendSlice(allocator, &.{ 9, root_name, 1, 0, edge_counts[0], 0, 0 });
     for (snapshot_nodes, 1..) |node, node_index| {
-        const name_index = try strings.intern(node.name);
+        const node_name = try privateHeapSnapshotNodeName(node, node_name_arena.allocator());
+        const name_index = try strings.intern(node_name);
         try nodes.appendSlice(allocator, &.{
             privateHeapSnapshotV8NodeType(node),
             name_index,
@@ -1656,6 +1664,12 @@ fn privateGenerateHeapProfile(group: *CContextGroup, allocator: std.mem.Allocato
     defer visitor.deinit();
     const nodes = try privateHeapSnapshotNodes(group, &visitor, allocator);
     defer allocator.free(nodes);
+    var node_name_arena = std.heap.ArenaAllocator.init(allocator);
+    defer node_name_arena.deinit();
+    const node_names = try allocator.alloc([]const u8, nodes.len);
+    defer allocator.free(node_names);
+    for (nodes, node_names) |node, *name|
+        name.* = try privateHeapSnapshotNodeName(node, node_name_arena.allocator());
     const retained = try privateHeapSnapshotRetainedSizes(nodes, visitor.edges.items, allocator);
     defer allocator.free(retained);
 
@@ -1688,7 +1702,7 @@ fn privateGenerateHeapProfile(group: *CContextGroup, allocator: std.mem.Allocato
         try privateSnapshotAppendFmt(&output, allocator, "| {d} | `", .{node.id});
         try privateSnapshotAppendMarkdownText(&output, allocator, privateHeapSnapshotClassName(node));
         try output.appendSlice(allocator, "` | `");
-        try privateSnapshotAppendMarkdownText(&output, allocator, node.name);
+        try privateSnapshotAppendMarkdownText(&output, allocator, node_names[root_index - 1]);
         try output.appendSlice(allocator, "` |\n");
     }
     try output.appendSlice(allocator, "\n## Complete Cells\n\n| ID | Type | Shallow size | External bytes | Retained size | Name |\n| ---: | --- | ---: | ---: | ---: | --- |\n");
@@ -1696,7 +1710,7 @@ fn privateGenerateHeapProfile(group: *CContextGroup, allocator: std.mem.Allocato
         try privateSnapshotAppendFmt(&output, allocator, "| {d} | `", .{node.id});
         try privateSnapshotAppendMarkdownText(&output, allocator, privateHeapSnapshotClassName(node));
         try privateSnapshotAppendFmt(&output, allocator, "` | {d} B | {d} B | {d} B | `", .{ node.size, node.external_size, retained[node_index] });
-        try privateSnapshotAppendMarkdownText(&output, allocator, node.name);
+        try privateSnapshotAppendMarkdownText(&output, allocator, node_names[node_index - 1]);
         try output.appendSlice(allocator, "` |\n");
     }
     try output.appendSlice(allocator, "\n## Complete Strong Edges\n\n| From | Kind | Name/index | To |\n| ---: | --- | --- | ---: |\n");
@@ -33264,11 +33278,45 @@ test "private heap snapshot serializers return no partial output on allocation f
     }
 }
 
+test "private heap snapshot outputs preserve semantic flat Latin-1 string names" {
+    const vm_ref = JSC__VM__create(0) orelse return error.VMCreateFailed;
+    defer JSContextGroupRelease(@ptrCast(vm_ref));
+    const group = privateGroupFromVM(vm_ref) orelse return error.MissingVM;
+
+    const stored = try group.primary.evaluate(
+        "globalThis.__heap_snapshot_latin1_703 = 'caf\xc3\xa9\xc3\xbf'",
+    );
+    try std.testing.expect(stored.isString());
+    if (strcell.flat_storage_active) {
+        try std.testing.expect(stored.strIsFlatLatin1());
+        try std.testing.expectEqualStrings("caf\xe9\xff", stored.asStr());
+    }
+
+    const json = try privateGenerateHeapSnapshotV8(group, std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const strings = parsed.value.object.get("strings") orelse return error.MissingSnapshotStrings;
+    var found = false;
+    for (strings.array.items) |entry| {
+        if (entry == .string and std.mem.eql(u8, entry.string, "caf\xc3\xa9\xc3\xbf")) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+
+    const profile = try privateGenerateHeapProfile(group, std.testing.allocator);
+    defer std.testing.allocator.free(profile);
+    try std.testing.expect(std.mem.indexOf(u8, profile, "caf\xc3\xa9\xc3\xbf") != null);
+}
+
 test "private heap snapshot retained sizes use exact graph dominators" {
     const cells = [_]PrivateHeapSnapshotNode{
-        .{ .id = 2, .size = 10, .external_size = 0, .name = "A", .kind = .object, .pointer = @ptrFromInt(1) },
-        .{ .id = 4, .size = 20, .external_size = 0, .name = "B", .kind = .object, .pointer = @ptrFromInt(2) },
-        .{ .id = 6, .size = 30, .external_size = 0, .name = "C", .kind = .object, .pointer = @ptrFromInt(3) },
+        .{ .id = 2, .size = 10, .external_size = 0, .kind = .object, .pointer = @ptrFromInt(1) },
+        .{ .id = 4, .size = 20, .external_size = 0, .kind = .object, .pointer = @ptrFromInt(2) },
+        .{ .id = 6, .size = 30, .external_size = 0, .kind = .object, .pointer = @ptrFromInt(3) },
     };
     const edges = [_]ReachabilityEdge{
         .{ .from_index = 0, .to_index = 1, .kind = .internal, .name = .none },
