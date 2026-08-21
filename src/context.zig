@@ -15341,6 +15341,63 @@ test "FormData canonicalizes stored entry-name physical StringData" {
     )).asBool());
 }
 
+test "Request validates and preserves exposed RequestInit string state" {
+    try std.testing.expect((try evalIn(
+        \\const integrity = "caf\u00e9\u00ff";
+        \\let calls = 0;
+        \\const request = new Request("https://example.test/", {
+        \\  method: "post", cache: "no-cache", credentials: "include", mode: "same-origin",
+        \\  redirect: "manual", integrity: { toString() { calls++; return integrity; } }, keepalive: true
+        \\});
+        \\const copy = new Request(request);
+        \\const clone = request.clone();
+        \\function matches(value) {
+        \\  return value.method === "POST" && value.cache === "no-cache" &&
+        \\    value.credentials === "include" && value.mode === "same-origin" &&
+        \\    value.redirect === "manual" && value.integrity === integrity && value.keepalive;
+        \\}
+        \\matches(request) && matches(copy) && matches(clone) && calls === 1
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\function rejects(init) {
+        \\  try { new Request("https://example.test/", init); return false; }
+        \\  catch (error) { return error instanceof TypeError; }
+        \\}
+        \\rejects(1) && rejects(Symbol()) && rejects(1n) &&
+        \\  rejects({ cache: "invalid" }) && rejects({ credentials: "invalid" }) &&
+        \\  rejects({ mode: "invalid" }) && rejects({ mode: "navigate" }) &&
+        \\  rejects({ redirect: "invalid" }) && rejects({ method: "bad method" }) &&
+        \\  rejects({ method: "trace" }) && rejects({ method: "\u0100" }) &&
+        \\  rejects({ cache: "only-if-cached" }) && rejects({ method: "PUT", mode: "no-cors" }) &&
+        \\  rejects({ method: "GET", body: "x" }) &&
+        \\  new Request("https://example.test/", { cache: "only-if-cached", mode: "same-origin" }).cache === "only-if-cached" &&
+        \\  new Request("https://example.test/", { method: "post", mode: "no-cors" }).method === "POST"
+    )).asBool());
+}
+
+test "RequestInit converts supported members in Web IDL order" {
+    try std.testing.expect((try evalIn(
+        \\const order = [];
+        \\const init = {};
+        \\const values = {
+        \\  body: { toString() { order.push("to body"); return "x"; } },
+        \\  cache: { toString() { order.push("to cache"); return "no-cache"; } },
+        \\  credentials: { toString() { order.push("to credentials"); return "include"; } },
+        \\  headers: undefined,
+        \\  integrity: { toString() { order.push("to integrity"); return ""; } },
+        \\  keepalive: false,
+        \\  method: { toString() { order.push("to method"); return "POST"; } },
+        \\  mode: { toString() { order.push("to mode"); return "cors"; } },
+        \\  redirect: { toString() { order.push("to redirect"); return "follow"; } }
+        \\};
+        \\for (const name of ["body", "cache", "credentials", "headers", "integrity", "keepalive", "method", "mode", "redirect"]) {
+        \\  Object.defineProperty(init, name, { get() { order.push("get " + name); return values[name]; } });
+        \\}
+        \\new Request("https://example.test/", init);
+        \\order.join(",") === "get body,to body,get cache,to cache,get credentials,to credentials,get headers,get integrity,to integrity,get keepalive,get method,to method,get mode,to mode,get redirect,to redirect"
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;

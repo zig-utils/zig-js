@@ -49884,10 +49884,29 @@ fn responseRedirectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) v
     return Value.obj(try responseMake(self, status, "", headers, .{ .bytes = null, .ctype = null }, "default", "", false));
 }
 // ---- Request --------------------------------------------------------
-fn requestNormalizeMethod(m: []const u8) []const u8 {
+fn requestByteString(self: *Interpreter, input: Value) EvalError![]const u8 {
+    const string = try self.toStringValue(input);
+    var units = Interpreter.StringCodeUnitIterator.initValue(string);
+    while (units.next()) |unit| if (unit.unit > 0xff)
+        return self.throwError("TypeError", "Request method is not a ByteString");
+    return string.asWtf8(self.arena);
+}
+fn requestEnum(self: *Interpreter, input: Value, comptime member: []const u8, comptime allowed: anytype) EvalError![]const u8 {
+    const string = try self.toStringWtf8(input);
+    inline for (allowed) |candidate| if (std.mem.eql(u8, string, candidate)) return candidate;
+    return self.throwError("TypeError", "Invalid RequestInit " ++ member);
+}
+fn requestValidateMethod(self: *Interpreter, method: []const u8) EvalError![]const u8 {
+    if (!fetch_headers.validName(method)) return self.throwError("TypeError", "Invalid Request method");
+    inline for (.{ "CONNECT", "TRACE", "TRACK" }) |forbidden| if (std.ascii.eqlIgnoreCase(method, forbidden))
+        return self.throwError("TypeError", "Forbidden Request method");
     const known = [_][]const u8{ "DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT" };
-    for (known) |k| if (std.ascii.eqlIgnoreCase(m, k)) return k;
-    return m;
+    for (known) |candidate| if (std.ascii.eqlIgnoreCase(method, candidate)) return candidate;
+    return method;
+}
+fn requestStoredString(self: *Interpreter, source: *value.Object, slot: []const u8, fallback: []const u8) EvalError![]const u8 {
+    const stored = source.getOwn(slot) orelse return fallback;
+    return if (stored.isString()) stored.asWtf8(self.arena) else fallback;
 }
 fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -49897,16 +49916,29 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const input = args[0];
     var url: []const u8 = "";
     var method: []const u8 = "GET";
+    var cache: []const u8 = "default";
+    var credentials: []const u8 = "same-origin";
+    var mode: []const u8 = "cors";
+    var redirect: []const u8 = "follow";
+    var integrity: []const u8 = "";
+    var keepalive = false;
     var headers_init: Value = Value.undef();
-    var body_v: Value = Value.undef();
+    var headers_override: ?*value.Object = null;
+    var body_override: ?BodyExtract = null;
     var inherited_body: Value = Value.undef();
     var inherited_source: ?*value.Object = null;
     if (input.isObject() and input.asObj().getOwn("\x00Qurl") != null) {
         // Copy from an existing Request.
         const src = input.asObj();
         if (fetchBodyIsUsed(src)) return self.throwError("TypeError", "Cannot construct a Request from a consumed body");
-        url = (src.getOwn("\x00Qurl") orelse Value.str("")).asStr();
-        method = (src.getOwn("\x00Qmethod") orelse Value.str("GET")).asStr();
+        url = try requestStoredString(self, src, "\x00Qurl", "");
+        method = try requestStoredString(self, src, "\x00Qmethod", "GET");
+        cache = try requestStoredString(self, src, "\x00Qcache", "default");
+        credentials = try requestStoredString(self, src, "\x00Qcredentials", "same-origin");
+        mode = try requestStoredString(self, src, "\x00Qmode", "cors");
+        redirect = try requestStoredString(self, src, "\x00Qredirect", "follow");
+        integrity = try requestStoredString(self, src, "\x00Qintegrity", "");
+        keepalive = if (src.getOwn("\x00Qkeepalive")) |stored| stored.toBoolean() else false;
         if (src.getOwn("\x00Qheaders")) |h| headers_init = h;
         inherited_body = fetchBodyValue(src);
         inherited_source = src;
@@ -49914,39 +49946,52 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
         const parsed = (try urlParse(self.arena, try self.toStringWtf8(input), null)) orelse return self.throwError("TypeError", "Failed to construct 'Request': Invalid URL");
         url = try urlSerialize(self.arena, parsed, false);
     }
-    var cache: []const u8 = "default";
-    var credentials: []const u8 = "same-origin";
-    var mode: []const u8 = "cors";
-    var redirect: []const u8 = "follow";
-    var integrity: []const u8 = "";
-    var keepalive = false;
-    if (args.len > 1 and args[1].isObject()) {
-        const mv = try self.getProperty(args[1], "method");
-        if (!mv.isUndefined()) method = requestNormalizeMethod(try self.toStringV(mv));
-        const hv = try self.getProperty(args[1], "headers");
-        if (!hv.isUndefined()) headers_init = hv;
-        body_v = try self.getProperty(args[1], "body");
-        const cv = try self.getProperty(args[1], "cache");
-        if (!cv.isUndefined()) cache = try self.toStringV(cv);
-        const crv = try self.getProperty(args[1], "credentials");
-        if (!crv.isUndefined()) credentials = try self.toStringV(crv);
-        const mdv = try self.getProperty(args[1], "mode");
-        if (!mdv.isUndefined()) mode = try self.toStringV(mdv);
-        const rdv = try self.getProperty(args[1], "redirect");
-        if (!rdv.isUndefined()) redirect = try self.toStringV(rdv);
-        const iv = try self.getProperty(args[1], "integrity");
-        if (!iv.isUndefined()) integrity = try self.toStringV(iv);
-        const kv = try self.getProperty(args[1], "keepalive");
+    const init = if (args.len > 1) args[1] else Value.undef();
+    if (!init.isUndefined() and !init.isNull() and !builtins.isRealObject(init))
+        return self.throwError("TypeError", "RequestInit must be an object");
+    if (builtins.isRealObject(init)) {
+        // Web IDL dictionary conversion reads members lexicographically and
+        // converts each value before observing the next property.
+        const bv = try self.getProperty(init, "body");
+        if (!bv.isUndefined()) body_override = try fetchExtractBody(self, bv);
+        const cv = try self.getProperty(init, "cache");
+        if (!cv.isUndefined()) cache = try requestEnum(self, cv, "cache", .{ "default", "no-store", "reload", "no-cache", "force-cache", "only-if-cached" });
+        const crv = try self.getProperty(init, "credentials");
+        if (!crv.isUndefined()) credentials = try requestEnum(self, crv, "credentials", .{ "omit", "same-origin", "include" });
+        const hv = try self.getProperty(init, "headers");
+        if (!hv.isUndefined()) headers_override = try fetchMakeHeaders(self, hv);
+        const iv = try self.getProperty(init, "integrity");
+        if (!iv.isUndefined()) integrity = try self.toStringWtf8(iv);
+        const kv = try self.getProperty(init, "keepalive");
         if (!kv.isUndefined()) keepalive = kv.toBoolean();
+        const mv = try self.getProperty(init, "method");
+        if (!mv.isUndefined()) method = try requestByteString(self, mv);
+        const mdv = try self.getProperty(init, "mode");
+        if (!mdv.isUndefined()) mode = try requestEnum(self, mdv, "mode", .{ "navigate", "same-origin", "no-cors", "cors" });
+        const rdv = try self.getProperty(init, "redirect");
+        if (!rdv.isUndefined()) redirect = try requestEnum(self, rdv, "redirect", .{ "follow", "error", "manual" });
     }
-    const headers = try fetchMakeHeaders(self, headers_init);
-    const be = if (body_v.isUndefined() and !inherited_body.isUndefined()) blk: {
+    method = try requestValidateMethod(self, method);
+    // Fetch Request constructor steps 17, 21, and 32 enforce these
+    // cross-member constraints only after Web IDL has converted the dictionary.
+    if (std.mem.eql(u8, mode, "navigate")) return self.throwError("TypeError", "Request mode cannot be navigate");
+    if (std.mem.eql(u8, cache, "only-if-cached") and !std.mem.eql(u8, mode, "same-origin"))
+        return self.throwError("TypeError", "only-if-cached requires same-origin mode");
+    if (std.mem.eql(u8, mode, "no-cors") and
+        !std.mem.eql(u8, method, "GET") and
+        !std.mem.eql(u8, method, "HEAD") and
+        !std.mem.eql(u8, method, "POST"))
+        return self.throwError("TypeError", "no-cors requires a CORS-safelisted method");
+    const headers = headers_override orelse try fetchMakeHeaders(self, headers_init);
+    const be = if (body_override) |configured| configured else if (!inherited_body.isUndefined()) blk: {
         if (rsIsStream(inherited_body) and rsReader(inherited_body.asObj()) != null)
             return self.throwError("TypeError", "Cannot construct a Request from a locked body");
-        if (!inherited_body.isNull()) if (inherited_source) |source|
-            try source.setOwn(self.arena, self.root_shape, "\x00QbodyUsed", Value.boolVal(true));
         break :blk try fetchExtractBody(self, inherited_body);
-    } else try fetchExtractBody(self, body_v);
+    } else try fetchExtractBody(self, Value.undef());
+    if ((std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "HEAD")) and (be.bytes != null or be.stream != null))
+        return self.throwError("TypeError", "Request with GET/HEAD method cannot have body");
+    if (body_override == null and !inherited_body.isUndefined() and !inherited_body.isNull()) if (inherited_source) |source|
+        try source.setOwn(self.arena, self.root_shape, "\x00QbodyUsed", Value.boolVal(true));
     if (be.ctype) |ct| {
         if (!try fetchHeadersHasName(self, headers, "content-type"))
             try headersAppendRaw(self, Value.obj(headers), Value.str("content-type"), try Value.strAlloc(self.arena, ct));
