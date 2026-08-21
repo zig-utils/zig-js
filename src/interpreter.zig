@@ -44870,8 +44870,8 @@ fn domExceptionConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) 
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'DOMException': Please use the 'new' operator");
-    const message = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "";
-    const name = if (args.len > 1 and !args[1].isUndefined()) try self.toStringV(args[1]) else "Error";
+    const message = if (args.len > 0 and !args[0].isUndefined()) try self.toStringWtf8(args[0]) else "";
+    const name = if (args.len > 1 and !args[1].isUndefined()) try self.toStringWtf8(args[1]) else "Error";
     return self.makeDOMException(name, message);
 }
 

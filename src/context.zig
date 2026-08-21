@@ -15216,6 +15216,21 @@ test "TextEncoder encodeInto canonicalizes physical StringData" {
     )).asBool());
 }
 
+test "DOMException canonicalizes persistent physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const message = "caf\u00e9\u00ff";
+        \\const name = "Nam\u00e9\u00ff";
+        \\const order = [];
+        \\const exception = new DOMException(
+        \\  { toString() { order.push("message"); return message; } },
+        \\  { toString() { order.push("name"); return name; } }
+        \\);
+        \\exception.message === message && exception.name === name &&
+        \\  Error.prototype.toString.call(exception) === name + ": " + message &&
+        \\  order.join(",") === "message,name"
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
