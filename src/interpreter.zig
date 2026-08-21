@@ -8374,6 +8374,23 @@ pub const Interpreter = struct {
         return v.toString(self.arena);
     }
 
+    /// Like `toStringV`, but retain the resulting string Value so a
+    /// representation-aware consumer can stream code units without copying an
+    /// existing string through an encoded byte slice and a new StringCell.
+    pub fn toStringValue(self: *Interpreter, v: Value) EvalError!Value {
+        if (v.isObject() and v.asObj().is_symbol)
+            return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+        if (v.isObject()) {
+            const prim = try self.toPrimitive(v, .string);
+            if (prim.isObject() and prim.asObj().is_symbol)
+                return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+            if (prim.isString()) return prim;
+            return Value.strAlloc(self.arena, try prim.toString(self.arena));
+        }
+        if (v.isString()) return v;
+        return Value.strAlloc(self.arena, try v.toString(self.arena));
+    }
+
     /// Like `toStringV`, but a string result is returned as canonical WTF-8 via
     /// `Value.asWtf8` (re-encoding a flat-latin1 cell). Use this — not
     /// `toStringV` — at every site that feeds the coerced string into WTF-8
@@ -15907,7 +15924,7 @@ pub const Interpreter = struct {
             const ri = items.items;
             if (ri.len > 1) {
                 const temp = try self.arena.alloc(Value, ri.len);
-                try self.mergeSortValues(ri, temp, cmp, sortCompare);
+                try self.mergeSortValues(ri, temp, cmp, sortCompareSpec);
             }
             try result.asObj().replaceDenseElementsAndSetLength(self.arena, ri, ri.len);
             return result;
@@ -16445,9 +16462,11 @@ pub const Interpreter = struct {
             const n = try self.toNumberV(r);
             return if (std.math.isNan(n)) 0 else n;
         }
-        const as = try self.toStringV(a);
-        const bs = try self.toStringV(b);
-        return switch (std.mem.order(u8, as, bs)) {
+        // CompareArrayElements steps 5–8: ToString x before y, then compare the
+        // resulting UTF-16 code-unit sequences rather than their byte encoding.
+        const as = try self.toStringValue(a);
+        const bs = try self.toStringValue(b);
+        return switch (compareStringsUtf16(as, bs)) {
             .lt => -1,
             .eq => 0,
             .gt => 1,

@@ -15264,6 +15264,22 @@ test "Events canonicalize persistent and compared physical StringData" {
     )).asBool());
 }
 
+test "Array default sort compares representation-aware UTF-16 code units" {
+    try std.testing.expect((try evalIn(
+        \\let calls = "";
+        \\const bmp = { toString() { calls += "b"; return "\uffff"; } };
+        \\const astral = { toString() { calls += "a"; return "\u{10000}"; } };
+        \\const sorted = [bmp, astral].sort();
+        \\const copied = [bmp, astral].toSorted();
+        \\const withUndefined = [undefined, "z", "a"].toSorted();
+        \\const latin1 = ["\u00e9", "\u00c3\u00a9"].toSorted();
+        \\sorted[0] === astral && sorted[1] === bmp &&
+        \\  copied[0] === astral && copied[1] === bmp && calls === "baba" &&
+        \\  withUndefined[0] === "a" && withUndefined[1] === "z" && withUndefined[2] === undefined &&
+        \\  latin1[0] === "\u00c3\u00a9" && latin1[1] === "\u00e9"
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
