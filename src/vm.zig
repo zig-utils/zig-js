@@ -9136,6 +9136,14 @@ test "vm: String relational comparison streams representation-aware UTF-16 units
     )).asBool());
 }
 
+test "vm: dynamic code parser ingress canonicalizes physical StringData" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\eval("'café'") === "café" && Function("return 'café'")() === "café"
+    )).asBool());
+}
+
 test "vm: number bitwise dispatch preserves conversions and coercion fallbacks" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

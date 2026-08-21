@@ -18295,7 +18295,9 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len == 0) return Value.undef();
     if (!args[0].isString()) return args[0]; // eval of a non-string is the identity
-    const src = args[0].asStr();
+    // The lexer consumes canonical WTF-8, not the StringCell's physical image.
+    // This borrows canonical/ASCII storage and only allocates for flat latin1.
+    const src = try args[0].asWtf8(self.arena);
     if (sourceOnlyEmptyBlocks(src)) return Value.undef();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
@@ -20333,7 +20335,7 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const fnobj = self.active_native orelse return Value.undef();
     const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return Value.undef()));
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else Value.undef();
-    const src = args[0].asStr();
+    const src = try args[0].asWtf8(self.arena);
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("evalScript", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
@@ -20643,7 +20645,7 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const src = if (args.len > 0) args[0] else Value.undef();
     if (!src.isString()) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate expects a string");
     const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
-    const source = src.asStr();
+    const source = try src.asWtf8(self.arena);
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAtInRealm(caller_env, "ShadowRealm.evaluate", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
@@ -22945,9 +22947,9 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                 var i: usize = 0;
                 while (i + 1 < args.len) : (i += 1) {
                     if (i != 0) try params.append(self.arena, ',');
-                    try params.appendSlice(self.arena, try self.toStringV(args[i]));
+                    try params.appendSlice(self.arena, try self.toStringWtf8(args[i]));
                 }
-                body = try self.toStringV(args[args.len - 1]);
+                body = try self.toStringWtf8(args[args.len - 1]);
             }
             // CreateDynamicFunction parses in the constructor's realm, so
             // SyntaxError instances are from that realm too.
@@ -51752,6 +51754,39 @@ test "interpreter direct eval new target early errors" {
         \\f();
         \\name
     )).asStr());
+}
+
+test "dynamic code parser ingress canonicalizes physical StringData" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let realm = $262.createRealm();
+        \\let shadow = new ShadowRealm();
+        \\let GeneratorFunction = Object.getPrototypeOf(function*() {}).constructor;
+        \\let AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+        \\let AsyncGeneratorFunction = Object.getPrototypeOf(async function*() {}).constructor;
+        \\eval("'café'") === "café" &&
+        \\  (0, eval)("'café'") === "café" &&
+        \\  realm.evalScript("'café'") === "café" &&
+        \\  shadow.evaluate("'café'") === "café" &&
+        \\  Function("return 'café'")() === "café" &&
+        \\  GeneratorFunction("yield 'café'")().next().value === "café" &&
+        \\  typeof AsyncFunction("return 'café'") === "function" &&
+        \\  typeof AsyncGeneratorFunction("yield 'café'") === "function"
+    )).asBool());
+
+    if (strcell.flat_storage_active) {
+        var env = Environment{ .arena = a };
+        const root_shape = try Shape.createRoot(a);
+        var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+        const source = try Value.strAlloc(a, "'caf\xC3\xA9'");
+        var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+        machine.arena = unavailable.allocator();
+        try std.testing.expectError(error.OutOfMemory, evalFn(@ptrCast(&machine), Value.undef(), &.{source}));
+        try std.testing.expect(unavailable.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+    }
 }
 
 test "interpreter direct eval super early errors run before side effects" {

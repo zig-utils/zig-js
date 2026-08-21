@@ -118,9 +118,9 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
         var i: usize = 0;
         while (i + 1 < args.len) : (i += 1) {
             if (i != 0) try params.append(self.arena, ',');
-            try params.appendSlice(self.arena, try self.toStringV(args[i]));
+            try params.appendSlice(self.arena, try self.toStringWtf8(args[i]));
         }
-        body = try self.toStringV(args[args.len - 1]);
+        body = try self.toStringWtf8(args[args.len - 1]);
     }
     // CreateDynamicFunction uses the constructor's realm for parsing and for
     // any SyntaxError it creates, not the caller's current realm.
