@@ -4199,7 +4199,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     const inputs = frame.scratch.?[first .. first + count];
     vm.recordExecutionTier(.runtime_operation_calls);
     if (descriptor.bytecode_op == @backingInt(bc.Op.to_numeric) and inputs.len == 1)
-        return finishNativeOperation(frame, vm, operation_id, vm.toNumericPrimitive(Value.fromRawBits(inputs[0])));
+        return finishNativeOperation(frame, vm, operation_id, vm.toNumericValue(Value.fromRawBits(inputs[0])));
     if ((descriptor.bytecode_op == @backingInt(bc.Op.neg) or
         descriptor.bytecode_op == @backingInt(bc.Op.pos) or
         descriptor.bytecode_op == @backingInt(bc.Op.not) or
@@ -4938,7 +4938,7 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
     }}, &.{});
     defer metadata.destroy();
     var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
-    scratch[0] = Value.num(42).rawBits();
+    scratch[0] = Value.str("42").rawBits();
     var frame = jit.NativeFrame{
         .scratch = &scratch,
         .runtime_context = &machine,
@@ -6356,7 +6356,7 @@ fn runChunk(
                 try stack.append(stack_alloc, try vm.applyUnary(unaryOp(inst.op), stack.pop().?));
             },
             .to_numeric => {
-                try stack.append(stack_alloc, try vm.toNumericPrimitive(stack.pop().?));
+                try stack.append(stack_alloc, try vm.toNumericValue(stack.pop().?));
             },
             .require_object_coercible => {
                 const input = stack.pop().?;
@@ -9379,6 +9379,122 @@ test "vm: computed compound assignment preserves abrupt order and suspended refe
         \\var third = iterator.next(3);
         \\first.value === "key" && first.done === false && second.value === "rhs" && second.done === false && third.value === 7 && third.done === true &&
         \\  original.value === 7 && current.value === 100
+    )).asBool());
+}
+
+test "vm: member update expressions preserve numeric results and one reference" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("number:5:5:number:6:7:7:7:10:9:5:6:bkgns:3:3:gs:9:8", (try vmRun(arena.allocator(),
+        \\function runMemberUpdates() {
+        \\  var values = { preInc: "4", postInc: "6", preDec: 8, postDec: 10 };
+        \\  var a = ++values.preInc;
+        \\  var b = values.postInc++;
+        \\  var c = --values.preDec;
+        \\  var d = values.postDec--;
+        \\  var log = "";
+        \\  var backing = { valueOf() { log = log + "n"; return 5; } };
+        \\  var target = {};
+        \\  Object.defineProperty(target, "value", {
+        \\    get() { log = log + "g"; return backing; },
+        \\    set(value) { log = log + "s"; backing = value; }
+        \\  });
+        \\  function base() { log = log + "b"; return target; }
+        \\  var key = { toString() { log = log + "k"; return "value"; } };
+        \\  var old = base()[key]++;
+        \\  var proxyLog = "";
+        \\  var proxied = { value: 2 };
+        \\  var proxy = new Proxy(proxied, {
+        \\    get(target, property) { proxyLog = proxyLog + "g"; return target[property]; },
+        \\    set(target, property, value) { proxyLog = proxyLog + "s"; target[property] = value; return true; }
+        \\  });
+        \\  var proxyNew = ++proxy.value;
+        \\  var symbol = Symbol("update");
+        \\  var symbolTarget = { [symbol]: 9 };
+        \\  var symbolOld = symbolTarget[symbol]--;
+        \\  return typeof a + ":" + a + ":" + values.preInc + ":" + typeof b + ":" + b + ":" + values.postInc + ":" + c + ":" + values.preDec + ":" + d + ":" + values.postDec + ":" +
+        \\    old + ":" + backing + ":" + log + ":" + proxyNew + ":" + proxied.value + ":" + proxyLog + ":" + symbolOld + ":" + symbolTarget[symbol];
+        \\}
+        \\runMemberUpdates()
+    )).asStr());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function bigintRecursionAndNamedBase() {
+        \\  var big = { value: 4n };
+        \\  var bigOld = big.value++;
+        \\  var bigNew = --big.value;
+        \\  var first = { value: 1 };
+        \\  var second = { value: 20 };
+        \\  var baseCalls = 0;
+        \\  function base() { baseCalls = baseCalls + 1; return baseCalls === 1 ? first : second; }
+        \\  var namedOld = base().value++;
+        \\  var inner = { value: 2 };
+        \\  var outer = { value: { valueOf() { return update(inner); } } };
+        \\  function update(target) { return target.value++; }
+        \\  var recursiveOld = update(outer);
+        \\  return bigOld === 4n && bigNew === 4n && big.value === 4n && namedOld === 1 && baseCalls === 1 && first.value === 2 && second.value === 20 &&
+        \\    recursiveOld === 2 && inner.value === 3 && outer.value === 3;
+        \\}
+        \\bigintRecursionAndNamedBase()
+    )).asBool());
+}
+
+test "vm: member updates preserve abrupt order strict writes and suspended keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function abruptUpdates() {
+        \\  var log = "";
+        \\  var mode = "";
+        \\  var backing = { valueOf() { log = log + "n"; if (mode === "numeric") throw 7082; return 4; } };
+        \\  var target = {};
+        \\  Object.defineProperty(target, "value", {
+        \\    get() { log = log + "g"; if (mode === "get") throw 7081; return backing; },
+        \\    set(value) { log = log + "s"; if (mode === "set") throw 7083; backing = value; }
+        \\  });
+        \\  function base(isNull) { log = log + "b"; return isNull ? null : target; }
+        \\  function key() { log = log + "e"; return { toString() { log = log + "k"; if (mode === "key") throw 7080; return "value"; } }; }
+        \\  var observed = "";
+        \\  try { base(true)[key()]++; } catch (error) { observed = observed + (error instanceof TypeError) + ":" + log; }
+        \\  log = ""; mode = "key";
+        \\  try { base(false)[key()]++; } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  log = ""; mode = "get";
+        \\  try { base(false)[key()]++; } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  log = ""; mode = "numeric";
+        \\  try { base(false)[key()]++; } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  log = ""; mode = "set";
+        \\  try { base(false)[key()]++; } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  return observed === "true:be|7080:bek|7081:bekg|7082:bekgn|7083:bekgns";
+        \\}
+        \\abruptUpdates()
+    )).asBool());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function strictUpdateFailures() {
+        \\  "use strict";
+        \\  var getterCalls = 0;
+        \\  var readOnly = {};
+        \\  Object.defineProperty(readOnly, "value", { get() { getterCalls = getterCalls + 1; return 2; } });
+        \\  var readOnlyError = false;
+        \\  try { readOnly.value++; } catch (error) { readOnlyError = error instanceof TypeError; }
+        \\  var proxyTarget = { value: 3 };
+        \\  var proxy = new Proxy(proxyTarget, { set() { return false; } });
+        \\  var proxyError = false;
+        \\  try { ++proxy.value; } catch (error) { proxyError = error instanceof TypeError; }
+        \\  return readOnlyError && proxyError && getterCalls === 1 && readOnly.value === 2 && proxyTarget.value === 3;
+        \\}
+        \\strictUpdateFailures()
+    )).asBool());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\var original = { value: 4 };
+        \\var current = original;
+        \\function* update() { return current[yield "key"]++; }
+        \\var iterator = update();
+        \\var first = iterator.next();
+        \\current = { value: 100 };
+        \\var second = iterator.next("value");
+        \\first.value === "key" && first.done === false && second.value === 4 && second.done === true && original.value === 5 && current.value === 100
     )).asBool());
 }
 

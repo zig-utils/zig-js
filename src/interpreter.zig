@@ -5490,19 +5490,20 @@ pub const Interpreter = struct {
                 return Value.num(if (prefix) up else o);
             }
         }
-        // A computed member target `base[prop]++` evaluates its reference (base
-        // and the ToPropertyKey of prop) exactly once — read and write go through
-        // the same captured (recv, key). (Non-computed/private members have no
-        // side-effecting key, so they fall through to the eval+assignTo path.)
-        if (target.* == .member and target.member.computed != null and !target.member.optional) {
-            const recv = try self.eval(target.member.object);
-            // Evaluate the key expression (GetValue) but defer ToPropertyKey: a
-            // nullish base is a TypeError BEFORE the key is coerced, so
-            // `++null[{toString(){throw}}]` throws TypeError, not the toString error.
-            const key_val = try self.eval(target.member.computed.?);
-            if (recv.isNull() or recv.isUndefined())
-                return self.throwError("TypeError", "Cannot read properties of null or undefined");
-            const key = try self.keyOf(key_val);
+        // A member update evaluates its Reference once: both a side-effecting
+        // base in `base().name++` and a computed key are captured for the later
+        // PutValue rather than re-evaluated after ToNumeric.
+        if (target.* == .member and !target.member.optional) {
+            const member = target.member;
+            const recv = try self.eval(member.object);
+            const key = if (member.computed) |computed| key: {
+                // Evaluate the key expression (GetValue) but reject a nullish
+                // base before observable ToPropertyKey coercion.
+                const key_val = try self.eval(computed);
+                if (recv.isNull() or recv.isUndefined())
+                    return self.throwError("TypeError", "Cannot read properties of null or undefined");
+                break :key try self.keyOf(key_val);
+            } else member.property;
             var ov = try self.getProperty(recv, key);
             if (ov.isObject() and !ov.asObj().is_bigint and !ov.asObj().is_symbol)
                 ov = try self.toPrimitive(ov, .number);
@@ -17643,6 +17644,16 @@ pub const Interpreter = struct {
         if (v.isObject() and !v.asObj().is_bigint and !v.asObj().is_symbol)
             return self.toPrimitive(v, .number);
         return v;
+    }
+
+    /// ToNumeric(v): preserve a BigInt primitive, otherwise return the Number
+    /// produced after the single ToPrimitive(number) reduction. Bytecode uses
+    /// this for postfix update's observable old value, whose type must already
+    /// be numeric before PutValue (`"6"++` evaluates to Number 6).
+    pub fn toNumericValue(self: *Interpreter, v: Value) EvalError!Value {
+        const primitive = try self.toNumericPrimitive(v);
+        if (primitive.isObject() and primitive.asObj().is_bigint) return primitive;
+        return Value.num(try self.toNumberV(primitive));
     }
 
     fn evalLogical(self: *Interpreter, op: ast.LogicalOp, left: *Node, right: *Node) EvalError!Value {

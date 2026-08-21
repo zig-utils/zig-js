@@ -3476,27 +3476,30 @@ pub const Compiler = struct {
         }
     }
 
-    /// `++x` / `x++` on an identifier (member targets fall back). Prefix yields
-    /// the new value, postfix the old.
+    /// Prefix yields the new numeric value; postfix yields the old numeric value.
     fn compileUpdate(self: *Compiler, inc: bool, prefix: bool, target: *Node) CompileError!void {
-        if (target.* != .identifier) return error.Unsupported;
-        const name = target.identifier;
-        // `++`/`--` are ToNumeric(old) ± 1, not `old + 1`: a raw `.add` with a
-        // Number 1 would string-concatenate a string operand and TypeError a
-        // BigInt. The inc/dec opcodes ToNumeric first and add 1 of the operand's
-        // own numeric type (Number or BigInt).
-        const step: bc.Op = if (inc) .inc else .dec;
-        if (prefix) {
-            try self.emitLoad(name);
-            _ = try self.chunk.emit(step, 0);
-            try self.emitStore(name); // leaves the new value
-        } else {
-            try self.emitLoad(name);
-            _ = try self.chunk.emit(.to_numeric, 0); // postfix result is the numeric old value
-            _ = try self.chunk.emit(.dup, 0); // keep the numeric old value
-            _ = try self.chunk.emit(step, 0);
-            try self.emitStore(name);
-            _ = try self.chunk.emit(.pop, 0); // discard the new value, leave the old
+        switch (target.*) {
+            .identifier => |name| {
+                // `++`/`--` are ToNumeric(old) ± 1, not `old + 1`: a raw `.add`
+                // would string-concatenate a string operand and TypeError a
+                // BigInt. The inc/dec opcodes add 1 of the numeric operand type.
+                const step: bc.Op = if (inc) .inc else .dec;
+                if (prefix) {
+                    try self.emitLoad(name);
+                    _ = try self.chunk.emit(step, 0);
+                    try self.emitStore(name); // leaves the new value
+                } else {
+                    try self.emitLoad(name);
+                    _ = try self.chunk.emit(.to_numeric, 0); // postfix result is the numeric old value
+                    _ = try self.chunk.emit(.dup, 0); // keep the numeric old value
+                    _ = try self.chunk.emit(step, 0);
+                    try self.emitStore(name);
+                    _ = try self.chunk.emit(.pop, 0); // discard the new value, leave the old
+                }
+            },
+            .member => try self.compileMemberUpdate(inc, prefix, target),
+            // Super needs a receiver-aware write operation.
+            else => return error.Unsupported,
         }
     }
 
@@ -3803,6 +3806,33 @@ pub const Compiler = struct {
         try self.emitLoadMemberRefBase(ref);
         try self.emitLoad(result);
         try self.emitSetMemberRef(ref);
+    }
+
+    fn compileMemberUpdate(self: *Compiler, inc: bool, prefix: bool, target: *Node) CompileError!void {
+        // ECMA-262 Update Expressions resolves lhs once, then performs GetValue,
+        // ToNumeric, the numeric-type-specific ±1, and PutValue in that order.
+        const ref = try self.compileMemberRef(target);
+        try self.emitGetMemberRef(ref);
+        _ = try self.chunk.emit(.to_numeric, 0);
+
+        var old: ?[]const u8 = null;
+        if (!prefix) {
+            const old_temp = try self.freshActivationTemp();
+            try self.emitDefineActivationTemp(old_temp);
+            try self.emitLoad(old_temp);
+            old = old_temp;
+        }
+        _ = try self.chunk.emit(if (inc) .inc else .dec, 0);
+        const updated = try self.freshActivationTemp();
+        try self.emitDefineActivationTemp(updated);
+
+        try self.emitLoadMemberRefBase(ref);
+        try self.emitLoad(updated);
+        try self.emitSetMemberRef(ref);
+        if (!prefix) {
+            _ = try self.chunk.emit(.pop, 0);
+            try self.emitLoad(old.?);
+        }
     }
 
     fn compoundAssignmentOp(op: ast.BinaryOp) CompileError!bc.Op {
@@ -4404,10 +4434,11 @@ test "compiler admits global-only class members and rejects frame captures" {
     }
 }
 
-test "compiler retains a causal barrier for super assignments" {
+test "compiler retains a causal barrier for super assignments and updates" {
     const sources = [_][]const u8{
         "class Derived extends Base { method(){ return super.value ??= 1; } }",
         "class Derived extends Base { method(){ return super.value += 1; } }",
+        "class Derived extends Base { method(){ return super.value++; } }",
     };
     for (sources) |source| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -4440,11 +4471,17 @@ test "compiler reports stable program admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.invalid_root, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "var holder = {}; holder.value += 1;");
-    const unsupported_program = try unsupported_parser.parseProgram();
-    switch (try Compiler.admitProgram(arena.allocator(), unsupported_program)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.unsupported_lowering, reason),
+    const unsupported_sources = [_][]const u8{
+        "var holder = {}; holder.value += 1;",
+        "var holder = {}; holder.value++;",
+    };
+    for (unsupported_sources) |source| {
+        var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
+        const unsupported_program = try unsupported_parser.parseProgram();
+        switch (try Compiler.admitProgram(arena.allocator(), unsupported_program)) {
+            .compiled => return error.TestUnexpectedResult,
+            .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.unsupported_lowering, reason),
+        }
     }
 
     var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "null ?? 1;");
@@ -4468,14 +4505,14 @@ test "compiler reports stable generator admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.expression_body, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ var holder = {}; yield holder.value++; }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ var holder = {}; yield holder?.value; }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitGenerator(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.unsupported_lowering, reason),
     }
 
-    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* compiled(){ var holder = { value: 1 }; yield (holder.value += 1); }");
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* compiled(){ var holder = { value: 1 }; return holder[yield \"key\"]++; }");
     const compiled_program = try compiled_parser.parseProgram();
     switch (try Compiler.admitGenerator(arena.allocator(), compiled_program.program[0].func_decl, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
@@ -4494,14 +4531,14 @@ test "compiler reports stable async admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.async_generator, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ var holder = {}; return holder.value++; }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ var holder = {}; return holder?.value; }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitAsync(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.unsupported_lowering, reason),
     }
 
-    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function compiled(){ var holder = { value: 1 }; return holder.value += 1; }");
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function compiled(){ var holder = { value: 1 }; return ++holder[await Promise.resolve(\"value\")]; }");
     const compiled_program = try compiled_parser.parseProgram();
     switch (try Compiler.admitAsync(arena.allocator(), compiled_program.program[0].func_decl, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),

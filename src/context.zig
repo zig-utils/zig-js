@@ -22732,11 +22732,13 @@ test "bytecode admission inventory retains exact runtime reasons" {
         \\globalThis.generatorCompiled = function* generatorCompiled() { yield 1; };
         \\globalThis.generatorLogical = function* generatorLogical() { var holder = {}; yield (holder.value ??= 1); };
         \\globalThis.generatorCompound = function* generatorCompound() { var holder = { value: 1 }; yield (holder.value += 1); };
-        \\globalThis.generatorRejected = function* generatorRejected() { var holder = {}; yield holder.value++; };
+        \\globalThis.generatorUpdate = function* generatorUpdate() { var holder = { value: 1 }; return holder[yield "key"]++; };
+        \\globalThis.generatorRejected = function* generatorRejected() { var holder = {}; yield holder?.value; };
         \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
         \\globalThis.asyncLogical = async function asyncLogical() { var holder = {}; return holder.value ??= 1; };
         \\globalThis.asyncCompound = async function asyncCompound() { var holder = { value: 1 }; return holder.value += 1; };
-        \\globalThis.asyncRejected = async function asyncRejected() { var holder = {}; return holder.value++; };
+        \\globalThis.asyncUpdate = async function asyncUpdate() { var holder = { value: 1 }; return ++holder[await Promise.resolve("value")]; };
+        \\globalThis.asyncRejected = async function asyncRejected() { var holder = {}; return holder?.value; };
     );
     _ = try ctx.evaluate(
         \\globalThis.templateDefault = function templateDefault(value = 1) { return value; };
@@ -22753,10 +22755,12 @@ test "bytecode admission inventory retains exact runtime reasons" {
         .{ .name = "generatorCompiled", .reason = .generator_compiled },
         .{ .name = "generatorLogical", .reason = .generator_compiled },
         .{ .name = "generatorCompound", .reason = .generator_compiled },
+        .{ .name = "generatorUpdate", .reason = .generator_compiled },
         .{ .name = "generatorRejected", .reason = .generator_rejected_unsupported_lowering },
         .{ .name = "asyncCompiled", .reason = .async_compiled },
         .{ .name = "asyncLogical", .reason = .async_compiled },
         .{ .name = "asyncCompound", .reason = .async_compiled },
+        .{ .name = "asyncUpdate", .reason = .async_compiled },
         .{ .name = "asyncRejected", .reason = .async_rejected_unsupported_lowering },
     };
     for (expected) |entry| {
@@ -22780,8 +22784,8 @@ test "bytecode admission inventory retains exact runtime reasons" {
     try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
     try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
     try std.testing.expectEqual(before.count(.plain_compiled) + 2, after.count(.plain_compiled));
-    try std.testing.expectEqual(before.count(.generator_compiled) + 3, after.count(.generator_compiled));
-    try std.testing.expectEqual(before.count(.async_compiled) + 3, after.count(.async_compiled));
+    try std.testing.expectEqual(before.count(.generator_compiled) + 4, after.count(.generator_compiled));
+    try std.testing.expectEqual(before.count(.async_compiled) + 4, after.count(.async_compiled));
     for (expected) |entry| {
         if (entry.reason == .plain_compiled or entry.reason == .generator_compiled or entry.reason == .async_compiled) continue;
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
@@ -22964,6 +22968,41 @@ test "forced tree-walker and required bytecode agree on member compound assignme
     try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
     try std.testing.expectEqual(@as(u64, 4), tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker));
     try std.testing.expectEqual(@as(u64, 4), bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled));
+}
+
+test "forced tree-walker and required bytecode agree on member update expressions" {
+    const source =
+        \\var updateHolder = { value: 4 };
+        \\var updateOther = { value: 40 };
+        \\var updateBaseCalls = 0;
+        \\var updateKeyCalls = 0;
+        \\function updateBase() { updateBaseCalls = updateBaseCalls + 1; return updateBaseCalls === 1 ? updateHolder : updateOther; }
+        \\function updateKey() { updateKeyCalls = updateKeyCalls + 1; return "value"; }
+        \\function runMemberUpdates() {
+        \\  var old = updateBase().value++;
+        \\  var current = ++updateHolder[updateKey()];
+        \\  return old === 4 && current === 6 && updateHolder.value === 6 && updateOther.value === 40 && updateBaseCalls === 1 && updateKeyCalls === 1;
+        \\}
+        \\runMemberUpdates();
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    const tree_result = try tree_ctx.evaluate(source);
+    const bytecode_result = try bytecode_ctx.evaluate(source);
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    try std.testing.expectEqual(@as(u64, 3), tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker));
+    try std.testing.expectEqual(@as(u64, 3), bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled));
 }
 
 test "parser-derived arguments use preserves forced execution tiers" {
@@ -23805,6 +23844,9 @@ test "required bytecode program retains async function templates" {
         \\var compoundOriginal = { value: 5 };
         \\var compoundCurrent = compoundOriginal;
         \\var compoundKeyCalls = 0;
+        \\var updateObserved = "pending";
+        \\var updateOriginal = { value: 5 };
+        \\var updateCurrent = updateOriginal;
         \\var overrideRejection = async function() {
         \\  try { await Promise.reject("early"); }
         \\  finally { return "override"; }
@@ -23816,19 +23858,24 @@ test "required bytecode program retains async function templates" {
         \\var asyncMemberCompound = async function() {
         \\  return compoundCurrent[(compoundKeyCalls = compoundKeyCalls + 1, "value")] += await Promise.resolve(6);
         \\};
+        \\var asyncMemberUpdate = async function() {
+        \\  return updateCurrent[await Promise.resolve("value")]++;
+        \\};
         \\overrideRejection().then(function(value) { observed = value; });
         \\asyncNullish(false).then(function(left) {
         \\  asyncNullish(null).then(function(right) { nullishObserved = left + ":" + right; });
         \\});
         \\asyncMemberLogical().then(function(value) { logicalObserved = value; });
         \\asyncMemberCompound().then(function(value) { compoundObserved = value; });
+        \\asyncMemberUpdate().then(function(value) { updateObserved = value; });
         \\logicalCurrent = { value: 100 };
         \\compoundCurrent = { value: 100 };
+        \\updateCurrent = { value: 100 };
     );
-    const result = try ctx.evaluate("drainMicrotasks(); observed + '|' + nullishObserved + '|' + logicalObserved + ':' + logicalOriginal.value + ':' + logicalCurrent.value + ':' + logicalKeyCalls + '|' + compoundObserved + ':' + compoundOriginal.value + ':' + compoundCurrent.value + ':' + compoundKeyCalls;");
-    try std.testing.expectEqualStrings("override|false:7|17:17:100:1|11:11:100:1", result.asStr());
+    const result = try ctx.evaluate("drainMicrotasks(); observed + '|' + nullishObserved + '|' + logicalObserved + ':' + logicalOriginal.value + ':' + logicalCurrent.value + ':' + logicalKeyCalls + '|' + compoundObserved + ':' + compoundOriginal.value + ':' + compoundCurrent.value + ':' + compoundKeyCalls + '|' + updateObserved + ':' + updateOriginal.value + ':' + updateCurrent.value;");
+    try std.testing.expectEqualStrings("override|false:7|17:17:100:1|11:11:100:1|5:6:100", result.asStr());
     const inventory = ctx.bytecodeAdmissionSnapshot();
-    try std.testing.expectEqual(@as(u64, 4), inventory.count(.template_async_compiled));
+    try std.testing.expectEqual(@as(u64, 5), inventory.count(.template_async_compiled));
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_async_fallback));
 }
 
