@@ -15466,6 +15466,75 @@ test "Request implements remaining RequestInit state and dependent signals" {
     )).asBool());
 }
 
+test "Fetch Headers guards sanitize construction and mutation" {
+    try std.testing.expect((try evalIn(
+        \\const free = new Headers({ Cookie: "visible", "Set-Cookie": "also-visible" });
+        \\const request = new Request("https://example.test/", { headers: {
+        \\  Cookie: "secret=1", Host: "attacker.test", "Sec-X": "reserved",
+        \\  "X-HTTP-Method-Override": "TRACE", "X-Allowed": "yes"
+        \\}});
+        \\request.headers.append("Cookie", "secret=2");
+        \\request.headers.set("Host", "other.test");
+        \\request.headers.append("X-HTTP-Method", "GET");
+        \\const copy = new Request(request);
+        \\const clone = request.clone();
+        \\free.has("cookie") && free.has("set-cookie") &&
+        \\  !request.headers.has("cookie") && !request.headers.has("host") &&
+        \\  !request.headers.has("sec-x") && !request.headers.has("x-http-method-override") &&
+        \\  request.headers.get("x-allowed") === "yes" && request.headers.get("x-http-method") === "GET" &&
+        \\  copy.headers.get("x-allowed") === "yes" && clone.headers.get("x-allowed") === "yes"
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\const long = "s".repeat(127);
+        \\const request = new Request("https://example.test/", { mode: "no-cors", headers: {
+        \\  Accept: long, "Accept-Language": "en-US", "Content-Language": "en",
+        \\  "Content-Type": "text/plain;charset=UTF-8", Range: "bytes=0-9",
+        \\  "X-Unsafe": "no"
+        \\}});
+        \\request.headers.append("Accept", "");
+        \\request.headers.set("Accept-Language", "en_US");
+        \\request.headers.set("Content-Type", "application/json");
+        \\request.headers.append("DPR", "2");
+        \\request.headers.delete("X-Unsafe");
+        \\const clone = request.clone();
+        \\request.headers.get("accept") === long && request.headers.get("accept-language") === "en-US" &&
+        \\  request.headers.get("content-language") === "en" &&
+        \\  request.headers.get("content-type") === "text/plain;charset=UTF-8" &&
+        \\  !request.headers.has("range") && !request.headers.has("x-unsafe") && !request.headers.has("dpr") &&
+        \\  clone.headers.get("accept") === long
+    )).asBool());
+}
+
+test "Fetch Headers response and immutable guards are exact" {
+    try std.testing.expect((try evalIn(
+        \\const response = new Response(null, { headers: { "Set-Cookie": "secret=1", "X-Visible": "yes" } });
+        \\response.headers.append("Set-Cookie", "secret=2");
+        \\response.headers.set("X-Visible", "changed");
+        \\const clone = response.clone();
+        \\const immutable = [Response.error(), Response.redirect("https://example.test/"), Response.redirect("https://example.test/").clone()];
+        \\let throws = 0;
+        \\for (const item of immutable) {
+        \\  for (const mutate of [
+        \\    () => item.headers.append("X-New", "no"),
+        \\    () => item.headers.set("X-New", "no"),
+        \\    () => item.headers.delete("Location")
+        \\  ]) try { mutate(); } catch (error) { if (error instanceof TypeError) throws++; }
+        \\}
+        \\!response.headers.has("set-cookie") && response.headers.get("x-visible") === "changed" &&
+        \\  clone.headers.get("x-visible") === "changed" && throws === 9 &&
+        \\  Response.redirect("https://example.test/").headers.get("location") === "https://example.test/"
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\let rejected = 0;
+        \\for (const make of [
+        \\  () => new Headers([["invalidĀ", "value"]]),
+        \\  () => new Headers([["name", "invalidĀ"]])
+        \\]) try { make(); } catch (error) { if (error instanceof TypeError) rejected++; }
+        \\const latin1 = new Headers([["x-byte", "café"]]);
+        \\rejected === 2 && latin1.get("x-byte") === "café"
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;

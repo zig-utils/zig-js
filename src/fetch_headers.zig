@@ -9,7 +9,11 @@
 
 const std = @import("std");
 
-pub const Error = error{ InvalidName, InvalidValue, OutOfMemory };
+pub const Error = error{ InvalidName, InvalidValue, Immutable, OutOfMemory };
+
+/// Fetch Standard headers guards. The value lives beside the native header
+/// list so shared-realm wrappers observe one synchronized mutation policy.
+pub const Guard = enum { none, request, request_no_cors, response, immutable };
 
 pub const known_names = [_][]const u8{
     "Accept",
@@ -152,6 +156,121 @@ pub fn validValue(value: []const u8) bool {
     return true;
 }
 
+fn isForbiddenMethod(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "CONNECT") or
+        std.ascii.eqlIgnoreCase(value, "TRACE") or
+        std.ascii.eqlIgnoreCase(value, "TRACK");
+}
+
+/// Fetch's "get, decode, and split" keeps quoted strings intact, so commas in
+/// them do not manufacture separate override-method values.
+fn containsForbiddenMethodValue(value: []const u8) bool {
+    var start: usize = 0;
+    var index: usize = 0;
+    var quoted = false;
+    var escaped = false;
+    while (index <= value.len) : (index += 1) {
+        if (index == value.len or (value[index] == ',' and !quoted)) {
+            if (isForbiddenMethod(std.mem.trim(u8, value[start..index], " \t"))) return true;
+            start = index + 1;
+            continue;
+        }
+        const byte = value[index];
+        if (quoted) {
+            if (escaped) {
+                escaped = false;
+            } else if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '"') {
+                quoted = false;
+            }
+        } else if (byte == '"') {
+            quoted = true;
+        }
+    }
+    return false;
+}
+
+pub fn forbiddenRequestHeader(name: []const u8, value: []const u8) bool {
+    inline for (.{
+        "accept-charset",
+        "accept-encoding",
+        "access-control-request-headers",
+        "access-control-request-method",
+        "connection",
+        "content-length",
+        "cookie",
+        "cookie2",
+        "date",
+        "dnt",
+        "expect",
+        "host",
+        "keep-alive",
+        "origin",
+        "referer",
+        "set-cookie",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "via",
+    }) |forbidden| if (std.ascii.eqlIgnoreCase(name, forbidden)) return true;
+    if ((name.len >= 6 and std.ascii.startsWithIgnoreCase(name, "proxy-")) or
+        (name.len >= 4 and std.ascii.startsWithIgnoreCase(name, "sec-"))) return true;
+    inline for (.{ "x-http-method", "x-http-method-override", "x-method-override" }) |override| {
+        if (std.ascii.eqlIgnoreCase(name, override)) return containsForbiddenMethodValue(value);
+    }
+    return false;
+}
+
+fn corsUnsafeByte(byte: u8) bool {
+    if (byte < 0x20 and byte != '\t') return true;
+    return switch (byte) {
+        '"', '(', ')', ':', '<', '>', '?', '@', '[', '\\', ']', '{', '}', 0x7f => true,
+        else => false,
+    };
+}
+
+fn corsLanguageByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or switch (byte) {
+        ' ', '*', ',', '-', '.', ';', '=' => true,
+        else => false,
+    };
+}
+
+fn corsSafelistedMime(value: []const u8) bool {
+    const semicolon = std.mem.indexOfScalar(u8, value, ';') orelse value.len;
+    const essence = std.mem.trim(u8, value[0..semicolon], " \t");
+    inline for (.{ "application/x-www-form-urlencoded", "multipart/form-data", "text/plain" }) |allowed| {
+        if (std.ascii.eqlIgnoreCase(essence, allowed)) return true;
+    }
+    return false;
+}
+
+pub fn corsSafelistedRequestHeader(name: []const u8, value: []const u8) bool {
+    if (value.len > 128) return false;
+    if (std.ascii.eqlIgnoreCase(name, "accept")) {
+        for (value) |byte| if (corsUnsafeByte(byte)) return false;
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "accept-language") or std.ascii.eqlIgnoreCase(name, "content-language")) {
+        for (value) |byte| if (!corsLanguageByte(byte)) return false;
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "content-type")) {
+        for (value) |byte| if (corsUnsafeByte(byte)) return false;
+        return corsSafelistedMime(value);
+    }
+    return false;
+}
+
+fn noCorsSafelistedName(name: []const u8) bool {
+    inline for (.{ "accept", "accept-language", "content-language", "content-type" }) |allowed| {
+        if (std.ascii.eqlIgnoreCase(name, allowed)) return true;
+    }
+    return false;
+}
+
 const Entry = struct {
     /// Canonical WebCore spelling for known names; first spelling for uncommon
     /// names. Comparisons always use `lower_name`.
@@ -192,6 +311,7 @@ pub const Record = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.atomic.Mutex = .unlocked,
+    guard: Guard = .none,
     entries: std.ArrayListUnmanaged(Entry) = .empty,
 
     pub fn create() Error!*Record {
@@ -226,6 +346,59 @@ pub const Record = struct {
         return null;
     }
 
+    fn findNameLocked(self: *const Record, name: []const u8) ?usize {
+        for (self.entries.items, 0..) |entry, index| {
+            if (std.ascii.eqlIgnoreCase(entry.lower_name, name)) return index;
+        }
+        return null;
+    }
+
+    fn removeNameLocked(self: *Record, name: []const u8) void {
+        var index: usize = 0;
+        while (index < self.entries.items.len) {
+            if (!std.ascii.eqlIgnoreCase(self.entries.items[index].lower_name, name)) {
+                index += 1;
+                continue;
+            }
+            const removed = self.entries.orderedRemove(index);
+            removed.deinit(self.allocator);
+        }
+    }
+
+    fn removePrivilegedNoCorsLocked(self: *Record) void {
+        self.removeNameLocked("range");
+    }
+
+    fn validateGuardLocked(self: *const Record, name: []const u8, value: []const u8) Error!bool {
+        return switch (self.guard) {
+            .none, .request_no_cors => true,
+            .immutable => error.Immutable,
+            .request => !forbiddenRequestHeader(name, value),
+            .response => !std.ascii.eqlIgnoreCase(name, "set-cookie") and !std.ascii.eqlIgnoreCase(name, "set-cookie2"),
+        };
+    }
+
+    pub fn setGuard(self: *Record, guard: Guard) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.guard = guard;
+    }
+
+    pub fn getGuard(self: *Record) Guard {
+        self.lock();
+        defer self.mutex.unlock();
+        return self.guard;
+    }
+
+    /// Empty the underlying list without consulting the Headers API guard.
+    /// Fetch construction uses this after it has copied the initializer.
+    pub fn clear(self: *Record) void {
+        self.lock();
+        defer self.mutex.unlock();
+        for (self.entries.items) |entry| entry.deinit(self.allocator);
+        self.entries.clearRetainingCapacity();
+    }
+
     fn lowerAlloc(self: *Record, name: []const u8) Error![]u8 {
         const lower = self.allocator.alloc(u8, name.len) catch return error.OutOfMemory;
         for (name, lower) |char, *slot| slot.* = std.ascii.toLower(char);
@@ -241,15 +414,9 @@ pub const Record = struct {
         return .{ .display_name = display, .lower_name = lower, .value = owned_value, .known_index = known_index };
     }
 
-    pub fn append(self: *Record, name: []const u8, raw_value: []const u8) Error!void {
-        if (!validName(name)) return error.InvalidName;
-        const value = normalizeValue(raw_value);
-        if (!validValue(value)) return error.InvalidValue;
+    fn appendLocked(self: *Record, name: []const u8, value: []const u8) Error!void {
         const known_index = knownNameIndex(name);
         const is_set_cookie = known_index == set_cookie_index;
-
-        self.lock();
-        defer self.mutex.unlock();
 
         if (!is_set_cookie) {
             var lower_stack: [64]u8 = undefined;
@@ -269,6 +436,42 @@ pub const Record = struct {
         const entry = try self.makeEntry(name, value, known_index);
         errdefer entry.deinit(self.allocator);
         self.entries.append(self.allocator, entry) catch return error.OutOfMemory;
+    }
+
+    /// Privileged mutation of the underlying header list. Network and private
+    /// ABI adapters use this path; JavaScript Headers methods use appendGuarded.
+    pub fn append(self: *Record, name: []const u8, raw_value: []const u8) Error!void {
+        if (!validName(name)) return error.InvalidName;
+        const value = normalizeValue(raw_value);
+        if (!validValue(value)) return error.InvalidValue;
+        self.lock();
+        defer self.mutex.unlock();
+        try self.appendLocked(name, value);
+    }
+
+    pub fn appendGuarded(self: *Record, name: []const u8, raw_value: []const u8) Error!void {
+        if (!validName(name)) return error.InvalidName;
+        const value = normalizeValue(raw_value);
+        if (!validValue(value)) return error.InvalidValue;
+        self.lock();
+        defer self.mutex.unlock();
+        if (!try self.validateGuardLocked(name, value)) return;
+        if (self.guard == .request_no_cors) {
+            const previous = if (self.findNameLocked(name)) |index| self.entries.items[index].value else null;
+            const appended_len = std.math.add(usize, 2, value.len) catch return;
+            const combined_len = if (previous) |stored| std.math.add(usize, stored.len, appended_len) catch return else value.len;
+            if (combined_len > 128) return;
+            var combined_storage: [128]u8 = undefined;
+            const combined = if (previous) |stored| blk: {
+                @memcpy(combined_storage[0..stored.len], stored);
+                @memcpy(combined_storage[stored.len .. stored.len + 2], ", ");
+                @memcpy(combined_storage[stored.len + 2 .. combined_len], value);
+                break :blk combined_storage[0..combined_len];
+            } else value;
+            if (!corsSafelistedRequestHeader(name, combined)) return;
+        }
+        try self.appendLocked(name, value);
+        if (self.guard == .request_no_cors) self.removePrivilegedNoCorsLocked();
     }
 
     pub fn appendKnown(self: *Record, index: u8, value: []const u8) Error!void {
@@ -314,17 +517,11 @@ pub const Record = struct {
         self.entries.append(self.allocator, entry) catch return error.OutOfMemory;
     }
 
-    pub fn set(self: *Record, name: []const u8, raw_value: []const u8) Error!void {
-        if (!validName(name)) return error.InvalidName;
-        const value = normalizeValue(raw_value);
-        if (!validValue(value)) return error.InvalidValue;
+    fn setLocked(self: *Record, name: []const u8, value: []const u8) Error!void {
         const known_index = knownNameIndex(name);
         const replacement = try self.makeEntry(name, value, known_index);
         var owns_replacement = true;
         defer if (owns_replacement) replacement.deinit(self.allocator);
-
-        self.lock();
-        defer self.mutex.unlock();
 
         var first: ?usize = null;
         var index: usize = 0;
@@ -352,28 +549,49 @@ pub const Record = struct {
         }
     }
 
+    pub fn set(self: *Record, name: []const u8, raw_value: []const u8) Error!void {
+        if (!validName(name)) return error.InvalidName;
+        const value = normalizeValue(raw_value);
+        if (!validValue(value)) return error.InvalidValue;
+        self.lock();
+        defer self.mutex.unlock();
+        try self.setLocked(name, value);
+    }
+
+    pub fn setGuarded(self: *Record, name: []const u8, raw_value: []const u8) Error!void {
+        if (!validName(name)) return error.InvalidName;
+        const value = normalizeValue(raw_value);
+        if (!validValue(value)) return error.InvalidValue;
+        self.lock();
+        defer self.mutex.unlock();
+        if (!try self.validateGuardLocked(name, value)) return;
+        if (self.guard == .request_no_cors and !corsSafelistedRequestHeader(name, value)) return;
+        try self.setLocked(name, value);
+        if (self.guard == .request_no_cors) self.removePrivilegedNoCorsLocked();
+    }
+
     pub fn setKnown(self: *Record, index: u8, value: []const u8) Error!void {
         return self.set(knownName(index) orelse return error.InvalidName, value);
     }
 
     pub fn remove(self: *Record, name: []const u8) Error!void {
         if (!validName(name)) return error.InvalidName;
-        var lower_stack: [64]u8 = undefined;
-        const lower = if (name.len <= lower_stack.len) lower_stack[0..name.len] else self.allocator.alloc(u8, name.len) catch return error.OutOfMemory;
-        defer if (name.len > lower_stack.len) self.allocator.free(lower);
-        for (name, lower) |char, *slot| slot.* = std.ascii.toLower(char);
-
         self.lock();
         defer self.mutex.unlock();
-        var index: usize = 0;
-        while (index < self.entries.items.len) {
-            if (!std.mem.eql(u8, self.entries.items[index].lower_name, lower)) {
-                index += 1;
-                continue;
-            }
-            const removed = self.entries.orderedRemove(index);
-            removed.deinit(self.allocator);
-        }
+        self.removeNameLocked(name);
+    }
+
+    pub fn removeGuarded(self: *Record, name: []const u8) Error!void {
+        if (!validName(name)) return error.InvalidName;
+        self.lock();
+        defer self.mutex.unlock();
+        if (!try self.validateGuardLocked(name, "")) return;
+        if (self.guard == .request_no_cors and
+            !noCorsSafelistedName(name) and
+            !std.ascii.eqlIgnoreCase(name, "range")) return;
+        if (self.findNameLocked(name) == null) return;
+        self.removeNameLocked(name);
+        if (self.guard == .request_no_cors) self.removePrivilegedNoCorsLocked();
     }
 
     pub fn removeKnown(self: *Record, index: u8) void {
@@ -450,11 +668,18 @@ pub const Record = struct {
         errdefer result.release();
         self.lock();
         defer self.mutex.unlock();
+        result.guard = self.guard;
         result.entries.ensureTotalCapacity(result.allocator, self.entries.items.len) catch return error.OutOfMemory;
         for (self.entries.items) |entry| {
             const copied = result.makeEntry(entry.display_name, entry.value, entry.known_index) catch return error.OutOfMemory;
             result.entries.appendAssumeCapacity(copied);
         }
+        return result;
+    }
+
+    pub fn cloneWithGuard(self: *Record, guard: Guard) Error!*Record {
+        const result = try self.clone();
+        result.guard = guard;
         return result;
     }
 
@@ -618,4 +843,78 @@ test "FetchHeaders response snapshot uses pinned category order" {
     try std.testing.expectEqualStrings("Date", snapshot.rows[2].name);
     try std.testing.expectEqualStrings("Accept", snapshot.rows[3].name);
     try std.testing.expectEqualStrings("X-First", snapshot.rows[4].name);
+}
+
+test "FetchHeaders guards enforce Fetch mutation algorithms" {
+    const request = try Record.create();
+    defer request.release();
+    request.setGuard(.request);
+    try request.appendGuarded("Cookie", "secret=1");
+    try request.appendGuarded("Sec-Fetch-Site", "same-origin");
+    try request.appendGuarded("X-HTTP-Method-Override", "GET, track ");
+    try std.testing.expect(request.isEmpty());
+    try request.appendGuarded("X-HTTP-Method-Override", "\",TRACE\",");
+    try std.testing.expect(try request.has("x-http-method-override"));
+
+    const response = try Record.create();
+    defer response.release();
+    response.setGuard(.response);
+    try response.appendGuarded("Set-Cookie", "secret=1");
+    try response.appendGuarded("X-Visible", "yes");
+    try std.testing.expect(!try response.has("set-cookie"));
+    try std.testing.expect(try response.has("x-visible"));
+
+    response.setGuard(.immutable);
+    try std.testing.expectError(error.Immutable, response.appendGuarded("X-New", "no"));
+    try std.testing.expectError(error.Immutable, response.setGuarded("X-Visible", "no"));
+    try std.testing.expectError(error.Immutable, response.removeGuarded("X-Visible"));
+}
+
+test "FetchHeaders no-CORS guards combine atomically and remove privileged Range" {
+    const headers = try Record.create();
+    defer headers.release();
+    headers.setGuard(.request_no_cors);
+
+    var long_value: [127]u8 = undefined;
+    @memset(&long_value, 's');
+    try headers.appendGuarded("Accept", long_value[0..]);
+    try headers.appendGuarded("Accept", "");
+    const unchanged = (try headers.getCopy(std.testing.allocator, "accept")).?;
+    defer std.testing.allocator.free(unchanged);
+    try std.testing.expectEqualStrings(long_value[0..], unchanged);
+    var too_long: [129]u8 = undefined;
+    @memcpy(too_long[0..127], long_value[0..]);
+    @memcpy(too_long[127..129], ", ");
+    try headers.setGuarded("Accept", too_long[0..]);
+    try headers.appendGuarded("X-Unsafe", "ignored");
+    try headers.setGuarded("Content-Type", "application/json");
+    try std.testing.expect(!try headers.has("x-unsafe"));
+    try std.testing.expect(!try headers.has("content-type"));
+
+    // A privileged API can seed Range. A no-op mutation preserves it, while a
+    // successful unprivileged mutation removes it after publication.
+    try headers.append("Range", "bytes=0-9");
+    try headers.removeGuarded("Accept-Language");
+    try std.testing.expect(try headers.has("range"));
+    try headers.setGuarded("Content-Type", "text/plain;charset=UTF-8");
+    try std.testing.expect(!try headers.has("range"));
+    try std.testing.expect(try headers.has("content-type"));
+}
+
+test "FetchHeaders no-CORS guarded appends serialize shared mutations" {
+    const headers = try Record.create();
+    defer headers.release();
+    headers.setGuard(.request_no_cors);
+    const Worker = struct {
+        fn run(record: *Record) void {
+            for (0..100) |_| record.appendGuarded("Accept", "a") catch return;
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Worker.run, .{headers});
+    for (&threads) |*thread| thread.join();
+    const value = (try headers.getCopy(std.testing.allocator, "accept")).?;
+    defer std.testing.allocator.free(value);
+    try std.testing.expect(value.len <= 128);
+    try std.testing.expect(corsSafelistedRequestHeader("accept", value));
 }

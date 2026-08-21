@@ -11750,6 +11750,7 @@ fn privatePublishFetchHeadersError(context: *Context, err: fetch_headers.Error) 
     const abrupt = machine.throwError("TypeError", switch (err) {
         error.InvalidName => "Invalid header name",
         error.InvalidValue => "Invalid header value",
+        error.Immutable => "Headers are immutable",
         error.OutOfMemory => unreachable,
     });
     privateSetPendingAbrupt(context, &machine, abrupt);

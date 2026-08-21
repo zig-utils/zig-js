@@ -47680,8 +47680,34 @@ fn headersThrow(self: *Interpreter, err: fetch_headers.Error) EvalError {
     return switch (err) {
         error.InvalidName => self.throwError("TypeError", "Invalid header name"),
         error.InvalidValue => self.throwError("TypeError", "Invalid header value"),
+        error.Immutable => self.throwError("TypeError", "Headers are immutable"),
         error.OutOfMemory => error.OutOfMemory,
     };
+}
+
+/// Web IDL ByteString conversion for Fetch header names and values. Header
+/// storage is the isomorphic byte image, not the string's WTF-8 encoding.
+fn headersByteString(self: *Interpreter, input: Value) EvalError![]const u8 {
+    const string = try self.toStringValue(input);
+    if (string.strIsAscii()) return string.asStr();
+    var length: usize = 0;
+    var units = Interpreter.StringCodeUnitIterator.initValue(string);
+    while (units.next()) |unit| {
+        if (unit.unit > 0xff) return self.throwError("TypeError", "Header value is not a ByteString");
+        length += 1;
+    }
+    const bytes = try self.arena.alloc(u8, length);
+    units = Interpreter.StringCodeUnitIterator.initValue(string);
+    var index: usize = 0;
+    while (units.next()) |unit| : (index += 1) bytes[index] = @intCast(unit.unit);
+    return bytes;
+}
+
+fn headersStringValue(self: *Interpreter, bytes: []const u8) EvalError!Value {
+    for (bytes) |byte| if (byte >= 0x80) {
+        return Value.strAlloc(self.arena, try strcell.latin1FlatToWtf8(self.arena, bytes));
+    };
+    return Value.strAlloc(self.arena, bytes);
 }
 
 /// Consume one native record reference and create its genuine JS wrapper.
@@ -47707,14 +47733,30 @@ pub fn fetchHeadersCreateEmpty(self: *Interpreter) EvalError!Value {
     return fetchHeadersCreateWithRecord(self, fetch_headers.Record.create() catch return error.OutOfMemory);
 }
 
+fn fetchHeadersCreateEmptyGuarded(self: *Interpreter, guard: fetch_headers.Guard) EvalError!Value {
+    const record = fetch_headers.Record.create() catch return error.OutOfMemory;
+    record.setGuard(guard);
+    return fetchHeadersCreateWithRecord(self, record);
+}
+
+fn fetchHeadersCloneWithGuard(self: *Interpreter, source: Value, guard: fetch_headers.Guard) EvalError!Value {
+    const record = fetchHeadersRecord(source) orelse return fetchHeadersCreateEmptyGuarded(self, guard);
+    return fetchHeadersCreateWithRecord(self, record.cloneWithGuard(guard) catch return error.OutOfMemory);
+}
+
 pub fn fetchHeadersAppendBytes(self: *Interpreter, this: Value, name: []const u8, header_value: []const u8) EvalError!void {
+    const record = try headersRecord(self, this);
+    record.appendGuarded(name, header_value) catch |err| return headersThrow(self, err);
+}
+
+fn fetchHeadersAppendBytesPrivileged(self: *Interpreter, this: Value, name: []const u8, header_value: []const u8) EvalError!void {
     const record = try headersRecord(self, this);
     record.append(name, header_value) catch |err| return headersThrow(self, err);
 }
 
 fn headersAppendRaw(self: *Interpreter, this: Value, name_v: Value, value_v: Value) EvalError!void {
-    const name = try self.toStringWtf8(name_v);
-    const header_value = try self.toStringWtf8(value_v);
+    const name = try headersByteString(self, name_v);
+    const header_value = try headersByteString(self, value_v);
     try fetchHeadersAppendBytes(self, this, name, header_value);
 }
 fn headersAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -47724,30 +47766,30 @@ fn headersAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 }
 fn headersSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
-    const header_value = try self.toStringWtf8(if (args.len > 1) args[1] else Value.undef());
+    const name = try headersByteString(self, if (args.len > 0) args[0] else Value.undef());
+    const header_value = try headersByteString(self, if (args.len > 1) args[1] else Value.undef());
     const record = try headersRecord(self, this);
-    record.set(name, header_value) catch |err| return headersThrow(self, err);
+    record.setGuarded(name, header_value) catch |err| return headersThrow(self, err);
     return Value.undef();
 }
 fn headersGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
+    const name = try headersByteString(self, if (args.len > 0) args[0] else Value.undef());
     const record = try headersRecord(self, this);
     const result = record.getCopy(self.arena, name) catch |err| return headersThrow(self, err);
-    return if (result) |bytes| try Value.strAlloc(self.arena, bytes) else Value.nul();
+    return if (result) |bytes| try headersStringValue(self, bytes) else Value.nul();
 }
 fn headersHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
+    const name = try headersByteString(self, if (args.len > 0) args[0] else Value.undef());
     const record = try headersRecord(self, this);
     return Value.boolVal(record.has(name) catch |err| return headersThrow(self, err));
 }
 fn headersDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
+    const name = try headersByteString(self, if (args.len > 0) args[0] else Value.undef());
     const record = try headersRecord(self, this);
-    record.remove(name) catch |err| return headersThrow(self, err);
+    record.removeGuarded(name) catch |err| return headersThrow(self, err);
     return Value.undef();
 }
 fn headersGetSetCookieFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -47757,7 +47799,7 @@ fn headersGetSetCookieFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const snapshot = (try headersRecord(self, this)).snapshot(self.arena, .lower) catch |err| return headersThrow(self, err);
     defer snapshot.deinit(self.arena);
     for (snapshot.rows) |row| {
-        if (std.mem.eql(u8, row.name, "set-cookie")) try arr.appendElement(self.arena, try Value.strAlloc(self.arena, row.value));
+        if (std.mem.eql(u8, row.name, "set-cookie")) try arr.appendElement(self.arena, try headersStringValue(self, row.value));
     }
     return Value.obj(arr);
 }
@@ -47767,8 +47809,8 @@ fn headersSortedEntries(self: *Interpreter, this: Value) EvalError!*value.Object
     const out = (try self.newArray()).asObj();
     for (snapshot.rows) |row| {
         const pair = (try self.newArray()).asObj();
-        try pair.appendElement(self.arena, try Value.strAlloc(self.arena, row.name));
-        try pair.appendElement(self.arena, try Value.strAlloc(self.arena, row.value));
+        try pair.appendElement(self.arena, try headersStringValue(self, row.name));
+        try pair.appendElement(self.arena, try headersStringValue(self, row.value));
         try out.appendElement(self.arena, Value.obj(pair));
     }
     return out;
@@ -49606,8 +49648,8 @@ fn fetchExtractBody(self: *Interpreter, body_v: Value) EvalError!BodyExtract {
     if (bufferSourceBytes(body_v)) |b| return .{ .bytes = b, .ctype = null };
     return .{ .bytes = try wtf8ToUtf8Bytes(self.arena, try self.toStringWtf8(body_v)), .ctype = "text/plain;charset=UTF-8" };
 }
-fn fetchMakeHeaders(self: *Interpreter, init_v: Value) EvalError!*value.Object {
-    const created = try fetchHeadersCreateEmpty(self);
+fn fetchMakeHeaders(self: *Interpreter, init_v: Value, guard: fetch_headers.Guard) EvalError!*value.Object {
+    const created = try fetchHeadersCreateEmptyGuarded(self, guard);
     if (!init_v.isUndefined() and !init_v.isNull()) try fetchHeadersFill(self, created, init_v);
     return created.asObj();
 }
@@ -49649,7 +49691,7 @@ fn fetchBodyContentType(self: *Interpreter, object: *value.Object) EvalError!Val
     if (!headers_value.isObject()) return Value.str("");
     const record = try headersRecord(self, headers_value);
     const content_type = (record.getCopy(self.arena, "content-type") catch |err| return headersThrow(self, err)) orelse "";
-    return Value.strAlloc(self.arena, content_type);
+    return headersStringValue(self, content_type);
 }
 fn fetchEnsureBodyStream(self: *Interpreter, object: *value.Object) EvalError!?*value.Object {
     const body = fetchBodyValue(object);
@@ -49796,7 +49838,7 @@ fn responseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     }
     if (status < 200 or status > 599) return self.throwError("RangeError", "Failed to construct 'Response': The status provided is outside the range [200, 599].");
     const st: u32 = @intFromFloat(status);
-    const headers = try fetchMakeHeaders(self, headers_init);
+    const headers = try fetchMakeHeaders(self, headers_init, .response);
     const be = try fetchExtractBody(self, body_v);
     if ((be.bytes != null or be.stream != null) and (st == 204 or st == 205 or st == 304))
         return self.throwError("TypeError", "Response with null body status cannot have body");
@@ -49842,7 +49884,9 @@ fn responseCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const source = try fetchBodyObject(self, this);
     if (source.getOwn("\x00Rstatus") == null) return self.throwError("TypeError", "Response.clone called on an incompatible receiver");
-    const headers = try fetchMakeHeaders(self, source.getOwn("\x00Rheaders") orelse Value.undef());
+    const source_headers = source.getOwn("\x00Rheaders") orelse Value.undef();
+    const guard = if (fetchHeadersRecord(source_headers)) |record| record.getGuard() else fetch_headers.Guard.response;
+    const headers = (try fetchHeadersCloneWithGuard(self, source_headers, guard)).asObj();
     const status_value = source.getOwn("\x00Rstatus") orelse Value.num(200);
     const status: u32 = if (status_value.isNumber()) @intFromFloat(status_value.asNum()) else 200;
     const status_text = source.getOwn("\x00RstatusText") orelse Value.str("");
@@ -49864,7 +49908,7 @@ fn responseErrorStaticFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return Value.obj(try responseMake(self, 0, "", try fetchMakeHeaders(self, Value.undef()), .{ .bytes = null, .ctype = null }, "error", "", false));
+    return Value.obj(try responseMake(self, 0, "", try fetchMakeHeaders(self, Value.undef(), .immutable), .{ .bytes = null, .ctype = null }, "error", "", false));
 }
 fn responseJsonStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -49884,7 +49928,7 @@ fn responseJsonStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value
         if (!stv.isUndefined()) status_text = try self.toStringWtf8(stv);
         headers_init = try self.getProperty(args[1], "headers");
     }
-    const headers = try fetchMakeHeaders(self, headers_init);
+    const headers = try fetchMakeHeaders(self, headers_init, .response);
     if (!try fetchHeadersHasName(self, headers, "content-type"))
         try headersAppendRaw(self, Value.obj(headers), Value.str("content-type"), Value.str("application/json"));
     return Value.obj(try responseMake(self, status, status_text, headers, .{ .bytes = bytes, .ctype = "application/json" }, "default", "", false));
@@ -49899,8 +49943,8 @@ fn responseRedirectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (args.len > 1 and !args[1].isUndefined()) status = @intFromFloat(try self.toNumberV(args[1]));
     if (status != 301 and status != 302 and status != 303 and status != 307 and status != 308)
         return self.throwError("RangeError", "Failed to execute 'redirect' on 'Response': Invalid status code");
-    const headers = try fetchMakeHeaders(self, Value.undef());
-    try headersAppendRaw(self, Value.obj(headers), Value.str("location"), try Value.strAlloc(self.arena, url));
+    const headers = try fetchMakeHeaders(self, Value.undef(), .immutable);
+    try fetchHeadersAppendBytesPrivileged(self, Value.obj(headers), "location", url);
     return Value.obj(try responseMake(self, status, "", headers, .{ .bytes = null, .ctype = null }, "default", "", false));
 }
 // ---- Request --------------------------------------------------------
@@ -50034,7 +50078,7 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
             init_nonempty = true;
             if (!builtins.isRealObject(hv))
                 return self.throwError("TypeError", "RequestInit headers must be a HeadersInit object");
-            headers_override = try fetchMakeHeaders(self, hv);
+            headers_override = try fetchMakeHeaders(self, hv, .none);
         }
         const iv = try self.getProperty(init, "integrity");
         if (!iv.isUndefined()) {
@@ -50129,7 +50173,18 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
         !std.mem.eql(u8, method, "HEAD") and
         !std.mem.eql(u8, method, "POST"))
         return self.throwError("TypeError", "no-cors requires a CORS-safelisted method");
-    const headers = headers_override orelse try fetchMakeHeaders(self, headers_init);
+    const header_guard: fetch_headers.Guard = if (std.mem.eql(u8, mode, "no-cors")) .request_no_cors else .request;
+    const headers = (try fetchHeadersCloneWithGuard(self, headers_init, header_guard)).asObj();
+    if (init_nonempty) {
+        // Fetch constructor step 33 snapshots the chosen source before clearing
+        // the target list, then refills through its request guard.
+        const fill_source = if (headers_override) |configured|
+            Value.obj(configured)
+        else
+            try fetchHeadersCloneWithGuard(self, Value.obj(headers), .none);
+        (try headersRecord(self, Value.obj(headers))).clear();
+        try fetchHeadersFill(self, Value.obj(headers), fill_source);
+    }
     const has_body = body_override != null or (!inherited_body.isUndefined() and !inherited_body.isNull());
     if ((std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "HEAD")) and has_body)
         return self.throwError("TypeError", "Request with GET/HEAD method cannot have body");
@@ -50215,7 +50270,9 @@ fn requestCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         "\x00Qpriority",
     }) |slot| try obj.setOwn(self.arena, self.root_shape, slot, source.getOwn(slot) orelse Value.undef());
     try obj.setOwn(self.arena, self.root_shape, "\x00Qsignal", Value.obj(cloned_signal));
-    try obj.setOwn(self.arena, self.root_shape, "\x00Qheaders", Value.obj(try fetchMakeHeaders(self, source.getOwn("\x00Qheaders") orelse Value.undef())));
+    const source_headers = source.getOwn("\x00Qheaders") orelse Value.undef();
+    const guard = if (fetchHeadersRecord(source_headers)) |record| record.getGuard() else fetch_headers.Guard.request;
+    try obj.setOwn(self.arena, self.root_shape, "\x00Qheaders", try fetchHeadersCloneWithGuard(self, source_headers, guard));
     try obj.setOwn(self.arena, self.root_shape, "\x00QbodyUsed", Value.boolVal(false));
     try fetchStoreBody(self, obj, "\x00Qbody", try fetchCloneBody(self, source));
     return Value.obj(obj);
