@@ -15810,7 +15810,7 @@ pub const Interpreter = struct {
                     if (args.len > 1) args[1] else Value.undef(),
                 };
                 const r = try self.callMethod(el, "toLocaleString", &forwarded);
-                try buf.appendSlice(self.arena, try self.toStringV(r));
+                try buf.appendSlice(self.arena, try self.toStringWtf8(r));
             }
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
@@ -23730,13 +23730,13 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     if (eq(name, "join")) {
         // The separator coerces once (it can resize the buffer); each element is
         // then read length-aware — an index now out of bounds joins as "".
-        const sep = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else ",";
+        const sep = if (args.len > 0 and !args[0].isUndefined()) try self.toStringWtf8(args[0]) else ",";
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         var i: usize = 0;
         while (i < len) : (i += 1) {
             if (i > 0) try buf.appendSlice(self.arena, sep);
             const el = try self.taLoadIdx(ta, i);
-            if (!el.isUndefined()) try buf.appendSlice(self.arena, try self.toStringV(el));
+            if (!el.isUndefined()) try buf.appendSlice(self.arena, try self.toStringWtf8(el));
         }
         return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
     }
@@ -23754,7 +23754,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
                 if (args.len > 1) args[1] else Value.undef(),
             };
             const r = try self.callValueWithThis(method, &forwarded, el);
-            try buf.appendSlice(self.arena, try self.toStringV(r));
+            try buf.appendSlice(self.arena, try self.toStringWtf8(r));
         }
         return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
     }

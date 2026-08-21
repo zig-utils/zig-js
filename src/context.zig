@@ -16734,6 +16734,29 @@ test "String exotic reflection uses UTF-16 code units across representations" {
     )).asBool());
 }
 
+test "String result builders canonicalize physical storage" {
+    try std.testing.expect((try evalIn(
+        \\const text = "caf\u00e9\u00ff";
+        \\let rawCalls = 0;
+        \\const rawSub = { toString() { rawCalls++; return text; } };
+        \\const raw = String.raw({ raw: ["<", ">"] }, rawSub) === "<caf\u00e9\u00ff>" && rawCalls === 1;
+        \\let separatorCalls = 0;
+        \\const separator = { toString() { separatorCalls++; return text; } };
+        \\const joined = new Uint8Array([1, 2]).join(separator) === "1caf\u00e9\u00ff2" && separatorCalls === 1;
+        \\const oldNumberLocale = Number.prototype.toLocaleString;
+        \\let localeCalls = 0;
+        \\Number.prototype.toLocaleString = function() { localeCalls++; return text; };
+        \\let localized;
+        \\try {
+        \\  localized = [1, 2].toLocaleString() === "caf\u00e9\u00ff,caf\u00e9\u00ff" &&
+        \\    new Uint8Array([1, 2]).toLocaleString() === "caf\u00e9\u00ff,caf\u00e9\u00ff" && localeCalls === 4;
+        \\} finally {
+        \\  Number.prototype.toLocaleString = oldNumberLocale;
+        \\}
+        \\raw && joined && localized
+    )).asBool());
+}
+
 test "borrowed Array mutators throw on String exotic length writes" {
     try std.testing.expect((try evalIn(
         \\function throws(fn) {

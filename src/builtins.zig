@@ -2598,7 +2598,7 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         // (and throws for a Symbol), propagating any abrupt completion.
         try buf.appendSlice(self.arena, try self.toStringWtf8(try self.getProperty(raw, key)));
         if (i + 1 == segs) break;
-        if (i < subs.len) try buf.appendSlice(self.arena, try self.toStringV(subs[i]));
+        if (i < subs.len) try buf.appendSlice(self.arena, try self.toStringWtf8(subs[i]));
     }
     return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
 }
