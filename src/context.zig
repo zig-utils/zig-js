@@ -22726,6 +22726,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
     _ = try ctx.evaluate(
         \\let marker = { x: 1 };
         \\globalThis.admitted = function admitted(p) { "use strict"; return p.x; };
+        \\globalThis.computedTagged = function computedTagged(holder, key, value) { "use strict"; return holder[key]`a${value}b`; };
         \\globalThis.withArguments = function withArguments() { return arguments[0]; };
         \\globalThis.notCandidate = function notCandidate() { return 1; };
         \\globalThis.shadowed = function shadowed(p) { "use strict"; { let p = 2; } return marker.x; };
@@ -22733,11 +22734,13 @@ test "bytecode admission inventory retains exact runtime reasons" {
         \\globalThis.generatorLogical = function* generatorLogical() { var holder = {}; yield (holder.value ??= 1); };
         \\globalThis.generatorCompound = function* generatorCompound() { var holder = { value: 1 }; yield (holder.value += 1); };
         \\globalThis.generatorUpdate = function* generatorUpdate() { var holder = { value: 1 }; return holder[yield "key"]++; };
+        \\globalThis.generatorTagged = function* generatorTagged(holder) { return holder[yield "key"]`a${yield "value"}b`; };
         \\globalThis.generatorRejected = function* generatorRejected() { var holder = {}; yield holder?.value; };
         \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
         \\globalThis.asyncLogical = async function asyncLogical() { var holder = {}; return holder.value ??= 1; };
         \\globalThis.asyncCompound = async function asyncCompound() { var holder = { value: 1 }; return holder.value += 1; };
         \\globalThis.asyncUpdate = async function asyncUpdate() { var holder = { value: 1 }; return ++holder[await Promise.resolve("value")]; };
+        \\globalThis.asyncTagged = async function asyncTagged(holder) { return holder[await Promise.resolve("tag")]`a${await Promise.resolve(1)}b`; };
         \\globalThis.asyncRejected = async function asyncRejected() { var holder = {}; return holder?.value; };
     );
     _ = try ctx.evaluate(
@@ -22749,6 +22752,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
 
     const expected = [_]struct { name: []const u8, reason: interp.BytecodeAdmissionReason }{
         .{ .name = "admitted", .reason = .plain_compiled },
+        .{ .name = "computedTagged", .reason = .plain_compiled },
         .{ .name = "withArguments", .reason = .plain_policy_arguments },
         .{ .name = "notCandidate", .reason = .plain_policy_not_candidate },
         .{ .name = "shadowed", .reason = .plain_compiled },
@@ -22756,11 +22760,13 @@ test "bytecode admission inventory retains exact runtime reasons" {
         .{ .name = "generatorLogical", .reason = .generator_compiled },
         .{ .name = "generatorCompound", .reason = .generator_compiled },
         .{ .name = "generatorUpdate", .reason = .generator_compiled },
+        .{ .name = "generatorTagged", .reason = .generator_compiled },
         .{ .name = "generatorRejected", .reason = .generator_rejected_unsupported_lowering },
         .{ .name = "asyncCompiled", .reason = .async_compiled },
         .{ .name = "asyncLogical", .reason = .async_compiled },
         .{ .name = "asyncCompound", .reason = .async_compiled },
         .{ .name = "asyncUpdate", .reason = .async_compiled },
+        .{ .name = "asyncTagged", .reason = .async_compiled },
         .{ .name = "asyncRejected", .reason = .async_rejected_unsupported_lowering },
     };
     for (expected) |entry| {
@@ -22783,9 +22789,9 @@ test "bytecode admission inventory retains exact runtime reasons" {
     const after = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
     try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
-    try std.testing.expectEqual(before.count(.plain_compiled) + 2, after.count(.plain_compiled));
-    try std.testing.expectEqual(before.count(.generator_compiled) + 4, after.count(.generator_compiled));
-    try std.testing.expectEqual(before.count(.async_compiled) + 4, after.count(.async_compiled));
+    try std.testing.expectEqual(before.count(.plain_compiled) + 3, after.count(.plain_compiled));
+    try std.testing.expectEqual(before.count(.generator_compiled) + 5, after.count(.generator_compiled));
+    try std.testing.expectEqual(before.count(.async_compiled) + 5, after.count(.async_compiled));
     for (expected) |entry| {
         if (entry.reason == .plain_compiled or entry.reason == .generator_compiled or entry.reason == .async_compiled) continue;
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
@@ -23003,6 +23009,83 @@ test "forced tree-walker and required bytecode agree on member update expression
     try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
     try std.testing.expectEqual(@as(u64, 3), tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker));
     try std.testing.expectEqual(@as(u64, 3), bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled));
+}
+
+test "forced tree-walker and required bytecode agree on computed tagged template references" {
+    const source =
+        \\var taggedLog = "";
+        \\var taggedFirstStrings;
+        \\var taggedHolder = {
+        \\  marker: "receiver",
+        \\  get tag() {
+        \\    taggedLog = taggedLog + "g";
+        \\    return function(strings, value) {
+        \\      taggedLog = taggedLog + "c";
+        \\      var same = taggedFirstStrings === undefined ? (taggedFirstStrings = strings, true) : taggedFirstStrings === strings;
+        \\      return this.marker + ":" + strings[0] + ":" + value + ":" + strings[1] + ":" + same + ":" + Object.isFrozen(strings);
+        \\    };
+        \\  }
+        \\};
+        \\var taggedKey = { toString() { taggedLog = taggedLog + "k"; return "tag"; } };
+        \\function taggedBase() { taggedLog = taggedLog + "b"; return taggedHolder; }
+        \\function runComputedTagged(value) { return taggedBase()[taggedKey]`a${(taggedLog = taggedLog + "s", value)}z`; }
+        \\var taggedFirst = runComputedTagged(7);
+        \\var taggedSecond = runComputedTagged(8);
+        \\taggedFirst + "|" + taggedSecond + "|" + taggedLog;
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    const expected = "receiver:a:7:z:true:true|receiver:a:8:z:true:true|bkgscbkgsc";
+    try std.testing.expectEqualStrings(expected, (try tree_ctx.evaluate(source)).asStr());
+    try std.testing.expectEqualStrings(expected, (try bytecode_ctx.evaluate(source)).asStr());
+    try std.testing.expect(tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker) > 0);
+    try std.testing.expect(bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled) > 0);
+}
+
+test "generator and async bytecode preserve super tagged template references" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_jit = false });
+    defer ctx.destroy();
+    const before = ctx.bytecodeAdmissionSnapshot();
+    _ = try ctx.evaluate(
+        \\var superAsyncObserved = "pending";
+        \\class TaggedBase {
+        \\  tag(strings, value) { return this.marker + ":" + strings[0] + ":" + value + ":" + strings[1]; }
+        \\}
+        \\class TaggedDerived extends TaggedBase {
+        \\  constructor() { super(); this.marker = "derived"; }
+        \\  named() { "use strict"; return super.tag`n${6}m`; }
+        \\  *generated() { return super[yield "key"]`g${yield "value"}z`; }
+        \\  async awaited() { return super[await Promise.resolve("tag")]`a${await Promise.resolve(8)}q`; }
+        \\}
+        \\var taggedDerived = new TaggedDerived();
+        \\var superNamedObserved = taggedDerived.named();
+        \\var taggedIterator = taggedDerived.generated();
+        \\var superFirst = taggedIterator.next();
+        \\var superSecond = taggedIterator.next("tag");
+        \\var superThird = taggedIterator.next(9);
+        \\taggedDerived.awaited().then(function(value) { superAsyncObserved = value; });
+    );
+    try std.testing.expect((try ctx.evaluate(
+        \\drainMicrotasks();
+        \\superNamedObserved === "derived:n:6:m" &&
+        \\superFirst.value === "key" && superFirst.done === false &&
+        \\superSecond.value === "value" && superSecond.done === false &&
+        \\superThird.value === "derived:g:9:z" && superThird.done === true &&
+        \\superAsyncObserved === "derived:a:8:q"
+    )).asBool());
+    const after = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(before.count(.generator_compiled) + 1, after.count(.generator_compiled));
+    try std.testing.expectEqual(before.count(.async_compiled) + 1, after.count(.async_compiled));
 }
 
 test "parser-derived arguments use preserves forced execution tiers" {

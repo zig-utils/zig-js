@@ -7334,20 +7334,45 @@ pub const Interpreter = struct {
     }
 
     fn evalTaggedTemplate(self: *Interpreter, site: *const Node, tag_node: *Node, expr_nodes: []*Node) EvalError!Value {
+        // TaggedTemplate evaluates the tag Reference and GetValue before
+        // GetTemplateObject or any substitution. Capture the receiver now so a
+        // member/super tag cannot be re-resolved after observable expressions.
+        var callee: Value = undefined;
+        var receiver: ?Value = null;
+        switch (tag_node.*) {
+            .member => |m| {
+                const recv = try self.eval(m.object);
+                const key_value: ?Value = if (m.computed) |key| try self.eval(key) else null;
+                if (recv.isNull() or recv.isUndefined()) {
+                    if (m.optional) return error.OptShortCircuit;
+                    return self.throwError("TypeError", "cannot read property of null or undefined");
+                }
+                const key = if (key_value) |key_primitive| try self.keyOf(key_primitive) else m.property;
+                callee = try self.getProperty(recv, key);
+                receiver = recv;
+            },
+            .super_member => |m| {
+                const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                if (!self.this_initialized)
+                    return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                const key_value: ?Value = if (m.computed) |key| try self.eval(key) else null;
+                const parent = home.protoAtomic() orelse
+                    return self.throwError("TypeError", "Cannot read property of null (super)");
+                const key = if (key_value) |key_primitive| try self.keyOf(key_primitive) else m.property;
+                callee = try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
+                receiver = self.this_value;
+            },
+            else => callee = try self.eval(tag_node),
+        }
+
         const strings = try self.getTemplateObject(site);
-        // Build the argument list: strings, then each substitution value.
         var args: std.ArrayListUnmanaged(Value) = .empty;
         try args.append(self.arena, Value.obj(strings));
         for (expr_nodes) |en| try args.append(self.arena, try self.eval(en));
-
-        // Resolve the tag and its `this` (member receiver, else undefined).
-        if (tag_node.* == .member) {
-            const m = tag_node.member;
-            const recv = try self.eval(m.object);
-            const key = try self.memberKey(m.property, m.computed);
-            return self.callMethod(recv, key, args.items);
-        }
-        return self.callValue(try self.eval(tag_node), args.items);
+        return if (receiver) |recv|
+            self.callValueWithThis(callee, args.items, recv)
+        else
+            self.callValue(callee, args.items);
     }
 
     fn freezeTemplateArray(self: *Interpreter, obj: *value.Object) EvalError!void {

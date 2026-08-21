@@ -3086,8 +3086,38 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
             return;
         }
-        // Computed/optional member tag and super tag are rare — keep on the tree-walker.
-        if (tag.* == .member or tag.* == .super_member) return error.Unsupported;
+        if (tag.* == .member) {
+            const m = tag.member;
+            if (m.optional or m.computed == null) return error.Unsupported;
+            // MemberExpression evaluation completes before GetTemplateObject or
+            // any substitution. Keep one receiver below the computed lookup so
+            // the eventual tag call observes the original base as `this`.
+            try self.compileExpr(m.object);
+            _ = try self.chunk.emit(.dup, 0);
+            try self.compileExpr(m.computed.?);
+            _ = try self.chunk.emit(.get_index, 0);
+            _ = try self.chunk.emit(.swap, 0); // [method, recv]
+            _ = try self.chunk.emit(.template_object, ti);
+            for (exprs) |e| try self.compileExpr(e);
+            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
+            return;
+        }
+        if (tag.* == .super_member) {
+            // A super property Reference reads through the home object's parent
+            // but calls with the current this binding, never the super base.
+            const m = tag.super_member;
+            if (m.computed) |key| {
+                try self.compileExpr(key);
+                _ = try self.chunk.emit(.super_get_index, 0);
+            } else {
+                _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property)));
+            }
+            _ = try self.chunk.emit(.load_this, 0);
+            _ = try self.chunk.emit(.template_object, ti);
+            for (exprs) |e| try self.compileExpr(e);
+            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
+            return;
+        }
         // Plain tag (identifier / call / …): this = undefined.
         try self.compileExpr(tag);
         _ = try self.chunk.emit(.template_object, ti);
@@ -4457,6 +4487,59 @@ test "compiler retains a causal barrier for super assignments and updates" {
             .compiled => return error.TestUnexpectedResult,
             .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
         }
+    }
+}
+
+test "compiler admits computed and super tagged template references" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function tagged(holder, key, value){ \"use strict\"; return holder[key]`a${value}b`; }",
+    );
+    const program = try parser.parseProgram();
+    const plain = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_tail_member = false;
+    for (plain.code.items) |inst| if (inst.op == .tail_call_with_this) {
+        saw_tail_member = true;
+    };
+    try std.testing.expect(saw_tail_member);
+
+    var class_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "class Derived extends Base { method(value){ \"use strict\"; return super.tag`a${value}b`; } *generated(){ return super[yield \"key\"]`g${yield \"value\"}z`; } async awaited(){ return super[await Promise.resolve(\"tag\")]`p${await Promise.resolve(1)}q`; } }",
+    );
+    const class_program = try class_parser.parseProgram();
+    const declaration = class_program.program[0];
+    if (declaration.* != .var_decl or declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const class = declaration.var_decl.init.?;
+    if (class.* != .class_expr or class.class_expr.members.len != 3)
+        return error.TestUnexpectedResult;
+
+    const method = class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
+    const method_chunk = switch (try Compiler.admitPlainFunction(arena.allocator(), method.function)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_tail_super = false;
+    for (method_chunk.code.items) |inst| if (inst.op == .tail_call_with_this) {
+        saw_tail_super = true;
+    };
+    try std.testing.expect(saw_tail_super);
+
+    const generated = class.class_expr.members[1].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitGenerator(arena.allocator(), generated.function, true)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+    const awaited = class.class_expr.members[2].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitAsync(arena.allocator(), awaited.function, true)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
     }
 }
 

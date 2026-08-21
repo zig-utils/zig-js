@@ -9498,6 +9498,72 @@ test "vm: member updates preserve abrupt order strict writes and suspended keys"
     )).asBool());
 }
 
+test "vm: computed tagged templates preserve reference order and recursion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings(
+        "receiver:a:7:z:true|bkgsc",
+        (try vmRun(arena.allocator(),
+            \\var taggedLog = "";
+            \\var taggedHolder = {
+            \\  marker: "receiver",
+            \\  get tag() {
+            \\    taggedLog = taggedLog + "g";
+            \\    return function(strings, value) {
+            \\      taggedLog = taggedLog + "c";
+            \\      return this.marker + ":" + strings[0] + ":" + value + ":" + strings[1] + ":" + Object.isFrozen(strings);
+            \\    };
+            \\  }
+            \\};
+            \\var taggedKey = { toString() { taggedLog = taggedLog + "k"; return "tag"; } };
+            \\function taggedBase() { taggedLog = taggedLog + "b"; return taggedHolder; }
+            \\function taggedSubstitution() { taggedLog = taggedLog + "s"; return 7; }
+            \\function invokeTagged() { return taggedBase()[taggedKey]`a${taggedSubstitution()}z`; }
+            \\invokeTagged() + "|" + taggedLog
+        )).asStr(),
+    );
+
+    try std.testing.expectEqualStrings(
+        "7090:bk|7091:bkg|7092:bkgs|7093:bkgsc",
+        (try vmRun(arena.allocator(),
+            \\var abruptLog = "";
+            \\var abruptMode = "";
+            \\var abruptTarget = {
+            \\  get tag() {
+            \\    abruptLog = abruptLog + "g";
+            \\    if (abruptMode === "get") throw 7091;
+            \\    return function() { abruptLog = abruptLog + "c"; if (abruptMode === "call") throw 7093; };
+            \\  }
+            \\};
+            \\var abruptKey = { toString() { abruptLog = abruptLog + "k"; if (abruptMode === "key") throw 7090; return "tag"; } };
+            \\function abruptBase() { abruptLog = abruptLog + "b"; return abruptTarget; }
+            \\function abruptSubstitution() { abruptLog = abruptLog + "s"; if (abruptMode === "sub") throw 7092; return 1; }
+            \\function observe(mode) {
+            \\  abruptLog = ""; abruptMode = mode;
+            \\  try { abruptBase()[abruptKey]`a${abruptSubstitution()}z`; } catch (error) { return error + ":" + abruptLog; }
+            \\  return "missing";
+            \\}
+            \\observe("key") + "|" + observe("get") + "|" + observe("sub") + "|" + observe("call")
+        )).asStr(),
+    );
+
+    try std.testing.expectEqualStrings(
+        "outer|inner:5",
+        (try vmRun(arena.allocator(),
+            \\var innerTag = { marker: "inner", tag(strings, value) { return this.marker + ":" + value; } };
+            \\var outerTag = {
+            \\  marker: "outer",
+            \\  tag(strings, value) {
+            \\    var nested = innerTag["tag"]`i${value}n`;
+            \\    return this.marker + "|" + nested;
+            \\  }
+            \\};
+            \\function recursiveTagged() { return outerTag["tag"]`o${5}z`; }
+            \\recursiveTagged()
+        )).asStr(),
+    );
+}
+
 test "vm: String relational comparison streams representation-aware UTF-16 units" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
