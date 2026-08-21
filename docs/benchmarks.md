@@ -678,6 +678,54 @@ remains visible instead of being hidden.
 Hosted CI validates schemas, migrations, checksums, thermal drift, and combined
 gate behavior without executing reference-host measurements.
 
+## Exact algorithmic-growth evidence
+
+The additive
+[`algorithmic-growth-schema-v1.json`](.data/algorithmic-growth-schema-v1.json)
+owns compiler-classifier changes whose optimized timed boundary is too short
+for stable wall, cycle, or energy measurement while the exact parent grows
+superlinearly. It does not relax or replace the ordinary exact-parent profile.
+Each input remains a complete `exact_parent_ab` artifact with every wall, CPU,
+RSS, allocation, instruction, cycle, energy, thermal, quality, power, and
+full-efficiency decision preserved.
+
+The growth artifact scores only retired instructions per identical logical job
+and exact allocation replay across at least three frozen, strictly increasing
+input widths. Parent and candidate revision, first-parent, dependency, binary,
+source, toolchain, host, sample-count, mode, lane, workload-family, job-count,
+and checksum identities are validated before normalization. Each variant and
+width must keep retired instructions at or below five-percent RSD; allocation
+requests and bytes must repeat exactly. The report derives adjacent and
+first-to-last instruction ratios and logarithmic growth exponents from the raw
+normalized medians.
+
+Wall time, CPU time, RSS, cycles, energy, and thermal observations are
+diagnostic-only in this profile. They cannot support a throughput, latency,
+energy, or full-efficiency claim, even when their raw values look favorable.
+An ordinary exact-parent artifact rejected for noisy energy therefore stays
+rejected by the ordinary profile while still being eligible to contribute
+stable instruction evidence to this separate claim boundary.
+
+Collect every ordinary row first, then aggregate the complete artifacts from a
+clean tracked worktree:
+
+```sh
+~/Code/Home/lang/zig-out/bin/home-tool run tools/algorithmic-growth.ts \
+  --family-prefix representative_frontend_compile_tdz_clear_ \
+  --row 1024:docs/.data/exact-parent-tdz-clear-1024-YYYY-MM-DD.json \
+  --row 2048:docs/.data/exact-parent-tdz-clear-2048-YYYY-MM-DD.json \
+  --row 4096:docs/.data/exact-parent-tdz-clear-4096-YYYY-MM-DD.json \
+  --raw-out docs/.data/algorithmic-growth-tdz-clear-YYYY-MM-DD.json \
+  --markdown-out docs/.data/algorithmic-growth-tdz-clear-YYYY-MM-DD.md
+
+~/Code/Home/lang/zig-out/bin/home-tool run tools/algorithmic-growth.ts \
+  --artifact docs/.data/algorithmic-growth-tdz-clear-YYYY-MM-DD.json
+```
+
+The aggregate raw JSON embeds every exact-parent input losslessly and records
+both the source-file and canonical embedded-artifact SHA-256. No sample is
+discarded, extrapolated, rewritten, or replaced with an unavailable metric.
+
 ## Latest GC fragmentation and compaction
 
 The [July 19, 2026 report](.data/gc-compaction-2026-07-19.md) preserves all

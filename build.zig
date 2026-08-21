@@ -2201,6 +2201,7 @@ pub fn build(b: *std.Build) void {
     const build_feedback_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/build-feedback.ts", "--self-test" });
     const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
+    const algorithmic_growth_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/algorithmic-growth.ts", "--self-test" });
     const generation_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-generation-benchmark.ts", "--self-test" });
     const wasm_simd_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-simd-benchmark.ts", "--self-test" });
     const wasm_threads_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-threads-benchmark.ts", "--self-test" });
@@ -2218,6 +2219,7 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&build_feedback_test.step);
     comparison_harness_test_step.dependOn(&performance_attribution_test.step);
     comparison_harness_test_step.dependOn(&exact_parent_regression_test.step);
+    comparison_harness_test_step.dependOn(&algorithmic_growth_test.step);
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
     comparison_harness_test_step.dependOn(&wasm_simd_benchmark_test.step);
     comparison_harness_test_step.dependOn(&wasm_threads_benchmark_test.step);
