@@ -6847,11 +6847,11 @@ fn objectToString(o: *Object, arena: std.mem.Allocator) error{OutOfMemory}![]con
     if (o.boxedPrimitive()) |p| return p.toString(arena);
     if (o.behavior.is_error) {
         const name = if (o.getOwn("name")) |v|
-            (if (v.isString()) v.asStr() else o.errorName())
+            (if (v.isString()) try v.asWtf8(arena) else o.errorName())
         else
             o.errorName();
         const msg = if (o.getOwn("message")) |v|
-            (if (v.isString()) v.asStr() else "")
+            (if (v.isString()) try v.asWtf8(arena) else "")
         else
             "";
         if (msg.len == 0) return name;

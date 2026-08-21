@@ -12804,6 +12804,33 @@ test "Error prototypes: chain, name/message inheritance, toString" {
     try expectEvalStr("E: m", "Error.prototype.toString.call({ name: 'E', message: 'm' })");
 }
 
+test "Zig Value.toString canonicalizes Error StringData fields" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{
+            .source = "(() => { const e = new Error('caf\\u00e9\\u00ff'); e.name = 'Nam\\u00e9\\u00ff'; return e; })()",
+            .expected = "Nam\xc3\xa9\xc3\xbf: caf\xc3\xa9\xc3\xbf",
+        },
+        .{
+            .source = "(() => { const e = new Error('caf\\u00e9\\u00ff'); e.name = ''; return e; })()",
+            .expected = ": caf\xc3\xa9\xc3\xbf",
+        },
+        .{
+            .source = "(() => { const e = new Error(''); e.name = 'Nam\\u00e9\\u00ff'; return e; })()",
+            .expected = "Nam\xc3\xa9\xc3\xbf",
+        },
+        .{ .source = "new Error()", .expected = "Error" },
+    };
+    for (cases) |case| {
+        const rendered = try (try ctx.evaluate(case.source)).toString(scratch.allocator());
+        try std.testing.expectEqualStrings(case.expected, rendered);
+    }
+}
+
 test "Object.prototype legacy accessor helpers (__define/lookup__)" {
     try std.testing.expectEqual(@as(f64, 42), (try evalIn(
         \\var o = {}; o.__defineGetter__("x", function () { return 42; }); o.x
