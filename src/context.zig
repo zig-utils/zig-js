@@ -17887,6 +17887,41 @@ test "structuredClone: identity, cycles, types, SAB sharing, transfer" {
     );
 }
 
+test "structuredClone preserves canonical string fields" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\const flatText = "caf\u00e9\u00ff";
+        \\const asciiText = "plain";
+        \\const canonicalText = "€";
+        \\const astralText = "🚀";
+        \\const loneSurrogate = String.fromCharCode(0xD800);
+        \\const flatClone = structuredClone(flatText);
+        \\const flatError = structuredClone(new Error(flatText));
+        \\const file = new File(["payload"], flatText, { type: "Text/Plain", lastModified: 513 });
+        \\const fileClone = structuredClone(file);
+        \\[
+        \\  structuredClone(asciiText) === asciiText,
+        \\  structuredClone(canonicalText) === canonicalText,
+        \\  structuredClone(astralText) === astralText,
+        \\  structuredClone(astralText).length,
+        \\  structuredClone(loneSurrogate) === loneSurrogate,
+        \\  structuredClone(loneSurrogate).length,
+        \\  flatClone === flatText,
+        \\  flatClone.length,
+        \\  flatError.message === flatText,
+        \\  fileClone instanceof File,
+        \\  fileClone.name === flatText,
+        \\  fileClone.type,
+        \\  fileClone.lastModified,
+        \\].join("|");
+    );
+    try std.testing.expectEqualStrings(
+        "true|true|true|2|true|1|true|5|true|true|true|text/plain|513",
+        result.asStr(),
+    );
+}
+
 test "structured clone rejects forged replayed and trailing SAB tokens" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

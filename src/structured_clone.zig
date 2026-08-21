@@ -193,6 +193,39 @@ const Writer = struct {
         try w.out.appendSlice(w.gpa, &len_buf);
         try w.out.appendSlice(w.gpa, s);
     }
+    /// Write the canonical WTF-8 content of a String Value. Flat Latin-1 is a
+    /// physical one-byte-per-code-unit image, so fill the final wire field
+    /// directly instead of allocating a temporary transcode and copying it.
+    fn valueStr(w: *Writer, v: Value) error{ OutOfMemory, Overflow }!void {
+        std.debug.assert(v.isString());
+        const bytes = v.asStr();
+        if (!v.strIsFlatLatin1()) return w.str(bytes);
+
+        return w.flatLatin1Str(bytes);
+    }
+
+    fn flatLatin1Str(w: *Writer, bytes: []const u8) error{ OutOfMemory, Overflow }!void {
+        var extra: usize = 0;
+        for (bytes) |byte_value| extra += @intFromBool(byte_value >= 0x80);
+        const canonical_len = std.math.add(usize, bytes.len, extra) catch return error.Overflow;
+        const wire_len = std.math.cast(u32, canonical_len) orelse return error.Overflow;
+        const field_len = std.math.add(usize, @sizeOf(u32), canonical_len) catch return error.Overflow;
+        try w.reserve(field_len);
+        // Capacity is acquired before publishing the length, so OOM cannot
+        // leave a partial field in an otherwise reusable serializer buffer.
+        try w.out.ensureUnusedCapacity(w.gpa, field_len);
+        var len_buf: [@sizeOf(u32)]u8 = undefined;
+        std.mem.writeInt(u32, &len_buf, wire_len, .little);
+        w.out.appendSliceAssumeCapacity(&len_buf);
+        for (bytes) |byte_value| {
+            if (byte_value < 0x80) {
+                w.out.appendAssumeCapacity(byte_value);
+            } else {
+                w.out.appendAssumeCapacity(@intCast(0xC0 | (byte_value >> 6)));
+                w.out.appendAssumeCapacity(@intCast(0x80 | (byte_value & 0x3F)));
+            }
+        }
+    }
 };
 
 // ---- reader -----------------------------------------------------------------
@@ -262,6 +295,13 @@ const Serializer = struct {
 
     fn writeStr(s: *Serializer, text: []const u8) HostError!void {
         return s.w.str(text) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Overflow => s.throwClone("DataCloneError: structured clone string is too large"),
+        };
+    }
+
+    fn writeValueStr(s: *Serializer, v: Value) HostError!void {
+        return s.w.valueStr(v) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Overflow => s.throwClone("DataCloneError: structured clone string is too large"),
         };
@@ -356,7 +396,7 @@ const Serializer = struct {
             },
             .string => {
                 try s.w.tag(.string);
-                try s.writeStr(try v.asWtf8(s.self.arena));
+                try s.writeValueStr(v);
             },
             .object => try s.serObject(v.asObj(), depth),
         }
@@ -499,7 +539,7 @@ const Serializer = struct {
             const msg = try s.self.getProperty(Value.obj(o), "message");
             if (msg.isString()) {
                 try s.w.byte(1);
-                try s.writeStr(try msg.asWtf8(s.self.arena));
+                try s.writeValueStr(msg);
             } else {
                 try s.w.byte(0);
             }
@@ -520,10 +560,16 @@ const Serializer = struct {
             const bytes: []const u8 = if (bufv.isObject()) (if (bufv.asObj().arrayBuffer()) |ab| ab.bytes() else &.{}) else &.{};
             try s.writeStr(bytes);
             const tv = o.getOwn("\x00blobtype");
-            try s.writeStr(if (tv != null and tv.?.isString()) tv.?.asStr() else "");
+            if (tv != null and tv.?.isString())
+                try s.writeValueStr(tv.?)
+            else
+                try s.writeStr("");
             if (is_file) {
                 const nv = o.getOwn("\x00filename");
-                try s.writeStr(if (nv != null and nv.?.isString()) nv.?.asStr() else "");
+                if (nv != null and nv.?.isString())
+                    try s.writeValueStr(nv.?)
+                else
+                    try s.writeStr("");
                 const mv = o.getOwn("\x00filemod");
                 try s.w.num(if (mv != null and mv.?.isNumber()) mv.?.asNum() else 0);
             }
@@ -1258,6 +1304,29 @@ test "structured clone SAB tokens are single-use and reject forgery" {
     try std.testing.expect(releaseSharedRefToken(released));
     try std.testing.expect(!releaseSharedRefToken(released));
     try std.testing.expectEqual(baseline, sharedRefTokenCount());
+}
+
+test "structured clone flat Latin-1 writer is allocation-exact and atomic" {
+    const flat = "caf\xE9\xFF";
+    const expected = [_]u8{ 7, 0, 0, 0 } ++ "caf\xC3\xA9\xC3\xBF".*;
+    var measured: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
+    var writer = Writer{ .gpa = measured.allocator() };
+    defer writer.out.deinit(writer.gpa);
+    try writer.flatLatin1Str(flat);
+    try std.testing.expectEqual(@as(usize, 1), measured.allocations);
+    try std.testing.expectEqualSlices(u8, &expected, writer.out.items);
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed_writer = Writer{ .gpa = unavailable.allocator() };
+    defer failed_writer.out.deinit(failed_writer.gpa);
+    try std.testing.expectError(error.OutOfMemory, failed_writer.flatLatin1Str(flat));
+    try std.testing.expectEqual(@as(usize, 0), failed_writer.out.items.len);
+
+    var limited_writer = Writer{ .gpa = std.testing.allocator, .limit = expected.len - 1 };
+    defer limited_writer.out.deinit(limited_writer.gpa);
+    try std.testing.expectError(error.OutOfMemory, limited_writer.flatLatin1Str(flat));
+    try std.testing.expect(limited_writer.limit_exceeded);
+    try std.testing.expectEqual(@as(usize, 0), limited_writer.out.items.len);
 }
 
 test "structured clone SAB token consumption is atomic" {
