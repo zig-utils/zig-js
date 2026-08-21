@@ -3334,7 +3334,10 @@ export fn JSFunction__createFromZig(
         privatePublishBunStringError(context, err);
         return .empty;
     };
-    const name = name_value.asStr();
+    const name = privateCanonicalStringBytes(context, name_value) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
     const name_copy = context.arena().dupe(u8, name) catch {
         privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
         return .empty;
@@ -4638,6 +4641,14 @@ fn privateZigStringValue(context: *Context, string: *const PrivateZigString) Pri
     return privateBunStringValue(context, &bun_string, null);
 }
 
+/// Semantic byte consumers use canonical WTF-8, never a StringCell's physical
+/// backing image. ASCII and canonical cells borrow; a future flat Latin-1 cell
+/// performs one bounded conversion in the owning context arena.
+fn privateCanonicalStringBytes(context: *Context, string: Value) error{OutOfMemory}![]const u8 {
+    std.debug.assert(string.isString());
+    return string.asWtf8(context.arena());
+}
+
 fn privateZigStringToCopiedValue(
     string: *const PrivateZigString,
     global: JSContextRef,
@@ -4843,7 +4854,11 @@ export fn ZigString__toAtomicValue(
         privatePublishBunStringError(context, err);
         return .empty;
     };
-    const cell = group.atom_strings.intern(copied.asStr()) catch {
+    const canonical = privateCanonicalStringBytes(context, copied) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    const cell = group.atom_strings.intern(canonical) catch {
         privatePublishBunStringError(context, error.OutOfMemory);
         return .empty;
     };
@@ -6699,7 +6714,11 @@ fn privateZigStringErrorInstance(
         return .empty;
     };
     defer context.popActiveInterpreter(&machine);
-    const result = machine.makeError(error_name, message_value.asStr()) catch |err| {
+    const message_bytes = privateCanonicalStringBytes(context, message_value) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const result = machine.makeError(error_name, message_bytes) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
@@ -6802,11 +6821,19 @@ fn privateZigStringErrorWithCode(
         return .empty;
     };
     defer context.popActiveInterpreter(&machine);
-    const result = machine.makeError(error_name, message_value.asStr()) catch |err| {
+    const message_bytes = privateCanonicalStringBytes(context, message_value) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const code_bytes = privateCanonicalStringBytes(context, code_value) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const result = machine.makeError(error_name, message_bytes) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
-    privateSetErrorCodeWithAttributes(&machine, result, code_value.asStr(), code_writable) catch |err| {
+    privateSetErrorCodeWithAttributes(&machine, result, code_bytes, code_writable) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
@@ -6853,7 +6880,11 @@ fn privateBunStringErrorFactory(
         return .empty;
     };
     defer context.popActiveInterpreter(&machine);
-    const result = machine.makeError(error_name, message_value.asStr()) catch |err| {
+    const message_bytes = privateCanonicalStringBytes(context, message_value) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const result = machine.makeError(error_name, message_bytes) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
@@ -6948,14 +6979,18 @@ export fn SystemError__toErrorInstance(this: ?*const PrivateSystemError, global:
     };
     defer context.popActiveInterpreter(&machine);
 
-    const result = machine.makeError("Error", message_value.asStr()) catch |err| {
+    const message_bytes = privateCanonicalStringBytes(context, message_value) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const result = machine.makeError("Error", message_bytes) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
     const object = result.asObj();
     // JSC materializes an own `message` property even for the empty string;
     // makeError only installs one for non-empty messages.
-    if (message_value.asStr().len == 0) {
+    if (message_bytes.len == 0) {
         object.setOwn(machine.arena, machine.root_shape, "message", Value.staticStr("")) catch |err| {
             privateSetPendingAbrupt(context, &machine, err);
             return .empty;
@@ -7017,10 +7052,22 @@ export fn SystemError__toErrorInstanceWithInfoObject(this: ?*const PrivateSystem
         privatePublishBunStringError(context, err);
         return .empty;
     };
+    const syscall_bytes = privateCanonicalStringBytes(context, syscall_value) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    const code_bytes = privateCanonicalStringBytes(context, code_value) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    const message_bytes = privateCanonicalStringBytes(context, message_value) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
     const summary = std.fmt.allocPrint(
         context.arena(),
         "A system error occurred: {s} returned {s} ({s})",
-        .{ syscall_value.asStr(), code_value.asStr(), message_value.asStr() },
+        .{ syscall_bytes, code_bytes, message_bytes },
     ) catch {
         privatePublishBunStringError(context, error.OutOfMemory);
         return .empty;
@@ -7182,7 +7229,11 @@ export fn JSC__JSGlobalObject__createAggregateError(
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
-    const result = privateMakeAggregateError(&machine, array, message_value.asStr(), Value.undef()) catch |err| {
+    const message_bytes = privateCanonicalStringBytes(context, message_value) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const result = privateMakeAggregateError(&machine, array, message_bytes, Value.undef()) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
@@ -7230,7 +7281,11 @@ export fn JSC__JSGlobalObject__createAggregateErrorWithArray(
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
-    const result = privateMakeAggregateError(&machine, errors_value, message_value.asStr(), cause) catch |err| {
+    const message_bytes = privateCanonicalStringBytes(context, message_value) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const result = privateMakeAggregateError(&machine, errors_value, message_bytes, cause) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
@@ -7257,7 +7312,10 @@ fn privateZigStringPropertyKey(context: *Context, key: *const PrivateZigString) 
         privatePublishBunStringError(context, err);
         return null;
     };
-    return string.asStr();
+    return privateCanonicalStringBytes(context, string) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return null;
+    };
 }
 
 fn privateBunStringPropertyKey(context: *Context, key: *const PrivateBunString) ?[]const u8 {
@@ -7265,7 +7323,10 @@ fn privateBunStringPropertyKey(context: *Context, key: *const PrivateBunString) 
         privatePublishBunStringError(context, err);
         return null;
     };
-    return string.asStr();
+    return privateCanonicalStringBytes(context, string) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return null;
+    };
 }
 
 fn privateLatin1PropertyKey(context: *Context, bytes: [*]const u8, len: u32) ?[]const u8 {
@@ -8637,7 +8698,10 @@ export fn ZigString__toDOMExceptionInstance(
         privatePublishBunStringError(context, err);
         return .empty;
     };
-    const supplied_message = message_value.asStr();
+    const supplied_message = privateCanonicalStringBytes(context, message_value) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
 
     const gc_saved = gc_mod.setActiveContext(context);
     defer gc_mod.restoreActiveContext(gc_saved);
@@ -8993,7 +9057,15 @@ export fn JSC__JSValue__getIfPropertyExistsFromPath(
     };
 
     const result: ?Value = if (path.isString())
-        privateTraverseStringPath(&machine, context.arena(), target, path.asStr()) catch |err| {
+        privateTraverseStringPath(
+            &machine,
+            context.arena(),
+            target,
+            privateCanonicalStringBytes(context, path) catch {
+                privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+                return .empty;
+            },
+        ) catch |err| {
             if (err == error.InvalidString) {
                 const abrupt = machine.throwError("TypeError", "Invalid property path string");
                 privateSetPendingAbrupt(context, &machine, abrupt);
@@ -11146,7 +11218,10 @@ export fn JSC__createStructure(
                 return .empty;
             };
             if (!name_value.isString()) return .empty;
-            const name = name_value.asStr();
+            const name = privateCanonicalStringBytes(context, name_value) catch {
+                privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+                return .empty;
+            };
             var duplicate = false;
             for (collected.items) |existing| {
                 if (std.mem.eql(u8, existing, name)) {
@@ -11301,7 +11376,11 @@ export fn URLSearchParams__create(global: JSContextRef, input: ?*const PrivateZi
         return .empty;
     };
     if (!init.isString()) return .empty;
-    const created = interp.urlSearchParamsCreateFromString(&machine, init.asStr()) catch |err| {
+    const canonical = privateCanonicalStringBytes(context, init) catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    const created = interp.urlSearchParamsCreateFromString(&machine, canonical) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
@@ -14225,7 +14304,7 @@ export fn JSGlobalObject__setTimeZone(global: JSContextRef, time_zone: ?*const P
         }
         return false;
     };
-    const bytes = decoded.asStr();
+    const bytes = privateCanonicalStringBytes(context, decoded) catch return false;
     if (bytes.len == 0) return interp.setTimeZoneOverride(gpa, null);
     var buf: [128]u8 = undefined;
     const canonical = interp.validCanonicalTimeZoneName(bytes, &buf) orelse return false;
@@ -29264,6 +29343,7 @@ test "private property path traversal preserves pinned string and array semantic
     try Probe.expect(internal, context, "({ a: { b: 41 } })", "'a.b'", "41");
     try Probe.expect(internal, context, "({ a: { b: 42 } })", "'a[b]'", "42");
     try Probe.expect(internal, context, "({ 'A😀': { '𐐀': 43 } })", "'A😀.𐐀'", "43");
+    try Probe.expect(internal, context, "({ 'café': { 'ÿ': 56 } })", "'café.ÿ'", "56");
     try Probe.expect(internal, context, "({ '': 44 })", "''", "44");
     try Probe.expect(internal, context, "({ '': { '': 45 } })", "'.'", "45");
     try Probe.expect(internal, context, "({ '': { a: 46 } })", "'.a'", "46");
@@ -29322,6 +29402,67 @@ test "private property path traversal preserves pinned string and array semantic
     try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__getIfPropertyExistsFromPath(blocked_target, context, blocked_path));
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(224), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private decoded String semantic egress is canonical" {
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    const latin1 = [_]u8{ 'c', 'a', 'f', 0xe9, 0xff };
+    const input = PrivateZigString{ .tagged_ptr = @intFromPtr(&latin1), .len = latin1.len };
+    const decoded = try privateZigStringValue(internal, &input);
+    const canonical = try privateCanonicalStringBytes(internal, decoded);
+    try std.testing.expectEqualStrings("caf\xC3\xA9\xC3\xBF", canonical);
+    if (decoded.strIsFlatLatin1())
+        try std.testing.expect(@intFromPtr(decoded.asStr().ptr) != @intFromPtr(canonical.ptr))
+    else
+        try std.testing.expectEqual(@intFromPtr(decoded.asStr().ptr), @intFromPtr(canonical.ptr));
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    if (decoded.strIsFlatLatin1()) {
+        try std.testing.expectError(error.OutOfMemory, decoded.asWtf8(unavailable.allocator()));
+    } else {
+        const borrowed = try decoded.asWtf8(unavailable.allocator());
+        try std.testing.expectEqual(@intFromPtr(decoded.asStr().ptr), @intFromPtr(borrowed.ptr));
+        try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+    }
+
+    const ascii = "plain";
+    const ascii_input = PrivateZigString{ .tagged_ptr = @intFromPtr(ascii.ptr), .len = ascii.len };
+    const ascii_value = try privateZigStringValue(internal, &ascii_input);
+    const ascii_canonical = try privateCanonicalStringBytes(internal, ascii_value);
+    try std.testing.expectEqual(@intFromPtr(ascii_value.asStr().ptr), @intFromPtr(ascii_canonical.ptr));
+
+    try std.testing.expectEqualStrings("caf\xC3\xA9\xC3\xBF", privateZigStringPropertyKey(internal, &input) orelse return error.ValueInitFailed);
+    const first_atom = privateValueFrom(context, ZigString__toAtomicValue(&input, context)) orelse return error.ValueInitFailed;
+    const second_atom = privateValueFrom(context, ZigString__toAtomicValue(&input, context)) orelse return error.ValueInitFailed;
+    try std.testing.expectEqual(first_atom.rawBits(), second_atom.rawBits());
+    try std.testing.expectEqualStrings("caf\xC3\xA9\xC3\xBF", try first_atom.asWtf8(internal.arena()));
+
+    const error_value = privateValueFrom(context, ZigString__toErrorInstance(&input, context)) orelse return error.ValueInitFailed;
+    const error_message = error_value.asObj().getOwn("message") orelse return error.MissingException;
+    try std.testing.expectEqualStrings("caf\xC3\xA9\xC3\xBF", try error_message.asWtf8(internal.arena()));
+
+    const dom_value = privateValueFrom(context, ZigString__toDOMExceptionInstance(&input, context, 8)) orelse return error.ValueInitFailed;
+    const dom_message = dom_value.asObj().getOwn("\x00dommsg") orelse return error.MissingException;
+    try std.testing.expectEqualStrings("caf\xC3\xA9\xC3\xBF", try dom_message.asWtf8(internal.arena()));
+
+    const query = [_]u8{ 'c', 'a', 'f', 0xe9, '=', 0xff };
+    const query_input = PrivateZigString{ .tagged_ptr = @intFromPtr(&query), .len = query.len };
+    const params = privateValueFrom(context, URLSearchParams__create(context, &query_input)) orelse return error.ValueInitFailed;
+    var machine = internal.interpreter();
+    try std.testing.expectEqualStrings("caf%C3%A9=%C3%BF", try interp.urlSearchParamsSerialize(&machine, params));
+
+    const form = privateValueFrom(context, WebCore__DOMFormData__createFromURLQuery(context, &query_input)) orelse return error.ValueInitFailed;
+    try std.testing.expectEqualStrings("caf%C3%A9=%C3%BF", try interp.formDataSerialize(&machine, form));
+
+    const raw_url = "https://example.test/caf\xE9?x=\xFF";
+    const url_input = PrivateZigString{ .tagged_ptr = @intFromPtr(raw_url.ptr), .len = raw_url.len };
+    const url = privateValueFrom(context, BunString__toURL(&url_input, context)) orelse return error.ValueInitFailed;
+    try std.testing.expectEqualStrings(
+        "https://example.test/caf%C3%A9?x=%C3%BF",
+        try interp.urlSerialize(internal.arena(), interp.urlLoad(url.asObj()), false),
+    );
 }
 
 test "private value-key property query and BunString upsert preserve direct and observable semantics" {
