@@ -47896,12 +47896,12 @@ fn fdUSVString(self: *Interpreter, input: Value) EvalError![]const u8 {
     return wtf8ToUtf8Bytes(self.arena, try self.toStringWtf8(input));
 }
 
-fn fdPair(pair: Value) struct { name: []const u8, value: Value } {
+fn fdPair(self: *Interpreter, pair: Value) EvalError!struct { name: []const u8, value: Value } {
     if (!pair.isObject()) return .{ .name = "", .value = Value.str("") };
     const entry = pair.asObj();
     const name_value = entry.elementAt(0) orelse Value.str("");
     return .{
-        .name = if (name_value.isString()) name_value.asStr() else "",
+        .name = if (name_value.isString()) try name_value.asWtf8(self.arena) else "",
         .value = entry.elementAt(1) orelse Value.str(""),
     };
 }
@@ -47957,7 +47957,7 @@ fn fdSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
     const fresh = (try self.newArray()).asObj();
     var placed = false;
     for (try list.internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, fdPair(pair).name, entry.name)) {
+        if (std.mem.eql(u8, (try fdPair(self, pair)).name, entry.name)) {
             if (!placed) {
                 try fdPushValue(self, fresh, entry.name, entry.value);
                 placed = true;
@@ -47975,7 +47975,7 @@ fn fdGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
     try fdRequireArgs(self, args, 1, "get");
     const name = try fdUSVString(self, args[0]);
     for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const entry = fdPair(pair);
+        const entry = try fdPair(self, pair);
         if (std.mem.eql(u8, entry.name, name)) return entry.value;
     }
     return Value.nul();
@@ -47986,7 +47986,7 @@ fn fdGetAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     const name = try fdUSVString(self, args[0]);
     const arr = (try self.newArray()).asObj();
     for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const entry = fdPair(pair);
+        const entry = try fdPair(self, pair);
         if (std.mem.eql(u8, entry.name, name)) try arr.appendElement(self.arena, entry.value);
     }
     return Value.obj(arr);
@@ -47996,7 +47996,7 @@ fn fdHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
     try fdRequireArgs(self, args, 1, "has");
     const name = try fdUSVString(self, args[0]);
     for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, fdPair(pair).name, name)) return Value.boolVal(true);
+        if (std.mem.eql(u8, (try fdPair(self, pair)).name, name)) return Value.boolVal(true);
     }
     return Value.boolVal(false);
 }
@@ -48007,7 +48007,7 @@ fn fdDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     const list = try fdList(self, this);
     const fresh = (try self.newArray()).asObj();
     for (try list.internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, fdPair(pair).name, name)) continue;
+        if (std.mem.eql(u8, (try fdPair(self, pair)).name, name)) continue;
         try fresh.appendElement(self.arena, pair);
     }
     try this.asObj().setOwn(self.arena, self.root_shape, "\x00fd", Value.obj(fresh));
@@ -48019,7 +48019,7 @@ fn fdForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     if (!cb.isObject() or !cb.asObj().isCallableObject()) return self.throwError("TypeError", "FormData.forEach callback is not a function");
     const this_arg = if (args.len > 1) args[1] else Value.undef();
     for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const entry = fdPair(pair);
+        const entry = try fdPair(self, pair);
         _ = try self.callValueWithThis(cb, &.{ entry.value, try Value.strAlloc(self.arena, entry.name), this }, this_arg);
     }
     return Value.undef();
@@ -48031,7 +48031,7 @@ fn fdIterFn(comptime which: enum { entries, keys, values }) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const snap = (try self.newArray()).asObj();
             for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-                const entry = fdPair(pair);
+                const entry = try fdPair(self, pair);
                 switch (which) {
                     .keys => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, entry.name)),
                     .values => try snap.appendElement(self.arena, entry.value),
@@ -48116,7 +48116,7 @@ pub fn formDataEntries(self: *Interpreter, form: Value) EvalError![]FormDataEntr
     const items = try (try fdList(self, form)).internalElementsSnapshot(self.arena);
     const entries = try self.arena.alloc(FormDataEntry, items.len);
     for (items, entries) |pair, *entry| {
-        const decoded = fdPair(pair);
+        const decoded = try fdPair(self, pair);
         entry.* = .{ .name = decoded.name, .value = decoded.value };
     }
     return entries;
@@ -48125,7 +48125,7 @@ pub fn formDataEntries(self: *Interpreter, form: Value) EvalError![]FormDataEntr
 pub fn formDataEntryAt(self: *Interpreter, form: Value, index: usize) EvalError!?FormDataEntry {
     const list = try fdList(self, form);
     const pair = list.elementAt(index) orelse return null;
-    const decoded = fdPair(pair);
+    const decoded = try fdPair(self, pair);
     return .{ .name = decoded.name, .value = decoded.value };
 }
 

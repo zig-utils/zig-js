@@ -15319,6 +15319,28 @@ test "computed property display names canonicalize physical StringData" {
     )).asBool());
 }
 
+test "FormData canonicalizes stored entry-name physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const name = "caf\u00e9\u00ff";
+        \\let calls = 0;
+        \\const value = { toString() { calls++; return name; } };
+        \\const form = new FormData();
+        \\form.append(value, "first");
+        \\form.append(name, "second");
+        \\const before = form.getAll(name);
+        \\const keys = [...form.keys()];
+        \\let seen = "";
+        \\form.forEach((entry, key) => { seen += key + ":" + entry + ";"; });
+        \\form.set(value, "final");
+        \\const updated = form.get(name);
+        \\form.delete(value);
+        \\before.length === 2 && before[0] === "first" && before[1] === "second" &&
+        \\  keys.length === 2 && keys[0] === name && keys[1] === name &&
+        \\  seen === name + ":first;" + name + ":second;" && updated === "final" &&
+        \\  !form.has(name) && calls === 3
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
