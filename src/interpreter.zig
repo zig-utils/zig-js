@@ -3380,7 +3380,10 @@ pub const Interpreter = struct {
             env.bindings_allocator = self.gc_side_storage;
             env.gc_name_bytes_live = self.gc_environment_name_bytes_live;
             env.parent = parent;
-            env.gc_managed = gc_mod.allocationsAreManaged();
+            // Cell ownership is fixed by allocEnv. In particular, a concurrent
+            // marker can read this bit through a different Environment edge,
+            // so even a same-value rewrite here would be an engine-state race.
+            std.debug.assert(env.gc_managed == (self.gc_side_storage != null));
             env.fn_scope = false;
             env.private_activation = parent.private_activation and !parent.captured;
             // The cached cell can have survived long enough to tenure. Reusing
@@ -3415,7 +3418,10 @@ pub const Interpreter = struct {
             env.bindings_allocator = self.gc_side_storage;
             env.gc_name_bytes_live = self.gc_environment_name_bytes_live;
             env.parent = func.closure;
-            env.gc_managed = gc_mod.allocationsAreManaged();
+            // Reuse changes graph edges and activation state, never the cell's
+            // allocation-time ownership ruling. Keep this a read-only invariant
+            // for concurrent parent-edge tracing.
+            std.debug.assert(env.gc_managed == (self.gc_side_storage != null));
             env.fn_scope = true;
             env.private_activation = true;
             // A cached activation can be tenured while its new closure parent
