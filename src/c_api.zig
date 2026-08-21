@@ -4971,11 +4971,13 @@ fn privateSpecificTypeAppendUTF16(
 /// callable: a Proxy trap or a user getter must not run merely because an
 /// argument diagnostic is being assembled. This follows Zig::functionName's
 /// own-data-first order and then uses the engine's immutable function metadata.
-fn privateSpecificTypeFunctionName(object: *Object) []const u8 {
+/// The returned slice is canonical WTF-8; flat StringData conversion remains
+/// owned by the caller's bounded allocator and propagates OOM.
+fn privateSpecificTypeFunctionName(allocator: std.mem.Allocator, object: *Object) error{OutOfMemory}![]const u8 {
     if (object.proxyHandler() != null or object.proxy_revoked) return "";
     if (privateDirectDataProperty(object, "name")) |name|
-        if (name.isString() and name.asStr().len > 0) return name.asStr();
-    return privateCalculatedDisplayName(object);
+        if (name.isString() and name.asStr().len > 0) return name.asWtf8(allocator);
+    return privateCalculatedDisplayName(allocator, object);
 }
 
 const PrivateDiagnosticQuoteStyle = enum {
@@ -5081,7 +5083,7 @@ const PrivateDiagnosticInspector = struct {
     }
 
     fn formatFunction(self: *PrivateDiagnosticInspector, object: *Object) !void {
-        const name = privateSpecificTypeFunctionName(object);
+        const name = try privateSpecificTypeFunctionName(self.allocator, object);
         if (interp.Interpreter.funcOf(Value.obj(object))) |function| {
             if (function.is_class_constructor) {
                 try self.append("[class");
@@ -5152,9 +5154,9 @@ const PrivateDiagnosticInspector = struct {
         }
     }
 
-    fn objectName(self: *PrivateDiagnosticInspector, object: *Object) []const u8 {
+    fn objectName(self: *PrivateDiagnosticInspector, object: *Object) ![]const u8 {
         const raw = privateStaticClassInfoName(Value.obj(object)) orelse "Object";
-        return privateCalculatedClassName(self.machine, object, raw);
+        return privateCalculatedClassName(self.allocator, self.machine, object, raw);
     }
 
     fn beginCircular(self: *PrivateDiagnosticInspector, object: *Object) !bool {
@@ -5429,7 +5431,7 @@ const PrivateDiagnosticInspector = struct {
         }
         if (self.depth > self.max_depth) {
             try self.append("[");
-            try self.append(self.objectName(object));
+            try self.append(try self.objectName(object));
             try self.append(" ...]");
             return;
         }
@@ -5442,7 +5444,7 @@ const PrivateDiagnosticInspector = struct {
                 std.mem.eql(u8, key, "constructor")) continue;
             visible += 1;
         }
-        const name = self.objectName(object);
+        const name = try self.objectName(object);
         if (object.protoExplicitNull()) {
             try self.append("[Object: null prototype] ");
         } else if (!std.mem.eql(u8, name, "Object")) {
@@ -5586,7 +5588,7 @@ fn privateDetermineSpecificTypeBytes(
                 try output.appendSlice(allocator, "))");
             } else if (object.isCallableObject()) {
                 try output.appendSlice(allocator, "function ");
-                try output.appendSlice(allocator, privateSpecificTypeFunctionName(object));
+                try output.appendSlice(allocator, try privateSpecificTypeFunctionName(allocator, object));
             } else {
                 const constructor = try machine.getProperty(input, "constructor");
                 const constructor_root = try machine.pushTempRoot(constructor);
@@ -5595,7 +5597,10 @@ fn privateDetermineSpecificTypeBytes(
                     const name = try machine.getProperty(constructor, "name");
                     const name_root = try machine.pushTempRoot(name);
                     defer machine.restoreTempRoots(name_root);
-                    const name_string = try machine.toStringV(name);
+                    // WebIDL-facing diagnostics expose canonical WTF-8, never
+                    // the returned StringCell's representation-specific bytes.
+                    const name_value = try machine.toStringValue(name);
+                    const name_string = try name_value.asWtf8(allocator);
                     try output.appendSlice(allocator, "an instance of ");
                     try output.appendSlice(allocator, name_string);
                 } else {
@@ -9154,23 +9159,31 @@ fn privateDirectDataPropertyInChain(object: *Object, property: []const u8) ?Valu
     return null;
 }
 
-fn privateCalculatedDisplayName(object: *Object) []const u8 {
+/// Pure own-data/metadata lookup used by private embedding boundaries. String
+/// properties cross those boundaries as canonical WTF-8, never physical cell
+/// bytes; callers choose the allocator and retain the conversion lifetime.
+fn privateCalculatedDisplayName(allocator: std.mem.Allocator, object: *Object) error{OutOfMemory}![]const u8 {
     const callable = object.jsFunction() != null or object.native != null or object.hostCallback() != null or
         object.errorCtor() != null;
     if (!callable) return "";
     if (privateDirectDataProperty(object, "displayName")) |display_name|
-        if (display_name.isString()) return display_name.asStr();
+        if (display_name.isString()) return display_name.asWtf8(allocator);
     if (interp.Interpreter.funcOf(Value.obj(object))) |function| return function.name;
     if (privateDirectDataProperty(object, "name")) |name|
-        if (name.isString()) return name.asStr();
+        if (name.isString()) return name.asWtf8(allocator);
     return "";
 }
 
-fn privateCalculatedClassName(machine: *interp.Interpreter, object: *Object, raw_name: []const u8) []const u8 {
+fn privateCalculatedClassName(
+    allocator: std.mem.Allocator,
+    machine: *interp.Interpreter,
+    object: *Object,
+    raw_name: []const u8,
+) error{OutOfMemory}![]const u8 {
     var constructor_name: ?[]const u8 = null;
     if (privateDirectDataProperty(object, "constructor")) |constructor|
         if (constructor.isObject()) {
-            const name = privateCalculatedDisplayName(constructor.asObj());
+            const name = try privateCalculatedDisplayName(allocator, constructor.asObj());
             if (name.len > 0) constructor_name = name;
         };
 
@@ -9178,7 +9191,7 @@ fn privateCalculatedClassName(machine: *interp.Interpreter, object: *Object, raw
         if (object.protoAtomic()) |prototype| {
             if (privateDirectDataPropertyInChain(prototype, "constructor")) |constructor|
                 if (constructor.isObject()) {
-                    const name = privateCalculatedDisplayName(constructor.asObj());
+                    const name = try privateCalculatedDisplayName(allocator, constructor.asObj());
                     if (name.len > 0) constructor_name = name;
                 };
         }
@@ -9187,7 +9200,7 @@ fn privateCalculatedClassName(machine: *interp.Interpreter, object: *Object, raw
     if (constructor_name == null or std.mem.eql(u8, constructor_name.?, "Object")) {
         if (interp.objectToStringTagKey(machine)) |tag_key| {
             if (privateDirectDataPropertyInChain(object, tag_key)) |tag|
-                if (tag.isString()) return tag.asStr();
+                if (tag.isString()) return tag.asWtf8(allocator);
         }
         if (raw_name.len > 0) return raw_name;
         if (constructor_name == null) return "Object";
@@ -9218,8 +9231,10 @@ fn privateNameProperty(
         };
         if (tag) |candidate| {
             if (candidate.isString() and candidate.asStr().len > 0) {
-                const w = candidate.asWtf8Owned(gpa) catch return false;
-                defer gpa.free(w);
+                const w = candidate.asWtf8(context.arena()) catch |err| {
+                    privatePublishBunStringError(context, err);
+                    return false;
+                };
                 return privateWriteBorrowedName(context, w, output);
             }
         }
@@ -9227,8 +9242,13 @@ fn privateNameProperty(
 
     const is_named_function = object.jsFunction() != null or object.native != null or
         object.hostCallback() != null or object.errorCtor() != null;
-    if (is_named_function)
-        return privateWriteBorrowedName(context, privateCalculatedDisplayName(object), output);
+    if (is_named_function) {
+        const name = privateCalculatedDisplayName(context.arena(), object) catch |err| {
+            privatePublishBunStringError(context, err);
+            return false;
+        };
+        return privateWriteBorrowedName(context, name, output);
+    }
     output.len = 0;
     return true;
 }
@@ -9311,7 +9331,11 @@ export fn JSC__JSValue__getClassName(
         _ = privateNameProperty(context, &machine, internal.asObj(), output);
         return;
     }
-    _ = privateWriteBorrowedName(context, privateCalculatedClassName(&machine, internal.asObj(), raw_name), output);
+    const name = privateCalculatedClassName(context.arena(), &machine, internal.asObj(), raw_name) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+    _ = privateWriteBorrowedName(context, name, output);
 }
 
 export fn JSC__JSValue__getName(
@@ -9342,7 +9366,10 @@ export fn JSC__JSValue__getName(
         return;
     }
 
-    var name = privateCalculatedDisplayName(internal.asObj());
+    var name = privateCalculatedDisplayName(context.arena(), internal.asObj()) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
     if (name.len == 0) {
         if (interp.objectToStringTagKey(&machine)) |tag_key| {
             const tag = machine.getPropertyIfExists(internal, tag_key) catch |err| {
@@ -9350,7 +9377,10 @@ export fn JSC__JSValue__getName(
                 return;
             };
             if (tag) |candidate| {
-                if (candidate.isString()) name = candidate.asStr();
+                if (candidate.isString()) name = candidate.asWtf8(context.arena()) catch |err| {
+                    privatePublishBunStringError(context, err);
+                    return;
+                };
             }
         }
     }
@@ -10410,7 +10440,7 @@ fn privateDeepArrayIndex(machine: *interp.Interpreter, object: *Object, index: u
     return machine.getDirectIndex(object, @intCast(index));
 }
 
-fn privateDeepClassName(machine: *interp.Interpreter, object: *Object) []const u8 {
+fn privateDeepClassName(machine: *interp.Interpreter, object: *Object) error{OutOfMemory}![]const u8 {
     var target = object;
     var guard: usize = 0;
     while (target.proxyTarget()) |next| {
@@ -10418,7 +10448,7 @@ fn privateDeepClassName(machine: *interp.Interpreter, object: *Object) []const u
         if (guard > 10_000) break;
         target = next;
     }
-    return privateCalculatedClassName(machine, target, privateStaticClassInfoName(Value.obj(target)) orelse "Object");
+    return privateCalculatedClassName(machine.arena, machine, target, privateStaticClassInfoName(Value.obj(target)) orelse "Object");
 }
 
 fn privateDeepCompareEnumerable(
@@ -10645,7 +10675,7 @@ fn privateAsymmetricMatcher(
         const marker = privateMatcherData(object, &.{"$$typeof"}) orelse return null;
         const expected = try interp.symbolForKey(machine, "jest.asymmetricMatcher");
         if (!value.strictEquals(marker, expected)) return null;
-        kind = privateAsymmetricKind(privateDeepClassName(machine, object));
+        kind = privateAsymmetricKind(try privateDeepClassName(machine, object));
         if (kind == null) {
             const method = privateMatcherData(object, &.{"asymmetricMatch"}) orelse return null;
             if (!method.isCallable()) return machine.throwError("TypeError", "asymmetricMatch is not callable");
@@ -10707,7 +10737,7 @@ fn privateAsymmetricCompare(
                 const constructor_name = if (explicit_type != null and explicit_type.?.isString())
                     explicit_type.?.asStr()
                 else
-                    privateCalculatedDisplayName(constructor.asObj());
+                    try privateCalculatedDisplayName(machine.arena, constructor.asObj());
                 if ((machine.env.get("Symbol") != null and value.strictEquals(constructor, machine.env.get("Symbol").?)) or std.mem.eql(u8, constructor_name, "Symbol")) {
                     raw = other.isObject() and other.asObj().is_symbol;
                     break :any_match;
@@ -10918,12 +10948,12 @@ fn privateDeepCompare(
         if (boxed_left.isString()) {
             const boxed_right = right.boxedPrimitive() orelse return false;
             return boxed_right.isString() and
-                std.mem.eql(u8, privateDeepClassName(machine, left), privateDeepClassName(machine, right)) and
+                std.mem.eql(u8, try privateDeepClassName(machine, left), try privateDeepClassName(machine, right)) and
                 std.mem.eql(u8, boxed_left.asStr(), boxed_right.asStr());
         }
     }
 
-    if (strict and !std.mem.eql(u8, privateDeepClassName(machine, left), privateDeepClassName(machine, right))) return false;
+    if (strict and !std.mem.eql(u8, try privateDeepClassName(machine, left), try privateDeepClassName(machine, right))) return false;
     return privateDeepCompareEnumerable(machine, left, right, strict, enable_asymmetric, stack, false, false);
 }
 
@@ -29765,7 +29795,7 @@ test "private class and display names preserve metadata and observable tag rules
             else
                 JSC__JSValue__getNameProperty(value_encoded, global, &output);
             const result = try privateZigStringValue(context_, &output);
-            return result.asStr();
+            return result.asWtf8(context_.arena());
         }
 
         fn bunName(context_: *Context, global: JSContextRef, value_encoded: EncodedValue) ![]const u8 {
@@ -29773,7 +29803,7 @@ test "private class and display names preserve metadata and observable tag rules
             JSC__JSValue__getName(value_encoded, global, &output);
             defer if (output.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(output.value.wtf_string_impl);
             const result = try privateBunStringValue(context_, &output, null);
-            return context_.arena().dupe(u8, result.asStr());
+            return context_.arena().dupe(u8, try result.asWtf8(context_.arena()));
         }
     };
 
@@ -29805,6 +29835,7 @@ test "private class and display names preserve metadata and observable tag rules
     try std.testing.expectEqual(@as(usize, 225), untouched_length);
 
     try std.testing.expectEqualStrings("Tagged", try Probe.zigName(internal, context, try Probe.encoded(internal, "({ [Symbol.toStringTag]: 'Tagged' })"), false));
+    try std.testing.expectEqualStrings("caf\xc3\xa9", try Probe.zigName(internal, context, try Probe.encoded(internal, "({ [Symbol.toStringTag]: 'caf\xc3\xa9' })"), false));
     try std.testing.expectEqualStrings("named", try Probe.zigName(internal, context, try Probe.encoded(internal, "(function named() {})"), false));
     try std.testing.expectEqualStrings("max", try Probe.zigName(internal, context, try Probe.encoded(internal, "Math.max"), false));
     try std.testing.expectEqualStrings("fallback", try Probe.zigName(internal, context, try Probe.encoded(internal, "(() => { function fallback() {} fallback[Symbol.toStringTag] = 1; return fallback; })()"), false));
@@ -29816,6 +29847,7 @@ test "private class and display names preserve metadata and observable tag rules
 
     try std.testing.expectEqualStrings("Array", try Probe.zigName(internal, context, try Probe.encoded(internal, "[]"), true));
     try std.testing.expectEqualStrings("Widget", try Probe.zigName(internal, context, try Probe.encoded(internal, "new (class Widget {})"), true));
+    try std.testing.expectEqualStrings("Caf\xc3\xa9", try Probe.zigName(internal, context, try Probe.encoded(internal, "({ constructor: Object.assign(function () {}, { displayName: 'Caf\xc3\xa9' }) })"), true));
     try std.testing.expectEqualStrings("named", try Probe.zigName(internal, context, try Probe.encoded(internal, "(function named() {})"), true));
     try std.testing.expectEqualStrings("DirectTag", try Probe.zigName(internal, context, try Probe.encoded(internal, "({ [Symbol.toStringTag]: 'DirectTag' })"), true));
     const pure_tag = try Probe.encoded(internal, "globalThis.__class_tag_gets_225 = 0; Object.defineProperty({}, Symbol.toStringTag, { get() { __class_tag_gets_225++; return 'Wrong'; } })");
@@ -29823,8 +29855,17 @@ test "private class and display names preserve metadata and observable tag rules
     try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__class_tag_gets_225")).asNum());
 
     try std.testing.expectEqualStrings("Shown", try Probe.bunName(internal, context, try Probe.encoded(internal, "(() => { function original() {} original.displayName = 'Shown'; return original; })()")));
+    try std.testing.expectEqualStrings("Caf\xc3\xa9", try Probe.bunName(internal, context, try Probe.encoded(internal, "(() => { function original() {} original.displayName = 'Caf\xc3\xa9'; return original; })()")));
     try std.testing.expectEqualStrings("名字😀", try Probe.bunName(internal, context, try Probe.encoded(internal, "({ [Symbol.toStringTag]: '名字😀' })")));
     try std.testing.expectEqualStrings("", try Probe.bunName(internal, context, try Probe.encoded(internal, "({ name: 'spoofed' })")));
+
+    const allocation_name = try internal.evaluate("(() => { function original() {} original.displayName = 'Caf\xc3\xa9'; return original; })()");
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    if (strcell.flat_storage_active) {
+        try std.testing.expectError(error.OutOfMemory, privateCalculatedDisplayName(unavailable.allocator(), allocation_name.asObj()));
+    } else {
+        try std.testing.expectEqualStrings("Caf\xc3\xa9", try privateCalculatedDisplayName(unavailable.allocator(), allocation_name.asObj()));
+    }
 
     const shared_function = try Probe.encoded(internal, "(function sharedName() {})");
     try std.testing.expectEqualStrings("sharedName", try Probe.zigName(internal, sibling, shared_function, false));
@@ -30009,7 +30050,7 @@ test "private received-value diagnostics preserve exact types and abrupt complet
             defer privateDerefBunString(output);
             if (output.tag == .dead) return error.DiagnosticFailed;
             const projected = try privateBunStringValue(context_, &output, null);
-            return context_.arena().dupe(u8, projected.asStr());
+            return context_.arena().dupe(u8, try projected.asWtf8(context_.arena()));
         }
     };
 
@@ -30049,6 +30090,10 @@ test "private received-value diagnostics preserve exact types and abrupt complet
         try Probe.run(internal, context, try Probe.encoded(internal, "(() => { function original() {} Object.defineProperty(original, 'name', { value: 'renamed' }); return original; })()")),
     );
     try std.testing.expectEqualStrings(
+        "function caf\xc3\xa9",
+        try Probe.run(internal, context, try Probe.encoded(internal, "(() => { function original() {} Object.defineProperty(original, 'name', { value: 'caf\xc3\xa9' }); return original; })()")),
+    );
+    try std.testing.expectEqualStrings(
         "function ",
         try Probe.run(internal, context, try Probe.encoded(internal, "(() => { globalThis.__diagnostic_name_gets_393 = 0; const target = function hidden() {}; const proxy = new Proxy(target, { get(t, k, r) { __diagnostic_name_gets_393++; return Reflect.get(t, k, r); } }); return proxy; })()")),
     );
@@ -30086,9 +30131,9 @@ test "private received-value diagnostics preserve exact types and abrupt complet
     );
     const observable = try Probe.encoded(
         internal,
-        "globalThis.__diagnostic_order_393 = ''; ({ get constructor() { __diagnostic_order_393 += 'c'; return { get name() { __diagnostic_order_393 += 'n'; return { toString() { __diagnostic_order_393 += 's'; return 'Observed'; } }; } }; } })",
+        "globalThis.__diagnostic_order_393 = ''; ({ get constructor() { __diagnostic_order_393 += 'c'; return { get name() { __diagnostic_order_393 += 'n'; return { toString() { __diagnostic_order_393 += 's'; return 'Observ\xc3\xa9d'; } }; } }; } })",
     );
-    try std.testing.expectEqualStrings("an instance of Observed", try Probe.run(internal, context, observable));
+    try std.testing.expectEqualStrings("an instance of Observ\xc3\xa9d", try Probe.run(internal, context, observable));
     try std.testing.expectEqualStrings("cns", (try internal.evaluate("__diagnostic_order_393")).asStr());
 
     try std.testing.expectEqualStrings(
@@ -30124,6 +30169,14 @@ test "private received-value diagnostics preserve exact types and abrupt complet
     try std.testing.expectEqualStrings(
         "{\n  a: 1,\n}",
         try Probe.run(internal, context, try Probe.encoded(internal, "({ constructor: 0, a: 1 })")),
+    );
+    try std.testing.expectEqualStrings(
+        "{\n  fn: [Function: caf\xc3\xa9],\n}",
+        try Probe.run(
+            internal,
+            context,
+            try Probe.encoded(internal, "({ constructor: 0, fn: Object.defineProperty(function () {}, 'name', { value: 'caf\xc3\xa9' }) })"),
+        ),
     );
     try std.testing.expectEqualStrings(
         "[Object: null prototype] {\n" ++
