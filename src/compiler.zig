@@ -919,7 +919,8 @@ pub const Compiler = struct {
     /// True while lowering an async function body, so `await` may suspend (it
     /// reuses `gen_yield`; the async driver resumes it on promise settlement).
     in_async: bool = false,
-    /// Counter for synthesized temp names (`yield*` iterator/result holders).
+    /// Counter for synthesized activation-temp names (destructuring, `yield*`,
+    /// and resolved references that must survive recursion or suspension).
     tmp_counter: u32 = 0,
     /// >0 while compiling inside a `try` that has a `finally`. A `return`/`break`/
     /// `continue` crossing it is lowered as `abrupt_*` so the finally still runs.
@@ -3232,8 +3233,8 @@ pub const Compiler = struct {
                 else => return error.Unsupported,
             },
             // Logical assignment on a member target must resolve the reference
-            // once; the tree-walker handles that, so defer to it.
-            .logical_assign => return error.Unsupported,
+            // once across the read, short-circuit, and possible write.
+            .logical_assign => |a| try self.compileMemberLogicalAssign(a),
             .op_assign => |oa| switch (oa.target.*) {
                 // Identifier target: load the old value, apply the op, store back.
                 // (No `with` here — a function using `with` already falls back to
@@ -3722,11 +3723,81 @@ pub const Compiler = struct {
         return to_present;
     }
 
+    fn compileMemberLogicalAssign(self: *Compiler, assignment: anytype) CompileError!void {
+        // Program chunks have no frame or private activation environment. Until
+        // #706 supplies program-local scratch, synthesized names would be shared
+        // across nested/parallel evaluations and could corrupt the Reference.
+        if (self.mode == .program or assignment.target.* != .member or assignment.target.member.optional)
+            return error.Unsupported;
+        const member = assignment.target.member;
+
+        // Evaluate the Reference once. Frame-mode temps are real activation
+        // slots so recursion cannot overwrite them; environment-mode temps live
+        // in the generator/async activation and survive suspension.
+        const object = try self.freshActivationTemp();
+        try self.compileExpr(member.object);
+        try self.emitDefineActivationTemp(object);
+
+        var key: ?[]const u8 = null;
+        if (member.computed) |key_expr| {
+            // PropertyAccessors evaluates the key expression before checking
+            // the base, but RequireObjectCoercible precedes observable
+            // ToPropertyKey. Store the resulting key string so GetValue and
+            // PutValue cannot invoke user coercion twice.
+            try self.compileExpr(key_expr);
+            try self.emitLoad(object);
+            _ = try self.chunk.emit(.require_object_coercible, 1);
+            _ = try self.chunk.emit(.to_property_key, 0);
+            const key_temp = try self.freshActivationTemp();
+            try self.emitDefineActivationTemp(key_temp);
+            key = key_temp;
+        }
+
+        try self.emitLoad(object);
+        if (key) |key_temp| {
+            try self.emitLoad(key_temp);
+            _ = try self.chunk.emit(.get_index, 0);
+        } else {
+            _ = try self.chunk.emit(.get_prop, try self.addMemberName(member.property));
+        }
+        const short = try self.chunk.emit(switch (assignment.op) {
+            .@"and" => .jump_if_false_peek,
+            .@"or" => .jump_if_true_peek,
+            .nullish => .jump_if_not_nullish_peek,
+        }, 0);
+
+        _ = try self.chunk.emit(.pop, 0);
+        try self.emitLoad(object);
+        if (key) |key_temp| try self.emitLoad(key_temp);
+        // The suspendable VM snapshots its operand stack, so keeping the
+        // resolved base/key below the RHS also roots the exact Reference across
+        // yield/await without another environment lookup or allocation.
+        try self.compileExpr(assignment.value);
+        _ = try self.chunk.emit(
+            if (key != null) .set_index else .set_prop,
+            if (key != null) 0 else try self.addMemberName(member.property),
+        );
+        self.chunk.patchToHere(short);
+    }
+
     /// A unique, user-unreferenceable temp name (contains a NUL byte).
     fn freshTemp(self: *Compiler) CompileError![]const u8 {
         const n = self.tmp_counter;
         self.tmp_counter += 1;
         return std.fmt.allocPrint(self.arena, "\x00ys{d}", .{n});
+    }
+
+    fn freshActivationTemp(self: *Compiler) CompileError![]const u8 {
+        const name = try self.freshTemp();
+        if (self.scope) |scope| _ = try scope.addLocal(self.arena, name, false, false);
+        return name;
+    }
+
+    fn emitDefineActivationTemp(self: *Compiler, name: []const u8) CompileError!void {
+        if (self.scope != null) return self.emitDefine(name);
+        // Env-mode generator/async functions have no frame slots. Keep compiler
+        // state in their private activation Environment instead of `def_var`.
+        _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), 1);
     }
 
     fn hasSpread(args: []const *Node) bool {
@@ -4189,7 +4260,7 @@ test "compiler reports stable plain-function admission reasons" {
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var parser = try @import("parser.zig").Parser.init(arena.allocator(), "function f(value){ let result = value ?? 1; return result + 1; }");
+    var parser = try @import("parser.zig").Parser.init(arena.allocator(), "function f(holder, value){ holder.value ??= value; return holder.value + 1; }");
     const program = try parser.parseProgram();
     const admission = try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl);
     switch (admission) {
@@ -4290,6 +4361,28 @@ test "compiler admits global-only class members and rejects frame captures" {
     }
 }
 
+test "compiler retains a causal barrier for super logical assignment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "class Derived extends Base { method(){ return super.value ??= 1; } }",
+    );
+    const program = try parser.parseProgram();
+    const declaration = program.program[0];
+    if (declaration.* != .var_decl or declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const class = declaration.var_decl.init.?;
+    if (class.* != .class_expr or class.class_expr.members.len != 1 or class.class_expr.members[0].func == null)
+        return error.TestUnexpectedResult;
+    const method = class.class_expr.members[0].func.?;
+    if (method.* != .function) return error.TestUnexpectedResult;
+    switch (try Compiler.admitPlainFunction(arena.allocator(), method.function)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    }
+}
+
 test "compiler reports stable program admission reasons" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -4329,14 +4422,14 @@ test "compiler reports stable generator admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.expression_body, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ var holder = {}; yield (holder.value ??= 1); }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ var holder = {}; yield (holder.value += 1); }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitGenerator(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.unsupported_lowering, reason),
     }
 
-    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* compiled(){ yield (null ?? 1); }");
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* compiled(){ var holder = {}; yield (holder.value ??= 1); }");
     const compiled_program = try compiled_parser.parseProgram();
     switch (try Compiler.admitGenerator(arena.allocator(), compiled_program.program[0].func_decl, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
@@ -4355,14 +4448,14 @@ test "compiler reports stable async admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.async_generator, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ var holder = {}; return holder.value ??= 1; }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ var holder = {}; return holder.value += 1; }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitAsync(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.unsupported_lowering, reason),
     }
 
-    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function compiled(){ return null ?? 1; }");
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function compiled(){ var holder = {}; return holder.value ??= 1; }");
     const compiled_program = try compiled_parser.parseProgram();
     switch (try Compiler.admitAsync(arena.allocator(), compiled_program.program[0].func_decl, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),

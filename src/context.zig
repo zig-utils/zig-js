@@ -22730,11 +22730,11 @@ test "bytecode admission inventory retains exact runtime reasons" {
         \\globalThis.notCandidate = function notCandidate() { return 1; };
         \\globalThis.shadowed = function shadowed(p) { "use strict"; { let p = 2; } return marker.x; };
         \\globalThis.generatorCompiled = function* generatorCompiled() { yield 1; };
-        \\globalThis.generatorNullish = function* generatorNullish() { yield (null ?? 1); };
-        \\globalThis.generatorRejected = function* generatorRejected() { var holder = {}; yield (holder.value ??= 1); };
+        \\globalThis.generatorLogical = function* generatorLogical() { var holder = {}; yield (holder.value ??= 1); };
+        \\globalThis.generatorRejected = function* generatorRejected() { var holder = {}; yield (holder.value += 1); };
         \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
-        \\globalThis.asyncNullish = async function asyncNullish() { return null ?? 1; };
-        \\globalThis.asyncRejected = async function asyncRejected() { var holder = {}; return holder.value ??= 1; };
+        \\globalThis.asyncLogical = async function asyncLogical() { var holder = {}; return holder.value ??= 1; };
+        \\globalThis.asyncRejected = async function asyncRejected() { var holder = {}; return holder.value += 1; };
     );
     _ = try ctx.evaluate(
         \\globalThis.templateDefault = function templateDefault(value = 1) { return value; };
@@ -22749,10 +22749,10 @@ test "bytecode admission inventory retains exact runtime reasons" {
         .{ .name = "notCandidate", .reason = .plain_policy_not_candidate },
         .{ .name = "shadowed", .reason = .plain_compiled },
         .{ .name = "generatorCompiled", .reason = .generator_compiled },
-        .{ .name = "generatorNullish", .reason = .generator_compiled },
+        .{ .name = "generatorLogical", .reason = .generator_compiled },
         .{ .name = "generatorRejected", .reason = .generator_rejected_unsupported_lowering },
         .{ .name = "asyncCompiled", .reason = .async_compiled },
-        .{ .name = "asyncNullish", .reason = .async_compiled },
+        .{ .name = "asyncLogical", .reason = .async_compiled },
         .{ .name = "asyncRejected", .reason = .async_rejected_unsupported_lowering },
     };
     for (expected) |entry| {
@@ -22888,6 +22888,43 @@ test "forced tree-walker and required bytecode agree on nullish coalescing" {
     try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
     try std.testing.expectEqual(@as(u64, 1), tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker));
     try std.testing.expectEqual(@as(u64, 1), bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled));
+}
+
+test "forced tree-walker and required bytecode agree on member logical assignment" {
+    const source =
+        \\var logicalHolder = { value: null };
+        \\var logicalBaseCalls = 0;
+        \\var logicalKeyCalls = 0;
+        \\var logicalRhsCalls = 0;
+        \\function logicalBase() { logicalBaseCalls = logicalBaseCalls + 1; return logicalHolder; }
+        \\function logicalKey() { logicalKeyCalls = logicalKeyCalls + 1; return "value"; }
+        \\function logicalRhs() { logicalRhsCalls = logicalRhsCalls + 1; return 19; }
+        \\function runLogicalAssignment() {
+        \\  var logicalAssigned = logicalBase()[logicalKey()] ??= logicalRhs();
+        \\  var logicalShorted = logicalBase()[logicalKey()] ??= logicalRhs();
+        \\  return logicalAssigned === 19 && logicalShorted === 19 && logicalHolder.value === 19 &&
+        \\    logicalBaseCalls === 2 && logicalKeyCalls === 2 && logicalRhsCalls === 1;
+        \\}
+        \\runLogicalAssignment();
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    const tree_result = try tree_ctx.evaluate(source);
+    const bytecode_result = try bytecode_ctx.evaluate(source);
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    try std.testing.expectEqual(@as(u64, 4), tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker));
+    try std.testing.expectEqual(@as(u64, 4), bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled));
 }
 
 test "parser-derived arguments use preserves forced execution tiers" {
@@ -23721,20 +23758,29 @@ test "required bytecode program retains async function templates" {
     _ = try ctx.evaluate(
         \\var observed = "pending";
         \\var nullishObserved = "pending";
+        \\var logicalObserved = "pending";
+        \\var logicalOriginal = { value: null };
+        \\var logicalCurrent = logicalOriginal;
+        \\var logicalKeyCalls = 0;
         \\var overrideRejection = async function() {
         \\  try { await Promise.reject("early"); }
         \\  finally { return "override"; }
         \\};
         \\var asyncNullish = async function(value) { return value ?? 7; };
+        \\var asyncMemberLogical = async function() {
+        \\  return logicalCurrent[(logicalKeyCalls = logicalKeyCalls + 1, "value")] ??= await Promise.resolve(17);
+        \\};
         \\overrideRejection().then(function(value) { observed = value; });
         \\asyncNullish(false).then(function(left) {
         \\  asyncNullish(null).then(function(right) { nullishObserved = left + ":" + right; });
         \\});
+        \\asyncMemberLogical().then(function(value) { logicalObserved = value; });
+        \\logicalCurrent = { value: 100 };
     );
-    const result = try ctx.evaluate("drainMicrotasks(); observed + '|' + nullishObserved;");
-    try std.testing.expectEqualStrings("override|false:7", result.asStr());
+    const result = try ctx.evaluate("drainMicrotasks(); observed + '|' + nullishObserved + '|' + logicalObserved + ':' + logicalOriginal.value + ':' + logicalCurrent.value + ':' + logicalKeyCalls;");
+    try std.testing.expectEqualStrings("override|false:7|17:17:100:1", result.asStr());
     const inventory = ctx.bytecodeAdmissionSnapshot();
-    try std.testing.expectEqual(@as(u64, 2), inventory.count(.template_async_compiled));
+    try std.testing.expectEqual(@as(u64, 3), inventory.count(.template_async_compiled));
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_async_fallback));
 }
 

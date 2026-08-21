@@ -6361,7 +6361,10 @@ fn runChunk(
             .require_object_coercible => {
                 const input = stack.pop().?;
                 if (input.isNull() or input.isUndefined())
-                    return vm.throwError("TypeError", "cannot destructure null or undefined");
+                    return vm.throwError(
+                        "TypeError",
+                        if (inst.a == 1) "cannot read property of null or undefined" else "cannot destructure null or undefined",
+                    );
             },
             .to_property_key => {
                 // ToPropertyKey: coerce once (runs the key's toString/valueOf)
@@ -9090,7 +9093,9 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     var env = Environment{ .arena = arena, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(arena);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape };
+    const tdz_marker = try gc_mod.allocObj(arena);
+    tdz_marker.* = .{};
+    var machine = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape, .tdz_marker = tdz_marker };
     return run(&machine, chunk, null);
 }
 
@@ -9155,6 +9160,107 @@ test "vm: nullish coalescing preserves values and exact evaluation order" {
         \\let fourth = falsy.next(8);
         \\first.value === "pause" && first.done === false && second.value === 7 && second.done === true &&
         \\  third.value === "pause" && fourth.value === 0 && fourth.done === true
+    )).asBool());
+}
+
+test "vm: member logical assignment resolves one observable reference" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function runMemberLogical() {
+        \\var values = { andRun: 2, andShort: 0, orRun: 0, orShort: 3, nullRun: null, nullShort: false };
+        \\values.andRun &&= 9;
+        \\values.andShort &&= 9;
+        \\values.orRun ||= 8;
+        \\values.orShort ||= 8;
+        \\values.nullRun ??= 7;
+        \\values.nullShort ??= 7;
+        \\var log = "";
+        \\var backing = null;
+        \\var target = {};
+        \\Object.defineProperty(target, "value", {
+        \\  get() { log = log + "g"; return backing; },
+        \\  set(value) { log = log + "s"; backing = value; }
+        \\});
+        \\function base() { log = log + "b"; return target; }
+        \\var key = { toString() { log = log + "k"; return "value"; } };
+        \\function rhs() { log = log + "r"; return 11; }
+        \\var assigned = base()[key] ??= rhs();
+        \\var firstLog = log;
+        \\log = "";
+        \\var shorted = base()[key] ??= rhs();
+        \\var proxyLog = "";
+        \\var proxied = { value: 0 };
+        \\var proxy = new Proxy(proxied, {
+        \\  get(target, property) { proxyLog = proxyLog + "g"; return target[property]; },
+        \\  set(target, property, value) { proxyLog = proxyLog + "s"; target[property] = value; return true; }
+        \\});
+        \\var proxyAssigned = proxy.value ||= 14;
+        \\var proxyShorted = proxy.value ||= 15;
+        \\var symbol = Symbol("logical");
+        \\var symbolTarget = { [symbol]: null };
+        \\var symbolAssigned = symbolTarget[symbol] ??= 16;
+        \\return values.andRun === 9 && values.andShort === 0 && values.orRun === 8 && values.orShort === 3 &&
+        \\  values.nullRun === 7 && values.nullShort === false && assigned === 11 && shorted === 11 &&
+        \\  firstLog === "bkgrs" && log === "bkg" && proxyAssigned === 14 && proxyShorted === 14 &&
+        \\  proxied.value === 14 && proxyLog === "gsg" && symbolAssigned === 16 && symbolTarget[symbol] === 16
+        \\}
+        \\runMemberLogical()
+    )).asBool());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\let outer = { value: null };
+        \\let inner = { value: null };
+        \\function assign(target, recurse) {
+        \\  return target.value ??= recurse ? assign(inner, false) : 5;
+        \\}
+        \\assign(outer, true) === 5 && outer.value === 5 && inner.value === 5
+    )).asBool());
+}
+
+test "vm: computed logical assignment preserves abrupt order and suspended references" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function runAbruptLogical() {
+        \\var log = "";
+        \\var mode = "";
+        \\var backing = null;
+        \\var target = {};
+        \\Object.defineProperty(target, "value", {
+        \\  get() { log = log + "g"; if (mode === "get") throw 7051; return backing; },
+        \\  set(value) { log = log + "s"; if (mode === "set") throw 7053; backing = value; }
+        \\});
+        \\function base(isNull) { log = log + "b"; return isNull ? null : target; }
+        \\function key() { log = log + "e"; return { toString() { log = log + "k"; if (mode === "key") throw 7050; return "value"; } }; }
+        \\function rhs() { log = log + "r"; if (mode === "rhs") throw 7052; return 12; }
+        \\var observed = "";
+        \\try { base(true)[key()] ??= rhs(); } catch (error) { observed = observed + (error instanceof TypeError && error.message === "cannot read property of null or undefined") + ":" + log; }
+        \\log = ""; mode = "key";
+        \\try { base(false)[key()] ??= rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\log = ""; mode = "get";
+        \\try { base(false)[key()] ??= rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\log = ""; mode = "rhs";
+        \\try { base(false)[key()] ??= rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\log = ""; mode = "set";
+        \\try { base(false)[key()] ??= rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\return observed === "true:be|7050:bek|7051:bekg|7052:bekgr|7053:bekgrs";
+        \\}
+        \\runAbruptLogical()
+    )).asBool());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\let original = { value: null };
+        \\let current = original;
+        \\let keyCalls = 0;
+        \\function key() { keyCalls = keyCalls + 1; return "value"; }
+        \\function* assign() { return current[key()] ??= yield "pause"; }
+        \\let iterator = assign();
+        \\let first = iterator.next();
+        \\current = { value: 100 };
+        \\let second = iterator.next(13);
+        \\first.value === "pause" && first.done === false && second.value === 13 && second.done === true &&
+        \\  original.value === 13 && current.value === 100 && keyCalls === 1
     )).asBool());
 }
 
