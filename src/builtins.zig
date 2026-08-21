@@ -1470,12 +1470,12 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
         break :blk if (pv.isUndefined()) "" else try self.toStringWtf8(pv);
     };
     const flags: []const u8 = if (!flags_arg.isUndefined())
-        try self.toStringV(flags_arg)
+        try self.toStringWtf8(flags_arg)
     else if (internal_flags) |f|
         f
     else blk: {
         const fv = if (pattern_is_regexp) try self.getProperty(a0, "flags") else Value.undef();
-        break :blk if (fv.isUndefined()) "" else try self.toStringV(fv);
+        break :blk if (fv.isUndefined()) "" else try self.toStringWtf8(fv);
     };
     return self.makeRegexFromConstructor(pattern, flags);
 }

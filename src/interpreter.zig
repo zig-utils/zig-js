@@ -9965,8 +9965,8 @@ pub const Interpreter = struct {
                 pattern = pattern_v.asObj().regexSource();
                 flags = pattern_v.asObj().regexFlags();
             } else {
-                if (!pattern_v.isUndefined()) pattern = try self.toStringV(pattern_v);
-                if (!flags_v.isUndefined()) flags = try self.toStringV(flags_v);
+                if (!pattern_v.isUndefined()) pattern = try self.toStringWtf8(pattern_v);
+                if (!flags_v.isUndefined()) flags = try self.toStringWtf8(flags_v);
             }
             try self.validateRegExpFlags(flags);
             const source = if (pattern.len == 0) "(?:)" else pattern;
@@ -11127,8 +11127,8 @@ pub const Interpreter = struct {
     fn regexpToString(self: *Interpreter, this: Value) EvalError!Value {
         if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype.toString called on a non-object");
         if (self.isRegExpProto(this.asObj())) return Value.str("/(?:)/");
-        const src = try self.toStringV(try self.getProperty(this, "source"));
-        const flags = try self.toStringV(try self.getProperty(this, "flags"));
+        const src = try self.toStringWtf8(try self.getProperty(this, "source"));
+        const flags = try self.toStringWtf8(try self.getProperty(this, "flags"));
         return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ "/", src, "/", flags }));
     }
 
@@ -35485,7 +35485,7 @@ fn regexpLegacyGetter(comptime field: ReLegacyField) value.NativeFn {
 fn regexpLegacyInputSetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     try regexpLegacyBrandCheck(self, this);
-    self.re_legacy.input = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    self.re_legacy.input = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
 

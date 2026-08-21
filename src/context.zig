@@ -11622,6 +11622,29 @@ test "RegExp flags and toString use generic canonical accessors" {
     )).asBool());
 }
 
+test "RegExp construction state canonicalizes physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const text = "caf\u00e9\u00ff";
+        \\const order = [];
+        \\const compiled = /x/;
+        \\compiled.compile(
+        \\  { toString() { order.push("compile-pattern"); return text; } },
+        \\  { toString() { order.push("compile-flags"); return ""; } }
+        \\);
+        \\const compileOk = compiled.source === text && compiled.test(text);
+        \\const described = RegExp.prototype.toString.call({
+        \\  get source() { order.push("get-source"); return { toString() { order.push("source-string"); return text; } }; },
+        \\  get flags() { order.push("get-flags"); return { toString() { order.push("flags-string"); return "g"; } }; }
+        \\});
+        \\let constructorFlags = 0;
+        \\const constructed = new RegExp("x", { toString() { constructorFlags++; return "g"; } });
+        \\RegExp.input = text;
+        \\compileOk && described === "/caf\u00e9\u00ff/g" && constructed.global && constructorFlags === 1 &&
+        \\  RegExp.input === text &&
+        \\  order.join(",") === "compile-pattern,compile-flags,get-source,source-string,get-flags,flags-string"
+    )).asBool());
+}
+
 test "RegExp accessors use their own realm prototype" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
