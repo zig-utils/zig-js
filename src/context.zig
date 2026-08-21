@@ -25265,14 +25265,20 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
         .parallel_js = true,
     });
     defer ctx.destroy();
-    // Keep the production tranche unchanged. The two lanes below create more
-    // than 512 KiB of 128-byte Object-class cells by themselves, so removing
-    // per-iteration block Environment cells cannot disable the rendezvous.
+    // Keep the production tranche unchanged. Tracking is armed when the second
+    // worker record is registered, so both workers rendezvous before allocating:
+    // the first cannot finish its otherwise-untracked churn while the main
+    // interpreter is still constructing the second Thread. The two released
+    // lanes then create more than 512 KiB of 128-byte Object-class cells by
+    // themselves, independent of scheduler placement and block Environments.
     ctx.gc_cooperative_tranche_bytes = 512 * 1024;
     try std.testing.expect(ctx.beginCooperativeGcProfile());
 
     const result = try ctx.evaluate(
+        \\const cooperativeChurnGate = new Int32Array(new SharedArrayBuffer(4));
         \\function cooperativeChurn(lane) {
+        \\  Atomics.add(cooperativeChurnGate, 0, 1);
+        \\  while (Atomics.load(cooperativeChurnGate, 0) !== 2) {}
         \\  const ring = [];
         \\  for (let i = 0; i < 64; i++) ring.push({ value: i, lane: lane, prior: 0 });
         \\  for (let i = 0; i < 2400; i++) {
