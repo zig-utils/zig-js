@@ -9264,6 +9264,124 @@ test "vm: computed logical assignment preserves abrupt order and suspended refer
     )).asBool());
 }
 
+test "vm: member compound assignment implements every operator and one reference" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function runMemberCompound() {
+        \\  var values = { add: 3, sub: 8, mul: 4, div: 9, mod: 10, pow: 3, and: 6, or: 4, xor: 7, shl: 3, shr: -16, ushr: -16, text: "a" };
+        \\  values.add += 4; values.sub -= 3; values.mul *= 5; values.div /= 2; values.mod %= 4; values.pow **= 3;
+        \\  values.and &= 3; values.or |= 3; values.xor ^= 3; values.shl <<= 2; values.shr >>= 2; values.ushr >>>= 2; values.text += 7;
+        \\  var log = "";
+        \\  var backing = { valueOf() { log = log + "n"; return 5; } };
+        \\  var target = {};
+        \\  Object.defineProperty(target, "value", {
+        \\    get() { log = log + "g"; return backing; },
+        \\    set(value) { log = log + "s"; backing = value; }
+        \\  });
+        \\  function base() { log = log + "b"; return target; }
+        \\  var key = { toString() { log = log + "k"; return "value"; } };
+        \\  function rhs() { log = log + "r"; return { valueOf() { log = log + "v"; return 6; } }; }
+        \\  var assigned = base()[key] += rhs();
+        \\  var proxyLog = "";
+        \\  var proxied = { value: 2 };
+        \\  var proxy = new Proxy(proxied, {
+        \\    get(target, property) { proxyLog = proxyLog + "g"; return target[property]; },
+        \\    set(target, property, value) { proxyLog = proxyLog + "s"; target[property] = value; return true; }
+        \\  });
+        \\  var proxyAssigned = proxy.value *= 7;
+        \\  var symbol = Symbol("compound");
+        \\  var symbolTarget = { [symbol]: 8 };
+        \\  var symbolAssigned = symbolTarget[symbol] -= 3;
+        \\  return values.add === 7 && values.sub === 5 && values.mul === 20 && values.div === 4.5 && values.mod === 2 && values.pow === 27 &&
+        \\    values.and === 2 && values.or === 7 && values.xor === 4 && values.shl === 12 && values.shr === -4 && values.ushr === 1073741820 && values.text === "a7" &&
+        \\    assigned === 11 && backing === 11 && log === "bkgrnvs" && proxyAssigned === 14 && proxied.value === 14 && proxyLog === "gs" &&
+        \\    symbolAssigned === 5 && symbolTarget[symbol] === 5;
+        \\}
+        \\runMemberCompound()
+    )).asBool());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function bigintAndRecursion() {
+        \\  var big = { value: 6n };
+        \\  var bigintResult = big.value &= 3n;
+        \\  var mixedTypeError = false;
+        \\  try { big.value += 1; } catch (error) { mixedTypeError = error instanceof TypeError; }
+        \\  var outer = { value: 1 };
+        \\  var inner = { value: 2 };
+        \\  function assign(target, recurse) { return target.value += recurse ? assign(inner, false) : 3; }
+        \\  var recursiveResult = assign(outer, true);
+        \\  return bigintResult === 2n && big.value === 2n && mixedTypeError && recursiveResult === 6 && outer.value === 6 && inner.value === 5;
+        \\}
+        \\bigintAndRecursion()
+    )).asBool());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function strictFailures() {
+        \\  "use strict";
+        \\  var getterCalls = 0;
+        \\  var readOnly = {};
+        \\  Object.defineProperty(readOnly, "value", { get() { getterCalls = getterCalls + 1; return 2; } });
+        \\  var readOnlyError = false;
+        \\  try { readOnly.value += 1; } catch (error) { readOnlyError = error instanceof TypeError; }
+        \\  var proxyTarget = { value: 3 };
+        \\  var proxy = new Proxy(proxyTarget, { set() { return false; } });
+        \\  var proxyError = false;
+        \\  try { proxy.value *= 2; } catch (error) { proxyError = error instanceof TypeError; }
+        \\  return readOnlyError && proxyError && getterCalls === 1 && readOnly.value === 2 && proxyTarget.value === 3;
+        \\}
+        \\strictFailures()
+    )).asBool());
+}
+
+test "vm: computed compound assignment preserves abrupt order and suspended references" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function runAbruptCompound() {
+        \\  var log = "";
+        \\  var mode = "";
+        \\  var backing = { valueOf() { log = log + "n"; if (mode === "binary") throw 7073; return 4; } };
+        \\  var target = {};
+        \\  Object.defineProperty(target, "value", {
+        \\    get() { log = log + "g"; if (mode === "get") throw 7071; return backing; },
+        \\    set(value) { log = log + "s"; if (mode === "set") throw 7074; backing = value; }
+        \\  });
+        \\  function base(isNull) { log = log + "b"; return isNull ? null : target; }
+        \\  function key() { log = log + "e"; return { toString() { log = log + "k"; if (mode === "key") throw 7070; return "value"; } }; }
+        \\  function rhs() { log = log + "r"; if (mode === "rhs") throw 7072; return 2; }
+        \\  var observed = "";
+        \\  try { base(true)[key()] += rhs(); } catch (error) { observed = observed + (error instanceof TypeError) + ":" + log; }
+        \\  log = ""; mode = "key";
+        \\  try { base(false)[key()] += rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  log = ""; mode = "get";
+        \\  try { base(false)[key()] += rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  log = ""; mode = "rhs";
+        \\  try { base(false)[key()] += rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  log = ""; mode = "binary";
+        \\  try { base(false)[key()] += rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  log = ""; mode = "set";
+        \\  try { base(false)[key()] += rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
+        \\  return observed === "true:be|7070:bek|7071:bekg|7072:bekgr|7073:bekgrn|7074:bekgrns";
+        \\}
+        \\runAbruptCompound()
+    )).asBool());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\var original = { value: 4 };
+        \\var current = original;
+        \\function* assign() { return current[yield "key"] += yield "rhs"; }
+        \\var iterator = assign();
+        \\var first = iterator.next();
+        \\current = { value: 100 };
+        \\var second = iterator.next("value");
+        \\original.value = 40;
+        \\var third = iterator.next(3);
+        \\first.value === "key" && first.done === false && second.value === "rhs" && second.done === false && third.value === 7 && third.done === true &&
+        \\  original.value === 7 && current.value === 100
+    )).asBool());
+}
+
 test "vm: String relational comparison streams representation-aware UTF-16 units" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
