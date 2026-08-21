@@ -193,7 +193,7 @@ pub fn parseFloatFn(ctx: *anyopaque, this: Value, args: []const Value) HostError
     const self = interp(ctx);
     // ToString(string) — throws a TypeError for a Symbol argument (per spec),
     // rather than silently stringifying it to NaN.
-    const s = try self.toStringV(arg(args, 0));
+    const s = try self.toStringWtf8(arg(args, 0));
     const nan = std.math.nan(f64);
     // ParseFloat: trim leading StrWhiteSpace, then take the longest prefix that is
     // a StrDecimalLiteral. We scan that grammar by hand rather than leaning on
@@ -231,7 +231,7 @@ pub fn parseIntFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
     _ = this;
     const self = interp(ctx);
     // ToString(string) — throws a TypeError for a Symbol argument (per spec).
-    const s = try self.toStringV(arg(args, 0));
+    const s = try self.toStringWtf8(arg(args, 0));
     var radix: i32 = 10;
     var strip_prefix = true;
     if (args.len >= 2 and !args[1].isUndefined()) {

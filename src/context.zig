@@ -15101,6 +15101,20 @@ test "parseFloat: Unicode whitespace, Infinity, and no numeric separators" {
     try std.testing.expectError(error.Throw, evalIn("parseFloat({ valueOf: function() { return 1; }, toString: function() { throw 'error'; } })"));
 }
 
+test "numeric parsers canonicalize physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const nbsp = "\u00a0";
+        \\let floatCalls = 0;
+        \\const floatInput = { toString() { floatCalls++; return nbsp + "1.25tail"; } };
+        \\const floatOk = parseFloat(floatInput) === 1.25 && floatCalls === 1;
+        \\const order = [];
+        \\const intInput = { toString() { order.push("input"); return nbsp + "11tail"; } };
+        \\const radix = { valueOf() { order.push("radix"); return 2; } };
+        \\const intOk = parseInt(intInput, radix) === 3 && order.join(",") === "input,radix";
+        \\floatOk && intOk
+    )).asBool());
+}
+
 test "parseInt radix coercion follows ToInt32" {
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', 4294967298)")).asNum());
     try std.testing.expectEqual(@as(f64, 3), (try evalIn("parseInt('11', -4294967294)")).asNum());
