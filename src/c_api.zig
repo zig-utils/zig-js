@@ -21543,7 +21543,14 @@ fn propertyKeyBytes(c: *Context, machine: *interp.Interpreter, key_ref: JSValueR
         } else setException(c, exception, @errorName(err));
         return null;
     };
-    if (key.isString()) return key.asStr();
+    // ToPropertyKey yields a semantic String, not permission to expose its
+    // physical StringCell image. Property lookup consumes canonical WTF-8;
+    // ASCII/current cells borrow while a flat Latin-1 cell converts once in
+    // the context arena. Preserve allocation failure at the public boundary.
+    if (key.isString()) return key.asWtf8(c.arena()) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
     if (key.isObject() and key.asObj().is_symbol) return key.asObj().symbolKey();
     return key.toString(c.arena()) catch {
         setException(c, exception, "OutOfMemory");
@@ -25109,6 +25116,18 @@ test "C-API: JSObjectSetPropertyForKey preserves key coercion and attributes" {
     const five = JSStringCreateWithUTF8CString("5") orelse return error.StringInitFailed;
     defer JSStringRelease(five);
     try std.testing.expect(JSValueToBoolean(ctx, JSObjectGetProperty(ctx, object, five, &exception)));
+
+    const latin1_name = JSStringCreateWithUTF8CString("caf\xC3\xA9\xC3\xBF") orelse return error.StringInitFailed;
+    defer JSStringRelease(latin1_name);
+    const latin1_key = JSValueMakeString(ctx, latin1_name) orelse return error.ValueCreateFailed;
+    JSObjectSetPropertyForKey(ctx, object, latin1_key, JSValueMakeNumber(ctx, 17), 0, &exception);
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSObjectHasPropertyForKey(ctx, object, latin1_key, &exception));
+    const latin1_stored = JSObjectGetPropertyForKey(ctx, object, latin1_key, &exception) orelse return error.PropertyGetFailed;
+    try std.testing.expectEqual(@as(f64, 17), JSValueToNumber(ctx, latin1_stored, &exception));
+    try std.testing.expect(JSObjectDeletePropertyForKey(ctx, object, latin1_key, &exception));
+    try std.testing.expect(!JSObjectHasPropertyForKey(ctx, object, latin1_key, &exception));
+    try std.testing.expect(exception == null);
 
     const throwing_key_source = JSStringCreateWithUTF8CString("({ [Symbol.toPrimitive]() { throw 44; } })") orelse return error.StringInitFailed;
     defer JSStringRelease(throwing_key_source);
