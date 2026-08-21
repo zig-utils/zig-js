@@ -11845,6 +11845,31 @@ test "RegExp replace uses generic exec and UTF-16 positions" {
     )).asBool());
 }
 
+test "RegExp protocols canonicalize physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const text = "caf\u00e9\u00ff";
+        \\let replacementCalls = 0;
+        \\const replacement = { toString() { replacementCalls++; return text; } };
+        \\const globalReplaced = "aa".replace(/a/g, replacement) === text + text;
+        \\const nonGlobalReplaced = "aa".replace(/a/, replacement) === text + "a";
+        \\const order = [];
+        \\const replaceLike = {
+        \\  [Symbol.match]: true,
+        \\  get flags() { order.push("replace-flags-get"); return { toString() { order.push("replace-flags-string"); return "g" + text; } }; },
+        \\  [Symbol.replace]() { order.push("replace-dispatch"); return text; }
+        \\};
+        \\const replaceAllOk = "x".replaceAll(replaceLike, "y") === text;
+        \\const matchLike = {
+        \\  [Symbol.match]: true,
+        \\  get flags() { order.push("match-flags-get"); return { toString() { order.push("match-flags-string"); return "g" + text; } }; },
+        \\  [Symbol.matchAll]() { order.push("match-dispatch"); return text; }
+        \\};
+        \\const matchAllOk = "x".matchAll(matchLike) === text;
+        \\globalReplaced && nonGlobalReplaced && replacementCalls === 2 && replaceAllOk && matchAllOk &&
+        \\  order.join(",") === "replace-flags-get,replace-flags-string,replace-dispatch,match-flags-get,match-flags-string,match-dispatch"
+    )).asBool());
+}
+
 test "RegExp builtin exec exposes UTF-16 positions" {
     try std.testing.expect((try evalIn(
         \\var s = "\ud834\udf06";

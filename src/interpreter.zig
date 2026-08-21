@@ -10887,7 +10887,7 @@ pub const Interpreter = struct {
         if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype[Symbol.matchAll] called on a non-object");
         const default_ctor = self.env.get("RegExp") orelse return self.throwError("TypeError", "RegExp is not defined");
         const c = try self.speciesConstructor(this, default_ctor);
-        const flags = try self.toStringV(try self.getProperty(this, "flags"));
+        const flags = try self.toStringWtf8(try self.getProperty(this, "flags"));
         const matcher = try self.construct(c, &.{ this, try Value.strAlloc(self.arena, flags) });
         const last_index = toLen(try self.toNumberV(try self.getProperty(this, "lastIndex")));
         try self.setRegExpLikeLastIndex(matcher, @floatFromInt(last_index));
@@ -10912,7 +10912,7 @@ pub const Interpreter = struct {
 
     fn regexpMatch(self: *Interpreter, rx: Value, s: []const u8) EvalError!Value {
         if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.match] called on a non-object");
-        const flags = try self.toStringV(try self.getProperty(rx, "flags"));
+        const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
         if (!global) return try self.regexpExecGeneric(rx, s);
         const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
@@ -10962,8 +10962,8 @@ pub const Interpreter = struct {
     fn regexpReplace(self: *Interpreter, rx: Value, s: []const u8, replace_value: Value) EvalError!Value {
         if (!isRegExpObjectValue(rx)) return self.throwError("TypeError", "RegExp.prototype[Symbol.replace] called on a non-object");
         const functional_replace = replace_value.isCallable();
-        const replace_string = if (functional_replace) "" else try self.toStringV(replace_value);
-        const flags = try self.toStringV(try self.getProperty(rx, "flags"));
+        const replace_string = if (functional_replace) "" else try self.toStringWtf8(replace_value);
+        const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
         const full_unicode = global and (std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null);
 
@@ -11063,7 +11063,7 @@ pub const Interpreter = struct {
 
         const default_ctor = self.env.get("RegExp") orelse Value.undef();
         const ctor = try self.speciesConstructor(rx, default_ctor);
-        const flags = try self.toStringV(try self.getProperty(rx, "flags"));
+        const flags = try self.toStringWtf8(try self.getProperty(rx, "flags"));
         const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const splitter_flags = if (std.mem.indexOfScalar(u8, flags, 'y') != null) flags else try std.mem.concat(self.arena, u8, &.{ flags, "y" });
         const splitter = try self.construct(ctor, &.{ rx, try Value.strAlloc(self.arena, splitter_flags) });
@@ -16622,7 +16622,7 @@ pub const Interpreter = struct {
             const flags_v = try self.getProperty(search, "flags");
             if (flags_v.isUndefined() or flags_v.isNull())
                 return self.throwError("TypeError", "String.prototype.replaceAll called with a RegExp whose flags is undefined or null");
-            const flags_s = try self.toStringV(flags_v);
+            const flags_s = try self.toStringWtf8(flags_v);
             if (std.mem.indexOfScalar(u8, flags_s, 'g') == null)
                 return self.throwError("TypeError", "String.prototype.replaceAll must be called with a global RegExp");
         }
@@ -17147,7 +17147,7 @@ pub const Interpreter = struct {
                     const flags_v = try self.getProperty(regexp, "flags");
                     if (flags_v.isUndefined() or flags_v.isNull())
                         return self.throwError("TypeError", "String.prototype.matchAll called with a RegExp whose flags is undefined or null");
-                    const flags_s = try self.toStringV(flags_v);
+                    const flags_s = try self.toStringWtf8(flags_v);
                     if (std.mem.indexOfScalar(u8, flags_s, 'g') == null)
                         return self.throwError("TypeError", "String.prototype.matchAll called with a non-global RegExp argument");
                 }
