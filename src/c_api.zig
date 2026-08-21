@@ -10775,12 +10775,13 @@ fn privateAsymmetricCompare(
         },
         .string_containing => {
             const expected = privateMatcherSample(matcher.object, &.{"stringValue"}) orelse Value.undef();
-            raw = other.isString() and expected.isString() and std.mem.indexOf(u8, other.asStr(), expected.asStr()) != null;
+            if (other.isString() and expected.isString())
+                raw = try machine.stringIncludesUtf16(try other.asWtf8(machine.arena), try expected.asWtf8(machine.arena));
         },
         .string_matching => {
             const expected = privateMatcherSample(matcher.object, &.{"testValue"}) orelse Value.undef();
             if (other.isString() and expected.isString())
-                raw = std.mem.indexOf(u8, other.asStr(), expected.asStr()) != null
+                raw = try machine.stringIncludesUtf16(try other.asWtf8(machine.arena), try expected.asWtf8(machine.arena))
             else if (other.isString() and expected.isObject() and expected.asObj().behavior.is_regex)
                 raw = try machine.regexpTestBuiltin(expected.asObj(), other);
         },
@@ -10949,7 +10950,7 @@ fn privateDeepCompare(
             const boxed_right = right.boxedPrimitive() orelse return false;
             return boxed_right.isString() and
                 std.mem.eql(u8, try privateDeepClassName(machine, left), try privateDeepClassName(machine, right)) and
-                std.mem.eql(u8, boxed_left.asStr(), boxed_right.asStr());
+                value.strictEquals(boxed_left, boxed_right);
         }
     }
 
@@ -11156,7 +11157,7 @@ export fn JSC__JSString__eql(
     const right_box = privateStringBoxFromCell(right_cell) orelse return false;
     const left = valueFromContext(context, @ptrCast(left_box)) orelse return false;
     const right = valueFromContext(context, @ptrCast(right_box)) orelse return false;
-    return std.mem.eql(u8, left.asStr(), right.asStr());
+    return value.strictEquals(left, right);
 }
 
 export fn JSC__JSString__is8Bit(cell: ?*anyopaque) callconv(.c) bool {
@@ -31388,6 +31389,49 @@ test "private deep equality preserves pinned structural semantics and boundaries
     try std.testing.expect(!JSC__JSValue__deepEquals(deep_left, deep_right, context));
     try std.testing.expect(JSGlobalObject__hasException(context));
     JSGlobalObject__clearException(context);
+}
+
+test "private StringData predicates compare semantic content" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    const runtime = try internal.evaluate("'caf\xc3\xa9 needle'");
+    const canonical = Value.str("caf\xc3\xa9 needle");
+    const runtime_encoded = privateEncodedFromValue(internal, runtime);
+    const canonical_encoded = privateEncodedFromValue(internal, canonical);
+    try std.testing.expect(JSC__JSString__eql(
+        JSC__JSValue__asString(runtime_encoded),
+        context,
+        JSC__JSValue__asString(canonical_encoded),
+    ));
+
+    const runtime_box = try internal.evaluate("new String('caf\xc3\xa9 needle')");
+    const canonical_box = try internal.evaluate("new String('placeholder')");
+    try canonical_box.asObj().setBoxedPrimitive(internal.arena(), canonical);
+    try std.testing.expect(JSC__JSValue__strictDeepEquals(
+        privateEncodedFromValue(internal, runtime_box),
+        privateEncodedFromValue(internal, canonical_box),
+        context,
+    ));
+
+    const containing = try internal.evaluate("({ __zig_js_asymmetric_matcher__: 'string_containing', sample: '' })");
+    try containing.asObj().setOwn(internal.arena(), internal.root_shape, "sample", Value.str("\xed\xb2\xa9"));
+    try std.testing.expect(JSC__JSValue__jestDeepEquals(
+        privateEncodedFromValue(internal, try internal.evaluate("'\xf0\x9f\x92\xa9'")),
+        privateEncodedFromValue(internal, containing),
+        context,
+    ));
+
+    const matching = try internal.evaluate("({ __zig_js_asymmetric_matcher__: 'string_matching', sample: '' })");
+    try matching.asObj().setOwn(internal.arena(), internal.root_shape, "sample", Value.str("\xc3\xa9 n"));
+    try std.testing.expect(JSC__JSValue__jestDeepEquals(
+        runtime_encoded,
+        privateEncodedFromValue(internal, matching),
+        context,
+    ));
 }
 
 test "private Jest deep matching preserves asymmetric and subset semantics" {
