@@ -17083,7 +17083,7 @@ pub const Interpreter = struct {
                 try buf.append(self.arena, '<');
                 try buf.appendSlice(self.arena, h.tag);
                 if (h.attr.len != 0) {
-                    const v = try self.toStringV(arg0(args));
+                    const v = try self.toStringWtf8(arg0(args));
                     try buf.append(self.arena, ' ');
                     try buf.appendSlice(self.arena, h.attr);
                     try buf.appendSlice(self.arena, "=\"");

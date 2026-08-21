@@ -16819,6 +16819,25 @@ test "String result builders canonicalize physical storage" {
     )).asBool());
 }
 
+test "Annex B CreateHTML attributes canonicalize physical storage" {
+    try std.testing.expect((try evalIn(
+        \\const text = "caf\u00e9\"\u00ff";
+        \\const escaped = "caf\u00e9&quot;\u00ff";
+        \\let calls = 0;
+        \\const attr = { toString() { calls++; return text; } };
+        \\const wrappers = "x".anchor(attr) === '<a name="' + escaped + '">x</a>' &&
+        \\  "x".fontcolor(attr) === '<font color="' + escaped + '">x</font>' &&
+        \\  "x".fontsize(attr) === '<font size="' + escaped + '">x</font>' &&
+        \\  "x".link(attr) === '<a href="' + escaped + '">x</a>' && calls === 4;
+        \\const order = [];
+        \\const ordered = String.prototype.anchor.call(
+        \\  { toString() { order.push("receiver"); return "x"; } },
+        \\  { toString() { order.push("attribute"); return text; } }
+        \\) === '<a name="' + escaped + '">x</a>';
+        \\wrappers && ordered && order.join(",") === "receiver,attribute"
+    )).asBool());
+}
+
 test "borrowed Array mutators throw on String exotic length writes" {
     try std.testing.expect((try evalIn(
         \\function throws(fn) {
