@@ -95,9 +95,18 @@ pub const ValueNB = struct {
     pub inline fn asObj(self: ValueNB) *Object {
         return @ptrCast(@alignCast(self.nb.asPointer()));
     }
+    pub inline fn asStringCell(self: ValueNB) *const StringCell {
+        return @ptrCast(@alignCast(self.nb.asPointer()));
+    }
     pub inline fn asStr(self: ValueNB) []const u8 {
-        const cell: *StringCell = @ptrCast(@alignCast(self.nb.asPointer()));
-        return cell.bytes;
+        return self.asStringCell().bytes;
+    }
+    pub inline fn strIsFlatLatin1(self: ValueNB) bool {
+        return strcell.isFlatLatin1(self.asStringCell().hashState());
+    }
+    pub fn asWtf8(self: ValueNB, allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+        if (self.strIsFlatLatin1()) return strcell.latin1FlatToWtf8(allocator, self.asStr());
+        return self.asStr();
     }
 
     // ---- Representative semantic methods (operate on the bits natively) ---
@@ -116,7 +125,7 @@ pub const ValueNB = struct {
             .null => 0,
             .boolean => if (self.asBool()) 1 else 0,
             .number => self.asNum(),
-            .string => value.stringToNumber(self.asStr(), false),
+            .string => value.stringToNumber(self.asStr(), self.strIsFlatLatin1()),
             .object => if (self.asObj().is_bigint) value.bigIntToNumber(self.asObj()) else std.math.nan(f64),
         };
     }
@@ -183,12 +192,13 @@ test "value_nb: strings round-trip via StringCell with no allocator and match se
     const prev = strcell.setActiveTable(&table);
     defer _ = strcell.setActiveTable(prev);
 
-    const strs = [_][]const u8{ "", "hi", "a longer one", "0", "  42  ", "ünïcödé" };
+    const strs = [_][]const u8{ "", "hi", "a longer one", "0", "  42  ", "\xc2\xa0" ++ "42" ++ "\xc2\xa0", "ünïcödé" };
     for (strs) |s| {
         const nb = ValueNB.str(s); // <-- no allocator argument
         const v = try Value.strAlloc(va, s);
         try std.testing.expectEqual(@as(ValueNB.Kind, .string), nb.kind());
-        try std.testing.expectEqualStrings(s, nb.asStr());
+        try std.testing.expectEqualStrings(v.asStr(), nb.asStr());
+        try std.testing.expectEqualStrings(s, try nb.asWtf8(va));
         try std.testing.expectEqual(v.toBoolean(), nb.toBoolean()); // "" is falsy
         // ToNumber("0")==0, ToNumber("  42  ")==42, etc. — must match the union.
         if (std.math.isNan(v.toNumber())) {
@@ -197,6 +207,14 @@ test "value_nb: strings round-trip via StringCell with no allocator and match se
             try std.testing.expectEqual(v.toNumber(), nb.toNumber());
         }
         try std.testing.expectEqualStrings("string", nb.typeOf());
+    }
+    const latin1 = ValueNB.str("caf\xc3\xa9");
+    var unavailable: std.testing.FailingAllocator = .init(a, .{ .fail_index = 0 });
+    if (strcell.flat_storage_active) {
+        try std.testing.expectError(error.OutOfMemory, latin1.asWtf8(unavailable.allocator()));
+    } else {
+        const borrowed = try latin1.asWtf8(unavailable.allocator());
+        try std.testing.expectEqual(@intFromPtr(latin1.asStr().ptr), @intFromPtr(borrowed.ptr));
     }
     // Equal strings intern to the same cell → pointer-equal NaN-box words.
     try std.testing.expectEqual(ValueNB.str("dup").nb.bits(), ValueNB.str("dup").nb.bits());
