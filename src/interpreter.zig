@@ -49747,7 +49747,7 @@ fn responseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
         const sv = try self.getProperty(args[1], "status");
         if (!sv.isUndefined()) status = try self.toNumberV(sv);
         const stv = try self.getProperty(args[1], "statusText");
-        if (!stv.isUndefined()) status_text = try self.toStringV(stv);
+        if (!stv.isUndefined()) status_text = try self.toStringWtf8(stv);
         headers_init = try self.getProperty(args[1], "headers");
     }
     if (status < 200 or status > 599) return self.throwError("RangeError", "Failed to construct 'Response': The status provided is outside the range [200, 599].");
@@ -49837,7 +49837,7 @@ fn responseJsonStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value
         const sv = try self.getProperty(args[1], "status");
         if (!sv.isUndefined()) status = @intFromFloat(try self.toNumberV(sv));
         const stv = try self.getProperty(args[1], "statusText");
-        if (!stv.isUndefined()) status_text = try self.toStringV(stv);
+        if (!stv.isUndefined()) status_text = try self.toStringWtf8(stv);
         headers_init = try self.getProperty(args[1], "headers");
     }
     const headers = try fetchMakeHeaders(self, headers_init);
@@ -49848,7 +49848,7 @@ fn responseJsonStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn responseRedirectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const url_raw = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const url_raw = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const parsed = (try urlParse(self.arena, url_raw, null)) orelse return self.throwError("TypeError", "Failed to execute 'redirect' on 'Response': Invalid URL");
     const url = try urlSerialize(self.arena, parsed, false);
     var status: u32 = 302;

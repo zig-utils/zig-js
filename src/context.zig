@@ -15231,6 +15231,21 @@ test "DOMException canonicalizes persistent physical StringData" {
     )).asBool());
 }
 
+test "Response canonicalizes persistent and parsed physical StringData" {
+    try std.testing.expect((try evalIn(
+        \\const text = "caf\u00e9\u00ff";
+        \\let calls = 0;
+        \\const value = { toString() { calls++; return text; } };
+        \\const response = new Response(null, { statusText: value });
+        \\const json = Response.json({ ok: true }, { statusText: value });
+        \\const redirect = Response.redirect({
+        \\  toString() { calls++; return "https://example.com/" + text; }
+        \\});
+        \\response.statusText === text && json.statusText === text && calls === 3 &&
+        \\  redirect.headers.get("location") === "https://example.com/caf%C3%A9%C3%BF"
+    )).asBool());
+}
+
 test "DataView constructor observes NewTarget prototype side effects" {
     try std.testing.expect((try evalIn(
         \\var other = $262.createRealm().global;
