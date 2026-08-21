@@ -48229,10 +48229,10 @@ pub fn formDataNativeBlobPointer(input: Value) ?*anyopaque {
     return input.asObj().private_data;
 }
 
-pub fn formDataFilename(input: Value) ?[]const u8 {
+pub fn formDataFilename(self: *Interpreter, input: Value) EvalError!?[]const u8 {
     if (!blobIsFile(input)) return null;
     const filename = input.asObj().getOwn("\x00filename") orelse return "";
-    return if (filename.isString()) filename.asStr() else "";
+    return if (filename.isString()) try filename.asWtf8(self.arena) else "";
 }
 fn installFormData(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;

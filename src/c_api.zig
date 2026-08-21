@@ -11734,7 +11734,10 @@ export fn DOMFormData__forEach(
             const encoded = privateEncodedFromValue(context, current_value);
             break :blob_token @ptrFromInt(encoded.asCellAddress() catch return);
         };
-        const filename = interp.formDataFilename(current_value) orelse "";
+        const filename = (interp.formDataFilename(&machine, current_value) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        }) orelse "";
         const filename_view = privateBorrowedZigStringView(group, filename) catch return;
         cb(callback_context, &name_view, blob_pointer, &filename_view, 1);
     }

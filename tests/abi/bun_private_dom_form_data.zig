@@ -126,7 +126,7 @@ pub fn main() void {
     var native_blob_sentinel: usize = 0xB00B_374;
     const native_blob: *anyopaque = @ptrCast(&native_blob_sentinel);
     const blob_name_bytes = "file";
-    const filename_bytes = "fixture.bin";
+    const filename_bytes = "caf\xe9.bin";
     var blob_name = zigString(blob_name_bytes);
     var filename = zigString(filename_bytes);
     WebCore__DOMFormData__appendBlob(form, context, &blob_name, native_blob, &filename);
@@ -147,7 +147,7 @@ pub fn main() void {
         !zigStringEquals(each.entries[1].value, "two words") or
         !each.entries[3].is_blob or each.entries[3].blob != native_blob or
         !zigStringEquals(each.entries[3].name, "file") or
-        !zigStringEquals(each.entries[3].filename, "fixture.bin"))
+        !zigStringEquals(each.entries[3].filename, filename_bytes))
         fail("Bun DOMFormData forEach projection mismatch");
 
     const empty = WebCore__DOMFormData__create(context);
