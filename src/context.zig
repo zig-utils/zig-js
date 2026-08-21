@@ -22735,13 +22735,13 @@ test "bytecode admission inventory retains exact runtime reasons" {
         \\globalThis.generatorCompound = function* generatorCompound() { var holder = { value: 1 }; yield (holder.value += 1); };
         \\globalThis.generatorUpdate = function* generatorUpdate() { var holder = { value: 1 }; return holder[yield "key"]++; };
         \\globalThis.generatorTagged = function* generatorTagged(holder) { return holder[yield "key"]`a${yield "value"}b`; };
-        \\globalThis.generatorRejected = function* generatorRejected() { var holder = {}; yield holder?.value; };
+        \\globalThis.generatorRejected = function* generatorRejected() { return class extends Base {}; };
         \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
         \\globalThis.asyncLogical = async function asyncLogical() { var holder = {}; return holder.value ??= 1; };
         \\globalThis.asyncCompound = async function asyncCompound() { var holder = { value: 1 }; return holder.value += 1; };
         \\globalThis.asyncUpdate = async function asyncUpdate() { var holder = { value: 1 }; return ++holder[await Promise.resolve("value")]; };
         \\globalThis.asyncTagged = async function asyncTagged(holder) { return holder[await Promise.resolve("tag")]`a${await Promise.resolve(1)}b`; };
-        \\globalThis.asyncRejected = async function asyncRejected() { var holder = {}; return holder?.value; };
+        \\globalThis.asyncRejected = async function asyncRejected() { return class extends Base {}; };
     );
     _ = try ctx.evaluate(
         \\globalThis.templateDefault = function templateDefault(value = 1) { return value; };
@@ -22902,6 +22902,80 @@ test "forced tree-walker and required bytecode agree on nullish coalescing" {
     try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
     try std.testing.expectEqual(@as(u64, 1), tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker));
     try std.testing.expectEqual(@as(u64, 1), bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled));
+}
+
+test "forced tree-walker and required bytecode agree on optional chains" {
+    const source =
+        \\var optionalLog = "";
+        \\var optionalKeyHits = 0;
+        \\var optionalArgHits = 0;
+        \\var optionalGetterHits = 0;
+        \\var optionalCallHits = 0;
+        \\var optionalProxyGets = 0;
+        \\var optionalProxy;
+        \\function optionalKey() { optionalKeyHits = optionalKeyHits + 1; optionalLog = optionalLog + "k"; return "method"; }
+        \\function optionalArg() { optionalArgHits = optionalArgHits + 1; optionalLog = optionalLog + "a"; return 9; }
+        \\var optionalTarget = {
+        \\  get method() {
+        \\    optionalGetterHits = optionalGetterHits + 1;
+        \\    optionalLog = optionalLog + "g";
+        \\    return function(value) {
+        \\      optionalCallHits = optionalCallHits + 1;
+        \\      optionalLog = optionalLog + (this === optionalProxy ? "c" : "x");
+        \\      return { value: value };
+        \\    };
+        \\  }
+        \\};
+        \\optionalProxy = new Proxy(optionalTarget, {
+        \\  get: function(target, key) { optionalProxyGets = optionalProxyGets + 1; optionalLog = optionalLog + "p"; return target[key]; }
+        \\});
+        \\function optionalAbsent(base) {
+        \\  var absentRead = base?.[optionalKey()]?.value;
+        \\  var absentCall = base?.method?.(optionalArg());
+        \\  return absentRead === undefined && absentCall === undefined;
+        \\}
+        \\function optionalLive() {
+        \\  var chained = optionalProxy?.[optionalKey()]?.(optionalArg())?.value;
+        \\  var missing = optionalProxy?.missing?.(optionalArg());
+        \\  var parenthesized = (optionalProxy?.method)(optionalArg());
+        \\  var outerShort = (null?.method)?.(optionalArg());
+        \\  var continued = optionalProxy?.method(optionalArg()).value;
+        \\  return chained === 9 && missing === undefined && parenthesized.value === 9 && outerShort === undefined && continued === 9;
+        \\}
+        \\function optionalTerminated() {
+        \\  var before = optionalArgHits;
+        \\  try { (null?.method)(optionalArg()); } catch (error) { return error.name + ":" + (optionalArgHits - before); }
+        \\  return "no error";
+        \\}
+        \\var optionalEvalMarker = "global";
+        \\function optionalIndirectEval() { var optionalEvalMarker = "local"; return eval?.("optionalEvalMarker"); }
+        \\function optionalTail(fn, count) { "use strict"; return count === 0 ? fn?.() : optionalTail(fn, count - 1); }
+        \\function optionalTailTarget() { return 17; }
+        \\optionalAbsent(null) && optionalLive() && optionalTerminated() === "TypeError:1" &&
+        \\  optionalIndirectEval() === "global" &&
+        \\  optionalKeyHits === 1 && optionalArgHits === 4 && optionalGetterHits === 3 && optionalCallHits === 3 && optionalProxyGets === 4 &&
+        \\  optionalLog === "kpgacppgacpgaca";
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    const tree_result = try tree_ctx.evaluate(source);
+    const bytecode_result = try bytecode_ctx.evaluate(source);
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    try std.testing.expect((try tree_ctx.evaluate("optionalTail(optionalTailTarget, 20) === 17 && optionalTail(null, 20) === undefined")).asBool());
+    try std.testing.expect((try bytecode_ctx.evaluate("optionalTail(optionalTailTarget, 20000) === 17 && optionalTail(null, 20000) === undefined")).asBool());
+    try std.testing.expect(tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker) > 0);
+    try std.testing.expect(bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled) > 0);
 }
 
 test "forced tree-walker and required bytecode agree on member logical assignment" {
@@ -23086,6 +23160,47 @@ test "generator and async bytecode preserve super tagged template references" {
     const after = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(before.count(.generator_compiled) + 1, after.count(.generator_compiled));
     try std.testing.expectEqual(before.count(.async_compiled) + 1, after.count(.async_compiled));
+}
+
+test "generator and async bytecode preserve optional chains across suspension" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_jit = false });
+    defer ctx.destroy();
+    const before = ctx.bytecodeAdmissionSnapshot();
+    _ = try ctx.evaluate(
+        \\var optionalSuspendLog = "";
+        \\var optionalSuspendHolder = {
+        \\  marker: "receiver",
+        \\  get method() {
+        \\    optionalSuspendLog = optionalSuspendLog + "g";
+        \\    return function(value) { optionalSuspendLog = optionalSuspendLog + (this === optionalSuspendHolder ? "c" : "x"); return { value: value }; };
+        \\  }
+        \\};
+        \\function* optionalGenerated(base) { return base?.[yield "key"]?.(yield "argument")?.value; }
+        \\function optionalAsyncKey() { optionalSuspendLog = optionalSuspendLog + "k"; return Promise.resolve("method"); }
+        \\function optionalAsyncArgument() { optionalSuspendLog = optionalSuspendLog + "a"; return Promise.resolve(13); }
+        \\async function optionalAwaited(base) { return base?.[await optionalAsyncKey()]?.(await optionalAsyncArgument())?.value; }
+        \\var optionalPresentIterator = optionalGenerated(optionalSuspendHolder);
+        \\var optionalPresentFirst = optionalPresentIterator.next();
+        \\var optionalPresentSecond = optionalPresentIterator.next("method");
+        \\var optionalPresentThird = optionalPresentIterator.next(12);
+        \\var optionalAbsentIterator = optionalGenerated(null);
+        \\var optionalAbsentFirst = optionalAbsentIterator.next();
+        \\var optionalAwaitedPresent = "pending";
+        \\var optionalAwaitedAbsent = "pending";
+        \\optionalAwaited(optionalSuspendHolder).then(function(value) { optionalAwaitedPresent = value; });
+        \\optionalAwaited(null).then(function(value) { optionalAwaitedAbsent = value; });
+    );
+    try std.testing.expect((try ctx.evaluate(
+        \\drainMicrotasks();
+        \\optionalPresentFirst.value === "key" && optionalPresentFirst.done === false &&
+        \\optionalPresentSecond.value === "argument" && optionalPresentSecond.done === false &&
+        \\optionalPresentThird.value === 12 && optionalPresentThird.done === true &&
+        \\optionalAbsentFirst.value === undefined && optionalAbsentFirst.done === true &&
+        \\optionalAwaitedPresent === 13 && optionalAwaitedAbsent === undefined && optionalSuspendLog === "gckgac"
+    )).asBool());
+    const after = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(before.count(.template_generator_compiled) + 1, after.count(.template_generator_compiled));
+    try std.testing.expectEqual(before.count(.template_async_compiled) + 1, after.count(.template_async_compiled));
 }
 
 test "plain and generator bytecode preserve super method call references" {

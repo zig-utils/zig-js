@@ -7220,8 +7220,18 @@ pub const Interpreter = struct {
     fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool) EvalError!Value {
         if (callee_node.* == .optional_chain and callee_node.optional_chain.* == .member) {
             const m = callee_node.optional_chain.member;
-            const recv = try self.eval(m.object);
-            if (m.optional and (recv.isNull() or recv.isUndefined())) return error.OptShortCircuit;
+            const recv_opt: ?Value = self.eval(m.object) catch |err|
+                if (err == error.OptShortCircuit) null else return err;
+            if (recv_opt == null or (m.optional and (recv_opt.?.isNull() or recv_opt.?.isUndefined()))) {
+                // Parentheses terminate the inner chain. Its absent Reference is
+                // the ordinary value undefined: an outer optional call skips its
+                // arguments, while an ordinary call evaluates them and then
+                // throws for calling undefined. Do not leak OptShortCircuit past
+                // the wrapper or accidentally retain the pre-short-circuit base.
+                if (optional) return error.OptShortCircuit;
+                return self.callValueWithThis(Value.undef(), try self.evalArgs(arg_nodes), Value.undef());
+            }
+            const recv = recv_opt.?;
             const key = try self.memberKey(m.property, m.computed);
             if (optional) {
                 const method = try self.getProperty(recv, key);

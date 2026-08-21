@@ -3021,6 +3021,7 @@ pub const Compiler = struct {
                 self.chunk.patchToHere(to_else);
                 try self.compileTailExpr(c.alternate);
             },
+            .optional_chain => |inner| try self.compileOptionalChain(inner, true),
             .tagged_template => |t| try self.compileTaggedTemplate(node, t.tag, t.exprs, true),
             else => {
                 try self.compileExpr(node);
@@ -3061,10 +3062,206 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
             return;
         }
+        if (c.callee.* == .optional_chain and c.callee.optional_chain.* == .member) {
+            try self.compileParenthesizedOptionalMemberReference(c.callee.optional_chain.member);
+            _ = try self.chunk.emit(.swap, 0);
+            for (c.args) |arg| try self.compileExpr(arg);
+            _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+            return;
+        }
         const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
         try self.compileExpr(c.callee);
         for (c.args) |arg| try self.compileExpr(arg);
         _ = try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len));
+    }
+
+    const OptionalExit = struct {
+        instruction: usize,
+        /// Operands owned by this chain at the optional point. Values below
+        /// these belong to the surrounding expression and must survive the
+        /// short circuit unchanged.
+        cleanup: u8,
+    };
+
+    fn emitOptionalExit(
+        self: *Compiler,
+        exits: *std.ArrayListUnmanaged(OptionalExit),
+        cleanup: u8,
+    ) CompileError!void {
+        const instruction = try self.chunk.emit(.jump_if_nullish_peek, 0);
+        try exits.append(self.arena, .{ .instruction = instruction, .cleanup = cleanup });
+    }
+
+    /// Complete an optional-chain control-flow region. The fallthrough path
+    /// already has `result_arity` operands; every nullish exit discards only the
+    /// values owned by the chain and synthesizes the same result shape. This is
+    /// compile-time jump patching over the ordinary operand stack, not runtime
+    /// exception/scratch state.
+    fn finishOptionalRegion(
+        self: *Compiler,
+        exits: []const OptionalExit,
+        result_arity: u8,
+    ) CompileError!void {
+        if (exits.len == 0) return;
+
+        const skip_cleanup = try self.chunk.emit(.jump, 0);
+        var targets: [3]?usize = .{ null, null, null };
+        var joins: [3]?usize = .{ null, null, null };
+        for (exits) |exit| {
+            std.debug.assert(exit.cleanup > 0 and exit.cleanup < targets.len);
+            if (targets[exit.cleanup] != null) continue;
+            targets[exit.cleanup] = self.chunk.here();
+            for (0..exit.cleanup) |_| _ = try self.chunk.emit(.pop, 0);
+            for (0..result_arity) |_| _ = try self.chunk.emit(.load_undefined, 0);
+            joins[exit.cleanup] = try self.chunk.emit(.jump, 0);
+        }
+        self.chunk.patchToHere(skip_cleanup);
+        for (exits) |exit| self.chunk.patchTo(exit.instruction, targets[exit.cleanup].?);
+        for (joins) |join| if (join) |instruction| self.chunk.patchToHere(instruction);
+    }
+
+    fn finishOptionalTailRegion(self: *Compiler, exits: []const OptionalExit) CompileError!void {
+        var targets: [3]?usize = .{ null, null, null };
+        for (exits) |exit| {
+            std.debug.assert(exit.cleanup > 0 and exit.cleanup < targets.len);
+            if (targets[exit.cleanup] != null) continue;
+            targets[exit.cleanup] = self.chunk.here();
+            for (0..exit.cleanup) |_| _ = try self.chunk.emit(.pop, 0);
+            _ = try self.chunk.emit(.ret_undef, 0);
+        }
+        for (exits) |exit| self.chunk.patchTo(exit.instruction, targets[exit.cleanup].?);
+    }
+
+    fn compileOptionalChain(self: *Compiler, inner: *Node, is_tail: bool) CompileError!void {
+        var exits: std.ArrayListUnmanaged(OptionalExit) = .empty;
+        if (is_tail and inner.* == .call) {
+            try self.compileOptionalCall(inner.call, &exits, true);
+            try self.finishOptionalTailRegion(exits.items);
+            return;
+        }
+
+        try self.compileOptionalValue(inner, &exits);
+        if (is_tail) {
+            _ = try self.chunk.emit(.ret, 0);
+            try self.finishOptionalTailRegion(exits.items);
+        } else {
+            try self.finishOptionalRegion(exits.items, 1);
+        }
+    }
+
+    /// Lower one node on an unparenthesized optional-chain spine. Recursive
+    /// calls are limited to member bases and call callees: computed keys and
+    /// arguments are ordinary nested expressions, and a nested optional_chain
+    /// wrapper therefore correctly terminates the outer chain at parentheses.
+    fn compileOptionalValue(
+        self: *Compiler,
+        node: *Node,
+        exits: *std.ArrayListUnmanaged(OptionalExit),
+    ) CompileError!void {
+        switch (node.*) {
+            .member => |member| {
+                try self.compileOptionalValue(member.object, exits);
+                if (member.optional) try self.emitOptionalExit(exits, 1);
+                if (member.computed) |key| {
+                    try self.compileExpr(key);
+                    _ = try self.chunk.emit(.get_index, 0);
+                } else {
+                    _ = try self.chunk.emit(.get_prop, try self.addMemberName(member.property));
+                }
+            },
+            .call => |call| try self.compileOptionalCall(call, exits, false),
+            else => try self.compileExpr(node),
+        }
+    }
+
+    /// Leave `[receiver, method]` on the operand stack. The member's base is
+    /// checked before a computed key only for `?.[`; ordinary computed access
+    /// retains its existing key-expression-before-RequireObjectCoercible order.
+    fn compileOptionalMemberReference(
+        self: *Compiler,
+        member: anytype,
+        exits: *std.ArrayListUnmanaged(OptionalExit),
+    ) CompileError!void {
+        try self.compileOptionalValue(member.object, exits);
+        if (member.optional) try self.emitOptionalExit(exits, 1);
+        _ = try self.chunk.emit(.dup, 0);
+        if (member.computed) |key| {
+            try self.compileExpr(key);
+            _ = try self.chunk.emit(.get_index, 0);
+        } else {
+            _ = try self.chunk.emit(.get_prop, try self.addMemberName(member.property));
+        }
+    }
+
+    /// Parentheses terminate short-circuit propagation but preserve a member
+    /// Reference for call `this` binding. Normalize the inner chain to two
+    /// operands so `(base?.method)()` still calls with `this = base`, while a
+    /// nullish base becomes an ordinary call of undefined (and therefore throws)
+    /// unless the outer call is itself optional.
+    fn compileParenthesizedOptionalMemberReference(
+        self: *Compiler,
+        member: anytype,
+    ) CompileError!void {
+        var inner_exits: std.ArrayListUnmanaged(OptionalExit) = .empty;
+        try self.compileOptionalMemberReference(member, &inner_exits);
+        try self.finishOptionalRegion(inner_exits.items, 2);
+    }
+
+    fn compileOptionalSuperReference(self: *Compiler, member: anytype) CompileError!void {
+        // GetThisBinding precedes the computed key and the super lookup. Retain
+        // that exact receiver below the method so an optional call can inspect
+        // the method before argument evaluation and then bind the original this.
+        _ = try self.chunk.emit(.load_this, 0);
+        if (member.computed) |key| {
+            try self.compileExpr(key);
+            _ = try self.chunk.emit(.super_get_index, 0);
+        } else {
+            _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, member.property)));
+        }
+    }
+
+    fn compileOptionalCall(
+        self: *Compiler,
+        call: anytype,
+        exits: *std.ArrayListUnmanaged(OptionalExit),
+        is_tail: bool,
+    ) CompileError!void {
+        const spread = hasSpread(call.args);
+        if (is_tail and spread) return error.Unsupported;
+
+        var has_receiver = false;
+        if (call.callee.* == .member) {
+            try self.compileOptionalMemberReference(call.callee.member, exits);
+            has_receiver = true;
+        } else if (call.callee.* == .optional_chain and call.callee.optional_chain.* == .member) {
+            try self.compileParenthesizedOptionalMemberReference(call.callee.optional_chain.member);
+            has_receiver = true;
+        } else if (call.callee.* == .super_member) {
+            try self.compileOptionalSuperReference(call.callee.super_member);
+            has_receiver = true;
+        } else {
+            try self.compileOptionalValue(call.callee, exits);
+        }
+
+        if (call.optional) try self.emitOptionalExit(exits, if (has_receiver) 2 else 1);
+        if (has_receiver) _ = try self.chunk.emit(.swap, 0); // [method, receiver]
+
+        if (spread) {
+            try self.compileArgsArray(call.args);
+            _ = try self.chunk.emit(if (has_receiver) .call_with_this_spread else .call_spread, 0);
+            return;
+        }
+
+        for (call.args) |arg| try self.compileExpr(arg);
+        _ = try self.chunk.emit(
+            if (has_receiver)
+                if (is_tail) .tail_call_with_this else .call_with_this
+            else if (is_tail)
+                .tail_call
+            else
+                .call,
+            @intCast(call.args.len),
+        );
     }
 
     fn compileSuperCall(self: *Compiler, call: anytype, is_tail: bool) CompileError!void {
@@ -3376,6 +3573,16 @@ pub const Compiler = struct {
                         for (c.args) |arg| try self.compileExpr(arg);
                         _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
                     }
+                } else if (c.callee.* == .optional_chain and c.callee.optional_chain.* == .member) {
+                    try self.compileParenthesizedOptionalMemberReference(c.callee.optional_chain.member);
+                    _ = try self.chunk.emit(.swap, 0);
+                    if (spread) {
+                        try self.compileArgsArray(c.args);
+                        _ = try self.chunk.emit(.call_with_this_spread, 0);
+                    } else {
+                        for (c.args) |arg| try self.compileExpr(arg);
+                        _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
+                    }
                 } else {
                     // A direct `eval(...)` inside a slot-based function must see the
                     // function's locals (and correct `this`/private names), which
@@ -3396,6 +3603,7 @@ pub const Compiler = struct {
                     }
                 }
             },
+            .optional_chain => |inner| try self.compileOptionalChain(inner, false),
             .this_expr => _ = try self.chunk.emit(.load_this, 0),
             .new_target_expr => _ = try self.chunk.emit(.load_new_target, 0),
             .member => |m| {
@@ -4657,10 +4865,20 @@ test "compiler lowers ordinary spread calls and constructors across tiers" {
     try std.testing.expectEqual(@as(usize, 1), receiver_calls);
     try std.testing.expectEqual(@as(usize, 1), constructors);
 
-    for (program.program[2..5]) |declaration| switch (try Compiler.admitPlainFunction(arena.allocator(), declaration.func_decl)) {
+    for (program.program[2..4]) |declaration| switch (try Compiler.admitPlainFunction(arena.allocator(), declaration.func_decl)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
     };
+
+    const optional = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[4].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_optional_receiver_spread = false;
+    for (optional.code.items) |inst| if (inst.op == .call_with_this_spread) {
+        saw_optional_receiver_spread = true;
+    };
+    try std.testing.expect(saw_optional_receiver_spread);
 
     const declaration = program.program[5];
     if (declaration.* != .var_decl or declaration.var_decl.init == null)
@@ -4710,6 +4928,67 @@ test "compiler lowers ordinary spread calls and constructors across tiers" {
     try std.testing.expect(saw_program_call and saw_program_eval and saw_program_constructor);
 }
 
+test "compiler lowers optional chains across bytecode tiers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function plain(holder, key, args){ var read = holder?.[key]?.value; var called = holder?.method?.(...args); return read ?? called; } function tail(holder){ \"use strict\"; return holder?.method?.(); } function tailSpread(holder, args){ \"use strict\"; return holder?.method?.(...args); } function* generated(holder){ return holder?.[yield \"key\"]?.(yield \"argument\")?.value; } async function awaited(holder){ return holder?.[await Promise.resolve(\"method\")]?.(await Promise.resolve(1))?.value; }",
+    );
+    const program = try parser.parseProgram();
+    if (program.program.len != 5) return error.TestUnexpectedResult;
+
+    const plain = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var nullish_exits: usize = 0;
+    var receiver_spreads: usize = 0;
+    for (plain.code.items) |inst| switch (inst.op) {
+        .jump_if_nullish_peek => nullish_exits += 1,
+        .call_with_this_spread => receiver_spreads += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 4), nullish_exits);
+    try std.testing.expectEqual(@as(usize, 1), receiver_spreads);
+
+    const tail = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[1].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_tail_call = false;
+    var saw_short_return = false;
+    for (tail.code.items) |inst| switch (inst.op) {
+        .tail_call_with_this => saw_tail_call = true,
+        .ret_undef => saw_short_return = true,
+        else => {},
+    };
+    try std.testing.expect(saw_tail_call and saw_short_return);
+
+    switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[2].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    }
+    switch (try Compiler.admitGenerator(arena.allocator(), program.program[3].func_decl, true)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+    switch (try Compiler.admitAsync(arena.allocator(), program.program[4].func_decl, true)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var program_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "var optionalProgram = optionalProgramHolder?.method?.(1)?.value;",
+    );
+    const optional_program = try program_parser.parseProgram();
+    switch (try Compiler.admitProgram(arena.allocator(), optional_program)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+}
+
 test "compiler reports stable program admission reasons" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -4755,7 +5034,7 @@ test "compiler reports stable generator admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.expression_body, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ var holder = {}; yield holder?.value; }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ return class extends Base {}; }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitGenerator(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
@@ -4781,7 +5060,7 @@ test "compiler reports stable async admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.async_generator, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ var holder = {}; return holder?.value; }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ return class extends Base {}; }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitAsync(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
