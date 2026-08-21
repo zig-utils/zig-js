@@ -714,6 +714,17 @@ pub const InternTable = struct {
         return cell;
     }
 
+    /// Intern a representation-selected cell by its canonical StringData.
+    /// Canonical cells borrow their existing WTF-8 bytes. A flat-latin1 cell
+    /// needs a temporary canonical key because its physical bytes are not a
+    /// valid input to `intern` and can collide with unrelated WTF-8 content.
+    pub fn internCell(self: *InternTable, cell: *const StringCell) std.mem.Allocator.Error!*StringCell {
+        if (!isFlatLatin1(cell.hashState())) return self.intern(cell.bytes);
+        const canonical = try latin1FlatToWtf8(self.allocator, cell.bytes);
+        defer self.allocator.free(canonical);
+        return self.intern(canonical);
+    }
+
     /// Total interned cells across all shards (test/diagnostic helper).
     pub fn count(self: *InternTable) usize {
         var n: usize = 0;

@@ -26,7 +26,7 @@ pub fn encode(intern: *strcell.InternTable, v: Value) std.mem.Allocator.Error!Na
         .null => NanBox.encodeNull(),
         .boolean => NanBox.encodeBool(v.asBool()),
         .number => NanBox.encodeNumber(v.asNum()),
-        .string => NanBox.encodeString(@ptrCast(try intern.intern(v.asStr()))),
+        .string => NanBox.encodeString(@ptrCast(try intern.internCell(v.asStringCell()))),
         .object => NanBox.encodeObject(@ptrCast(v.asObj())),
     };
 }
@@ -101,7 +101,7 @@ test "valuebox: strings round-trip and equal strings share one cell" {
     defer value_arena.deinit();
     const va = value_arena.allocator();
 
-    const strs = [_][]const u8{ "", "hi", "a longer string with spaces", "ünïcödé ☃", "undefined" };
+    const strs = [_][]const u8{ "", "hi", "caf\xc3\xa9", "a longer string with spaces", "ünïcödé ☃", "undefined" };
     for (strs) |s| try expectRoundTrip(&intern, try Value.strAlloc(va, s));
 
     // The shared-string property: two equal-byte string Values encode to the
@@ -112,6 +112,21 @@ test "valuebox: strings round-trip and equal strings share one cell" {
     const n2 = try encode(&intern, try Value.strAlloc(va, &buf));
     try std.testing.expectEqual(n1.asPointer(), n2.asPointer());
     try std.testing.expect(n1.isString());
+
+    const canonical_latin1 = try intern.intern("caf\xc3\xa9");
+    const encoded_latin1 = try encode(&intern, Value.str("caf\xc3\xa9"));
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(canonical_latin1)), encoded_latin1.asPointer());
+}
+
+test "valuebox: string interning releases representation scratch on failure" {
+    const run = struct {
+        fn check(backing: std.mem.Allocator) !void {
+            var intern = strcell.InternTable.init(backing);
+            defer intern.deinit();
+            _ = try encode(&intern, Value.str("caf\xc3\xa9"));
+        }
+    }.check;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, run, .{});
 }
 
 test "valuebox: string literals encode with no allocator and decode equal" {
