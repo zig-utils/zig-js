@@ -3179,9 +3179,15 @@ pub const Compiler = struct {
                 try self.compileExpr(s.second);
             },
             .logical => |l| {
-                if (l.op == .nullish) return error.Unsupported; // distinct short-circuit predicate → tree-walk
                 try self.compileExpr(l.left);
-                const peek: bc.Op = if (l.op == .@"and") .jump_if_false_peek else .jump_if_true_peek;
+                const peek: bc.Op = switch (l.op) {
+                    .@"and" => .jump_if_false_peek,
+                    .@"or" => .jump_if_true_peek,
+                    // ECMA-262 CoalesceExpression evaluates the RHS only when
+                    // the left value is null or undefined; falsy values remain
+                    // on the stack as the expression result.
+                    .nullish => .jump_if_not_nullish_peek,
+                };
                 const short = try self.chunk.emit(peek, 0);
                 _ = try self.chunk.emit(.pop, 0);
                 try self.compileExpr(l.right);
@@ -4183,7 +4189,7 @@ test "compiler reports stable plain-function admission reasons" {
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var parser = try @import("parser.zig").Parser.init(arena.allocator(), "function f(value){ return value + 1; }");
+    var parser = try @import("parser.zig").Parser.init(arena.allocator(), "function f(value){ let result = value ?? 1; return result + 1; }");
     const program = try parser.parseProgram();
     const admission = try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl);
     switch (admission) {
@@ -4295,14 +4301,14 @@ test "compiler reports stable program admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.invalid_root, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "null ?? 1;");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "var holder = {}; holder.value ??= 1;");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitProgram(arena.allocator(), unsupported_program)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.unsupported_lowering, reason),
     }
 
-    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "1 + 2;");
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "null ?? 1;");
     const compiled_program = try compiled_parser.parseProgram();
     switch (try Compiler.admitProgram(arena.allocator(), compiled_program)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
@@ -4323,14 +4329,14 @@ test "compiler reports stable generator admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.expression_body, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ yield (null ?? 1); }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ var holder = {}; yield (holder.value ??= 1); }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitGenerator(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.unsupported_lowering, reason),
     }
 
-    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* compiled(){ yield 1; }");
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* compiled(){ yield (null ?? 1); }");
     const compiled_program = try compiled_parser.parseProgram();
     switch (try Compiler.admitGenerator(arena.allocator(), compiled_program.program[0].func_decl, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
@@ -4349,14 +4355,14 @@ test "compiler reports stable async admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.async_generator, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ return null ?? 1; }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ var holder = {}; return holder.value ??= 1; }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitAsync(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.unsupported_lowering, reason),
     }
 
-    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function compiled(){ return await 1; }");
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function compiled(){ return null ?? 1; }");
     const compiled_program = try compiled_parser.parseProgram();
     switch (try Compiler.admitAsync(arena.allocator(), compiled_program.program[0].func_decl, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),

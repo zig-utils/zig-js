@@ -22730,9 +22730,11 @@ test "bytecode admission inventory retains exact runtime reasons" {
         \\globalThis.notCandidate = function notCandidate() { return 1; };
         \\globalThis.shadowed = function shadowed(p) { "use strict"; { let p = 2; } return marker.x; };
         \\globalThis.generatorCompiled = function* generatorCompiled() { yield 1; };
-        \\globalThis.generatorRejected = function* generatorRejected() { yield (null ?? 1); };
+        \\globalThis.generatorNullish = function* generatorNullish() { yield (null ?? 1); };
+        \\globalThis.generatorRejected = function* generatorRejected() { var holder = {}; yield (holder.value ??= 1); };
         \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
-        \\globalThis.asyncRejected = async function asyncRejected() { return null ?? 1; };
+        \\globalThis.asyncNullish = async function asyncNullish() { return null ?? 1; };
+        \\globalThis.asyncRejected = async function asyncRejected() { var holder = {}; return holder.value ??= 1; };
     );
     _ = try ctx.evaluate(
         \\globalThis.templateDefault = function templateDefault(value = 1) { return value; };
@@ -22747,8 +22749,10 @@ test "bytecode admission inventory retains exact runtime reasons" {
         .{ .name = "notCandidate", .reason = .plain_policy_not_candidate },
         .{ .name = "shadowed", .reason = .plain_compiled },
         .{ .name = "generatorCompiled", .reason = .generator_compiled },
+        .{ .name = "generatorNullish", .reason = .generator_compiled },
         .{ .name = "generatorRejected", .reason = .generator_rejected_unsupported_lowering },
         .{ .name = "asyncCompiled", .reason = .async_compiled },
+        .{ .name = "asyncNullish", .reason = .async_compiled },
         .{ .name = "asyncRejected", .reason = .async_rejected_unsupported_lowering },
     };
     for (expected) |entry| {
@@ -22772,8 +22776,10 @@ test "bytecode admission inventory retains exact runtime reasons" {
     try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
     try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
     try std.testing.expectEqual(before.count(.plain_compiled) + 2, after.count(.plain_compiled));
+    try std.testing.expectEqual(before.count(.generator_compiled) + 2, after.count(.generator_compiled));
+    try std.testing.expectEqual(before.count(.async_compiled) + 2, after.count(.async_compiled));
     for (expected) |entry| {
-        if (entry.reason == .plain_compiled) continue;
+        if (entry.reason == .plain_compiled or entry.reason == .generator_compiled or entry.reason == .async_compiled) continue;
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
     }
     for (template_expected) |entry|
@@ -22851,6 +22857,37 @@ test "forced tree-walker and required bytecode preserve exact observable state" 
     try std.testing.expectEqual(@as(u64, 2), bytecode.count(.template_plain_compiled));
     try std.testing.expectEqual(@as(u64, 0), bytecode.count(.program_forced_tree_walker));
     try std.testing.expectEqual(@as(u64, 0), bytecode.count(.template_plain_fallback));
+}
+
+test "forced tree-walker and required bytecode agree on nullish coalescing" {
+    const source =
+        \\var nullishHits = 0;
+        \\function tierNullish(input) {
+        \\  var selected = input ?? (nullishHits = nullishHits + 1, 7);
+        \\  return selected;
+        \\}
+        \\var nullishValue = tierNullish(null);
+        \\var falsyValue = tierNullish(false);
+        \\nullishValue === 7 && falsyValue === false && nullishHits === 1;
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    const tree_result = try tree_ctx.evaluate(source);
+    const bytecode_result = try bytecode_ctx.evaluate(source);
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    try std.testing.expectEqual(@as(u64, 1), tree_ctx.bytecodeAdmissionSnapshot().count(.plain_forced_tree_walker));
+    try std.testing.expectEqual(@as(u64, 1), bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled));
 }
 
 test "parser-derived arguments use preserves forced execution tiers" {
@@ -23683,16 +23720,21 @@ test "required bytecode program retains async function templates" {
 
     _ = try ctx.evaluate(
         \\var observed = "pending";
+        \\var nullishObserved = "pending";
         \\var overrideRejection = async function() {
         \\  try { await Promise.reject("early"); }
         \\  finally { return "override"; }
         \\};
+        \\var asyncNullish = async function(value) { return value ?? 7; };
         \\overrideRejection().then(function(value) { observed = value; });
+        \\asyncNullish(false).then(function(left) {
+        \\  asyncNullish(null).then(function(right) { nullishObserved = left + ":" + right; });
+        \\});
     );
-    const result = try ctx.evaluate("drainMicrotasks(); observed;");
-    try std.testing.expectEqualStrings("override", result.asStr());
+    const result = try ctx.evaluate("drainMicrotasks(); observed + '|' + nullishObserved;");
+    try std.testing.expectEqualStrings("override|false:7", result.asStr());
     const inventory = ctx.bytecodeAdmissionSnapshot();
-    try std.testing.expectEqual(@as(u64, 1), inventory.count(.template_async_compiled));
+    try std.testing.expectEqual(@as(u64, 2), inventory.count(.template_async_compiled));
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_async_fallback));
 }
 

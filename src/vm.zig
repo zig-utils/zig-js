@@ -9125,6 +9125,39 @@ test "vm: arithmetic, precedence, comparison, logical" {
     try std.testing.expectEqualStrings("ab1", (try vmRun(a, "'a' + 'b' + 1")).asStr());
 }
 
+test "vm: nullish coalescing preserves values and exact evaluation order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\let hits = 0;
+        \\function rhs() { hits = hits + 1; return 9; }
+        \\let a = null ?? rhs();
+        \\let b = undefined ?? rhs();
+        \\let c = false ?? rhs();
+        \\let d = 0 ?? rhs();
+        \\let e = NaN ?? rhs();
+        \\let f = "" ?? rhs();
+        \\let order = "";
+        \\function left(value) { order = order + "l"; return value; }
+        \\function throwingRight() { order = order + "r"; throw 704; }
+        \\try { left(0) ?? throwingRight(); order = order + "s"; } catch (error) { order = "wrong"; }
+        \\try { left(null) ?? throwingRight(); } catch (error) { order = order + error; }
+        \\a === 9 && b === 9 && c === false && d === 0 && e !== e && f === "" && hits === 2 && order === "lslr704"
+    )).asBool());
+
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function* choose(value) { let resumed = yield "pause"; return value ?? resumed; }
+        \\let nullish = choose(null);
+        \\let first = nullish.next();
+        \\let second = nullish.next(7);
+        \\let falsy = choose(0);
+        \\let third = falsy.next();
+        \\let fourth = falsy.next(8);
+        \\first.value === "pause" && first.done === false && second.value === 7 && second.done === true &&
+        \\  third.value === "pause" && fourth.value === 0 && fourth.done === true
+    )).asBool());
+}
+
 test "vm: String relational comparison streams representation-aware UTF-16 units" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
