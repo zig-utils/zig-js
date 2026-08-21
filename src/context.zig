@@ -15378,23 +15378,91 @@ test "Request validates and preserves exposed RequestInit string state" {
 test "RequestInit converts supported members in Web IDL order" {
     try std.testing.expect((try evalIn(
         \\const order = [];
+        \\const controller = new AbortController();
         \\const init = {};
         \\const values = {
         \\  body: { toString() { order.push("to body"); return "x"; } },
         \\  cache: { toString() { order.push("to cache"); return "no-cache"; } },
         \\  credentials: { toString() { order.push("to credentials"); return "include"; } },
+        \\  duplex: { toString() { order.push("to duplex"); return "half"; } },
         \\  headers: undefined,
         \\  integrity: { toString() { order.push("to integrity"); return ""; } },
         \\  keepalive: false,
         \\  method: { toString() { order.push("to method"); return "POST"; } },
         \\  mode: { toString() { order.push("to mode"); return "cors"; } },
-        \\  redirect: { toString() { order.push("to redirect"); return "follow"; } }
+        \\  priority: { toString() { order.push("to priority"); return "high"; } },
+        \\  redirect: { toString() { order.push("to redirect"); return "follow"; } },
+        \\  referrer: { toString() { order.push("to referrer"); return "https://example.test/from"; } },
+        \\  referrerPolicy: { toString() { order.push("to referrerPolicy"); return "no-referrer"; } },
+        \\  signal: controller.signal,
+        \\  window: null
         \\};
-        \\for (const name of ["body", "cache", "credentials", "headers", "integrity", "keepalive", "method", "mode", "redirect"]) {
+        \\for (const name of ["body", "cache", "credentials", "duplex", "headers", "integrity", "keepalive", "method", "mode", "priority", "redirect", "referrer", "referrerPolicy", "signal", "window"]) {
         \\  Object.defineProperty(init, name, { get() { order.push("get " + name); return values[name]; } });
         \\}
-        \\new Request("https://example.test/", init);
-        \\order.join(",") === "get body,to body,get cache,to cache,get credentials,to credentials,get headers,get integrity,to integrity,get keepalive,get method,to method,get mode,to mode,get redirect,to redirect"
+        \\const input = { toString() { order.push("to input"); return "https://example.test/"; } };
+        \\new Request(input, init);
+        \\order.join(",") === "to input,get body,to body,get cache,to cache,get credentials,to credentials,get duplex,to duplex,get headers,get integrity,to integrity,get keepalive,get method,to method,get mode,to mode,get priority,to priority,get redirect,to redirect,get referrer,to referrer,get referrerPolicy,to referrerPolicy,get signal,get window"
+    )).asBool());
+}
+
+test "Request implements remaining RequestInit state and dependent signals" {
+    try std.testing.expect((try evalIn(
+        \\const url = "https://example.test/path";
+        \\const controller = new AbortController();
+        \\const reason = { code: 690 };
+        \\const request = new Request(url, {
+        \\  method: "POST", referrer: "https://example.test/from#fragment",
+        \\  referrerPolicy: "strict-origin", signal: controller.signal,
+        \\  duplex: "half", priority: "high", window: null
+        \\});
+        \\const copy = new Request(request);
+        \\const clone = request.clone();
+        \\const reset = new Request(request, { method: "POST" });
+        \\const detached = new Request(request, { signal: null });
+        \\const ignored = new Request(request, { unknown: true });
+        \\const before = request.referrer === "https://example.test/from#fragment" &&
+        \\  request.referrerPolicy === "strict-origin" && request.duplex === "half" &&
+        \\  request.signal instanceof AbortSignal && request.signal !== controller.signal &&
+        \\  copy.signal !== request.signal && clone.signal !== request.signal &&
+        \\  detached.signal !== request.signal && !detached.signal.aborted &&
+        \\  copy.referrer === request.referrer && clone.referrerPolicy === request.referrerPolicy &&
+        \\  reset.referrer === "about:client" && reset.referrerPolicy === "" &&
+        \\  ignored.referrer === request.referrer && !request.isReloadNavigation &&
+        \\  !request.isHistoryNavigation && !request.signal.aborted;
+        \\controller.abort(reason);
+        \\before && request.signal.aborted && request.signal.reason === reason &&
+        \\  copy.signal.reason === reason && clone.signal.reason === reason && reset.signal.reason === reason &&
+        \\  !detached.signal.aborted
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\const url = "https://example.test/";
+        \\function rejects(init) {
+        \\  try { new Request(url, init); return false; }
+        \\  catch (error) { return error instanceof TypeError; }
+        \\}
+        \\const validStream = new ReadableStream({ start(controller) { controller.close(); } });
+        \\const valid = new Request(url, { method: "POST", body: validStream, duplex: "half" });
+        \\rejects({ duplex: "full" }) && rejects({ priority: "urgent" }) &&
+        \\  rejects({ headers: null }) && rejects({ referrerPolicy: "invalid" }) && rejects({ signal: {} }) &&
+        \\  rejects({ window: false }) && rejects({ referrer: "/relative" }) &&
+        \\  rejects({ method: "POST", body: new ReadableStream({}) }) &&
+        \\  rejects({ method: "POST", body: new ReadableStream({}), duplex: "half", keepalive: true }) &&
+        \\  rejects({ method: "POST", body: new ReadableStream({}), duplex: "half", mode: "no-cors" }) &&
+        \\  valid.body === validStream && valid.duplex === "half" &&
+        \\  new Request(url, { referrer: "" }).referrer === "" &&
+        \\  new Request(url, { referrer: "about:client" }).referrer === "about:client" &&
+        \\  new Request(url, { referrer: "https://cross-origin.test/from" }).referrer === "about:client" &&
+        \\  new Request(url, { window: undefined }).url === url
+    )).asBool());
+    try std.testing.expect((try evalIn(
+        \\const stream = new ReadableStream({});
+        \\const source = new Request("https://example.test/", { method: "POST", body: stream, duplex: "half" });
+        \\const reader = source.body.getReader();
+        \\let lockedRejected = false;
+        \\try { new Request(source); } catch (error) { lockedRejected = error instanceof TypeError; }
+        \\const replaced = new Request(source, { method: "POST", body: "replacement" });
+        \\lockedRejected && !source.bodyUsed && replaced.body !== source.body
     )).asBool());
 }
 

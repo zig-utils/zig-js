@@ -46958,6 +46958,26 @@ pub fn signalAbort(self: *Interpreter, sig: *value.Object, reason: Value) EvalEr
     for (ordered.items) |item| try runAbortSignalSteps(self, item, r);
 }
 
+/// DOM's dependent-signal operation for the single-source case used by
+/// Request construction and cloning. The dependent is always a fresh signal;
+/// an already-aborted source synchronously transfers its exact reason.
+fn makeDependentAbortSignal(self: *Interpreter, source: ?*value.Object) EvalError!*value.Object {
+    const dependent = try makeAbortSignal(self);
+    const parent = source orelse return dependent;
+    if (abortSignalAborted(parent)) {
+        try signalAbort(self, dependent, abortSignalReason(parent));
+        return dependent;
+    }
+    const deps: *value.Object = blk: {
+        if (parent.getOwn("\x00ASdeps")) |stored| if (stored.isObject()) break :blk stored.asObj();
+        const created = (try self.newArray()).asObj();
+        try parent.setOwn(self.arena, self.root_shape, "\x00ASdeps", Value.obj(created));
+        break :blk created;
+    };
+    try deps.appendElement(self.arena, Value.obj(dependent));
+    return dependent;
+}
+
 pub fn abortSignalAborted(sig: *value.Object) bool {
     return sig.behavior.is_abort_signal and evBool(sig, "\x00ASaborted");
 }
@@ -49908,6 +49928,25 @@ fn requestStoredString(self: *Interpreter, source: *value.Object, slot: []const 
     const stored = source.getOwn(slot) orelse return fallback;
     return if (stored.isString()) stored.asWtf8(self.arena) else fallback;
 }
+fn requestParseReferrer(self: *Interpreter, input: []const u8, request_url: []const u8) EvalError![]const u8 {
+    if (input.len == 0) return "";
+    // This standalone engine has no implicit document base URL. Relative
+    // referrers therefore fail closed; embedders must supply an absolute URL.
+    const parsed = (try urlParse(self.arena, input, null)) orelse
+        return self.throwError("TypeError", "Invalid Request referrer URL");
+    if (std.mem.eql(u8, parsed.scheme, "about") and std.mem.eql(u8, parsed.path, "client"))
+        return "about:client";
+    // A standalone realm has no ambient browsing-context origin. Bind its
+    // synthetic Fetch settings to the Request URL's tuple origin and fail
+    // closed for opaque or cross-origin referrers.
+    const target = (try urlParse(self.arena, request_url, null)) orelse return "about:client";
+    const referrer_origin = try urlOrigin(self.arena, parsed);
+    const target_origin = try urlOrigin(self.arena, target);
+    if (std.mem.eql(u8, referrer_origin, "null") or
+        std.mem.eql(u8, target_origin, "null") or
+        !std.mem.eql(u8, referrer_origin, target_origin)) return "about:client";
+    return urlSerialize(self.arena, parsed, false);
+}
 fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -49922,15 +49961,19 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     var redirect: []const u8 = "follow";
     var integrity: []const u8 = "";
     var keepalive = false;
+    var referrer: []const u8 = "about:client";
+    var referrer_policy: []const u8 = "";
+    var priority: []const u8 = "auto";
     var headers_init: Value = Value.undef();
     var headers_override: ?*value.Object = null;
     var body_override: ?BodyExtract = null;
     var inherited_body: Value = Value.undef();
     var inherited_source: ?*value.Object = null;
+    var signal_source: ?*value.Object = null;
+    var input_url: ?[]const u8 = null;
     if (input.isObject() and input.asObj().getOwn("\x00Qurl") != null) {
         // Copy from an existing Request.
         const src = input.asObj();
-        if (fetchBodyIsUsed(src)) return self.throwError("TypeError", "Cannot construct a Request from a consumed body");
         url = try requestStoredString(self, src, "\x00Qurl", "");
         method = try requestStoredString(self, src, "\x00Qmethod", "GET");
         cache = try requestStoredString(self, src, "\x00Qcache", "default");
@@ -49939,59 +49982,175 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
         redirect = try requestStoredString(self, src, "\x00Qredirect", "follow");
         integrity = try requestStoredString(self, src, "\x00Qintegrity", "");
         keepalive = if (src.getOwn("\x00Qkeepalive")) |stored| stored.toBoolean() else false;
+        referrer = try requestStoredString(self, src, "\x00Qreferrer", "about:client");
+        referrer_policy = try requestStoredString(self, src, "\x00QreferrerPolicy", "");
+        priority = try requestStoredString(self, src, "\x00Qpriority", "auto");
+        if (src.getOwn("\x00Qsignal")) |stored| {
+            if (abortIsSignal(stored)) signal_source = stored.asObj();
+        }
         if (src.getOwn("\x00Qheaders")) |h| headers_init = h;
         inherited_body = fetchBodyValue(src);
         inherited_source = src;
     } else {
-        const parsed = (try urlParse(self.arena, try self.toStringWtf8(input), null)) orelse return self.throwError("TypeError", "Failed to construct 'Request': Invalid URL");
-        url = try urlSerialize(self.arena, parsed, false);
+        // RequestInfo is converted before RequestInit, but URL parsing belongs
+        // to the constructor algorithm after both arguments are converted.
+        input_url = try fdUSVString(self, input);
     }
     const init = if (args.len > 1) args[1] else Value.undef();
     if (!init.isUndefined() and !init.isNull() and !builtins.isRealObject(init))
         return self.throwError("TypeError", "RequestInit must be an object");
+    var init_nonempty = false;
+    var duplex_present = false;
+    var referrer_override: ?[]const u8 = null;
+    var referrer_policy_override: ?[]const u8 = null;
+    var window_present = false;
+    var window_value = Value.undef();
     if (builtins.isRealObject(init)) {
         // Web IDL dictionary conversion reads members lexicographically and
         // converts each value before observing the next property.
         const bv = try self.getProperty(init, "body");
-        if (!bv.isUndefined()) body_override = try fetchExtractBody(self, bv);
+        if (!bv.isUndefined()) {
+            init_nonempty = true;
+            if (!bv.isNull()) body_override = try fetchExtractBody(self, bv);
+        }
         const cv = try self.getProperty(init, "cache");
-        if (!cv.isUndefined()) cache = try requestEnum(self, cv, "cache", .{ "default", "no-store", "reload", "no-cache", "force-cache", "only-if-cached" });
+        if (!cv.isUndefined()) {
+            init_nonempty = true;
+            cache = try requestEnum(self, cv, "cache", .{ "default", "no-store", "reload", "no-cache", "force-cache", "only-if-cached" });
+        }
         const crv = try self.getProperty(init, "credentials");
-        if (!crv.isUndefined()) credentials = try requestEnum(self, crv, "credentials", .{ "omit", "same-origin", "include" });
+        if (!crv.isUndefined()) {
+            init_nonempty = true;
+            credentials = try requestEnum(self, crv, "credentials", .{ "omit", "same-origin", "include" });
+        }
+        const dv = try self.getProperty(init, "duplex");
+        if (!dv.isUndefined()) {
+            init_nonempty = true;
+            _ = try requestEnum(self, dv, "duplex", .{"half"});
+            duplex_present = true;
+        }
         const hv = try self.getProperty(init, "headers");
-        if (!hv.isUndefined()) headers_override = try fetchMakeHeaders(self, hv);
+        if (!hv.isUndefined()) {
+            init_nonempty = true;
+            if (!builtins.isRealObject(hv))
+                return self.throwError("TypeError", "RequestInit headers must be a HeadersInit object");
+            headers_override = try fetchMakeHeaders(self, hv);
+        }
         const iv = try self.getProperty(init, "integrity");
-        if (!iv.isUndefined()) integrity = try self.toStringWtf8(iv);
+        if (!iv.isUndefined()) {
+            init_nonempty = true;
+            integrity = try self.toStringWtf8(iv);
+        }
         const kv = try self.getProperty(init, "keepalive");
-        if (!kv.isUndefined()) keepalive = kv.toBoolean();
+        if (!kv.isUndefined()) {
+            init_nonempty = true;
+            keepalive = kv.toBoolean();
+        }
         const mv = try self.getProperty(init, "method");
-        if (!mv.isUndefined()) method = try requestByteString(self, mv);
+        if (!mv.isUndefined()) {
+            init_nonempty = true;
+            method = try requestByteString(self, mv);
+        }
         const mdv = try self.getProperty(init, "mode");
-        if (!mdv.isUndefined()) mode = try requestEnum(self, mdv, "mode", .{ "navigate", "same-origin", "no-cors", "cors" });
+        if (!mdv.isUndefined()) {
+            init_nonempty = true;
+            mode = try requestEnum(self, mdv, "mode", .{ "navigate", "same-origin", "no-cors", "cors" });
+        }
+        const pv = try self.getProperty(init, "priority");
+        if (!pv.isUndefined()) {
+            init_nonempty = true;
+            priority = try requestEnum(self, pv, "priority", .{ "high", "low", "auto" });
+        }
         const rdv = try self.getProperty(init, "redirect");
-        if (!rdv.isUndefined()) redirect = try requestEnum(self, rdv, "redirect", .{ "follow", "error", "manual" });
+        if (!rdv.isUndefined()) {
+            init_nonempty = true;
+            redirect = try requestEnum(self, rdv, "redirect", .{ "follow", "error", "manual" });
+        }
+        const rv = try self.getProperty(init, "referrer");
+        if (!rv.isUndefined()) {
+            init_nonempty = true;
+            referrer_override = try fdUSVString(self, rv);
+        }
+        const rpv = try self.getProperty(init, "referrerPolicy");
+        if (!rpv.isUndefined()) {
+            init_nonempty = true;
+            referrer_policy_override = try requestEnum(self, rpv, "referrerPolicy", .{
+                "",
+                "no-referrer",
+                "no-referrer-when-downgrade",
+                "same-origin",
+                "origin",
+                "strict-origin",
+                "origin-when-cross-origin",
+                "strict-origin-when-cross-origin",
+                "unsafe-url",
+            });
+        }
+        const sv = try self.getProperty(init, "signal");
+        if (!sv.isUndefined()) {
+            init_nonempty = true;
+            if (sv.isNull()) {
+                signal_source = null;
+            } else if (abortIsSignal(sv)) {
+                signal_source = sv.asObj();
+            } else {
+                return self.throwError("TypeError", "RequestInit signal must be an AbortSignal");
+            }
+        }
+        const wv = try self.getProperty(init, "window");
+        if (!wv.isUndefined()) {
+            init_nonempty = true;
+            window_present = true;
+            window_value = wv;
+        }
     }
-    method = try requestValidateMethod(self, method);
-    // Fetch Request constructor steps 17, 21, and 32 enforce these
-    // cross-member constraints only after Web IDL has converted the dictionary.
+    if (input_url) |raw| {
+        const parsed = (try urlParse(self.arena, raw, null)) orelse
+            return self.throwError("TypeError", "Failed to construct 'Request': Invalid URL");
+        url = try urlSerialize(self.arena, parsed, false);
+    }
+    if (window_present and !window_value.isNull())
+        return self.throwError("TypeError", "RequestInit window must be null");
+    if (init_nonempty) {
+        referrer = "about:client";
+        referrer_policy = "";
+    }
+    if (referrer_override) |configured| referrer = try requestParseReferrer(self, configured, url);
+    if (referrer_policy_override) |configured| referrer_policy = configured;
+    // Fetch Request constructor steps 17, 21, 25, and 32 retain their specified
+    // error order after Web IDL has converted the complete dictionary.
     if (std.mem.eql(u8, mode, "navigate")) return self.throwError("TypeError", "Request mode cannot be navigate");
     if (std.mem.eql(u8, cache, "only-if-cached") and !std.mem.eql(u8, mode, "same-origin"))
         return self.throwError("TypeError", "only-if-cached requires same-origin mode");
+    method = try requestValidateMethod(self, method);
+    const signal = try makeDependentAbortSignal(self, signal_source);
     if (std.mem.eql(u8, mode, "no-cors") and
         !std.mem.eql(u8, method, "GET") and
         !std.mem.eql(u8, method, "HEAD") and
         !std.mem.eql(u8, method, "POST"))
         return self.throwError("TypeError", "no-cors requires a CORS-safelisted method");
     const headers = headers_override orelse try fetchMakeHeaders(self, headers_init);
+    const has_body = body_override != null or (!inherited_body.isUndefined() and !inherited_body.isNull());
+    if ((std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "HEAD")) and has_body)
+        return self.throwError("TypeError", "Request with GET/HEAD method cannot have body");
+    const using_inherited_body = body_override == null and !inherited_body.isUndefined() and !inherited_body.isNull();
     const be = if (body_override) |configured| configured else if (!inherited_body.isUndefined()) blk: {
-        if (rsIsStream(inherited_body) and rsReader(inherited_body.asObj()) != null)
-            return self.throwError("TypeError", "Cannot construct a Request from a locked body");
         break :blk try fetchExtractBody(self, inherited_body);
     } else try fetchExtractBody(self, Value.undef());
-    if ((std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "HEAD")) and (be.bytes != null or be.stream != null))
-        return self.throwError("TypeError", "Request with GET/HEAD method cannot have body");
-    if (body_override == null and !inherited_body.isUndefined() and !inherited_body.isNull()) if (inherited_source) |source|
+    if (body_override != null and be.stream != null) {
+        const stream = be.stream.?.asObj();
+        if (keepalive) return self.throwError("TypeError", "keepalive Request cannot use a ReadableStream body");
+        if (rsHiddenBool(stream, "\x00rsDisturbed") or rsReader(stream) != null)
+            return self.throwError("TypeError", "Request body ReadableStream is unusable");
+        if (!duplex_present) return self.throwError("TypeError", "ReadableStream Request body requires duplex");
+    }
+    if (be.stream != null and !std.mem.eql(u8, mode, "same-origin") and !std.mem.eql(u8, mode, "cors"))
+        return self.throwError("TypeError", "ReadableStream Request body requires same-origin or cors mode");
+    if (using_inherited_body) if (inherited_source) |source| {
+        if (fetchBodyIsUsed(source) or (rsIsStream(inherited_body) and rsReader(inherited_body.asObj()) != null))
+            return self.throwError("TypeError", "Cannot construct a Request from an unusable body");
         try source.setOwn(self.arena, self.root_shape, "\x00QbodyUsed", Value.boolVal(true));
+    };
     if (be.ctype) |ct| {
         if (!try fetchHeadersHasName(self, headers, "content-type"))
             try headersAppendRaw(self, Value.obj(headers), Value.str("content-type"), try Value.strAlloc(self.arena, ct));
@@ -50011,6 +50170,10 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     try obj.setOwn(self.arena, rs, "\x00Qredirect", try Value.strAlloc(self.arena, redirect));
     try obj.setOwn(self.arena, rs, "\x00Qintegrity", try Value.strAlloc(self.arena, integrity));
     try obj.setOwn(self.arena, rs, "\x00Qkeepalive", Value.boolVal(keepalive));
+    try obj.setOwn(self.arena, rs, "\x00Qreferrer", try Value.strAlloc(self.arena, referrer));
+    try obj.setOwn(self.arena, rs, "\x00QreferrerPolicy", try Value.strAlloc(self.arena, referrer_policy));
+    try obj.setOwn(self.arena, rs, "\x00Qpriority", try Value.strAlloc(self.arena, priority));
+    try obj.setOwn(self.arena, rs, "\x00Qsignal", Value.obj(signal));
     return Value.obj(obj);
 }
 fn requestSlotGetter(comptime slot: []const u8) value.NativeFn {
@@ -50033,6 +50196,11 @@ fn requestCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     if (self.env.get("Request")) |constructor| if (constructor.isObject()) {
         if (constructor.asObj().getOwn("prototype")) |proto| if (proto.isObject()) obj.setProtoAtomic(proto.asObj());
     };
+    const source_signal: ?*value.Object = if (source.getOwn("\x00Qsignal")) |stored|
+        if (abortIsSignal(stored)) stored.asObj() else null
+    else
+        null;
+    const cloned_signal = try makeDependentAbortSignal(self, source_signal);
     inline for (.{
         "\x00Qurl",
         "\x00Qmethod",
@@ -50042,7 +50210,11 @@ fn requestCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         "\x00Qredirect",
         "\x00Qintegrity",
         "\x00Qkeepalive",
+        "\x00Qreferrer",
+        "\x00QreferrerPolicy",
+        "\x00Qpriority",
     }) |slot| try obj.setOwn(self.arena, self.root_shape, slot, source.getOwn(slot) orelse Value.undef());
+    try obj.setOwn(self.arena, self.root_shape, "\x00Qsignal", Value.obj(cloned_signal));
     try obj.setOwn(self.arena, self.root_shape, "\x00Qheaders", Value.obj(try fetchMakeHeaders(self, source.getOwn("\x00Qheaders") orelse Value.undef())));
     try obj.setOwn(self.arena, self.root_shape, "\x00QbodyUsed", Value.boolVal(false));
     try fetchStoreBody(self, obj, "\x00Qbody", try fetchCloneBody(self, source));
@@ -50109,8 +50281,32 @@ fn installFetchTypes(env: *Environment, rs: *Shape, object_proto: *value.Object)
     try setNativeGetter(a, rs, qp, "integrity", fetchSlotStrGetter("\x00Qintegrity", ""));
     try setNativeGetter(a, rs, qp, "keepalive", fetchBoolSlotGetter("\x00Qkeepalive"));
     try setNativeGetter(a, rs, qp, "destination", fetchSlotStrGetter("\x00__none", ""));
-    try setNativeGetter(a, rs, qp, "referrer", fetchSlotStrGetter("\x00__none2", "about:client"));
-    inline for (.{ "url", "method", "headers", "body", "bodyUsed", "cache", "credentials", "mode", "redirect", "integrity", "keepalive", "destination", "referrer" }) |g| {
+    try setNativeGetter(a, rs, qp, "referrer", fetchSlotStrGetter("\x00Qreferrer", "about:client"));
+    try setNativeGetter(a, rs, qp, "referrerPolicy", fetchSlotStrGetter("\x00QreferrerPolicy", ""));
+    try setNativeGetter(a, rs, qp, "isReloadNavigation", fetchBoolSlotGetter("\x00QreloadNavigation"));
+    try setNativeGetter(a, rs, qp, "isHistoryNavigation", fetchBoolSlotGetter("\x00QhistoryNavigation"));
+    try setNativeGetter(a, rs, qp, "signal", requestSlotGetter("\x00Qsignal"));
+    try setNativeGetter(a, rs, qp, "duplex", fetchSlotStrGetter("\x00__duplex", "half"));
+    inline for (.{
+        "url",
+        "method",
+        "headers",
+        "body",
+        "bodyUsed",
+        "cache",
+        "credentials",
+        "mode",
+        "redirect",
+        "integrity",
+        "keepalive",
+        "destination",
+        "referrer",
+        "referrerPolicy",
+        "isReloadNavigation",
+        "isHistoryNavigation",
+        "signal",
+        "duplex",
+    }) |g| {
         try qp.setAttr(a, g, .{ .enumerable = true, .configurable = true });
     }
     try setNative(a, rs, qp, "clone", 0, requestCloneFn);

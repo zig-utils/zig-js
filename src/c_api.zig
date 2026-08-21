@@ -33537,7 +33537,9 @@ test "Fetch Body preserves ReadableStream lifecycle" {
         \\  });
         \\});
         \\let requestStream407 = new ReadableStream({ start(c) { c.enqueue("request"); c.close(); } });
-        \\let request407 = new Request("https://example.test/", { method: "POST", body: requestStream407 });
+        \\let request407 = new Request("https://example.test/", {
+        \\  method: "POST", body: requestStream407, duplex: "half"
+        \\});
         \\__body407.requestIdentity = request407.body === requestStream407;
         \\request407.text().then(function (text) { __body407.request = text === "request" && request407.bodyUsed; });
         \\let cloneStream407 = new ReadableStream({ start(c) {
@@ -33551,7 +33553,9 @@ test "Fetch Body preserves ReadableStream lifecycle" {
         \\  __body407.cloneResponse = text === "cloned" && cloneResponse407.headers.get("x-clone") === "yes";
         \\});
         \\let requestCloneStream407 = new ReadableStream({ start(c) { c.enqueue("request-clone"); c.close(); } });
-        \\let requestCloneSource407 = new Request("https://example.test/", { method: "POST", body: requestCloneStream407 });
+        \\let requestCloneSource407 = new Request("https://example.test/", {
+        \\  method: "POST", body: requestCloneStream407, duplex: "half"
+        \\});
         \\let requestClone407 = requestCloneSource407.clone();
         \\requestCloneSource407.text().then(function (text) { __body407.requestCloneSource = text === "request-clone"; });
         \\requestClone407.text().then(function (text) { __body407.requestClone = text === "request-clone"; });
