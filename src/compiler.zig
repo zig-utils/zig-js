@@ -3188,9 +3188,20 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.pop, 0);
                 _ = try self.chunk.emit(.load_true, 0);
             },
-            // Identifier and SuperReference deletion depend on environment and
-            // GetThisBinding rules not represented by these property opcodes.
-            .identifier, .super_member => return error.Unsupported,
+            .super_member => |member| {
+                // Delete of a SuperReference always throws, but reference
+                // construction performs GetThisBinding before evaluating a
+                // computed key. The key is never coerced with ToPropertyKey.
+                if (member.computed) |key| {
+                    _ = try self.chunk.emit(.check_super_this, 0);
+                    try self.compileExpr(key);
+                    _ = try self.chunk.emit(.pop, 0);
+                }
+                _ = try self.chunk.emit(.delete_super, 0);
+            },
+            // Bare identifier deletion depends on Environment Record reference
+            // deletion rather than an object-property operation.
+            .identifier => return error.Unsupported,
             else => {
                 try self.compileExpr(target);
                 _ = try self.chunk.emit(.pop, 0);
@@ -5236,7 +5247,7 @@ test "compiler lowers property deletion across bytecode tiers" {
     defer arena.deinit();
     var parser = try @import("parser.zig").Parser.init(
         arena.allocator(),
-        "function plain(holder, key){ var named = delete holder.value; var computed = delete holder[key]; var optional = delete holder?.[key]?.value; var terminated = delete (holder?.value).nested; var nonref = delete sideEffect(); return named && computed && optional && terminated && nonref; } function* generated(holder){ \"use strict\"; return delete holder?.[yield \"key\"]; } async function awaited(holder){ \"use strict\"; return delete holder?.[await getKey()]; } function binding(name){ return delete name; } class Derived extends Base { method(){ return delete super.value; } }",
+        "function plain(holder, key){ var named = delete holder.value; var computed = delete holder[key]; var optional = delete holder?.[key]?.value; var terminated = delete (holder?.value).nested; var nonref = delete sideEffect(); return named && computed && optional && terminated && nonref; } function* generated(holder){ \"use strict\"; return delete holder?.[yield \"key\"]; } async function awaited(holder){ \"use strict\"; return delete holder?.[await getKey()]; } function binding(name){ return delete name; } class Derived extends Base { method(){ return delete super.value; } computed(){ return delete super[yieldKey()]; } }",
     );
     const program = try parser.parseProgram();
     if (program.program.len != 5) return error.TestUnexpectedResult;
@@ -5288,12 +5299,20 @@ test "compiler lowers property deletion across bytecode tiers" {
     if (declaration.* != .var_decl or declaration.var_decl.init == null)
         return error.TestUnexpectedResult;
     const class = declaration.var_decl.init.?;
-    if (class.* != .class_expr or class.class_expr.members.len != 1)
+    if (class.* != .class_expr or class.class_expr.members.len != 2)
         return error.TestUnexpectedResult;
-    const method = class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
-    switch (try Compiler.admitPlainFunction(arena.allocator(), method.function)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    for (class.class_expr.members) |member| {
+        const method = member.func orelse return error.TestUnexpectedResult;
+        switch (try Compiler.admitPlainFunction(arena.allocator(), method.function)) {
+            .compiled => |compiled| {
+                var saw_super_delete = false;
+                for (compiled.chunk.code.items) |inst| {
+                    if (inst.op == .delete_super) saw_super_delete = true;
+                }
+                try std.testing.expect(saw_super_delete);
+            },
+            .rejected => return error.TestUnexpectedResult,
+        }
     }
 
     var program_parser = try @import("parser.zig").Parser.init(

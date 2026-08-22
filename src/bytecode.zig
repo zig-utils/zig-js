@@ -405,6 +405,7 @@ pub const Op = enum(u8) {
     set_index, // pop value, pop key, pop object -> push value (after set)
     super_set_from, // operands a: name index, b: strict; pop value/base, [[Set]] with receiver = this, push value
     super_set_index_from, // operand a: strict; pop value/key/base, [[Set]] with receiver = this, push value
+    delete_super, // validate the SuperReference and throw its mandatory ReferenceError
     delete_prop, // operands a: name index, b: strict; pop object -> push [[Delete]] result
     delete_index, // operand a: strict; pop key, pop object -> push [[Delete]] result
     instance_of, // pop rhs, pop lhs -> push (lhs instanceof rhs)

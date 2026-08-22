@@ -23247,6 +23247,153 @@ test "required bytecode deletion survives generator and async suspension plus mo
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_async_fallback));
 }
 
+test "forced tree-walker and required bytecode agree on super deletion" {
+    const setup =
+        \\var superDeleteLog = "";
+        \\function superDeleteKey() {
+        \\  superDeleteLog = superDeleteLog + "e";
+        \\  return { toString: function() { superDeleteLog = superDeleteLog + "k"; return "value"; } };
+        \\}
+        \\function superDeleteThrow() { superDeleteLog = superDeleteLog + "x"; throw new RangeError("key"); }
+        \\class SuperDeleteBase {}
+        \\class SuperDeleteDerived extends SuperDeleteBase {
+        \\  named() { try { delete super.value; } catch (error) { return error.name; } return "none"; }
+        \\  computed() { try { delete super[superDeleteKey()]; } catch (error) { return error.name; } return "none"; }
+        \\  abrupt() { try { delete super[superDeleteThrow()]; } catch (error) { return error.name; } return "none"; }
+        \\}
+        \\class SuperDeleteUninitialized extends SuperDeleteBase {
+        \\  constructor() {
+        \\    var observed;
+        \\    try { delete super[superDeleteKey()]; } catch (error) { observed = error.name + ":" + superDeleteLog; }
+        \\    super();
+        \\    this.observed = observed;
+        \\  }
+        \\}
+        \\var superDeleteInstance = new SuperDeleteDerived();
+        \\function runSuperDeletes() {
+        \\  superDeleteLog = "";
+        \\  var named = superDeleteInstance.named(); var namedLog = superDeleteLog;
+        \\  superDeleteLog = "";
+        \\  var computed = superDeleteInstance.computed(); var computedLog = superDeleteLog;
+        \\  superDeleteLog = "";
+        \\  var abrupt = superDeleteInstance.abrupt(); var abruptLog = superDeleteLog;
+        \\  superDeleteLog = "";
+        \\  var uninitialized = new SuperDeleteUninitialized().observed; var uninitializedLog = superDeleteLog;
+        \\  Object.setPrototypeOf(SuperDeleteDerived.prototype, null); superDeleteLog = "";
+        \\  var nullBase = superDeleteInstance.computed(); var nullBaseLog = superDeleteLog;
+        \\  return named === "ReferenceError" && namedLog === "" &&
+        \\    computed === "ReferenceError" && computedLog === "e" &&
+        \\    abrupt === "RangeError" && abruptLog === "x" &&
+        \\    uninitialized === "ReferenceError:" && uninitializedLog === "" &&
+        \\    nullBase === "ReferenceError" && nullBaseLog === "e";
+        \\}
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+    });
+    defer bytecode_ctx.destroy();
+    _ = try tree_ctx.evaluate(setup);
+    _ = try bytecode_ctx.evaluate(setup);
+    const bytecode_before = bytecode_ctx.bytecodeAdmissionSnapshot();
+    tree_ctx.setBytecodeExecutionModeForTesting(.tree_walker);
+    bytecode_ctx.setBytecodeExecutionModeForTesting(.required);
+    const tree_execution_before = tree_ctx.tierAttributionSnapshot().execution;
+    const bytecode_execution_before = bytecode_ctx.tierAttributionSnapshot().execution;
+
+    const tree_result = try tree_ctx.evaluate("runSuperDeletes()");
+    const bytecode_result = try bytecode_ctx.evaluate("runSuperDeletes()");
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    const tree_execution_after = tree_ctx.tierAttributionSnapshot().execution;
+    const bytecode_execution_after = bytecode_ctx.tierAttributionSnapshot().execution;
+    try std.testing.expect(tree_execution_after.count(.tree_walker_entries) > tree_execution_before.count(.tree_walker_entries));
+    try std.testing.expect(bytecode_execution_after.count(.vm_entries) > bytecode_execution_before.count(.vm_entries));
+    const bytecode_after = bytecode_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(bytecode_before.count(.template_plain_fallback), bytecode_after.count(.template_plain_fallback));
+}
+
+test "resumable bytecode preserves super deletion across suspension and moving GC" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+    const before = ctx.bytecodeAdmissionSnapshot();
+
+    const first = try ctx.evaluate(
+        \\var suspendedSuperDeleteCoercions = 0;
+        \\var suspendedSuperDeleteKey = { toString: function() { suspendedSuperDeleteCoercions = suspendedSuperDeleteCoercions + 1; return "value"; } };
+        \\class SuspendedSuperDeleteBase {}
+        \\class SuspendedSuperDeleteDerived extends SuspendedSuperDeleteBase {
+        \\  *generated() { return delete super[yield "key"]; }
+        \\  async awaited() { return delete super[await Promise.resolve(suspendedSuperDeleteKey)]; }
+        \\  async *asyncGenerated() { return delete super[yield "key"]; }
+        \\}
+        \\globalThis.suspendedSuperDeleteIterator = new SuspendedSuperDeleteDerived().generated();
+        \\suspendedSuperDeleteIterator.next().value;
+    );
+    try std.testing.expectEqualStrings("key", first.asStr());
+    const compacted = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+    try std.testing.expect(compacted.moved_cells > 0);
+
+    try std.testing.expect((try ctx.evaluate(
+        \\var suspendedSuperDeleteGeneratedError = "none";
+        \\try { suspendedSuperDeleteIterator.next(suspendedSuperDeleteKey); }
+        \\catch (error) { suspendedSuperDeleteGeneratedError = error.name; }
+        \\suspendedSuperDeleteGeneratedError === "ReferenceError" && suspendedSuperDeleteCoercions === 0;
+    )).asBool());
+
+    _ = try ctx.evaluate(
+        \\globalThis.suspendedSuperDeleteAwaitedError = "pending";
+        \\new SuspendedSuperDeleteDerived().awaited().then(
+        \\  function() { suspendedSuperDeleteAwaitedError = "fulfilled"; },
+        \\  function(error) { suspendedSuperDeleteAwaitedError = error.name; }
+        \\);
+    );
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate(
+        \\drainMicrotasks();
+        \\suspendedSuperDeleteAwaitedError === "ReferenceError" && suspendedSuperDeleteCoercions === 0;
+    )).asBool());
+
+    _ = try ctx.evaluate(
+        \\globalThis.suspendedSuperDeleteAsyncIterator = new SuspendedSuperDeleteDerived().asyncGenerated();
+        \\globalThis.suspendedSuperDeleteAsyncFirst = "pending";
+        \\suspendedSuperDeleteAsyncIterator.next().then(function(result) {
+        \\  suspendedSuperDeleteAsyncFirst = result.value + ":" + result.done;
+        \\});
+    );
+    try std.testing.expect((try ctx.evaluate(
+        \\drainMicrotasks();
+        \\suspendedSuperDeleteAsyncFirst === "key:false";
+    )).asBool());
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate(
+        \\globalThis.suspendedSuperDeleteAsyncError = "pending";
+        \\suspendedSuperDeleteAsyncIterator.next(suspendedSuperDeleteKey).then(
+        \\  function() { suspendedSuperDeleteAsyncError = "fulfilled"; },
+        \\  function(error) { suspendedSuperDeleteAsyncError = error.name; }
+        \\);
+        \\drainMicrotasks();
+        \\suspendedSuperDeleteAsyncError === "ReferenceError" && suspendedSuperDeleteCoercions === 0;
+    )).asBool());
+
+    const after = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(before.count(.generator_compiled) + 2, after.count(.generator_compiled));
+    try std.testing.expectEqual(before.count(.async_compiled) + 1, after.count(.async_compiled));
+    try std.testing.expectEqual(before.count(.template_generator_fallback), after.count(.template_generator_fallback));
+    try std.testing.expectEqual(before.count(.template_async_fallback), after.count(.template_async_fallback));
+}
+
 test "forced tree-walker and required bytecode agree on member logical assignment" {
     const source =
         \\var logicalHolder = { value: null };
