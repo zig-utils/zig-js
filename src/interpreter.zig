@@ -34846,10 +34846,18 @@ fn arrayIteratorValue(self: *Interpreter, kind: usize, index: usize, elem: Value
     };
 }
 
-/// Map/Set iterator `next` over logical insertion serials. The iterator's
-/// property lock makes concurrent `next()` calls one atomic cursor advance;
-/// the collection's elements lock then snapshots one live result. Both locks
-/// are released before allocating the observable IteratorResult/entry array.
+/// Map/Set iterator `next` over logical insertion serials. The caller holds the
+/// iterator's property lock for the entire inspect-and-advance transaction
+/// (#643): a dispatch probe that read rare-state outside the lock raced peer
+/// threads' locked cursor-field stores once codegen materialized those contents
+/// into the probe. The collection's elements lock then snapshots one live
+/// result under the same critical section, and both locks are released before
+/// allocating the observable IteratorResult/entry array.
+///
+/// Synchronization ruling: every published cursor lives behind its owning
+/// iterator object's `property_lock` (per-activation writers, peer iterators
+/// unaffected); GC trace reads `source` through the backing lock and relocation
+/// rewrites it only at a world-stopped commit.
 fn collectionCursorIterNext(self: *Interpreter, iterator: *value.Object) value.HostError!Value {
     var done = false;
     var kind: u8 = 0;
@@ -34857,7 +34865,6 @@ fn collectionCursorIterNext(self: *Interpreter, iterator: *value.Object) value.H
     var entry_value: Value = Value.undef();
     var is_map = false;
 
-    iterator.lockProperties();
     const cursor = iterator.collectionIteratorState() orelse {
         iterator.unlockProperties();
         return self.throwError("TypeError", "next called on an incompatible receiver");
@@ -34936,7 +34943,17 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "next called on non-object");
     const o = this.asObj();
-    if (o.collectionIteratorState() != null) return collectionCursorIterNext(self, o);
+    // Inspecting and advancing a shared collection cursor is one atomic logical
+    // transaction (#643): the rare-state probe runs inside the same property
+    // lock critical section that guards every cursor-field store, so no
+    // toolchain can hoist a torn content read into the unlocked dispatch. The
+    // content-free tag pre-check keeps non-collection iterators (the hot array
+    // case) off the lock entirely; the tag is immutable once published.
+    if (o.hasCollectionIterator()) {
+        o.lockProperties();
+        if (o.collectionIteratorState() != null) return collectionCursorIterNext(self, o);
+        o.unlockProperties();
+    }
     // Brand check: a genuine Array/Map/Set/String iterator carries its `__src`
     // cursor slot as an OWN property. A bare object, a boxed primitive, the
     // iterator *prototype* itself, or `Object.create(anIterator)` (which only

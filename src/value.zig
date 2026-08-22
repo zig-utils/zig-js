@@ -3090,6 +3090,16 @@ pub const Object = struct {
         return &cold.rare.collection_iterator;
     }
 
+    /// Content-free cursor presence probe (#643). Reads only the atomically
+    /// published cold pointer and the immutable rare tag — never the cursor
+    /// fields themselves — so dispatch can skip the property-lock transaction
+    /// for non-collection iterators without re-introducing an unlocked read of
+    /// state that peer threads mutate behind that lock.
+    pub inline fn hasCollectionIterator(self: *const Object) bool {
+        const cold = self.coldState() orelse return false;
+        return cold.hasRare(.collection_iterator);
+    }
+
     /// GC-visible Object edges out of the WebAssembly rare states (issue #141).
     /// At most one wasm rare tag is active per object, so a single flat
     /// snapshot covers all of them; null/empty fields mark nothing.

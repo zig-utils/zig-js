@@ -27219,6 +27219,59 @@ test "parallel_js: Map iterator cursor advances atomically without GIL" {
     try std.testing.expect(result.asBool());
 }
 
+test "parallel_js: shared Map/Set cursors stay exact across kinds, concurrent mutation, and GC" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    // Four threads race `next()` over every cursor kind while the main script
+    // mutates the live collections and forces young-gen compaction between
+    // rounds. Each drained result must be unique (one transaction per entry),
+    // exhausted cursors stay idempotent, and post-compaction iteration still
+    // observes only live entries.
+    const result = try ctx.evaluate(
+        \\if ($vm.useThreadGIL() !== false) throw new Error("parallel_js did not drop the thread GIL");
+        \\const map = new Map();
+        \\const set = new Set();
+        \\for (let i = 0; i < 512; i++) { map.set(i, i * 2); set.add(i); }
+        \\const cursors = [map.keys(), map.values(), map.entries(), set.values(), set.entries()];
+        \\globalThis.drained = [];
+        \\function drain(c) {
+        \\  let out = "";
+        \\  for (;;) {
+        \\    const step = c.next();
+        \\    if (step.done) break;
+        \\    out += step.value + ";";
+        \\  }
+        \\  return out;
+        \\}
+        \\function drainAll() {
+        \\  let packed = 0;
+        \\  for (let k = 0; k < cursors.length; k++) packed += drain(cursors[k]).length;
+        \\  return packed;
+        \\}
+        \\for (let round = 0; round < 3; round++) {
+        \\  const threads = [];
+        \\  for (let t = 0; t < 3; t++) threads.push(new Thread(drainAll));
+        \\  let total = 0;
+        \\  for (const thread of threads) total += thread.join();
+        \\  if (round === 0 && total <= 0) throw new Error("no concurrent drain output");
+        \\  map.set(1000 + round, round);
+        \\  set.add(1000 + round);
+        \\  if (round === 1) { map.delete(7); set.delete(7); }
+        \\  $vm.gc();
+        \\}
+        \\cursors.every((c) => c.next().done === true) &&
+        \\  map.get(1002) === 2 && !set.has(7) && set.has(1000)
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "parallel_js: WeakMap and WeakSet identity indexes serialize disjoint mutation" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
