@@ -25004,6 +25004,129 @@ test "captured destructuring loop evaluation survives generator and async suspen
     try std.testing.expectEqual(@as(f64, 13), (try async_ctx.evaluate("asyncPatternResult")).asNum());
 }
 
+test "yield-aware object assignment rest preserves target and copy ordering" {
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .enable_gc = true,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    try std.testing.expectEqualStrings(
+        "member-target,member-copy,member-coerce,member-set,super-target,super-copy,super-coerce,super-set,null-copy,TypeError",
+        (try tree_ctx.evaluate(
+            \\var trace = [];
+            \\function memberTarget() {
+            \\  trace.push("member-target");
+            \\  return {set rest(value) { trace.push("member-set"); }};
+            \\}
+            \\var memberKey = {toString() { trace.push("member-coerce"); return "rest"; }};
+            \\var memberSource = {get tail() { gc(); trace.push("member-copy"); return 2; }};
+            \\({...memberTarget()[memberKey]} = memberSource);
+            \\class Base { set rest(value) { this.saved = value; trace.push("super-set"); } }
+            \\class Derived extends Base {
+            \\  assign(source, key) { ({...super[(trace.push("super-target"), gc(), key)]} = source); }
+            \\}
+            \\var superKey = {toString() { trace.push("super-coerce"); return "rest"; }};
+            \\var superSource = {get tail() { gc(); trace.push("super-copy"); return 5; }};
+            \\new Derived().assign(superSource, superKey);
+            \\var nullKey = {toString() { trace.push("null-coerce"); return "rest"; }};
+            \\var nullSource = {get tail() { trace.push("null-copy"); return 8; }};
+            \\try { ({...null[nullKey]} = nullSource); } catch (error) { trace.push(error.name); }
+            \\trace.join(",");
+        )).asStr(),
+    );
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .enable_gc = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    try std.testing.expectEqualStrings("key", (try ctx.evaluate(
+        \\globalThis.objectRestTrace = [];
+        \\globalThis.objectRestTail = 0;
+        \\function objectRestTarget() {
+        \\  return {set rest(value) { objectRestTail = value.tail; }};
+        \\}
+        \\function objectRestKey() {
+        \\  return {toString() { objectRestTrace.push("coerce"); return "rest"; }};
+        \\}
+        \\function* assignObjectRest(source, holder) {
+        \\  ({[(objectRestTrace.push("property"), yield "key")]: holder[(objectRestTrace.push("property-target"), "value")] = yield "default",
+        \\    ...objectRestTarget()[(objectRestTrace.push("target"), objectRestKey())]} = source);
+        \\  return holder.value + "|" + objectRestTail + "|" + objectRestTrace.join(",");
+        \\}
+        \\var objectRestSource = {get tail() { gc(); objectRestTrace.push("copy"); return 2; }};
+        \\var objectRestHolder = {};
+        \\var objectRestIterator = assignObjectRest(objectRestSource, objectRestHolder);
+        \\objectRestIterator.next().value;
+    )).asStr());
+    try std.testing.expectEqualStrings(
+        "default",
+        (try ctx.evaluate("objectRestIterator.next('missing').value")).asStr(),
+    );
+    try std.testing.expectEqualStrings(
+        "7|2|property,property-target,target,copy,coerce",
+        (try ctx.evaluate("objectRestIterator.next(7).value")).asStr(),
+    );
+
+    try std.testing.expectEqualStrings("default", (try ctx.evaluate(
+        \\function* assignIdentifierRest(source) {
+        \\  var value, rest;
+        \\  ({missing: value = yield "default", ...rest} = source);
+        \\  return value + rest.tail;
+        \\}
+        \\var objectRestIdentifierIterator = assignIdentifierRest({tail: 2});
+        \\objectRestIdentifierIterator.next().value;
+    )).asStr());
+    try std.testing.expectEqual(
+        @as(f64, 9),
+        (try ctx.evaluate("objectRestIdentifierIterator.next(7).value")).asNum(),
+    );
+
+    try std.testing.expectEqualStrings("rest-key", (try ctx.evaluate(
+        \\globalThis.objectRestYieldTail = 0;
+        \\function objectRestYieldTarget() {
+        \\  return {set slot(value) { objectRestYieldTail = value.tail; }};
+        \\}
+        \\function* assignYieldingRest(source) {
+        \\  ({...objectRestYieldTarget()[yield "rest-key"]} = source);
+        \\  return objectRestYieldTail;
+        \\}
+        \\var objectRestYieldIterator = assignYieldingRest({get tail() { gc(); return 3; }});
+        \\objectRestYieldIterator.next().value;
+    )).asStr());
+    try std.testing.expectEqual(
+        @as(f64, 3),
+        (try ctx.evaluate("objectRestYieldIterator.next('slot').value")).asNum(),
+    );
+
+    try std.testing.expectEqualStrings("default", (try ctx.evaluate(
+        \\objectRestTrace = [];
+        \\var objectRestBase = {
+        \\  set rest(value) { this.saved = value; objectRestTrace.push("set"); }
+        \\};
+        \\var objectRestDerived = {
+        \\  *assign(source) {
+        \\    var value;
+        \\    ({missing: value = yield "default", ...super[(objectRestTrace.push("target"), gc(), {
+        \\      toString() { objectRestTrace.push("coerce"); return "rest"; }
+        \\    })]} = source);
+        \\    return value + "|" + this.saved.tail + "|" + objectRestTrace.join(",");
+        \\  }
+        \\};
+        \\Object.setPrototypeOf(objectRestDerived, objectRestBase);
+        \\var objectRestSuperSource = {get tail() { gc(); objectRestTrace.push("copy"); return 5; }};
+        \\var objectRestSuperIterator = objectRestDerived.assign(objectRestSuperSource);
+        \\objectRestSuperIterator.next().value;
+    )).asStr());
+    try std.testing.expectEqualStrings(
+        "7|5|target,copy,coerce,set",
+        (try ctx.evaluate("objectRestSuperIterator.next(7).value")).asStr(),
+    );
+}
+
 test "catch destructuring binding survives generator and async suspension" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,

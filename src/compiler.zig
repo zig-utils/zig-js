@@ -221,6 +221,7 @@ fn nodeHasYield(node: *const ast.Node) bool {
                 if (pp.default) |d| if (nodeHasYield(d)) break :blk true;
                 if (nodeHasYield(pp.target)) break :blk true;
             }
+            if (p.rest) |rest| if (nodeHasYield(rest)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -2771,10 +2772,15 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.pop, 0);
     }
 
-    /// Pre-evaluate a member target's base (and computed key) into fresh temps,
-    /// BEFORE the iterator advances (the spec evaluates the reference first).
-    /// Returns the temp names, or null when `target` is not a member.
+    /// Pre-evaluate a member/super target's base (and computed key) into fresh
+    /// temps BEFORE the iterator advances or object-rest copying begins. Returns
+    /// null for identifier targets, which use the existing name-store path.
     const MemberRef = struct { obj: []const u8, key: ?[]const u8 };
+
+    const PatternAssignmentRef = union(enum) {
+        member: MemberRef,
+        super: CompiledSuperRef,
+    };
 
     /// Runtime class construction rewrites `#name` to its unique storage key
     /// before compiling method bodies. An unreplaced source name can still
@@ -2785,34 +2791,53 @@ pub const Compiler = struct {
             return error.Unsupported;
         return self.chunk.addName(try value_mod.encodeStringKey(self.arena, name));
     }
-    fn preEvalMemberRef(self: *Compiler, target: ?*Node) CompileError!?MemberRef {
+    fn preEvalPatternAssignmentRef(self: *Compiler, target: ?*Node) CompileError!?PatternAssignmentRef {
         const t = target orelse return null;
-        if (t.* != .member) return null;
-        const m = t.member;
-        const obj_tmp = try self.freshTemp();
-        try self.compileExpr(m.object);
-        try self.emitDefine(obj_tmp);
-        var key_tmp: ?[]const u8 = null;
-        if (m.computed) |ce| {
-            const kt = try self.freshTemp();
-            try self.compileExpr(ce);
-            try self.emitDefine(kt);
-            key_tmp = kt;
+        switch (t.*) {
+            .member => |m| {
+                const obj_tmp = try self.freshTemp();
+                try self.compileExpr(m.object);
+                try self.emitDefine(obj_tmp);
+                var key_tmp: ?[]const u8 = null;
+                if (m.computed) |ce| {
+                    const kt = try self.freshTemp();
+                    try self.compileExpr(ce);
+                    try self.emitDefine(kt);
+                    key_tmp = kt;
+                }
+                return .{ .member = .{ .obj = obj_tmp, .key = key_tmp } };
+            },
+            .super_member => return .{ .super = try self.compileSuperRef(t, false, false) },
+            else => return null,
         }
-        return .{ .obj = obj_tmp, .key = key_tmp };
     }
 
-    /// Store the value in temp `val` through an already-evaluated member ref.
-    fn storeMemberRef(self: *Compiler, target: *Node, ref: MemberRef, val: []const u8) CompileError!void {
-        const m = target.member;
-        try self.emitLoad(ref.obj); // [obj]
-        if (ref.key) |kt| {
-            try self.emitLoad(kt); // [obj, key]
-            try self.emitLoad(val); // [obj, key, val]
-            _ = try self.chunk.emit(.set_index, 0);
-        } else {
-            try self.emitLoad(val); // [obj, val]
-            _ = try self.chunk.emit(.set_prop, try self.addMemberName(m.property));
+    fn preEvalMemberRef(self: *Compiler, target: ?*Node) CompileError!?PatternAssignmentRef {
+        const t = target orelse return null;
+        if (t.* != .member) return null;
+        return self.preEvalPatternAssignmentRef(t);
+    }
+
+    /// Store `val` through an already-evaluated member or super Reference.
+    fn storePatternAssignmentRef(self: *Compiler, target: *Node, ref: PatternAssignmentRef, val: []const u8) CompileError!void {
+        switch (ref) {
+            .member => |member_ref| {
+                const m = target.member;
+                try self.emitLoad(member_ref.obj); // [obj]
+                if (member_ref.key) |kt| {
+                    try self.emitLoad(kt); // [obj, key]
+                    try self.emitLoad(val); // [obj, key, val]
+                    _ = try self.chunk.emit(.set_index, 0);
+                } else {
+                    try self.emitLoad(val); // [obj, val]
+                    _ = try self.chunk.emit(.set_prop, try self.addMemberName(m.property));
+                }
+            },
+            .super => |super_ref| {
+                try self.emitLoadSuperRefBase(super_ref);
+                try self.emitLoad(val);
+                try self.emitSetSuperRef(super_ref);
+            },
         }
         _ = try self.chunk.emit(.pop, 0); // discard the set result
     }
@@ -2904,7 +2929,7 @@ pub const Compiler = struct {
             // assign ev to the target
             if (elem.target) |t| {
                 if (mode == .assignment and t.* == .member) {
-                    try self.storeMemberRef(t, ref.?, ev);
+                    try self.storePatternAssignmentRef(t, ref.?, ev);
                 } else {
                     try self.compilePatternTarget(t, ev, mode);
                 }
@@ -2947,7 +2972,7 @@ pub const Compiler = struct {
             self.chunk.patchToHere(to_end);
             self.chunk.patchToHere(to_end2);
             if (mode == .assignment and rest_target.* == .member)
-                try self.storeMemberRef(rest_target, rref.?, ra)
+                try self.storePatternAssignmentRef(rest_target, rref.?, ra)
             else
                 try self.compilePatternTarget(rest_target, ra, mode);
         }
@@ -2956,31 +2981,38 @@ pub const Compiler = struct {
 
     /// `{ k0: t0 = d0, ... } = src` (assignment form, in a generator).
     fn compileObjectPattern(self: *Compiler, props: []const ast.ObjPatProp, rest: ?*ast.Node, src: []const u8, mode: PatternMode) CompileError!void {
-        if (mode == .assignment and rest != null) return error.Unsupported;
+        // Resolving a bare rest identifier inside `with` performs an observable
+        // HasBinding before CopyDataProperties. The bytecode name store would
+        // resolve it only afterward, so retain the exact interpreter fallback
+        // for that dynamic-environment corner until resolved binding references
+        // have an activation-owned representation.
+        if (mode == .assignment and self.environment_depth != 0) if (rest) |rest_target|
+            if (rest_target.* == .identifier) return error.Unsupported;
         try self.emitLoad(src);
         _ = try self.chunk.emit(.require_object_coercible, 0);
         var excluded: std.ArrayListUnmanaged([]const u8) = .empty;
         for (props) |prop| {
             // PropertyName (may be computed and yield), then the target reference.
-            const ref = if (mode == .assignment) try self.preEvalMemberRef(prop.target) else null;
-            const ev = try self.freshTemp();
-            // ev = src[key]
+            const key = try self.freshTemp();
             if (prop.key_expr) |ke| {
                 try self.compileExpr(ke);
                 _ = try self.chunk.emit(.to_property_key, 0);
-                const key = try self.freshTemp();
                 try self.emitDefine(key);
-                try excluded.append(self.arena, key);
-                try self.emitLoad(src);
-                try self.emitLoad(key);
-                _ = try self.chunk.emit(.get_index, 0);
             } else {
-                const key = try self.freshTemp();
                 const ci = try self.chunk.addConst(try Value.strAlloc(self.arena, try value_mod.encodeStringKey(self.arena, prop.key)));
                 _ = try self.chunk.emit(.load_const, ci);
                 try self.emitDefine(key);
-                try excluded.append(self.arena, key);
-                try self.emitLoad(src);
+            }
+            try excluded.append(self.arena, key);
+
+            const ref = if (mode == .assignment) try self.preEvalMemberRef(prop.target) else null;
+            const ev = try self.freshTemp();
+            // ev = src[key]
+            try self.emitLoad(src);
+            if (prop.key_expr != null) {
+                try self.emitLoad(key);
+                _ = try self.chunk.emit(.get_index, 0);
+            } else {
                 _ = try self.chunk.emit(.get_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, prop.key)));
             }
             try self.emitDefine(ev);
@@ -2994,17 +3026,30 @@ pub const Compiler = struct {
                 self.chunk.patchToHere(has_val);
             }
             if (mode == .assignment and prop.target.* == .member)
-                try self.storeMemberRef(prop.target, ref.?, ev)
+                try self.storePatternAssignmentRef(prop.target, ref.?, ev)
             else
                 try self.compilePatternTarget(prop.target, ev, mode);
         }
         if (rest) |rest_target| {
+            // RestDestructuringAssignmentEvaluation evaluates the assignment
+            // target before CopyDataProperties, but performs PutValue after the
+            // copy. Preserve the raw computed key across that interval so its
+            // expression runs before source getters while ToPropertyKey remains
+            // deferred to the eventual store. The activation-owned temps also
+            // precisely root the base/key across getter calls and moving GC.
+            const rest_ref = if (mode == .assignment)
+                try self.preEvalPatternAssignmentRef(rest_target)
+            else
+                null;
             try self.emitLoad(src);
             for (excluded.items) |key| try self.emitLoad(key);
             _ = try self.chunk.emit(.object_rest, @intCast(excluded.items.len));
             const rest_value = try self.freshTemp();
             try self.emitDefine(rest_value);
-            try self.compilePatternTarget(rest_target, rest_value, mode);
+            if (rest_ref) |ref|
+                try self.storePatternAssignmentRef(rest_target, ref, rest_value)
+            else
+                try self.compilePatternTarget(rest_target, rest_value, mode);
         }
     }
 

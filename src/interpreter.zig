@@ -13541,12 +13541,56 @@ pub const Interpreter = struct {
             }
         }
         if (rest) |rest_target| {
+            // RestDestructuringAssignmentEvaluation creates the target Reference
+            // before CopyDataProperties. Keep its base, raw computed key, and
+            // super base stable while source getters run; ToPropertyKey and the
+            // final PutValue deliberately remain after the copy.
+            var rest_recv: Value = Value.undef();
+            var rest_member: ?struct { property: []const u8, computed: bool, keyval: Value } = null;
+            var rest_super: ?struct { base: Value, property: []const u8, computed: bool, keyval: Value } = null;
+            if (!declare) switch (rest_target.*) {
+                .member => |member| {
+                    rest_recv = try self.eval(member.object);
+                    const keyval = if (member.computed) |key| try self.eval(key) else Value.undef();
+                    rest_member = .{ .property = member.property, .computed = member.computed != null, .keyval = keyval };
+                },
+                .super_member => |member| {
+                    _ = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                    if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                    const keyval = if (member.computed) |key| try self.eval(key) else Value.undef();
+                    // The key expression may collect and relocate the home
+                    // object. Re-read the interpreter-owned root before the
+                    // spec's subsequent GetSuperBase step.
+                    const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                    rest_super = .{
+                        .base = if (home.protoAtomic()) |base| Value.obj(base) else Value.nul(),
+                        .property = member.property,
+                        .computed = member.computed != null,
+                        .keyval = keyval,
+                    };
+                },
+                else => {},
+            };
             const rest_obj = try self.copyObjectRest(val, consumed.items);
             // A declaration binds the rest name; an assignment writes through the
             // target reference — which may be a member (`({...obj.y} = …)`), so it
             // runs a setter / honors a const binding like any other assignment.
             if (declare) {
                 try self.bindPattern(rest_target, rest_obj, true);
+            } else if (rest_member) |member| {
+                // PutValue checks the captured base before coercing the raw
+                // computed key. A nullish base therefore throws without running
+                // a user-defined toString after CopyDataProperties completes.
+                if (rest_recv.isNull() or rest_recv.isUndefined())
+                    return self.throwError("TypeError", "cannot set property of null or undefined");
+                const key = if (member.computed) try self.keyOf(member.keyval) else member.property;
+                try self.setMember(rest_recv, key, rest_obj);
+            } else if (rest_super) |super_ref| {
+                if (!super_ref.base.isObject()) return self.throwError("TypeError", "Cannot set property of null (super)");
+                const key = if (super_ref.computed) try self.keyOf(super_ref.keyval) else super_ref.property;
+                if (!try self.setMemberResult(super_ref.base, key, rest_obj, self.this_value)) {
+                    if (self.strict) return self.throwError("TypeError", "Cannot set property");
+                }
             } else {
                 try self.assignTo(rest_target, rest_obj);
             }
