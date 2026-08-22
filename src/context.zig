@@ -23354,6 +23354,110 @@ test "forced tree-walker and required bytecode agree on member update expression
     try std.testing.expectEqual(@as(u64, 3), bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled));
 }
 
+test "forced tree-walker and required bytecode agree on captured super writes" {
+    const setup =
+        \\var superWriteLog = "";
+        \\var superWriteMutate = false;
+        \\function superWriteKey() {
+        \\  superWriteLog = superWriteLog + "e";
+        \\  return { toString: function() { superWriteLog = superWriteLog + "k"; return "value"; } };
+        \\}
+        \\function superWriteRhs(value) { superWriteLog = superWriteLog + "r"; return value; }
+        \\class SuperWriteBase {}
+        \\Object.defineProperty(SuperWriteBase.prototype, "value", {
+        \\  configurable: true,
+        \\  get: function() {
+        \\    superWriteLog = superWriteLog + "g";
+        \\    if (superWriteMutate) Object.setPrototypeOf(SuperWriteDerived.prototype, SuperWriteOther.prototype);
+        \\    return this._value;
+        \\  },
+        \\  set: function(value) { superWriteLog = superWriteLog + "s"; this._value = value; }
+        \\});
+        \\class SuperWriteOther {}
+        \\Object.defineProperty(SuperWriteOther.prototype, "value", {
+        \\  get: function() { superWriteLog = superWriteLog + "o"; return this._value; },
+        \\  set: function(value) { superWriteLog = superWriteLog + "t"; this._value = value; }
+        \\});
+        \\class SuperWriteDerived extends SuperWriteBase {
+        \\  constructor() { super(); this._value = null; }
+        \\  direct(value) { return super[superWriteKey()] = superWriteRhs(value); }
+        \\  logical(value) { return super[superWriteKey()] ??= superWriteRhs(value); }
+        \\  compound(value) { return super[superWriteKey()] += superWriteRhs(value); }
+        \\  postfix() { return super.value++; }
+        \\  prefix() { return ++super.value; }
+        \\  captured(value) { return super.value += value; }
+        \\}
+        \\class SuperWriteReadOnlyBase { get value() { return 2; } }
+        \\class SuperWriteReadOnlyDerived extends SuperWriteReadOnlyBase { update() { return super.value++; } }
+        \\class SuperWriteNullDerived extends SuperWriteBase {
+        \\  direct(value) { return super[superWriteKey()] = superWriteRhs(value); }
+        \\}
+        \\var superWriteInstance = new SuperWriteDerived();
+        \\var superWriteReadOnlyInstance = new SuperWriteReadOnlyDerived();
+        \\var superWriteNullInstance = new SuperWriteNullDerived();
+        \\function runSuperWrites() {
+        \\  var instance = superWriteInstance;
+        \\  superWriteLog = "";
+        \\  var direct = instance.direct(4); var directLog = superWriteLog;
+        \\  instance._value = null; superWriteLog = ""; superWriteMutate = true;
+        \\  var logical = instance.logical(5); var logicalLog = superWriteLog;
+        \\  superWriteMutate = false; Object.setPrototypeOf(SuperWriteDerived.prototype, SuperWriteBase.prototype);
+        \\  superWriteLog = "";
+        \\  var shorted = instance.logical(6); var shortLog = superWriteLog;
+        \\  instance._value = 2; superWriteLog = "";
+        \\  var compound = instance.compound(3); var compoundLog = superWriteLog;
+        \\  instance._value = 5; superWriteLog = "";
+        \\  var postfix = instance.postfix(); var postfixLog = superWriteLog;
+        \\  instance._value = 6n; superWriteLog = "";
+        \\  var prefix = instance.prefix(); var prefixLog = superWriteLog;
+        \\  instance._value = 2; superWriteLog = ""; superWriteMutate = true;
+        \\  var captured = instance.captured(3); var capturedLog = superWriteLog; superWriteMutate = false;
+        \\  var strictError = false;
+        \\  try { superWriteReadOnlyInstance.update(); } catch (error) { strictError = error instanceof TypeError; }
+        \\  var nullInstance = superWriteNullInstance;
+        \\  Object.setPrototypeOf(SuperWriteNullDerived.prototype, null); superWriteLog = "";
+        \\  var nullError = false;
+        \\  try { nullInstance.direct(9); } catch (error) { nullError = error instanceof TypeError; }
+        \\  var nullLog = superWriteLog;
+        \\  return direct === 4 && directLog === "erks" && logical === 5 && logicalLog === "ekgrs" &&
+        \\    shorted === 5 && shortLog === "ekg" && compound === 5 && compoundLog === "ekgrs" &&
+        \\    postfix === 5 && postfixLog === "gs" && prefix === 7n && prefixLog === "gs" &&
+        \\    captured === 5 && capturedLog === "gs" && instance._value === 5 &&
+        \\    Object.getPrototypeOf(SuperWriteDerived.prototype) === SuperWriteOther.prototype &&
+        \\    strictError && nullError && nullLog === "er";
+        \\}
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+    });
+    defer bytecode_ctx.destroy();
+    _ = try tree_ctx.evaluate(setup);
+    _ = try bytecode_ctx.evaluate(setup);
+    const bytecode_before = bytecode_ctx.bytecodeAdmissionSnapshot();
+    tree_ctx.setBytecodeExecutionModeForTesting(.tree_walker);
+    bytecode_ctx.setBytecodeExecutionModeForTesting(.required);
+    const tree_execution_before = tree_ctx.tierAttributionSnapshot().execution;
+    const bytecode_execution_before = bytecode_ctx.tierAttributionSnapshot().execution;
+
+    const tree_result = try tree_ctx.evaluate("runSuperWrites()");
+    const bytecode_result = try bytecode_ctx.evaluate("runSuperWrites()");
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    const tree_execution_after = tree_ctx.tierAttributionSnapshot().execution;
+    const bytecode_execution_after = bytecode_ctx.tierAttributionSnapshot().execution;
+    try std.testing.expect(tree_execution_after.count(.tree_walker_entries) > tree_execution_before.count(.tree_walker_entries));
+    try std.testing.expect(bytecode_execution_after.count(.vm_entries) > bytecode_execution_before.count(.vm_entries));
+    const bytecode_after = bytecode_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(bytecode_before.count(.template_plain_fallback), bytecode_after.count(.template_plain_fallback));
+}
+
 test "forced tree-walker and required bytecode agree on computed tagged template references" {
     const source =
         \\var taggedLog = "";
@@ -23429,6 +23533,134 @@ test "generator and async bytecode preserve super tagged template references" {
     const after = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(before.count(.generator_compiled) + 1, after.count(.generator_compiled));
     try std.testing.expectEqual(before.count(.async_compiled) + 1, after.count(.async_compiled));
+}
+
+test "resumable bytecode preserves captured super writes across suspension" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    const before = ctx.bytecodeAdmissionSnapshot();
+    _ = try ctx.evaluate(
+        \\var capturedSuperLog = "";
+        \\var capturedSuperMutate = false;
+        \\class CapturedSuperBase {}
+        \\Object.defineProperty(CapturedSuperBase.prototype, "value", {
+        \\  get: function() {
+        \\    capturedSuperLog = capturedSuperLog + "g";
+        \\    if (capturedSuperMutate) Object.setPrototypeOf(CapturedSuperDerived.prototype, CapturedSuperOther.prototype);
+        \\    return this._value;
+        \\  },
+        \\  set: function(value) { capturedSuperLog = capturedSuperLog + "s"; this._value = value; }
+        \\});
+        \\class CapturedSuperOther {}
+        \\Object.defineProperty(CapturedSuperOther.prototype, "value", {
+        \\  get: function() { capturedSuperLog = capturedSuperLog + "o"; return this._value; },
+        \\  set: function(value) { capturedSuperLog = capturedSuperLog + "t"; this._value = value; }
+        \\});
+        \\class CapturedSuperDerived extends CapturedSuperBase {
+        \\  constructor(value) { super(); this._value = value; }
+        \\  *generated() { return super[yield "key"] += yield "rhs"; }
+        \\  async awaited() { return super[await Promise.resolve("value")] ??= await Promise.resolve(7); }
+        \\  async *asyncGenerated() { return super[yield "key"] += await Promise.resolve(2); }
+        \\  *generatedMatrix() {
+        \\    yield "resume";
+        \\    this._value = 1;
+        \\    var a = super.value = 2; var b = super["value"] = 3;
+        \\    this._value = null; var c = super.value ??= 4;
+        \\    this._value = null; var d = super["value"] ??= 5;
+        \\    var e = super.value += 1; var f = super["value"] += 2;
+        \\    var g = super.value++; var h = ++super["value"];
+        \\    return a === 2 && b === 3 && c === 4 && d === 5 && e === 6 && f === 8 && g === 8 && h === 10 && this._value === 10;
+        \\  }
+        \\  async awaitedMatrix() {
+        \\    await Promise.resolve();
+        \\    this._value = 1;
+        \\    var a = super.value = 2; var b = super["value"] = 3;
+        \\    this._value = null; var c = super.value ??= 4;
+        \\    this._value = null; var d = super["value"] ??= 5;
+        \\    var e = super.value += 1; var f = super["value"] += 2;
+        \\    var g = super.value++; var h = ++super["value"];
+        \\    return a === 2 && b === 3 && c === 4 && d === 5 && e === 6 && f === 8 && g === 8 && h === 10 && this._value === 10;
+        \\  }
+        \\  async *asyncGeneratedMatrix() {
+        \\    yield "resume";
+        \\    this._value = 1;
+        \\    var a = super.value = 2; var b = super["value"] = 3;
+        \\    this._value = null; var c = super.value ??= 4;
+        \\    this._value = null; var d = super["value"] ??= 5;
+        \\    var e = super.value += 1; var f = super["value"] += 2;
+        \\    var g = super.value++; var h = ++super["value"];
+        \\    return a === 2 && b === 3 && c === 4 && d === 5 && e === 6 && f === 8 && g === 8 && h === 10 && this._value === 10;
+        \\  }
+        \\}
+        \\var capturedSuperGenerated = new CapturedSuperDerived(4);
+        \\var capturedSuperIterator = capturedSuperGenerated.generated();
+        \\var capturedSuperFirst = capturedSuperIterator.next();
+        \\var capturedSuperSecond = capturedSuperIterator.next("value");
+        \\Object.setPrototypeOf(CapturedSuperDerived.prototype, CapturedSuperOther.prototype);
+        \\var capturedSuperThird = capturedSuperIterator.next(3);
+        \\Object.setPrototypeOf(CapturedSuperDerived.prototype, CapturedSuperBase.prototype);
+        \\var capturedSuperAwaited = new CapturedSuperDerived(null);
+        \\var capturedSuperAwaitedResult = "pending";
+        \\capturedSuperMutate = true;
+        \\capturedSuperAwaited.awaited().then(function(value) { capturedSuperAwaitedResult = value; });
+    );
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate(
+        \\drainMicrotasks();
+        \\capturedSuperFirst.value === "key" && capturedSuperFirst.done === false &&
+        \\capturedSuperSecond.value === "rhs" && capturedSuperSecond.done === false &&
+        \\capturedSuperThird.value === 7 && capturedSuperThird.done === true && capturedSuperGenerated._value === 7 &&
+        \\capturedSuperAwaitedResult === 7 && capturedSuperAwaited._value === 7 && capturedSuperLog === "gsgs"
+    )).asBool());
+
+    _ = try ctx.evaluate(
+        \\Object.setPrototypeOf(CapturedSuperDerived.prototype, CapturedSuperBase.prototype);
+        \\capturedSuperMutate = false;
+        \\var capturedSuperGeneratorMatrix = new CapturedSuperDerived(0);
+        \\var capturedSuperGeneratorMatrixIterator = capturedSuperGeneratorMatrix.generatedMatrix();
+        \\var capturedSuperGeneratorMatrixFirst = capturedSuperGeneratorMatrixIterator.next();
+        \\var capturedSuperGeneratorMatrixLast = capturedSuperGeneratorMatrixIterator.next();
+        \\var capturedSuperAwaitedMatrix = "pending";
+        \\new CapturedSuperDerived(0).awaitedMatrix().then(function(value) { capturedSuperAwaitedMatrix = value; });
+        \\var capturedSuperAsyncGeneratorMatrixIterator = new CapturedSuperDerived(0).asyncGeneratedMatrix();
+        \\var capturedSuperAsyncGeneratorMatrixFirst = "pending";
+        \\var capturedSuperAsyncGeneratorMatrixLast = "pending";
+        \\capturedSuperAsyncGeneratorMatrixIterator.next().then(function(result) { capturedSuperAsyncGeneratorMatrixFirst = result.value + ":" + result.done; });
+        \\drainMicrotasks();
+        \\capturedSuperAsyncGeneratorMatrixIterator.next().then(function(result) { capturedSuperAsyncGeneratorMatrixLast = result.value + ":" + result.done; });
+    );
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate(
+        \\drainMicrotasks();
+        \\capturedSuperGeneratorMatrixFirst.value === "resume" && capturedSuperGeneratorMatrixFirst.done === false &&
+        \\capturedSuperGeneratorMatrixLast.value === true && capturedSuperGeneratorMatrixLast.done === true &&
+        \\capturedSuperAwaitedMatrix === true &&
+        \\capturedSuperAsyncGeneratorMatrixFirst === "resume:false" && capturedSuperAsyncGeneratorMatrixLast === "true:true"
+    )).asBool());
+
+    _ = try ctx.evaluate(
+        \\Object.setPrototypeOf(CapturedSuperDerived.prototype, CapturedSuperBase.prototype);
+        \\capturedSuperLog = ""; capturedSuperMutate = true;
+        \\var capturedSuperAsyncGenerated = new CapturedSuperDerived(5);
+        \\var capturedSuperAsyncIterator = capturedSuperAsyncGenerated.asyncGenerated();
+        \\var capturedSuperAsyncFirst = "pending";
+        \\var capturedSuperAsyncLast = "pending";
+        \\capturedSuperAsyncIterator.next().then(function(result) { capturedSuperAsyncFirst = result.value + ":" + result.done; });
+        \\drainMicrotasks();
+        \\capturedSuperAsyncIterator.next("value").then(function(result) { capturedSuperAsyncLast = result.value + ":" + result.done; });
+    );
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate(
+        \\drainMicrotasks();
+        \\capturedSuperAsyncFirst === "key:false" && capturedSuperAsyncLast === "7:true" &&
+        \\capturedSuperAsyncGenerated._value === 7 && capturedSuperLog === "gs"
+    )).asBool());
+    const after = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(before.count(.generator_compiled) + 4, after.count(.generator_compiled));
+    try std.testing.expectEqual(before.count(.async_compiled) + 2, after.count(.async_compiled));
 }
 
 test "generator and async bytecode preserve optional chains across suspension" {

@@ -6698,6 +6698,33 @@ fn runChunk(
                 const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
                 try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), try propKey(vm, key), vm.this_value));
             },
+            .check_super_this => {
+                _ = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                if (!vm.this_initialized)
+                    return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+            },
+            .super_base => {
+                const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                if (!vm.this_initialized)
+                    return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                const parent = home.protoAtomic();
+                if (parent == null and inst.a != 0)
+                    return vm.throwError("TypeError", "Cannot read property of null (super)");
+                try stack.append(stack_alloc, if (parent) |object| Value.obj(object) else Value.nul());
+            },
+            .super_get_from => {
+                const parent = stack.pop().?;
+                if (!parent.isObject())
+                    return vm.throwError("TypeError", "Cannot read property of null (super)");
+                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(parent, chunk.names.items[inst.a], vm.this_value));
+            },
+            .super_get_index_from => {
+                const key = stack.pop().?;
+                const parent = stack.pop().?;
+                if (!parent.isObject())
+                    return vm.throwError("TypeError", "Cannot read property of null (super)");
+                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(parent, try propKey(vm, key), vm.this_value));
+            },
             .enter_block => {
                 const benv = try gc_mod.allocEnv(vm.arena);
                 vm.initEnvironment(benv, vm.env, false);
@@ -6807,6 +6834,25 @@ fn runChunk(
                     continue;
                 }
                 try vm.setMember(obj, try propKey(vm, key), v);
+                try stack.append(stack_alloc, v);
+            },
+            .super_set_from => {
+                const v = stack.pop().?;
+                const parent = stack.pop().?;
+                if (!parent.isObject())
+                    return vm.throwError("TypeError", "Cannot set property of null (super)");
+                if (!try vm.setMemberResult(parent, chunk.names.items[inst.a], v, vm.this_value) and inst.b != 0)
+                    return vm.throwError("TypeError", "Cannot set property");
+                try stack.append(stack_alloc, v);
+            },
+            .super_set_index_from => {
+                const v = stack.pop().?;
+                const key = stack.pop().?;
+                const parent = stack.pop().?;
+                if (!parent.isObject())
+                    return vm.throwError("TypeError", "Cannot set property of null (super)");
+                if (!try vm.setMemberResult(parent, try propKey(vm, key), v, vm.this_value) and inst.a != 0)
+                    return vm.throwError("TypeError", "Cannot set property");
                 try stack.append(stack_alloc, v);
             },
             .delete_prop => {
@@ -9140,6 +9186,89 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     tdz_marker.* = .{};
     var machine = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape, .tdz_marker = tdz_marker };
     return run(&machine, chunk, null);
+}
+
+test "vm: captured super references reject an uninitialized this binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    const home = try gc_mod.allocObj(allocator);
+    home.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+        .home_object = home,
+        .this_initialized = false,
+    };
+    const chunk = try allocator.create(Chunk);
+    chunk.* = Chunk.init(allocator);
+    _ = try chunk.emit(.check_super_this, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+
+    try std.testing.expectError(error.Throw, run(&machine, chunk, null));
+    try std.testing.expectEqualStrings("ReferenceError", machine.exception.asObj().errorName());
+}
+
+test "vm: captured super writes cache native rejection and preserve exact fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "class Derived extends Base { method(){ return super.value = 1; } }");
+    const program = try parser.parseProgram();
+    const declaration = program.program[0];
+    if (declaration.* != .var_decl or declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const class = declaration.var_decl.init.?;
+    if (class.* != .class_expr or class.class_expr.members.len != 1)
+        return error.TestUnexpectedResult;
+    const method = class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
+    if (method.* != .function) return error.TestUnexpectedResult;
+    const compiled = try Compiler.compilePlainFunction(allocator, method.function);
+
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    const parent = try gc_mod.allocObj(allocator);
+    parent.* = .{};
+    const home = try gc_mod.allocObj(allocator);
+    home.* = .{};
+    home.setProtoAtomic(parent);
+    const receiver = try gc_mod.allocObj(allocator);
+    receiver.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+        .home_object = home,
+        .this_value = Value.obj(receiver),
+        .jit_owner = &owner,
+    };
+    try machine.setMember(Value.obj(parent), "value", Value.num(0));
+    const native_hits_before = optimizer_native_hits.load(.monotonic);
+    const slots = try allocator.alloc(Value, compiled.local_count);
+    var frame = Frame{ .slots = slots, .parent = null };
+
+    for (0..10) |_| {
+        @memset(slots, Value.undef());
+        try std.testing.expectEqual(@as(f64, 1), (try run(&machine, compiled.chunk, &frame)).asNum());
+    }
+    try std.testing.expectEqual(jit.OptimizerTierState.rejected, compiled.chunk.optimizer_tier.state.load(.acquire));
+    try std.testing.expect(compiled.chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    try std.testing.expectEqual(@as(u64, 0), compiled.chunk.optimizer_tier.compileCount());
+    try std.testing.expect(compiled.chunk.tier.loadCode() == null);
+    try std.testing.expectEqual(native_hits_before, optimizer_native_hits.load(.monotonic));
 }
 
 test "vm: non-tail invocation generator spread preserves direct eval and method evaluation order" {

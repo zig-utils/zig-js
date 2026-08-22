@@ -386,6 +386,10 @@ pub const Op = enum(u8) {
     get_prop, // operand a: name index; pop object -> push object[name]
     super_get, // operand a: name index; push super.[name] (home_object.proto[name], receiver = this)
     super_get_index, // pop key; push super[key] (home_object.proto[key], receiver = this)
+    check_super_this, // validate the active home object and initialized this binding
+    super_base, // operand a: require non-null; push the current home-object prototype (or null)
+    super_get_from, // operand a: name index; pop captured base -> push base[name] with receiver = this
+    super_get_index_from, // pop key, captured base -> push base[key] with receiver = this
     enter_block, // push a declarative block Environment Record onto vm.env
     exit_block, // pop the innermost block/with environment off vm.env
     dispose_scope, // DisposeResources for the current Environment Record
@@ -399,6 +403,8 @@ pub const Op = enum(u8) {
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
     set_index, // pop value, pop key, pop object -> push value (after set)
+    super_set_from, // operands a: name index, b: strict; pop value/base, [[Set]] with receiver = this, push value
+    super_set_index_from, // operand a: strict; pop value/key/base, [[Set]] with receiver = this, push value
     delete_prop, // operands a: name index, b: strict; pop object -> push [[Delete]] result
     delete_index, // operand a: strict; pop key, pop object -> push [[Delete]] result
     instance_of, // pop rhs, pop lhs -> push (lhs instanceof rhs)

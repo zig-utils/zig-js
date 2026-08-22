@@ -3547,6 +3547,7 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.set_prop, ni);
                     }
                 },
+                .super_member => try self.compileSuperAssign(a),
                 // Destructuring assignment `[a,b] = v` / `{x} = v`. A pattern with
                 // no `yield` reuses the tree-walker via `bind_pattern` (proven,
                 // handles every edge case); a pattern that DOES embed `yield`
@@ -3567,7 +3568,11 @@ pub const Compiler = struct {
             },
             // Logical assignment on a member target must resolve the reference
             // once across the read, short-circuit, and possible write.
-            .logical_assign => |a| try self.compileMemberLogicalAssign(a),
+            .logical_assign => |a| switch (a.target.*) {
+                .member => try self.compileMemberLogicalAssign(a),
+                .super_member => try self.compileSuperLogicalAssign(a),
+                else => return error.Unsupported,
+            },
             .op_assign => |oa| switch (oa.target.*) {
                 // Identifier target: load the old value, apply the op, store back.
                 // (No `with` here — a function using `with` already falls back to
@@ -3579,7 +3584,7 @@ pub const Compiler = struct {
                     try self.emitStore(name);
                 },
                 .member => try self.compileMemberCompoundAssign(oa),
-                // Super needs a receiver-aware write operation.
+                .super_member => try self.compileSuperCompoundAssign(oa),
                 else => return error.Unsupported,
             },
             .conditional => |c| {
@@ -3835,7 +3840,7 @@ pub const Compiler = struct {
                 }
             },
             .member => try self.compileMemberUpdate(inc, prefix, target),
-            // Super needs a receiver-aware write operation.
+            .super_member => try self.compileSuperUpdate(inc, prefix, target),
             else => return error.Unsupported,
         }
     }
@@ -4054,6 +4059,117 @@ pub const Compiler = struct {
         property: []const u8,
     };
 
+    const CompiledSuperRef = struct {
+        base: []const u8,
+        key: ?[]const u8,
+        property: []const u8,
+    };
+
+    /// Resolve a SuperReference once. Computed references perform
+    /// GetThisBinding before evaluating the key, capture GetSuperBase after the
+    /// key expression, and optionally defer ToPropertyKey until PutValue (plain
+    /// assignment). Activation-owned temps preserve both facts across a
+    /// getter/RHS suspension without re-reading the mutable home prototype.
+    fn compileSuperRef(
+        self: *Compiler,
+        target: *Node,
+        require_base: bool,
+        coerce_key: bool,
+    ) CompileError!CompiledSuperRef {
+        if (self.mode == .program or target.* != .super_member)
+            return error.Unsupported;
+        const member = target.super_member;
+
+        var key: ?[]const u8 = null;
+        if (member.computed) |key_expr| {
+            _ = try self.chunk.emit(.check_super_this, 0);
+            try self.compileExpr(key_expr);
+            if (!coerce_key) {
+                const key_temp = try self.freshActivationTemp();
+                try self.emitDefineActivationTemp(key_temp);
+                key = key_temp;
+            }
+        }
+
+        _ = try self.chunk.emit(.super_base, @intFromBool(require_base));
+        const base = try self.freshActivationTemp();
+        try self.emitDefineActivationTemp(base);
+
+        if (member.computed != null and coerce_key) {
+            _ = try self.chunk.emit(.to_property_key, 0);
+            const key_temp = try self.freshActivationTemp();
+            try self.emitDefineActivationTemp(key_temp);
+            key = key_temp;
+        }
+        return .{ .base = base, .key = key, .property = member.property };
+    }
+
+    fn emitLoadSuperRefBase(self: *Compiler, ref: CompiledSuperRef) CompileError!void {
+        try self.emitLoad(ref.base);
+        if (ref.key) |key| try self.emitLoad(key);
+    }
+
+    fn emitGetSuperRef(self: *Compiler, ref: CompiledSuperRef) CompileError!void {
+        try self.emitLoadSuperRefBase(ref);
+        _ = try self.chunk.emit(
+            if (ref.key != null) .super_get_index_from else .super_get_from,
+            if (ref.key != null) 0 else try self.addMemberName(ref.property),
+        );
+    }
+
+    fn emitSetSuperRef(self: *Compiler, ref: CompiledSuperRef) CompileError!void {
+        _ = try self.chunk.emitAB(
+            if (ref.key != null) .super_set_index_from else .super_set_from,
+            if (ref.key != null) @intFromBool(self.is_strict) else try self.addMemberName(ref.property),
+            if (ref.key != null) 0 else @intFromBool(self.is_strict),
+        );
+    }
+
+    fn compileSuperAssign(self: *Compiler, assignment: anytype) CompileError!void {
+        // Assignment evaluates the SuperReference before the RHS but defers a
+        // computed ToPropertyKey until PutValue. Capture the raw key and base,
+        // then preserve the RHS while that one key coercion runs.
+        const ref = try self.compileSuperRef(assignment.target, false, false);
+        try self.compileExpr(assignment.value);
+        const result = try self.freshActivationTemp();
+        try self.emitDefineActivationTemp(result);
+        try self.emitLoadSuperRefBase(ref);
+        try self.emitLoad(result);
+        try self.emitSetSuperRef(ref);
+    }
+
+    fn compileSuperLogicalAssign(self: *Compiler, assignment: anytype) CompileError!void {
+        const ref = try self.compileSuperRef(assignment.target, true, true);
+        try self.emitGetSuperRef(ref);
+        const short = try self.chunk.emit(switch (assignment.op) {
+            .@"and" => .jump_if_false_peek,
+            .@"or" => .jump_if_true_peek,
+            .nullish => .jump_if_not_nullish_peek,
+        }, 0);
+
+        _ = try self.chunk.emit(.pop, 0);
+        try self.compileExpr(assignment.value);
+        const result = try self.freshActivationTemp();
+        try self.emitDefineActivationTemp(result);
+        try self.emitLoadSuperRefBase(ref);
+        try self.emitLoad(result);
+        try self.emitSetSuperRef(ref);
+        self.chunk.patchToHere(short);
+    }
+
+    fn compileSuperCompoundAssign(self: *Compiler, assignment: anytype) CompileError!void {
+        const ref = try self.compileSuperRef(assignment.target, true, true);
+        try self.emitGetSuperRef(ref);
+        try self.compileExpr(assignment.value);
+        _ = try self.chunk.emit(try compoundAssignmentOp(assignment.op), 0);
+
+        const result = try self.freshActivationTemp();
+        try self.emitDefineActivationTemp(result);
+        try self.emitLoadSuperRefBase(ref);
+        try self.emitLoad(result);
+        try self.emitSetSuperRef(ref);
+    }
+
     fn compileMemberRef(self: *Compiler, target: *Node) CompileError!CompiledMemberRef {
         // Program chunks have no frame or private activation environment. Until
         // #706 supplies program-local scratch, synthesized names would be shared
@@ -4166,6 +4282,31 @@ pub const Compiler = struct {
         try self.emitLoadMemberRefBase(ref);
         try self.emitLoad(updated);
         try self.emitSetMemberRef(ref);
+        if (!prefix) {
+            _ = try self.chunk.emit(.pop, 0);
+            try self.emitLoad(old.?);
+        }
+    }
+
+    fn compileSuperUpdate(self: *Compiler, inc: bool, prefix: bool, target: *Node) CompileError!void {
+        const ref = try self.compileSuperRef(target, true, true);
+        try self.emitGetSuperRef(ref);
+        _ = try self.chunk.emit(.to_numeric, 0);
+
+        var old: ?[]const u8 = null;
+        if (!prefix) {
+            const old_temp = try self.freshActivationTemp();
+            try self.emitDefineActivationTemp(old_temp);
+            try self.emitLoad(old_temp);
+            old = old_temp;
+        }
+        _ = try self.chunk.emit(if (inc) .inc else .dec, 0);
+        const updated = try self.freshActivationTemp();
+        try self.emitDefineActivationTemp(updated);
+
+        try self.emitLoadSuperRefBase(ref);
+        try self.emitLoad(updated);
+        try self.emitSetSuperRef(ref);
         if (!prefix) {
             _ = try self.chunk.emit(.pop, 0);
             try self.emitLoad(old.?);
@@ -4771,16 +4912,31 @@ test "compiler admits global-only class members and rejects frame captures" {
     }
 }
 
-test "compiler retains a causal barrier for super assignments and updates" {
-    const sources = [_][]const u8{
-        "class Derived extends Base { method(){ return super.value ??= 1; } }",
-        "class Derived extends Base { method(){ return super.value += 1; } }",
-        "class Derived extends Base { method(){ return super.value++; } }",
+test "compiler admits captured super assignments and updates" {
+    const cases = [_]struct { source: []const u8, set_op: bc.Op }{
+        .{ .source = "class Derived extends Base { method(){ return super.value = 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super[key()] = 1; } }", .set_op = .super_set_index_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value ??= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value &&= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value ||= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super[key()] += 1; } }", .set_op = .super_set_index_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value -= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value *= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value /= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value %= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value **= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value &= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value |= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value ^= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value <<= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value >>= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value >>>= 1; } }", .set_op = .super_set_from },
+        .{ .source = "class Derived extends Base { method(){ return super.value++; } }", .set_op = .super_set_from },
     };
-    for (sources) |source| {
+    for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        var parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
         const program = try parser.parseProgram();
         const declaration = program.program[0];
         if (declaration.* != .var_decl or declaration.var_decl.init == null)
@@ -4791,8 +4947,13 @@ test "compiler retains a causal barrier for super assignments and updates" {
         const method = class.class_expr.members[0].func.?;
         if (method.* != .function) return error.TestUnexpectedResult;
         switch (try Compiler.admitPlainFunction(arena.allocator(), method.function)) {
-            .compiled => return error.TestUnexpectedResult,
-            .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+            .compiled => |compiled| {
+                var saw_set = false;
+                for (compiled.chunk.code.items) |instruction|
+                    saw_set = saw_set or instruction.op == case.set_op;
+                try std.testing.expect(saw_set);
+            },
+            .rejected => return error.TestUnexpectedResult,
         }
     }
 }

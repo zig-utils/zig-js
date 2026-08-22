@@ -4286,6 +4286,10 @@ pub const Interpreter = struct {
                         break :blk new;
                     },
                     .super_member => |m| {
+                        // Logical assignment carries one SuperReference through
+                        // GetValue, the short-circuit decision, and PutValue. A
+                        // getter/RHS may mutate the method home's prototype, but
+                        // the eventual write still targets this captured base.
                         const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
                         if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
                         const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
@@ -4342,9 +4346,26 @@ pub const Interpreter = struct {
                         try self.setMember(obj, key, rhs);
                         break :blk rhs;
                     },
+                    .super_member => |m| {
+                        const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                        if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                        const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
+                        const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+                        const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
+                        const old = try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
+                        const short = switch (la.op) {
+                            .@"and" => !old.toBoolean(),
+                            .@"or" => old.toBoolean(),
+                            .nullish => !(old.isNull() or old.isUndefined()),
+                        };
+                        if (short) break :blk old;
+                        const rhs = try self.eval(la.value);
+                        if (!try self.setMemberResult(Value.obj(parent), key, rhs, self.this_value)) {
+                            if (self.strict) return self.throwError("TypeError", "Cannot set property");
+                        }
+                        break :blk rhs;
+                    },
                     else => {
-                        // super.x &&= …: the base (home object / `this`) is stable,
-                        // so a read followed by assignTo resolves it consistently.
                         const old = try self.eval(la.target);
                         const short = switch (la.op) {
                             .@"and" => !old.toBoolean(),
