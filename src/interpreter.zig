@@ -1428,8 +1428,87 @@ pub const ThisCell = struct {
 };
 
 pub const ImportMetaSlot = struct {
-    obj: ?*value.Object = null,
+    /// Module functions may be entered concurrently by shared-realm threads.
+    /// The published pointer is therefore acquire/release, while `init_lock`
+    /// serializes the first allocation so one declaring module has exactly one
+    /// observable (and one allocated) import.meta object.
+    obj: std.atomic.Value(?*value.Object) = .init(null),
+    init_lock: std.atomic.Mutex = .unlocked,
+
+    pub fn init(object: ?*value.Object) ImportMetaSlot {
+        return .{ .obj = .init(object) };
+    }
+
+    pub fn load(self: *const ImportMetaSlot) ?*value.Object {
+        return self.obj.load(.acquire);
+    }
+
+    pub fn publish(self: *ImportMetaSlot, object: *value.Object) void {
+        self.obj.store(object, .release);
+    }
+
+    fn lockInitialization(self: *ImportMetaSlot) void {
+        var spins: usize = 0;
+        while (!self.init_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
 };
+
+test "import.meta slot publishes one identity under concurrent first use" {
+    const lane_count = 8;
+    var slot = ImportMetaSlot{};
+    var machines: [lane_count]Interpreter = undefined;
+    var results: [lane_count]Value = undefined;
+    var threads: [lane_count]std.Thread = undefined;
+    var ready = std.atomic.Value(usize).init(0);
+    var start = std.atomic.Value(bool).init(false);
+
+    const Lane = struct {
+        fn run(machine: *Interpreter, shared_slot: *ImportMetaSlot, ready_count: *std.atomic.Value(usize), start_flag: *std.atomic.Value(bool), result: *Value) void {
+            machine.arena = std.testing.allocator;
+            machine.gc = null;
+            machine.import_meta_slot = shared_slot;
+            machine.import_meta_obj = null;
+            _ = ready_count.fetchAdd(1, .release);
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            result.* = machine.importMetaValue() catch unreachable;
+        }
+    };
+
+    for (&threads, &machines, &results) |*thread, *machine, *result|
+        thread.* = try std.Thread.spawn(.{}, Lane.run, .{ machine, &slot, &ready, &start, result });
+    while (ready.load(.acquire) != lane_count) std.atomic.spinLoopHint();
+    start.store(true, .release);
+    for (&threads) |*thread| thread.join();
+
+    const published = slot.load() orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.destroy(published);
+    for (results) |result| {
+        try std.testing.expect(result.isObject());
+        try std.testing.expectEqual(published, result.asObj());
+    }
+}
+
+test "import.meta slot retries cleanly after allocation failure" {
+    var slot = ImportMetaSlot{};
+    var machine: Interpreter = undefined;
+    var no_memory: [1]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
+    machine.arena = fixed.allocator();
+    machine.gc = null;
+    machine.import_meta_slot = &slot;
+    machine.import_meta_obj = null;
+
+    try std.testing.expectError(error.OutOfMemory, machine.importMetaValue());
+    try std.testing.expect(slot.load() == null);
+
+    machine.arena = std.testing.allocator;
+    const retried = try machine.importMetaValue();
+    const published = slot.load() orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.destroy(published);
+    try std.testing.expectEqual(published, retried.asObj());
+}
 
 /// Resolve a function's realm global once, when its closure is created. The
 /// ambient interpreter may currently be entered from another realm (notably
@@ -4303,7 +4382,7 @@ pub const Interpreter = struct {
 
             .await_expr => |a| try self.evalAwait(a.argument),
 
-            .import_meta => try self.evalImportMeta(),
+            .import_meta => try self.importMetaValue(),
             .import_call => |ic| try self.evalImportCall(ic.specifier, ic.options, ic.phase),
 
             .super_call => |sc| blk: {
@@ -7867,7 +7946,7 @@ pub const Interpreter = struct {
             std.mem.indexOf(u8, func.source, "eval") != null;
         self.tree_tail_call = null;
         self.import_meta_slot = func.import_meta_slot;
-        self.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
+        self.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
         self.cur_module = func.module_referrer;
         if (func.realm_global) |global| {
             self.global_object = global;
@@ -9350,12 +9429,21 @@ pub const Interpreter = struct {
 
     /// `import.meta` — the surrounding module's meta-object (an ordinary
     /// extensible object with a null [[Prototype]]), created once and cached.
-    fn evalImportMeta(self: *Interpreter) EvalError!Value {
+    pub fn importMetaValue(self: *Interpreter) EvalError!Value {
         if (self.import_meta_slot) |slot| {
-            if (slot.obj) |o| return Value.obj(o);
+            if (slot.load()) |o| {
+                self.import_meta_obj = o;
+                return Value.obj(o);
+            }
+            slot.lockInitialization();
+            defer slot.init_lock.unlock();
+            if (slot.load()) |o| {
+                self.import_meta_obj = o;
+                return Value.obj(o);
+            }
             const o = try gc_mod.allocObj(self.arena);
             o.* = .{ .proto = null };
-            slot.obj = o;
+            slot.publish(o);
             self.import_meta_obj = o;
             return Value.obj(o);
         }

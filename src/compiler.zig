@@ -3686,6 +3686,7 @@ pub const Compiler = struct {
             .optional_chain => |inner| try self.compileOptionalChain(inner, false),
             .this_expr => _ = try self.chunk.emit(.load_this, 0),
             .new_target_expr => _ = try self.chunk.emit(.load_new_target, 0),
+            .import_meta => _ = try self.chunk.emit(.load_import_meta, 0),
             .member => |m| {
                 try self.compileExpr(m.object);
                 if (m.computed) |ce| {
@@ -5149,6 +5150,47 @@ test "compiler lowers property deletion across bytecode tiers" {
             try std.testing.expect(saw_program_delete);
         },
         .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler lowers import.meta across module function tiers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "export function plain(){ return import.meta; } export function* generated(){ yield import.meta; return import.meta; } export async function awaited(){ await 0; return import.meta; }",
+    );
+    const program = try parser.parseModule();
+    try std.testing.expectEqual(@as(usize, 3), program.program.len);
+
+    const functions = try arena.allocator().alloc(*const ast.FunctionNode, program.program.len);
+    for (program.program, functions) |item, *function| {
+        if (item.* != .export_decl) return error.TestUnexpectedResult;
+        const declaration = item.export_decl.declaration orelse return error.TestUnexpectedResult;
+        if (declaration.* != .func_decl) return error.TestUnexpectedResult;
+        function.* = declaration.func_decl;
+    }
+
+    const plain = switch (try Compiler.admitPlainFunction(arena.allocator(), functions[0])) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const generated = switch (try Compiler.admitGenerator(arena.allocator(), functions[1], true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const awaited = switch (try Compiler.admitAsync(arena.allocator(), functions[2], true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+
+    for ([_]*Chunk{ plain, generated, awaited }) |chunk| {
+        var import_meta_loads: usize = 0;
+        for (chunk.code.items) |instruction|
+            if (instruction.op == .load_import_meta) {
+                import_meta_loads += 1;
+            };
+        try std.testing.expect(import_meta_loads > 0);
     }
 }
 

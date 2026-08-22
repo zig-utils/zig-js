@@ -145,6 +145,14 @@ pub fn rewriteOptionalSlot(v: anytype, comptime T: type, slot: *?*T) void {
     slot.* = @ptrCast(@alignCast(v.resolve(old)));
 }
 
+/// Rewrite an acquire/release-published strong pointer while every realm
+/// mutator is parked. Keeping this typed prevents a relocation caller from
+/// silently casting an atomic edge to a plain optional slot.
+pub fn rewriteAtomicOptionalSlot(v: anytype, comptime T: type, slot: *std.atomic.Value(?*T)) void {
+    const old = slot.load(.acquire) orelse return;
+    slot.store(@ptrCast(@alignCast(v.resolve(old))), .release);
+}
+
 pub fn rewriteAtomicPointerSlot(v: anytype, slot: *std.atomic.Value(?*anyopaque)) void {
     const old = slot.load(.acquire) orelse return;
     slot.store(v.resolve(old), .release);

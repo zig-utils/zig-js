@@ -1510,7 +1510,7 @@ pub fn traceFunction(f: *interp.Function, v: anytype) void {
     v.mark(f.home_object);
     v.mark(f.super_ctor);
     v.mark(f.obj);
-    if (f.import_meta_slot) |slot| if (slot.obj) |o| v.mark(o);
+    if (f.import_meta_slot) |slot| if (slot.load()) |o| v.mark(o);
     markValue(v, f.arrow_this);
     markValue(v, f.arrow_new_target);
     if (f.this_cell) |cell| markValue(v, cell.value);
@@ -1533,7 +1533,7 @@ pub fn relocateFunction(f: *interp.Function, v: anytype) void {
     gc_relocation.rewriteOptionalSlot(v, Object, &f.super_ctor);
     gc_relocation.rewriteOptionalSlot(v, Object, &f.obj);
     if (f.import_meta_slot) |slot|
-        gc_relocation.rewriteOptionalSlot(v, Object, &slot.obj);
+        gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
     gc_relocation.rewriteValueSlot(v, &f.arrow_this);
     gc_relocation.rewriteValueSlot(v, &f.arrow_new_target);
     if (f.this_cell) |cell| gc_relocation.rewriteValueSlot(v, &cell.value);
@@ -1557,7 +1557,7 @@ test "Function marking and relocation cover every managed field" {
     var old_objects: [15]Object = undefined;
     var new_objects: [15]Object = undefined;
     var body: ast.Node = .undefined_lit;
-    var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[4] };
+    var import_meta = interp.ImportMetaSlot.init(&old_objects[4]);
     var this_cell = interp.ThisCell{
         .value = Value.obj(&old_objects[7]),
         .initialized = true,
@@ -1644,7 +1644,7 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expectEqual(&new_objects[1], function.home_object.?);
     try std.testing.expectEqual(&new_objects[2], function.super_ctor.?);
     try std.testing.expectEqual(&new_objects[3], function.obj.?);
-    try std.testing.expectEqual(&new_objects[4], import_meta.obj.?);
+    try std.testing.expectEqual(&new_objects[4], import_meta.load().?);
     try std.testing.expectEqual(&new_objects[5], function.arrow_this.asObj());
     try std.testing.expectEqual(&new_objects[6], function.arrow_new_target.asObj());
     try std.testing.expectEqual(&new_objects[7], this_cell.value.asObj());
@@ -1889,7 +1889,7 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     markValue(v, g.this_value);
     v.mark(g.home_object);
     v.mark(g.super_ctor);
-    if (g.import_meta_slot) |slot| v.mark(slot.obj);
+    if (g.import_meta_slot) |slot| v.mark(slot.load());
     v.mark(g.result);
     if (g.async_parent_promise) |parent| markManaged(v, parent);
     for (g.pendingRequests()) |req| {
@@ -1914,7 +1914,7 @@ pub fn relocateGenerator(g: *vm.Generator, v: anytype) void {
     gc_relocation.rewriteOptionalSlot(v, Object, &g.home_object);
     gc_relocation.rewriteOptionalSlot(v, Object, &g.super_ctor);
     if (g.import_meta_slot) |slot|
-        gc_relocation.rewriteOptionalSlot(v, Object, &slot.obj);
+        gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
     gc_relocation.rewriteOptionalSlot(v, Object, &g.result);
     gc_relocation.rewriteOptionalSlot(v, promise.Promise, &g.async_parent_promise);
     for (@constCast(g.pendingRequests())) |*request| {
@@ -1992,7 +1992,7 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
         .stack_depth = 0,
         .environment = &old_environment,
     }};
-    var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[8] };
+    var import_meta = interp.ImportMetaSlot.init(&old_objects[8]);
     var requests = [_]vm.AsyncGenRequest{
         .{ .kind = .send, .value = Value.obj(&old_objects[10]), .result = &old_objects[11] },
         .{ .kind = .return_, .value = Value.obj(&old_objects[12]), .result = &old_objects[13] },
@@ -2085,7 +2085,7 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
     try std.testing.expectEqual(&new_objects[5], generator.this_value.asObj());
     try std.testing.expectEqual(&new_objects[6], generator.home_object.?);
     try std.testing.expectEqual(&new_objects[7], generator.super_ctor.?);
-    try std.testing.expectEqual(&new_objects[8], import_meta.obj.?);
+    try std.testing.expectEqual(&new_objects[8], import_meta.load().?);
     try std.testing.expectEqual(&new_objects[9], generator.result.?);
     try std.testing.expectEqual(&new_promise, generator.async_parent_promise.?);
     try std.testing.expectEqual(&new_objects[10], requests[0].value.asObj());
@@ -2190,7 +2190,7 @@ pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.M
         v.mark(m.env);
         if (m.ns) |ns| v.mark(ns);
         if (m.deferred_ns) |ns| v.mark(ns);
-        if (m.import_meta_slot.obj) |o| v.mark(o);
+        if (m.import_meta_slot.load()) |o| v.mark(o);
         if (m.eval_error) |err| markValue(v, err);
         if (m.completion_promise) |completion| markManaged(v, completion);
         for (m.dynamic_waiters.items) |waiter| {
@@ -2207,7 +2207,7 @@ pub fn relocateModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Contex
         gc_relocation.rewriteRequiredSlot(v, Environment, &module.env);
         gc_relocation.rewriteOptionalSlot(v, Object, &module.ns);
         gc_relocation.rewriteOptionalSlot(v, Object, &module.deferred_ns);
-        gc_relocation.rewriteOptionalSlot(v, Object, &module.import_meta_slot.obj);
+        gc_relocation.rewriteAtomicOptionalSlot(v, Object, &module.import_meta_slot.obj);
         gc_relocation.rewriteOptionalValueSlot(v, &module.eval_error);
         gc_relocation.rewriteOptionalSlot(v, promise.Promise, &module.completion_promise);
         for (module.dynamic_waiters.items) |*waiter| {
@@ -2272,7 +2272,7 @@ test "realm root relocation rewrites microtask variants and module graph" {
         .env = &old_environment,
         .ns = &old_objects[11],
         .deferred_ns = &old_objects[12],
-        .import_meta_slot = .{ .obj = &old_objects[13] },
+        .import_meta_slot = interp.ImportMetaSlot.init(&old_objects[13]),
         .eval_error = Value.obj(&old_objects[14]),
         .completion_promise = &old_promises[2],
     };
@@ -2332,7 +2332,7 @@ test "realm root relocation rewrites microtask variants and module graph" {
     try std.testing.expectEqual(&new_environment, module.env);
     try std.testing.expectEqual(&new_objects[11], module.ns.?);
     try std.testing.expectEqual(&new_objects[12], module.deferred_ns.?);
-    try std.testing.expectEqual(&new_objects[13], module.import_meta_slot.obj.?);
+    try std.testing.expectEqual(&new_objects[13], module.import_meta_slot.load().?);
     try std.testing.expectEqual(&new_objects[14], module.eval_error.?.asObj());
     try std.testing.expectEqual(&new_promises[2], module.completion_promise.?);
     try std.testing.expectEqual(&new_promises[3], module.dynamic_waiters.items[0].capability);
@@ -2473,7 +2473,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     var sym_it = machine.symbols.valueIterator();
     while (sym_it.next()) |sym| v.mark(sym.*);
     if (machine.import_meta_slot) |slot| {
-        if (slot.obj) |o| v.mark(o);
+        if (slot.load()) |o| v.mark(o);
     } else if (machine.import_meta_obj) |o| v.mark(o);
     markValue(v, machine.ret_value);
     markValue(v, machine.this_value);
@@ -2561,7 +2561,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     while (symbol_it.next()) |symbol|
         gc_relocation.rewriteRequiredSlot(v, Object, symbol);
     if (machine.import_meta_slot) |slot| {
-        gc_relocation.rewriteOptionalSlot(v, Object, &slot.obj);
+        gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
     } else {
         gc_relocation.rewriteOptionalSlot(v, Object, &machine.import_meta_obj);
     }
@@ -2615,7 +2615,7 @@ test "realm root relocation rewrites active interpreter containers" {
     machine.active_function = &old_objects[7];
     machine.home_object = &old_objects[8];
     machine.super_ctor = &old_objects[9];
-    var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[10] };
+    var import_meta = interp.ImportMetaSlot.init(&old_objects[10]);
     machine.import_meta_slot = &import_meta;
     try machine.gc_temp_roots.append(machine.arena, Value.obj(&old_objects[11]));
     try machine.gc_temp_promise_roots.append(machine.arena, &old_promise);
@@ -2721,7 +2721,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[7], machine.active_function.?);
     try std.testing.expectEqual(&new_objects[8], machine.home_object.?);
     try std.testing.expectEqual(&new_objects[9], machine.super_ctor.?);
-    try std.testing.expectEqual(&new_objects[10], import_meta.obj.?);
+    try std.testing.expectEqual(&new_objects[10], import_meta.load().?);
     try std.testing.expectEqual(&new_objects[11], machine.gc_temp_roots.items[0].asObj());
     try std.testing.expectEqual(&new_promise, machine.gc_temp_promise_roots.items[0]);
     try std.testing.expectEqual(&new_objects[12], machine.gc_object_reserve.items[0]);

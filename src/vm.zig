@@ -6075,6 +6075,7 @@ fn runChunk(
             .load_null => try stack.append(stack_alloc, Value.nul()),
             .load_true => try stack.append(stack_alloc, Value.boolVal(true)),
             .load_false => try stack.append(stack_alloc, Value.boolVal(false)),
+            .load_import_meta => try stack.append(stack_alloc, try vm.importMetaValue()),
             .pop => _ = stack.pop(),
             .dup => try stack.append(stack_alloc, stack.items[stack.items.len - 1]),
             .swap => {
@@ -7348,6 +7349,8 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     const saved_this_initialized = vm.this_initialized;
     const saved_nt = vm.new_target;
     const saved_eval_nt = vm.direct_eval_new_target_allowed;
+    const saved_import_meta_slot = vm.import_meta_slot;
+    const saved_import_meta_obj = vm.import_meta_obj;
     const saved_cur_module = vm.cur_module;
     vm.env = genv;
     vm.this_value = bound_this;
@@ -7356,6 +7359,8 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     vm.this_initialized = true;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
+    vm.import_meta_slot = func.import_meta_slot;
+    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
     vm.cur_module = func.module_referrer;
     defer {
         vm.env = saved_env;
@@ -7365,6 +7370,8 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
         vm.this_initialized = saved_this_initialized;
         vm.new_target = saved_nt;
         vm.direct_eval_new_target_allowed = saved_eval_nt;
+        vm.import_meta_slot = saved_import_meta_slot;
+        vm.import_meta_obj = saved_import_meta_obj;
         vm.cur_module = saved_cur_module;
     }
     try vm.bindParams2(func.params, args, func.is_arrow);
@@ -7529,7 +7536,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     vm.home_object = g.home_object;
     vm.super_ctor = g.super_ctor;
     vm.import_meta_slot = g.import_meta_slot;
-    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.obj else null;
+    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
     defer {
@@ -7649,6 +7656,9 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const saved_this_initialized = vm.this_initialized;
     const saved_nt = vm.new_target;
     const saved_eval_nt = vm.direct_eval_new_target_allowed;
+    const saved_import_meta_slot = vm.import_meta_slot;
+    const saved_import_meta_obj = vm.import_meta_obj;
+    const saved_cur_module = vm.cur_module;
     vm.env = genv;
     vm.this_value = bound_this;
     vm.home_object = func.home_object;
@@ -7656,6 +7666,9 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     vm.this_initialized = true;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
+    vm.import_meta_slot = func.import_meta_slot;
+    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
+    vm.cur_module = func.module_referrer;
     defer {
         vm.env = saved_env;
         vm.this_value = saved_this;
@@ -7664,6 +7677,9 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
         vm.this_initialized = saved_this_initialized;
         vm.new_target = saved_nt;
         vm.direct_eval_new_target_allowed = saved_eval_nt;
+        vm.import_meta_slot = saved_import_meta_slot;
+        vm.import_meta_obj = saved_import_meta_obj;
+        vm.cur_module = saved_cur_module;
     }
     // An error thrown synchronously while evaluating parameter defaults (or
     // binding `this`) of an async function must settle the result promise as a
@@ -7694,6 +7710,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
+        .import_meta_slot = func.import_meta_slot,
         .module_referrer = func.module_referrer,
         .is_async = true,
         .result = result,
@@ -7854,6 +7871,8 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     const s_super = vm.super_ctor;
     const s_nt = vm.new_target;
     const s_eval_nt = vm.direct_eval_new_target_allowed;
+    const s_import_meta_slot = vm.import_meta_slot;
+    const s_import_meta_obj = vm.import_meta_obj;
     const s_cur_module = vm.cur_module;
     vm.env = g.env;
     vm.this_value = g.this_value;
@@ -7861,6 +7880,8 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     vm.super_ctor = g.super_ctor;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
+    vm.import_meta_slot = g.import_meta_slot;
+    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
     vm.cur_module = g.module_referrer;
     defer {
         vm.env = s_env;
@@ -7869,6 +7890,8 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
         vm.super_ctor = s_super;
         vm.new_target = s_nt;
         vm.direct_eval_new_target_allowed = s_eval_nt;
+        vm.import_meta_slot = s_import_meta_slot;
+        vm.import_meta_obj = s_import_meta_obj;
         vm.cur_module = s_cur_module;
     }
     try vm.stackGuard();
@@ -7966,6 +7989,9 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const saved_this_initialized = vm.this_initialized;
     const saved_nt = vm.new_target;
     const saved_eval_nt = vm.direct_eval_new_target_allowed;
+    const saved_import_meta_slot = vm.import_meta_slot;
+    const saved_import_meta_obj = vm.import_meta_obj;
+    const saved_cur_module = vm.cur_module;
     vm.env = genv;
     vm.this_value = bound_this;
     vm.home_object = func.home_object;
@@ -7973,6 +7999,9 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     vm.this_initialized = true;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
+    vm.import_meta_slot = func.import_meta_slot;
+    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
+    vm.cur_module = func.module_referrer;
     defer {
         vm.env = saved_env;
         vm.this_value = saved_this;
@@ -7981,6 +8010,9 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
         vm.this_initialized = saved_this_initialized;
         vm.new_target = saved_nt;
         vm.direct_eval_new_target_allowed = saved_eval_nt;
+        vm.import_meta_slot = saved_import_meta_slot;
+        vm.import_meta_obj = saved_import_meta_obj;
+        vm.cur_module = saved_cur_module;
     }
     try vm.bindParams2(func.params, args, func.is_arrow);
     // Separate body var-env when the params contain a default (see makeGenerator).
@@ -8132,7 +8164,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     vm.home_object = g.home_object;
     vm.super_ctor = g.super_ctor;
     vm.import_meta_slot = g.import_meta_slot;
-    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.obj else null;
+    vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
     defer {
@@ -8786,7 +8818,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.direct_eval_new_target_allowed = if (func.is_arrow) func.arrow_direct_eval_new_target_allowed else true;
     vm.bytecode_execution_mode = func.bytecode_execution_mode;
     vm.import_meta_slot = func.import_meta_slot;
-    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.obj else null;
+    vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
     vm.cur_module = func.module_referrer;
     vm.this_value = bindThisForCall(vm, func, this_val) catch |e| {
         popActivation(vm, act);

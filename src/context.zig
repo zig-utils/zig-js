@@ -9372,7 +9372,7 @@ pub const Context = struct {
         machine.strict = true;
         machine.cur_module = m.path;
         machine.import_meta_slot = &m.import_meta_slot;
-        machine.import_meta_obj = m.import_meta_slot.obj;
+        machine.import_meta_obj = m.import_meta_slot.load();
         for (m.items) |item| try self.instantiateModuleFunctionItem(&machine, m, item);
     }
 
@@ -9560,7 +9560,7 @@ pub const Context = struct {
         machine.this_value = Value.undef(); // module top-level `this` is undefined
         machine.cur_module = m.path; // referrer for runtime import()
         machine.import_meta_slot = &m.import_meta_slot;
-        machine.import_meta_obj = m.import_meta_slot.obj;
+        machine.import_meta_obj = m.import_meta_slot.load();
         machine.stack_trace_call_frame = &stack_trace_call_frame;
         defer {
             machine.env = saved_env;
@@ -10334,6 +10334,108 @@ test "modules keep import.meta distinct per declaring module" {
         \\export function getMeta() { return import.meta; }
         },
     });
+}
+
+test "module functions keep declaring import.meta across bytecode suspension" {
+    const source =
+        \\import { meta as depMeta, plain as depPlain, plainDefault as depPlainDefault, generated as depGenerated, awaited as depAwaited } from "./dep.js";
+        \\var entryMeta = import.meta;
+        \\if (depMeta === entryMeta) throw new Error("module meta shared");
+        \\for (var importMetaHot = 0; importMetaHot < 64; importMetaHot = importMetaHot + 1)
+        \\  if (depPlain() !== depMeta) throw new Error("plain lost declaring meta");
+        \\globalThis.importMetaDepMeta = depMeta;
+        \\globalThis.importMetaPlainDefault = depPlainDefault;
+        \\globalThis.importMetaGenerator = depGenerated();
+        \\if (importMetaGenerator.next().value !== depMeta) throw new Error("generator lost declaring meta");
+        \\globalThis.importMetaAwaited = depAwaited;
+    ;
+    const fixtures = &.{ModuleFixture{ .path = "dep.js", .source =
+        \\export var meta = import.meta;
+        \\export function plain() { return import.meta; }
+        \\export function plainDefault(value = import.meta) { return value === import.meta ? value : null; }
+        \\export function* generated(value = import.meta) { if (value !== import.meta) throw new Error("generator parameter lost declaring meta"); var before = import.meta; yield before; return before === import.meta; }
+        \\export async function awaited(value = import.meta) { if (value !== import.meta) return false; var before = import.meta; await 0; return before === import.meta; }
+    }};
+    const start_async =
+        \\globalThis.importMetaAsyncState = "pending";
+        \\importMetaAwaited().then(
+        \\  function(ok) { importMetaAsyncState = ok ? "ok" : "bad"; },
+        \\  function(error) { importMetaAsyncState = "rejected:" + error.name + ":" + error.message; }
+        \\);
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    try evaluateModuleWithFixturesInContext(tree_ctx, source, fixtures);
+    try std.testing.expect((try tree_ctx.evaluate("importMetaPlainDefault() === importMetaDepMeta")).asBool());
+    try std.testing.expect((try tree_ctx.evaluate("var resumed = importMetaGenerator.next(); resumed.done && resumed.value;")).asBool());
+    _ = try tree_ctx.evaluate(start_async);
+    try std.testing.expectEqualStrings("ok", (try tree_ctx.evaluate("drainMicrotasks(); importMetaAsyncState;")).asStr());
+
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+    try evaluateModuleWithFixturesInContext(bytecode_ctx, source, fixtures);
+    try std.testing.expect((try bytecode_ctx.evaluate("var resumed = importMetaGenerator.next(); resumed.done && resumed.value;")).asBool());
+    _ = try bytecode_ctx.evaluate(start_async);
+    try std.testing.expectEqualStrings("ok", (try bytecode_ctx.evaluate("drainMicrotasks(); importMetaAsyncState;")).asStr());
+    const inventory = bytecode_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(inventory.count(.plain_compiled) > 0);
+    try std.testing.expect(inventory.count(.generator_compiled) > 0);
+    try std.testing.expect(inventory.count(.async_compiled) > 0);
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.generator_rejected_unsupported_lowering));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.async_rejected_unsupported_lowering));
+
+    const automatic_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = true,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic_ctx.destroy();
+    try evaluateModuleWithFixturesInContext(automatic_ctx, source, fixtures);
+    try std.testing.expect((try automatic_ctx.evaluate("importMetaPlainDefault() === importMetaDepMeta")).asBool());
+    try std.testing.expect((try automatic_ctx.evaluate("var resumed = importMetaGenerator.next(); resumed.done && resumed.value;")).asBool());
+    _ = try automatic_ctx.evaluate(start_async);
+    try std.testing.expectEqualStrings("ok", (try automatic_ctx.evaluate("drainMicrotasks(); importMetaAsyncState;")).asStr());
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        const automatic_dependency = automatic_ctx.module_registry.get("dep.js") orelse return error.TestUnexpectedResult;
+        const plain_value = automatic_dependency.env.get("plain") orelse return error.TestUnexpectedResult;
+        const plain_function = interp.Interpreter.funcOf(plain_value) orelse return error.TestUnexpectedResult;
+        const plain_chunk = plain_function.chunk orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(jit.TierState.rejected, plain_chunk.tier.loadState());
+        try std.testing.expect(plain_chunk.tier.loadCode() == null);
+    }
+
+    const moving_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer moving_ctx.destroy();
+    moving_ctx.collectGarbage();
+    const heap = moving_ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    try evaluateModuleWithFixturesInContext(moving_ctx, source, fixtures);
+    _ = try moving_ctx.evaluate(start_async);
+    const dependency = moving_ctx.module_registry.get("dep.js") orelse return error.TestUnexpectedResult;
+    const meta_before = dependency.import_meta_slot.load() orelse return error.TestUnexpectedResult;
+
+    // Both the generator and async function are suspended here. Nursery
+    // relocation must rewrite the module-owned atomic slot before either tier
+    // reloads import.meta from its declaring module.
+    const moved = moving_ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(moved.moved_cells > 0);
+    const meta_after = dependency.import_meta_slot.load() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(meta_before != meta_after);
+    try std.testing.expect((try moving_ctx.evaluate("var resumed = importMetaGenerator.next(); resumed.done && resumed.value;")).asBool());
+    try std.testing.expectEqualStrings("ok", (try moving_ctx.evaluate("drainMicrotasks(); importMetaAsyncState;")).asStr());
 }
 
 test "modules bind source-phase imports as module source objects" {
