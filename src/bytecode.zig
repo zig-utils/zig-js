@@ -426,6 +426,8 @@ pub const Op = enum(u8) {
     call_spread, // stack: callee, args_array -> push result (this = undefined)
     call_eval_spread, // stack: eval candidate, args_array -> push direct/indirect eval result
     call_with_this_spread, // stack: callee, this, args_array -> push result
+    tail_call_spread, // stack: callee, args_array -> replace current activation
+    tail_call_with_this_spread, // stack: callee, this, args_array -> replace current activation
     new_spread, // stack: callee, args_array -> push constructed object
     ret, // pop -> return value, end frame
     ret_undef, // return undefined, end frame

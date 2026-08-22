@@ -357,7 +357,8 @@ fn stageNativeOperationDescriptors(
                 inst.op == .call_with_this_spread or inst.op == .call_with_this or
                 inst.op == .new_call or inst.op == .new_spread or inst.op == .tail_call or
                 inst.op == .tail_call_eval or inst.op == .tail_call_method or
-                inst.op == .tail_call_with_this)
+                inst.op == .tail_call_with_this or inst.op == .tail_call_spread or
+                inst.op == .tail_call_with_this_spread)
                 break :runtime operation.lhs;
             if (inst.op == .load_var or
                 inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
@@ -5307,6 +5308,8 @@ test "optimizer lowering publishes executable invocation forms" {
         .{ .op = .tail_call_eval, .a = 1, .inputs = 2 },
         .{ .op = .tail_call_method, .b = 1, .inputs = 2, .name = "method" },
         .{ .op = .tail_call_with_this, .a = 1, .inputs = 3 },
+        .{ .op = .tail_call_spread, .inputs = 2 },
+        .{ .op = .tail_call_with_this_spread, .inputs = 3 },
     };
 
     for (cases) |case| {

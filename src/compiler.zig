@@ -3079,7 +3079,6 @@ pub const Compiler = struct {
 
     fn compileTailCall(self: *Compiler, c: anytype) CompileError!void {
         const spread = hasSpread(c.args);
-        if (spread) return error.Unsupported;
         if (c.callee.* == .super_member) {
             try self.compileSuperCall(c, true);
             return;
@@ -3093,8 +3092,13 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.dup, 0);
             _ = try self.chunk.emit(.get_prop, ni);
             _ = try self.chunk.emit(.swap, 0);
-            for (c.args) |arg| try self.compileExpr(arg);
-            _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+            if (spread) {
+                try self.compileArgsArray(c.args);
+                _ = try self.chunk.emit(.tail_call_with_this_spread, 0);
+            } else {
+                for (c.args) |arg| try self.compileExpr(arg);
+                _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+            }
             return;
         }
         if (c.callee.* == .member) {
@@ -3105,19 +3109,38 @@ pub const Compiler = struct {
             try self.compileExpr(m.computed.?);
             _ = try self.chunk.emit(.get_index, 0);
             _ = try self.chunk.emit(.swap, 0);
-            for (c.args) |arg| try self.compileExpr(arg);
-            _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+            if (spread) {
+                try self.compileArgsArray(c.args);
+                _ = try self.chunk.emit(.tail_call_with_this_spread, 0);
+            } else {
+                for (c.args) |arg| try self.compileExpr(arg);
+                _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+            }
             return;
         }
         if (c.callee.* == .optional_chain and c.callee.optional_chain.* == .member) {
             try self.compileParenthesizedOptionalMemberReference(c.callee.optional_chain.member);
             _ = try self.chunk.emit(.swap, 0);
-            for (c.args) |arg| try self.compileExpr(arg);
-            _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+            if (spread) {
+                try self.compileArgsArray(c.args);
+                _ = try self.chunk.emit(.tail_call_with_this_spread, 0);
+            } else {
+                for (c.args) |arg| try self.compileExpr(arg);
+                _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+            }
             return;
         }
         const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
         try self.compileExpr(c.callee);
+        if (spread) {
+            // A direct eval in a slot-backed function must observe that
+            // function's locals. Keep the existing dynamic-environment barrier;
+            // optional `eval?.(...)` remains indirect and lowers normally.
+            if (is_eval) return error.Unsupported;
+            try self.compileArgsArray(c.args);
+            _ = try self.chunk.emit(.tail_call_spread, 0);
+            return;
+        }
         for (c.args) |arg| try self.compileExpr(arg);
         _ = try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len));
     }
@@ -3375,7 +3398,6 @@ pub const Compiler = struct {
         is_tail: bool,
     ) CompileError!void {
         const spread = hasSpread(call.args);
-        if (is_tail and spread) return error.Unsupported;
 
         var has_receiver = false;
         if (call.callee.* == .member) {
@@ -3396,7 +3418,15 @@ pub const Compiler = struct {
 
         if (spread) {
             try self.compileArgsArray(call.args);
-            _ = try self.chunk.emit(if (has_receiver) .call_with_this_spread else .call_spread, 0);
+            _ = try self.chunk.emit(
+                if (has_receiver)
+                    if (is_tail) .tail_call_with_this_spread else .call_with_this_spread
+                else if (is_tail)
+                    .tail_call_spread
+                else
+                    .call_spread,
+                0,
+            );
             return;
         }
 
@@ -3426,9 +3456,8 @@ pub const Compiler = struct {
         }
         _ = try self.chunk.emit(.swap, 0); // [method, this]
         if (hasSpread(call.args)) {
-            if (is_tail) return error.Unsupported;
             try self.compileArgsArray(call.args);
-            _ = try self.chunk.emit(.call_with_this_spread, 0);
+            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this_spread else .call_with_this_spread, 0);
             return;
         }
         for (call.args) |arg| try self.compileExpr(arg);
@@ -5182,14 +5211,14 @@ test "compiler lowers super calls in tail and receiver-aware spread positions" {
     defer arena.deinit();
     var parser = try @import("parser.zig").Parser.init(
         arena.allocator(),
-        "class Derived extends Base { named(value){ return super.method(value); } computed(key, value){ return super[key](value); } *spread(args){ var value = super[\"method\"](...args); yield value; } *suspended(){ var value = super[yield \"key\"](yield \"argument\"); return value; } tailSpread(args){ return super.method(...args); } }",
+        "class Derived extends Base { named(value){ return super.method(value); } computed(key, value){ return super[key](value); } *spread(args){ var value = super[\"method\"](...args); yield value; } *suspended(){ var value = super[yield \"key\"](yield \"argument\"); return value; } tailSpread(args){ return super.method(...args); } tailSpreadComputed(key, args){ return super[key](...args); } }",
     );
     const program = try parser.parseProgram();
     const declaration = program.program[0];
     if (declaration.* != .var_decl or declaration.var_decl.init == null)
         return error.TestUnexpectedResult;
     const class = declaration.var_decl.init.?;
-    if (class.* != .class_expr or class.class_expr.members.len != 5)
+    if (class.* != .class_expr or class.class_expr.members.len != 6)
         return error.TestUnexpectedResult;
 
     for (class.class_expr.members[0..2]) |member| {
@@ -5222,10 +5251,18 @@ test "compiler lowers super calls in tail and receiver-aware spread positions" {
         .rejected => return error.TestUnexpectedResult,
     }
 
-    const tail_spread = class.class_expr.members[4].func orelse return error.TestUnexpectedResult;
-    switch (try Compiler.admitPlainFunction(arena.allocator(), tail_spread.function)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    for (class.class_expr.members[4..6]) |member| {
+        const tail_spread = member.func orelse return error.TestUnexpectedResult;
+        switch (try Compiler.admitPlainFunction(arena.allocator(), tail_spread.function)) {
+            .compiled => |compiled| {
+                var saw_tail_spread = false;
+                for (compiled.chunk.code.items) |inst| if (inst.op == .tail_call_with_this_spread) {
+                    saw_tail_spread = true;
+                };
+                try std.testing.expect(saw_tail_spread);
+            },
+            .rejected => return error.TestUnexpectedResult,
+        }
     }
 }
 
@@ -5273,10 +5310,20 @@ test "compiler lowers ordinary spread calls and constructors across tiers" {
     try std.testing.expectEqual(@as(usize, 1), receiver_calls);
     try std.testing.expectEqual(@as(usize, 1), constructors);
 
-    for (program.program[2..4]) |declaration| switch (try Compiler.admitPlainFunction(arena.allocator(), declaration.func_decl)) {
+    const tail = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[2].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_tail_spread = false;
+    for (tail.code.items) |inst| if (inst.op == .tail_call_spread) {
+        saw_tail_spread = true;
+    };
+    try std.testing.expect(saw_tail_spread);
+
+    switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[3].func_decl)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
-    };
+    }
 
     const optional = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[4].func_decl)) {
         .compiled => |compiled| compiled.chunk,
@@ -5336,6 +5383,107 @@ test "compiler lowers ordinary spread calls and constructors across tiers" {
     try std.testing.expect(saw_program_call and saw_program_eval and saw_program_constructor);
 }
 
+test "compiler lowers proper tail calls with spread arguments across tiers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function direct(fn, args){ \"use strict\"; return fn(0, ...args, 3); } function named(holder, args){ \"use strict\"; return holder.method(...args); } function computed(holder, key, args){ \"use strict\"; return holder[key](...args); } function optional(holder, args){ \"use strict\"; return holder?.method?.(...args); } function parenthesized(holder, args){ \"use strict\"; return (holder?.method)(...args); } function optionalEval(args){ \"use strict\"; return eval?.(...args); } function evalSpreadBarrier(args){ \"use strict\"; var local = 1; return eval(...args); } function evalFixedBarrier(){ \"use strict\"; var local = 1; return eval(\"local\"); } function* generated(fn, args){ \"use strict\"; yield 0; return fn(...args); } function* generatedEval(args){ \"use strict\"; yield 0; return eval(...args); } async function awaited(fn, args){ \"use strict\"; await 0; return fn(...args); } async function* asyncGenerated(fn, args){ \"use strict\"; yield 0; return fn(...args); } function sloppy(fn, args){ return fn(...args); }",
+    );
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 13), program.program.len);
+
+    for (program.program[0..6], 0..) |declaration, index| {
+        const chunk = switch (try Compiler.admitPlainFunction(arena.allocator(), declaration.func_decl)) {
+            .compiled => |compiled| compiled.chunk,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        const expected: bc.Op = if (index == 0 or index == 5) .tail_call_spread else .tail_call_with_this_spread;
+        var saw_expected = false;
+        for (chunk.code.items) |inst| if (inst.op == expected) {
+            saw_expected = true;
+        };
+        try std.testing.expect(saw_expected);
+    }
+
+    switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[6].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    }
+    const fixed_eval = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[7].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_fixed_eval_tail = false;
+    for (fixed_eval.code.items) |inst| if (inst.op == .tail_call_eval) {
+        saw_fixed_eval_tail = true;
+    };
+    try std.testing.expect(saw_fixed_eval_tail);
+
+    const generated = switch (try Compiler.admitGenerator(arena.allocator(), program.program[8].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const generated_eval = switch (try Compiler.admitGenerator(arena.allocator(), program.program[9].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const awaited = switch (try Compiler.admitAsync(arena.allocator(), program.program[10].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const async_generated = switch (try Compiler.admitGenerator(arena.allocator(), program.program[11].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var concise_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "var concise = async (fn, args) => fn(...args);",
+    );
+    const concise_program = try concise_parser.parseModule();
+    const concise_node = concise_program.program[0].var_decl.init orelse return error.TestUnexpectedResult;
+    if (concise_node.* != .function) return error.TestUnexpectedResult;
+    try std.testing.expect(concise_node.function.is_strict and concise_node.function.is_expr_body);
+    const concise = switch (try Compiler.admitAsync(arena.allocator(), concise_node.function, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    // ECMA-262 §15.10.1 IsInTailPosition, steps 4-7, excludes generator,
+    // async-function, async-generator, and async concise bodies. Their return
+    // wrappers keep ordinary spread operations even for a strict
+    // return-position call.
+    for ([_]*Chunk{ generated, awaited, async_generated, concise }) |chunk| {
+        var saw_ordinary_spread = false;
+        for (chunk.code.items) |inst| switch (inst.op) {
+            .call_spread => saw_ordinary_spread = true,
+            .tail_call_spread => return error.TestUnexpectedResult,
+            else => {},
+        };
+        try std.testing.expect(saw_ordinary_spread);
+    }
+    var saw_eval_spread = false;
+    for (generated_eval.code.items) |inst| switch (inst.op) {
+        .call_eval_spread => saw_eval_spread = true,
+        .tail_call_spread => return error.TestUnexpectedResult,
+        else => {},
+    };
+    try std.testing.expect(saw_eval_spread);
+
+    const sloppy = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[12].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_ordinary_spread = false;
+    var saw_return = false;
+    for (sloppy.code.items) |inst| switch (inst.op) {
+        .call_spread => saw_ordinary_spread = true,
+        .ret => saw_return = true,
+        .tail_call_spread => return error.TestUnexpectedResult,
+        else => {},
+    };
+    try std.testing.expect(saw_ordinary_spread and saw_return);
+}
+
 test "compiler lowers optional chains across bytecode tiers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -5374,8 +5522,17 @@ test "compiler lowers optional chains across bytecode tiers" {
     try std.testing.expect(saw_tail_call and saw_short_return);
 
     switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[2].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+        .compiled => |compiled| {
+            var saw_tail_spread = false;
+            var saw_optional_short_return = false;
+            for (compiled.chunk.code.items) |inst| switch (inst.op) {
+                .tail_call_with_this_spread => saw_tail_spread = true,
+                .ret_undef => saw_optional_short_return = true,
+                else => {},
+            };
+            try std.testing.expect(saw_tail_spread and saw_optional_short_return);
+        },
+        .rejected => return error.TestUnexpectedResult,
     }
     switch (try Compiler.admitGenerator(arena.allocator(), program.program[3].func_decl, true)) {
         .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),

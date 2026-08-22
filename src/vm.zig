@@ -4082,6 +4082,10 @@ fn tailCallEvalValue(vm: *Interpreter, callee: Value, args: []const Value) EvalE
     return tailCallValue(vm, callee, args, Value.undef());
 }
 
+fn tailCallSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value) EvalError!Value {
+    return tailCallValue(vm, callee, try spreadArguments(vm, args_array), this_val);
+}
+
 fn tailCallMethodValue(vm: *Interpreter, receiver: Value, name: []const u8, args: []const Value) EvalError!Value {
     return tailCallValue(vm, try vm.getProperty(receiver, name), args, receiver);
 }
@@ -4424,7 +4428,9 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         descriptor.bytecode_op == @backingInt(bc.Op.tail_call) or
         descriptor.bytecode_op == @backingInt(bc.Op.tail_call_eval) or
         descriptor.bytecode_op == @backingInt(bc.Op.tail_call_method) or
-        descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this))
+        descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this) or
+        descriptor.bytecode_op == @backingInt(bc.Op.tail_call_spread) or
+        descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this_spread))
     {
         const values: []const Value = @ptrCast(inputs);
         if (builtin.is_test and descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and
@@ -4460,6 +4466,10 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
                 return @backingInt(jit.NativeOperationStatus.host_trap), values[1..])
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this) and values.len >= 2)
             tailCallValue(vm, values[0], values[2..], values[1])
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_spread) and values.len == 2)
+            tailCallSpreadValue(vm, values[0], values[1], Value.undef())
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this_spread) and values.len == 3)
+            tailCallSpreadValue(vm, values[0], values[2], values[1])
         else
             return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, result);
@@ -5182,6 +5192,8 @@ test "vm: native operation dispatcher executes invocation forms including tail c
     var spread = value.Object{ .is_array = true };
     try spread.appendInternalElement(allocator, Value.num(20));
     try spread.appendInternalElement(allocator, Value.num(22));
+    var receiver_spread = value.Object{ .is_array = true };
+    try receiver_spread.appendInternalElement(allocator, Value.num(42));
     try std.testing.expectEqual(
         @as(f64, 42),
         (try Dispatch.run(&machine, .call_spread, &.{ Value.obj(&callable), Value.obj(&spread) }, null)).asNum(),
@@ -5189,6 +5201,10 @@ test "vm: native operation dispatcher executes invocation forms including tail c
     try std.testing.expectEqual(
         @as(f64, 42),
         (try Dispatch.run(&machine, .tail_call, &.{ Value.obj(&callable), Value.num(20), Value.num(22) }, null)).asNum(),
+    );
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try Dispatch.run(&machine, .tail_call_spread, &.{ Value.obj(&callable), Value.obj(&spread) }, null)).asNum(),
     );
     try std.testing.expectEqual(
         Value.obj(&receiver).rawBits(),
@@ -5200,6 +5216,15 @@ test "vm: native operation dispatcher executes invocation forms including tail c
             &machine,
             .tail_call_with_this,
             &.{ Value.obj(&callable), Value.obj(&receiver), Value.num(42) },
+            null,
+        )).rawBits(),
+    );
+    try std.testing.expectEqual(
+        Value.obj(&receiver).rawBits(),
+        (try Dispatch.run(
+            &machine,
+            .tail_call_with_this_spread,
+            &.{ Value.obj(&callable), Value.obj(&receiver), Value.obj(&receiver_spread) },
             null,
         )).rawBits(),
     );
@@ -7088,6 +7113,41 @@ fn runChunk(
                 const this_val = stack.pop().?;
                 const callee = stack.pop().?;
                 try stack.append(stack_alloc, try callValue(vm, callee, try spreadArguments(vm, args_arr), this_val));
+            },
+            .tail_call_spread => {
+                const args_arr = stack.items[stack.items.len - 1];
+                const callee = stack.items[stack.items.len - 2];
+                const args = try spreadArguments(vm, args_arr);
+                if (vm.driver_active) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, args, Value.undef(), Value.undef());
+                        stack.shrinkRetainingCapacity(stack.items.len - 2);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callValue(vm, callee, args, Value.undef());
+            },
+            .tail_call_with_this_spread => {
+                const args_arr = stack.items[stack.items.len - 1];
+                const this_val = stack.items[stack.items.len - 2];
+                const callee = stack.items[stack.items.len - 3];
+                const args = try spreadArguments(vm, args_arr);
+                if (vm.driver_active) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
+                        stack.shrinkRetainingCapacity(stack.items.len - 3);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callValue(vm, callee, args, this_val);
             },
             .new_spread => {
                 const args_arr = stack.pop().?;

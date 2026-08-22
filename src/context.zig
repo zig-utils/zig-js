@@ -24202,6 +24202,109 @@ test "ordinary spread calls and constructors preserve references across tiers" {
     try std.testing.expect(bytecode.count(.template_plain_compiled) > 0);
 }
 
+test "proper tail calls with spread preserve references and bounded activation depth" {
+    const source =
+        \\var tailSpreadLog = "";
+        \\function tailSpreadArgs(a, b) { tailSpreadLog = tailSpreadLog + "a"; return [a, b]; }
+        \\function tailSpreadDirect(n, value) {
+        \\  "use strict";
+        \\  if (n === 0) return value;
+        \\  return tailSpreadDirect(...[n - 1, value + 1]);
+        \\}
+        \\var tailSpreadHolder = {
+        \\  marker: "receiver"
+        \\};
+        \\Object.defineProperty(tailSpreadHolder, "method", {
+        \\  configurable: true,
+        \\  get: function() {
+        \\    tailSpreadLog = tailSpreadLog + "g";
+        \\    return function(a, b) { "use strict"; tailSpreadLog = tailSpreadLog + "m"; return this.marker + ":" + a + ":" + b; };
+        \\  }
+        \\});
+        \\function tailSpreadBase() { tailSpreadLog = tailSpreadLog + "b"; return tailSpreadHolder; }
+        \\function tailSpreadKey() { tailSpreadLog = tailSpreadLog + "k"; return "method"; }
+        \\function tailSpreadComputed() {
+        \\  "use strict";
+        \\  return tailSpreadBase()[tailSpreadKey()](...tailSpreadArgs(4, 2));
+        \\}
+        \\function tailSpreadOptional(holder) {
+        \\  "use strict";
+        \\  return holder?.method?.(...tailSpreadArgs(5, 3));
+        \\}
+        \\function tailSpreadParenthesized(holder) {
+        \\  "use strict";
+        \\  return (holder?.method)(...tailSpreadArgs(6, 4));
+        \\}
+        \\var tailSpreadEvalMarker = "global";
+        \\function tailSpreadIndirectEval() { "use strict"; var tailSpreadEvalMarker = "local"; return eval?.(...["tailSpreadEvalMarker"]); }
+        \\var tailSpreadAbruptCalled = false;
+        \\var tailSpreadAbruptReturns = 0;
+        \\var tailSpreadAbruptIterable = {};
+        \\tailSpreadAbruptIterable[Symbol.iterator] = function() {
+        \\  var record = { done: false };
+        \\  Object.defineProperty(record, "value", { get: function() { throw "tail-spread-stop"; } });
+        \\  return { next: function() { return record; }, return: function() { tailSpreadAbruptReturns = tailSpreadAbruptReturns + 1; return {}; } };
+        \\};
+        \\function tailSpreadAbrupt(fn, iterable) { "use strict"; return fn(...iterable); }
+        \\var TailSpreadBase = class { method(a, b) { tailSpreadLog = tailSpreadLog + "s"; return this.marker + ":" + a + ":" + b; } };
+        \\var TailSpreadDerived = class extends TailSpreadBase { call(args) { return super.method(...args); } };
+        \\var tailSpreadDerived = Object.create(TailSpreadDerived.prototype);
+        \\tailSpreadDerived.marker = "super";
+        \\function* tailSpreadGenerated(fn, args) { "use strict"; yield "ready"; return fn(...args); }
+        \\function* tailSpreadEval() { "use strict"; var local = 42; yield "eval"; return eval(...["local"]); }
+        \\var tailSpreadComputedResult = tailSpreadComputed();
+        \\var tailSpreadOptionalResult = tailSpreadOptional(tailSpreadHolder);
+        \\var tailSpreadAbsentResult = tailSpreadOptional(null);
+        \\var tailSpreadParenthesizedResult = tailSpreadParenthesized(tailSpreadHolder);
+        \\var tailSpreadIndirectEvalResult = tailSpreadIndirectEval();
+        \\var tailSpreadAbruptResult = "";
+        \\try { tailSpreadAbrupt(function() { tailSpreadAbruptCalled = true; }, tailSpreadAbruptIterable); } catch (error) { tailSpreadAbruptResult = error; }
+        \\var tailSpreadSuperResult = tailSpreadDerived.call([7, 5]);
+        \\var tailSpreadGeneratedIterator = tailSpreadGenerated(function(a, b) { return a + b; }, [8, 4]);
+        \\var tailSpreadGeneratedFirst = tailSpreadGeneratedIterator.next();
+        \\var tailSpreadGeneratedResult = tailSpreadGeneratedIterator.next();
+        \\var tailSpreadEvalIterator = tailSpreadEval();
+        \\var tailSpreadEvalFirst = tailSpreadEvalIterator.next();
+        \\var tailSpreadEvalResult = tailSpreadEvalIterator.next();
+    ;
+    const assertion =
+        \\tailSpreadComputedResult === "receiver:4:2" &&
+        \\tailSpreadOptionalResult === "receiver:5:3" &&
+        \\tailSpreadAbsentResult === undefined &&
+        \\tailSpreadParenthesizedResult === "receiver:6:4" &&
+        \\tailSpreadIndirectEvalResult === "global" &&
+        \\tailSpreadAbruptResult === "tail-spread-stop" && tailSpreadAbruptCalled === false && tailSpreadAbruptReturns === 0 &&
+        \\tailSpreadSuperResult === "super:7:5" &&
+        \\tailSpreadGeneratedFirst.value === "ready" && tailSpreadGeneratedFirst.done === false &&
+        \\tailSpreadGeneratedResult.value === 12 && tailSpreadGeneratedResult.done === true &&
+        \\tailSpreadEvalFirst.value === "eval" && tailSpreadEvalFirst.done === false &&
+        \\tailSpreadEvalResult.value === 42 && tailSpreadEvalResult.done === true &&
+        \\tailSpreadLog === "bkgamgamgams";
+    ;
+
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var shallow_results: [modes.len]u64 = undefined;
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        try std.testing.expect((try ctx.evaluate(assertion)).asBool());
+        shallow_results[index] = (try ctx.evaluate("tailSpreadDirect(20, 0)")).rawBits();
+        if (mode == .required) {
+            try std.testing.expectEqual(@as(f64, 20000), (try ctx.evaluate("tailSpreadLog = ''; tailSpreadDirect(20000, 0)")).asNum());
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 5);
+            try std.testing.expect(inventory.count(.template_generator_compiled) >= 2);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_generator_fallback));
+        }
+    }
+    try std.testing.expectEqual(shallow_results[0], shallow_results[1]);
+}
+
 test "parser-derived arguments use preserves forced execution tiers" {
     const source =
         \\function scopeOwner(box) {

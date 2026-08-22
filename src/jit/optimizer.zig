@@ -165,6 +165,8 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .tail_call_eval,
         .tail_call_method,
         .tail_call_with_this,
+        .tail_call_spread,
+        .tail_call_with_this_spread,
         => .call,
         .load_bigint,
         .load_var_or_undef,
@@ -557,8 +559,8 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .call, .call_eval, .new_call, .tail_call, .tail_call_eval => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
         .call_method, .tail_call_method => .{ .required = inst.b +| 1, .removed = inst.b +| 1, .added = 1 },
         .call_with_this, .tail_call_with_this => .{ .required = inst.a +| 2, .removed = inst.a +| 2, .added = 1 },
-        .call_spread, .call_eval_spread, .new_spread => .{ .required = 2, .removed = 2, .added = 1 },
-        .call_with_this_spread => .{ .required = 3, .removed = 3, .added = 1 },
+        .call_spread, .call_eval_spread, .tail_call_spread, .new_spread => .{ .required = 2, .removed = 2, .added = 1 },
+        .call_with_this_spread, .tail_call_with_this_spread => .{ .required = 3, .removed = 3, .added = 1 },
         .get_prop, .super_get_index, .iter_of, .async_iter_of, .enum_keys => .{ .required = 1, .removed = 1, .added = 1 },
         .prepare_class_heritage => .{ .required = 1, .removed = 1, .added = 2 },
         .get_index, .set_prop, .instance_of, .import_call => .{ .required = 2, .removed = 2, .added = 1 },
@@ -626,6 +628,8 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .call_spread,
         .call_eval_spread,
         .call_with_this_spread,
+        .tail_call_spread,
+        .tail_call_with_this_spread,
         .call_with_this,
         .new_call,
         .new_spread,
@@ -1334,7 +1338,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 stack[depth] = result;
                 depth += effect.added;
             },
-            .tail_call, .tail_call_eval, .tail_call_method, .tail_call_with_this => {
+            .tail_call, .tail_call_eval, .tail_call_method, .tail_call_with_this, .tail_call_spread, .tail_call_with_this_spread => {
                 const effect = depthEffect(inst);
                 if (depth < effect.required) return error.InvalidControlFlow;
                 try builder.appendFrameState(.call, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
@@ -1349,6 +1353,8 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                         .tail_call_eval => .call_eval,
                         .tail_call_method => .call_method,
                         .tail_call_with_this => .call_with_this,
+                        .tail_call_spread => .call_spread,
+                        .tail_call_with_this_spread => .call_with_this_spread,
                         else => unreachable,
                     },
                     .immediate = if (inst.op == .tail_call_method) inst.b else inst.a,
@@ -1731,6 +1737,8 @@ fn supports(op: bc.Op) bool {
         .call_spread,
         .call_eval_spread,
         .call_with_this_spread,
+        .tail_call_spread,
+        .tail_call_with_this_spread,
         .call_with_this,
         .new_call,
         .new_spread,
@@ -2116,6 +2124,8 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         .{ .op = .tail_call_eval, .inputs = 2, .a = 1 },
         .{ .op = .tail_call_method, .inputs = 2, .b = 1 },
         .{ .op = .tail_call_with_this, .inputs = 3, .a = 1 },
+        .{ .op = .tail_call_spread, .inputs = 2 },
+        .{ .op = .tail_call_with_this_spread, .inputs = 3 },
         .{ .op = .new_object, .inputs = 0 },
         .{ .op = .new_array, .inputs = 0 },
         .{ .op = .init_prop, .inputs = 2 },

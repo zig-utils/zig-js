@@ -1521,10 +1521,26 @@ pub fn functionRealmGlobal(env: *Environment, fallback: ?*value.Object) ?*value.
 
 pub fn vmChunkAllowsInlineCalls(chunk: *const bc.Chunk) bool {
     for (chunk.code.items) |inst| switch (inst.op) {
-        .tail_call, .tail_call_eval, .tail_call_method, .tail_call_with_this => return false,
+        .tail_call, .tail_call_eval, .tail_call_method, .tail_call_with_this, .tail_call_spread, .tail_call_with_this_spread => return false,
         else => {},
     };
     return true;
+}
+
+test "VM spread tail calls retain trampoline-owned activation replacement" {
+    for ([_]bc.Op{ .tail_call_spread, .tail_call_with_this_spread }) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        _ = try chunk.emit(op, 0);
+        try std.testing.expect(!vmChunkAllowsInlineCalls(&chunk));
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ordinary = bc.Chunk.init(arena.allocator());
+    _ = try ordinary.emit(.call_spread, 0);
+    try std.testing.expect(vmChunkAllowsInlineCalls(&ordinary));
 }
 
 /// Test-harness execution contract. `required` never counts a tree-walker
