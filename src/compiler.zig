@@ -73,6 +73,11 @@ const SlotBinding = struct {
 /// performs InitializeBinding.
 const FnScope = struct {
     parent: ?*FnScope,
+    /// Runtime Environment Records between this frame and its parent frame at
+    /// closure creation. Frame slots are not present in `vm.env`, so dynamic
+    /// name resolution must stop at this boundary before falling back to an
+    /// enclosing non-deletable slot.
+    parent_environment_depth: u32 = 0,
     names: std.StringHashMapUnmanaged(SlotBinding) = .{},
     lexical_scopes: std.ArrayListUnmanaged(*std.StringHashMapUnmanaged(SlotBinding)) = .empty,
     slot_names: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -903,7 +908,7 @@ fn stmtListCanEscapeAbruptly(stmts: []*Node) bool {
 /// Where a referenced name lives.
 const Resolved = union(enum) {
     local: SlotBinding, // slot in the current frame
-    upval: struct { depth: u32, binding: SlotBinding }, // an enclosing function's frame
+    upval: struct { depth: u32, environment_depth: u32, binding: SlotBinding }, // an enclosing function's frame
     environment: SlotBinding, // statically known declarative Environment binding
     global, // by name, against the Environment
 };
@@ -1410,12 +1415,18 @@ pub const Compiler = struct {
 
     fn resolve(self: *Compiler, name: []const u8) Resolved {
         var depth: u32 = 0;
+        var environment_depth: u32 = 0;
         var scope = self.scope;
         while (scope) |sc| {
             if (sc.get(name)) |binding| {
                 if (binding.environment) return .{ .environment = binding };
-                return if (depth == 0) .{ .local = binding } else .{ .upval = .{ .depth = depth, .binding = binding } };
+                return if (depth == 0) .{ .local = binding } else .{ .upval = .{
+                    .depth = depth,
+                    .environment_depth = environment_depth,
+                    .binding = binding,
+                } };
             }
+            environment_depth += sc.parent_environment_depth;
             depth += 1;
             scope = sc.parent;
         }
@@ -3199,9 +3210,37 @@ pub const Compiler = struct {
                 }
                 _ = try self.chunk.emit(.delete_super, 0);
             },
-            // Bare identifier deletion depends on Environment Record reference
-            // deletion rather than an object-property operation.
-            .identifier => return error.Unsupported,
+            .identifier => |name| {
+                // Plain frame mode has no materialized `arguments` binding;
+                // retain its existing general policy barrier. Suspendable
+                // env-mode functions bind it normally and use delete_name.
+                if (self.scope != null and std.mem.eql(u8, name, "arguments")) return error.Unsupported;
+                switch (self.resolve(name)) {
+                    // A frame slot is a declarative binding and cannot be deleted.
+                    // Activation-local block/with records may still shadow it, so
+                    // search exactly those records before taking the false fallback.
+                    .local => {
+                        if (self.environment_depth == 0)
+                            _ = try self.chunk.emit(.load_false, 0)
+                        else
+                            _ = try self.chunk.emitAB(.delete_name, try self.chunk.addName(name), self.environment_depth);
+                    },
+                    .upval => |upvalue| {
+                        const environment_depth = self.environment_depth + upvalue.environment_depth;
+                        if (environment_depth == 0)
+                            _ = try self.chunk.emit(.load_false, 0)
+                        else
+                            _ = try self.chunk.emitAB(.delete_name, try self.chunk.addName(name), environment_depth);
+                    },
+                    // Environment-backed suspendable locals and globals need full
+                    // ResolveBinding/DeleteBinding semantics at execution time.
+                    .environment, .global => _ = try self.chunk.emitAB(
+                        .delete_name,
+                        try self.chunk.addName(name),
+                        bc.delete_name_full_environment_depth,
+                    ),
+                }
+            },
             else => {
                 try self.compileExpr(target);
                 _ = try self.chunk.emit(.pop, 0);
@@ -4416,6 +4455,7 @@ pub const Compiler = struct {
         const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, fnode);
         scope.* = .{
             .parent = self.scope,
+            .parent_environment_depth = self.environment_depth,
             .tdz_checks = tdz_checks,
         };
 
@@ -5291,10 +5331,17 @@ test "compiler lowers property deletion across bytecode tiers" {
     };
     try std.testing.expect(saw_async_delete);
 
-    switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[3].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
-    }
+    const binding = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[3].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_local_false = false;
+    for (binding.code.items) |inst| switch (inst.op) {
+        .load_false => saw_local_false = true,
+        .delete_name => return error.TestUnexpectedResult,
+        else => {},
+    };
+    try std.testing.expect(saw_local_false);
     const declaration = program.program[4];
     if (declaration.* != .var_decl or declaration.var_decl.init == null)
         return error.TestUnexpectedResult;
@@ -5330,6 +5377,83 @@ test "compiler lowers property deletion across bytecode tiers" {
             try std.testing.expect(saw_program_delete);
         },
         .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler bounds identifier deletion before frame bindings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function* generated(name){ yield 0; return delete name; } async function awaited(name){ await 0; return delete name; } function outer(name, holder){ var nested; with (holder) { nested = function(){ return delete name; }; } return nested; } function deepOuter(name, first){ var middle; with (first) { middle = function(second){ var nested; with (second) { nested = function(){ return delete name; }; } return nested; }; } return middle; } delete missingGlobalName;",
+    );
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 5), program.program.len);
+
+    const generated = switch (try Compiler.admitGenerator(arena.allocator(), program.program[0].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const awaited = switch (try Compiler.admitAsync(arena.allocator(), program.program[1].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    for ([_]*Chunk{ generated, awaited }) |chunk| {
+        var saw_full_delete = false;
+        for (chunk.code.items) |inst| if (inst.op == .delete_name) {
+            saw_full_delete = true;
+            try std.testing.expectEqual(bc.delete_name_full_environment_depth, inst.b);
+        };
+        try std.testing.expect(saw_full_delete);
+    }
+
+    const outer = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[2].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), outer.fns.items.len);
+    const nested = outer.fns.items[0].chunk orelse return error.TestUnexpectedResult;
+    var saw_bounded_delete = false;
+    for (nested.code.items) |inst| if (inst.op == .delete_name) {
+        saw_bounded_delete = true;
+        try std.testing.expectEqual(@as(u32, 1), inst.b);
+    };
+    try std.testing.expect(saw_bounded_delete);
+
+    const deep_outer = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[3].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), deep_outer.fns.items.len);
+    const middle = deep_outer.fns.items[0].chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), middle.fns.items.len);
+    const deep_nested = middle.fns.items[0].chunk orelse return error.TestUnexpectedResult;
+    var saw_deep_bounded_delete = false;
+    for (deep_nested.code.items) |inst| if (inst.op == .delete_name) {
+        saw_deep_bounded_delete = true;
+        try std.testing.expectEqual(@as(u32, 2), inst.b);
+    };
+    try std.testing.expect(saw_deep_bounded_delete);
+
+    const compiled_program = switch (try Compiler.admitProgram(arena.allocator(), program)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_program_delete = false;
+    for (compiled_program.code.items) |inst| if (inst.op == .delete_name) {
+        saw_program_delete = true;
+        try std.testing.expectEqual(bc.delete_name_full_environment_depth, inst.b);
+    };
+    try std.testing.expect(saw_program_delete);
+
+    var arguments_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function plainArguments(){ return delete arguments; }",
+    );
+    const arguments_program = try arguments_parser.parseProgram();
+    switch (try Compiler.admitPlainFunction(arena.allocator(), arguments_program.program[0].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
     }
 }
 

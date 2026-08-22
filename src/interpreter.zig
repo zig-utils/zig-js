@@ -3297,6 +3297,69 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// Delete an IdentifierReference after resolving its Environment Record.
+    /// Frame-mode bytecode supplies a bounded search: activation-local
+    /// declarative/`with` records may shadow a known slot, but environments
+    /// lexically behind that non-deletable frame/upvalue binding must not.
+    /// Null searches the complete name-backed Environment chain.
+    pub fn deleteIdentifier(self: *Interpreter, name: []const u8, strict: bool, environment_limit: ?u32) EvalError!bool {
+        var remaining = environment_limit;
+        var env: ?*Environment = self.env;
+        while (env) |e| {
+            if (remaining) |count| {
+                if (count == 0) return false;
+                remaining = count - 1;
+            }
+
+            const locked = e.lockBindingsForRead();
+            const owns = e.vars.contains(name) or e.aliases.get(name) != null;
+            const deletable = owns and e.deletable.contains(name);
+            const is_global = e.parent == null;
+            e.unlockBindingsForRead(locked);
+            if (owns) {
+                // A sloppy eval-created binding is removed from the declaring
+                // Environment. Global variable bindings instead mirror their
+                // configurable state on the global object's own property.
+                if (deletable) {
+                    _ = e.removeVar(name);
+                    return true;
+                }
+                if (is_global) {
+                    if (self.global_object) |global| {
+                        if (objectHasOwn(global, name)) {
+                            const deleted = try self.deleteOwn(global, name);
+                            if (deleted) _ = e.removeVar(name);
+                            if (!deleted and strict) return self.throwError("TypeError", "Cannot delete property");
+                            return deleted;
+                        }
+                    }
+                }
+                if (strict) return self.throwError("TypeError", "Cannot delete binding");
+                return false;
+            }
+            if (e.with_object) |object| {
+                if (try self.withHasBinding(object, name)) {
+                    const deleted = try self.deleteOwn(object, name);
+                    if (!deleted and strict) return self.throwError("TypeError", "Cannot delete property");
+                    return deleted;
+                }
+            }
+            env = e.parent;
+        }
+
+        // A bounded search reaching the chain tail still falls back to the
+        // statically known non-deletable slot rather than an unresolvable name.
+        if (environment_limit != null) return false;
+        if (self.global_object) |global| {
+            if (objectHasOwn(global, name)) {
+                const deleted = try self.deleteOwn(global, name);
+                if (!deleted and strict) return self.throwError("TypeError", "Cannot delete property");
+                return deleted;
+            }
+        }
+        return true;
+    }
+
     /// Whether a `with` binding object provides a binding for `name`: it has the
     /// property AND `name` is not listed truthy in the object's
     /// `[Symbol.unscopables]` (which hides selected names from `with` scope).
@@ -4001,44 +4064,8 @@ pub const Interpreter = struct {
                 // built-ins go, non-configurable global vars stay (false). A name
                 // bound only in a declarative record (`let`/`const`, or a
                 // function-local) is not deletable → false.
-                if (target.* == .identifier) {
-                    if (try self.assignWithObject(target.identifier)) |o| {
-                        const ok = try self.deleteOwn(o, target.identifier);
-                        if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
-                        break :blk Value.boolVal(ok);
-                    }
-                    if (bindingEnvOf(self.env, target.identifier)) |e| {
-                        // A deletable binding (a sloppy eval-created var/function) is
-                        // removed and `delete` is true; a later reference is then
-                        // unresolvable. At the global variable environment, the
-                        // binding is mirrored by a global-object property, whose
-                        // [[Configurable]] decides deletability.
-                        if (e.deletable.contains(target.identifier)) {
-                            _ = e.removeVar(target.identifier);
-                            break :blk Value.boolVal(true);
-                        }
-                        if (e.parent == null) {
-                            if (self.global_object) |g| {
-                                if (objectHasOwn(g, target.identifier)) {
-                                    const ok = try self.deleteOwn(g, target.identifier);
-                                    if (ok) _ = e.removeVar(target.identifier);
-                                    if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
-                                    break :blk Value.boolVal(ok);
-                                }
-                            }
-                        }
-                        if (self.strict) return self.throwError("TypeError", "Cannot delete binding");
-                        break :blk Value.boolVal(false);
-                    }
-                    if (self.global_object) |g| {
-                        if (objectHasOwn(g, target.identifier)) {
-                            const ok = try self.deleteOwn(g, target.identifier);
-                            if (!ok and self.strict) return self.throwError("TypeError", "Cannot delete property");
-                            break :blk Value.boolVal(ok);
-                        }
-                    }
-                    break :blk Value.boolVal(true);
-                }
+                if (target.* == .identifier)
+                    break :blk Value.boolVal(try self.deleteIdentifier(target.identifier, self.strict, null));
                 // Any other operand (a CallExpression, literal, parenthesized
                 // expression, …) is not a Reference: evaluate it for its side
                 // effects, then `delete` is simply true.

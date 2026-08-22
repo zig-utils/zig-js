@@ -406,6 +406,7 @@ pub const Op = enum(u8) {
     super_set_from, // operands a: name index, b: strict; pop value/base, [[Set]] with receiver = this, push value
     super_set_index_from, // operand a: strict; pop value/key/base, [[Set]] with receiver = this, push value
     delete_super, // validate the SuperReference and throw its mandatory ReferenceError
+    delete_name, // operands a: name index, b: activation-local environment search depth (or delete_name_full_environment_depth)
     delete_prop, // operands a: name index, b: strict; pop object -> push [[Delete]] result
     delete_index, // operand a: strict; pop key, pop object -> push [[Delete]] result
     instance_of, // pop rhs, pop lhs -> push (lhs instanceof rhs)
@@ -469,6 +470,11 @@ pub const Inst = struct {
     a: u32 = 0,
     b: u32 = 0,
 };
+
+/// `delete_name` searches the complete Environment chain for name-backed
+/// generator/async/program bindings. Any smaller operand bounds the search
+/// before a statically resolved non-deletable frame/upvalue binding.
+pub const delete_name_full_environment_depth: u32 = std.math.maxInt(u32);
 
 const OptimizerBinaryProfile = struct {
     lhs_kinds: std.atomic.Value(u8) = .init(0),

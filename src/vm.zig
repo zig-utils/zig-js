@@ -6861,6 +6861,14 @@ fn runChunk(
                     return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
                 return vm.throwError("ReferenceError", "Cannot delete a super property");
             },
+            .delete_name => {
+                const environment_limit: ?u32 = if (inst.b == bc.delete_name_full_environment_depth) null else inst.b;
+                try stack.append(stack_alloc, Value.boolVal(try vm.deleteIdentifier(
+                    chunk.names.items[inst.a],
+                    vm.strict,
+                    environment_limit,
+                )));
+            },
             .delete_prop => {
                 const obj = stack.pop().?;
                 const deleted = try vm.deleteNamedProperty(obj, chunk.names.items[inst.a], inst.b != 0);
@@ -9321,6 +9329,40 @@ test "vm: super deletion caches native rejection and preserves exact fallback" {
         @memset(slots, Value.undef());
         try std.testing.expectError(error.Throw, run(&machine, compiled.chunk, &frame));
         try std.testing.expectEqualStrings("ReferenceError", machine.exception.asObj().errorName());
+    }
+    try std.testing.expectEqual(jit.OptimizerTierState.rejected, compiled.chunk.optimizer_tier.state.load(.acquire));
+    try std.testing.expect(compiled.chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    try std.testing.expectEqual(@as(u64, 0), compiled.chunk.optimizer_tier.compileCount());
+    try std.testing.expect(compiled.chunk.tier.loadCode() == null);
+    try std.testing.expectEqual(native_hits_before, optimizer_native_hits.load(.monotonic));
+}
+
+test "vm: identifier deletion caches native rejection and preserves exact fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "function drop(){ return delete missingDeleteName; }");
+    const program = try parser.parseProgram();
+    const compiled = try Compiler.compilePlainFunction(allocator, program.program[0].func_decl);
+
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+    };
+    const native_hits_before = optimizer_native_hits.load(.monotonic);
+    const slots = try allocator.alloc(Value, compiled.local_count);
+    var frame = Frame{ .slots = slots, .parent = null };
+
+    for (0..10) |_| {
+        @memset(slots, Value.undef());
+        try std.testing.expect((try run(&machine, compiled.chunk, &frame)).asBool());
     }
     try std.testing.expectEqual(jit.OptimizerTierState.rejected, compiled.chunk.optimizer_tier.state.load(.acquire));
     try std.testing.expect(compiled.chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);

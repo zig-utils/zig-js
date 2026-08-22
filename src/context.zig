@@ -23319,6 +23319,172 @@ test "forced tree-walker and required bytecode agree on super deletion" {
     try std.testing.expectEqual(bytecode_before.count(.template_plain_fallback), bytecode_after.count(.template_plain_fallback));
 }
 
+test "forced tree-walker and required bytecode agree on identifier deletion" {
+    const setup =
+        \\var deleteNameFixedGlobal = 1;
+        \\Object.defineProperty(globalThis, "deleteNameConfigurableGlobal", { value: 2, configurable: true });
+        \\var deleteNameLog = "";
+        \\var deleteNameVisibleTarget = { name: 1 };
+        \\var deleteNameVisibleProxy = new Proxy(deleteNameVisibleTarget, {
+        \\  has: function(target, key) { if (key === "name") deleteNameLog = deleteNameLog + "h"; return Reflect.has(target, key); },
+        \\  deleteProperty: function(target, key) { deleteNameLog = deleteNameLog + "d"; return Reflect.deleteProperty(target, key); }
+        \\});
+        \\var deleteNameHiddenTarget = { name: 1 };
+        \\deleteNameHiddenTarget[Symbol.unscopables] = { name: true };
+        \\var deleteNameHiddenProxy = new Proxy(deleteNameHiddenTarget, {
+        \\  has: function(target, key) { if (key === "name") deleteNameLog = deleteNameLog + "h"; return Reflect.has(target, key); },
+        \\  get: function(target, key) { if (key === Symbol.unscopables) deleteNameLog = deleteNameLog + "u"; return Reflect.get(target, key); },
+        \\  deleteProperty: function(target, key) { deleteNameLog = deleteNameLog + "x"; return Reflect.deleteProperty(target, key); }
+        \\});
+        \\var deleteNameAbruptProxy = new Proxy({ name: 1 }, {
+        \\  has: function(target, key) { if (key === "name") { deleteNameLog = deleteNameLog + "a"; throw new RangeError("has"); } return Reflect.has(target, key); }
+        \\});
+        \\function deleteNameOuter(name, holder) {
+        \\  var nested;
+        \\  with (holder) { nested = function() { return delete name; }; }
+        \\  return nested;
+        \\}
+        \\function deleteNameDeepOuter(name, first) {
+        \\  var middle;
+        \\  with (first) {
+        \\    middle = function(second) {
+        \\      var nested;
+        \\      with (second) { nested = function() { return delete name; }; }
+        \\      return nested;
+        \\    };
+        \\  }
+        \\  return middle;
+        \\}
+        \\function deleteNamePlain(local) {
+        \\  let lexical = 1;
+        \\  var localResult = delete local;
+        \\  var lexicalResult = delete lexical;
+        \\  var fixedResult = delete deleteNameFixedGlobal;
+        \\  var configurableResult = delete deleteNameConfigurableGlobal;
+        \\  var missingResult = delete deleteNameMissingGlobal;
+        \\  return !localResult && !lexicalResult && !fixedResult && configurableResult && missingResult;
+        \\}
+        \\function runDeleteNames() {
+        \\  var plain = deleteNamePlain(1);
+        \\  var visible = deleteNameOuter(7, deleteNameVisibleProxy); deleteNameLog = "";
+        \\  var visibleResult = visible(); var visibleLog = deleteNameLog;
+        \\  var hidden = deleteNameOuter(8, deleteNameHiddenProxy); deleteNameLog = "";
+        \\  var hiddenResult = hidden(); var hiddenLog = deleteNameLog;
+        \\  var abrupt = deleteNameOuter(9, deleteNameAbruptProxy); deleteNameLog = "";
+        \\  var abruptName = "none";
+        \\  try { abrupt(); } catch (error) { abruptName = error.name; }
+        \\  var abruptLog = deleteNameLog;
+        \\  var deepFirst = { name: 1 }; var deepSecond = { name: 2 };
+        \\  var deepSecondResult = deleteNameDeepOuter(10, deepFirst)(deepSecond)();
+        \\  var deepFirstResult = deleteNameDeepOuter(11, deepFirst)({})();
+        \\  var deepFallbackResult = deleteNameDeepOuter(12, {})({})();
+        \\  return plain && visibleResult && visibleLog === "hd" && !("name" in deleteNameVisibleTarget) &&
+        \\    !hiddenResult && hiddenLog === "hu" && deleteNameHiddenTarget.name === 1 &&
+        \\    abruptName === "RangeError" && abruptLog === "a" &&
+        \\    deepSecondResult && !("name" in deepSecond) && deepFirstResult && !("name" in deepFirst) && !deepFallbackResult &&
+        \\    !("deleteNameConfigurableGlobal" in globalThis) && deleteNameFixedGlobal === 1;
+        \\}
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+    });
+    defer bytecode_ctx.destroy();
+    _ = try tree_ctx.evaluate(setup);
+    _ = try bytecode_ctx.evaluate(setup);
+    const bytecode_before = bytecode_ctx.bytecodeAdmissionSnapshot();
+    tree_ctx.setBytecodeExecutionModeForTesting(.tree_walker);
+    bytecode_ctx.setBytecodeExecutionModeForTesting(.required);
+    const tree_execution_before = tree_ctx.tierAttributionSnapshot().execution;
+    const bytecode_execution_before = bytecode_ctx.tierAttributionSnapshot().execution;
+
+    const tree_result = try tree_ctx.evaluate("runDeleteNames()");
+    const bytecode_result = try bytecode_ctx.evaluate("runDeleteNames()");
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    const program_source =
+        \\Object.defineProperty(globalThis, "programDeleteName", { value: 1, configurable: true });
+        \\(delete programDeleteName) && (delete missingProgramDeleteName);
+    ;
+    const tree_program_result = try tree_ctx.evaluate(program_source);
+    const bytecode_program_result = try bytecode_ctx.evaluate(program_source);
+    try std.testing.expect(tree_program_result.asBool());
+    try std.testing.expectEqual(tree_program_result.rawBits(), bytecode_program_result.rawBits());
+    const tree_execution_after = tree_ctx.tierAttributionSnapshot().execution;
+    const bytecode_execution_after = bytecode_ctx.tierAttributionSnapshot().execution;
+    try std.testing.expect(tree_execution_after.count(.tree_walker_entries) > tree_execution_before.count(.tree_walker_entries));
+    try std.testing.expect(bytecode_execution_after.count(.vm_entries) > bytecode_execution_before.count(.vm_entries));
+    const bytecode_after = bytecode_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(bytecode_before.count(.template_plain_fallback), bytecode_after.count(.template_plain_fallback));
+}
+
+test "resumable bytecode preserves identifier deletion across suspension and moving GC" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+    const before = ctx.bytecodeAdmissionSnapshot();
+
+    const first = try ctx.evaluate(
+        \\function* suspendedDeleteName(name) {
+        \\  var localDeleted = delete name;
+        \\  eval("var transientDeleteName = 1");
+        \\  yield "pause";
+        \\  var transientDeleted = delete transientDeleteName;
+        \\  return localDeleted + ":" + transientDeleted + ":" + typeof transientDeleteName;
+        \\}
+        \\async function awaitedDeleteName(name) { await Promise.resolve(); return delete name; }
+        \\async function* asyncGeneratedDeleteName() { yield "pause"; return delete missingAsyncGeneratedDeleteName; }
+        \\globalThis.suspendedDeleteNameIterator = suspendedDeleteName(1);
+        \\suspendedDeleteNameIterator.next().value;
+    );
+    try std.testing.expectEqualStrings("pause", first.asStr());
+    const compacted = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+    try std.testing.expect(compacted.moved_cells > 0);
+    try std.testing.expect((try ctx.evaluate(
+        \\var suspendedDeleteNameLast = suspendedDeleteNameIterator.next();
+        \\suspendedDeleteNameLast.done && suspendedDeleteNameLast.value === "false:true:undefined";
+    )).asBool());
+
+    _ = try ctx.evaluate(
+        \\globalThis.awaitedDeleteNameResult = "pending";
+        \\awaitedDeleteName(2).then(function(value) { awaitedDeleteNameResult = value; });
+        \\globalThis.asyncGeneratedDeleteNameIterator = asyncGeneratedDeleteName();
+        \\globalThis.asyncGeneratedDeleteNameFirst = "pending";
+        \\asyncGeneratedDeleteNameIterator.next().then(function(result) {
+        \\  asyncGeneratedDeleteNameFirst = result.value + ":" + result.done;
+        \\});
+    );
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate(
+        \\drainMicrotasks();
+        \\awaitedDeleteNameResult === false && asyncGeneratedDeleteNameFirst === "pause:false";
+    )).asBool());
+    try std.testing.expect((try ctx.evaluate(
+        \\globalThis.asyncGeneratedDeleteNameLast = "pending";
+        \\asyncGeneratedDeleteNameIterator.next().then(function(result) {
+        \\  asyncGeneratedDeleteNameLast = result.value + ":" + result.done;
+        \\});
+        \\drainMicrotasks();
+        \\asyncGeneratedDeleteNameLast === "true:true";
+    )).asBool());
+
+    const after = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(before.count(.template_generator_compiled) + 2, after.count(.template_generator_compiled));
+    try std.testing.expectEqual(before.count(.template_async_compiled) + 1, after.count(.template_async_compiled));
+    try std.testing.expectEqual(before.count(.template_generator_fallback), after.count(.template_generator_fallback));
+    try std.testing.expectEqual(before.count(.template_async_fallback), after.count(.template_async_fallback));
+}
+
 test "resumable bytecode preserves super deletion across suspension and moving GC" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
