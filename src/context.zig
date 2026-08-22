@@ -7272,6 +7272,12 @@ pub const Context = struct {
     /// `parallel_js`, recovery is allowed only when allocation happened under an
     /// active interpreter that can safely elect the abort/no-sweep parallel
     /// collector; otherwise it fails closed to ordinary OOM.
+    /// How long an allocation-failure recovery in GIL mode waits for running
+    /// peers to reach their next natural park before refusing to collect.
+    /// Long enough to span typical Atomics.wait backoffs; short enough to stay
+    /// inside allocation-failure latency budgets (#722).
+    const recovery_peer_park_wait: u64 = 50 * std.time.ns_per_ms;
+
     pub fn collectForAllocationFailure(self: *Context, machine: ?*interp.Interpreter) bool {
         if (self.gc_bootstrapping) return false;
         const h = self.gc orelse return false;
@@ -7279,9 +7285,24 @@ pub const Context = struct {
         if (self.gc_par_collector.load(.acquire) != null) return false;
         if (self.parallel_js and self.hasRunningJsThreads()) {
             return self.collectForParallelAllocationFailure(h, machine);
-        }
-        if (self.gil) |g| {
-            if (!g.allOthersParked()) return false;
+        }        if (self.gil) |g| {
+            // Peers release the GIL for non-JS work without publishing a scan
+            // range, so demanding an already-all-parked world made heap-cap
+            // recovery effectively sticky under sustained multi-thread
+            // allocation (#722): the allocating thread's bounded retry threw a
+            // second, uncaught OOM before any peer reached its next natural
+            // park, even though peers park constantly (Atomics.wait backoffs,
+            // join). Wait bounded for the SAME safety predicate instead of
+            // requiring it instantly — this is a spin on an existing condition,
+            // not a new handshake; on timeout the behavior is exactly the old
+            // refusal. Parallel-JS keeps its own conductor-coordinated path.
+            if (!g.allOthersParked()) {
+                const deadline = timerNowNs() + recovery_peer_park_wait;
+                while (!g.allOthersParked()) {
+                    if (timerNowNs() >= deadline) return false;
+                    std.Thread.yield() catch {};
+                }
+            }
         } else if (self.hasRunningJsThreads()) {
             return false;
         }
