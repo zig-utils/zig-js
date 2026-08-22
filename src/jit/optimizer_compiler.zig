@@ -5424,6 +5424,7 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .iter_close_completion, .inputs = 3, .kind = .effect },
         .{ .op = .async_iter_close, .inputs = 1, .kind = .effect },
         .{ .op = .async_iter_close_completion, .inputs = 3, .kind = .effect },
+        .{ .op = .prepare_class_heritage, .inputs = 1, .kind = .effect },
         .{ .op = .eval_class, .b = 2, .inputs = 2, .kind = .effect },
     };
 

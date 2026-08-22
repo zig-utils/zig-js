@@ -801,19 +801,27 @@ fn classDeferredBodiesCaptureNames(members: []const ast.ClassMember, names: *con
 /// none of them closes over a slot in that activation or an enclosing VM frame.
 /// Global-only methods therefore remain bytecode-eligible; a real frame capture
 /// still rejects the whole function before execution.
-fn classDeferredBodiesCaptureFrame(arena: std.mem.Allocator, scope: *const FnScope, members: []const ast.ClassMember) CompileError!bool {
+fn classDeferredBodiesCaptureFrame(arena: std.mem.Allocator, scope: *const FnScope, members: []const ast.ClassMember, class_name: []const u8) CompileError!bool {
     var frame_names: LoopBindingNames = .{};
     var current: ?*const FnScope = scope;
     while (current) |frame_scope| : (current = frame_scope.parent) {
         var names = frame_scope.names.keyIterator();
-        while (names.next()) |name| try frame_names.add(arena, name.*);
+        while (names.next()) |name| {
+            // Deferred class elements resolve the class's own name through the
+            // class Environment, even when an outer frame slot has the same
+            // spelling. That binding is therefore not a frame capture.
+            if (class_name.len == 0 or !std.mem.eql(u8, name.*, class_name))
+                try frame_names.add(arena, name.*);
+        }
         for (frame_scope.lexical_scopes.items) |bindings| {
             var lexical = bindings.iterator();
             while (lexical.next()) |entry| {
                 // Environment-backed bindings are exactly what eval_class can
                 // capture through its live Environment chain. Only a real frame
                 // slot remains unavailable to deferred class member evaluation.
-                if (!entry.value_ptr.environment) try frame_names.add(arena, entry.key_ptr.*);
+                if (!entry.value_ptr.environment and
+                    (class_name.len == 0 or !std.mem.eql(u8, entry.key_ptr.*, class_name)))
+                    try frame_names.add(arena, entry.key_ptr.*);
             }
         }
     }
@@ -1886,6 +1894,17 @@ pub const Compiler = struct {
     fn emitExitEnvironment(self: *Compiler) CompileError!void {
         std.debug.assert(self.environment_depth > 0);
         _ = try self.chunk.emit(.exit_block, 0);
+        self.environment_depth -= 1;
+    }
+
+    fn emitEnterClassEnvironment(self: *Compiler) CompileError!void {
+        _ = try self.chunk.emit(.enter_block, 1);
+        self.environment_depth += 1;
+    }
+
+    fn emitExitClassEnvironment(self: *Compiler) CompileError!void {
+        std.debug.assert(self.environment_depth > 0);
+        _ = try self.chunk.emit(.exit_block, 1);
         self.environment_depth -= 1;
     }
 
@@ -3651,18 +3670,37 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.make_closure, fi);
             },
             .class_expr => |c| {
-                // Generator bodies may suspend while evaluating computed class
-                // element names. Lower those key expressions in source order, then
-                // let the VM delegate class construction to the shared interpreter.
-                if (c.superclass != null) return error.Unsupported;
                 // `eval_class` delegates deferred member bodies to the
                 // tree-walker. Reject only when one actually reads a frame local;
                 // global-only methods need no frame Environment and are safe.
                 // (Env-mode generators already expose locals in that chain.)
                 if (self.scope) |scope|
-                    if (try classDeferredBodiesCaptureFrame(self.arena, scope, c.members)) return error.Unsupported;
+                    if (try classDeferredBodiesCaptureFrame(self.arena, scope, c.members, c.name)) return error.Unsupported;
+
+                // ClassDefinitionEvaluation creates its lexical Environment before
+                // evaluating heritage, and a named class binding is already in TDZ
+                // there. Keep that Environment activation-local across suspended
+                // heritage/computed names and through class construction.
+                try self.pushLexicalScope();
+                defer self.popLexicalScope();
+                if (c.name.len > 0) if (self.scope) |scope|
+                    try scope.addEnvironmentLexical(self.arena, c.name, true);
+                try self.emitEnterClassEnvironment();
+                if (c.name.len > 0) try self.emitDeclareEnvironmentLexicalName(c.name, true);
+
+                const saved_strict = self.is_strict;
+                self.is_strict = true;
+                defer self.is_strict = saved_strict;
+                var input_count: u32 = 0;
+                if (c.superclass) |superclass| {
+                    try self.compileExpr(superclass);
+                    _ = try self.chunk.emit(.prepare_class_heritage, 0);
+                    input_count = 2;
+                }
                 const computed_count = try self.compileClassComputedKeys(c.members);
-                _ = try self.chunk.emitAB(.eval_class, try self.chunk.addClass(node), computed_count);
+                input_count = std.math.add(u32, input_count, computed_count) catch return error.OutOfMemory;
+                _ = try self.chunk.emitAB(.eval_class, try self.chunk.addClass(node), input_count);
+                try self.emitExitClassEnvironment();
             },
             .call => |c| {
                 const spread = hasSpread(c.args);
@@ -4963,6 +5001,83 @@ test "compiler admits global-only class members and rejects frame captures" {
     }
 }
 
+test "compiler lowers prepared class heritage across bytecode tiers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "var ProgramClass = class ProgramNamed extends ProgramBase {}; function plain(Base){ return class Named extends Base { [key()](){} }; } function shadow(Named){ return class Named extends Named { static self(){ return Named; } }; } function* generated(Base){ return class Generated extends (yield Base) { [yield \"key\"](){} }; } async function awaited(Base){ return class Awaited extends (await Base) { [await key()](){} }; } async function* asyncGenerated(Base){ return class AsyncGenerated extends (yield Base) {}; }",
+    );
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 6), program.program.len);
+
+    const program_chunk = switch (try Compiler.admitProgram(arena.allocator(), program)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var program_prepares: usize = 0;
+    for (program_chunk.code.items) |instruction| {
+        if (instruction.op == .prepare_class_heritage) {
+            program_prepares += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), program_prepares);
+
+    const plain = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[1].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const shadow = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[2].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const generated = switch (try Compiler.admitGenerator(arena.allocator(), program.program[3].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const awaited = switch (try Compiler.admitAsync(arena.allocator(), program.program[4].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const async_generated = switch (try Compiler.admitGenerator(arena.allocator(), program.program[5].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+
+    for ([_]*Chunk{ program_chunk, plain, shadow, generated, awaited, async_generated }) |chunk| {
+        var class_phase: u8 = 0;
+        for (chunk.code.items) |instruction| switch (instruction.op) {
+            .enter_block => if (instruction.a != 0) {
+                try std.testing.expectEqual(@as(u8, 0), class_phase);
+                class_phase = 1;
+            },
+            .prepare_class_heritage => {
+                try std.testing.expectEqual(@as(u8, 1), class_phase);
+                class_phase = 2;
+            },
+            .eval_class => {
+                try std.testing.expectEqual(@as(u8, 2), class_phase);
+                try std.testing.expect(instruction.b >= 2);
+                class_phase = 3;
+            },
+            .exit_block => if (instruction.a != 0) {
+                try std.testing.expectEqual(@as(u8, 3), class_phase);
+                class_phase = 4;
+            },
+            else => {},
+        };
+        try std.testing.expectEqual(@as(u8, 4), class_phase);
+    }
+
+    // The inner class binding, not the same-spelled parameter, resolves while
+    // heritage is evaluated and therefore observes the class TDZ at runtime.
+    var shadow_loads_environment = false;
+    for (shadow.code.items) |instruction| if (instruction.op == .load_var) {
+        if (std.mem.eql(u8, shadow.names.items[instruction.a], "Named")) shadow_loads_environment = true;
+    };
+    try std.testing.expect(shadow_loads_environment);
+}
+
 test "compiler admits captured super assignments and updates" {
     const cases = [_]struct { source: []const u8, set_op: bc.Op }{
         .{ .source = "class Derived extends Base { method(){ return super.value = 1; } }", .set_op = .super_set_from },
@@ -5543,7 +5658,7 @@ test "compiler reports stable generator admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.expression_body, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ return class extends Base {}; }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ for (using x of []) break; }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitGenerator(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,
@@ -5569,7 +5684,7 @@ test "compiler reports stable async admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.async_generator, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ return class extends Base {}; }");
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ for (using x of []) break; }");
     const unsupported_program = try unsupported_parser.parseProgram();
     switch (try Compiler.admitAsync(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
         .compiled => return error.TestUnexpectedResult,

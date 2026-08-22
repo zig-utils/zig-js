@@ -22837,13 +22837,15 @@ test "bytecode admission inventory retains exact runtime reasons" {
         \\globalThis.generatorCompound = function* generatorCompound() { var holder = { value: 1 }; yield (holder.value += 1); };
         \\globalThis.generatorUpdate = function* generatorUpdate() { var holder = { value: 1 }; return holder[yield "key"]++; };
         \\globalThis.generatorTagged = function* generatorTagged(holder) { return holder[yield "key"]`a${yield "value"}b`; };
-        \\globalThis.generatorRejected = function* generatorRejected() { return class extends Base {}; };
+        \\globalThis.generatorHeritage = function* generatorHeritage() { return class extends Base {}; };
+        \\globalThis.generatorRejected = function* generatorRejected() { for (using x of []) break; };
         \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
         \\globalThis.asyncLogical = async function asyncLogical() { var holder = {}; return holder.value ??= 1; };
         \\globalThis.asyncCompound = async function asyncCompound() { var holder = { value: 1 }; return holder.value += 1; };
         \\globalThis.asyncUpdate = async function asyncUpdate() { var holder = { value: 1 }; return ++holder[await Promise.resolve("value")]; };
         \\globalThis.asyncTagged = async function asyncTagged(holder) { return holder[await Promise.resolve("tag")]`a${await Promise.resolve(1)}b`; };
-        \\globalThis.asyncRejected = async function asyncRejected() { return class extends Base {}; };
+        \\globalThis.asyncHeritage = async function asyncHeritage() { return class extends Base {}; };
+        \\globalThis.asyncRejected = async function asyncRejected() { for (using x of []) break; };
     );
     _ = try ctx.evaluate(
         \\globalThis.templateDefault = function templateDefault(value = 1) { return value; };
@@ -22863,12 +22865,14 @@ test "bytecode admission inventory retains exact runtime reasons" {
         .{ .name = "generatorCompound", .reason = .generator_compiled },
         .{ .name = "generatorUpdate", .reason = .generator_compiled },
         .{ .name = "generatorTagged", .reason = .generator_compiled },
+        .{ .name = "generatorHeritage", .reason = .generator_compiled },
         .{ .name = "generatorRejected", .reason = .generator_rejected_unsupported_lowering },
         .{ .name = "asyncCompiled", .reason = .async_compiled },
         .{ .name = "asyncLogical", .reason = .async_compiled },
         .{ .name = "asyncCompound", .reason = .async_compiled },
         .{ .name = "asyncUpdate", .reason = .async_compiled },
         .{ .name = "asyncTagged", .reason = .async_compiled },
+        .{ .name = "asyncHeritage", .reason = .async_compiled },
         .{ .name = "asyncRejected", .reason = .async_rejected_unsupported_lowering },
     };
     for (expected) |entry| {
@@ -22892,8 +22896,8 @@ test "bytecode admission inventory retains exact runtime reasons" {
     try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
     try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
     try std.testing.expectEqual(before.count(.plain_compiled) + 3, after.count(.plain_compiled));
-    try std.testing.expectEqual(before.count(.generator_compiled) + 5, after.count(.generator_compiled));
-    try std.testing.expectEqual(before.count(.async_compiled) + 5, after.count(.async_compiled));
+    try std.testing.expectEqual(before.count(.generator_compiled) + 6, after.count(.generator_compiled));
+    try std.testing.expectEqual(before.count(.async_compiled) + 6, after.count(.async_compiled));
     for (expected) |entry| {
         if (entry.reason == .plain_compiled or entry.reason == .generator_compiled or entry.reason == .async_compiled) continue;
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
@@ -24276,6 +24280,150 @@ test "required bytecode retains the exact class-constructor semantic barrier" {
     try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
     try std.testing.expectEqual(@as(u64, 1), inventory.count(.plain_policy_class_constructor_semantics));
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+}
+
+test "forced tree-walker and required bytecode preserve class heritage ordering" {
+    const source =
+        \\var heritageLog = "";
+        \\function HeritageBase() {}
+        \\var HeritageProxy = new Proxy(HeritageBase, {
+        \\  get: function(target, key) {
+        \\    if (key === "prototype") heritageLog = heritageLog + "h";
+        \\    return Reflect.get(target, key);
+        \\  }
+        \\});
+        \\function heritageKey() { heritageLog = heritageLog + "k"; return "method"; }
+        \\var ProgramDerived = class ProgramDerived extends HeritageProxy {
+        \\  [heritageKey()]() { return 1; }
+        \\  static { heritageLog = heritageLog + "s"; }
+        \\};
+        \\function makePlain(base) {
+        \\  return class PlainDerived extends base {
+        \\    [heritageKey()]() { return 2; }
+        \\    static { heritageLog = heritageLog + "s"; }
+        \\  };
+        \\}
+        \\function namedHeritageTdz(Named) {
+        \\  try { return class Named extends Named {}; }
+        \\  catch (error) { return error.name; }
+        \\}
+        \\function invalidHeritage() {
+        \\  var invalid = new Proxy(function InvalidBase() {}, {
+        \\    get: function(target, key) {
+        \\      if (key === "prototype") { heritageLog = heritageLog + "b"; return 1; }
+        \\      return Reflect.get(target, key);
+        \\    }
+        \\  });
+        \\  try { return class extends invalid { [heritageKey()]() {} }; }
+        \\  catch (error) { return error.name; }
+        \\}
+        \\function strictHeritage() {
+        \\  try { return class extends (heritageUndeclared = 1, HeritageProxy) {}; }
+        \\  catch (error) { return error.name + ":" + typeof heritageUndeclared; }
+        \\}
+        \\function* strictSuspendedHeritage() {
+        \\  return class extends (yield HeritageBase) {
+        \\    [((yield "strict"), heritageSuspendedUndeclared = 1, "method")]() {}
+        \\  };
+        \\}
+        \\function strictSuspension() {
+        \\  var iterator = strictSuspendedHeritage();
+        \\  iterator.next();
+        \\  iterator.next(HeritageBase);
+        \\  try { iterator.next(); }
+        \\  catch (error) { return error.name + ":" + typeof heritageSuspendedUndeclared; }
+        \\}
+        \\function nullHeritage() {
+        \\  var NullDerived = class extends null {};
+        \\  return Object.getPrototypeOf(NullDerived) === Function.prototype &&
+        \\    Object.getPrototypeOf(NullDerived.prototype) === null;
+        \\}
+        \\function selfNamedClass(SelfNamed) {
+        \\  return class SelfNamed { static self() { return SelfNamed; } };
+        \\}
+        \\var PlainDerived = makePlain(HeritageProxy);
+        \\var SelfNamed = selfNamedClass(null);
+        \\var heritageResult =
+        \\  Object.getPrototypeOf(ProgramDerived) === HeritageProxy &&
+        \\  Object.getPrototypeOf(ProgramDerived.prototype) === HeritageBase.prototype &&
+        \\  Object.getPrototypeOf(PlainDerived) === HeritageProxy &&
+        \\  Object.getPrototypeOf(PlainDerived.prototype) === HeritageBase.prototype &&
+        \\  namedHeritageTdz(null) === "ReferenceError" &&
+        \\  invalidHeritage() === "TypeError" &&
+        \\  strictHeritage() === "ReferenceError:undefined" && nullHeritage() &&
+        \\  strictSuspension() === "ReferenceError:undefined" &&
+        \\  SelfNamed.self() === SelfNamed &&
+        \\  heritageLog === "hkshksb";
+        \\heritageResult + ":" + heritageLog;
+    ;
+
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    for (modes) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqualStrings("true:hkshksb", (try ctx.evaluate(source)).asStr());
+        const inventory = ctx.bytecodeAdmissionSnapshot();
+        if (mode == .required) {
+            try std.testing.expect(inventory.count(.program_compiled) > 0);
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 5);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expect(inventory.count(.template_generator_compiled) > 0);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_generator_fallback));
+        }
+    }
+}
+
+test "required bytecode keeps prepared class heritage rooted across suspension" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    try std.testing.expect((try ctx.evaluate(
+        \\function* suspendedHeritage() {
+        \\  return class SuspendedDerived extends (yield "heritage") {
+        \\    [yield "key"]() { return 7; }
+        \\    self() { return SuspendedDerived; }
+        \\  };
+        \\}
+        \\function SuspendedBase() {}
+        \\SuspendedBase.prototype.marker = 42;
+        \\globalThis.suspendedHeritageGets = 0;
+        \\globalThis.suspendedHeritageCandidate = new Proxy(SuspendedBase, {
+        \\  get: function(target, key) {
+        \\    if (key === "prototype") suspendedHeritageGets = suspendedHeritageGets + 1;
+        \\    return Reflect.get(target, key);
+        \\  }
+        \\});
+        \\suspendedHeritageCandidate.staticMarker = 99;
+        \\globalThis.suspendedHeritageIterator = suspendedHeritage();
+        \\suspendedHeritageIterator.next().value === "heritage" &&
+        \\  suspendedHeritageIterator.next(suspendedHeritageCandidate).value === "key" &&
+        \\  suspendedHeritageGets === 1;
+    )).asBool());
+    _ = try ctx.evaluate("suspendedHeritageCandidate = null; SuspendedBase = null;");
+
+    const compacted = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+    try std.testing.expect(compacted.moved_cells > 0);
+    try std.testing.expect((try ctx.evaluate(
+        \\var suspendedHeritageResult = suspendedHeritageIterator.next("method");
+        \\suspendedHeritageResult.done &&
+        \\  suspendedHeritageGets === 1 &&
+        \\  Object.getPrototypeOf(suspendedHeritageResult.value).staticMarker === 99 &&
+        \\  Object.getPrototypeOf(suspendedHeritageResult.value.prototype).marker === 42 &&
+        \\  suspendedHeritageResult.value.prototype.method() === 7 &&
+        \\  suspendedHeritageResult.value.prototype.self() === suspendedHeritageResult.value;
+    )).asBool());
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(inventory.count(.template_generator_compiled) > 0);
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_generator_fallback));
 }
 
 test "forced tree-walker and required bytecode preserve exception and side effects" {

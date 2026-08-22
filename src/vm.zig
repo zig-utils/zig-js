@@ -230,6 +230,12 @@ pub const Exec = struct {
     /// its call-entry environment. Break/continue targets use this to unwind
     /// repeated-body environments without disturbing the captured outer chain.
     environment_depth: u32 = 0,
+    /// ClassDefinitionEvaluation is strict code even when its containing
+    /// activation is sloppy. The depth/base pair survives suspension and lets a
+    /// caught abrupt completion restore the exact enclosing strictness.
+    class_strict_depth: u32 = 0,
+    class_strict_base: bool = false,
+    strict_initialized: bool = false,
     /// Target depth for a break/continue completion travelling through finally.
     abrupt_environment_depth: u32 = 0,
 };
@@ -248,6 +254,7 @@ pub const Handler = struct {
     /// block or per-iteration environments crossed by the throw/return.
     environment: ?*interp.Environment = null,
     environment_depth: u32 = 0,
+    class_strict_depth: u32 = 0,
 
     pub const none: u32 = std.math.maxInt(u32);
 };
@@ -258,11 +265,22 @@ fn restoreHandlerEnvironment(vm: *Interpreter, gen: ?*Generator, exec: *Exec, ha
         if (gen) |activation| activation.env = environment;
     }
     exec.environment_depth = handler.environment_depth;
+    exec.class_strict_depth = handler.class_strict_depth;
+    vm.strict = if (exec.class_strict_depth > 0) true else exec.class_strict_base;
 }
 
 fn restoreSuspendedGeneratorHandlerEnvironment(generator: *Generator, handler: Handler) void {
     if (handler.environment) |environment| generator.env = environment;
     generator.exec.environment_depth = handler.environment_depth;
+    generator.exec.class_strict_depth = handler.class_strict_depth;
+}
+
+fn activateExecStrict(vm: *Interpreter, exec: *Exec, gen: ?*Generator) void {
+    if (!exec.strict_initialized) {
+        exec.class_strict_base = if (gen) |activation| activation.strict else vm.strict;
+        exec.strict_initialized = true;
+    }
+    vm.strict = if (exec.class_strict_depth > 0) true else exec.class_strict_base;
 }
 
 fn unwindEnvironmentToDepth(vm: *Interpreter, gen: ?*Generator, exec: *Exec, target_depth: u32) void {
@@ -5903,6 +5921,9 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    const saved_execution_strict = vm.strict;
+    defer vm.strict = saved_execution_strict;
+    activateExecStrict(vm, exec, gen);
     vm.recordExecutionTier(.vm_entries);
     const saved_gc_active_generator = vm.gc_active_generator;
     vm.gc_active_generator = if (gen) |activation| @ptrCast(activation) else null;
@@ -6731,12 +6752,21 @@ fn runChunk(
                 vm.env = benv;
                 if (gen) |g| g.env = benv;
                 exec.environment_depth += 1;
+                if (inst.a != 0) {
+                    exec.class_strict_depth += 1;
+                    vm.strict = true;
+                }
             },
             .exit_block => {
                 vm.env = vm.env.parent.?;
                 if (gen) |g| g.env = vm.env;
                 std.debug.assert(exec.environment_depth > 0);
                 exec.environment_depth -= 1;
+                if (inst.a != 0) {
+                    std.debug.assert(exec.class_strict_depth > 0);
+                    exec.class_strict_depth -= 1;
+                    vm.strict = if (exec.class_strict_depth > 0) true else exec.class_strict_base;
+                }
             },
             .dispose_scope => {
                 if (inst.a == 1) {
@@ -7233,17 +7263,29 @@ fn runChunk(
                 try stack.append(stack_alloc, r);
                 try stack.append(stack_alloc, Value.boolVal(true));
             },
+            .prepare_class_heritage => {
+                const prepared = try vm.prepareClassHeritage(stack.pop().?);
+                try stack.append(stack_alloc, prepared.constructor);
+                try stack.append(stack_alloc, prepared.prototype);
+            },
             .eval_class => {
                 const node = chunk.classes.items[inst.a];
                 const c = node.class_expr;
-                const count: usize = inst.b;
-                const keys = try vm.arena.alloc(Value, count);
-                var i = count;
+                const total_count: usize = inst.b;
+                const heritage_count: usize = if (c.superclass != null) 2 else 0;
+                if (total_count < heritage_count) return error.OutOfMemory;
+                const computed_count = total_count - heritage_count;
+                const keys = try vm.arena.alloc(Value, computed_count);
+                var i = computed_count;
                 while (i > 0) {
                     i -= 1;
                     keys[i] = stack.pop().?;
                 }
-                try stack.append(stack_alloc, try vm.evalClassWithComputedKeys(c.name, c.inferred_name, c.superclass, c.members, c.source, keys));
+                const heritage: ?Interpreter.PreparedClassHeritage = if (c.superclass != null) .{
+                    .prototype = stack.pop().?,
+                    .constructor = stack.pop().?,
+                } else null;
+                try stack.append(stack_alloc, try vm.evalClassWithPreparedHeritage(c.name, c.inferred_name, c.members, c.source, heritage, keys));
             },
             .template_object => {
                 const node = chunk.templates.items[inst.a];
@@ -7270,6 +7312,7 @@ fn runChunk(
                     .stack_depth = @intCast(stack.items.len - @intFromBool(inst.op == .push_handler_catch)),
                     .environment = if (outer) vm.env.parent.? else vm.env,
                     .environment_depth = if (outer) exec.environment_depth - 1 else exec.environment_depth,
+                    .class_strict_depth = exec.class_strict_depth,
                 });
             },
             .pop_handler => _ = exec.handlers.pop(),
@@ -8771,6 +8814,11 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     act.exec.acc = Value.undef();
     act.exec.ip = 0;
     act.exec.frame = null;
+    act.exec.environment_depth = 0;
+    act.exec.abrupt_environment_depth = 0;
+    act.exec.class_strict_depth = 0;
+    act.exec.class_strict_base = false;
+    act.exec.strict_initialized = false;
     act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
     vm.vm_activation_free = act;
 }
@@ -9096,7 +9144,10 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
         const outcome: EvalError!Value = if (try tryRunNative(vm, &cur.exec, cur.chunk, cur.frame, null)) |native_result| result: {
             cur.optimizer_delta.observeValue(optimizerProfileKind(native_result));
             break :result native_result;
-        } else runChunk(vm, &cur.exec, cur.chunk, cur.frame, null, &cur.optimizer_delta);
+        } else run: {
+            activateExecStrict(vm, &cur.exec, null);
+            break :run runChunk(vm, &cur.exec, cur.chunk, cur.frame, null, &cur.optimizer_delta);
+        };
         if (cur.debug_environment != null) syncFrameFromDebugEnvironment(cur);
         const rv = outcome catch |e| {
             const abrupt = if (activationStackHasHandler(&acts)) vm.catchableOutOfMemory(e) else e;

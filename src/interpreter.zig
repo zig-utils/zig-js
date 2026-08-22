@@ -6862,9 +6862,29 @@ pub const Interpreter = struct {
         return self.evalClassWithComputedKeys(name, inferred_name, superclass, members, source, null);
     }
 
+    pub const PreparedClassHeritage = struct {
+        constructor: Value,
+        prototype: Value,
+    };
+
+    /// ClassDefinitionEvaluation's heritage validation. Keep this separate from
+    /// class construction so resumable bytecode can perform the observable
+    /// `prototype` lookup before computed element names, then retain both precise
+    /// Values on its activation stack across a yield/await.
+    pub fn prepareClassHeritage(self: *Interpreter, superclass: Value) EvalError!PreparedClassHeritage {
+        if (superclass.isNull()) return .{ .constructor = Value.nul(), .prototype = Value.nul() };
+        if (!isConstructorValue(superclass))
+            return self.throwError("TypeError", "class extends value is not a constructor");
+
+        const prototype = try self.getProperty(superclass, "prototype");
+        if (prototype.isObject() and !prototype.asObj().is_symbol and !prototype.asObj().is_bigint)
+            return .{ .constructor = superclass, .prototype = prototype };
+        if (prototype.isNull())
+            return .{ .constructor = superclass, .prototype = Value.nul() };
+        return self.throwError("TypeError", "class heritage's 'prototype' is not an object or null");
+    }
+
     pub fn evalClassWithComputedKeys(self: *Interpreter, name: []const u8, inferred_name: []const u8, superclass: ?*Node, members: []ast.ClassMember, source: []const u8, computed_keys: ?[]const Value) EvalError!Value {
-        var super_obj: ?*value.Object = null;
-        var super_proto: ?*value.Object = null;
         // A class with ClassHeritage is a *derived* class even when the heritage
         // is `null` (`class C extends null`): the constructor is a derived
         // constructor (its `this` is uninitialized until a — here impossible —
@@ -6885,31 +6905,46 @@ pub const Interpreter = struct {
         self.strict = true;
         defer self.strict = saved_strict;
         if (name.len > 0) try class_env.put(name, self.tdzVal());
-        if (superclass) |sc| {
-            const sv = try self.eval(sc);
-            if (sv.isNull()) {
-                // `extends null`: derived, null parent (handled above via `derived`).
-            } else if (isConstructorValue(sv)) {
-                super_obj = sv.asObj();
-                // protoParent = ? Get(superclass, "prototype"); it must be an Object
-                // or null (a bound function has no `prototype`; a `prototype` getter
-                // may return anything), else a TypeError.
-                const proto_v = try self.getProperty(sv, "prototype");
-                if (proto_v.isObject() and !proto_v.asObj().is_symbol and !proto_v.asObj().is_bigint) {
-                    super_proto = proto_v.asObj();
-                } else if (proto_v.isNull()) {
-                    super_proto = null;
-                } else {
-                    return self.throwError("TypeError", "class heritage's 'prototype' is not an object or null");
-                }
-            } else {
-                // Any non-null heritage that is not a constructor — a non-object, or
-                // a callable that lacks [[Construct]] (arrow / method / generator /
-                // async function) — is a TypeError.
-                return self.throwError("TypeError", "class extends value is not a constructor");
-            }
-        }
-        return self.buildClass(name, inferred_name, members, super_obj, super_proto, source, derived, class_env, computed_keys);
+        const prepared = if (superclass) |sc| try self.prepareClassHeritage(try self.eval(sc)) else null;
+        return self.buildClass(
+            name,
+            inferred_name,
+            members,
+            if (prepared) |heritage| if (heritage.constructor.isNull()) null else heritage.constructor.asObj() else null,
+            if (prepared) |heritage| if (heritage.prototype.isNull()) null else heritage.prototype.asObj() else null,
+            source,
+            derived,
+            class_env,
+            computed_keys,
+        );
+    }
+
+    /// Finish a bytecode-lowered class after the compiler has already entered its
+    /// lexical Environment, evaluated/validated heritage, and evaluated computed
+    /// names. No observable lookup is repeated here.
+    pub fn evalClassWithPreparedHeritage(
+        self: *Interpreter,
+        name: []const u8,
+        inferred_name: []const u8,
+        members: []ast.ClassMember,
+        source: []const u8,
+        heritage: ?PreparedClassHeritage,
+        computed_keys: []const Value,
+    ) EvalError!Value {
+        const saved_strict = self.strict;
+        self.strict = true;
+        defer self.strict = saved_strict;
+        return self.buildClass(
+            name,
+            inferred_name,
+            members,
+            if (heritage) |prepared| if (prepared.constructor.isNull()) null else prepared.constructor.asObj() else null,
+            if (heritage) |prepared| if (prepared.prototype.isNull()) null else prepared.prototype.asObj() else null,
+            source,
+            heritage != null,
+            self.env,
+            computed_keys,
+        );
     }
 
     fn buildClass(self: *Interpreter, name: []const u8, inferred_name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment, computed_keys: ?[]const Value) EvalError!Value {
@@ -6933,10 +6968,10 @@ pub const Interpreter = struct {
         self.current_private_map = private_map;
         defer self.current_private_map = saved_pm;
 
-        // `class_env` (created by evalClass, already the current scope) is the
-        // scope wrapping the class body; the class name is bound there once the
-        // constructor exists, so methods, static initializers, and instance-field
-        // initializers can refer to the class by name (`static x = C.m()`).
+        // `class_env` (created by evalClass or entered by class bytecode, and
+        // already current) wraps the class body. The class name is bound there
+        // once the constructor exists, so methods, static initializers, and
+        // instance-field initializers can refer to it (`static x = C.m()`).
 
         // Instance field initializers, prepended to the constructor body.
         var field_inits: std.ArrayListUnmanaged(*Node) = .empty;

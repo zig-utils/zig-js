@@ -390,8 +390,8 @@ pub const Op = enum(u8) {
     super_base, // operand a: require non-null; push the current home-object prototype (or null)
     super_get_from, // operand a: name index; pop captured base -> push base[name] with receiver = this
     super_get_index_from, // pop key, captured base -> push base[key] with receiver = this
-    enter_block, // push a declarative block Environment Record onto vm.env
-    exit_block, // pop the innermost block/with environment off vm.env
+    enter_block, // push a declarative block Environment; a != 0 also enters resumable strict class code
+    exit_block, // pop that Environment; a != 0 also exits resumable strict class code
     dispose_scope, // DisposeResources for the current Environment Record
     enter_with, // pop object; push an object Environment Record (with_object = ToObject(it)) onto vm.env
     exit_with, // pop the innermost with/block environment off vm.env (restore its parent)
@@ -444,7 +444,8 @@ pub const Op = enum(u8) {
     iter_close_completion, // pop iterator; IteratorClose while [completion-value, kind] is beneath it, preserving throw completions
     async_iter_close, // pop async iterator -> push return result and has-return flag; caller awaits/validates when present
     async_iter_close_completion, // async_iter_close while [completion-value, kind] is beneath it, preserving throw completions during GetMethod/Call
-    eval_class, // operand a: class AST index, b: computed-name count; pop raw computed-name values, evaluate the class
+    prepare_class_heritage, // pop raw extends value; validate once, push normalized constructor + prototype roots
+    eval_class, // operand a: class AST index, b: total prepared-heritage + computed-name inputs; build in the active class environment
     template_object, // operand a: template-site AST index; push the cached, frozen GetTemplateObject strings array for that tagged-template site
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)
@@ -653,8 +654,9 @@ pub const Chunk = struct {
     /// reuses the tree-walker's `bindPattern` over the live environment).
     patterns: std.ArrayListUnmanaged(*ast.Node) = .empty,
     /// Class-expression AST nodes referenced by `eval_class`; the compiler
-    /// evaluates any suspendable computed names first, then the VM delegates the
-    /// actual class construction back to the interpreter.
+    /// evaluates and prepares heritage plus any suspendable computed names first,
+    /// then the VM delegates construction back to the interpreter while the
+    /// activation-local class Environment remains active.
     classes: std.ArrayListUnmanaged(*ast.Node) = .empty,
     /// Tagged-template AST nodes referenced by `template_object`; the VM asks the
     /// interpreter for the per-site cached+frozen strings object (GetTemplateObject).
