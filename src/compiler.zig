@@ -968,6 +968,10 @@ pub const Compiler = struct {
     is_strict: bool = false,
     /// Emit per-statement VM checkpoints for debugger-enabled suspendable code.
     debug_checkpoints: bool = false,
+    /// Highest #706 scratch slot handed out by this compiler. Program chunks
+    /// publish it on their Chunk so each execution allocates an Exec-owned,
+    /// GC-rooted scratch array of exactly that size.
+    scratch_count: u32 = 0,
 
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
@@ -1025,6 +1029,7 @@ pub const Compiler = struct {
         c.is_strict = programIsStrict(program.program);
         try c.compileStmtList(program.program);
         _ = try chunk.emit(.halt, 0);
+        chunk.scratch_count = c.scratch_count;
         try chunk.finalize();
         return chunk;
     }
@@ -4215,15 +4220,25 @@ pub const Compiler = struct {
         return to_present;
     }
 
+    /// One resolved-reference temporary. Function activations keep named
+    /// frame/Environment temps; program chunks have neither, so #706
+    /// activation-local scratch slots on the running Exec hold them instead of
+    /// synthesized global names, which nested or parallel evaluations of the
+    /// same program could collide on.
+    const ActivationTemp = union(enum) {
+        named: []const u8,
+        scratch: u32,
+    };
+
     const CompiledMemberRef = struct {
-        object: []const u8,
-        key: ?[]const u8,
+        object: ActivationTemp,
+        key: ?ActivationTemp,
         property: []const u8,
     };
 
     const CompiledSuperRef = struct {
-        base: []const u8,
-        key: ?[]const u8,
+        base: ActivationTemp,
+        key: ?ActivationTemp,
         property: []const u8,
     };
 
@@ -4242,7 +4257,7 @@ pub const Compiler = struct {
             return error.Unsupported;
         const member = target.super_member;
 
-        var key: ?[]const u8 = null;
+        var key: ?ActivationTemp = null;
         if (member.computed) |key_expr| {
             _ = try self.chunk.emit(.check_super_this, 0);
             try self.compileExpr(key_expr);
@@ -4267,8 +4282,8 @@ pub const Compiler = struct {
     }
 
     fn emitLoadSuperRefBase(self: *Compiler, ref: CompiledSuperRef) CompileError!void {
-        try self.emitLoad(ref.base);
-        if (ref.key) |key| try self.emitLoad(key);
+        try self.emitLoadActivationTemp(ref.base);
+        if (ref.key) |key| try self.emitLoadActivationTemp(key);
     }
 
     fn emitGetSuperRef(self: *Compiler, ref: CompiledSuperRef) CompileError!void {
@@ -4296,7 +4311,7 @@ pub const Compiler = struct {
         const result = try self.freshActivationTemp();
         try self.emitDefineActivationTemp(result);
         try self.emitLoadSuperRefBase(ref);
-        try self.emitLoad(result);
+        try self.emitLoadActivationTemp(result);
         try self.emitSetSuperRef(ref);
     }
 
@@ -4314,7 +4329,7 @@ pub const Compiler = struct {
         const result = try self.freshActivationTemp();
         try self.emitDefineActivationTemp(result);
         try self.emitLoadSuperRefBase(ref);
-        try self.emitLoad(result);
+        try self.emitLoadActivationTemp(result);
         try self.emitSetSuperRef(ref);
         self.chunk.patchToHere(short);
     }
@@ -4328,33 +4343,35 @@ pub const Compiler = struct {
         const result = try self.freshActivationTemp();
         try self.emitDefineActivationTemp(result);
         try self.emitLoadSuperRefBase(ref);
-        try self.emitLoad(result);
+        try self.emitLoadActivationTemp(result);
         try self.emitSetSuperRef(ref);
     }
 
     fn compileMemberRef(self: *Compiler, target: *Node) CompileError!CompiledMemberRef {
-        // Program chunks have no frame or private activation environment. Until
-        // #706 supplies program-local scratch, synthesized names would be shared
-        // across nested/parallel evaluations and could corrupt the Reference.
-        if (self.mode == .program or target.* != .member or target.member.optional)
+        // Optional-chain targets keep their explicit unsupported admission: a
+        // deleted/absent base must short-circuit the whole assignment instead
+        // of throwing from RequireObjectCoercible, which this Reference shape
+        // does not model yet.
+        if (target.* != .member or target.member.optional)
             return error.Unsupported;
         const member = target.member;
 
         // Evaluate the Reference once. Frame-mode temps are real activation
         // slots so recursion cannot overwrite them; environment-mode temps live
-        // in the generator/async activation and survive suspension.
+        // in the generator/async activation and survive suspension; program
+        // chunks hold theirs in #706 activation-local Exec scratch.
         const object = try self.freshActivationTemp();
         try self.compileExpr(member.object);
         try self.emitDefineActivationTemp(object);
 
-        var key: ?[]const u8 = null;
+        var key: ?ActivationTemp = null;
         if (member.computed) |key_expr| {
             // PropertyAccessors evaluates the key expression before checking
             // the base, but RequireObjectCoercible precedes observable
             // ToPropertyKey. Store the resulting key string so GetValue and
             // PutValue cannot invoke user coercion twice.
             try self.compileExpr(key_expr);
-            try self.emitLoad(object);
+            try self.emitLoadActivationTemp(object);
             _ = try self.chunk.emit(.require_object_coercible, 1);
             _ = try self.chunk.emit(.to_property_key, 0);
             const key_temp = try self.freshActivationTemp();
@@ -4365,8 +4382,8 @@ pub const Compiler = struct {
     }
 
     fn emitLoadMemberRefBase(self: *Compiler, ref: CompiledMemberRef) CompileError!void {
-        try self.emitLoad(ref.object);
-        if (ref.key) |key| try self.emitLoad(key);
+        try self.emitLoadActivationTemp(ref.object);
+        if (ref.key) |key| try self.emitLoadActivationTemp(key);
     }
 
     fn emitGetMemberRef(self: *Compiler, ref: CompiledMemberRef) CompileError!void {
@@ -4419,7 +4436,7 @@ pub const Compiler = struct {
         const result = try self.freshActivationTemp();
         try self.emitDefineActivationTemp(result);
         try self.emitLoadMemberRefBase(ref);
-        try self.emitLoad(result);
+        try self.emitLoadActivationTemp(result);
         try self.emitSetMemberRef(ref);
     }
 
@@ -4430,11 +4447,11 @@ pub const Compiler = struct {
         try self.emitGetMemberRef(ref);
         _ = try self.chunk.emit(.to_numeric, 0);
 
-        var old: ?[]const u8 = null;
+        var old: ?ActivationTemp = null;
         if (!prefix) {
             const old_temp = try self.freshActivationTemp();
             try self.emitDefineActivationTemp(old_temp);
-            try self.emitLoad(old_temp);
+            try self.emitLoadActivationTemp(old_temp);
             old = old_temp;
         }
         _ = try self.chunk.emit(if (inc) .inc else .dec, 0);
@@ -4442,11 +4459,11 @@ pub const Compiler = struct {
         try self.emitDefineActivationTemp(updated);
 
         try self.emitLoadMemberRefBase(ref);
-        try self.emitLoad(updated);
+        try self.emitLoadActivationTemp(updated);
         try self.emitSetMemberRef(ref);
         if (!prefix) {
             _ = try self.chunk.emit(.pop, 0);
-            try self.emitLoad(old.?);
+            try self.emitLoadActivationTemp(old.?);
         }
     }
 
@@ -4455,11 +4472,11 @@ pub const Compiler = struct {
         try self.emitGetSuperRef(ref);
         _ = try self.chunk.emit(.to_numeric, 0);
 
-        var old: ?[]const u8 = null;
+        var old: ?ActivationTemp = null;
         if (!prefix) {
             const old_temp = try self.freshActivationTemp();
             try self.emitDefineActivationTemp(old_temp);
-            try self.emitLoad(old_temp);
+            try self.emitLoadActivationTemp(old_temp);
             old = old_temp;
         }
         _ = try self.chunk.emit(if (inc) .inc else .dec, 0);
@@ -4467,11 +4484,11 @@ pub const Compiler = struct {
         try self.emitDefineActivationTemp(updated);
 
         try self.emitLoadSuperRefBase(ref);
-        try self.emitLoad(updated);
+        try self.emitLoadActivationTemp(updated);
         try self.emitSetSuperRef(ref);
         if (!prefix) {
             _ = try self.chunk.emit(.pop, 0);
-            try self.emitLoad(old.?);
+            try self.emitLoadActivationTemp(old.?);
         }
     }
 
@@ -4500,17 +4517,41 @@ pub const Compiler = struct {
         return std.fmt.allocPrint(self.arena, "\x00ys{d}", .{n});
     }
 
-    fn freshActivationTemp(self: *Compiler) CompileError![]const u8 {
+    fn freshActivationTemp(self: *Compiler) CompileError!ActivationTemp {
+        // Program chunks have neither a frame nor a private activation
+        // Environment (#706): a synthesized name would resolve against the
+        // shared global environment, so nested or parallel evaluations of the
+        // same program could collide on it. Bounded Exec-owned scratch slots
+        // keep these temporaries activation-local instead.
+        if (self.mode == .program) {
+            const index = self.scratch_count;
+            self.scratch_count += 1;
+            return .{ .scratch = index };
+        }
         const name = try self.freshTemp();
         if (self.scope) |scope| _ = try scope.addLocal(self.arena, name, false, false);
-        return name;
+        return .{ .named = name };
     }
 
-    fn emitDefineActivationTemp(self: *Compiler, name: []const u8) CompileError!void {
+    fn emitDefineActivationTemp(self: *Compiler, temp: ActivationTemp) CompileError!void {
+        switch (temp) {
+            .named => |name| return self.emitDefineActivationTempNamed(name),
+            .scratch => |index| _ = try self.chunk.emit(.scratch_store, index),
+        }
+    }
+
+    fn emitDefineActivationTempNamed(self: *Compiler, name: []const u8) CompileError!void {
         if (self.scope != null) return self.emitDefine(name);
         // Env-mode generator/async functions have no frame slots. Keep compiler
         // state in their private activation Environment instead of `def_var`.
         _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), 1);
+    }
+
+    fn emitLoadActivationTemp(self: *Compiler, temp: ActivationTemp) CompileError!void {
+        switch (temp) {
+            .named => |name| return self.emitLoad(name),
+            .scratch => |index| _ = try self.chunk.emit(.scratch_load, index),
+        }
     }
 
     fn hasSpread(args: []const *Node) bool {
@@ -5826,9 +5867,35 @@ test "compiler reports stable program admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.invalid_root, reason),
     }
 
-    const unsupported_sources = [_][]const u8{
-        "var holder = {}; holder.value += 1;",
+    // Member references at top level lower through #706 activation-local
+    // scratch: every admitted program using them must declare scratch slots
+    // and move temporaries through the dedicated opcodes.
+    const scratch_sources = [_][]const u8{
+        "var holder = { value: 1 }; holder.value += 1;",
         "var holder = {}; holder.value++;",
+        "var holder = { key: 2 }; holder[holder.key] ??= 3;",
+    };
+    for (scratch_sources) |source| {
+        var scratch_parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
+        const scratch_program = try scratch_parser.parseProgram();
+        const chunk = switch (try Compiler.admitProgram(arena.allocator(), scratch_program)) {
+            .compiled => |compiled| compiled,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(chunk.scratch_count > 0);
+        var stores: usize = 0;
+        var loads: usize = 0;
+        for (chunk.code.items) |instruction| switch (instruction.op) {
+            .scratch_store => stores += 1,
+            .scratch_load => loads += 1,
+            else => {},
+        };
+        try std.testing.expect(stores > 0 and loads > 0);
+    }
+
+    // Explicit disposal remains a tree-walk-only boundary.
+    const unsupported_sources = [_][]const u8{
+        "for (using x of []) break;",
     };
     for (unsupported_sources) |source| {
         var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), source);

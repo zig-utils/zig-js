@@ -447,6 +447,8 @@ pub const Op = enum(u8) {
     async_iter_close, // pop async iterator -> push return result and has-return flag; caller awaits/validates when present
     async_iter_close_completion, // async_iter_close while [completion-value, kind] is beneath it, preserving throw completions during GetMethod/Call
     prepare_class_heritage, // pop raw extends value; validate once, push normalized constructor + prototype roots
+    scratch_store, // operand a: scratch slot; pop -> activation-local program scratch[a] (#706)
+    scratch_load, // operand a: scratch slot; push activation-local program scratch[a]
     eval_class, // operand a: class AST index, b: total prepared-heritage + computed-name inputs; build in the active class environment
     template_object, // operand a: template-site AST index; push the cached, frozen GetTemplateObject strings array for that tagged-template site
 
@@ -637,6 +639,12 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
+    /// Activation-local scratch slots for program chunks (#706). Program runs
+    /// have neither a frame nor a private activation Environment, so compiler
+    /// temporaries that must survive observable calls — resolved member
+    /// references above all — live in an Exec-owned, GC-rooted `Value` array
+    /// sized by this count. Function and env-mode chunks leave it at zero.
+    scratch_count: u32 = 0,
     /// Frame slots in chunks whose control flow can observe a lexical TDZ.
     /// Activations initialize these before the first debugger checkpoint;
     /// block-entry opcodes reset them when a lexical scope is re-entered.

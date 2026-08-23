@@ -31225,3 +31225,105 @@ test "enable_gc: FinalizationRegistry unregister prevents cleanup delivery" {
     );
     try std.testing.expectEqual(@as(f64, 0), r.asNum());
 }
+
+test "forced tree-walker and required bytecode preserve program member references" {
+    // #706: top-level compound/logical/update forms resolve their Reference
+    // into activation-local Exec scratch. The witness encodes the observable
+    // order — computed-key coercion exactly once per reference, GetValue
+    // before RHS, setter before completion value, postfix old-value result —
+    // so tree-walker and required-bytecode runs must agree byte for byte.
+    // Both stages end in an explicit string completion so the comparison is
+    // independent of Value-format coercion.
+    const sources = [2][]const u8{
+        "var target = { v: 2 };\n" ++
+            "target.v += 3;\n" ++
+            "var postfix = target.v++;\n" ++
+            "\"\" + postfix",
+        \\globalThis.refLog = "";
+        \\var target = Object.defineProperty({}, "v", {
+        \\  get: function () { globalThis.refLog += "g"; return 2; },
+        \\  set: function (x) { globalThis.refLog += "s"; }
+        \\});
+        \\var keys = { get k() { globalThis.refLog += "k"; return "v"; } };
+        \\target[keys.k] ??= 5;
+        \\target[keys.k] &&= target.v;
+        \\target.v++;
+        \\var postfix = target.v++;
+        \\var prefix = ++target.v;
+        \\globalThis.refLog + ":" + postfix + ":" + prefix
+        ,
+    };
+    const expected = [2][]const u8{ "5", "kgkggsgsgsgs:2:3" };
+
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    for (0..2) |stage| {
+        var actual: [modes.len][]const u8 = undefined;
+        for (modes, 0..) |mode, index| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            const outcome = try ctx.evaluate(sources[stage]);
+            try std.testing.expect(outcome.kind() == .string);
+            actual[index] = try std.testing.allocator.dupe(u8, outcome.asStr());
+            if (mode == .required) {
+                const inventory = ctx.bytecodeAdmissionSnapshot();
+                try std.testing.expect(inventory.count(.program_compiled) > 0);
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            }
+        }
+        try std.testing.expectEqualStrings(actual[0], actual[1]);
+        try std.testing.expectEqualStrings(expected[stage], actual[1]);
+        for (actual) |entry| std.testing.allocator.free(entry);
+    }
+}
+
+test "required bytecode keeps program scratch rooted and isolated across collections and eval" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    // Rooting: the compound assignment's base is a fresh literal whose ONLY
+    // strong reference between GetValue's getter and PutValue is the #706
+    // scratch slot — the getter forces a full collection from inside that
+    // window, so an untraced scratch would let the collector sweep or move
+    // the target out from under PutValue.
+    const diag = (try ctx.evaluate(
+        \\globalThis.gcCount = 0;
+        \\var trap = {
+        \\  get v() {
+        \\    globalThis.gcCount += 1;
+        \\    $vm.gc();
+        \\    return 7;
+        \\  },
+        \\  set v(x) {},
+        \\};
+        \\var isolated = true;
+        \\isolated = false;
+        \\globalThis.nestedSource =
+        \\  "(globalThis.nestDepth = (globalThis.nestDepth|0) + 1); " +
+        \\  "var inner = { n: globalThis.nestDepth }; inner.n *= 10; " +
+        \\  "if (globalThis.nestDepth < 3) (0, eval)(globalThis.nestedSource); inner.n";
+        \\for (let i = 0; i < 20000; i++) {
+        \\  globalThis.holder = { count: i };
+        \\  globalThis.holder.count += 1;
+        \\  if (i % 5000 === 0) $vm.gc();
+        \\}
+        \\var before = globalThis.gcCount;
+        \\trap.v += 5;
+        \\var nested = (0, eval)(globalThis.nestedSource);
+        \\((globalThis.gcCount === before + 1 &&
+        \\  globalThis.holder.count === 20000 &&
+        \\  nested === 30) ? "ok" :
+        \\  ("A" + globalThis.gcCount + ":" + before + ":" + globalThis.holder.count + ":" + nested))
+    )).asStr();
+    try std.testing.expectEqualStrings("ok", diag);
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(inventory.count(.program_compiled) >= 1);
+}
+

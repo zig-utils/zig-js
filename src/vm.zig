@@ -238,6 +238,12 @@ pub const Exec = struct {
     strict_initialized: bool = false,
     /// Target depth for a break/continue completion travelling through finally.
     abrupt_environment_depth: u32 = 0,
+    /// #706 activation-local scratch for program chunks: compiler temporaries
+    /// (resolved member references) that must survive observable calls. Owned
+    /// by this Exec, so recursive/nested-eval/parallel executions of one
+    /// program never share slots; traced and relocated with the other precise
+    /// exec roots.
+    scratch: []Value = &.{},
 };
 
 /// A live try handler: where to resume on a throw and the operand-stack depth
@@ -5998,6 +6004,15 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     // scan). No-op when the GC is off.
     exec.frame = frame; // so a mid-script collection roots this activation's slots
     exec.chunk = chunk; // and the chunk's managed constant pool
+    // Program chunks declare their scratch demand up front (#706). Allocate
+    // once per activation: a generator resuming through this path keeps its
+    // existing array, and a fresh Exec (recursive/nested/parallel program run)
+    // gets its own, so slots stay invocation-local.
+    if (chunk.scratch_count > 0 and exec.scratch.len < chunk.scratch_count) {
+        const scratch = try vm.arena.alloc(Value, chunk.scratch_count);
+        @memset(scratch, Value.undef());
+        exec.scratch = scratch;
+    }
     vm.pushExecRoot(exec);
     defer vm.popExecRoot(exec);
     if (try tryRunNative(vm, exec, chunk, frame, gen)) |result| {
@@ -7327,6 +7342,15 @@ fn runChunk(
                 const prepared = try vm.prepareClassHeritage(stack.pop().?);
                 try stack.append(stack_alloc, prepared.constructor);
                 try stack.append(stack_alloc, prepared.prototype);
+            },
+            .scratch_store => {
+                // #706: the slot index is chunk-declared and bounds-checked at
+                // allocation time, so a store cannot address outside this
+                // activation's scratch array.
+                exec.scratch[inst.a] = stack.pop().?;
+            },
+            .scratch_load => {
+                try stack.append(stack_alloc, exec.scratch[inst.a]);
             },
             .eval_class => {
                 const node = chunk.classes.items[inst.a];

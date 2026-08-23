@@ -2394,6 +2394,9 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (exec.chunk) |chunk| traceChunk(chunk, v);
         for (exec.stack.items) |s| markValueInternal(v, "interpreter VM operand stack", s);
         markValueInternal(v, "interpreter VM accumulator", exec.acc);
+        // #706 activation-local program scratch: same arena-backed precise-root
+        // story as the operand stack above.
+        for (exec.scratch) |s| markValueInternal(v, "interpreter VM activation scratch", s);
         for (exec.handlers.items) |handler|
             if (handler.environment) |environment| markManaged(v, environment);
         v.mark(exec.saved_home_object);
@@ -2515,6 +2518,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (exec.chunk) |chunk| relocateChunk(chunk, v);
         for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
         gc_relocation.rewriteValueSlot(v, &exec.acc);
+        for (exec.scratch) |*slot| gc_relocation.rewriteValueSlot(v, slot);
         for (exec.handlers.items) |*handler|
             gc_relocation.rewriteOptionalSlot(v, interp.Environment, &handler.environment);
         gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_home_object);
