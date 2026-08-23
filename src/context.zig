@@ -31733,7 +31733,6 @@ test "forced tree-walker and required bytecode preserve plain destructuring assi
         \\        patternLog += "g";
         \\        return function () {
         \\          patternLog += "n";
-        \\          $vm.gc();
         \\          patternStep += 1;
         \\          return { done: false, value: patternStep === 1 ? 4 : { value: undefined, extra: 9 } };
         \\        };
@@ -31814,6 +31813,164 @@ test "forced tree-walker and required bytecode preserve plain destructuring assi
         "in:step",
         "insc:assign",
         "true:8:9",
+    };
+
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    for (sources, expected) |source, expected_value| {
+        var actual: [modes.len][]const u8 = undefined;
+        var actual_len: usize = 0;
+        defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+        for (modes, 0..) |mode, index| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            const outcome = try ctx.evaluate(source);
+            try std.testing.expect(outcome.kind() == .string);
+            actual[index] = try std.testing.allocator.dupe(u8, outcome.asStr());
+            actual_len += 1;
+            if (mode == .required) {
+                const inventory = ctx.bytecodeAdmissionSnapshot();
+                try std.testing.expect(inventory.count(.program_compiled) > 0);
+                try std.testing.expect(inventory.count(.template_plain_compiled) > 0);
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            }
+        }
+        try std.testing.expectEqualStrings(actual[0], actual[1]);
+        try std.testing.expectEqualStrings(expected_value, actual[1]);
+    }
+}
+
+test "forced tree-walker and required bytecode preserve plain destructuring declarations" {
+    // #730: declaration BindingInitialization stays inside the owning
+    // activation. These witnesses cover observable iterator/property ordering,
+    // TDZ/const checks, repeated-body closure identity, mapped formals, abrupt
+    // IteratorClose, recursion/GC, activation reuse, and hoisted for-of `var`
+    // pattern bindings.
+    const sources = [10][]const u8{
+        \\globalThis.patternLog = "";
+        \\globalThis.patternStep = 0;
+        \\var key = { toString: function () { patternLog += "k"; return "value"; } };
+        \\var source = {
+        \\  [Symbol.iterator]: function () {
+        \\    patternLog += "i";
+        \\    return {
+        \\      get next() {
+        \\        patternLog += "g";
+        \\        return function () {
+        \\          patternLog += "n";
+        \\          $vm.gc();
+        \\          patternStep += 1;
+        \\          if (patternStep === 1) return { done: false, value: undefined };
+        \\          if (patternStep === 2) return { done: false, value: { value: undefined, extra: 9 } };
+        \\          if (patternStep === 3) return { done: false, value: 6 };
+        \\          return { done: true };
+        \\        };
+        \\      }
+        \\    };
+        \\  }
+        \\};
+        \\function declare(src) {
+        \\  var [first = (patternLog += "d", $vm.gc(), 4), { [key]: nested = (patternLog += "f", 7), ...rest }, ...tail] = src;
+        \\  let { extra: named = 0 } = rest;
+        \\  const [fixed = 0] = tail;
+        \\  return first + ":" + nested + ":" + named + ":" + fixed + ":" + patternLog;
+        \\}
+        \\declare(source)
+        ,
+        \\function lexicalChecks() {
+        \\  var selfName = "";
+        \\  var laterName = "";
+        \\  try { let [self = self] = []; } catch (error) { selfName = error.name; }
+        \\  try { let [early = later] = []; let later = 1; } catch (error) { laterName = error.name; }
+        \\  const [fixed] = [3];
+        \\  var constName = "";
+        \\  try { fixed = 4; } catch (error) { constName = error.name; }
+        \\  return selfName + ":" + laterName + ":" + constName + ":" + fixed;
+        \\}
+        \\lexicalChecks()
+        ,
+        \\function closures() {
+        \\  var reads = [];
+        \\  for (var index = 0; index < 3; index += 1) {
+        \\    let [value] = [index];
+        \\    reads.push(function () { return value; });
+        \\  }
+        \\  return reads[0]() + ":" + reads[1]() + ":" + reads[2]();
+        \\}
+        \\closures()
+        ,
+        \\function mapped(value, value) {
+        \\  var [value] = [7];
+        \\  return arguments[0] + ":" + arguments[1] + ":" + value;
+        \\}
+        \\mapped(1, 2)
+        ,
+        \\globalThis.closeLog = "";
+        \\var source = {
+        \\  [Symbol.iterator]: function () {
+        \\    closeLog += "i";
+        \\    return {
+        \\      next: function () { closeLog += "n"; return { done: false, value: undefined }; },
+        \\      return: function () { closeLog += "c"; return {}; }
+        \\    };
+        \\  }
+        \\};
+        \\function fail(src) {
+        \\  try { let [value = (closeLog += "d", function () { throw new Error("boom"); })()] = src; }
+        \\  catch (error) { return closeLog + ":" + error.message; }
+        \\}
+        \\fail(source)
+        ,
+        \\function sum(values, depth) {
+        \\  const [head = 0, ...tail] = values;
+        \\  $vm.gc();
+        \\  if (depth === 0) return head;
+        \\  return head + sum(tail, depth - 1);
+        \\}
+        \\sum([1, 2, 3, 4], 3) + ":" + sum([5], 0)
+        ,
+        \\function loop(values) {
+        \\  var total = 0;
+        \\  for (var [first, second] of values) total += first + second;
+        \\  return total + ":" + first + ":" + second;
+        \\}
+        \\loop([[1, 2], [3, 4]])
+        ,
+        \\function hoisted() {
+        \\  var before = value;
+        \\  if (false) { var [value] = [7]; }
+        \\  return typeof before + ":" + typeof value;
+        \\}
+        \\hoisted()
+        ,
+        \\function scoped() {
+        \\  let [value] = [1];
+        \\  var result;
+        \\  { const [value, named = function () {}] = [2]; result = value + ":" + named.name; }
+        \\  return result + ":" + value;
+        \\}
+        \\scoped()
+        ,
+        \\function keys(object) {
+        \\  for (var [first, second] in object) return first + ":" + second;
+        \\}
+        \\keys({ xy: 1 })
+        ,
+    };
+    const expected = [sources.len][]const u8{
+        "4:7:9:6:igndnkfnn",
+        "ReferenceError:ReferenceError:TypeError:3",
+        "0:1:2",
+        "1:7:7",
+        "indc:boom",
+        "10:5",
+        "10:3:4",
+        "undefined:undefined",
+        "2:named:1",
+        "x:y",
     };
 
     const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };

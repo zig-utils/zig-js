@@ -1238,7 +1238,7 @@ pub const Compiler = struct {
             .identifier => |name| try shadowAdd(arena, m, name, lexical),
             .obj_pattern => |p| {
                 for (p.props) |prop| try shadowScanPattern(arena, m, prop.target, lexical);
-                if (p.rest) |r| if (r.* == .identifier) try shadowAdd(arena, m, r.identifier, lexical);
+                if (p.rest) |rest| try shadowScanPattern(arena, m, rest, lexical);
             },
             .arr_pattern => |p| {
                 for (p.elems) |elem| if (elem.target) |t| try shadowScanPattern(arena, m, t, lexical);
@@ -1310,7 +1310,7 @@ pub const Compiler = struct {
             .identifier => |name| try declared.put(arena, name, {}),
             .obj_pattern => |p| {
                 for (p.props) |prop| try tdzDeclarePattern(arena, declared, prop.target);
-                if (p.rest) |r| if (r.* == .identifier) try declared.put(arena, r.identifier, {});
+                if (p.rest) |rest| try tdzDeclarePattern(arena, declared, rest);
             },
             .arr_pattern => |p| {
                 for (p.elems) |elem| if (elem.target) |t| try tdzDeclarePattern(arena, declared, t);
@@ -1318,6 +1318,35 @@ pub const Compiler = struct {
             },
             else => {},
         }
+    }
+
+    /// Binding positions do not read their identifiers, but computed property
+    /// names and defaults execute before BindingInitialization completes. Walk
+    /// only those evaluation regions so `let [x = x] = []` and a reference to a
+    /// later lexical binding select TDZ-checked frame bytecodes without treating
+    /// every declared name as a false-positive read.
+    fn tdzPatternRefsPending(pattern: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *const std.StringHashMapUnmanaged(void)) bool {
+        return switch (pattern.*) {
+            .identifier => false,
+            .obj_pattern => |object| blk: {
+                for (object.props) |property| {
+                    if (property.key_expr) |key| if (tdzRefsPending(key, m, declared)) break :blk true;
+                    if (property.default) |default| if (tdzRefsPending(default, m, declared)) break :blk true;
+                    if (tdzPatternRefsPending(property.target, m, declared)) break :blk true;
+                }
+                if (object.rest) |rest| if (tdzPatternRefsPending(rest, m, declared)) break :blk true;
+                break :blk false;
+            },
+            .arr_pattern => |array| blk: {
+                for (array.elems) |element| {
+                    if (element.default) |default| if (tdzRefsPending(default, m, declared)) break :blk true;
+                    if (element.target) |target| if (tdzPatternRefsPending(target, m, declared)) break :blk true;
+                }
+                if (array.rest) |rest| if (tdzPatternRefsPending(rest, m, declared)) break :blk true;
+                break :blk false;
+            },
+            else => false,
+        };
     }
 
     fn tdzRefsPending(node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *const std.StringHashMapUnmanaged(void)) bool {
@@ -1339,6 +1368,7 @@ pub const Compiler = struct {
             },
             .destructure_decl => |d| {
                 if (tdzRefsPending(d.init, m, declared)) return true;
+                if (d.kind != .@"var" and tdzPatternRefsPending(d.pattern, m, declared)) return true;
                 if (d.kind != .@"var") try tdzDeclarePattern(arena, declared, d.pattern);
             },
             .expr_stmt => |expr| return tdzRefsPending(expr, m, declared),
@@ -1639,6 +1669,7 @@ pub const Compiler = struct {
     fn emitLexicalInitializersForNode(self: *Compiler, node: *Node) CompileError!void {
         switch (node.*) {
             .var_decl => |d| if (d.kind != .@"var") try self.emitLexicalInitializer(d.name),
+            .destructure_decl => |d| if (d.kind != .@"var") try self.emitLexicalInitializersForPattern(d.pattern),
             .decl_group => |decls| for (decls) |decl| try self.emitLexicalInitializersForNode(decl),
             else => {},
         }
@@ -1656,6 +1687,8 @@ pub const Compiler = struct {
                 if (decl.kind != .@"var")
                     _ = try scope.addLexical(self.arena, decl.name, decl.kind == .@"const");
             },
+            .destructure_decl => |decl| if (decl.kind != .@"var")
+                try self.predeclareLexicalPattern(decl.pattern, decl.kind == .@"const"),
             .decl_group => |decls| for (decls) |decl| try self.predeclareLexicalNode(decl),
             else => {},
         }
@@ -1680,8 +1713,10 @@ pub const Compiler = struct {
                 try self.predeclareRepeatedBodyNode(declaration, captures),
             .destructure_decl => |declaration| {
                 if (declaration.kind == .@"var") return;
-                if (!captures.patternCaptured(declaration.pattern)) return error.Unsupported;
-                try self.markEnvironmentLexicalPattern(declaration.pattern, declaration.kind == .@"const");
+                if (captures.patternCaptured(declaration.pattern))
+                    try self.markEnvironmentLexicalPattern(declaration.pattern, declaration.kind == .@"const")
+                else
+                    try self.predeclareLexicalPattern(declaration.pattern, declaration.kind == .@"const");
             },
             else => {},
         }
@@ -1770,6 +1805,23 @@ pub const Compiler = struct {
                 for (array.elems) |element| if (element.target) |target|
                     try self.predeclareCheckedLexicalPattern(target, immutable);
                 if (array.rest) |rest| try self.predeclareCheckedLexicalPattern(rest, immutable);
+            },
+            else => return error.Unsupported,
+        }
+    }
+
+    fn predeclareLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
+        const scope = self.scope orelse return error.Unsupported;
+        switch (pattern.*) {
+            .identifier => |name| _ = try scope.addLexical(self.arena, name, immutable),
+            .obj_pattern => |object| {
+                for (object.props) |property| try self.predeclareLexicalPattern(property.target, immutable);
+                if (object.rest) |rest| try self.predeclareLexicalPattern(rest, immutable);
+            },
+            .arr_pattern => |array| {
+                for (array.elems) |element| if (element.target) |target|
+                    try self.predeclareLexicalPattern(target, immutable);
+                if (array.rest) |rest| try self.predeclareLexicalPattern(rest, immutable);
             },
             else => return error.Unsupported,
         }
@@ -2067,12 +2119,22 @@ pub const Compiler = struct {
             },
             .destructure_decl => |d| {
                 const environment_pattern = self.scope != null and self.patternUsesEnvironment(d.pattern);
-                if (self.scope != null and !environment_pattern) return error.Unsupported;
-                if (environment_pattern and patternHasEvaluationExpressions(d.pattern)) {
+                if (self.scope != null) {
+                    // A `var` binding under `with` performs dynamic ResolveBinding
+                    // during BindingInitialization. Frame slots cannot represent
+                    // that Reference; retain the exact whole-function fallback
+                    // already required by destructuring assignment in `with`.
+                    if (d.kind == .@"var" and self.environment_depth != 0) return error.Unsupported;
                     try self.compileExpr(d.init);
                     const src = try self.freshActivationTemp();
                     try self.emitDefineActivationTemp(src);
-                    try self.compilePattern(d.pattern, src, .{ .environment_lexical = d.kind == .@"const" });
+                    const mode: PatternMode = if (environment_pattern)
+                        .{ .environment_lexical = d.kind == .@"const" }
+                    else if (d.kind == .@"var")
+                        .var_declaration
+                    else
+                        .lexical;
+                    try self.compilePattern(d.pattern, src, mode);
                     return;
                 }
                 if (nodeHasYield(d.pattern)) {
@@ -2618,11 +2680,16 @@ pub const Compiler = struct {
             return;
         }
         if (native_pattern and (target.* == .arr_pattern or target.* == .obj_pattern)) {
+            if (decl_kind) |kind| if (kind == .@"var" and self.environment_depth != 0) return error.Unsupported;
             const value_name = try self.freshActivationTemp();
             try self.emitDefineActivationTemp(value_name);
             if (decl_kind) |kind| if (kind != .@"var")
                 try self.emitLexicalInitializersForPattern(target);
-            try self.compilePattern(target, value_name, if (decl_kind == null) .assignment_native else .lexical);
+            const mode: PatternMode = if (decl_kind) |kind|
+                if (kind == .@"var") .var_declaration else .lexical
+            else
+                .assignment_native;
+            try self.compilePattern(target, value_name, mode);
             return;
         }
         // `bind_pattern` destructures into the live environment. That is the
@@ -2653,7 +2720,7 @@ pub const Compiler = struct {
         const environment_binding = captured_binding or program_lexical_binding;
         if (environment_binding and !patternSupportsEnvironment(target)) return error.Unsupported;
         const lexical_scope = self.scope != null and if (decl_kind) |kind|
-            kind != .@"var" and (target.* == .identifier or captured_binding or (keys_first and (target.* == .arr_pattern or target.* == .obj_pattern)))
+            kind != .@"var" and (target.* == .identifier or target.* == .arr_pattern or target.* == .obj_pattern)
         else
             false;
         if (lexical_scope) {
@@ -2681,7 +2748,7 @@ pub const Compiler = struct {
                 try self.emitDeclareEnvironmentLexicalName(target.identifier, decl_kind.? == .@"const")
             else
                 try self.emitDeclareEnvironmentLexicalPattern(target, decl_kind.? == .@"const");
-        } else if (decl_kind) |kind| if (kind != .@"var" and (target.* == .identifier or keys_first)) {
+        } else if (decl_kind) |kind| if (kind != .@"var") {
             if (target.* == .identifier)
                 try self.emitLexicalInitializer(target.identifier)
             else if (target.* == .arr_pattern or target.* == .obj_pattern)
@@ -2752,7 +2819,8 @@ pub const Compiler = struct {
         // bind r.value to the loop target (identifier or destructuring pattern)
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
-        try self.compileLoopBind(decl_kind, target, captured_binding, false);
+        const native_pattern = self.scope != null and (target.* == .arr_pattern or target.* == .obj_pattern);
+        try self.compileLoopBind(decl_kind, target, captured_binding, native_pattern);
         try self.compileRepeatedBody(body);
         const continue_target = self.chunk.here();
         _ = try self.chunk.emit(.load_true, 0);
@@ -2896,6 +2964,7 @@ pub const Compiler = struct {
 
     const PatternMode = union(enum) {
         assignment_native,
+        var_declaration,
         lexical,
         environment_lexical: bool,
     };
@@ -2938,6 +3007,7 @@ pub const Compiler = struct {
                 try self.emitLoadActivationTemp(val);
                 switch (mode) {
                     .lexical => try self.emitDefineForce(name),
+                    .var_declaration => try self.emitDefineKind(name, .@"var", true),
                     .environment_lexical => |immutable| {
                         _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (immutable) 2 else 1);
                     },
@@ -5006,6 +5076,10 @@ fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node)
         .var_decl => |d| {
             if (d.kind == .@"var") _ = try scope.addLocal(arena, d.name, false, false);
         },
+        .destructure_decl => |d| if (d.kind == .@"var") {
+            var collector = FunctionLocalBindingCollector{ .scope = scope };
+            try collectPatternBindingNames(arena, d.pattern, &collector);
+        },
         .func_decl => |f| _ = try scope.addLocal(arena, f.name, false, false),
         .block => |stmts| for (stmts) |s| try collectFunctionLocals(arena, scope, s),
         .decl_group => |stmts| for (stmts) |s| try collectFunctionLocals(arena, scope, s),
@@ -5021,8 +5095,10 @@ fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node)
         },
         .for_in => |f| {
             if (f.decl_kind) |kind| {
-                if (kind == .@"var" and f.target.* == .identifier)
-                    _ = try scope.addLocal(arena, f.target.identifier, false, false);
+                if (kind == .@"var") {
+                    var collector = FunctionLocalBindingCollector{ .scope = scope };
+                    try collectPatternBindingNames(arena, f.target, &collector);
+                }
             }
             try collectFunctionLocals(arena, scope, f.body);
         },
@@ -5039,6 +5115,14 @@ fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node)
         else => {},
     }
 }
+
+const FunctionLocalBindingCollector = struct {
+    scope: *FnScope,
+
+    fn add(self: *FunctionLocalBindingCollector, arena: std.mem.Allocator, name: []const u8) CompileError!void {
+        _ = try self.scope.addLocal(arena, name, false, false);
+    }
+};
 
 test "compiler preserves a first-statement debugger checkpoint" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -5089,6 +5173,11 @@ test "compiler pending lexical query preserves TDZ classifications" {
         .{ .source = "function f(){ unrelated; let value = 1; }", .hazardous = false },
         .{ .source = "function f(){ value; let value = 1; }", .hazardous = true },
         .{ .source = "function f(){ let value = value; }", .hazardous = true },
+        .{ .source = "function f(){ let [value] = []; }", .hazardous = false },
+        .{ .source = "function f(){ let [value = value] = []; }", .hazardous = true },
+        .{ .source = "function f(){ let [value = later] = []; let later = 1; }", .hazardous = true },
+        .{ .source = "function f(){ let earlier = 1; let [value = earlier] = []; }", .hazardous = false },
+        .{ .source = "function f(){ let { [later]: value } = {}; let later = 1; }", .hazardous = true },
         .{ .source = "function f(){ function read(){ return value; } let value = 1; }", .hazardous = true },
         .{ .source = "function f(){ class Box { field = value; } let value = 1; }", .hazardous = true },
         .{ .source = "function f(){ class Box { static field = value; } let value = 1; }", .hazardous = true },
@@ -6288,6 +6377,60 @@ test "compiler lowers plain-function destructuring assignments without bind_patt
     var with_parser = try @import("parser.zig").Parser.init(
         arena.allocator(),
         "function assign(source, object){ with (object) { ([value] = source); } }",
+    );
+    const with_program = try with_parser.parseProgram();
+    switch (try Compiler.admitPlainFunction(arena.allocator(), with_program.program[0].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    }
+}
+
+test "compiler lowers plain-function destructuring declarations without bind_pattern" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function declare(source){ var [first, { value: nested = 3, ...rest }, ...tail] = source; { let { extra: lexical = fixed } = rest; const [fixed] = tail; return first + nested + lexical + fixed; } }",
+    );
+    const program = try parser.parseProgram();
+    const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |result| result,
+        .rejected => return error.TestUnexpectedResult,
+    };
+
+    var saw_iterator = false;
+    var saw_object_rest = false;
+    var saw_frame_store = false;
+    var saw_lexical_init = false;
+    for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
+        .bind_pattern => return error.TestUnexpectedResult,
+        .iter_of => saw_iterator = true,
+        .object_rest => saw_object_rest = true,
+        .store_local, .store_local_lexical, .store_local_mapped => saw_frame_store = true,
+        .init_local_lexical => saw_lexical_init = true,
+        else => {},
+    };
+    try std.testing.expect(saw_iterator);
+    try std.testing.expect(saw_object_rest);
+    try std.testing.expect(saw_frame_store);
+    try std.testing.expect(saw_lexical_init);
+
+    var loop_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function loop(values){ for (var [first, second] of values) {} return first + second; }",
+    );
+    const loop_program = try loop_parser.parseProgram();
+    const loop_compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), loop_program.program[0].func_decl)) {
+        .compiled => |result| result,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(loop_compiled.local_count >= 3);
+    for (loop_compiled.chunk.code.items) |instruction|
+        if (instruction.op == .bind_pattern) return error.TestUnexpectedResult;
+
+    var with_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function declare(source, object){ with (object) { var [value] = source; } }",
     );
     const with_program = try with_parser.parseProgram();
     switch (try Compiler.admitPlainFunction(arena.allocator(), with_program.program[0].func_decl)) {
