@@ -567,6 +567,19 @@ pub const StackTraceCallFrame = struct {
 /// method. `method == undefined` is the async null/undefined no-op sentinel.
 pub const Disposable = struct { value: Value, method: Value, is_async: bool, await_result: bool = false };
 
+/// An identifier Reference captured before later observable evaluation. Raw
+/// Environment/Object bases are activation-owned precise roots while live; the
+/// `.static` case delegates to the compiler's frame/upvalue fallback, and
+/// `.unresolvable` preserves that exact pre-side-effect resolution result.
+pub const BindingReference = union(enum) {
+    empty,
+    static,
+    environment: *Environment,
+    with_object: *value.Object,
+    global_object: *value.Object,
+    unresolvable,
+};
+
 pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
     /// `using` resources declared in this scope, in declaration order (disposed
@@ -1051,6 +1064,41 @@ pub const Environment = struct {
         var root = self;
         while (root.parent) |p| root = p;
         try root.put(name, v);
+    }
+
+    pub const ResolvedBindingState = enum {
+        mutable,
+        missing,
+        tdz,
+        immutable,
+        function_name,
+    };
+
+    /// Classify one exact Declarative Environment Record without walking to a
+    /// now-closer binding. Used by a previously captured Reference: PutValue
+    /// must retain its original base even if intervening JavaScript mutates the
+    /// surrounding environment chain before the store.
+    pub fn resolvedBindingState(self: *Environment, name: []const u8, tdz_marker: *value.Object) ResolvedBindingState {
+        const locked = self.lockBindingsForRead();
+        defer self.unlockBindingsForRead(locked);
+        if (self.aliases.contains(name)) return .immutable;
+        const current = self.vars.get(name) orelse return .missing;
+        if (current.isObject() and current.asObj() == tdz_marker) return .tdz;
+        if (self.consts.contains(name)) return .immutable;
+        if (self.fn_names.contains(name)) return .function_name;
+        return .mutable;
+    }
+
+    /// Store into this exact Environment Record. The caller has already applied
+    /// TDZ/immutability checks and deliberately does not fall through to a
+    /// different record if the binding disappeared after Reference creation.
+    pub fn assignOwnResolved(self: *Environment, name: []const u8, v: Value) bool {
+        self.barrierStoredValue(v);
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
+        const slot = self.vars.getPtr(name) orelse return false;
+        slot.* = v;
+        return true;
     }
 
     /// An indirect (module import) binding: `name` in module environment `env`.
@@ -3291,18 +3339,6 @@ pub const Interpreter = struct {
         return null;
     }
 
-    fn catchParamBindingEnvOf(start: *Environment, name: []const u8) ?*Environment {
-        var env: ?*Environment = start;
-        while (env) |e| {
-            const locked = e.lockBindingsForRead();
-            const owns = e.vars.contains(name) or e.aliases.get(name) != null;
-            e.unlockBindingsForRead(locked);
-            if (owns) return if (e.is_catch_param) e else null;
-            env = e.parent;
-        }
-        return null;
-    }
-
     pub fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
         var env: ?*Environment = self.env;
         while (env) |e| {
@@ -3316,6 +3352,54 @@ pub const Interpreter = struct {
             env = e.parent;
         }
         return null;
+    }
+
+    /// Resolve an identifier Reference now and retain its exact base for a later
+    /// PutValue. A bounded walk stops immediately before a statically resolved
+    /// frame/upvalue binding; a full walk additionally distinguishes a global
+    /// object binding from an unresolvable reference. `withHasBinding` runs only
+    /// here, so iterator/property/default side effects cannot repeat or retarget
+    /// the observable `has`/`@@unscopables` lookup.
+    pub fn captureBindingReference(self: *Interpreter, name: []const u8, environment_limit: ?u32) EvalError!BindingReference {
+        var remaining = environment_limit;
+        var env: ?*Environment = self.env;
+        while (env) |e| {
+            if (remaining) |count| {
+                if (count == 0) return .static;
+                remaining = count - 1;
+            }
+            const locked = e.lockBindingsForRead();
+            const owns_alias = e.aliases.contains(name);
+            const owns_var = e.vars.contains(name);
+            const owns = owns_alias or owns_var;
+            const root_object_candidate = owns_var and !owns_alias and e.parent == null and
+                !e.lexicals.contains(name) and !e.consts.contains(name);
+            e.unlockBindingsForRead(locked);
+            if (owns) {
+                if (root_object_candidate) if (self.currentGlobalObject()) |global|
+                    if (objectHasOwn(global, name)) return .{ .global_object = global };
+                return .{ .environment = e };
+            }
+            if (e.with_object) |object| {
+                // HasBinding can execute Proxy traps and @@unscopables getters,
+                // either of which may force a moving collection. Root the
+                // Environment Record that owns the object so both the selected
+                // base and the next outward link are read from relocated storage.
+                const environment_root = try self.pushTempEnvRoot(e);
+                defer self.restoreTempEnvRoots(environment_root);
+                if (try self.withHasBinding(object, name)) {
+                    const rooted_environment = self.tempEnvRoot(environment_root, e);
+                    return .{ .with_object = rooted_environment.with_object.? };
+                }
+                env = self.tempEnvRoot(environment_root, e).parent;
+                continue;
+            }
+            env = e.parent;
+        }
+        if (environment_limit != null) return .static;
+        if (try self.globalHasBinding(name))
+            return .{ .global_object = self.currentGlobalObject().? };
+        return .unresolvable;
     }
 
     /// Delete an IdentifierReference after resolving its Environment Record.
@@ -3385,11 +3469,20 @@ pub const Interpreter = struct {
     /// property AND `name` is not listed truthy in the object's
     /// `[Symbol.unscopables]` (which hides selected names from `with` scope).
     pub fn withHasBinding(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!bool {
-        if (!try self.hasPropertyResult(o, name)) return false;
+        // Both HasProperty and the two Gets below are observable. A Proxy trap
+        // or accessor may force moving GC, so never carry an unrooted raw object
+        // pointer from one operation to the next.
+        const object_fallback = Value.obj(o);
+        const object_root = try self.pushTempRoot(object_fallback);
+        defer self.restoreTempRoots(object_root);
+        if (!try self.hasPropertyResult(self.tempRoot(object_root, object_fallback).asObj(), name)) return false;
         const unsc_key = self.wellKnownSymbolKey("unscopables") orelse return true;
-        const unsc = try self.getProperty(Value.obj(o), unsc_key);
-        if (unsc.isObject()) {
-            if ((try self.getProperty(unsc, name)).toBoolean()) return false;
+        const unsc = try self.getProperty(self.tempRoot(object_root, object_fallback), unsc_key);
+        const unsc_root = try self.pushTempRoot(unsc);
+        defer self.restoreTempRoots(unsc_root);
+        const rooted_unsc = self.tempRoot(unsc_root, unsc);
+        if (rooted_unsc.isObject()) {
+            if ((try self.getProperty(rooted_unsc, name)).toBoolean()) return false;
         }
         return true;
     }
@@ -4611,8 +4704,8 @@ pub const Interpreter = struct {
                 // for a `var x = init` whose name a `with` object provides,
                 // capture that target object first, so a side effect in the
                 // initializer (e.g. `delete obj.x`) can't retarget the write.
-                const with_target: ?*value.Object = if (d.kind == .@"var" and d.init != null)
-                    try self.assignWithObject(d.name)
+                const binding_reference: ?BindingReference = if (d.kind == .@"var" and d.init != null)
+                    try self.captureBindingReference(d.name, null)
                 else
                     null;
                 var v: Value = Value.undef();
@@ -4630,15 +4723,10 @@ pub const Interpreter = struct {
                     // an initializer, or when no `with` shadows the name, the var
                     // scope binding takes the value as before.
                     if (d.init != null) {
-                        if (with_target) |o| {
-                            try self.setMember(Value.obj(o), d.name, v);
-                            break :blk Value.undef();
-                        }
-                        if (catchParamBindingEnvOf(self.env, d.name)) |catch_env| {
-                            try catch_env.assign(d.name, v);
-                            break :blk Value.undef();
-                        }
-                        try self.globalDefine(d.name, v);
+                        if (binding_reference) |reference|
+                            try self.storeCapturedBindingReference(reference, d.name, v)
+                        else
+                            try self.globalDefine(d.name, v);
                     }
                     // A bare `var x;` (no initializer) is a runtime no-op: the
                     // binding already exists from declaration instantiation
@@ -9427,6 +9515,23 @@ pub const Interpreter = struct {
         return self.gc_temp_roots.items[mark];
     }
 
+    fn pushTempEnvRoot(self: *Interpreter, environment: *Environment) EvalError!usize {
+        if (self.gc == null) return 0;
+        const mark = self.gc_env_roots.items.len;
+        try self.gc_env_roots.append(self.arena, environment);
+        return mark;
+    }
+
+    fn restoreTempEnvRoots(self: *Interpreter, mark: usize) void {
+        if (self.gc == null) return;
+        self.gc_env_roots.shrinkRetainingCapacity(mark);
+    }
+
+    fn tempEnvRoot(self: *Interpreter, mark: usize, fallback: *Environment) *Environment {
+        if (self.gc == null) return fallback;
+        return self.gc_env_roots.items[mark];
+    }
+
     test "Interpreter publishes into a reserved completion root without allocating" {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
@@ -13551,6 +13656,28 @@ pub const Interpreter = struct {
         }
     }
 
+    fn capturePatternIdentifierReference(self: *Interpreter, target: ?*Node, declare: bool) EvalError!?BindingReference {
+        const node = target orelse return null;
+        if (node.* != .identifier) return null;
+        // Lexical BindingInitialization targets the freshly instantiated record
+        // directly. Assignment and hoisted `var` patterns instead perform
+        // ResolveBinding at each leaf's specified evaluation point.
+        if (declare and !self.binding_hoisted) return null;
+        return try self.captureBindingReference(node.identifier, null);
+    }
+
+    fn bindPatternWithReference(
+        self: *Interpreter,
+        target: *Node,
+        val: Value,
+        declare: bool,
+        reference: ?BindingReference,
+    ) EvalError!void {
+        if (reference) |resolved|
+            return self.storeCapturedBindingReference(resolved, target.identifier, val);
+        return self.bindPattern(target, val, declare);
+    }
+
     fn setSuperMemberResolved(self: *Interpreter, property: []const u8, computed: ?*Node, computed_key: Value, v: Value) EvalError!void {
         const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
         if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
@@ -13587,13 +13714,10 @@ pub const Interpreter = struct {
                     else => unreachable,
                 }
             }
-            // KeyedBindingInitialization for a SingleNameBinding resolves the
-            // target binding (step 2) BEFORE GetV(value, P) (step 3). Inside a
-            // `with`, that ResolveBinding walk is observable — the object
-            // Environment Record's [[HasBinding]] (a proxy `has` trap). Trigger
-            // it now (a no-op when no `with` shadows the name).
-            if (declare and prop.target.* == .identifier)
-                _ = try self.assignWithObject(prop.target.identifier);
+            // KeyedBindingInitialization/AssignmentEvaluation resolves a plain
+            // identifier target before GetV(value, P). Retain that exact base,
+            // not merely the observable `with` lookup, across getters/defaults.
+            const binding_reference = try self.capturePatternIdentifierReference(prop.target, declare);
             var v = try self.getProperty(val, key);
             if (v.isUndefined()) {
                 if (prop.default) |d| {
@@ -13611,7 +13735,7 @@ pub const Interpreter = struct {
                     else => unreachable,
                 }
             } else {
-                try self.bindPattern(prop.target, v, declare);
+                try self.bindPatternWithReference(prop.target, v, declare, binding_reference);
             }
         }
         if (rest) |rest_target| {
@@ -13622,6 +13746,7 @@ pub const Interpreter = struct {
             var rest_recv: Value = Value.undef();
             var rest_member: ?struct { property: []const u8, computed: bool, keyval: Value } = null;
             var rest_super: ?struct { base: Value, property: []const u8, computed: bool, keyval: Value } = null;
+            const rest_binding_reference = try self.capturePatternIdentifierReference(rest_target, declare);
             if (!declare) switch (rest_target.*) {
                 .member => |member| {
                     rest_recv = try self.eval(member.object);
@@ -13650,7 +13775,7 @@ pub const Interpreter = struct {
             // target reference — which may be a member (`({...obj.y} = …)`), so it
             // runs a setter / honors a const binding like any other assignment.
             if (declare) {
-                try self.bindPattern(rest_target, rest_obj, true);
+                try self.bindPatternWithReference(rest_target, rest_obj, true, rest_binding_reference);
             } else if (rest_member) |member| {
                 // PutValue checks the captured base before coercing the raw
                 // computed key. A nullish base therefore throws without running
@@ -13666,7 +13791,7 @@ pub const Interpreter = struct {
                     if (self.strict) return self.throwError("TypeError", "Cannot set property");
                 }
             } else {
-                try self.assignTo(rest_target, rest_obj);
+                try self.bindPatternWithReference(rest_target, rest_obj, false, rest_binding_reference);
             }
         }
     }
@@ -13732,6 +13857,7 @@ pub const Interpreter = struct {
         if (val.isObject() and val.asObj().is_array and self.arrayIterIntact() and !self.arrayHasOwnIterator(val.asObj())) {
             var idx: usize = 0;
             for (elems) |elem| {
+                const binding_reference = try self.capturePatternIdentifierReference(elem.target, declare);
                 var v = try self.elementAt(val, idx);
                 idx += 1;
                 if (elem.target) |t| {
@@ -13741,16 +13867,17 @@ pub const Interpreter = struct {
                             if (t.* == .identifier) try self.maybeNameAnon(v, d, t.identifier);
                         }
                     }
-                    try self.bindPattern(t, v, declare);
+                    try self.bindPatternWithReference(t, v, declare, binding_reference);
                 }
             }
             if (rest) |rest_target| {
+                const binding_reference = try self.capturePatternIdentifierReference(rest_target, declare);
                 const rest_arr = try self.newArray();
                 const len = iterableLen(val);
                 while (idx < len) : (idx += 1) {
                     try rest_arr.asObj().appendElement(self.arena, try self.elementAt(val, idx));
                 }
-                try self.bindPattern(rest_target, rest_arr, declare);
+                try self.bindPatternWithReference(rest_target, rest_arr, declare, binding_reference);
             }
             return;
         }
@@ -13776,6 +13903,7 @@ pub const Interpreter = struct {
             var member_recv: Value = Value.undef();
             var member_keyval: Value = Value.undef();
             var member_kind: enum { none, member, super_member } = .none;
+            const binding_reference = try self.capturePatternIdentifierReference(elem.target, declare);
             if (!declare) if (elem.target) |t| switch (t.*) {
                 .member => |m| {
                     member_kind = .member;
@@ -13821,7 +13949,7 @@ pub const Interpreter = struct {
                         const m = t.super_member;
                         try self.setSuperMemberResolved(m.property, m.computed, member_keyval, v);
                     },
-                    .none => try self.bindPattern(t, v, declare),
+                    .none => try self.bindPatternWithReference(t, v, declare, binding_reference),
                 }
             }
         }
@@ -13832,6 +13960,7 @@ pub const Interpreter = struct {
             var rest_recv: Value = Value.undef();
             var rest_key: ?[]const u8 = null;
             var rest_super: ?struct { property: []const u8, computed: ?*Node, keyval: Value } = null;
+            const binding_reference = try self.capturePatternIdentifierReference(rest_target, declare);
             if (!declare) switch (rest_target.*) {
                 .member => |m| {
                     rest_recv = try self.eval(m.object);
@@ -13868,7 +13997,7 @@ pub const Interpreter = struct {
             else if (rest_super) |s|
                 try self.setSuperMemberResolved(s.property, s.computed, s.keyval, rest_arr)
             else
-                try self.bindPattern(rest_target, rest_arr, declare); // iterator already exhausted
+                try self.bindPatternWithReference(rest_target, rest_arr, declare, binding_reference); // iterator already exhausted
             return;
         }
         // IteratorClose: if destructuring finished before the iterator was
@@ -14010,6 +14139,49 @@ pub const Interpreter = struct {
             return;
         }
         try self.env.assign(name, v);
+    }
+
+    /// PutValue for a dynamically captured identifier Reference. Static
+    /// frame/upvalue fallbacks are handled by the VM because their storage does
+    /// not live in an Environment Record.
+    pub fn storeCapturedBindingReference(self: *Interpreter, reference: BindingReference, name: []const u8, v: Value) EvalError!void {
+        switch (reference) {
+            .empty => return self.throwError("InternalError", "uninitialized binding reference"),
+            .static => unreachable,
+            .with_object, .global_object => |object| {
+                // Object Environment Record SetMutableBinding performs its own
+                // HasProperty after Reference creation, but never repeats the
+                // earlier `@@unscopables` query for a `with` record. HasProperty
+                // is observable and may force moving GC, so refresh the base
+                // before the later Set.
+                const object_fallback = Value.obj(object);
+                const object_root = try self.pushTempRoot(object_fallback);
+                defer self.restoreTempRoots(object_root);
+                const still = try self.hasPropertyResult(self.tempRoot(object_root, object_fallback).asObj(), name);
+                if (!still and self.strict) return self.throwError("ReferenceError", name);
+                return self.setMember(self.tempRoot(object_root, object_fallback), name, v);
+            },
+            .unresolvable => {
+                if (self.strict) return self.throwError("ReferenceError", name);
+                const global = self.currentGlobalObject() orelse return self.env.assign(name, v);
+                return self.setMember(Value.obj(global), name, v);
+            },
+            .environment => |environment| {
+                switch (environment.resolvedBindingState(name, self.tdz_marker.?)) {
+                    .tdz => return self.throwError("ReferenceError", name),
+                    .immutable => return self.throwError("TypeError", "Assignment to constant variable."),
+                    .function_name => {
+                        if (self.strict) return self.throwError("TypeError", "Assignment to constant variable.");
+                        return;
+                    },
+                    .missing => return self.throwError("ReferenceError", name),
+                    .mutable => {},
+                }
+
+                if (!environment.assignOwnResolved(name, v))
+                    return self.throwError("ReferenceError", name);
+            },
+        }
     }
 
     pub fn defineLexicalVM(self: *Interpreter, name: []const u8, v: Value, is_const: bool) EvalError!void {

@@ -309,6 +309,8 @@ pub const Op = enum(u8) {
     def_var, // operand a: name index, b: 0 bare `var x;`, 1 `var x = init`, 2 force define/function/internal temp; pop value, define global
     def_lex, // operand a: name index, b: 1 let / 2 const / 3 let-TDZ / 4 const-TDZ; pop value, define lexical binding
     bind_pattern, // operand a: pattern index, b: mode (0 var, 1 let, 2 const, 3 assign); pop value, destructure into the pattern
+    resolve_binding_ref, // operand a: binding-reference plan; capture ResolveBinding before later observable work
+    store_binding_ref, // operand a: binding-reference plan; pop value, PutValue through the captured Reference
 
     // --- locals & upvalues (resolved to frame slots at compile time) ---
     init_local_lexical, // operand a: slot; reset binding to TDZ on scope entry
@@ -486,6 +488,26 @@ pub const Inst = struct {
 /// generator/async/program bindings. Any smaller operand bounds the search
 /// before a statically resolved non-deletable frame/upvalue binding.
 pub const delete_name_full_environment_depth: u32 = std.math.maxInt(u32);
+
+/// Static PutValue fallback used when a bounded ResolveBinding walk reaches the
+/// frame boundary without an intervening declarative/`with` Environment Record.
+/// The dynamic winner itself lives activation-locally in `vm.Exec`; this plan is
+/// immutable chunk metadata and therefore safe to share across invocations.
+pub const BindingReferenceFallback = struct {
+    op: Op,
+    a: u32 = 0,
+    b: u32 = 0,
+};
+
+pub const BindingReferencePlan = struct {
+    name_index: u32,
+    /// `delete_name_full_environment_depth` means search the complete lexical
+    /// chain and capture either an exact Environment/global-object base or an
+    /// unresolvable Reference. Smaller values stop before a statically known
+    /// frame/upvalue binding and select `fallback`.
+    environment_depth: u32,
+    fallback: BindingReferenceFallback,
+};
 
 const OptimizerBinaryProfile = struct {
     lhs_kinds: std.atomic.Value(u8) = .init(0),
@@ -688,6 +710,10 @@ pub const Chunk = struct {
     /// Destructuring-pattern AST nodes referenced by `bind_pattern` (the VM
     /// reuses the tree-walker's `bindPattern` over the live environment).
     patterns: std.ArrayListUnmanaged(*ast.Node) = .empty,
+    /// Immutable capture plans for identifier References whose environment
+    /// resolution must precede iterator/property/default side effects. Each
+    /// plan also owns one activation-local `Exec.binding_references` slot.
+    binding_reference_plans: std.ArrayListUnmanaged(BindingReferencePlan) = .empty,
     /// Class-expression AST nodes referenced by `eval_class`; the compiler
     /// evaluates and prepares heritage plus any suspendable computed names first,
     /// then the VM delegates construction back to the interpreter while the
@@ -832,6 +858,12 @@ pub const Chunk = struct {
     pub fn addPattern(self: *Chunk, node: *ast.Node) std.mem.Allocator.Error!u32 {
         const idx: u32 = @intCast(self.patterns.items.len);
         try self.patterns.append(self.arena, node);
+        return idx;
+    }
+
+    pub fn addBindingReferencePlan(self: *Chunk, plan: BindingReferencePlan) std.mem.Allocator.Error!u32 {
+        const idx: u32 = @intCast(self.binding_reference_plans.items.len);
+        try self.binding_reference_plans.append(self.arena, plan);
         return idx;
     }
 

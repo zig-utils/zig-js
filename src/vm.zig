@@ -279,6 +279,11 @@ pub const Exec = struct {
     /// program never share slots; traced and relocated with the other precise
     /// exec roots.
     scratch: []Value = &.{},
+    /// Identifier References captured before destructuring/initializer side
+    /// effects. The tagged bases are traced and relocated with this Exec, so a
+    /// suspended or recursively nested activation cannot lose or overwrite the
+    /// exact Environment/Object selected by ResolveBinding.
+    binding_references: []interp.BindingReference = &.{},
 };
 
 /// A live try handler: where to resume on a throw and the operand-stack depth
@@ -5986,6 +5991,14 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 /// non-null only when running a generator body, enabling the `gen_yield` opcode
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
+fn ensureBindingReferenceStorage(vm: *Interpreter, exec: *Exec, chunk: *const Chunk) EvalError!void {
+    const count = chunk.binding_reference_plans.items.len;
+    if (count == 0 or exec.binding_references.len >= count) return;
+    const references = try vm.arena.alloc(interp.BindingReference, count);
+    @memset(references, .empty);
+    exec.binding_references = references;
+}
+
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
     const saved_execution_strict = vm.strict;
     defer vm.strict = saved_execution_strict;
@@ -6048,6 +6061,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         @memset(scratch, Value.undef());
         exec.scratch = scratch;
     }
+    try ensureBindingReferenceStorage(vm, exec, chunk);
     vm.pushExecRoot(exec);
     defer vm.popExecRoot(exec);
     if (try tryRunNative(vm, exec, chunk, frame, gen)) |result| {
@@ -6110,6 +6124,47 @@ fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void {
 /// The instruction loop proper. Operates on `exec.stack` directly so the
 /// operand stack is always current when a throw unwinds (and persists across a
 /// generator's yield/resume). Returns the completion value or propagates a throw.
+fn storeStaticBindingFallback(
+    vm: *Interpreter,
+    frame: ?*Frame,
+    fallback: bc.BindingReferenceFallback,
+    stored: Value,
+    parallel: bool,
+) EvalError!void {
+    switch (fallback.op) {
+        .store_local => frame.?.writeSlot(fallback.a, stored, parallel),
+        .store_local_mapped => frame.?.writeSlot(fallback.a, stored, parallel),
+        .store_local_lexical => {
+            const target = frame.?;
+            const held = target.lockSlots(parallel);
+            const in_tdz = vm.isTdz(target.slots[fallback.a]);
+            if (!in_tdz and fallback.b == 0) target.slots[fallback.a] = stored;
+            target.unlockSlots(held);
+            if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+            if (fallback.b != 0) return vm.throwError("TypeError", "Assignment to constant variable");
+        },
+        .store_upval, .store_upval_mapped, .store_upval_lexical => {
+            var target = frame.?;
+            var depth = fallback.a;
+            while (depth > 0) : (depth -= 1) target = target.parent.?;
+            if (fallback.op == .store_upval_mapped) {
+                target.writeSlot(fallback.b, stored, parallel);
+                return;
+            }
+            const immutable_mask: u32 = @as(u32, 1) << 31;
+            const slot = if (fallback.op == .store_upval_lexical) fallback.b & ~immutable_mask else fallback.b;
+            const immutable = fallback.op == .store_upval_lexical and (fallback.b & immutable_mask) != 0;
+            const held = target.lockSlots(parallel);
+            const in_tdz = fallback.op == .store_upval_lexical and vm.isTdz(target.slots[slot]);
+            if (!in_tdz and !immutable) target.slots[slot] = stored;
+            target.unlockSlots(held);
+            if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+            if (immutable) return vm.throwError("TypeError", "Assignment to constant variable");
+        },
+        else => return vm.throwError("InternalError", "invalid binding-reference fallback"),
+    }
+}
+
 fn runChunk(
     vm: *Interpreter,
     exec: *Exec,
@@ -6250,6 +6305,27 @@ fn runChunk(
                 const pat = chunk.patterns.items[inst.a];
                 const v = stack.pop().?;
                 try vm.bindPatternVM(pat, v, inst.b);
+            },
+            .resolve_binding_ref => {
+                const plan = chunk.binding_reference_plans.items[inst.a];
+                const environment_limit: ?u32 = if (plan.environment_depth == bc.delete_name_full_environment_depth)
+                    null
+                else
+                    plan.environment_depth;
+                exec.binding_references[inst.a] = try vm.captureBindingReference(
+                    chunk.names.items[plan.name_index],
+                    environment_limit,
+                );
+            },
+            .store_binding_ref => {
+                const plan = chunk.binding_reference_plans.items[inst.a];
+                const reference = exec.binding_references[inst.a];
+                exec.binding_references[inst.a] = .empty;
+                const stored = stack.pop().?;
+                if (reference == .static)
+                    try storeStaticBindingFallback(vm, frame, plan.fallback, stored, parallel_sync)
+                else
+                    try vm.storeCapturedBindingReference(reference, chunk.names.items[plan.name_index], stored);
             },
 
             .init_local_lexical => {
@@ -8999,6 +9075,7 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     act.exec.class_strict_depth = 0;
     act.exec.class_strict_base = false;
     act.exec.strict_initialized = false;
+    @memset(act.exec.binding_references, .empty);
     act.frame.mapped_arguments = null;
     act.frame.mapped_parameter_indices = &.{};
     act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
@@ -9054,7 +9131,11 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
 /// propagating, so the caller is never left with the callee's state.
 fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!*Activation {
     const act = try acquireActivation(vm, func.local_count);
-    const exec = act.exec;
+    var exec = act.exec;
+    ensureBindingReferenceStorage(vm, &exec, fchunk) catch |err| {
+        releaseActivation(vm, act);
+        return err;
+    };
     const frame = act.frame;
     const slot_storage = act.slot_storage;
     const slots = frame.slots;

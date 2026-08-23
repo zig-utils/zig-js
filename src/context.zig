@@ -32001,6 +32001,161 @@ test "forced tree-walker and required bytecode preserve plain destructuring decl
     }
 }
 
+test "forced tree-walker and required bytecode preserve captured with binding references" {
+    // #731: ResolveBinding for each identifier target precedes the initializer,
+    // IteratorStep, or GetV that follows it. Proxy `has` and @@unscopables reads
+    // make Reference creation observable; forced moving collections inside
+    // those traps also prove the selected Environment/Object base is precisely
+    // rooted. Mutations inside later stages prove PutValue uses that captured
+    // base instead of resolving the name again.
+    const sources = [5][]const u8{
+        \\globalThis.bindingLog = "";
+        \\globalThis.bindingHasGcCount = 0;
+        \\function wrapped(target) {
+        \\  return new Proxy(target, {
+        \\    has: function (object, key) {
+        \\      if (key === "x") {
+        \\        bindingLog += "h";
+        \\        if (bindingHasGcCount < 2) { bindingHasGcCount++; $vm.gc(); }
+        \\      }
+        \\      return Reflect.has(object, key);
+        \\    },
+        \\    get: function (object, key, receiver) {
+        \\      var result = Reflect.get(object, key, receiver);
+        \\      if (key === Symbol.unscopables) {
+        \\        bindingLog += "u";
+        \\        if (result && typeof result === "object") $vm.gc();
+        \\      }
+        \\      return result;
+        \\    }
+        \\  });
+        \\}
+        \\function one(value, change) {
+        \\  return { [Symbol.iterator]: function () { return { next: function () { change(); return { done: false, value: value }; } }; } };
+        \\}
+        \\function run() {
+        \\  var x = "local";
+        \\  var a = { x: 1 };
+        \\  with (wrapped(a)) { var x = (delete a.x, 5); }
+        \\  var b = {};
+        \\  with (wrapped(b)) { [x] = one(7, function () { b.x = 8; }); }
+        \\  var c = { x: 1 };
+        \\  with (wrapped(c)) { [x] = one(9, function () { delete c.x; }); }
+        \\  var d = { x: 1 };
+        \\  d[Symbol.unscopables] = {};
+        \\  var source = { get p() { d[Symbol.unscopables].x = true; return 11; } };
+        \\  with (wrapped(d)) { ({ p: x } = source); }
+        \\  var outer = { x: 1 };
+        \\  var inner = {};
+        \\  var changeInner = function () { inner.x = 4; };
+        \\  with (wrapped(outer)) {
+        \\    with (wrapped(inner)) { [x] = one(12, changeInner); }
+        \\  }
+        \\  return x + ":" + a.x + ":" + b.x + ":" + c.x + ":" + d.x + ":" + outer.x + ":" + inner.x + ":" + bindingLog;
+        \\}
+        \\run()
+        ,
+        \\delete globalThis.lateBinding;
+        \\function strictCapture() {
+        \\  "use strict";
+        \\  try {
+        \\    ({ value: lateBinding } = { get value() { globalThis.lateBinding = 1; return 7; } });
+        \\    return "missed";
+        \\  } catch (error) {
+        \\    return error.name + ":" + globalThis.lateBinding;
+        \\  }
+        \\}
+        \\strictCapture()
+        ,
+        \\globalThis.bindingLog = "";
+        \\function wrapped(target) {
+        \\  return new Proxy(target, {
+        \\    has: function (object, key) {
+        \\      if (key === "x") bindingLog += "h";
+        \\      return Reflect.has(object, key);
+        \\    },
+        \\    get: function (object, key, receiver) {
+        \\      if (key === Symbol.unscopables) bindingLog += "u";
+        \\      return Reflect.get(object, key, receiver);
+        \\    }
+        \\  });
+        \\}
+        \\var target = { x: 1 };
+        \\function* suspended() {
+        \\  with (wrapped(target)) { [x = yield "pause"] = [undefined]; }
+        \\  return target.x + ":" + bindingLog;
+        \\}
+        \\var iterator = suspended();
+        \\var first = iterator.next();
+        \\delete target.x;
+        \\target[Symbol.unscopables] = { x: true };
+        \\$vm.gc();
+        \\var second = iterator.next(13);
+        \\first.value + ":" + first.done + ":" + second.value + ":" + second.done
+        ,
+        \\globalThis.keptBinding = 1;
+        \\function globalFallback() {
+        \\  var object = {};
+        \\  with (object) {
+        \\    ({ value: keptBinding } = { get value() { object.keptBinding = 8; return 7; } });
+        \\  }
+        \\  return globalThis.keptBinding + ":" + object.keptBinding;
+        \\}
+        \\globalFallback()
+        ,
+        \\globalThis.deletedBinding = 1;
+        \\function strictGlobalCapture() {
+        \\  "use strict";
+        \\  try {
+        \\    ({ value: deletedBinding } = { get value() { delete globalThis.deletedBinding; return 7; } });
+        \\    return "missed";
+        \\  } catch (error) {
+        \\    return error.name + ":" + ("deletedBinding" in globalThis);
+        \\  }
+        \\}
+        \\strictGlobalCapture()
+        ,
+    };
+    const expected = [sources.len][]const u8{
+        "7:5:8:9:11:12:4:huhhhuhhuhhhuh",
+        "ReferenceError:1",
+        "pause:false:13:huh:true",
+        "7:8",
+        "ReferenceError:false",
+    };
+
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    for (sources, expected) |source, expected_value| {
+        for (configurations) |configuration| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .enable_threads = configuration.parallel_js,
+                .parallel_gc = configuration.parallel_js,
+                .parallel_js = configuration.parallel_js,
+                .bytecode_execution_mode = configuration.mode,
+            });
+            defer ctx.destroy();
+            const outcome = try ctx.evaluate(source);
+            try std.testing.expect(outcome.kind() == .string);
+            try std.testing.expectEqualStrings(expected_value, outcome.asStr());
+            if (configuration.mode == .required) {
+                const inventory = ctx.bytecodeAdmissionSnapshot();
+                try std.testing.expect(inventory.count(.program_compiled) > 0);
+                try std.testing.expect(inventory.count(.template_plain_compiled) > 0);
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            }
+        }
+    }
+}
+
 test "required bytecode keeps program scratch rooted and isolated across collections and eval" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

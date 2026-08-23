@@ -295,25 +295,6 @@ fn nodeHasYield(node: *const ast.Node) bool {
     };
 }
 
-fn assignmentPatternHasIdentifierTarget(pattern: *const ast.Node) bool {
-    return switch (pattern.*) {
-        .identifier => true,
-        .arr_pattern => |array| blk: {
-            for (array.elems) |element| if (element.target) |target|
-                if (assignmentPatternHasIdentifierTarget(target)) break :blk true;
-            if (array.rest) |rest| break :blk assignmentPatternHasIdentifierTarget(rest);
-            break :blk false;
-        },
-        .obj_pattern => |object| blk: {
-            for (object.props) |property|
-                if (assignmentPatternHasIdentifierTarget(property.target)) break :blk true;
-            if (object.rest) |rest| break :blk assignmentPatternHasIdentifierTarget(rest);
-            break :blk false;
-        },
-        else => false,
-    };
-}
-
 /// Whether a loop `body` declares a block-scoped (`let`/`const`) binding that a
 /// closure in the body captures — which needs a fresh per-iteration binding the
 /// VM's single flat frame slot can't provide (all iterations' closures would
@@ -1596,6 +1577,58 @@ pub const Compiler = struct {
         }
     }
 
+    fn bindingReferencePlan(self: *Compiler, name: []const u8) CompileError!?u32 {
+        const resolved = self.resolve(name);
+        const fallback: bc.BindingReferenceFallback = switch (resolved) {
+            .local => |binding| .{
+                .op = if (binding.mapped_parameter)
+                    .store_local_mapped
+                else if (binding.tdz_checked or binding.immutable)
+                    .store_local_lexical
+                else
+                    .store_local,
+                .a = binding.slot,
+                .b = @intFromBool(binding.immutable),
+            },
+            .upval => |upvalue| .{
+                .op = if (upvalue.binding.mapped_parameter)
+                    .store_upval_mapped
+                else if (upvalue.binding.tdz_checked or upvalue.binding.immutable)
+                    .store_upval_lexical
+                else
+                    .store_upval,
+                .a = upvalue.depth,
+                .b = upvalue.binding.slot | (if (upvalue.binding.immutable) @as(u32, 1) << 31 else 0),
+            },
+            // A full Environment walk never selects its static fallback: it
+            // captures an exact Environment/global-object/unresolvable base.
+            .environment, .global => .{ .op = .store_var },
+        };
+        const environment_depth: u32 = switch (resolved) {
+            .local => self.environment_depth,
+            .upval => |upvalue| self.environment_depth + upvalue.environment_depth,
+            .environment, .global => bc.delete_name_full_environment_depth,
+        };
+        // With no intervening Environment Record, a frame/upvalue Reference is
+        // already immutable compile-time state and needs no activation slot.
+        if (environment_depth == 0) switch (resolved) {
+            .local, .upval => return null,
+            .environment, .global => {},
+        };
+        const name_index = try self.chunk.addName(name);
+        const index = try self.chunk.addBindingReferencePlan(.{
+            .name_index = name_index,
+            .environment_depth = environment_depth,
+            .fallback = fallback,
+        });
+        _ = try self.chunk.emit(.resolve_binding_ref, index);
+        return index;
+    }
+
+    fn emitStoreBindingReference(self: *Compiler, index: u32) CompileError!void {
+        _ = try self.chunk.emit(.store_binding_ref, index);
+    }
+
     /// Emit a definition of `name` (var/let/const/function decl) with its value
     /// already on the stack; consumes the value.
     fn emitDefine(self: *Compiler, name: []const u8) CompileError!void {
@@ -2105,6 +2138,14 @@ pub const Compiler = struct {
         if (self.debug_checkpoints) try self.chunk.markDebugStatement(node);
         switch (node.*) {
             .var_decl => |d| {
+                // BindingIdentifier evaluation creates the Reference before the
+                // initializer. Only an activation-local Environment Record can
+                // shadow this function's hoisted `var`, so ordinary declarations
+                // retain their direct frame/global path.
+                const binding_reference = if (d.kind == .@"var" and d.init != null and self.environment_depth != 0)
+                    try self.bindingReferencePlan(d.name)
+                else
+                    null;
                 if (d.init) |init_node| {
                     try self.compileExpr(init_node);
                     try self.emitNamedEval(init_node, d.name);
@@ -2114,17 +2155,15 @@ pub const Compiler = struct {
                 // `using x = v;` / `await using x = v;`: keep a copy of the resource
                 // to register for DisposeResources at the variable scope's exit.
                 if (d.dispose != 0) _ = try self.chunk.emit(.dup, 0);
-                try self.emitDefineKind(d.name, d.kind, d.init != null);
+                if (binding_reference) |reference|
+                    try self.emitStoreBindingReference(reference)
+                else
+                    try self.emitDefineKind(d.name, d.kind, d.init != null);
                 if (d.dispose != 0) _ = try self.chunk.emit(.register_disposable, if (d.dispose == 2) 1 else 0);
             },
             .destructure_decl => |d| {
                 const environment_pattern = self.scope != null and self.patternUsesEnvironment(d.pattern);
                 if (self.scope != null) {
-                    // A `var` binding under `with` performs dynamic ResolveBinding
-                    // during BindingInitialization. Frame slots cannot represent
-                    // that Reference; retain the exact whole-function fallback
-                    // already required by destructuring assignment in `with`.
-                    if (d.kind == .@"var" and self.environment_depth != 0) return error.Unsupported;
                     try self.compileExpr(d.init);
                     const src = try self.freshActivationTemp();
                     try self.emitDefineActivationTemp(src);
@@ -2656,7 +2695,7 @@ pub const Compiler = struct {
             // while resolving the one-shot base/key Reference.
             const value_name = try self.freshActivationTemp();
             try self.emitDefineActivationTemp(value_name);
-            const reference = (try self.preEvalPatternAssignmentRef(target)) orelse return error.Unsupported;
+            const reference = (try self.preEvalPatternAssignmentRef(target, .assignment_native)) orelse return error.Unsupported;
             try self.storePatternAssignmentRef(target, reference, value_name);
             return;
         }
@@ -2680,7 +2719,6 @@ pub const Compiler = struct {
             return;
         }
         if (native_pattern and (target.* == .arr_pattern or target.* == .obj_pattern)) {
-            if (decl_kind) |kind| if (kind == .@"var" and self.environment_depth != 0) return error.Unsupported;
             const value_name = try self.freshActivationTemp();
             try self.emitDefineActivationTemp(value_name);
             if (decl_kind) |kind| if (kind != .@"var")
@@ -2974,13 +3012,6 @@ pub const Compiler = struct {
     }
 
     fn compileAssignPattern(self: *Compiler, pattern: *Node, src: ActivationTemp) CompileError!void {
-        // Resolving an identifier assignment target inside `with` performs the
-        // observable object-Environment [[HasBinding]] before IteratorStep or
-        // GetV. Name-store bytecode resolves only at PutValue, so retain the
-        // exact whole-function fallback until a resolved binding Reference is
-        // activation-owned alongside member/super references.
-        if (self.environment_depth != 0 and assignmentPatternHasIdentifierTarget(pattern))
-            return error.Unsupported;
         // A compiled assignment must write the exact statically resolved
         // frame/upvalue/global target. `bind_pattern` delegates to the
         // tree-walker Environment chain and therefore cannot represent a plain
@@ -3039,6 +3070,7 @@ pub const Compiler = struct {
     const MemberRef = struct { obj: ActivationTemp, key: ?ActivationTemp };
 
     const PatternAssignmentRef = union(enum) {
+        binding: u32,
         member: MemberRef,
         super: CompiledSuperRef,
     };
@@ -3052,10 +3084,16 @@ pub const Compiler = struct {
             return error.Unsupported;
         return self.chunk.addName(try value_mod.encodeStringKey(self.arena, name));
     }
-    fn preEvalPatternAssignmentRef(self: *Compiler, target: ?*Node) CompileError!?PatternAssignmentRef {
+    fn preEvalPatternAssignmentRef(self: *Compiler, target: ?*Node, mode: PatternMode) CompileError!?PatternAssignmentRef {
         const t = target orelse return null;
         switch (t.*) {
+            .identifier => |name| switch (mode) {
+                .assignment_native, .var_declaration => if (try self.bindingReferencePlan(name)) |reference|
+                    return .{ .binding = reference },
+                .lexical, .environment_lexical => {},
+            },
             .member => |m| {
+                if (!patternModeIsAssignment(mode)) return null;
                 const obj_tmp = try self.freshActivationTemp();
                 try self.compileExpr(m.object);
                 try self.emitDefineActivationTemp(obj_tmp);
@@ -3068,14 +3106,21 @@ pub const Compiler = struct {
                 }
                 return .{ .member = .{ .obj = obj_tmp, .key = key_tmp } };
             },
-            .super_member => return .{ .super = try self.compileSuperRef(t, false, false) },
+            .super_member => if (patternModeIsAssignment(mode))
+                return .{ .super = try self.compileSuperRef(t, false, false) },
             else => return null,
         }
+        return null;
     }
 
     /// Store `val` through an already-evaluated member or super Reference.
     fn storePatternAssignmentRef(self: *Compiler, target: *Node, ref: PatternAssignmentRef, val: ActivationTemp) CompileError!void {
         switch (ref) {
+            .binding => |reference| {
+                try self.emitLoadActivationTemp(val);
+                try self.emitStoreBindingReference(reference);
+                return;
+            },
             .member => |member_ref| {
                 const m = target.member;
                 try self.emitLoadActivationTemp(member_ref.obj); // [obj]
@@ -3146,7 +3191,7 @@ pub const Compiler = struct {
         for (elems) |elem| {
             // Spec order: evaluate the target reference first, then step the
             // iterator. Member/super targets carry an observable reference eval.
-            const ref = if (patternModeIsAssignment(mode)) try self.preEvalPatternAssignmentRef(elem.target) else null;
+            const ref = try self.preEvalPatternAssignmentRef(elem.target, mode);
             // ev = undefined; if (!done) { r = it.next(); if (r.done) done = true else ev = r.value }
             const ev = try self.freshActivationTemp();
             _ = try self.chunk.emit(.load_undefined, 0);
@@ -3202,18 +3247,17 @@ pub const Compiler = struct {
             }
             // assign ev to the target
             if (elem.target) |t| {
-                if (patternModeIsAssignment(mode) and (t.* == .member or t.* == .super_member)) {
-                    try self.storePatternAssignmentRef(t, ref.?, ev);
-                } else {
+                if (ref) |reference|
+                    try self.storePatternAssignmentRef(t, reference, ev)
+                else
                     try self.compilePatternTarget(t, ev, mode);
-                }
             }
         }
 
         if (rest) |rest_target| {
             // Spec order: evaluate the rest target reference (may yield) BEFORE
             // collecting the remaining elements.
-            const rref = if (patternModeIsAssignment(mode)) try self.preEvalPatternAssignmentRef(rest_target) else null;
+            const rref = try self.preEvalPatternAssignmentRef(rest_target, mode);
             // rest = []; while (!done) { r = it.next(); if (r.done) { done=true; break } rest.push(r.value) }
             const ra = try self.freshActivationTemp();
             _ = try self.chunk.emit(.new_array, 0);
@@ -3252,8 +3296,8 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.jump, @intCast(top));
             self.chunk.patchToHere(to_end);
             self.chunk.patchToHere(to_end2);
-            if (patternModeIsAssignment(mode) and (rest_target.* == .member or rest_target.* == .super_member))
-                try self.storePatternAssignmentRef(rest_target, rref.?, ra)
+            if (rref) |reference|
+                try self.storePatternAssignmentRef(rest_target, reference, ra)
             else
                 try self.compilePatternTarget(rest_target, ra, mode);
         }
@@ -3279,7 +3323,7 @@ pub const Compiler = struct {
             }
             try excluded.append(self.arena, key);
 
-            const ref = if (patternModeIsAssignment(mode)) try self.preEvalPatternAssignmentRef(prop.target) else null;
+            const ref = try self.preEvalPatternAssignmentRef(prop.target, mode);
             const ev = try self.freshActivationTemp();
             // ev = src[key]
             try self.emitLoadActivationTemp(src);
@@ -3299,8 +3343,8 @@ pub const Compiler = struct {
                 try self.emitPatternDefault(d, prop.target, ev);
                 self.chunk.patchToHere(has_val);
             }
-            if (patternModeIsAssignment(mode) and (prop.target.* == .member or prop.target.* == .super_member))
-                try self.storePatternAssignmentRef(prop.target, ref.?, ev)
+            if (ref) |reference|
+                try self.storePatternAssignmentRef(prop.target, reference, ev)
             else
                 try self.compilePatternTarget(prop.target, ev, mode);
         }
@@ -3311,10 +3355,7 @@ pub const Compiler = struct {
             // expression runs before source getters while ToPropertyKey remains
             // deferred to the eventual store. The activation-owned temps also
             // precisely root the base/key across getter calls and moving GC.
-            const rest_ref = if (patternModeIsAssignment(mode))
-                try self.preEvalPatternAssignmentRef(rest_target)
-            else
-                null;
+            const rest_ref = try self.preEvalPatternAssignmentRef(rest_target, mode);
             try self.emitLoadActivationTemp(src);
             for (excluded.items) |key| try self.emitLoadActivationTemp(key);
             _ = try self.chunk.emit(.object_rest, @intCast(excluded.items.len));
@@ -3985,8 +4026,10 @@ pub const Compiler = struct {
             },
             .op_assign => |oa| switch (oa.target.*) {
                 // Identifier target: load the old value, apply the op, store back.
-                // (No `with` here — a function using `with` already falls back to
-                // the tree-walker, which resolves the reference once.)
+                // #732 owns the broader dynamic-`with` Reference path for
+                // ordinary reads/compound/update/call expressions; #731 keeps
+                // its activation-owned lowering scoped to destructuring and
+                // simple `var` initialization.
                 .identifier => |name| {
                     try self.emitLoad(name);
                     try self.compileExpr(oa.value);
@@ -6367,7 +6410,7 @@ test "compiler lowers plain-function destructuring assignments without bind_patt
         for (chunk.code.items) |instruction| switch (instruction.op) {
             .bind_pattern => return error.TestUnexpectedResult,
             .store_upval, .store_upval_lexical => saw_upvalue_store = true,
-            .store_var => saw_global_store = true,
+            .store_var, .store_binding_ref => saw_global_store = true,
             else => {},
         };
     };
@@ -6380,8 +6423,19 @@ test "compiler lowers plain-function destructuring assignments without bind_patt
     );
     const with_program = try with_parser.parseProgram();
     switch (try Compiler.admitPlainFunction(arena.allocator(), with_program.program[0].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+        .compiled => |result| {
+            try std.testing.expect(result.chunk.binding_reference_plans.items.len > 0);
+            var saw_resolve = false;
+            var saw_store = false;
+            for (result.chunk.code.items) |instruction| switch (instruction.op) {
+                .resolve_binding_ref => saw_resolve = true,
+                .store_binding_ref => saw_store = true,
+                .bind_pattern => return error.TestUnexpectedResult,
+                else => {},
+            };
+            try std.testing.expect(saw_resolve and saw_store);
+        },
+        .rejected => return error.TestUnexpectedResult,
     }
 }
 
@@ -6434,8 +6488,19 @@ test "compiler lowers plain-function destructuring declarations without bind_pat
     );
     const with_program = try with_parser.parseProgram();
     switch (try Compiler.admitPlainFunction(arena.allocator(), with_program.program[0].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+        .compiled => |result| {
+            try std.testing.expect(result.chunk.binding_reference_plans.items.len > 0);
+            var saw_resolve = false;
+            var saw_store = false;
+            for (result.chunk.code.items) |instruction| switch (instruction.op) {
+                .resolve_binding_ref => saw_resolve = true,
+                .store_binding_ref => saw_store = true,
+                .bind_pattern => return error.TestUnexpectedResult,
+                else => {},
+            };
+            try std.testing.expect(saw_resolve and saw_store);
+        },
+        .rejected => return error.TestUnexpectedResult,
     }
 }
 
