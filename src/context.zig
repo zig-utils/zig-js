@@ -336,6 +336,17 @@ pub const BudgetAllocator = struct {
     limit: usize,
     used: std.atomic.Value(usize) = .init(0),
     peak: std.atomic.Value(usize) = .init(0),
+    /// One-time bounded headroom granted after a full recovery collection that
+    /// still could not satisfy a request (#722). At a hard cap that state means
+    /// the collector cannot prove dead the bytes the mutator's own conservative
+    /// stack scan pins — recently dead storm garbage survives because stale
+    /// words persist in the allocating thread's scanned range until its frames
+    /// unwind and overwrite them. The grace lets such a retry succeed so
+    /// unwinding can proceed; later collections reclaim the slack once the pins
+    /// clear. Zero disables the escape hatch entirely (unit fixtures).
+    grace_bytes: usize = 0,
+    grace_granted: std.atomic.Value(bool) = .init(false),
+    extra: std.atomic.Value(usize) = .init(0),
     recover_ctx: ?*anyopaque = null,
     recover_fn: ?RecoveryFn = null,
     /// A quota miss under an allocator/GC lock cannot collect synchronously.
@@ -357,9 +368,10 @@ pub const BudgetAllocator = struct {
     }
 
     fn reserve(self: *BudgetAllocator, amount: usize) ?usize {
+        const ceiling = self.limit + self.extra.load(.monotonic);
         var current = self.used.load(.monotonic);
         while (true) {
-            if (amount > self.limit -| current) return null;
+            if (amount > ceiling -| current) return null;
             const next = current + amount;
             if (self.used.cmpxchgWeak(current, next, .acq_rel, .monotonic)) |observed| {
                 current = observed;
@@ -387,7 +399,19 @@ pub const BudgetAllocator = struct {
     fn reserveWithRecovery(self: *BudgetAllocator, amount: usize) ?usize {
         if (self.reserve(amount)) |next| return next;
         if (!self.tryRecover()) return null;
-        return self.reserve(amount);
+        if (self.reserve(amount)) |next| return next;
+        // A full collection ran and the retry still missed (#722): the retained
+        // bytes cannot be proven dead — conservative self-stack pinning. Grant
+        // the single bounded grace so the mutator can unwind past its stale
+        // pins; ordinary enforcement resumes against the raised ceiling, and
+        // later collections reclaim the slack once it drains.
+        if (self.grace_bytes != 0 and self.extra.load(.monotonic) == 0 and
+            self.grace_granted.cmpxchgStrong(false, true, .acq_rel, .monotonic) == null)
+        {
+            _ = self.extra.store(self.grace_bytes, .release);
+            return self.reserve(amount);
+        }
+        return null;
     }
 
     fn release(self: *BudgetAllocator, amount: usize) void {
@@ -453,11 +477,13 @@ pub const BudgetAllocator = struct {
 
     pub fn stats(self: *const BudgetAllocator) Context.HeapBudgetStats {
         const used = @constCast(self).used.load(.acquire);
+        const extra = self.extra.load(.acquire);
         return .{
             .limit_bytes = self.limit,
             .used_bytes = used,
             .peak_bytes = @constCast(self).peak.load(.acquire),
-            .remaining_bytes = self.limit -| used,
+            .remaining_bytes = self.limit + extra -| used,
+            .grace_granted_bytes = if (self.grace_granted.load(.acquire)) self.grace_bytes else 0,
         };
     }
 };
@@ -4082,6 +4108,11 @@ pub const Context = struct {
         used_bytes: usize,
         peak_bytes: usize,
         remaining_bytes: usize,
+        /// #722: the one-time bounded conservative-pin grace. Zero until a full
+        /// recovery collection still could not satisfy a request; `peak_bytes`
+        /// may legitimately reach `limit_bytes + grace_granted_bytes` before
+        /// enforcement resumes failing closed against the raised ceiling.
+        grace_granted_bytes: usize = 0,
     };
 
     /// Read-only evidence for the abort-safe parallel collector. The corpus
@@ -4750,7 +4781,8 @@ pub const Context = struct {
         errdefer if (budget_allocator) |ba| gpa.destroy(ba);
         const limited_gpa = if (options.heap_limit_bytes) |limit| blk: {
             const ba = try gpa.create(BudgetAllocator);
-            ba.* = .{ .inner = serialized_gpa, .limit = limit };
+            // #722: proportional conservative-pin grace (see BudgetAllocator).
+            ba.* = .{ .inner = serialized_gpa, .limit = limit, .grace_bytes = @min(limit / 64, 1024 * 1024) };
             budget_allocator = ba;
             break :blk ba.allocator();
         } else serialized_gpa;
@@ -20145,7 +20177,10 @@ test "Context heap_limit_bytes object side-store pressure fails closed" {
         \\})();
     ));
     const stats = ctx.heapBudgetStats().?;
-    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+    // #722: enforcement still fails closed, but the single bounded
+    // conservative-pin grace may legitimately carry `peak` up to
+    // `limit + grace_granted_bytes` before the hard failure.
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes + stats.grace_granted_bytes);
 }
 
 test "Context heapBudgetStats is absent without heap_limit_bytes" {
