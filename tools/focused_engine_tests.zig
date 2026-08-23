@@ -56,6 +56,11 @@ const frontend_cases = [_]Case{
         .source = "/a+/.test('aaa') ? 1 : 0",
         .expected = 1,
     },
+    .{
+        .name = "for-in head forms",
+        .source = "let score = 0; for (const key in { a: 1, b: 2 }) score += key === 'a' ? 1 : 2; for (const [first] in { cd: 1 }) score += first === 'c' ? 4 : 0; score",
+        .expected = 7,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

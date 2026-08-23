@@ -23105,6 +23105,154 @@ test "forced tree-walker and required bytecode agree on optional chains" {
     try std.testing.expect(bytecode_ctx.bytecodeAdmissionSnapshot().count(.template_plain_compiled) > 0);
 }
 
+test "forced tree-walker and required bytecode agree on owned for-in enumeration" {
+    const source =
+        \\var forInIteratorHits = 0;
+        \\Array.prototype[Symbol.iterator] = function () { forInIteratorHits++; throw new Error("array iterator observed"); };
+        \\var forInProgram = "";
+        \\for (var programKey in { a: 1, b: 2 }) forInProgram += programKey;
+        \\var forInProgramLexical = "";
+        \\for (const [programFirst] in { cd: 1, ef: 2 }) forInProgramLexical += programFirst;
+        \\var forInProgramCaptures = [];
+        \\for (let programCaptured in { p: 1, q: 2 }) forInProgramCaptures.push(function () { return programCaptured; });
+        \\var forInProgramHolder = {};
+        \\var forInProgramMemberKeyHits = 0;
+        \\for (forInProgramHolder[(forInProgramMemberKeyHits++, "key")] in { z: 1 }) {}
+        \\var forInProgramAssigned = "";
+        \\for ([forInProgramAssigned] in { uv: 1 }) {}
+        \\var forInPatternLog = "";
+        \\function forInComputedKey() { forInPatternLog += "K"; return "0"; }
+        \\function plainForIn(object) {
+        \\  var trace = "";
+        \\  var holder = {};
+        \\  var captures = [];
+        \\  outer: for (let key in object) {
+        \\    captures.push(function () { return key; });
+        \\    trace += key;
+        \\    if (key === "a") { delete object.b; continue outer; }
+        \\    if (key === "c") break outer;
+        \\  }
+        \\  for (holder.key in { x: 1 }) {}
+        \\  var pattern = "";
+        \\  for (const [first] in { de: 1, fg: 2 }) pattern += first;
+        \\  for (const { length: size = 9, [forInComputedKey()]: picked = "!" } in { ab: 1 }) pattern += "|" + size + picked;
+        \\  var assigned;
+        \\  for ([assigned] in { hi: 1 }) {}
+        \\  var nested = "";
+        \\  for (const [[nestedFirst]] in { xy: 1 }) nested += nestedFirst;
+        \\  return trace + "|" + holder.key + "|" + pattern + "|" + assigned + "|" + nested + "|" + captures.map(function (capture) { return capture(); }).join(",");
+        \\}
+        \\function primitiveForIn() { var out = ""; for (var key in "xy") out += key; for (var ignored in null) out += ignored; for (var ignored2 in undefined) out += ignored2; return out; }
+        \\function prototypeForIn() {
+        \\  var proto = { inherited: 1, shadowed: 1 };
+        \\  var object = Object.create(proto);
+        \\  object.own = 1;
+        \\  Object.defineProperty(object, "shadowed", { enumerable: false, value: 2 });
+        \\  object[Symbol("hidden")] = 3;
+        \\  var out = [];
+        \\  for (var key in object) out.push(key);
+        \\  return out.join(",");
+        \\}
+        \\function returnForIn(object) { for (var key in object) return key; return "none"; }
+        \\function outerContinueForIn() { var out = ""; outer: for (var i = 0; i < 2; i++) { for (var key in { a: 1, b: 2 }) { out += i + key; continue outer; } } return out; }
+        \\function throwingForIn() {
+        \\  var object = new Proxy({ a: 1 }, { has: function (target, key) { throw new Error("has:" + key); } });
+        \\  try { for (var key in object) {} } catch (error) { return error.message; }
+        \\  return "missed";
+        \\}
+        \\var forInProxyLog = "";
+        \\var forInProxyTarget = { a: 1, b: 2 };
+        \\var forInProxy = new Proxy(forInProxyTarget, {
+        \\  ownKeys: function (target) { forInProxyLog += "O"; return Reflect.ownKeys(target); },
+        \\  getOwnPropertyDescriptor: function (target, key) { forInProxyLog += "D" + key; return Reflect.getOwnPropertyDescriptor(target, key); },
+        \\  has: function (target, key) { forInProxyLog += "H" + key; return Reflect.has(target, key); }
+        \\});
+        \\function proxyForIn(value) {
+        \\  var out = "";
+        \\  for (var key in value) { out += key; if (key === "a") delete forInProxyTarget.b; }
+        \\  return out;
+        \\}
+        \\function* generatedForIn(object) { for (const key in object) yield key; }
+        \\async function asyncForIn(object) { var out = ""; for (const key in object) { await 0; out += key; } return out; }
+        \\var forInPlain = plainForIn({ a: 1, b: 2, c: 3 });
+        \\var forInPrimitive = primitiveForIn();
+        \\var forInPrototype = prototypeForIn();
+        \\var forInReturn = returnForIn({ r: 1, s: 2 });
+        \\var forInOuterContinue = outerContinueForIn();
+        \\var forInThrown = throwingForIn();
+        \\var forInProxyOut = proxyForIn(forInProxy);
+        \\var forInGenerator = generatedForIn({ g: 1, h: 2 });
+        \\var forInGenerated = forInGenerator.next().value + "," + forInGenerator.next().value + "," + forInGenerator.next().done;
+        \\var forInAsync = "pending";
+        \\asyncForIn({ m: 1, n: 2 }).then(function (value) { forInAsync = value; });
+        \\forInProgram === "ab" && forInProgramLexical === "ce" && forInProgramCaptures[0]() + forInProgramCaptures[1]() === "pq" &&
+        \\  forInProgramHolder.key === "z" && forInProgramMemberKeyHits === 1 && forInProgramAssigned === "u" &&
+        \\  forInPlain === "ac|x|df|2a|h|x|a,c" && forInPatternLog === "K" && forInPrimitive === "01" &&
+        \\  forInPrototype === "own,inherited" && forInReturn === "r" && forInOuterContinue === "0a1a" && forInThrown === "has:a" &&
+        \\  forInProxyOut === "a" && forInGenerated === "g,h,true" && forInIteratorHits === 0;
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    const tree_result = try tree_ctx.evaluate(source);
+    const bytecode_result = try bytecode_ctx.evaluate(source);
+    try std.testing.expect(tree_result.asBool());
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    const state = "forInProgram + '#' + forInProgramLexical + '#' + forInProgramCaptures[0]() + forInProgramCaptures[1]() + '#' + forInProgramHolder.key + '#' + forInProgramMemberKeyHits + '#' + forInProgramAssigned + '#' + forInPlain + '#' + forInPatternLog + '#' + forInPrimitive + '#' + forInPrototype + '#' + forInReturn + '#' + forInOuterContinue + '#' + forInThrown + '#' + forInProxyOut + '#' + forInProxyLog + '#' + forInGenerated + '#' + forInAsync + '#' + forInIteratorHits";
+    const tree_state = (try tree_ctx.evaluate(state)).asStr();
+    const bytecode_state = (try bytecode_ctx.evaluate(state)).asStr();
+    try std.testing.expectEqualStrings("ab#ce#pq#z#1#u#ac|x|df|2a|h|x|a,c#K#01#own,inherited#r#0a1a#has:a#a#ODaDbHaHb#g,h,true#mn#0", tree_state);
+    try std.testing.expectEqualStrings(tree_state, bytecode_state);
+    const tree = tree_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(tree.count(.plain_forced_tree_walker) >= 2);
+    const bytecode = bytecode_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(bytecode.count(.program_compiled) >= 2);
+    try std.testing.expect(bytecode.count(.template_plain_compiled) >= 2);
+    try std.testing.expect(bytecode.count(.template_generator_compiled) >= 1);
+    try std.testing.expect(bytecode.count(.template_async_compiled) >= 1);
+}
+
+test "moving GC preserves required-bytecode for-in enumeration roots" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\var rootedProgramHolder = {};
+        \\for (rootedProgramHolder[(gc(), "key")] in { z: 1 }) {}
+        \\var rootedProgramPattern = "";
+        \\for ({ missing: rootedProgramPattern = (gc(), "fallback") } in { uv: 1 }) {}
+        \\function rootedForIn(object) {
+        \\  var keys = "";
+        \\  var captures = [];
+        \\  for (let key in object) {
+        \\    gc();
+        \\    keys += key;
+        \\    captures.push(function () { return key; });
+        \\  }
+        \\  gc();
+        \\  return keys + "|" + captures.map(function (capture) { return capture(); }).join(",");
+        \\}
+        \\rootedProgramHolder.key + "|" + rootedProgramPattern + "|" + rootedForIn({ a: 1, b: 2, c: 3 });
+    );
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("z|fallback|abc|a,b,c", result.asStr());
+    const admission = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(admission.count(.program_compiled) >= 1);
+    try std.testing.expect(admission.count(.template_plain_compiled) >= 1);
+}
+
 test "forced tree-walker and required bytecode agree on property deletion" {
     const source =
         \\var deleteLog = "";
@@ -31326,4 +31474,3 @@ test "required bytecode keeps program scratch rooted and isolated across collect
     const inventory = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expect(inventory.count(.program_compiled) >= 1);
 }
-

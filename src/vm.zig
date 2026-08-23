@@ -7290,7 +7290,43 @@ fn runChunk(
             },
             .enum_keys => {
                 const v = stack.pop().?;
-                try stack.append(stack_alloc, try vm.forInKeysArray(v));
+                const state = try vm.prepareForIn(v);
+                try stack.ensureTotalCapacity(stack_alloc, stack.items.len + 3);
+                stack.appendAssumeCapacity(state.target);
+                stack.appendAssumeCapacity(state.keys);
+                stack.appendAssumeCapacity(Value.num(0));
+            },
+            .enum_next => {
+                // Keep the three-word state rooted on the operand stack while
+                // Proxy [[HasProperty]] or key conversion runs. One candidate
+                // per dispatch preserves watchdog, GC, debugger, and GIL polls.
+                const base = stack.items.len - 3;
+                const target = stack.items[base];
+                const keys = stack.items[base + 1].asObj();
+                var index: usize = @intFromFloat(stack.items[base + 2].asNum());
+                try stack.ensureTotalCapacity(stack_alloc, stack.items.len + 3);
+
+                var key = Value.undef();
+                var has_candidate = false;
+                var present = false;
+                if (index < keys.elementsLen()) {
+                    key = keys.denseElement(index).?;
+                    index += 1;
+                    has_candidate = true;
+                    present = try vm.hasPropertyResult(target.asObj(), try propKey(vm, key));
+                }
+                stack.items[base + 2] = Value.num(@floatFromInt(index));
+                stack.appendAssumeCapacity(key);
+                stack.appendAssumeCapacity(Value.boolVal(present));
+                stack.appendAssumeCapacity(Value.boolVal(has_candidate));
+            },
+            .enum_end_completion => {
+                const base = stack.items.len - 5;
+                const completion_value = stack.items[base + 3];
+                const completion_kind = stack.items[base + 4];
+                stack.shrinkRetainingCapacity(base);
+                stack.appendAssumeCapacity(completion_value);
+                stack.appendAssumeCapacity(completion_kind);
             },
             .iter_close => {
                 const it = stack.pop().?;

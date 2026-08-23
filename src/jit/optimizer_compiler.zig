@@ -5423,6 +5423,8 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .iter_of, .inputs = 1, .kind = .effect },
         .{ .op = .async_iter_of, .inputs = 1, .kind = .effect },
         .{ .op = .enum_keys, .inputs = 1, .kind = .effect },
+        .{ .op = .enum_next, .inputs = 3, .kind = .effect },
+        .{ .op = .enum_end_completion, .inputs = 5, .kind = .effect },
         .{ .op = .iter_close, .inputs = 1, .kind = .effect },
         .{ .op = .iter_close_completion, .inputs = 3, .kind = .effect },
         .{ .op = .async_iter_close, .inputs = 1, .kind = .effect },

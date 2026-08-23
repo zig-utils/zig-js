@@ -5212,20 +5212,23 @@ pub const Interpreter = struct {
         return out.items;
     }
 
-    /// The for-in key list of `v` as a fresh array. Null/undefined (and
-    /// primitives) yield an empty array. Used by the generator VM's `enum_keys`
-    /// opcode to drive for-in via the for-of machinery.
-    pub fn forInKeysArray(self: *Interpreter, v: Value) EvalError!Value {
+    pub const ForInPreparation = struct {
+        target: Value,
+        keys: Value,
+    };
+
+    /// Prepare the VM's private for-in operand-stack state. The target is boxed
+    /// exactly once per ForIn/OfHeadEvaluation and the fresh dense key array is
+    /// never exposed to JavaScript or driven through the iterator protocol.
+    pub fn prepareForIn(self: *Interpreter, v: Value) EvalError!ForInPreparation {
         const arr = (try self.newArray()).asObj();
         // ForIn/OfHeadEvaluation: undefined/null enumerate nothing; any other
         // value is ToObject'd first (so a primitive string yields its indices).
-        if (!v.isUndefined() and !v.isNull()) {
-            const o = try self.toObject(v);
-            for (try self.forInKeyList(o)) |k| {
-                try arr.appendElement(self.arena, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
-            }
-        }
-        return Value.obj(arr);
+        if (v.isUndefined() or v.isNull()) return .{ .target = v, .keys = Value.obj(arr) };
+        const target = try self.toObject(v);
+        for (try self.forInKeyList(target)) |k|
+            try arr.appendElement(self.arena, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
+        return .{ .target = Value.obj(target), .keys = Value.obj(arr) };
     }
 
     /// Bind one iteration's value to the loop target: a declaration declares

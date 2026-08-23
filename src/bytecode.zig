@@ -441,7 +441,9 @@ pub const Op = enum(u8) {
     assert_iter_result, // peek top; throw a TypeError if it is not an Object (the iterator-result-not-object check shared by next/throw/return)
     iter_of, // pop iterable -> push an iterator object (has a `.next()`); for `yield*`
     async_iter_of, // pop iterable -> push its async iterator (Symbol.asyncIterator, else a sync iterator); for `for await`
-    enum_keys, // pop object -> push an array of its for-in keys (own enumerable + array indices)
+    enum_keys, // pop value -> push [ToObject target, owned candidate array, cursor]
+    enum_next, // peek state -> advance one candidate, push [key, present, has candidate]
+    enum_end_completion, // remove enumeration state below a pending [completion value, kind]
     iter_close, // pop iterator; normal-completion IteratorClose (call return() if present, validate result is Object)
     iter_close_completion, // pop iterator; IteratorClose while [completion-value, kind] is beneath it, preserving throw completions
     async_iter_close, // pop async iterator -> push return result and has-return flag; caller awaits/validates when present

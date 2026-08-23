@@ -194,6 +194,8 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .iter_of,
         .async_iter_of,
         .enum_keys,
+        .enum_next,
+        .enum_end_completion,
         .iter_close,
         .iter_close_completion,
         .async_iter_close,
@@ -563,7 +565,10 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .call_with_this, .tail_call_with_this => .{ .required = inst.a +| 2, .removed = inst.a +| 2, .added = 1 },
         .call_spread, .call_eval_spread, .tail_call_spread, .new_spread => .{ .required = 2, .removed = 2, .added = 1 },
         .call_with_this_spread, .tail_call_with_this_spread => .{ .required = 3, .removed = 3, .added = 1 },
-        .get_prop, .super_get_index, .iter_of, .async_iter_of, .enum_keys => .{ .required = 1, .removed = 1, .added = 1 },
+        .get_prop, .super_get_index, .iter_of, .async_iter_of => .{ .required = 1, .removed = 1, .added = 1 },
+        .enum_keys => .{ .required = 1, .removed = 1, .added = 3 },
+        .enum_next => .{ .required = 3, .removed = 0, .added = 3 },
+        .enum_end_completion => .{ .required = 5, .removed = 3, .added = 0 },
         .prepare_class_heritage => .{ .required = 1, .removed = 1, .added = 2 },
         .scratch_store => .{ .required = 1, .removed = 1, .added = 0 },
         .scratch_load => .{ .required = 0, .removed = 0, .added = 1 },
@@ -900,12 +905,14 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
     var queue_index: usize = 0;
     var active_handlers: std.ArrayListUnmanaged(HandlerState) = .empty;
     defer active_handlers.deinit(allocator);
+    var max_stack_depth: u32 = 0;
     while (queue_index < queue.items.len) : (queue_index += 1) {
         const block_id = queue.items[queue_index];
         const block = blocks[block_id];
         active_handlers.clearRetainingCapacity();
         try active_handlers.appendSlice(allocator, entry_handlers[block_id].?);
         var depth = entry_depths[block_id] orelse return error.InvalidControlFlow;
+        max_stack_depth = @max(max_stack_depth, depth);
         for (chunk.code.items[block.start..block.end]) |inst| {
             if (!supports(inst.op)) return error.UnsupportedChunk;
             switch (inst.op) {
@@ -944,6 +951,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             const effect = depthEffect(inst);
             if (depth < effect.required) return error.InvalidControlFlow;
             depth = depth - effect.removed + effect.added;
+            max_stack_depth = @max(max_stack_depth, depth);
         }
         for (block.successors[0..block.successor_count]) |successor| {
             try propagateEntryState(allocator, entry_depths, entry_handlers, &queue, successor, depth, active_handlers.items);
@@ -1012,7 +1020,10 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
 
     const locals = try allocator.alloc(ValueId, local_count);
     defer allocator.free(locals);
-    const stack = try allocator.alloc(ValueId, chunk.code.items.len + 1);
+    // Multi-result interpreter-owned opcodes can grow the operand stack faster
+    // than the instruction count. The validation walk above already computes
+    // every reachable depth, so size the SSA scratch buffer from that contract.
+    const stack = try allocator.alloc(ValueId, @max(@as(usize, 1), max_stack_depth));
     defer allocator.free(stack);
     var handlers: std.ArrayListUnmanaged(HandlerState) = .empty;
     defer handlers.deinit(allocator);
