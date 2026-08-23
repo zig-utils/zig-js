@@ -31462,6 +31462,137 @@ test "forced tree-walker and required bytecode preserve program member reference
     }
 }
 
+test "forced tree-walker and required bytecode preserve plain destructuring assignments" {
+    // #726: frame-mode destructuring stays entirely in bytecode. The first
+    // witness makes Reference creation, iterator stepping, deferred computed
+    // key coercion, default evaluation, object-rest copying, PutValue, and
+    // IteratorClose observable. The second covers receiver-aware super and an
+    // array-rest frame binding inside an ordinary method; the final witness
+    // distinguishes an enclosing upvalue store from a global store.
+    const sources = [5][]const u8{
+        \\globalThis.patternLog = "";
+        \\globalThis.patternStep = 0;
+        \\var key = { toString: function () { patternLog += "k"; return "value"; } };
+        \\var target = { set value(v) { patternLog += "s" + v; } };
+        \\var source = {
+        \\  [Symbol.iterator]: function () {
+        \\    patternLog += "i";
+        \\    return {
+        \\      get next() {
+        \\        patternLog += "g";
+        \\        return function () {
+        \\          patternLog += "n";
+        \\          $vm.gc();
+        \\          patternStep += 1;
+        \\          return { done: false, value: patternStep === 1 ? 4 : { value: undefined, extra: 9 } };
+        \\        };
+        \\      },
+        \\      return: function () { patternLog += "c"; return {}; }
+        \\    };
+        \\  }
+        \\};
+        \\function assign(src) {
+        \\  let fallback, named, rhs;
+        \\  rhs = ([target[key], { value: fallback = (patternLog += "d", $vm.gc(), 7), ...target.rest }] = src);
+        \\  ({ missing: named = function () {} } = {});
+        \\  return (rhs === src) + ":" + fallback + ":" + named.name + ":" + target.rest.extra + ":" + patternLog;
+        \\}
+        \\assign(source)
+        ,
+        \\globalThis.superLog = "";
+        \\var base = {
+        \\  set value(v) { this.seen = v; superLog += "s"; }
+        \\};
+        \\var derived = {
+        \\  assign(source) {
+        \\    let tail, rhs;
+        \\    rhs = ([super.value, ...tail] = source);
+        \\    return (rhs === source) + ":" + this.seen + ":" + tail.join(",") + ":" + superLog;
+        \\  }
+        \\};
+        \\Object.setPrototypeOf(derived, base);
+        \\derived.assign([5, 6, 7])
+        ,
+        \\globalThis.stepLog = "";
+        \\var source = {
+        \\  [Symbol.iterator]: function () {
+        \\    stepLog += "i";
+        \\    return {
+        \\      next: function () { stepLog += "n"; throw new Error("step"); },
+        \\      return: function () { stepLog += "c"; return {}; }
+        \\    };
+        \\  }
+        \\};
+        \\function assign(src) {
+        \\  let value;
+        \\  try { ([value] = src); } catch (error) { return stepLog + ":" + error.message; }
+        \\}
+        \\assign(source)
+        ,
+        \\globalThis.closeLog = "";
+        \\var target = { set value(v) { closeLog += "s"; throw new Error("assign"); } };
+        \\var source = {
+        \\  [Symbol.iterator]: function () {
+        \\    closeLog += "i";
+        \\    return {
+        \\      next: function () { closeLog += "n"; return { done: false, value: 1 }; },
+        \\      return: function () { closeLog += "c"; throw new Error("close"); }
+        \\    };
+        \\  }
+        \\};
+        \\function assign(src) {
+        \\  try { ([target.value] = src); } catch (error) { return closeLog + ":" + error.message; }
+        \\}
+        \\assign(source)
+        ,
+        \\var globalTarget = 0;
+        \\function outer() {
+        \\  let captured = 0;
+        \\  function assign(source) {
+        \\    let rhs = ([captured, globalTarget] = source);
+        \\    return (rhs === source) + ":" + captured + ":" + globalTarget;
+        \\  }
+        \\  return assign([8, 9]);
+        \\}
+        \\outer()
+        ,
+    };
+    const expected = [5][]const u8{
+        "true:7:named:9:ignks4ndc",
+        "true:5:6,7:s",
+        "in:step",
+        "insc:assign",
+        "true:8:9",
+    };
+
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    for (sources, expected) |source, expected_value| {
+        var actual: [modes.len][]const u8 = undefined;
+        var actual_len: usize = 0;
+        defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+        for (modes, 0..) |mode, index| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            const outcome = try ctx.evaluate(source);
+            try std.testing.expect(outcome.kind() == .string);
+            actual[index] = try std.testing.allocator.dupe(u8, outcome.asStr());
+            actual_len += 1;
+            if (mode == .required) {
+                const inventory = ctx.bytecodeAdmissionSnapshot();
+                try std.testing.expect(inventory.count(.program_compiled) > 0);
+                try std.testing.expect(inventory.count(.template_plain_compiled) > 0);
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            }
+        }
+        try std.testing.expectEqualStrings(actual[0], actual[1]);
+        try std.testing.expectEqualStrings(expected_value, actual[1]);
+    }
+}
+
 test "required bytecode keeps program scratch rooted and isolated across collections and eval" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

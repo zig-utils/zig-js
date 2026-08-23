@@ -159,8 +159,8 @@ fn retainDebugLocalNames(arena: std.mem.Allocator, chunk: *Chunk, scope: *const 
 }
 
 /// Whether a node embeds a `yield` reachable without crossing a function
-/// boundary — used to decide whether a destructuring assignment must be lowered
-/// to bytecode (yield present) or can defer to the tree-walker via `bind_pattern`.
+/// boundary. Loop-head assignment patterns use this to require resumable native
+/// lowering instead of the Environment-only `bind_pattern` path.
 fn nodeHasYield(node: *const ast.Node) bool {
     return switch (node.*) {
         .yield_expr => true,
@@ -222,6 +222,25 @@ fn nodeHasYield(node: *const ast.Node) bool {
                 if (nodeHasYield(pp.target)) break :blk true;
             }
             if (p.rest) |rest| if (nodeHasYield(rest)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn assignmentPatternHasIdentifierTarget(pattern: *const ast.Node) bool {
+    return switch (pattern.*) {
+        .identifier => true,
+        .arr_pattern => |array| blk: {
+            for (array.elems) |element| if (element.target) |target|
+                if (assignmentPatternHasIdentifierTarget(target)) break :blk true;
+            if (array.rest) |rest| break :blk assignmentPatternHasIdentifierTarget(rest);
+            break :blk false;
+        },
+        .obj_pattern => |object| blk: {
+            for (object.props) |property|
+                if (assignmentPatternHasIdentifierTarget(property.target)) break :blk true;
+            if (object.rest) |rest| break :blk assignmentPatternHasIdentifierTarget(rest);
             break :blk false;
         },
         else => false,
@@ -2764,7 +2783,7 @@ pub const Compiler = struct {
         self.chunk.patchToHere(after);
     }
 
-    // ---- destructuring assignment (generator, yield-aware) ----------------
+    // ---- activation-local destructuring assignment -------------------------
 
     /// `pattern = value` as an expression. Evaluates `value`, leaves it on the
     /// stack as the result, and destructures it into `pattern`.
@@ -2796,18 +2815,30 @@ pub const Compiler = struct {
     }
 
     const PatternMode = union(enum) {
-        assignment,
         assignment_native,
         lexical,
         environment_lexical: bool,
     };
 
     fn patternModeIsAssignment(mode: PatternMode) bool {
-        return mode == .assignment or mode == .assignment_native;
+        return mode == .assignment_native;
     }
 
     fn compileAssignPattern(self: *Compiler, pattern: *Node, src: ActivationTemp) CompileError!void {
-        try self.compilePattern(pattern, src, .assignment);
+        // Resolving an identifier assignment target inside `with` performs the
+        // observable object-Environment [[HasBinding]] before IteratorStep or
+        // GetV. Name-store bytecode resolves only at PutValue, so retain the
+        // exact whole-function fallback until a resolved binding Reference is
+        // activation-owned alongside member/super references.
+        if (self.environment_depth != 0 and assignmentPatternHasIdentifierTarget(pattern))
+            return error.Unsupported;
+        // A compiled assignment must write the exact statically resolved
+        // frame/upvalue/global target. `bind_pattern` delegates to the
+        // tree-walker Environment chain and therefore cannot represent a plain
+        // function's frame slots. Keep the complete pattern in bytecode in
+        // every mode; ActivationTemp selects frame, Environment, or program
+        // scratch storage without changing the evaluation algorithm.
+        try self.compilePattern(pattern, src, .assignment_native);
     }
 
     fn compilePattern(self: *Compiler, pattern: *Node, src: ActivationTemp, mode: PatternMode) CompileError!void {
@@ -2830,24 +2861,17 @@ pub const Compiler = struct {
                     .environment_lexical => |immutable| {
                         _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (immutable) 2 else 1);
                     },
-                    .assignment, .assignment_native => {
+                    .assignment_native => {
                         try self.emitStore(name);
                         _ = try self.chunk.emit(.pop, 0);
                     },
                 }
             },
             .arr_pattern, .obj_pattern => {
-                // Environment-backed binding patterns stay entirely in bytecode:
-                // defaults and computed keys must run in the current activation.
-                // Assignment patterns retain the compact tree-walker operation
-                // unless a suspension point requires resumable lowering.
-                if (mode != .assignment or nodeHasYield(target)) {
-                    try self.compilePattern(target, val, mode);
-                } else {
-                    try self.emitLoadActivationTemp(val);
-                    const pi = try self.chunk.addPattern(target);
-                    _ = try self.chunk.emitAB(.bind_pattern, pi, 3);
-                }
+                // Nested binding and assignment patterns stay in the current
+                // activation so defaults, computed keys, and statically
+                // resolved targets share the enclosing bytecode state.
+                try self.compilePattern(target, val, mode);
             },
             else => return error.Unsupported, // member handled separately (ordered ref eval)
         }
@@ -2899,12 +2923,6 @@ pub const Compiler = struct {
         }
     }
 
-    fn preEvalMemberRef(self: *Compiler, target: ?*Node) CompileError!?PatternAssignmentRef {
-        const t = target orelse return null;
-        if (t.* != .member) return null;
-        return self.preEvalPatternAssignmentRef(t);
-    }
-
     /// Store `val` through an already-evaluated member or super Reference.
     fn storePatternAssignmentRef(self: *Compiler, target: *Node, ref: PatternAssignmentRef, val: ActivationTemp) CompileError!void {
         switch (ref) {
@@ -2929,7 +2947,7 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.pop, 0); // discard the set result
     }
 
-    /// `[ e0, e1, ... ] = src` (assignment form, in a generator). Drives the
+    /// `[ e0, e1, ... ] = src` (assignment form). Drives the
     /// iterator protocol, applies defaults (which may yield), and runs
     /// IteratorClose when destructuring stops before exhausting the iterator —
     /// on a normal early stop AND on an abrupt completion (a `yield` resumed
@@ -2940,6 +2958,13 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.iter_of, 0);
         const it = try self.freshActivationTemp();
         try self.emitDefineActivationTemp(it);
+        // GetIterator caches [[NextMethod]] once. Reading `iterator.next` on
+        // every element would repeat an observable getter and could call a
+        // different method after user code mutates the iterator.
+        const next_method = try self.freshActivationTemp();
+        try self.emitLoadActivationTemp(it);
+        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("next"));
+        try self.emitDefineActivationTemp(next_method);
         const done = try self.freshActivationTemp();
         _ = try self.chunk.emit(.load_false, 0);
         try self.emitDefineActivationTemp(done);
@@ -2948,7 +2973,7 @@ pub const Compiler = struct {
         // completion (return/throw injected at an embedded yield) still closes
         // the iterator before propagating.
         const ph = try self.chunk.emitAB(.push_handler, none, none);
-        try self.compileArrayPatternBody(elems, rest, it, done, mode);
+        try self.compileArrayPatternBody(elems, rest, it, next_method, done, mode);
         _ = try self.chunk.emit(.pop_handler, 0);
         _ = try self.chunk.emit(.push_completion, 0); // normal completion
         // The normal path falls straight into the finally body (which the abrupt
@@ -2959,16 +2984,19 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.not, 0);
         const skip = try self.chunk.emit(.jump_if_false, 0);
         try self.emitLoadActivationTemp(it);
-        _ = try self.chunk.emit(.iter_close, 0);
+        // The pending [value, kind] completion remains below the iterator.
+        // IteratorClose preserves an existing throw even when `return` itself
+        // throws, while a close failure replaces a normal completion.
+        _ = try self.chunk.emit(.iter_close_completion, 0);
         self.chunk.patchToHere(skip);
         _ = try self.chunk.emit(.end_finally, 0);
     }
 
-    fn compileArrayPatternBody(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, it: ActivationTemp, done: ActivationTemp, mode: PatternMode) CompileError!void {
+    fn compileArrayPatternBody(self: *Compiler, elems: []const ast.ArrPatElem, rest: ?*Node, it: ActivationTemp, next_method: ActivationTemp, done: ActivationTemp, mode: PatternMode) CompileError!void {
         for (elems) |elem| {
             // Spec order: evaluate the target reference first, then step the
-            // iterator. Only member targets carry an observable reference eval.
-            const ref = if (patternModeIsAssignment(mode)) try self.preEvalMemberRef(elem.target) else null;
+            // iterator. Member/super targets carry an observable reference eval.
+            const ref = if (patternModeIsAssignment(mode)) try self.preEvalPatternAssignmentRef(elem.target) else null;
             // ev = undefined; if (!done) { r = it.next(); if (r.done) done = true else ev = r.value }
             const ev = try self.freshActivationTemp();
             _ = try self.chunk.emit(.load_undefined, 0);
@@ -2978,8 +3006,17 @@ pub const Compiler = struct {
             const skip_step = try self.chunk.emit(.jump_if_false, 0); // skip when done
             {
                 const r = try self.freshActivationTemp();
+                // IteratorStepValue marks the iterator record done before
+                // propagating an abrupt IteratorNext / IteratorComplete /
+                // IteratorValue completion. Set the flag before those calls,
+                // then clear it only after a value is obtained successfully;
+                // the enclosing finally must not IteratorClose after a step
+                // operation itself throws.
+                _ = try self.chunk.emit(.load_true, 0);
+                try self.emitStoreActivationTempDiscard(done);
+                try self.emitLoadActivationTemp(next_method);
                 try self.emitLoadActivationTemp(it);
-                _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+                _ = try self.chunk.emit(.call_with_this, 0);
                 try self.emitDefineActivationTemp(r);
                 try self.emitLoadActivationTemp(r);
                 _ = try self.chunk.emit(.assert_iter_result, 0);
@@ -2994,6 +3031,8 @@ pub const Compiler = struct {
                 try self.emitLoadActivationTemp(r);
                 _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
                 try self.emitStoreActivationTempDiscard(ev);
+                _ = try self.chunk.emit(.load_false, 0);
+                try self.emitStoreActivationTempDiscard(done);
                 self.chunk.patchToHere(after);
             }
             self.chunk.patchToHere(skip_step);
@@ -3013,7 +3052,7 @@ pub const Compiler = struct {
             }
             // assign ev to the target
             if (elem.target) |t| {
-                if (patternModeIsAssignment(mode) and t.* == .member) {
+                if (patternModeIsAssignment(mode) and (t.* == .member or t.* == .super_member)) {
                     try self.storePatternAssignmentRef(t, ref.?, ev);
                 } else {
                     try self.compilePatternTarget(t, ev, mode);
@@ -3024,7 +3063,7 @@ pub const Compiler = struct {
         if (rest) |rest_target| {
             // Spec order: evaluate the rest target reference (may yield) BEFORE
             // collecting the remaining elements.
-            const rref = if (patternModeIsAssignment(mode)) try self.preEvalMemberRef(rest_target) else null;
+            const rref = if (patternModeIsAssignment(mode)) try self.preEvalPatternAssignmentRef(rest_target) else null;
             // rest = []; while (!done) { r = it.next(); if (r.done) { done=true; break } rest.push(r.value) }
             const ra = try self.freshActivationTemp();
             _ = try self.chunk.emit(.new_array, 0);
@@ -3034,8 +3073,11 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.not, 0);
             const to_end = try self.chunk.emit(.jump_if_false, 0); // exit when done
             const r = try self.freshActivationTemp();
+            _ = try self.chunk.emit(.load_true, 0);
+            try self.emitStoreActivationTempDiscard(done);
+            try self.emitLoadActivationTemp(next_method);
             try self.emitLoadActivationTemp(it);
-            _ = try self.chunk.emitAB(.call_method, try self.chunk.addName("next"), 0);
+            _ = try self.chunk.emit(.call_with_this, 0);
             try self.emitDefineActivationTemp(r);
             try self.emitLoadActivationTemp(r);
             _ = try self.chunk.emit(.assert_iter_result, 0);
@@ -3047,15 +3089,20 @@ pub const Compiler = struct {
             try self.emitStoreActivationTempDiscard(done);
             const to_end2 = try self.chunk.emit(.jump, 0);
             self.chunk.patchToHere(not_done);
-            try self.emitLoadActivationTemp(ra);
+            const rest_value = try self.freshActivationTemp();
             try self.emitLoadActivationTemp(r);
             _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+            try self.emitDefineActivationTemp(rest_value);
+            _ = try self.chunk.emit(.load_false, 0);
+            try self.emitStoreActivationTempDiscard(done);
+            try self.emitLoadActivationTemp(ra);
+            try self.emitLoadActivationTemp(rest_value);
             _ = try self.chunk.emit(.array_append, 0);
             _ = try self.chunk.emit(.pop, 0); // drop the array left by array_append
             _ = try self.chunk.emit(.jump, @intCast(top));
             self.chunk.patchToHere(to_end);
             self.chunk.patchToHere(to_end2);
-            if (patternModeIsAssignment(mode) and rest_target.* == .member)
+            if (patternModeIsAssignment(mode) and (rest_target.* == .member or rest_target.* == .super_member))
                 try self.storePatternAssignmentRef(rest_target, rref.?, ra)
             else
                 try self.compilePatternTarget(rest_target, ra, mode);
@@ -3063,15 +3110,8 @@ pub const Compiler = struct {
         // The enclosing finally handler performs IteratorClose when `!done`.
     }
 
-    /// `{ k0: t0 = d0, ... } = src` (assignment form, in a generator).
+    /// `{ k0: t0 = d0, ... } = src` (assignment form).
     fn compileObjectPattern(self: *Compiler, props: []const ast.ObjPatProp, rest: ?*ast.Node, src: ActivationTemp, mode: PatternMode) CompileError!void {
-        // Resolving a bare rest identifier inside `with` performs an observable
-        // HasBinding before CopyDataProperties. The bytecode name store would
-        // resolve it only afterward, so retain the exact interpreter fallback
-        // for that dynamic-environment corner until resolved binding references
-        // have an activation-owned representation.
-        if (patternModeIsAssignment(mode) and self.environment_depth != 0) if (rest) |rest_target|
-            if (rest_target.* == .identifier) return error.Unsupported;
         try self.emitLoadActivationTemp(src);
         _ = try self.chunk.emit(.require_object_coercible, 0);
         var excluded: std.ArrayListUnmanaged(ActivationTemp) = .empty;
@@ -3089,7 +3129,7 @@ pub const Compiler = struct {
             }
             try excluded.append(self.arena, key);
 
-            const ref = if (patternModeIsAssignment(mode)) try self.preEvalMemberRef(prop.target) else null;
+            const ref = if (patternModeIsAssignment(mode)) try self.preEvalPatternAssignmentRef(prop.target) else null;
             const ev = try self.freshActivationTemp();
             // ev = src[key]
             try self.emitLoadActivationTemp(src);
@@ -3109,7 +3149,7 @@ pub const Compiler = struct {
                 try self.emitPatternDefault(d, prop.target, ev);
                 self.chunk.patchToHere(has_val);
             }
-            if (patternModeIsAssignment(mode) and prop.target.* == .member)
+            if (patternModeIsAssignment(mode) and (prop.target.* == .member or prop.target.* == .super_member))
                 try self.storePatternAssignmentRef(prop.target, ref.?, ev)
             else
                 try self.compilePatternTarget(prop.target, ev, mode);
@@ -3775,21 +3815,14 @@ pub const Compiler = struct {
                     }
                 },
                 .super_member => try self.compileSuperAssign(a),
-                // Destructuring assignment `[a,b] = v` / `{x} = v`. A pattern with
-                // no `yield` reuses the tree-walker via `bind_pattern` (proven,
-                // handles every edge case); a pattern that DOES embed `yield`
-                // (only reachable in a generator) is lowered to bytecode so the
-                // yield can suspend mid-destructure.
+                // Destructuring assignment `[a,b] = v` / `{x} = v`. Keep the
+                // complete operation in bytecode: frame-mode functions must
+                // write their statically resolved slots, while resumable and
+                // program chunks use Environment or scratch-backed activation
+                // temps. The shared native lowering also preserves suspension
+                // in defaults and computed keys.
                 .arr_pattern, .obj_pattern => {
-                    if (self.scope != null) return error.Unsupported; // env-mode only
-                    if (nodeHasYield(a.target)) {
-                        try self.compileDestructuringAssign(a.target, a.value);
-                    } else {
-                        try self.compileExpr(a.value);
-                        _ = try self.chunk.emit(.dup, 0); // leave the rhs as the result
-                        const pi = try self.chunk.addPattern(a.target);
-                        _ = try self.chunk.emitAB(.bind_pattern, pi, 3);
-                    }
+                    try self.compileDestructuringAssign(a.target, a.value);
                 },
                 else => return error.Unsupported,
             },
@@ -5996,6 +6029,66 @@ test "compiler lowers import.meta across module function tiers" {
                 import_meta_loads += 1;
             };
         try std.testing.expect(import_meta_loads > 0);
+    }
+}
+
+test "compiler lowers plain-function destructuring assignments without bind_pattern" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function assign(source, holder){ let first, nested, tail, result; result = ([first, { value: nested = 3, ...holder.rest }, ...tail] = source); return result === source ? first + nested + tail.length : -1; }",
+    );
+    const program = try parser.parseProgram();
+    const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |result| result,
+        .rejected => return error.TestUnexpectedResult,
+    };
+
+    var saw_iterator = false;
+    var saw_object_rest = false;
+    var saw_frame_store = false;
+    for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
+        .bind_pattern => return error.TestUnexpectedResult,
+        .iter_of => saw_iterator = true,
+        .object_rest => saw_object_rest = true,
+        .store_local, .store_local_lexical => saw_frame_store = true,
+        else => {},
+    };
+    try std.testing.expect(saw_iterator);
+    try std.testing.expect(saw_object_rest);
+    try std.testing.expect(saw_frame_store);
+
+    var closure_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function outer(source){ let captured; function assign(){ ([captured, globalTarget] = source); } return assign; }",
+    );
+    const closure_program = try closure_parser.parseProgram();
+    const closure_compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), closure_program.program[0].func_decl)) {
+        .compiled => |result| result,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_upvalue_store = false;
+    var saw_global_store = false;
+    for (closure_compiled.chunk.fns.items) |template| if (template.chunk) |chunk| {
+        for (chunk.code.items) |instruction| switch (instruction.op) {
+            .bind_pattern => return error.TestUnexpectedResult,
+            .store_upval, .store_upval_lexical => saw_upvalue_store = true,
+            .store_var => saw_global_store = true,
+            else => {},
+        };
+    };
+    try std.testing.expect(saw_upvalue_store);
+    try std.testing.expect(saw_global_store);
+
+    var with_parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function assign(source, object){ with (object) { ([value] = source); } }",
+    );
+    const with_program = try with_parser.parseProgram();
+    switch (try Compiler.admitPlainFunction(arena.allocator(), with_program.program[0].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
     }
 }
 

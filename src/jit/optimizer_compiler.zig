@@ -5419,6 +5419,7 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .enter_with, .inputs = 1, .kind = .effect },
         .{ .op = .register_disposable, .inputs = 1, .kind = .effect },
         .{ .op = .import_call, .inputs = 2, .kind = .effect },
+        .{ .op = .object_rest, .a = 2, .inputs = 3, .kind = .effect },
         .{ .op = .assert_iter_result, .inputs = 1, .kind = .effect },
         .{ .op = .iter_of, .inputs = 1, .kind = .effect },
         .{ .op = .async_iter_of, .inputs = 1, .kind = .effect },
