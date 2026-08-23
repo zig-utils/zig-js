@@ -71,13 +71,18 @@ pub const FunctionNode = struct {
     /// Empty when not captured (toString then falls back to native syntax).
     source: []const u8 = "",
     is_expr_body: bool = false,
-    /// Whether the (non-arrow) function might reference its `arguments` object.
-    /// The parser records `arguments`/`eval` IdentifierReferences in the active
-    /// ordinary function scope; nested ordinary functions start fresh state and
-    /// arrows inherit it. When false the function provably cannot name
-    /// `arguments`, so the tree-walker skips materializing the arguments exotic
-    /// object on each call. Defaults true (create it).
+    /// Whether the (non-arrow) function references its `arguments` object.
+    /// Nested ordinary functions start fresh state and arrows inherit the active
+    /// owner. When false, and no direct eval is present, the tree-walker skips
+    /// materializing the arguments exotic object on each call. Defaults true so
+    /// source-less synthetic nodes preserve the conservative runtime contract.
     uses_arguments: bool = true,
+    /// Whether this ordinary function scope contains a syntactic direct-eval
+    /// call, including one in a nested arrow. Direct eval may resolve
+    /// `arguments` without an explicit IdentifierReference in the parsed body,
+    /// but remains distinct because slot-backed locals require an exact dynamic
+    /// environment bridge before the function can enter the VM.
+    uses_direct_eval: bool = false,
     /// Arrow functions don't get their own `arguments` (or `this`).
     is_arrow: bool = false,
     /// Explicit named function expressions have an internal immutable self-name

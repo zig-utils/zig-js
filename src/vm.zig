@@ -1830,7 +1830,7 @@ fn compileQuickClosureCallLoopPlan(chunk: *Chunk, start: usize) QuickCallLoopPla
         code[start + 17].a != start)
         return .unsupported;
     const template = chunk.fns.items[template_index];
-    if (template.self_name.len != 0 or template.uses_arguments or template.is_generator or template.is_async or
+    if (template.self_name.len != 0 or template.uses_arguments or template.uses_direct_eval or template.is_generator or template.is_async or
         template.is_arrow or template.is_method or template.params.len != 1 or template.chunk == null)
         return .unsupported;
     const increment = chunk.consts.items[code[start + 13].a];
@@ -2283,7 +2283,7 @@ fn tryQuickNumericCallLoop(
             const template_index: usize = @intCast(raw_template_index);
             if (template_index >= chunk.fns.items.len) return null;
             const template = chunk.fns.items[template_index];
-            if (template.self_name.len != 0 or template.uses_arguments or template.is_generator or template.is_async or
+            if (template.self_name.len != 0 or template.uses_arguments or template.uses_direct_eval or template.is_generator or template.is_async or
                 template.is_arrow or template.is_method or template.params.len != 1)
                 return null;
             callee_chunk = template.chunk orelse return null;
@@ -8779,6 +8779,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .bytecode_admission_reason = admission_reason,
         .bytecode_execution_mode = vm.bytecode_execution_mode,
         .uses_arguments = tmpl.uses_arguments,
+        .uses_direct_eval = tmpl.uses_direct_eval,
         .is_generator = tmpl.is_generator,
         .is_async = tmpl.is_async,
         .is_strict = tmpl.is_strict,
@@ -9064,6 +9065,24 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
                 return e;
             };
         }
+    }
+    if (fchunk.arguments_slot) |slot| {
+        // FunctionDeclarationInstantiation creates the unmapped arguments
+        // exotic after base-instance initialization and before body evaluation.
+        // Strict chunks alone carry this slot; mapped sloppy arguments remain
+        // Environment-backed so indexed writes preserve live parameter aliases.
+        if (!func.is_strict or func.is_arrow or !func.uses_arguments or func.uses_direct_eval or
+            slot < fchunk.param_count or slot >= slots.len)
+        {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return vm.throwError("InternalError", "invalid bytecode arguments slot");
+        }
+        slots[slot] = vm.createArgumentsObject(func, args, func.closure) catch |e| {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return e;
+        };
     }
     if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
         const debug_environment = try gc_mod.allocEnv(vm.arena);

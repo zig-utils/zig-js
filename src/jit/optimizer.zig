@@ -425,6 +425,11 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     const code = chunk.code.items;
     if (code.len == 0) return error.EmptyChunk;
     if (code.len > std.math.maxInt(u32)) return error.UnsupportedChunk;
+    // Frame-state construction seeds parameters and ordinary undefined locals.
+    // An arguments slot is instead initialized by VM activation setup with a
+    // managed exotic object, so it must stay on exact bytecode until graph
+    // entries can represent guarded non-parameter activation inputs.
+    if (chunk.arguments_slot != null) return error.UnsupportedChunk;
     // Environment-unwinding jumps mutate interpreter-owned lexical state. They
     // remain exact bytecode exits until native frame states carry that depth.
     for (code) |instruction| if (instruction.op == .jump_env or instruction.op == .push_handler_catch or instruction.op == .push_handler_outer)
@@ -1817,6 +1822,17 @@ test "optimizer control-flow plans are deterministic" {
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "state branch b0 @3 locals=1 stack=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "state edge entry -> b0 @0") != null);
     for (first.graph.frame_state_values) |value| try std.testing.expect(value < first.graph.nodes.len);
+}
+
+test "optimizer rejects activation-initialized arguments slots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.local_count = 1;
+    chunk.arguments_slot = 0;
+    _ = try chunk.emit(.ret_undef, 0);
+
+    try std.testing.expectError(error.UnsupportedChunk, build(&chunk, std.testing.allocator));
 }
 
 test "optimizer SSA block arguments close loop backedges" {

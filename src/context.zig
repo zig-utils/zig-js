@@ -7317,7 +7317,8 @@ pub const Context = struct {
         if (self.gc_par_collector.load(.acquire) != null) return false;
         if (self.parallel_js and self.hasRunningJsThreads()) {
             return self.collectForParallelAllocationFailure(h, machine);
-        }        if (self.gil) |g| {
+        }
+        if (self.gil) |g| {
             // Peers release the GIL for non-JS work without publishing a scan
             // range, so demanding an already-all-parked world made heap-cap
             // recovery effectively sticky under sustained multi-thread
@@ -24547,6 +24548,86 @@ test "parser-derived arguments use preserves forced execution tiers" {
     try std.testing.expectEqual(results[0], results[1]);
 }
 
+test "forced tree-walker and required bytecode preserve strict arguments objects" {
+    const source =
+        \\function inspect(first, second) {
+        \\  "use strict";
+        \\  $vm.gc();
+        \\  var poison = "";
+        \\  try { arguments.callee; } catch (error) { poison = error.name; }
+        \\  var arrow = () => arguments[1];
+        \\  var replacement = { tag: "nine" };
+        \\  var rhsSame = (arguments[0] = replacement) === replacement;
+        \\  var values = "";
+        \\  for (var value of arguments) values += (value === replacement ? value.tag : value) + ",";
+        \\  return arguments.length + ":" + arguments[0].tag + ":" + first.tag + ":" + arrow() + ":" + poison + ":" + values + ":" + rhsSame;
+        \\}
+        \\function outer(value) {
+        \\  "use strict";
+        \\  var arrow = () => arguments[0];
+        \\  function inner(other) { "use strict"; return arguments[0] + ":" + (() => arguments[0])(); }
+        \\  return arrow() + ":" + inner(value + 1) + ":" + arguments[0];
+        \\}
+        \\function recursive(value) { "use strict"; if (value === 0) return arguments.length; return arguments[0] + recursive(value - 1); }
+        \\var holder = { tag: "holder", method(value) { "use strict"; return this.tag + ":" + arguments[0]; } };
+        \\function Box(value) { "use strict"; this.value = arguments[0]; }
+        \\function thrower(error) { "use strict"; throw arguments[0]; }
+        \\function makeArrow(value) { "use strict"; return () => arguments[0]; }
+        \\var marker = new Error("same");
+        \\var same = false;
+        \\try { thrower(marker); } catch (error) { same = error === marker; }
+        \\var escapedArrow = makeArrow(11);
+        \\$vm.gc();
+        \\inspect({ tag: "root" }, 3) + "|" + outer(4) + "|" + recursive(3) + "|" + holder.method(7) + "|" + (new Box(8)).value + "|" + same + "|" + escapedArrow();
+    ;
+    const expected = "2:nine:root:3:TypeError:nine,3,:true|4:5:5:4|7|holder:7|8|true|11";
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var actual: [modes.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(source);
+        try std.testing.expect(result.kind() == .string);
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 8);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_policy_arguments));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    // Exercise ordinary function policy independently of program-template
+    // compilation: the top-level lexical keeps the script on the tree walker,
+    // while the strict arguments owner itself must still enter the VM.
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 8), (try automatic.evaluate(
+        \\let scriptPolicyWitness = 0;
+        \\function automaticArguments(value) { "use strict"; return (() => arguments[0])(); }
+        \\function strictTailEval() { "use strict"; return eval("arguments.length"); }
+        \\automaticArguments(6) + strictTailEval(1, 2);
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_rejected_unsupported_lowering));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_arguments));
+}
+
 test "required bytecode rejects an uncompiled function instead of counting fallback coverage" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,
@@ -26231,11 +26312,11 @@ test "deep stack: spawned JS threads run non-tail recursion on a registered nati
 
 test "arguments elision: functions that never name arguments skip building it, others correct" {
     // Perf (#2): the tree-walker builds the `arguments` exotic object on every
-    // non-arrow call; when the source contains neither "arguments" nor "eval" it
-    // provably can't be referenced, so creation is skipped. This checks every way
-    // `arguments` can actually be reached still works — direct use, a nested arrow
-    // capturing it, `eval`, the sloppy mapped write-through, `arguments.callee`,
-    // and for-of — plus a function that doesn't use it (skips creation).
+    // non-arrow call; exact owner metadata now distinguishes an `arguments`
+    // reference from direct eval, and skips creation only when neither can
+    // observe the binding. This checks direct use, a nested arrow, direct eval,
+    // sloppy mapped write-through, `arguments.callee`, and for-of — plus a
+    // function that does not use it (skips creation).
     const ctx = try Context.createWith(std.testing.allocator, .{});
     defer ctx.destroy();
     const v = try ctx.evaluate(

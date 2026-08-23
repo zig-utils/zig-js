@@ -20,11 +20,11 @@ zig-js runs JavaScript through a tree-walking interpreter and a suspendable byte
 
 ### When each path runs
 
-Because the VM buys capability rather than speed, tiering is deliberately narrow (`plainFunctionMayUseBytecode`, `compiler.zig`):
+Because the VM buys capability rather than speed, tiering is deliberately narrow (`plainFunctionPolicyRejection` in `interpreter.zig` plus compiler admission):
 
 - **Generators / async / async generators** always compile to the VM — they need suspend/resume, which the tree-walker cannot express.
-- A **plain function or method** (non-generator, non-async, not using `arguments`) compiles to the VM only when it can actually benefit: it is strict and may contain a tail call/property operation, or it recurses by its own name (deep recursion that would otherwise overflow the native stack). Method activations preserve their exact home object and `super` constructor. Otherwise the function stays on the tree-walker.
-- Everything else — top-level code, and any function using a construct the compiler does not lower — tree-walks.
+- A **plain function or method** (non-generator, non-async) compiles to the VM only when it can actually benefit: it is strict and may contain a tail call/property operation, or it recurses by its own name (deep recursion that would otherwise overflow the native stack). Strict ordinary functions keep an observable unmapped `arguments` object in a precise frame slot; sloppy mapped arguments remain on the tree-walker until indexed parameter aliases can target frame slots exactly, and direct eval remains there until dynamic name resolution can observe frame locals. Method activations preserve their exact home object and `super` constructor. Otherwise the function stays on the tree-walker.
+- Top-level scripts attempt program bytecode; explicit execution policies and any construct the compiler does not lower retain the exact tree-walker path.
 
 Because most code tree-walks, the VM path is comparatively under-exercised, so VM/tree-walker semantic divergences are a known bug surface (see the block-scoping note below).
 

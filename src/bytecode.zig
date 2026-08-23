@@ -608,6 +608,10 @@ pub const FnTemplate = struct {
     /// Whether the source can observe its `arguments` object. Numeric leaf-call
     /// inlining requires false; arguments-using functions retain full call setup.
     uses_arguments: bool = true,
+    /// Whether the defining ordinary-function scope contains direct eval. Such
+    /// templates retain their dynamic-environment fallback even when they do
+    /// not contain an explicit `arguments` IdentifierReference.
+    uses_direct_eval: bool = false,
     is_generator: bool = false,
     is_async: bool = false,
     /// An arrow function: it captures `this`/`new.target`/`super`/the
@@ -641,6 +645,11 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
+    /// Frame slot initialized with this strict ordinary function's unmapped
+    /// arguments exotic object. Null for program/env-mode chunks, arrows,
+    /// functions that cannot observe `arguments`, and sloppy functions whose
+    /// mapped parameter aliases still require an Environment-backed contract.
+    arguments_slot: ?u32 = null,
     /// Activation-local scratch slots for program chunks (#706). Program runs
     /// have neither a frame nor a private activation Environment, so compiler
     /// temporaries that must survive observable calls — resolved member

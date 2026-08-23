@@ -189,6 +189,10 @@ pub const Parser = struct {
     /// it because they inherit `arguments`. The pointer never escapes parsing,
     /// so tracking adds no attacker-proportional allocation or cleanup path.
     current_arguments_use: ?*bool = null,
+    /// Direct eval has the same ordinary-function/arrow ownership boundary as
+    /// `arguments`, but is tracked separately so compiler admission cannot
+    /// confuse a dynamic-environment requirement with a frame-local binding.
+    current_direct_eval_use: ?*bool = null,
     /// Depth of syntax contexts where `new.target` is allowed. Ordinary
     /// functions/methods introduce one; arrows only inherit an outer one.
     new_target_depth: u32 = 0,
@@ -2264,8 +2268,13 @@ pub const Parser = struct {
 
     fn recordArgumentsUse(self: *Parser, name: []const u8) void {
         if (self.current_arguments_use) |uses_arguments| {
-            if (isEvalOrArguments(name)) uses_arguments.* = true;
+            if (std.mem.eql(u8, name, "arguments")) uses_arguments.* = true;
         }
+    }
+
+    fn recordDirectEvalUse(self: *Parser, callee: *const Node) void {
+        if (callee.* != .identifier or !std.mem.eql(u8, callee.identifier, "eval")) return;
+        if (self.current_direct_eval_use) |uses_direct_eval| uses_direct_eval.* = true;
     }
 
     fn isAnnexBCallAssignmentTarget(node: *const Node) bool {
@@ -2370,9 +2379,15 @@ pub const Parser = struct {
         if (name_tok.kind != .identifier) return ParseError.UnexpectedToken;
         if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
         var uses_arguments = false;
+        var uses_direct_eval = false;
         const saved_arguments_use = self.current_arguments_use;
+        const saved_direct_eval_use = self.current_direct_eval_use;
         self.current_arguments_use = &uses_arguments;
-        defer self.current_arguments_use = saved_arguments_use;
+        self.current_direct_eval_use = &uses_direct_eval;
+        defer {
+            self.current_arguments_use = saved_arguments_use;
+            self.current_direct_eval_use = saved_direct_eval_use;
+        }
         const params = try self.parseFunctionParamList(is_gen, is_async);
         const own_use_strict = self.peekUseStrict();
         // This function's strictness: inherited OR its own "use strict" prologue.
@@ -2392,7 +2407,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments };
+        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval };
         return self.alloc(.{ .func_decl = fnode });
     }
 
@@ -2422,9 +2437,15 @@ pub const Parser = struct {
             }
         }
         var uses_arguments = false;
+        var uses_direct_eval = false;
         const saved_arguments_use = self.current_arguments_use;
+        const saved_direct_eval_use = self.current_direct_eval_use;
         self.current_arguments_use = &uses_arguments;
-        defer self.current_arguments_use = saved_arguments_use;
+        self.current_direct_eval_use = &uses_direct_eval;
+        defer {
+            self.current_arguments_use = saved_arguments_use;
+            self.current_direct_eval_use = saved_direct_eval_use;
+        }
         const params = try self.parseFunctionParamList(is_gen, is_async);
         const own_use_strict = self.peekUseStrict();
         const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
@@ -2441,7 +2462,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -3102,6 +3123,7 @@ pub const Parser = struct {
                 e = try self.alloc(.{ .member = .{ .object = e, .computed = idx } });
             } else if (self.check(.lparen)) {
                 const args = try self.parseArgs();
+                if (!has_optional) self.recordDirectEvalUse(e);
                 e = try self.alloc(.{ .call = .{ .callee = e, .args = args } });
             } else if (self.check(.template)) {
                 // A tagged template may not appear in an optional chain
@@ -4405,9 +4427,15 @@ pub const Parser = struct {
     /// `is_gen` marks a generator method (`*m() {}`).
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
         var uses_arguments = false;
+        var uses_direct_eval = false;
         const saved_arguments_use = self.current_arguments_use;
+        const saved_direct_eval_use = self.current_direct_eval_use;
         self.current_arguments_use = &uses_arguments;
-        defer self.current_arguments_use = saved_arguments_use;
+        self.current_direct_eval_use = &uses_direct_eval;
+        defer {
+            self.current_arguments_use = saved_arguments_use;
+            self.current_direct_eval_use = saved_direct_eval_use;
+        }
         const params = try self.parseFunctionParamList(is_gen, is_async);
         try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const own_use_strict = self.peekUseStrict();
@@ -4417,7 +4445,7 @@ pub const Parser = struct {
         if (fn_strict) try self.validateStrictParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true, .uses_arguments = uses_arguments };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -4822,13 +4850,15 @@ test "parser derives arguments use in the active ordinary function scope" {
         \\  "arguments eval retrieval";
         \\  var evaluation = 0;
         \\  function inner() { return arguments.length; }
-        \\  function innerEval() { eval; }
+        \\  function innerEval() { return eval("arguments.length"); }
         \\  return object.eval;
         \\}
         \\function arrowOwner() { return () => arguments.length; }
         \\async function asyncUsed() { return arguments.length; }
         \\function* generatorClean() { "arguments eval"; yield 1; }
         \\function defaulted(value = (() => arguments[0])()) { return value; }
+        \\function directEval() { return eval("arguments[0]"); }
+        \\function indirectEval() { return eval?.("arguments[0]"); }
         \\var methods = {
         \\  clean() { "arguments eval"; return this.eval; },
         \\  used() { return { arguments }; },
@@ -4840,22 +4870,29 @@ test "parser derives arguments use in the active ordinary function scope" {
     ;
     var parser = try Parser.init(arena.allocator(), source);
     const program = try parser.parseProgram();
-    try std.testing.expectEqual(@as(usize, 7), program.program.len);
+    try std.testing.expectEqual(@as(usize, 9), program.program.len);
 
     const clean = program.program[0].func_decl;
     try std.testing.expect(!clean.uses_arguments);
+    try std.testing.expect(!clean.uses_direct_eval);
     try std.testing.expect(std.mem.startsWith(u8, clean.source, "function clean()"));
     try std.testing.expectEqual(@intFromPtr(source.ptr), @intFromPtr(clean.source.ptr));
     try std.testing.expectEqual(@as(usize, 5), clean.body.block.len);
     try std.testing.expect(clean.body.block[2].func_decl.uses_arguments);
-    try std.testing.expect(clean.body.block[3].func_decl.uses_arguments);
+    try std.testing.expect(!clean.body.block[3].func_decl.uses_arguments);
+    try std.testing.expect(clean.body.block[3].func_decl.uses_direct_eval);
 
     try std.testing.expect(program.program[1].func_decl.uses_arguments);
+    try std.testing.expect(!program.program[1].func_decl.uses_direct_eval);
     try std.testing.expect(program.program[2].func_decl.uses_arguments);
     try std.testing.expect(!program.program[3].func_decl.uses_arguments);
     try std.testing.expect(program.program[4].func_decl.uses_arguments);
+    try std.testing.expect(!program.program[5].func_decl.uses_arguments);
+    try std.testing.expect(program.program[5].func_decl.uses_direct_eval);
+    try std.testing.expect(!program.program[6].func_decl.uses_arguments);
+    try std.testing.expect(!program.program[6].func_decl.uses_direct_eval);
 
-    const methods_decl = program.program[5].var_decl.init orelse return error.TestUnexpectedResult;
+    const methods_decl = program.program[7].var_decl.init orelse return error.TestUnexpectedResult;
     if (methods_decl.* != .object_lit or methods_decl.object_lit.len != 5)
         return error.TestUnexpectedResult;
     const expected_method_use = [_]bool{ false, true, true, false, true };
@@ -4864,7 +4901,7 @@ test "parser derives arguments use in the active ordinary function scope" {
         try std.testing.expectEqual(expected, method.uses_arguments);
     }
 
-    const expression_decl = program.program[6].var_decl.init orelse return error.TestUnexpectedResult;
+    const expression_decl = program.program[8].var_decl.init orelse return error.TestUnexpectedResult;
     try std.testing.expect(expression_decl.* == .function and expression_decl.function.uses_arguments);
 }
 

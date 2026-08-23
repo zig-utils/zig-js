@@ -24,6 +24,11 @@ pub fn compileObserved(chunk: *const Chunk) !jit.CompiledCode {
 }
 
 fn compileWithObservability(chunk: *const Chunk, native_observability: bool) !jit.CompiledCode {
+    // VM activation setup initializes this non-parameter slot with a managed
+    // exotic object. Native entry analyses currently model only parameter
+    // inputs, so reject before constant/numeric selection rather than treating
+    // the slot as undefined or an unguarded numeric local.
+    if (chunk.arguments_slot != null) return error.UnsupportedChunk;
     if (constantResult(chunk)) |selection| {
         const exit_bytecode_offset: usize = if (chunk.code.items.len == 3 and chunk.code.items[1].op == .set_acc) 2 else 1;
         var compiled = if (native_observability)
@@ -43,6 +48,7 @@ fn compileWithObservability(chunk: *const Chunk, native_observability: bool) !ji
 /// `compile`. This keeps cold first calls fast without paying compiler setup
 /// for object, property, call, or closure-heavy functions.
 pub fn isCandidate(chunk: *const Chunk) bool {
+    if (chunk.arguments_slot != null) return false;
     if (constantResult(chunk) != null) return true;
     if (chunk.code.items.len == 0 or chunk.code.items.len > max_code_len or
         chunk.local_count > max_slots or chunk.param_count > chunk.local_count)
@@ -1704,6 +1710,19 @@ test "compiler lowers a constant-return bytecode function" {
     try std.testing.expectEqual(@as(usize, 2), locations.len);
     try std.testing.expectEqual(@as(?u32, 0), locations[0].bytecode_offset);
     try std.testing.expectEqual(@as(?u32, 1), locations[1].bytecode_offset);
+}
+
+test "baseline compiler rejects activation-initialized arguments slots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = Chunk.init(arena.allocator());
+    chunk.local_count = 1;
+    chunk.arguments_slot = 0;
+    _ = try chunk.emit(.load_undefined, 0);
+    _ = try chunk.emit(.ret, 0);
+
+    try std.testing.expect(!isCandidate(&chunk));
+    try std.testing.expectError(error.UnsupportedChunk, compile(&chunk));
 }
 
 test "observed baseline code records exact bytecode PC changes" {

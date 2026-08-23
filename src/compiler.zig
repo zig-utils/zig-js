@@ -158,6 +158,20 @@ fn retainDebugLocalNames(arena: std.mem.Allocator, chunk: *Chunk, scope: *const 
     chunk.debug_local_names = try arena.dupe([]const u8, scope.slot_names.items);
 }
 
+/// Strict ordinary functions receive an unmapped arguments object, so one
+/// activation-local slot is sufficient and nested arrows can resolve it like
+/// any other upvalue. Sloppy ordinary functions require a live [[ParameterMap]]
+/// alias to parameter bindings and stay fail-closed until that map can target
+/// frame slots directly.
+fn addStrictArgumentsSlot(
+    arena: std.mem.Allocator,
+    scope: *FnScope,
+    fnode: *const ast.FunctionNode,
+) CompileError!?u32 {
+    if (fnode.is_arrow or !fnode.uses_arguments or !fnode.is_strict) return null;
+    return try scope.addLocal(arena, "arguments", false, false);
+}
+
 /// Whether a node embeds a `yield` reachable without crossing a function
 /// boundary. Loop-head assignment patterns use this to require resumable native
 /// lowering instead of the Environment-only `bind_pattern` path.
@@ -1400,6 +1414,10 @@ pub const Compiler = struct {
     fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
+        if (fnode.uses_direct_eval)
+            return rejectPlainFunction(rejection, .unsupported_lowering);
+        if (!fnode.is_arrow and fnode.uses_arguments and !fnode.is_strict)
+            return rejectPlainFunction(rejection, .unsupported_lowering);
         // Function-scope `using` resources are disposed at function exit. The
         // frame-mode VM only emits block-level DisposeResources today, so keep
         // these bodies on the tree-walker until function-exit disposal is lowered.
@@ -1425,11 +1443,13 @@ pub const Compiler = struct {
                 return rejectPlainFunction(rejection, .parameter_prologue);
             _ = try scope.addLocal(arena, p.name, false, false);
         }
+        const arguments_slot = try addStrictArgumentsSlot(arena, scope, fnode);
         if (!fnode.is_expr_body) try collectFunctionLocals(arena, scope, fnode.body);
 
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         chunk.param_count = @intCast(fnode.params.len);
+        chunk.arguments_slot = arguments_slot;
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
@@ -1468,8 +1488,6 @@ pub const Compiler = struct {
 
     /// Emit a load of `name` to the appropriate location (local / upvalue / global).
     fn emitLoad(self: *Compiler, name: []const u8) CompileError!void {
-        // `arguments` inside a function is bound by the tree-walker only.
-        if (self.scope != null and std.mem.eql(u8, name, "arguments")) return error.Unsupported;
         switch (self.resolve(name)) {
             .local => |binding| _ = try self.chunk.emit(if (binding.tdz_checked) .load_local_lexical else .load_local, binding.slot),
             .upval => |u| _ = try self.chunk.emitAB(if (u.binding.tdz_checked) .load_upval_lexical else .load_upval, u.depth, u.binding.slot),
@@ -3300,6 +3318,10 @@ pub const Compiler = struct {
             return;
         }
         const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
+        // Tail position does not relax direct eval's requirement to observe
+        // slot-backed locals and the owning arguments binding. Env-mode chunks
+        // retain tail_call_eval; frame-mode functions stay on the tree walker.
+        if (self.scope != null and is_eval) return error.Unsupported;
         try self.compileExpr(c.callee);
         if (spread) {
             // A direct eval in a slot-backed function must observe that
@@ -3422,10 +3444,6 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.delete_super, 0);
             },
             .identifier => |name| {
-                // Plain frame mode has no materialized `arguments` binding;
-                // retain its existing general policy barrier. Suspendable
-                // env-mode functions bind it normally and use delete_name.
-                if (self.scope != null and std.mem.eql(u8, name, "arguments")) return error.Unsupported;
                 switch (self.resolve(name)) {
                     // A frame slot is a declarative binding and cannot be deleted.
                     // Activation-local block/with records may still shadow it, so
@@ -4744,6 +4762,15 @@ pub const Compiler = struct {
             template_admission = .async_compiled;
             break :blk compiled;
         } else blk: {
+            if (fnode.uses_direct_eval or
+                (!fnode.is_arrow and fnode.uses_arguments and !fnode.is_strict))
+            {
+                if (self.scope == null) {
+                    template_admission = .plain_unsupported_lowering;
+                    break :blk null;
+                }
+                return error.Unsupported;
+            }
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
             for (fnode.params) |p| {
@@ -4762,9 +4789,11 @@ pub const Compiler = struct {
                 }
                 _ = try scope.addLocal(self.arena, p.name, false, false);
             }
+            const arguments_slot = try addStrictArgumentsSlot(self.arena, scope, fnode);
             if (!fnode.is_expr_body) try collectFunctionLocals(self.arena, scope, fnode.body);
 
             compiled.param_count = @intCast(fnode.params.len);
+            compiled.arguments_slot = arguments_slot;
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
             if (fnode.is_expr_body) {
@@ -4816,6 +4845,7 @@ pub const Compiler = struct {
             .body = fnode.body,
             .source = fnode.source,
             .uses_arguments = fnode.uses_arguments,
+            .uses_direct_eval = fnode.uses_direct_eval,
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
             .is_arrow = fnode.is_arrow,
@@ -5614,19 +5644,12 @@ test "compiler lowers proper tail calls with spread arguments across tiers" {
         try std.testing.expect(saw_expected);
     }
 
-    switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[6].func_decl)) {
+    // Spread and fixed-arity direct eval both require the function's dynamic
+    // environment; tail position cannot make frame-local bindings observable.
+    for (program.program[6..8]) |declaration| switch (try Compiler.admitPlainFunction(arena.allocator(), declaration.func_decl)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
-    }
-    const fixed_eval = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[7].func_decl)) {
-        .compiled => |compiled| compiled.chunk,
-        .rejected => return error.TestUnexpectedResult,
     };
-    var saw_fixed_eval_tail = false;
-    for (fixed_eval.code.items) |inst| if (inst.op == .tail_call_eval) {
-        saw_fixed_eval_tail = true;
-    };
-    try std.testing.expect(saw_fixed_eval_tail);
 
     const generated = switch (try Compiler.admitGenerator(arena.allocator(), program.program[8].func_decl, true)) {
         .compiled => |chunk| chunk,
@@ -5912,6 +5935,80 @@ test "compiler lowers property deletion across bytecode tiers" {
         },
         .rejected => return error.TestUnexpectedResult,
     }
+}
+
+test "compiler gives strict arguments owners precise frame slots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function own(value){ \"use strict\"; return arguments[0] + arguments.length; } function outer(value){ \"use strict\"; var ownLength = arguments.length; var arrow = () => arguments[0]; function inner(other){ \"use strict\"; return arguments[0]; } return ownLength + arrow() + inner(value); } var holder = { method(value){ \"use strict\"; return arguments[0]; } }; function Constructor(value){ \"use strict\"; this.value = arguments[0]; } function sloppy(value){ return arguments[0]; } function evalOwner(){ \"use strict\"; return eval(\"arguments[0]\"); } function evalReference(){ \"use strict\"; return eval; }",
+    );
+    const program = try parser.parseProgram();
+    const chunk = switch (try Compiler.admitProgram(arena.allocator(), program)) {
+        .compiled => |compiled| compiled,
+        .rejected => return error.TestUnexpectedResult,
+    };
+
+    const Helper = struct {
+        fn named(owner: *Chunk, name: []const u8) ?*bc.FnTemplate {
+            for (owner.fns.items) |template| if (std.mem.eql(u8, template.name, name)) return template;
+            return null;
+        }
+
+        fn expectOwnArguments(template: *bc.FnTemplate) !u32 {
+            const compiled = template.chunk orelse return error.TestUnexpectedResult;
+            const slot = compiled.arguments_slot orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(compiled.param_count, slot);
+            try std.testing.expect(slot < compiled.local_count);
+            try std.testing.expectEqualStrings("arguments", compiled.debug_local_names[slot]);
+            var saw_load = false;
+            for (compiled.code.items) |instruction| {
+                if (instruction.op == .load_local and instruction.a == slot) saw_load = true;
+            }
+            try std.testing.expect(saw_load);
+            return slot;
+        }
+    };
+
+    _ = try Helper.expectOwnArguments(Helper.named(chunk, "own") orelse return error.TestUnexpectedResult);
+    _ = try Helper.expectOwnArguments(Helper.named(chunk, "method") orelse return error.TestUnexpectedResult);
+    _ = try Helper.expectOwnArguments(Helper.named(chunk, "Constructor") orelse return error.TestUnexpectedResult);
+
+    const outer_template = Helper.named(chunk, "outer") orelse return error.TestUnexpectedResult;
+    const outer_slot = try Helper.expectOwnArguments(outer_template);
+    const outer_chunk = outer_template.chunk.?;
+    const inner_template = Helper.named(outer_chunk, "inner") orelse return error.TestUnexpectedResult;
+    _ = try Helper.expectOwnArguments(inner_template);
+
+    var arrow_template: ?*bc.FnTemplate = null;
+    for (outer_chunk.fns.items) |template| if (template.is_arrow) {
+        arrow_template = template;
+        break;
+    };
+    const arrow_chunk = (arrow_template orelse return error.TestUnexpectedResult).chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u32, null), arrow_chunk.arguments_slot);
+    var saw_outer_arguments = false;
+    for (arrow_chunk.code.items) |instruction| {
+        if (instruction.op == .load_upval and instruction.a == 1 and instruction.b == outer_slot)
+            saw_outer_arguments = true;
+    }
+    try std.testing.expect(saw_outer_arguments);
+
+    const sloppy = Helper.named(chunk, "sloppy") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(bc.FnTemplateAdmission.plain_unsupported_lowering, sloppy.admission);
+    try std.testing.expectEqual(@as(?*Chunk, null), sloppy.chunk);
+
+    const eval_owner = Helper.named(chunk, "evalOwner") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(bc.FnTemplateAdmission.plain_unsupported_lowering, eval_owner.admission);
+    try std.testing.expect(eval_owner.uses_direct_eval);
+    try std.testing.expect(!eval_owner.uses_arguments);
+    try std.testing.expectEqual(@as(?*Chunk, null), eval_owner.chunk);
+
+    const eval_reference = Helper.named(chunk, "evalReference") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!eval_reference.uses_direct_eval);
+    try std.testing.expect(!eval_reference.uses_arguments);
+    try std.testing.expectEqual(@as(?u32, null), eval_reference.chunk.?.arguments_slot);
 }
 
 test "compiler bounds identifier deletion before frame bindings" {

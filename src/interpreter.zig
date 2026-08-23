@@ -1814,6 +1814,11 @@ pub const Function = struct {
     /// `ast.FunctionNode.uses_arguments`). Defaults true so a closure built
     /// without a source-derived flag (e.g. VM templates) stays correct.
     uses_arguments: bool = true,
+    /// A syntactic direct-eval call in this ordinary-function scope. It may
+    /// resolve `arguments` dynamically even when the parsed body has no explicit
+    /// reference, and frame-mode compilation remains barred until eval can see
+    /// activation slots exactly.
+    uses_direct_eval: bool = false,
     closure: *Environment,
     /// The function's [[Realm]] global object, captured when the function is
     /// created. Sloppy `this` substitution and realm-sensitive operations must
@@ -6184,6 +6189,7 @@ pub const Interpreter = struct {
             .is_expr_body = fnode.is_expr_body,
             .is_arrow = fnode.is_arrow,
             .uses_arguments = fnode.uses_arguments,
+            .uses_direct_eval = fnode.uses_direct_eval,
             .closure = closure,
             .realm_global = functionRealmGlobal(closure, self.global_object),
             .name = fnode.name,
@@ -6363,11 +6369,22 @@ pub const Interpreter = struct {
     /// VM instead of the tree-walker. Besides tail calls and recursion, named
     /// property functions enter the VM so their observed shapes can reach the
     /// optimizing tier. Unsupported bodies still fall back during compilation.
-    /// Generators, async, and `arguments`-using functions retain their dedicated
-    /// paths. Methods use the same compiler admission now that VM activations
-    /// carry their exact home object and super constructor.
+    /// Generators and async functions retain their dedicated paths. Sloppy
+    /// mapped-arguments owners stay on the tree walker; strict unmapped owners
+    /// use their compiler-assigned VM slot. Methods use the same admission now
+    /// that activations carry their exact home object and super constructor.
     fn plainFunctionPolicyRejection(fnode: *const ast.FunctionNode) ?BytecodeAdmissionReason {
-        if (fnode.uses_arguments) return .plain_policy_arguments;
+        // Strict ordinary functions use an unmapped arguments object, which a
+        // VM activation can own in one precise frame slot. Sloppy functions
+        // retain the policy barrier because their indexed properties alias live
+        // parameter bindings through [[ParameterMap]].
+        // Arrows created on the tree-walker also retain the barrier: standalone
+        // admission has no defining frame from which to resolve their inherited
+        // arguments binding. Arrows nested in compiled owners are lowered with
+        // that parent FnScope by Compiler.compileFunction instead.
+        if (fnode.is_arrow and fnode.uses_arguments) return .plain_policy_arguments;
+        if (fnode.uses_arguments)
+            return if (fnode.is_strict) null else .plain_policy_arguments;
         if (fnode.requires_tree_walk_class_constructor) return .plain_policy_class_constructor_semantics;
         if (fnode.is_strict) return if (sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null)
             null
@@ -7084,6 +7101,7 @@ pub const Interpreter = struct {
             // unused arguments exotic and blocks bytecode for every class
             // constructor synthesized here.
             .uses_arguments = if (ctor_node) |cf| cf.uses_arguments else false,
+            .uses_direct_eval = if (ctor_node) |cf| cf.uses_direct_eval else false,
             .requires_tree_walk_class_constructor = derived or field_inits.items.len != 0,
             // All class code is strict, so the constructor is a strict function
             // (e.g. its `.caller`/`.arguments` hit the %ThrowTypeError% poison pill
@@ -8160,13 +8178,12 @@ pub const Interpreter = struct {
             return throwClassConstructorCallError(self, func);
 
         // Non-arrow functions get an `arguments` array-like over the call args —
-        // but only if the body could reference it. When `uses_arguments` is false
-        // the source provably never names `arguments` (and has no `eval`/`var
-        // arguments`), so nothing looks it up: skip building the exotic object
-        // (and its element copy + parameter map) entirely. The later
-        // `body_env.vars.contains("arguments")` copy degrades gracefully when the
-        // binding is absent.
-        if (!func.is_arrow and func.uses_arguments) {
+        // but only if the body could reference it. An explicit reference or a
+        // direct eval can observe the binding; otherwise skip building the
+        // exotic object (and its element copy + parameter map) entirely. The
+        // later `body_env.vars.contains("arguments")` copy degrades gracefully
+        // when the binding is absent.
+        if (!func.is_arrow and (func.uses_arguments or func.uses_direct_eval)) {
             // The body references `arguments`: build eagerly and bind it.
             const args_obj = try self.createArgumentsObject(func, args, call_env);
             if (self.active_call_frame) |fr| {
@@ -8241,7 +8258,7 @@ pub const Interpreter = struct {
         const saved_params = self.cur_func_params;
         const saved_args_needed = self.cur_func_args_needed;
         self.cur_func_params = func.params;
-        self.cur_func_args_needed = func.uses_arguments;
+        self.cur_func_args_needed = func.uses_arguments or func.uses_direct_eval;
         defer {
             self.cur_func_params = saved_params;
             self.cur_func_args_needed = saved_args_needed;

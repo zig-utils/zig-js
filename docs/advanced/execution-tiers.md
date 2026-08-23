@@ -27,14 +27,18 @@ exists because the tree-walker cannot express certain things:
   native OS stack.
 
 So tiering into the VM is deliberately narrow
-(`plainFunctionMayUseBytecode` in `compiler.zig`):
+(`plainFunctionPolicyRejection` in `interpreter.zig` plus compiler admission):
 
 - generators / async / async generators **always** compile to the VM;
-- a **plain** function (non-method, non-generator, non-async, not using
-  `arguments`) compiles only when it can benefit — it is strict and may contain
-  a tail call, or it recurses by its own name;
-- everything else, including top-level code and any function using a construct
-  the compiler does not lower, tree-walks.
+- a **plain** function or method (non-generator, non-async) compiles only when it
+  can benefit — it is strict and may contain a tail call/property operation, or
+  it recurses by its own name. Strict functions may keep their unmapped
+  `arguments` object in a precise frame slot; sloppy mapped arguments retain
+  their live parameter-aliasing barrier, and direct eval retains its dynamic
+  environment barrier;
+- top-level scripts also attempt program bytecode, while explicit execution
+  policies and any construct the compiler does not lower retain the exact
+  tree-walker path.
 
 ### The slot model and remaining lexical boundary
 
