@@ -340,6 +340,15 @@ pub const Gil = struct {
         const io = agent.engineIo();
         if (!g.mutex.tryLock()) {
             _ = g.contenders.fetchAdd(1, .monotonic);
+            // Publish this thread's stack range while blocked (#722). A peer
+            // waiting here is not at an Atomics/Condition park, so without
+            // publication `allOthersParked` never observes it and an
+            // allocation-failure collector holding the GIL refuses to collect
+            // for as long as contention lasts — heap-cap recovery became
+            // effectively sticky. Same safety argument as `wait`: the blocked
+            // stack is stable, and the conservative scan roots its temporaries.
+            stack_scan.beginPark();
+            defer stack_scan.endPark();
             g.mutex.lockUncancelable(io);
             _ = g.contenders.fetchSub(1, .monotonic);
         }
