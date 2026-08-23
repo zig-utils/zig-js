@@ -87,6 +87,11 @@ fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError
 pub const Frame = struct {
     slots: []Value,
     parent: ?*Frame,
+    /// Sloppy simple parameters share atomic cells owned by this arguments
+    /// object. The frame retains only an object edge plus immutable slot layout,
+    /// never a raw pointer from an escaped object back into recyclable storage.
+    mapped_arguments: ?*value.Object = null,
+    mapped_parameter_indices: []const u32 = &.{},
     // Once a closure captures this frame (`makeClosure` walks the chain marking
     // `escaped`), its slots can be read/written concurrently: the defining
     // function via load/store_local on its own frame, and any escaped closure via
@@ -114,6 +119,36 @@ pub const Frame = struct {
     }
     pub fn unlockSlots(self: *Frame, held: bool) void {
         if (held) self.slot_lock.unlock();
+    }
+
+    inline fn mappedArgumentIndex(self: *const Frame, slot: usize) ?usize {
+        const object = self.mapped_arguments orelse return null;
+        if (slot >= self.mapped_parameter_indices.len) return null;
+        const index = self.mapped_parameter_indices[slot];
+        if (index == std.math.maxInt(u32)) return null;
+        const mapped_index: usize = @intCast(index);
+        const cold = object.coldState() orelse return null;
+        if (mapped_index >= cold.arg_map_values.len) return null;
+        return mapped_index;
+    }
+
+    pub inline fn readSlot(self: *Frame, slot: usize, parallel: bool) Value {
+        if (self.mappedArgumentIndex(slot)) |index|
+            return interp.mappedParameterCellGet(self.mapped_arguments.?, index).?;
+        const held = self.lockSlots(parallel);
+        defer self.unlockSlots(held);
+        return self.slots[slot];
+    }
+
+    pub inline fn writeSlot(self: *Frame, slot: usize, new_value: Value, parallel: bool) void {
+        if (self.mappedArgumentIndex(slot)) |index| {
+            const stored = interp.mappedParameterCellSet(self.mapped_arguments.?, index, new_value);
+            std.debug.assert(stored);
+            return;
+        }
+        const held = self.lockSlots(parallel);
+        self.slots[slot] = new_value;
+        self.unlockSlots(held);
     }
 
     /// Mark this frame and every ancestor as escaped — a closure capturing this
@@ -6051,12 +6086,16 @@ fn serviceVmDebugStatement(vm: *Interpreter, node: *const ast.Node, chunk: *Chun
     const frame = maybe_frame orelse return vm.serviceDebugStatement(node);
     const call_frame = vm.debug_call_frame orelse return vm.serviceDebugStatement(node);
     if (!call_frame.environment_is_vm_activation) return vm.serviceDebugStatement(node);
-    for (chunk.debug_local_names, frame.slots) |name, slot| {
-        if (name.len != 0) try call_frame.environment.put(name, slot);
+    const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
+    for (chunk.debug_local_names, 0..) |name, slot| {
+        if (name.len != 0) try call_frame.environment.put(name, frame.readSlot(slot, parallel_sync));
     }
     try vm.serviceDebugStatement(node);
-    for (chunk.debug_local_names, frame.slots) |name, *slot| {
-        if (name.len != 0) slot.* = call_frame.environment.getLocal(name) orelse slot.*;
+    for (chunk.debug_local_names, 0..) |name, slot| {
+        if (name.len != 0) {
+            const current = frame.readSlot(slot, parallel_sync);
+            frame.writeSlot(slot, call_frame.environment.getLocal(name) orelse current, parallel_sync);
+        }
     }
 }
 
@@ -6163,6 +6202,10 @@ fn runChunk(
                 if (vm.isTdz(v)) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
                 if (!parallel_sync) recordQuickGlobalBinding(chunk, ip - 1, vm, name);
                 try stack.append(stack_alloc, v);
+            },
+            .load_local_mapped => {
+                const cf = frame.?;
+                try stack.append(stack_alloc, cf.readSlot(inst.a, parallel_sync));
             },
             .load_var_or_undef => {
                 const name = chunk.names.items[inst.a];
@@ -6359,6 +6402,10 @@ fn runChunk(
                 cf.slots[inst.a] = v;
                 cf.unlockSlots(held);
             },
+            .store_local_mapped => {
+                const cf = frame.?;
+                cf.writeSlot(inst.a, stack.items[stack.items.len - 1], parallel_sync);
+            },
             .store_local_lexical => {
                 const cf = frame.?;
                 const v = stack.items[stack.items.len - 1]; // assignment leaves its value
@@ -6377,6 +6424,12 @@ fn runChunk(
                 const v = f.slots[inst.b];
                 f.unlockSlots(held);
                 try stack.append(stack_alloc, v);
+            },
+            .load_upval_mapped => {
+                var f = frame.?;
+                var d = inst.a;
+                while (d > 0) : (d -= 1) f = f.parent.?;
+                try stack.append(stack_alloc, f.readSlot(inst.b, parallel_sync));
             },
             .load_upval_lexical => {
                 var f = frame.?;
@@ -6397,6 +6450,12 @@ fn runChunk(
                 const held = f.lockSlots(parallel_sync);
                 f.slots[inst.b] = v;
                 f.unlockSlots(held);
+            },
+            .store_upval_mapped => {
+                var f = frame.?;
+                var d = inst.a;
+                while (d > 0) : (d -= 1) f = f.parent.?;
+                f.writeSlot(inst.b, stack.items[stack.items.len - 1], parallel_sync);
             },
             .store_upval_lexical => {
                 var f = frame.?;
@@ -8940,6 +8999,8 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     act.exec.class_strict_depth = 0;
     act.exec.class_strict_base = false;
     act.exec.strict_initialized = false;
+    act.frame.mapped_arguments = null;
+    act.frame.mapped_parameter_indices = &.{};
     act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
     vm.vm_activation_free = act;
 }
@@ -8952,6 +9013,8 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
             act.next_free = null;
             act.frame.slots = act.slot_storage[0..local_count];
             act.frame.parent = null;
+            act.frame.mapped_arguments = null;
+            act.frame.mapped_parameter_indices = &.{};
             act.frame.escaped.store(false, .monotonic);
             @memset(act.frame.slots, Value.undef());
             return act;
@@ -8995,8 +9058,25 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     const frame = act.frame;
     const slot_storage = act.slot_storage;
     const slots = frame.slots;
-    for (func.params, 0..) |_, i| {
-        if (i < args.len) slots[i] = args[i];
+    if (fchunk.parameter_slots.len == func.params.len) {
+        for (fchunk.parameter_slots, 0..) |slot, argument_index| {
+            if (slot >= slots.len) {
+                releaseActivation(vm, act);
+                return vm.throwError("InternalError", "invalid bytecode parameter slot");
+            }
+            // Assign every syntactic occurrence from left to right. Duplicate
+            // sloppy formals therefore leave the rightmost argument (or
+            // undefined when it is missing) in their one shared binding.
+            slots[slot] = if (argument_index < args.len) args[argument_index] else Value.undef();
+        }
+    } else if (fchunk.parameter_slots.len == 0) {
+        // Hand-authored unit-test chunks predate the explicit layout. Their
+        // parameters are unique and retain the historical positional contract.
+        const positional = @min(func.params.len, @min(args.len, slots.len));
+        @memcpy(slots[0..positional], args[0..positional]);
+    } else {
+        releaseActivation(vm, act);
+        return vm.throwError("InternalError", "invalid bytecode parameter layout");
     }
     // FunctionDeclarationInstantiation creates every lexical binding in its TDZ
     // before the first statement/debugger checkpoint. Scope-entry bytecodes
@@ -9067,28 +9147,45 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         }
     }
     if (fchunk.arguments_slot) |slot| {
-        // FunctionDeclarationInstantiation creates the unmapped arguments
-        // exotic after base-instance initialization and before body evaluation.
-        // Strict chunks alone carry this slot; mapped sloppy arguments remain
-        // Environment-backed so indexed writes preserve live parameter aliases.
-        if (!func.is_strict or func.is_arrow or !func.uses_arguments or func.uses_direct_eval or
-            slot < fchunk.param_count or slot >= slots.len)
+        // FunctionDeclarationInstantiation creates the arguments exotic after
+        // base-instance initialization and before body evaluation. Strict
+        // functions retain an unmapped object; sloppy simple functions publish
+        // their exact frame-slot map into object-owned atomic cells.
+        const mapped_layout_valid = if (func.is_strict)
+            fchunk.mapped_parameter_indices.len == 0
+        else if (func.params.len == 0)
+            fchunk.mapped_parameter_indices.len == 0
+        else
+            fchunk.mapped_parameter_indices.len == slots.len;
+        if (func.is_arrow or !func.uses_arguments or func.uses_direct_eval or
+            slot >= slots.len or !mapped_layout_valid or
+            (slot < fchunk.mapped_parameter_indices.len and
+                fchunk.mapped_parameter_indices[slot] != std.math.maxInt(u32)))
         {
             popActivation(vm, act);
             releaseActivation(vm, act);
             return vm.throwError("InternalError", "invalid bytecode arguments slot");
         }
-        slots[slot] = vm.createArgumentsObject(func, args, func.closure) catch |e| {
+        const arguments_value = (if (func.is_strict)
+            vm.createArgumentsObject(func, args, func.closure)
+        else
+            vm.createFrameArgumentsObject(func, args, slots, fchunk.mapped_parameter_indices)) catch |e| {
             popActivation(vm, act);
             releaseActivation(vm, act);
             return e;
         };
+        slots[slot] = arguments_value;
+        if (!func.is_strict and fchunk.mapped_parameter_indices.len != 0) {
+            frame.mapped_arguments = arguments_value.asObj();
+            frame.mapped_parameter_indices = fchunk.mapped_parameter_indices;
+        }
     }
     if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
         const debug_environment = try gc_mod.allocEnv(vm.arena);
         vm.initEnvironment(debug_environment, func.closure, true);
-        for (fchunk.debug_local_names, frame.slots) |name, slot| {
-            if (name.len != 0) try debug_environment.put(name, slot);
+        const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
+        for (fchunk.debug_local_names, 0..) |name, slot| {
+            if (name.len != 0) try debug_environment.put(name, frame.readSlot(slot, parallel_sync));
         }
         act.debug_environment = debug_environment;
         act.debug_call_frame = .{
@@ -9154,15 +9251,20 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
 
 fn syncDebugEnvironmentFromFrame(act: *Activation) EvalError!void {
     const environment = act.debug_environment orelse return;
-    for (act.chunk.debug_local_names, act.frame.slots) |name, slot| {
-        if (name.len != 0) try environment.put(name, slot);
+    const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
+    for (act.chunk.debug_local_names, 0..) |name, slot| {
+        if (name.len != 0) try environment.put(name, act.frame.readSlot(slot, parallel_sync));
     }
 }
 
 fn syncFrameFromDebugEnvironment(act: *Activation) void {
     const environment = act.debug_environment orelse return;
-    for (act.chunk.debug_local_names, act.frame.slots) |name, *slot| {
-        if (name.len != 0) slot.* = environment.getLocal(name) orelse slot.*;
+    const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
+    for (act.chunk.debug_local_names, 0..) |name, slot| {
+        if (name.len != 0) {
+            const current = act.frame.readSlot(slot, parallel_sync);
+            act.frame.writeSlot(slot, environment.getLocal(name) orelse current, parallel_sync);
+        }
     }
 }
 
@@ -14756,6 +14858,32 @@ test "vm: completed non-escaping recursive activations reuse bounded storage" {
     // fib(10) needs only its live recursion depth. Repeating it 50 times must
     // not retain one arena allocation per completed call.
     try std.testing.expect(machine.vm_activation_allocations <= 12);
+}
+
+test "vm: sloppy mapped arguments keep activation reuse ownership-safe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var parser = try Parser.init(a,
+        \\function mapped(n) { arguments[0] = n + 1; return n; }
+        \\function retain(n) { return arguments; }
+        \\var kept = retain(7);
+        \\var total = 0;
+        \\for (var i = 0; i < 2000; i = i + 1) total = total + mapped(i);
+        \\total + kept[0]
+    );
+    const prog = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(a, prog);
+    var env = Environment{ .arena = a, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(a);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    try std.testing.expectEqual(@as(f64, 2_001_007), (try run(&machine, chunk, null)).asNum());
+    // The arguments objects are per-call observable identities; the backing VM
+    // activation is not. Returning one object and then recycling its activation
+    // 2,000 times must neither mutate the retained map nor grow per invocation.
+    try std.testing.expect(machine.vm_activation_allocations <= 4);
 }
 
 test "vm: recursive calls throw a catchable RangeError before native stack overflow" {

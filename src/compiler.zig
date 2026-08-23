@@ -60,6 +60,10 @@ const SlotBinding = struct {
     lexical: bool = false,
     immutable: bool = false,
     tdz_checked: bool = false,
+    /// Sloppy simple-parameter binding whose storage is shared with one live
+    /// arguments [[ParameterMap]] entry. Dedicated bytecodes keep the ordinary
+    /// frame-slot hot path branch-free.
+    mapped_parameter: bool = false,
     /// Captured loop-head lexicals live in a real declarative Environment
     /// Record so CreatePerIterationEnvironment can give closures fresh cells.
     /// They still participate in static name resolution, but emit name-based
@@ -158,18 +162,67 @@ fn retainDebugLocalNames(arena: std.mem.Allocator, chunk: *Chunk, scope: *const 
     chunk.debug_local_names = try arena.dupe([]const u8, scope.slot_names.items);
 }
 
-/// Strict ordinary functions receive an unmapped arguments object, so one
-/// activation-local slot is sufficient and nested arrows can resolve it like
-/// any other upvalue. Sloppy ordinary functions require a live [[ParameterMap]]
-/// alias to parameter bindings and stay fail-closed until that map can target
-/// frame slots directly.
-fn addStrictArgumentsSlot(
+/// Every ordinary function that can observe its own arguments object receives
+/// one activation-local slot. Nested arrows resolve that owner slot like any
+/// other upvalue; arrows never manufacture an arguments binding themselves.
+fn addArgumentsSlot(
     arena: std.mem.Allocator,
     scope: *FnScope,
     fnode: *const ast.FunctionNode,
 ) CompileError!?u32 {
-    if (fnode.is_arrow or !fnode.uses_arguments or !fnode.is_strict) return null;
+    if (fnode.is_arrow or !fnode.uses_arguments) return null;
+    // FunctionDeclarationInstantiation suppresses the implicit object when a
+    // formal already owns the `arguments` binding.
+    for (fnode.params) |param|
+        if (param.pattern == null and std.mem.eql(u8, param.name, "arguments")) return null;
     return try scope.addLocal(arena, "arguments", false, false);
+}
+
+/// Mark each distinct sloppy simple formal and freeze its rightmost arguments
+/// index. ECMA-262 CreateMappedArgumentsObject scans formals right-to-left: an
+/// earlier duplicate remains an ordinary arguments element and only the last
+/// occurrence aliases the single parameter binding.
+fn configureMappedParameters(
+    arena: std.mem.Allocator,
+    scope: *FnScope,
+    fnode: *const ast.FunctionNode,
+    arguments_slot: ?u32,
+) CompileError![]const u32 {
+    if (fnode.is_arrow or fnode.is_strict or arguments_slot == null or fnode.params.len == 0) return &.{};
+
+    const unmapped = std.math.maxInt(u32);
+    const indices = try arena.alloc(u32, scope.count);
+    @memset(indices, unmapped);
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var index = fnode.params.len;
+    while (index > 0) {
+        index -= 1;
+        const param = fnode.params[index];
+        std.debug.assert(param.default == null and !param.is_rest and param.pattern == null);
+        if (seen.contains(param.name)) continue;
+        try seen.put(arena, param.name, {});
+        const binding = scope.names.getPtr(param.name) orelse return error.Unsupported;
+        binding.mapped_parameter = true;
+        indices[binding.slot] = @intCast(index);
+    }
+    return indices;
+}
+
+/// Expression lowering may append compiler temporaries after parameter bindings
+/// have been marked. Extend the immutable slot map to the final frame width so
+/// VM validation covers every slot while ordinary non-mapped bytecodes remain
+/// branch-free.
+fn finalizeMappedParameterIndices(
+    arena: std.mem.Allocator,
+    scope: *const FnScope,
+    initial: []const u32,
+) CompileError![]const u32 {
+    if (initial.len == 0 or initial.len == scope.count) return initial;
+    std.debug.assert(initial.len < scope.count);
+    const indices = try arena.alloc(u32, scope.count);
+    @memset(indices, std.math.maxInt(u32));
+    @memcpy(indices[0..initial.len], initial);
+    return indices;
 }
 
 /// Whether a node embeds a `yield` reachable without crossing a function
@@ -1416,8 +1469,6 @@ pub const Compiler = struct {
             return rejectPlainFunction(rejection, .generator_or_async);
         if (fnode.uses_direct_eval)
             return rejectPlainFunction(rejection, .unsupported_lowering);
-        if (!fnode.is_arrow and fnode.uses_arguments and !fnode.is_strict)
-            return rejectPlainFunction(rejection, .unsupported_lowering);
         // Function-scope `using` resources are disposed at function exit. The
         // frame-mode VM only emits block-level DisposeResources today, so keep
         // these bodies on the tree-walker until function-exit disposal is lowered.
@@ -1438,18 +1489,22 @@ pub const Compiler = struct {
         const tdz_checks = try functionNeedsTdzChecks(arena, fnode);
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null, .tdz_checks = tdz_checks };
-        for (fnode.params) |p| {
+        const parameter_slots = try arena.alloc(u32, fnode.params.len);
+        for (fnode.params, 0..) |p, index| {
             if (p.default != null or p.is_rest or p.pattern != null)
                 return rejectPlainFunction(rejection, .parameter_prologue);
-            _ = try scope.addLocal(arena, p.name, false, false);
+            parameter_slots[index] = try scope.addLocal(arena, p.name, false, false);
         }
-        const arguments_slot = try addStrictArgumentsSlot(arena, scope, fnode);
+        const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
         if (!fnode.is_expr_body) try collectFunctionLocals(arena, scope, fnode.body);
+        const mapped_parameter_indices = try configureMappedParameters(arena, scope, fnode, arguments_slot);
 
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         chunk.param_count = @intCast(fnode.params.len);
+        chunk.parameter_slots = parameter_slots;
         chunk.arguments_slot = arguments_slot;
+        chunk.mapped_parameter_indices = mapped_parameter_indices;
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
@@ -1458,6 +1513,7 @@ pub const Compiler = struct {
             _ = try chunk.emit(.ret_undef, 0);
         }
         chunk.local_count = scope.count;
+        chunk.mapped_parameter_indices = try finalizeMappedParameterIndices(arena, scope, mapped_parameter_indices);
         chunk.lexical_slots = scope.lexical_slots.items;
         try retainDebugLocalNames(arena, chunk, scope);
         try chunk.finalize();
@@ -1489,8 +1545,8 @@ pub const Compiler = struct {
     /// Emit a load of `name` to the appropriate location (local / upvalue / global).
     fn emitLoad(self: *Compiler, name: []const u8) CompileError!void {
         switch (self.resolve(name)) {
-            .local => |binding| _ = try self.chunk.emit(if (binding.tdz_checked) .load_local_lexical else .load_local, binding.slot),
-            .upval => |u| _ = try self.chunk.emitAB(if (u.binding.tdz_checked) .load_upval_lexical else .load_upval, u.depth, u.binding.slot),
+            .local => |binding| _ = try self.chunk.emit(if (binding.mapped_parameter) .load_local_mapped else if (binding.tdz_checked) .load_local_lexical else .load_local, binding.slot),
+            .upval => |u| _ = try self.chunk.emitAB(if (u.binding.mapped_parameter) .load_upval_mapped else if (u.binding.tdz_checked) .load_upval_lexical else .load_upval, u.depth, u.binding.slot),
             .environment, .global => _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
         }
     }
@@ -1498,8 +1554,14 @@ pub const Compiler = struct {
     /// Emit a store to `name` (assignment); leaves the value on the stack.
     fn emitStore(self: *Compiler, name: []const u8) CompileError!void {
         switch (self.resolve(name)) {
-            .local => |binding| _ = try self.chunk.emitAB(if (binding.tdz_checked or binding.immutable) .store_local_lexical else .store_local, binding.slot, @intFromBool(binding.immutable)),
-            .upval => |u| _ = try self.chunk.emitAB(if (u.binding.tdz_checked or u.binding.immutable) .store_upval_lexical else .store_upval, u.depth, u.binding.slot | (if (u.binding.immutable) @as(u32, 1) << 31 else 0)),
+            .local => |binding| _ = if (binding.mapped_parameter)
+                try self.chunk.emit(.store_local_mapped, binding.slot)
+            else
+                try self.chunk.emitAB(if (binding.tdz_checked or binding.immutable) .store_local_lexical else .store_local, binding.slot, @intFromBool(binding.immutable)),
+            .upval => |u| _ = if (u.binding.mapped_parameter)
+                try self.chunk.emitAB(.store_upval_mapped, u.depth, u.binding.slot)
+            else
+                try self.chunk.emitAB(if (u.binding.tdz_checked or u.binding.immutable) .store_upval_lexical else .store_upval, u.depth, u.binding.slot | (if (u.binding.immutable) @as(u32, 1) << 31 else 0)),
             .environment, .global => _ = try self.chunk.emit(.store_var, try self.chunk.addName(name)),
         }
     }
@@ -1513,11 +1575,11 @@ pub const Compiler = struct {
     fn emitDefineForce(self: *Compiler, name: []const u8) CompileError!void {
         switch (self.resolve(name)) {
             .local => |binding| {
-                _ = try self.chunk.emit(.store_local, binding.slot);
+                _ = try self.chunk.emit(if (binding.mapped_parameter) .store_local_mapped else .store_local, binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
             .upval => |u| {
-                _ = try self.chunk.emitAB(.store_upval, u.depth, u.binding.slot);
+                _ = try self.chunk.emitAB(if (u.binding.mapped_parameter) .store_upval_mapped else .store_upval, u.depth, u.binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
             .environment => |binding| _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (binding.immutable) 2 else 1),
@@ -1532,11 +1594,11 @@ pub const Compiler = struct {
     fn emitDefineKind(self: *Compiler, name: []const u8, kind: ast.DeclKind, has_init: bool) CompileError!void {
         switch (self.resolve(name)) {
             .local => |binding| {
-                _ = try self.chunk.emit(.store_local, binding.slot);
+                _ = try self.chunk.emit(if (binding.mapped_parameter) .store_local_mapped else .store_local, binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
             .upval => |u| {
-                _ = try self.chunk.emitAB(.store_upval, u.depth, u.binding.slot);
+                _ = try self.chunk.emitAB(if (u.binding.mapped_parameter) .store_upval_mapped else .store_upval, u.depth, u.binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
             .environment => |binding| _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (binding.immutable) 2 else 1),
@@ -4762,9 +4824,7 @@ pub const Compiler = struct {
             template_admission = .async_compiled;
             break :blk compiled;
         } else blk: {
-            if (fnode.uses_direct_eval or
-                (!fnode.is_arrow and fnode.uses_arguments and !fnode.is_strict))
-            {
+            if (fnode.uses_direct_eval) {
                 if (self.scope == null) {
                     template_admission = .plain_unsupported_lowering;
                     break :blk null;
@@ -4773,7 +4833,8 @@ pub const Compiler = struct {
             }
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
-            for (fnode.params) |p| {
+            const parameter_slots = try self.arena.alloc(u32, fnode.params.len);
+            for (fnode.params, 0..) |p, index| {
                 // Default values and rest params need a runtime prologue the VM
                 // doesn't emit yet. Generator-body env-mode closures can fall
                 // back to the tree-walker because their names live in Environment
@@ -4787,13 +4848,16 @@ pub const Compiler = struct {
                     }
                     return error.Unsupported;
                 }
-                _ = try scope.addLocal(self.arena, p.name, false, false);
+                parameter_slots[index] = try scope.addLocal(self.arena, p.name, false, false);
             }
-            const arguments_slot = try addStrictArgumentsSlot(self.arena, scope, fnode);
+            const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode);
             if (!fnode.is_expr_body) try collectFunctionLocals(self.arena, scope, fnode.body);
+            const mapped_parameter_indices = try configureMappedParameters(self.arena, scope, fnode, arguments_slot);
 
             compiled.param_count = @intCast(fnode.params.len);
+            compiled.parameter_slots = parameter_slots;
             compiled.arguments_slot = arguments_slot;
+            compiled.mapped_parameter_indices = mapped_parameter_indices;
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
             if (fnode.is_expr_body) {
@@ -4822,6 +4886,7 @@ pub const Compiler = struct {
                 _ = try compiled.emit(.ret_undef, 0);
             }
             compiled.local_count = scope.count;
+            compiled.mapped_parameter_indices = try finalizeMappedParameterIndices(self.arena, scope, mapped_parameter_indices);
             compiled.lexical_slots = scope.lexical_slots.items;
             try retainDebugLocalNames(self.arena, compiled, scope);
             try compiled.finalize();
@@ -5150,7 +5215,7 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
         .{ .source = "function f(){ { function nested(){} } }", .expected = .block_nested_function_declaration },
         .{ .source = "function f(value = 1){}", .expected = .parameter_prologue },
-        .{ .source = "function f(){ return arguments; }", .expected = .unsupported_lowering },
+        .{ .source = "function f(){ return eval('1'); }", .expected = .unsupported_lowering },
     };
 
     for (cases) |case| {
@@ -5937,12 +6002,12 @@ test "compiler lowers property deletion across bytecode tiers" {
     }
 }
 
-test "compiler gives strict arguments owners precise frame slots" {
+test "compiler gives arguments owners precise frame slots" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var parser = try @import("parser.zig").Parser.init(
         arena.allocator(),
-        "function own(value){ \"use strict\"; return arguments[0] + arguments.length; } function outer(value){ \"use strict\"; var ownLength = arguments.length; var arrow = () => arguments[0]; function inner(other){ \"use strict\"; return arguments[0]; } return ownLength + arrow() + inner(value); } var holder = { method(value){ \"use strict\"; return arguments[0]; } }; function Constructor(value){ \"use strict\"; this.value = arguments[0]; } function sloppy(value){ return arguments[0]; } function evalOwner(){ \"use strict\"; return eval(\"arguments[0]\"); } function evalReference(){ \"use strict\"; return eval; }",
+        "function own(value){ \"use strict\"; return arguments[0] + arguments.length; } function outer(value){ \"use strict\"; var ownLength = arguments.length; var arrow = () => arguments[0]; function inner(other){ \"use strict\"; return arguments[0]; } return ownLength + arrow() + inner(value); } var holder = { method(value){ \"use strict\"; return arguments[0]; } }; function Constructor(value){ \"use strict\"; this.value = arguments[0]; } function sloppy(value){ value = arguments[0] + 1; arguments[0] = value + 1; return value + arguments[0]; } function sloppyOuter(value){ var arrow = () => { value = value + 1; return value + arguments[0]; }; return arrow(); } function parameterArguments(arguments){ arguments = arguments + 1; return arguments; } function evalOwner(){ \"use strict\"; return eval(\"arguments[0]\"); } function evalReference(){ \"use strict\"; return eval; }",
     );
     const program = try parser.parseProgram();
     const chunk = switch (try Compiler.admitProgram(arena.allocator(), program)) {
@@ -5996,8 +6061,42 @@ test "compiler gives strict arguments owners precise frame slots" {
     try std.testing.expect(saw_outer_arguments);
 
     const sloppy = Helper.named(chunk, "sloppy") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(bc.FnTemplateAdmission.plain_unsupported_lowering, sloppy.admission);
-    try std.testing.expectEqual(@as(?*Chunk, null), sloppy.chunk);
+    try std.testing.expectEqual(bc.FnTemplateAdmission.plain_compiled, sloppy.admission);
+    const sloppy_chunk = sloppy.chunk orelse return error.TestUnexpectedResult;
+    const sloppy_arguments_slot = sloppy_chunk.arguments_slot orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(sloppy_chunk.local_count, sloppy_chunk.mapped_parameter_indices.len);
+    try std.testing.expectEqual(@as(u32, 0), sloppy_chunk.mapped_parameter_indices[0]);
+    try std.testing.expectEqual(std.math.maxInt(u32), sloppy_chunk.mapped_parameter_indices[sloppy_arguments_slot]);
+    var saw_mapped_load = false;
+    var saw_mapped_store = false;
+    for (sloppy_chunk.code.items) |instruction| switch (instruction.op) {
+        .load_local_mapped => saw_mapped_load = true,
+        .store_local_mapped => saw_mapped_store = true,
+        else => {},
+    };
+    try std.testing.expect(saw_mapped_load and saw_mapped_store);
+
+    const sloppy_outer = Helper.named(chunk, "sloppyOuter") orelse return error.TestUnexpectedResult;
+    const sloppy_outer_chunk = sloppy_outer.chunk orelse return error.TestUnexpectedResult;
+    var sloppy_arrow: ?*bc.FnTemplate = null;
+    for (sloppy_outer_chunk.fns.items) |template| if (template.is_arrow) {
+        sloppy_arrow = template;
+        break;
+    };
+    const sloppy_arrow_chunk = (sloppy_arrow orelse return error.TestUnexpectedResult).chunk orelse return error.TestUnexpectedResult;
+    var saw_mapped_upvalue_load = false;
+    var saw_mapped_upvalue_store = false;
+    for (sloppy_arrow_chunk.code.items) |instruction| switch (instruction.op) {
+        .load_upval_mapped => saw_mapped_upvalue_load = true,
+        .store_upval_mapped => saw_mapped_upvalue_store = true,
+        else => {},
+    };
+    try std.testing.expect(saw_mapped_upvalue_load and saw_mapped_upvalue_store);
+
+    const parameter_arguments = Helper.named(chunk, "parameterArguments") orelse return error.TestUnexpectedResult;
+    const parameter_arguments_chunk = parameter_arguments.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u32, null), parameter_arguments_chunk.arguments_slot);
+    try std.testing.expectEqual(@as(usize, 0), parameter_arguments_chunk.mapped_parameter_indices.len);
 
     const eval_owner = Helper.named(chunk, "evalOwner") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(bc.FnTemplateAdmission.plain_unsupported_lowering, eval_owner.admission);
@@ -6083,8 +6182,16 @@ test "compiler bounds identifier deletion before frame bindings" {
     );
     const arguments_program = try arguments_parser.parseProgram();
     switch (try Compiler.admitPlainFunction(arena.allocator(), arguments_program.program[0].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+        .compiled => |compiled| {
+            var saw_local_false = false;
+            for (compiled.chunk.code.items) |inst| switch (inst.op) {
+                .load_false => saw_local_false = true,
+                .delete_name => return error.TestUnexpectedResult,
+                else => {},
+            };
+            try std.testing.expect(saw_local_false);
+        },
+        .rejected => return error.TestUnexpectedResult,
     }
 }
 

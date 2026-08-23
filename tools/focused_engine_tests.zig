@@ -61,6 +61,22 @@ const frontend_cases = [_]Case{
         .source = "let score = 0; for (const key in { a: 1, b: 2 }) score += key === 'a' ? 1 : 2; for (const [first] in { cd: 1 }) score += first === 'c' ? 4 : 0; score",
         .expected = 7,
     },
+    .{
+        .name = "sloppy mapped arguments frame aliases",
+        .source =
+        \\function mapped(a, a, b) {
+        \\  var score = a === 2 ? 1 : 0;
+        \\  arguments[1] = 5; score += a === 5 ? 2 : 0;
+        \\  a = 7; score += arguments[1] === 7 ? 4 : 0;
+        \\  delete arguments[1]; a = 9;
+        \\  score += arguments[1] === undefined && a === 9 ? 8 : 0;
+        \\  b = 11; score += arguments.length === 2 && b === 11 ? 16 : 0;
+        \\  return score;
+        \\}
+        \\mapped(1, 2)
+        ,
+        .expected = 31,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

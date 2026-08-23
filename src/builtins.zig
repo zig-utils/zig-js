@@ -1723,7 +1723,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
                 } else if (!within and !target.isExtensible()) {
                     return false;
                 }
-                const am_mapped = target.is_arguments and interpreter.argMapName(target, i) != null;
+                const am_mapped = target.is_arguments and interpreter.argMapHas(target, i);
                 const new_value = if (d.getOwn("value")) |val|
                     val
                 else if (am_mapped)

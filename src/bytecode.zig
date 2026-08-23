@@ -313,12 +313,16 @@ pub const Op = enum(u8) {
     // --- locals & upvalues (resolved to frame slots at compile time) ---
     init_local_lexical, // operand a: slot; reset binding to TDZ on scope entry
     load_local, // operand a: slot in the current frame
+    load_local_mapped, // operand a: slot whose sloppy parameter may use an arguments-map cell
     load_local_lexical, // operand a: slot; ReferenceError while in TDZ
     store_local, // operand a: slot; assign, leave value on stack
+    store_local_mapped, // operand a: slot whose sloppy parameter may use an arguments-map cell
     store_local_lexical, // operand a: slot, b: immutable; checked assignment, leave value
     load_upval, // operand a: parent depth, b: slot
+    load_upval_mapped, // operand a: parent depth, b: mapped sloppy-parameter slot
     load_upval_lexical, // operand a: parent depth, b: slot; TDZ-checked
     store_upval, // operand a: parent depth, b: slot; leave value on stack
+    store_upval_mapped, // operand a: parent depth, b: mapped sloppy-parameter slot
     store_upval_lexical, // operand a: depth, b: slot | immutable high bit; checked assignment
 
     // --- unary ---
@@ -645,11 +649,21 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
-    /// Frame slot initialized with this strict ordinary function's unmapped
-    /// arguments exotic object. Null for program/env-mode chunks, arrows,
-    /// functions that cannot observe `arguments`, and sloppy functions whose
-    /// mapped parameter aliases still require an Environment-backed contract.
+    /// Syntactic parameter index -> activation slot. This is intentionally
+    /// distinct from `param_count`: sloppy duplicate formals share one binding,
+    /// and FunctionDeclarationInstantiation assigns that binding once per
+    /// occurrence from left to right (so the rightmost value wins).
+    parameter_slots: []const u32 = &.{},
+    /// Frame slot initialized with this ordinary function's arguments exotic
+    /// object. Strict functions use it directly; sloppy simple-parameter
+    /// functions additionally route the exact mapped parameter slots below.
+    /// Null for program/env-mode chunks, arrows, and functions that cannot
+    /// observe `arguments`.
     arguments_slot: ?u32 = null,
+    /// Local slot -> arguments index for a sloppy simple parameter that owns a
+    /// live [[ParameterMap]]. Unmapped slots contain `maxInt(u32)`. Empty for
+    /// strict/unmapped owners and every chunk without a mapped arguments object.
+    mapped_parameter_indices: []const u32 = &.{},
     /// Activation-local scratch slots for program chunks (#706). Program runs
     /// have neither a frame nor a private activation Environment, so compiler
     /// temporaries that must survive observable calls — resolved member

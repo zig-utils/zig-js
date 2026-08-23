@@ -18323,10 +18323,50 @@ test "parallel_js: mapped arguments severing is atomic under no-GIL readers" {
         \\  }
         \\  Atomics.store(shared, "stop", 1);
         \\  Atomics.notify(shared, "stop", readers.length);
-        \\  return readers.every(t => t.join() === 0);
+        \\  if (!readers.every(t => t.join() === 0)) return false;
+        \\  function mapped(value) {
+        \\    return { object: arguments, read: () => value, write: function (next) { value = next; } };
+        \\  }
+        \\  globalThis.mappedNoGilOwner = mapped;
+        \\  const pair = mapped(1);
+        \\  const live = { stop: 0, started: 0 };
+        \\  const liveReaders = [];
+        \\  for (let r = 0; r < 2; ++r) {
+        \\    liveReaders.push(new Thread((pair, live) => {
+        \\      Atomics.add(live, "started", 1);
+        \\      let failures = 0;
+        \\      while (Atomics.load(live, "stop") === 0) {
+        \\        const fromFrame = pair.read();
+        \\        const fromObject = pair.object[0];
+        \\        if (!(fromFrame === 1 || fromFrame === 2 || fromFrame === 3)) ++failures;
+        \\        if (!(fromObject === 1 || fromObject === 2 || fromObject === 3)) ++failures;
+        \\      }
+        \\      return failures;
+        \\    }, pair, live));
+        \\  }
+        \\  const writer = new Thread((pair, live) => {
+        \\    while (Atomics.load(live, "started") !== 2)
+        \\      Atomics.wait(live, "started", Atomics.load(live, "started"), 100);
+        \\    for (let i = 0; i < 2000; ++i) {
+        \\      pair.write(2);
+        \\      pair.object[0] = 3;
+        \\    }
+        \\    pair.write(2);
+        \\    Atomics.store(live, "stop", 1);
+        \\    Atomics.notify(live, "stop", 2);
+        \\    return 0;
+        \\  }, pair, live);
+        \\  if (writer.join() !== 0 || !liveReaders.every(t => t.join() === 0)) return false;
+        \\  return pair.read() === 2 && pair.object[0] === 2;
         \\})()
     );
     try std.testing.expect(result.asBool());
+    const mapped_value = ctx.global_object.getOwn("mappedNoGilOwner") orelse return error.TestUnexpectedResult;
+    const mapped_raw = mapped_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const mapped_function: *interp.Function = @ptrCast(@alignCast(mapped_raw));
+    const mapped_chunk = mapped_function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(mapped_chunk.arguments_slot != null);
+    try std.testing.expectEqual(mapped_chunk.local_count, mapped_chunk.mapped_parameter_indices.len);
 }
 
 test "TypedArray set coerces offset before detached buffer checks" {
@@ -22914,7 +22954,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
     const expected = [_]struct { name: []const u8, reason: interp.BytecodeAdmissionReason }{
         .{ .name = "admitted", .reason = .plain_compiled },
         .{ .name = "computedTagged", .reason = .plain_compiled },
-        .{ .name = "withArguments", .reason = .plain_policy_arguments },
+        .{ .name = "withArguments", .reason = .plain_compiled },
         .{ .name = "notCandidate", .reason = .plain_policy_not_candidate },
         .{ .name = "shadowed", .reason = .plain_compiled },
         .{ .name = "generatorCompiled", .reason = .generator_compiled },
@@ -22952,7 +22992,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
     const after = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
     try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
-    try std.testing.expectEqual(before.count(.plain_compiled) + 3, after.count(.plain_compiled));
+    try std.testing.expectEqual(before.count(.plain_compiled) + 4, after.count(.plain_compiled));
     try std.testing.expectEqual(before.count(.generator_compiled) + 6, after.count(.generator_compiled));
     try std.testing.expectEqual(before.count(.async_compiled) + 6, after.count(.async_compiled));
     for (expected) |entry| {
@@ -24628,6 +24668,135 @@ test "forced tree-walker and required bytecode preserve strict arguments objects
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_arguments));
 }
 
+test "forced tree-walker and required bytecode preserve sloppy mapped arguments frames" {
+    const source =
+        \\function basic(a, b) {
+        \\  var out = [];
+        \\  arguments[0] = 10; out.push(a, arguments[0]);
+        \\  b = 20; out.push(b, arguments[1]);
+        \\  Object.defineProperty(arguments, "0", { value: 30 }); out.push(a, arguments[0]);
+        \\  Object.defineProperty(arguments, "0", { writable: false }); a = 40; out.push(a, arguments[0]);
+        \\  Object.defineProperty(arguments, "1", { get: function () { return 50; }, configurable: true });
+        \\  b = 60; out.push(b, arguments[1]);
+        \\  return out.join(",");
+        \\}
+        \\function duplicate(a, a) {
+        \\  var out = [arguments[0], arguments[1], a];
+        \\  a = 3; out.push(arguments[1]);
+        \\  arguments[0] = 4; out.push(a);
+        \\  arguments[1] = 5; out.push(a, arguments[0]);
+        \\  return out.join(",");
+        \\}
+        \\function missing(a, b) { b = 7; return arguments.length + ":" + arguments[1] + ":" + b; }
+        \\function extra(a) { a = 4; arguments[1] = 8; return arguments.length + ":" + arguments[0] + ":" + arguments[1]; }
+        \\function arrowOwner(a) { var arrow = () => { a += 2; return arguments[0]; }; return arrow(); }
+        \\function nestedOwner(a) { function inner(a) { arguments[0] = 9; return a; } return a + ":" + arguments[0] + ":" + inner(4); }
+        \\function pair(a) { return [arguments, () => a, function (value) { a = value; return a; }]; }
+        \\function onlyArguments(a) { a = { tag: "retained" }; return arguments; }
+        \\function recursive(value) { if (value === 0) return arguments.length; return arguments[0] + recursive(value - 1); }
+        \\var holder = { tag: "holder", method(value) { arguments[0] = value + 1; return this.tag + ":" + value; } };
+        \\function Box(value) { arguments[0] = { tag: "box" }; this.value = value; }
+        \\function thrower(error) { arguments[0] = { tag: "thrown" }; throw error; }
+        \\function tail(value, remaining) { arguments[0] = value + 1; if (remaining === 0) return value; return tail(value, remaining - 1); }
+        \\var escaped = pair({ tag: "first" });
+        \\var only = onlyArguments({ tag: "discarded" });
+        \\$vm.gc();
+        \\escaped[0][0] = { tag: "second" };
+        \\var sharedRead = escaped[1]().tag;
+        \\escaped[2]({ tag: "third" });
+        \\var objectRead = escaped[0][0].tag;
+        \\delete escaped[0][0];
+        \\escaped[2]({ tag: "fourth" });
+        \\$vm.gc();
+        \\var thrownTag = "";
+        \\try { thrower({ tag: "initial" }); } catch (error) { thrownTag = error.tag; }
+        \\basic(1, 2) + "|" + duplicate(1, 2) + "|" + missing(1) + "|" + extra(1, 2) + "|" +
+        \\  arrowOwner(6) + "|" + nestedOwner(3) + "|" + sharedRead + ":" + objectRead + ":" +
+        \\  (escaped[0][0] === undefined) + ":" + escaped[1]().tag + "|" + only[0].tag + "|" +
+        \\  recursive(3) + "|" + holder.method(4) + "|" + (new Box(1)).value.tag + "|" + thrownTag + "|" + tail(1, 5);
+    ;
+    const expected = "10,10,20,20,30,30,40,30,60,50|1,2,2,3,3,5,4|1:undefined:7|2:4:8|8|3:3:9|second:third:true:fourth|retained|7|holder:5|box|thrown|7";
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var actual: [modes.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(source);
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 10);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_policy_arguments));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+}
+
+test "moving GC relocates live severed and recycled mapped arguments cells" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.mappedMoveDiscard = [];
+        \\for (var i = 0; i < 4096; ++i) mappedMoveDiscard.push({ dead: i, nested: { value: i } });
+        \\mappedMoveDiscard = null;
+        \\function mappedPair(value) {
+        \\  var object = arguments;
+        \\  return {
+        \\    object: object,
+        \\    read: () => value,
+        \\    write: function (next) { value = next; },
+        \\    sever: function () { delete object[0]; }
+        \\  };
+        \\}
+        \\function onlyArguments(value) { value = { tag: "recycled" }; return arguments; }
+        \\globalThis.mappedMoveLive = mappedPair({ tag: "live" });
+        \\globalThis.mappedMoveSevered = mappedPair({ tag: "initial" });
+        \\mappedMoveSevered.sever();
+        \\mappedMoveSevered.write({ tag: "severed" });
+        \\globalThis.mappedMoveRecycled = onlyArguments({ tag: "discarded" });
+    );
+    ctx.collectGarbage();
+    const compacted = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+    try std.testing.expect(compacted.moved_cells > 0);
+
+    const result = try ctx.evaluate(
+        \\var before = mappedMoveLive.object[0].tag + ":" + mappedMoveLive.read().tag;
+        \\mappedMoveLive.object[0] = { tag: "from-object" };
+        \\var objectToFrame = mappedMoveLive.read().tag;
+        \\mappedMoveLive.write({ tag: "from-frame" });
+        \\before + ":" + objectToFrame + ":" + mappedMoveLive.object[0].tag + "|" +
+        \\  (mappedMoveSevered.object[0] === undefined) + ":" + mappedMoveSevered.read().tag + "|" +
+        \\  mappedMoveRecycled[0].tag;
+    );
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings(
+        "live:live:from-object:from-frame|true:severed|recycled",
+        result.asStr(),
+    );
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 2), inventory.count(.program_compiled));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_policy_arguments));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+}
+
 test "required bytecode rejects an uncompiled function instead of counting fallback coverage" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,
@@ -26075,9 +26244,10 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     try std.testing.expectEqual(@as(usize, 0), ordinary_snapshot.runtime.minor_pauses.len);
     try std.testing.expectEqual(@as(usize, 0), ordinary_snapshot.runtime.full_pauses.len);
 
-    const profiled_tree = try Context.createWith(std.testing.allocator, .{
+    const profiled_tree = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
         .profile_execution_tiers = true,
+        .bytecode_execution_mode = .tree_walker,
     });
     defer profiled_tree.destroy();
     try std.testing.expectEqual(@as(f64, 4), (try profiled_tree.evaluate(

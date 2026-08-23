@@ -189,6 +189,7 @@ inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
         flags.intl_plural_rules or
         flags.intl_duration_format or
         flags.arg_map_names or
+        flags.arg_map_values or
         flags.arg_map_severed;
 }
 
@@ -286,6 +287,14 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (cold.iterator_helper) |p| v.mark(@as(*value.IterHelper, @ptrCast(@alignCast(p))));
     if (cold.module_ns) |p| v.mark(@as(*interp.ModuleNs, @ptrCast(@alignCast(p))));
     if (cold.arg_map_env) |p| v.mark(@as(*interp.Environment, @ptrCast(@alignCast(p))));
+    if (cold.cold) |state| {
+        // Once an arguments index is severed, the exotic object no longer owns
+        // that cell edge. A live VM frame deliberately overlaps all of its cells
+        // so concurrent severing cannot fall between the two root scans.
+        for (state.arg_map_values, 0..) |*cell, index|
+            if (index < state.arg_map_severed.len and !state.arg_map_severed[index].load(.acquire))
+                markValueInternal(v, "mapped arguments parameter cell", .{ .bits = cell.load(.acquire) });
+    }
     promise.traceNativePrivateData(o, v);
     interp.traceNativePrivateData(o, v);
     jsthread.traceNativePrivateData(o, v);
@@ -363,6 +372,9 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
         gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
     const cold = o.coldState() orelse return;
     gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.arg_map_env);
+    for (cold.arg_map_values, 0..) |*cell, index|
+        if (index < cold.arg_map_severed.len and !cold.arg_map_severed[index].load(.acquire))
+            gc_relocation.rewriteAtomicValueSlot(v, cell);
     switch (cold.rare_tag.load(.acquire)) {
         .boxed_primitive => gc_relocation.rewriteValueSlot(v, &cold.rare.boxed_primitive.value),
         .module_ns => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.module_ns.ptr),
@@ -1445,6 +1457,11 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         o.coldState().?.arg_map_names = &.{};
         released += 1;
     }
+    if (flags.arg_map_values) {
+        a.free(o.coldState().?.arg_map_values);
+        o.coldState().?.arg_map_values = &.{};
+        released += 1;
+    }
     if (flags.arg_map_severed) {
         a.free(o.coldState().?.arg_map_severed);
         o.coldState().?.arg_map_severed = &.{};
@@ -1490,6 +1507,7 @@ fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
     var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
     const lock_slots = if (comptime @hasDecl(@TypeOf(v.*), "concurrent")) v.concurrent() else false;
     while (frame) |current| : (frame = current.parent) {
+        traceFrameMappedParameters(current, v);
         const held = current.lockSlots(lock_slots);
         for (current.slots) |slot| markValueInternal(v, "captured VM frame slot", slot);
         current.unlockSlots(held);
@@ -1500,8 +1518,39 @@ fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
 /// frame chain is stable and must be rewritten without taking mutator locks.
 fn relocateCapturedFrame(raw: ?*anyopaque, v: anytype) void {
     var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
-    while (frame) |current| : (frame = current.parent)
+    while (frame) |current| : (frame = current.parent) {
+        relocateFrameMappedParameters(current, v);
         for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+    }
+}
+
+/// The arguments object owns every unsevered cell edge. A live frame marks all
+/// of its mapped cells as well: that overlap closes the concurrent hand-off race
+/// where severing could otherwise happen between the frame and object scans.
+/// World-stopped relocation below can use the exact severed complement.
+fn traceFrameMappedParameters(frame: *vm.Frame, v: anytype) void {
+    const arguments = frame.mapped_arguments orelse return;
+    v.mark(arguments);
+    const cold = arguments.coldState() orelse return;
+    for (frame.mapped_parameter_indices) |argument_index| {
+        if (argument_index == std.math.maxInt(u32)) continue;
+        const index: usize = @intCast(argument_index);
+        if (index >= cold.arg_map_values.len) continue;
+        markValueInternal(v, "live VM parameter cell", .{ .bits = cold.arg_map_values[index].load(.acquire) });
+    }
+}
+
+fn relocateFrameMappedParameters(frame: *vm.Frame, v: anytype) void {
+    gc_relocation.rewriteOptionalSlot(v, Object, &frame.mapped_arguments);
+    const arguments = frame.mapped_arguments orelse return;
+    const cold = arguments.coldState() orelse return;
+    for (frame.mapped_parameter_indices) |argument_index| {
+        if (argument_index == std.math.maxInt(u32)) continue;
+        const index: usize = @intCast(argument_index);
+        if (index >= cold.arg_map_values.len or index >= cold.arg_map_severed.len) continue;
+        if (!cold.arg_map_severed[index].load(.acquire)) continue;
+        gc_relocation.rewriteAtomicValueSlot(v, &cold.arg_map_values[index]);
+    }
 }
 
 pub fn traceFunction(f: *interp.Function, v: anytype) void {
@@ -2419,6 +2468,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         const lock_slots = v.concurrent();
         var fr: ?*vm.Frame = exec.frame;
         while (fr) |f| : (fr = f.parent) {
+            traceFrameMappedParameters(f, v);
             const held = f.lockSlots(lock_slots);
             for (f.slots) |slot| markValueInternal(v, "interpreter VM frame slot", slot);
             f.unlockSlots(held);
@@ -2524,8 +2574,10 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_home_object);
         gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_super_ctor);
         var frame = exec.frame;
-        while (frame) |current| : (frame = current.parent)
+        while (frame) |current| : (frame = current.parent) {
+            relocateFrameMappedParameters(current, v);
             for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+        }
     }
     relocateActiveNativeRoots(machine, v);
     for (machine.gc_wasm_roots.items) |roots| relocateWasmExecutionRoots(roots, v);

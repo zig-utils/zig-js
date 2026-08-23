@@ -6369,29 +6369,29 @@ pub const Interpreter = struct {
     /// VM instead of the tree-walker. Besides tail calls and recursion, named
     /// property functions enter the VM so their observed shapes can reach the
     /// optimizing tier. Unsupported bodies still fall back during compilation.
-    /// Generators and async functions retain their dedicated paths. Sloppy
-    /// mapped-arguments owners stay on the tree walker; strict unmapped owners
-    /// use their compiler-assigned VM slot. Methods use the same admission now
-    /// that activations carry their exact home object and super constructor.
+    /// Generators and async functions retain their dedicated paths. Ordinary
+    /// arguments owners use compiler-assigned frame slots; sloppy simple
+    /// parameters additionally use object-owned mapped cells. Methods use the
+    /// same admission now that activations carry their exact home object and
+    /// super constructor.
     fn plainFunctionPolicyRejection(fnode: *const ast.FunctionNode) ?BytecodeAdmissionReason {
-        // Strict ordinary functions use an unmapped arguments object, which a
-        // VM activation can own in one precise frame slot. Sloppy functions
-        // retain the policy barrier because their indexed properties alias live
-        // parameter bindings through [[ParameterMap]].
-        // Arrows created on the tree-walker also retain the barrier: standalone
+        // Arrows created on the tree-walker retain the barrier: standalone
         // admission has no defining frame from which to resolve their inherited
         // arguments binding. Arrows nested in compiled owners are lowered with
         // that parent FnScope by Compiler.compileFunction instead.
         if (fnode.is_arrow and fnode.uses_arguments) return .plain_policy_arguments;
-        if (fnode.uses_arguments)
-            return if (fnode.is_strict) null else .plain_policy_arguments;
+        // Sloppy caller/callee reflection observes the interpreter's dynamic
+        // call-frame chain, not merely the arguments exotic. Keep this more
+        // specific boundary ahead of mapped-arguments admission.
+        if (!fnode.is_strict and sourceMayObserveLegacyCallFrame(fnode.source))
+            return .plain_policy_legacy_call_frame;
+        if (fnode.uses_arguments) return null;
         if (fnode.requires_tree_walk_class_constructor) return .plain_policy_class_constructor_semantics;
         if (fnode.is_strict) return if (sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null)
             null
         else
             .plain_policy_not_candidate;
         const named_self_recursion = sourceHasNamedSelfCall(fnode.source, fnode.name);
-        if (sourceMayObserveLegacyCallFrame(fnode.source)) return .plain_policy_legacy_call_frame;
         if (sourceBodyMayCallOtherThan(fnode.source, if (named_self_recursion) fnode.name else ""))
             return .plain_policy_dynamic_call;
         if (!named_self_recursion and
@@ -8333,7 +8333,36 @@ pub const Interpreter = struct {
         return false;
     }
 
+    const ArgumentsMapTarget = union(enum) {
+        environment: *Environment,
+        frame: struct {
+            slot_values: []const Value,
+            mapped_parameter_indices: []const u32,
+        },
+    };
+
     pub fn createArgumentsObject(self: *Interpreter, func: *Function, args: []const Value, call_env: *Environment) EvalError!Value {
+        return self.createArgumentsObjectWithMap(func, args, .{ .environment = call_env });
+    }
+
+    /// Create the sloppy simple-parameter arguments object used by a VM frame.
+    /// Its mapped parameter cells belong to the object rather than pointing at
+    /// recyclable activation storage; dedicated mapped-local bytecodes share
+    /// those cells while the frame is live or captured.
+    pub fn createFrameArgumentsObject(
+        self: *Interpreter,
+        func: *Function,
+        args: []const Value,
+        slot_values: []const Value,
+        mapped_parameter_indices: []const u32,
+    ) EvalError!Value {
+        return self.createArgumentsObjectWithMap(func, args, .{ .frame = .{
+            .slot_values = slot_values,
+            .mapped_parameter_indices = mapped_parameter_indices,
+        } });
+    }
+
+    fn createArgumentsObjectWithMap(self: *Interpreter, func: *Function, args: []const Value, map_target: ArgumentsMapTarget) EvalError!Value {
         const args_obj = try self.newArray();
         args_obj.asObj().is_arguments = true;
         // The arguments exotic object's [[Prototype]] is %Object.prototype%
@@ -8380,26 +8409,51 @@ pub const Interpreter = struct {
         if (!func.is_strict and !non_simple_params and func.params.len > 0) {
             const n = @min(args.len, func.params.len);
             const cold = try args_obj.asObj().ensureCold(self.arena);
-            const names = try (try args_obj.asObj().argMapNamesAllocator(self.arena)).alloc([]const u8, n);
-            const severed = try (try args_obj.asObj().argMapSeveredAllocator(self.arena)).alloc(std.atomic.Value(bool), n);
-            for (names, 0..) |*nm, i| nm.* = func.params[i].name;
-            for (severed) |*flag| flag.* = .init(false);
-            // A duplicated parameter name maps only its last index.
-            for (names, 0..) |nm, i| {
-                var j = i + 1;
-                while (j < n) : (j += 1) if (std.mem.eql(u8, nm, names[j])) {
-                    names[i] = "";
-                    break;
-                };
+            switch (map_target) {
+                .environment => |call_env| {
+                    const names_allocator = try args_obj.asObj().argMapNamesAllocator(self.arena);
+                    const names = try names_allocator.alloc([]const u8, n);
+                    errdefer names_allocator.free(names);
+                    const severed_allocator = try args_obj.asObj().argMapSeveredAllocator(self.arena);
+                    const severed = try severed_allocator.alloc(std.atomic.Value(bool), n);
+                    errdefer severed_allocator.free(severed);
+                    for (names, 0..) |*nm, i| nm.* = func.params[i].name;
+                    for (severed) |*flag| flag.* = .init(false);
+                    // A duplicated parameter name maps only its last index.
+                    for (names, 0..) |nm, i| {
+                        var j = i + 1;
+                        while (j < n) : (j += 1) if (std.mem.eql(u8, nm, names[j])) {
+                            names[i] = "";
+                            break;
+                        };
+                    }
+                    // A mapped arguments object may outlive the call and
+                    // continues to alias Environment-backed parameters.
+                    call_env.markCaptured();
+                    cold.arg_map_env = @ptrCast(call_env);
+                    cold.arg_map_names = names;
+                    cold.arg_map_severed = severed;
+                },
+                .frame => |frame| {
+                    if (frame.mapped_parameter_indices.len > frame.slot_values.len)
+                        return self.throwError("InternalError", "invalid mapped arguments frame layout");
+                    const values_allocator = try args_obj.asObj().argMapValuesAllocator(self.arena);
+                    const values = try values_allocator.alloc(std.atomic.Value(u64), n);
+                    errdefer values_allocator.free(values);
+                    const severed_allocator = try args_obj.asObj().argMapSeveredAllocator(self.arena);
+                    const severed = try severed_allocator.alloc(std.atomic.Value(bool), n);
+                    errdefer severed_allocator.free(severed);
+                    for (values) |*cell| cell.* = .init(Value.undef().bits);
+                    for (severed) |*flag| flag.* = .init(true);
+                    for (frame.mapped_parameter_indices, 0..) |argument_index, slot| {
+                        if (argument_index >= n) continue;
+                        values[argument_index].store(frame.slot_values[slot].bits, .monotonic);
+                        severed[argument_index].store(false, .monotonic);
+                    }
+                    cold.arg_map_values = values;
+                    cold.arg_map_severed = severed;
+                },
             }
-            // A mapped arguments object may outlive the call and continues to
-            // alias parameter bindings. Its environment therefore has the same
-            // observable identity as a closure-captured activation and must
-            // never enter the completed-call cache.
-            call_env.markCaptured();
-            cold.arg_map_env = @ptrCast(call_env);
-            cold.arg_map_names = names;
-            cold.arg_map_severed = severed;
         }
         return args_obj;
     }
@@ -14163,7 +14217,7 @@ pub const Interpreter = struct {
             if (arrayElementIndex(key)) |i| {
                 // A mapped index writes through to its parameter binding (the
                 // element is kept in sync so the descriptor's value stays current).
-                if (argMapName(o, i) != null) {
+                if (argMapHas(o, i)) {
                     argMapSet(o, i, v);
                     _ = o.setElementAt(i, v);
                     return true;
@@ -51524,6 +51578,16 @@ pub fn argMapName(o: *value.Object, i: usize) ?[]const u8 {
     return if (nm.len == 0) null else nm;
 }
 
+/// Whether index `i` still participates in either supported [[ParameterMap]]
+/// representation. The tree-walker owns Environment-backed maps; compiled
+/// activations use atomic Value cells that never retain a recyclable frame.
+pub fn argMapHas(o: *value.Object, i: usize) bool {
+    const cold = o.coldState() orelse return false;
+    if (i >= cold.arg_map_severed.len or cold.arg_map_severed[i].load(.acquire)) return false;
+    if (cold.arg_map_env != null) return argMapName(o, i) != null;
+    return i < cold.arg_map_values.len;
+}
+
 /// Atomically sever a mapped-arguments index from its parameter binding.
 pub fn argMapSever(o: *value.Object, i: usize) void {
     const cold = o.coldState() orelse return;
@@ -51533,16 +51597,47 @@ pub fn argMapSever(o: *value.Object, i: usize) void {
 
 /// Read a mapped index's parameter binding (null if unmapped).
 pub fn argMapGet(o: *value.Object, i: usize) ?Value {
-    const nm = argMapName(o, i) orelse return null;
-    const env: *Environment = @ptrCast(@alignCast(o.coldState().?.arg_map_env.?));
-    return env.getLocal(nm);
+    if (!argMapHas(o, i)) return null;
+    const cold = o.coldState().?;
+    if (cold.arg_map_env) |raw| {
+        const nm = argMapName(o, i) orelse return null;
+        const env: *Environment = @ptrCast(@alignCast(raw));
+        return env.getLocal(nm);
+    }
+    return mappedParameterCellGet(o, i);
 }
 
 /// Write a mapped index's parameter binding.
 pub fn argMapSet(o: *value.Object, i: usize, v: Value) void {
-    const nm = argMapName(o, i) orelse return;
-    const env: *Environment = @ptrCast(@alignCast(o.coldState().?.arg_map_env.?));
-    _ = env.assignLocal(nm, v);
+    if (!argMapHas(o, i)) return;
+    const cold = o.coldState().?;
+    if (cold.arg_map_env) |raw| {
+        const nm = argMapName(o, i) orelse return;
+        const env: *Environment = @ptrCast(@alignCast(raw));
+        _ = env.assignLocal(nm, v);
+        return;
+    }
+    _ = mappedParameterCellSet(o, i, v);
+}
+
+/// Read the backing cell used by a compiled sloppy parameter. This deliberately
+/// ignores the object's severed bit: deleting or redefining arguments[i]
+/// disconnects the object view, but the function binding still owns the cell.
+pub inline fn mappedParameterCellGet(o: *value.Object, i: usize) ?Value {
+    const cold = o.coldState() orelse return null;
+    if (i >= cold.arg_map_values.len) return null;
+    return .{ .bits = cold.arg_map_values[i].load(.acquire) };
+}
+
+/// Publish a compiled sloppy parameter write. The generational barrier must
+/// precede the release-store so a concurrent marker cannot observe a young
+/// pointer without also observing its remembered-set edge.
+pub fn mappedParameterCellSet(o: *value.Object, i: usize, v: Value) bool {
+    const cold = o.coldState() orelse return false;
+    if (i >= cold.arg_map_values.len) return false;
+    gc_mod.barrierValueFromManaged(o, v);
+    cold.arg_map_values[i].store(v.bits, .release);
+    return true;
 }
 
 /// CanonicalNumericIndexString(key): the Number a key denotes when it is the

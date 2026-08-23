@@ -2316,6 +2316,10 @@ pub const ObjectColdState = struct {
     array_len: u32 = 0,
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
+    /// Sloppy VM-frame parameter cells. The owning arguments object and any
+    /// live/captured frame both address these atomic Value words; severing an
+    /// arguments index removes only the object's [[ParameterMap]] edge.
+    arg_map_values: []std.atomic.Value(u64) = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
     collection_state: ?*ObjectCollectionState = null,
     finalization_callback: Value = Value.undef(),
@@ -2407,6 +2411,7 @@ pub const ObjectBackingFlags = packed struct {
     intl_plural_rules: bool = false,
     intl_duration_format: bool = false,
     arg_map_names: bool = false,
+    arg_map_values: bool = false,
     arg_map_severed: bool = false,
 };
 
@@ -4264,6 +4269,10 @@ pub const Object = struct {
 
     pub fn argMapNamesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
         return self.ensureBackingFor(fallback, "arg_map_names");
+    }
+
+    pub fn argMapValuesAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
+        return self.ensureBackingFor(fallback, "arg_map_values");
     }
 
     pub fn argMapSeveredAllocator(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!std.mem.Allocator {
