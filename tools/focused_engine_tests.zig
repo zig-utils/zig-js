@@ -122,6 +122,11 @@ const frontend_cases = [_]Case{
         .source = "function calls(callee, receiver, direct = callee(2), method = receiver.add(3)) { return direct + method; } calls(function (value) { return value + 1; }, { base: 4, add(value) { return this.base + value; } })",
         .expected = 10,
     },
+    .{
+        .name = "parameter local construction defaults",
+        .source = "function Box(value) { this.value = value; } function constructs(Ctor, direct = new Ctor(3), nested = new Ctor(direct.value + 1)) { return direct.value + nested.value; } constructs(Box)",
+        .expected = 7,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

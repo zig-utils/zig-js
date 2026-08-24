@@ -25630,6 +25630,114 @@ test "forced tree-walker and required bytecode preserve parameter-local call def
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
 }
 
+test "forced tree-walker and required bytecode preserve parameter-local construction defaults" {
+    const source =
+        \\var parameterConstructionEffects = [];
+        \\function ParameterConstructBase(value) { void arguments; parameterConstructionEffects.push("base:" + new.target.name); $vm.gc(); this.value = value; this.target = new.target.name; }
+        \\var parameterConstructionHolder = { value: 7, Ctor: ParameterConstructBase, child: { Ctor: ParameterConstructBase } };
+        \\var parameterConstructionKey = { [Symbol.toPrimitive](hint) { void arguments; parameterConstructionEffects.push("key:" + hint); return "Ctor"; } };
+        \\var parameterConstructProxy;
+        \\parameterConstructProxy = new Proxy(ParameterConstructBase, { construct(target, args, newTarget) { void arguments; parameterConstructionEffects.push("proxy:" + (target === ParameterConstructBase) + ":" + (newTarget === parameterConstructProxy)); return { value: args[0] + 10, target: newTarget.name }; } });
+        \\function ParameterConstructOverride(value) { void arguments; parameterConstructionEffects.push("override"); return { value: value + 20 }; }
+        \\function ParameterConstructPrimitive(value) { void arguments; parameterConstructionEffects.push("primitive"); this.value = value; return 1; }
+        \\function ParameterConstructThrow() { void arguments; parameterConstructionEffects.push("throw"); throw new RangeError("parameter construction"); }
+        \\function parameterConstructions(Ctor, holder, key, direct = new Ctor(2), named = new holder.Ctor(3), computed = new holder[key](4), nested = new holder.child.Ctor(5), argument = new Ctor(holder.value)) { return direct.value + ":" + named.value + ":" + computed.value + ":" + nested.value + ":" + argument.value + ":" + direct.target; }
+        \\function parameterConstructOne(Ctor, value = new Ctor(6)) { return value; }
+        \\var parameterConstructOrderHolder = { get Ctor() { void arguments; parameterConstructionEffects.push("get"); return ParameterConstructBase; } };
+        \\var parameterConstructArgument = function() { "use strict"; void arguments; parameterConstructionEffects.push("argument"); return 8; };
+        \\function parameterOrderedConstruction(holder, argument, value = new holder.Ctor(argument())) { return value.value; }
+        \\var parameterConstructReentryCount = 0;
+        \\function ParameterConstructReentrant(value) { void arguments; parameterConstructReentryCount += 1; $vm.gc(); this.value = new ParameterConstructBase(value).value; }
+        \\var parameterConstructionArrow = (Ctor, value = new Ctor(9)) => value.value;
+        \\class ParameterConstructionBaseClass { constructor(Ctor, value = new Ctor(10)) { this.value = value.value; } }
+        \\var parameterConstructionMethod = { method(Ctor, value = new Ctor(11)) { return value.value; } };
+        \\function recursiveParameterConstruction(Ctor, remaining, value = new Ctor(remaining)) { return remaining === 0 ? value.value : recursiveParameterConstruction(Ctor, remaining - 1); }
+        \\function parameterConstructionSummary() {
+        \\  void arguments;
+        \\  parameterConstructionEffects = [];
+        \\  parameterConstructReentryCount = 0;
+        \\  var composed = parameterConstructions(ParameterConstructBase, parameterConstructionHolder, parameterConstructionKey);
+        \\  var proxied = parameterConstructOne(parameterConstructProxy).value;
+        \\  var override = parameterConstructOne(ParameterConstructOverride).value;
+        \\  var primitive = parameterConstructOne(ParameterConstructPrimitive).value;
+        \\  var ordered = parameterOrderedConstruction(parameterConstructOrderHolder, parameterConstructArgument);
+        \\  var reentered = parameterConstructOne(ParameterConstructReentrant).value;
+        \\  var bypass = parameterConstructOne(null, 12);
+        \\  var nonConstructable = "";
+        \\  try { parameterConstructOne(() => 1); } catch (error) { nonConstructable = error.name; }
+        \\  var constructThrow = "";
+        \\  try { parameterConstructOne(ParameterConstructThrow); } catch (error) { constructThrow = error.name; }
+        \\  return composed + "|" + proxied + "|" + override + "|" + primitive + "|" + ordered + "|" + reentered + ":" + parameterConstructReentryCount + "|" + bypass + ":" + nonConstructable + ":" + constructThrow + "|" +
+        \\    parameterConstructionArrow(ParameterConstructBase) + "|" + (new ParameterConstructionBaseClass(ParameterConstructBase)).value + "|" + parameterConstructionMethod.method(ParameterConstructBase) + "|" +
+        \\    recursiveParameterConstruction(ParameterConstructBase, 2) + "|" + parameterConstructionEffects.join(",");
+        \\}
+    ;
+    const expected = "2:3:4:5:7:ParameterConstructBase|16|26|6|8|6:1|12:TypeError:RangeError|9|10|11|0|base:ParameterConstructBase,base:ParameterConstructBase,key:string,base:ParameterConstructBase,base:ParameterConstructBase,base:ParameterConstructBase,proxy:true:true,override,primitive,get,argument,base:ParameterConstructBase,base:ParameterConstructBase,throw,base:ParameterConstructBase,base:ParameterConstructBase,base:ParameterConstructBase,base:ParameterConstructBase,base:ParameterConstructBase,base:ParameterConstructBase";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("parameterConstructionSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (configuration.mode == .required) {
+            const function_value = try ctx.evaluate("parameterConstructions");
+            const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualSlices(u32, &.{ 3, 4, 5, 6, 7 }, chunk.default_parameter_indices);
+            try std.testing.expect(chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 13);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
+        \\let parameterConstructionPolicyWitness = 0;
+        \\function AutomaticParameterBox(value) { this.value = value; }
+        \\function automaticParameterConstruction(Ctor, second = new Ctor(9)) { return [second.value][0]; }
+        \\automaticParameterConstruction(AutomaticParameterBox);
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 2), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+}
+
 test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local prologues" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -25648,6 +25756,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         \\function sharedInvocation(receiver = this, args = arguments, copy = receiver, score = copy === receiver ? 10 : -1) { return receiver.bias * score + args.length; }
         \\function sharedProperty(input, named = input.bias, computed = input["bias"], nested = input.nested.value) { return named * 100 + computed * 10 + nested; }
         \\function sharedCall(input, value = input.read(input.bias)) { return value; }
+        \\function SharedParameterBox(value) { this.value = value + 1; }
+        \\function sharedConstruction(Ctor, input, value = new Ctor(input.bias)) { return value.value; }
         \\globalThis.sharedPatternInputs = [
         \\  [[1, { right: 2 }], { bias: 3, extra: 4, nested: { value: 9 }, read(value) { return this.nested.value + value; } }],
         \\  [[2, { right: 3 }], { bias: 4, extra: 5, nested: { value: 10 }, read(value) { return this.nested.value + value; } }],
@@ -25677,6 +25787,13 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     const call_function: *interp.Function = @ptrCast(@alignCast(raw_call));
     const call_chunk = call_function.chunk orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{1}, call_chunk.default_parameter_indices);
+    const constructor_value = try ctx.evaluate("SharedParameterBox");
+    if (constructor_value.asObj().jsFunction() == null) return error.TestUnexpectedResult;
+    const construction_value = try ctx.evaluate("sharedConstruction");
+    const raw_construction = construction_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const construction_function: *interp.Function = @ptrCast(@alignCast(raw_construction));
+    const construction_chunk = construction_function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u32, &.{2}, construction_chunk.default_parameter_indices);
     const input_value = try ctx.evaluate("sharedPatternInputs");
     const inputs = input_value.asObj();
 
@@ -25692,6 +25809,9 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         property_chunk: *@import("bytecode.zig").Chunk,
         call_function: *interp.Function,
         call_chunk: *@import("bytecode.zig").Chunk,
+        constructor: Value,
+        construction_function: *interp.Function,
+        construction_chunk: *@import("bytecode.zig").Chunk,
         first: Value,
         second: Value,
         result: std.atomic.Value(i64) = .init(-1),
@@ -25748,6 +25868,16 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
                 ) catch return;
                 if (!call_out.isNumber()) return;
                 sum += @intFromFloat(call_out.asNum());
+                const construction_out = vm.runFunction(
+                    &machine,
+                    worker.construction_function,
+                    worker.construction_chunk,
+                    &.{ worker.constructor, worker.second },
+                    Value.undef(),
+                    Value.undef(),
+                ) catch return;
+                if (!construction_out.isNumber()) return;
+                sum += @intFromFloat(construction_out.asNum());
             }
             worker.result.store(sum, .release);
         }
@@ -25766,6 +25896,9 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
             .property_chunk = property_chunk,
             .call_function = call_function,
             .call_chunk = call_chunk,
+            .constructor = constructor_value,
+            .construction_function = construction_function,
+            .construction_chunk = construction_chunk,
             .first = pair.atomicDenseElementLoad(0) orelse return error.TestUnexpectedResult,
             .second = pair.atomicDenseElementLoad(1) orelse return error.TestUnexpectedResult,
         };
@@ -25775,7 +25908,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         thread.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[lane]});
     for (&threads) |*thread| thread.join();
     for (&workers, 0..) |*worker, lane| {
-        const expected: i64 = @intCast(iterations * (516 + 235 * lane));
+        const expected: i64 = @intCast(iterations * (520 + 236 * lane));
         try std.testing.expectEqual(expected, worker.result.load(.acquire));
     }
 }

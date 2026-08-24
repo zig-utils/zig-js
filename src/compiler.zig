@@ -266,6 +266,14 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
                     break :blk false;
             break :blk true;
         },
+        .new_expr => |construction| blk: {
+            if (!supportedPlainParameterDefault(construction.callee, fnode, parameter_index))
+                break :blk false;
+            for (construction.args) |argument|
+                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode, parameter_index))
+                    break :blk false;
+            break :blk true;
+        },
         else => false,
     };
 }
@@ -5734,7 +5742,8 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(first, value = first?.()){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, args, value = first(...args)){}", .expected = .parameter_prologue },
         .{ .source = "function f(eval, value = eval('1')){}", .expected = .unsupported_lowering },
-        .{ .source = "function f(first, value = new first()){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = new first(outer)){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, args, value = new first(...args)){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = value + 1){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = later + 1, later){}", .expected = .parameter_prologue },
         .{ .source = "function f(arguments = arguments){}", .expected = .parameter_prologue },
@@ -5821,6 +5830,44 @@ test "compiler reports stable plain-function admission reasons" {
         return error.TestUnexpectedResult;
     const super_method = super_class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
     switch (try Compiler.admitPlainFunction(super_arena.allocator(), super_method.function)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
+    }
+
+    var private_new_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer private_new_arena.deinit();
+    var private_new_parser = try @import("parser.zig").Parser.init(
+        private_new_arena.allocator(),
+        "class PrivateConstruct { #Ctor; method(first, value = new (first.#Ctor)()) {} }",
+    );
+    const private_new_program = try private_new_parser.parseProgram();
+    const private_new_declaration = private_new_program.program[0];
+    if (private_new_declaration.* != .var_decl or private_new_declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const private_new_class = private_new_declaration.var_decl.init.?;
+    if (private_new_class.* != .class_expr or private_new_class.class_expr.members.len != 2)
+        return error.TestUnexpectedResult;
+    const private_new_method = private_new_class.class_expr.members[1].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitPlainFunction(private_new_arena.allocator(), private_new_method.function)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
+    }
+
+    var super_new_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer super_new_arena.deinit();
+    var super_new_parser = try @import("parser.zig").Parser.init(
+        super_new_arena.allocator(),
+        "class DerivedConstruct extends Base { method(value = new super.Ctor()) {} }",
+    );
+    const super_new_program = try super_new_parser.parseProgram();
+    const super_new_declaration = super_new_program.program[0];
+    if (super_new_declaration.* != .var_decl or super_new_declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const super_new_class = super_new_declaration.var_decl.init.?;
+    if (super_new_class.* != .class_expr or super_new_class.class_expr.members.len != 1)
+        return error.TestUnexpectedResult;
+    const super_new_method = super_new_class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitPlainFunction(super_new_arena.allocator(), super_new_method.function)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
     }
@@ -6019,6 +6066,29 @@ test "compiler reports stable plain-function admission reasons" {
             };
             try std.testing.expectEqual(@as(usize, 2), value_calls);
             try std.testing.expectEqual(@as(usize, 3), receiver_calls);
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var construction_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer construction_arena.deinit();
+    var construction_parser = try @import("parser.zig").Parser.init(
+        construction_arena.allocator(),
+        "function constructionDefaults(Ctor, holder, key, direct = new Ctor(2), named = new holder.Ctor(3), computed = new holder[key](4), nested = new holder.child.Ctor(5), argument = new Ctor(holder.value)) { return direct; }",
+    );
+    const construction_program = try construction_parser.parseProgram();
+    const construction_admission = try Compiler.admitPlainFunction(construction_arena.allocator(), construction_program.program[0].func_decl);
+    switch (construction_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 8), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 3, 4, 5, 6, 7 }, compiled.chunk.default_parameter_indices);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+            var constructions: usize = 0;
+            for (compiled.chunk.code.items) |instruction| {
+                if (instruction.op == .new_call) constructions += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 5), constructions);
         },
         .rejected => return error.TestUnexpectedResult,
     }
