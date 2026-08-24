@@ -25125,6 +25125,118 @@ test "forced tree-walker and required bytecode preserve closed primitive default
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
 }
 
+test "forced tree-walker and required bytecode preserve invocation-context default leaves" {
+    const source =
+        \\function sloppyLeaf(receiver = this, args = arguments) {
+        \\  var original = receiver;
+        \\  args[0] = 0;
+        \\  $vm.gc();
+        \\  return (receiver === globalThis) + ":" + args.length + ":" + (receiver === original) + ":" + args[0];
+        \\}
+        \\var invocationHolder = { tag: "holder", method(receiver = this, args = arguments) { $vm.gc(); return (receiver === this) + ":" + args.length + ":" + args[2]; } };
+        \\class StrictInvocation { static method(receiver = this, args = arguments) { return (receiver === undefined) + ":" + args.length; } }
+        \\var detachedStrictInvocation = StrictInvocation.method;
+        \\function PlainTarget(target = new.target) { return target === undefined; }
+        \\function ConstructedTarget(target = new.target) { this.target = target; }
+        \\function AlternateTarget() {}
+        \\function ArrowOwner(target = new.target, args = arguments) {
+        \\  this.arrowResult = ((receiver = this, arrowTarget = new.target) => receiver === this && arrowTarget === target)();
+        \\}
+        \\class BaseInvocation { constructor(receiver = this, args = arguments) { $vm.gc(); this.same = receiver === this && args === arguments; } }
+        \\var providedInvocation = { tag: "provided" };
+        \\function bypassInvocation(receiver = this, target = new.target, args = arguments) { return receiver === providedInvocation && target === providedInvocation && args === providedInvocation; }
+        \\var recursiveInvocation = { depth: 3, method(receiver = this, args = arguments) { if (receiver !== this || args !== arguments) return false; if (this.depth === 0) return true; this.depth -= 1; return this.method(); } };
+        \\function invocationContextSummary() {
+        \\  var constructed = new ConstructedTarget();
+        \\  var reflected = Reflect.construct(ConstructedTarget, [], AlternateTarget);
+        \\  return sloppyLeaf(undefined, undefined, 7) + "|" + invocationHolder.method(undefined, undefined, 5) + "|" +
+        \\    detachedStrictInvocation() + "|" + PlainTarget() + ":" + (constructed.target === ConstructedTarget) + ":" + (reflected.target === AlternateTarget) + "|" +
+        \\    (new ArrowOwner()).arrowResult + "|" + (new BaseInvocation()).same + "|" +
+        \\    bypassInvocation(providedInvocation, providedInvocation, providedInvocation) + "|" + recursiveInvocation.method();
+        \\}
+    ;
+    const expected = "true:3:true:0|true:3:5|true:0|true:true:true|true|true|true|true";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("invocationContextSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (configuration.mode == .required) {
+            const function_value = try ctx.evaluate("sloppyLeaf");
+            const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, chunk.default_parameter_indices);
+            try std.testing.expect(chunk.has_non_simple_parameters);
+            try std.testing.expect(chunk.arguments_slot != null);
+            try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 10);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 1), (try automatic.evaluate(
+        \\let invocationDefaultPolicyWitness = 0;
+        \\function automaticInvocationDefault(receiver = this, args = arguments) { return receiver === globalThis && args === arguments ? 1 : 0; }
+        \\automaticInvocationDefault();
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+
+    const policy = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer policy.destroy();
+    try std.testing.expectEqualStrings("ReferenceError", (try policy.evaluate(
+        \\class PolicyBase {}
+        \\class PolicyDerived extends PolicyBase { constructor(receiver = this) { super(); } }
+        \\var policyError = "";
+        \\try { new PolicyDerived(); } catch (error) { policyError = error.name; }
+        \\policyError;
+    )).asStr());
+    const policy_inventory = policy.bytecodeAdmissionSnapshot();
+    try std.testing.expect(policy_inventory.count(.plain_policy_class_constructor_semantics) > 0);
+}
+
 test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local prologues" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -25140,6 +25252,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         \\function sharedPattern([left, { right }], { bias, ...rest }, literal = 4 + 4) {
         \\  return left * 100 + right * 10 + bias + rest.extra + literal;
         \\}
+        \\function sharedInvocation(receiver = this, args = arguments) { return receiver.bias * 10 + args.length; }
         \\globalThis.sharedPatternInputs = [
         \\  [[1, { right: 2 }], { bias: 3, extra: 4 }],
         \\  [[2, { right: 3 }], { bias: 4, extra: 5 }],
@@ -25153,6 +25266,12 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     const chunk = function.chunk orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, chunk.destructuring_parameter_indices);
     try std.testing.expectEqualSlices(u32, &.{2}, chunk.default_parameter_indices);
+    const invocation_value = try ctx.evaluate("sharedInvocation");
+    const raw_invocation = invocation_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const invocation_function: *interp.Function = @ptrCast(@alignCast(raw_invocation));
+    const invocation_chunk = invocation_function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, invocation_chunk.default_parameter_indices);
+    try std.testing.expect(invocation_chunk.arguments_slot != null);
     const input_value = try ctx.evaluate("sharedPatternInputs");
     const inputs = input_value.asObj();
 
@@ -25162,6 +25281,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         ctx: *Context,
         function: *interp.Function,
         chunk: *@import("bytecode.zig").Chunk,
+        invocation_function: *interp.Function,
+        invocation_chunk: *@import("bytecode.zig").Chunk,
         first: Value,
         second: Value,
         result: std.atomic.Value(i64) = .init(-1),
@@ -25188,6 +25309,16 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
                 ) catch return;
                 if (!value_out.isNumber()) return;
                 sum += @intFromFloat(value_out.asNum());
+                const invocation_out = vm.runFunction(
+                    &machine,
+                    worker.invocation_function,
+                    worker.invocation_chunk,
+                    &.{},
+                    worker.second,
+                    Value.undef(),
+                ) catch return;
+                if (!invocation_out.isNumber()) return;
+                sum += @intFromFloat(invocation_out.asNum());
             }
             worker.result.store(sum, .release);
         }
@@ -25200,6 +25331,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
             .ctx = ctx,
             .function = function,
             .chunk = chunk,
+            .invocation_function = invocation_function,
+            .invocation_chunk = invocation_chunk,
             .first = pair.atomicDenseElementLoad(0) orelse return error.TestUnexpectedResult,
             .second = pair.atomicDenseElementLoad(1) orelse return error.TestUnexpectedResult,
         };
@@ -25209,7 +25342,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         thread.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[lane]});
     for (&threads) |*thread| thread.join();
     for (&workers, 0..) |*worker, lane| {
-        const expected: i64 = @intCast(iterations * (135 + 112 * lane));
+        const expected: i64 = @intCast(iterations * (165 + 122 * lane));
         try std.testing.expectEqual(expected, worker.result.load(.acquire));
     }
 }

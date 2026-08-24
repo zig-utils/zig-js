@@ -177,11 +177,7 @@ fn addArgumentsSlot(
     if (fnode.is_arrow or !fnode.uses_arguments) return null;
     // FunctionDeclarationInstantiation suppresses the implicit object when a
     // formal already owns the `arguments` binding.
-    for (fnode.params) |param| {
-        if (param.pattern) |pattern| {
-            if (patternBindsName(pattern, "arguments")) return null;
-        } else if (std.mem.eql(u8, param.name, "arguments")) return null;
-    }
+    if (parametersBindName(fnode, "arguments")) return null;
     return try scope.addLocal(arena, "arguments", false, false);
 }
 
@@ -201,6 +197,15 @@ fn patternBindsName(pattern: *const ast.Node, name: []const u8) bool {
         },
         else => false,
     };
+}
+
+fn parametersBindName(fnode: *const ast.FunctionNode, name: []const u8) bool {
+    for (fnode.params) |parameter| {
+        if (parameter.pattern) |pattern| {
+            if (patternBindsName(pattern, name)) return true;
+        } else if (std.mem.eql(u8, parameter.name, name)) return true;
+    }
+    return false;
 }
 
 const PlainParameterLayout = struct {
@@ -229,6 +234,22 @@ fn closedPrimitiveParameterDefault(node: *const ast.Node) bool {
     };
 }
 
+fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode) bool {
+    if (closedPrimitiveParameterDefault(node)) return true;
+    // FunctionDeclarationInstantiation installs these invocation-context values
+    // before IteratorBindingInitialization. Admit only the complete leaf: an
+    // enclosing operation could coerce/call through `this`, `new.target`, or the
+    // arguments exotic and needs the broader parameter-environment ruling.
+    return switch (node.*) {
+        .this_expr, .new_target_expr => !fnode.requires_tree_walk_class_constructor,
+        .identifier => |name| !fnode.is_arrow and
+            fnode.uses_arguments and
+            std.mem.eql(u8, name, "arguments") and
+            !parametersBindName(fnode, "arguments"),
+        else => false,
+    };
+}
+
 fn configurePlainParameters(
     arena: std.mem.Allocator,
     scope: *FnScope,
@@ -239,7 +260,7 @@ fn configurePlainParameters(
     var has_default = false;
     for (fnode.params) |parameter| {
         if (parameter.default) |default| {
-            if (!closedPrimitiveParameterDefault(default)) return error.Unsupported;
+            if (!supportedPlainParameterDefault(default, fnode)) return error.Unsupported;
             has_default = true;
         }
         has_pattern = has_pattern or parameter.pattern != null;
@@ -5687,8 +5708,12 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = undefined){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = holder.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = this){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = new.target){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = this.value){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = +this){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = new.target.value){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = arguments.length){}", .expected = .parameter_prologue },
+        .{ .source = "function f(arguments, value = arguments){}", .expected = .parameter_prologue },
+        .{ .source = "function f([arguments], value = arguments){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = /x/){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = []){}", .expected = .parameter_prologue },
@@ -5719,6 +5744,22 @@ test "compiler reports stable plain-function admission reasons" {
             .compiled => return error.TestUnexpectedResult,
             .rejected => |reason| try std.testing.expectEqual(case.expected, reason),
         }
+    }
+
+    var inherited_arguments_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer inherited_arguments_arena.deinit();
+    var inherited_arguments_parser = try @import("parser.zig").Parser.init(
+        inherited_arguments_arena.allocator(),
+        "(value = arguments) => value",
+    );
+    const inherited_arguments_program = try inherited_arguments_parser.parseProgram();
+    const arrow_expression = inherited_arguments_program.program[0].expr_stmt;
+    if (arrow_expression.* != .function or !arrow_expression.function.is_arrow)
+        return error.TestUnexpectedResult;
+    const inherited_arguments_admission = try Compiler.admitPlainFunction(inherited_arguments_arena.allocator(), arrow_expression.function);
+    switch (inherited_arguments_admission) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
     }
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -5801,6 +5842,26 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
             for (compiled.chunk.code.items) |instruction| if (instruction.op == .bind_pattern)
                 return error.TestUnexpectedResult;
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var invocation_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer invocation_arena.deinit();
+    var invocation_parser = try @import("parser.zig").Parser.init(
+        invocation_arena.allocator(),
+        "function invocationDefaults(receiver = this, target = new.target, args = arguments) { return receiver; }",
+    );
+    const invocation_program = try invocation_parser.parseProgram();
+    const invocation_admission = try Compiler.admitPlainFunction(invocation_arena.allocator(), invocation_program.program[0].func_decl);
+    switch (invocation_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 3), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, compiled.chunk.parameter_slots);
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, compiled.chunk.default_parameter_indices);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expect(compiled.chunk.arguments_slot != null);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
         },
         .rejected => return error.TestUnexpectedResult,
     }

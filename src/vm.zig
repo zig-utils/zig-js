@@ -10001,6 +10001,73 @@ test "vm: BigInt closed default allocation failure restores the caller activatio
     try std.testing.expect(recovered.isObject() and recovered.asObj().is_bigint);
 }
 
+test "vm: own arguments default allocation failure restores the caller activation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(
+        allocator,
+        "function own(value = arguments) { return value.length; } own",
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+    };
+    const function_value = try run(&machine, root, null);
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u32, &.{0}, function_chunk.default_parameter_indices);
+    try std.testing.expect(function_chunk.arguments_slot != null);
+
+    try std.testing.expectEqual(
+        @as(f64, 0),
+        (try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef())).asNum(),
+    );
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    const saved_this = Value.num(101);
+    const saved_new_target = Value.num(102);
+    var failures: usize = 0;
+    var recovered = false;
+    defer machine.arena = allocator;
+    for (0..32) |fail_index| {
+        machine.this_value = saved_this;
+        machine.new_target = saved_new_target;
+        machine.strict = true;
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        const result = runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
+        machine.arena = allocator;
+        if (result) |value_out| {
+            try std.testing.expectEqual(@as(f64, 0), value_out.asNum());
+            recovered = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+        try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+        try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+        try std.testing.expect(machine.strict);
+        try std.testing.expectEqual(&env, machine.env);
+        try std.testing.expect(machine.vm_activation_free != null);
+        if (recovered) break;
+    }
+    try std.testing.expect(failures > 0 and recovered);
+    try std.testing.expectEqual(
+        @as(f64, 0),
+        (try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef())).asNum(),
+    );
+}
+
 test "vm: captured super references reject an uninitialized this binding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
