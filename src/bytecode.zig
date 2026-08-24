@@ -743,8 +743,8 @@ pub const Chunk = struct {
     /// metadata compact and branch-free.
     destructuring_parameter_indices: []const u32 = &.{},
     /// Sorted syntactic indices whose raw input is replaced at chunk entry only
-    /// when it is exactly undefined. The compiler admits only primitive-literal
-    /// Initializers until expression-bearing parameter environments are native.
+    /// when it is exactly undefined. The compiler admits only closed primitive
+    /// expression trees until observable parameter environments are native.
     default_parameter_indices: []const u32 = &.{},
     /// Syntactic index of the final named rest formal. Its activation slot is
     /// `parameter_slots[index]`; null means every formal is positional.

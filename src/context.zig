@@ -25008,7 +25008,7 @@ test "forced tree-walker and required bytecode preserve initializer-free destruc
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
 }
 
-test "forced tree-walker and required bytecode preserve primitive literal default parameters" {
+test "forced tree-walker and required bytecode preserve closed primitive default parameters" {
     const source =
         \\var literalDefaultLog = "";
         \\function literalDefaults(number = 4, big = 9007199254740993n, text = "ok", flag = false, nil = null, [letter] = "z") {
@@ -25023,33 +25023,40 @@ test "forced tree-walker and required bytecode preserve primitive literal defaul
         \\  arguments[0] = 8;
         \\  return value + ":" + rawMissing + ":" + arguments[0] + ":" + poison;
         \\}
-        \\function reenteredDefault(value = 6) { return value; }
-        \\function orderedDefault({ value }, tail = 2) { literalDefaultLog += "body,"; return value + tail; }
+        \\function reenteredDefault(value = 3 + 3) { return value; }
+        \\function orderedDefault({ value }, tail = 1 + 1) { literalDefaultLog += "body,"; return value + tail; }
         \\var orderedDefaultResult = orderedDefault({ get value() { literalDefaultLog += "get,"; return reenteredDefault() - 1; } }, undefined);
         \\function defaultClosure(value = 5) {
         \\  var value;
         \\  return { read: () => value, write: (next) => value = next };
         \\}
         \\var escapedDefault = defaultClosure();
-        \\function recursiveDefault(value = 4) { return value === 0 ? 0 : value + recursiveDefault(value - 1); }
-        \\var literalArrow = (value = 6) => value;
-        \\var literalHolder = { method(value = 7) { return this === literalHolder ? value : -1; } };
-        \\function LiteralBox(value = 8) { this.value = value; }
-        \\class LiteralClass { constructor(value = 9) { this.value = value; } }
+        \\function recursiveDefault(value = 2 + 2) { return value === 0 ? 0 : value + recursiveDefault(value - 1); }
+        \\var literalArrow = (value = 3 + 3) => value;
+        \\var literalHolder = { method(value = 3 + 4) { return this === literalHolder ? value : -1; } };
+        \\function LiteralBox(value = 4 + 4) { this.value = value; }
+        \\class LiteralClass { constructor(value = 3 * 3) { this.value = value; } }
         \\function prefixLength(first, second = 2, third = 3) { return first + second + third; }
         \\function nullPattern([value] = null) { return value; }
+        \\function closedDefaults(signed = -1, sum = 1 + 2, logical = (false && (1n / 0n)) || 4, choice = false ? (1n / 0n) : 6, sequence = (7, 8), voided = void 0, shifted = 8 >> 1, comparison = 1 < 2, bitwise = 6 & 3, big = -9n) {
+        \\  return signed + ":" + sum + ":" + logical + ":" + choice + ":" + sequence + ":" + (voided === undefined) + ":" + shifted + ":" + comparison + ":" + bitwise + ":" + big.toString();
+        \\}
+        \\function closedThrow(value = 1n / 0n) { return value.toString(); }
         \\function literalDefaultSummary() {
         \\  var nullPatternName = "";
         \\  try { nullPattern(); } catch (error) { nullPatternName = error.name; }
+        \\  var closedThrowName = "";
+        \\  try { closedThrow(); } catch (error) { closedThrowName = error.name; }
         \\  var before = escapedDefault.read();
         \\  escapedDefault.write(12);
         \\  return literalDefaults() + "|" + provided(0, "", false, undefined) + "|" + literalArguments() + "|" +
         \\    orderedDefaultResult + ":" + literalDefaultLog + "|" + before + ":" + escapedDefault.read() + "|" +
         \\    recursiveDefault() + "|" + literalArrow() + "|" + literalHolder.method() + "|" +
-        \\    (new LiteralBox()).value + "|" + (new LiteralClass()).value + "|" + prefixLength.length + "|" + nullPatternName;
+        \\    (new LiteralBox()).value + "|" + (new LiteralClass()).value + "|" + prefixLength.length + "|" + nullPatternName + "|" +
+        \\    closedDefaults() + "|" + closedDefaults(0, 0, 0, 0, 0, null, 0, false, 0, 0n) + "|" + closedThrowName + ":" + closedThrow(3n);
         \\}
     ;
-    const expected = "4:9007199254740993:ok:false:true:z|0::false:true|3:true:8:TypeError|7:get,body,|5:12|10|6|7|8|9|1|TypeError";
+    const expected = "4:9007199254740993:ok:false:true:z|0::false:true|3:true:8:TypeError|7:get,body,|5:12|10|6|7|8|9|1|TypeError|-1:3:4:6:8:true:4:true:2:-9|0:0:0:0:0:false:0:false:0:0|RangeError:3";
     const configurations = [_]struct {
         mode: interp.BytecodeExecutionMode,
         parallel_js: bool = false,
@@ -25092,7 +25099,7 @@ test "forced tree-walker and required bytecode preserve primitive literal defaul
             for (chunk.code.items) |instruction| if (instruction.op == .bind_pattern)
                 return error.TestUnexpectedResult;
             const inventory = ctx.bytecodeAdmissionSnapshot();
-            try std.testing.expect(inventory.count(.template_plain_compiled) >= 13);
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 15);
             try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
             try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
         }
@@ -25109,7 +25116,7 @@ test "forced tree-walker and required bytecode preserve primitive literal defaul
     defer automatic.destroy();
     try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
         \\let primitiveDefaultPolicyWitness = 0;
-        \\function automaticLiteralDefault(value = 9) { return [value][0]; }
+        \\function automaticLiteralDefault(value = 4 + 5) { return [value][0]; }
         \\automaticLiteralDefault();
     )).asNum());
     const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
@@ -25130,7 +25137,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     });
     defer ctx.destroy();
     _ = try ctx.evaluate(
-        \\function sharedPattern([left, { right }], { bias, ...rest }, literal = 8) {
+        \\function sharedPattern([left, { right }], { bias, ...rest }, literal = 4 + 4) {
         \\  return left * 100 + right * 10 + bias + rest.extra + literal;
         \\}
         \\globalThis.sharedPatternInputs = [

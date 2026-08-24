@@ -9932,13 +9932,13 @@ test "vm: destructuring parameter allocation failure restores the caller activat
     );
 }
 
-test "vm: BigInt literal default allocation failure restores the caller activation" {
+test "vm: BigInt closed default allocation failure restores the caller activation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     var parser = try Parser.init(
         allocator,
-        "function literal(value = 9007199254740993123456789n) { return value; } literal",
+        "function literal(value = -9007199254740993123456789n) { return value; } literal",
     );
     const program = try parser.parseProgram();
     const root = try Compiler.compileProgram(allocator, program);

@@ -92,6 +92,11 @@ const frontend_cases = [_]Case{
         .source = "function defaults(number = 4, text = 'four', flag = false, [letter] = 'z') { return number + text.length + (flag ? 100 : 0) + letter.length; } defaults(undefined, undefined, undefined, undefined)",
         .expected = 9,
     },
+    .{
+        .name = "closed primitive default expression frame",
+        .source = "function defaults(signed = -1, sum = 1 + 2, logical = (false && (1n / 0n)) || 4, choice = false ? (1n / 0n) : 6, sequence = (7, 8), voided = void 0, shifted = 8 >> 1, comparison = 1 < 2, bitwise = 6 & 3) { return signed + sum + logical + choice + sequence + (voided === undefined) + shifted + comparison + bitwise; } defaults()",
+        .expected = 28,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

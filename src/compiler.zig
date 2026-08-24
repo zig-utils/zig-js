@@ -215,9 +215,16 @@ const PlainParameterLayout = struct {
     }
 };
 
-fn primitiveLiteralParameterDefault(node: *const ast.Node) bool {
+fn closedPrimitiveParameterDefault(node: *const ast.Node) bool {
     return switch (node.*) {
         .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit => true,
+        .unary => |unary| closedPrimitiveParameterDefault(unary.operand),
+        .binary => |binary| closedPrimitiveParameterDefault(binary.left) and closedPrimitiveParameterDefault(binary.right),
+        .logical => |logical| closedPrimitiveParameterDefault(logical.left) and closedPrimitiveParameterDefault(logical.right),
+        .conditional => |conditional| closedPrimitiveParameterDefault(conditional.cond) and
+            closedPrimitiveParameterDefault(conditional.consequent) and
+            closedPrimitiveParameterDefault(conditional.alternate),
+        .sequence => |sequence| closedPrimitiveParameterDefault(sequence.first) and closedPrimitiveParameterDefault(sequence.second),
         else => false,
     };
 }
@@ -232,7 +239,7 @@ fn configurePlainParameters(
     var has_default = false;
     for (fnode.params) |parameter| {
         if (parameter.default) |default| {
-            if (!primitiveLiteralParameterDefault(default)) return error.Unsupported;
+            if (!closedPrimitiveParameterDefault(default)) return error.Unsupported;
             has_default = true;
         }
         has_pattern = has_pattern or parameter.pattern != null;
@@ -5679,8 +5686,6 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(){ { function nested(){} } }", .expected = .block_nested_function_declaration },
         .{ .source = "function f(value = outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = undefined){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = -1){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = 1 + 2){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = holder.value){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = this){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = new.target){}", .expected = .parameter_prologue },
@@ -5690,6 +5695,12 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = () => 1){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = class {}){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = side()){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = (1, outer)){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = false || outer){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = false ? 1 : outer){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = (outer = 1)){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = ++outer){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = delete holder.value){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = 1, ...tail){}", .expected = .parameter_prologue },
         .{ .source = "function f([value = 1]){}", .expected = .parameter_prologue },
         .{ .source = "function f([value] = []){}", .expected = .parameter_prologue },
@@ -5765,6 +5776,29 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expectEqualStrings("nil", compiled.chunk.debug_local_names[4]);
             try std.testing.expectEqualStrings("letter", compiled.chunk.debug_local_names[5]);
             try std.testing.expectEqualStrings("\x00param5", compiled.chunk.debug_local_names[6]);
+            for (compiled.chunk.code.items) |instruction| if (instruction.op == .bind_pattern)
+                return error.TestUnexpectedResult;
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var expression_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer expression_arena.deinit();
+    var expression_parser = try @import("parser.zig").Parser.init(
+        expression_arena.allocator(),
+        "function closedDefaults(signed = -1, sum = 1 + 2, logical = (false && (1n / 0n)) || 4, choice = false ? (1n / 0n) : 6, sequence = (7, 8), voided = void 0, shifted = 8 >> 1, comparison = 1 < 2, bitwise = 6 & 3, big = -9n) { return signed; }",
+    );
+    const expression_program = try expression_parser.parseProgram();
+    const expression_admission = try Compiler.admitPlainFunction(expression_arena.allocator(), expression_program.program[0].func_decl);
+    switch (expression_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 10), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, compiled.chunk.parameter_slots);
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, compiled.chunk.default_parameter_indices);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.destructuring_parameter_indices.len);
+            try std.testing.expectEqual(@as(?u32, null), compiled.chunk.rest_parameter_index);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
             for (compiled.chunk.code.items) |instruction| if (instruction.op == .bind_pattern)
                 return error.TestUnexpectedResult;
         },
