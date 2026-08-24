@@ -715,6 +715,53 @@ inline fn quickNumberToInt32(number: f64) i32 {
     return @bitCast(Value.uint32FromF64(number));
 }
 
+/// Execute one already-guarded Number/Number binary opcode. Null means the
+/// operands or opcode require the ordinary ECMAScript operation. In particular,
+/// `in` always stays generic because its RHS must be an Object.
+inline fn quickNumberBinary(op: bc.Op, lhs: Value, rhs: Value) ?Value {
+    @setEvalBranchQuota(10_000);
+    if (!lhs.isNumber() or !rhs.isNumber() or op == .in_op) return null;
+    const a = lhs.asNum();
+    const b = rhs.asNum();
+    if (builtin.is_test) switch (op) {
+        .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => _ = fast_number_bitwise_hits.fetchAdd(1, .monotonic),
+        else => {},
+    };
+    return switch (op) {
+        .add => Value.num(a + b),
+        .sub => Value.num(a - b),
+        .mul => Value.num(a * b),
+        .div => Value.num(a / b),
+        .mod => Value.num(numberRemainder(a, b)),
+        .pow => if (std.math.isInf(b) and @abs(a) == 1)
+            Value.num(std.math.nan(f64))
+        else
+            Value.num(std.math.pow(f64, a, b)),
+        .lt => Value.boolVal(a < b),
+        .le => Value.boolVal(a <= b),
+        .gt => Value.boolVal(a > b),
+        .ge => Value.boolVal(a >= b),
+        .eq, .eq_strict => Value.boolVal(a == b),
+        .neq, .neq_strict => Value.boolVal(a != b),
+        .bit_and => Value.num(@floatFromInt(quickNumberToInt32(a) & quickNumberToInt32(b))),
+        .bit_or => Value.num(@floatFromInt(quickNumberToInt32(a) | quickNumberToInt32(b))),
+        .bit_xor => Value.num(@floatFromInt(quickNumberToInt32(a) ^ quickNumberToInt32(b))),
+        .shl => shift: {
+            const amount: u5 = @intCast(Value.uint32FromF64(b) & 31);
+            break :shift Value.num(@floatFromInt(@as(i32, @bitCast(Value.uint32FromF64(a) << amount))));
+        },
+        .shr => shift: {
+            const amount: u5 = @intCast(Value.uint32FromF64(b) & 31);
+            break :shift Value.num(@floatFromInt(quickNumberToInt32(a) >> amount));
+        },
+        .ushr => shift: {
+            const amount: u5 = @intCast(Value.uint32FromF64(b) & 31);
+            break :shift Value.num(@floatFromInt(Value.uint32FromF64(a) >> amount));
+        },
+        else => null,
+    };
+}
+
 const max_quick_property_instructions: usize = 20;
 const max_quick_property_stack: usize = 8;
 const max_quick_property_ops: usize = 8;
@@ -6633,57 +6680,46 @@ fn runChunk(
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
-                chunk.observeOptimizerBinary(ip - 1, optimizerProfileKind(l), optimizerProfileKind(r));
-                // Number-number fast path: when both operands are numbers the
-                // result is computed inline, bit-for-bit identical to
-                // Interpreter.applyBinary, skipping its ToPrimitive / BigInt /
-                // string-concat dispatch. Bitwise and shift operators still run
-                // the exact ToInt32/ToUint32 conversions below; only `in` needs
-                // the general object path.
-                const result: Value = fast: {
-                    if (l.isNumber() and r.isNumber()) {
-                        const a = l.asNum();
-                        const b = r.asNum();
-                        if (builtin.is_test) switch (inst.op) {
-                            .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => _ = fast_number_bitwise_hits.fetchAdd(1, .monotonic),
-                            else => {},
-                        };
-                        break :fast switch (inst.op) {
-                            .add => Value.num(a + b),
-                            .sub => Value.num(a - b),
-                            .mul => Value.num(a * b),
-                            .div => Value.num(a / b),
-                            .mod => Value.num(numberRemainder(a, b)),
-                            .pow => if (std.math.isInf(b) and @abs(a) == 1)
-                                Value.num(std.math.nan(f64))
-                            else
-                                Value.num(std.math.pow(f64, a, b)),
-                            .lt => Value.boolVal(a < b),
-                            .le => Value.boolVal(a <= b),
-                            .gt => Value.boolVal(a > b),
-                            .ge => Value.boolVal(a >= b),
-                            .eq, .eq_strict => Value.boolVal(a == b),
-                            .neq, .neq_strict => Value.boolVal(a != b),
-                            .bit_and => Value.num(@floatFromInt(l.toInt32() & r.toInt32())),
-                            .bit_or => Value.num(@floatFromInt(l.toInt32() | r.toInt32())),
-                            .bit_xor => Value.num(@floatFromInt(l.toInt32() ^ r.toInt32())),
-                            .shl => shift: {
-                                const amount: u5 = @intCast(r.toUint32() & 31);
-                                break :shift Value.num(@floatFromInt(@as(i32, @bitCast(l.toUint32() << amount))));
-                            },
-                            .shr => shift: {
-                                const amount: u5 = @intCast(r.toUint32() & 31);
-                                break :shift Value.num(@floatFromInt(l.toInt32() >> amount));
-                            },
-                            .ushr => shift: {
-                                const amount: u5 = @intCast(r.toUint32() & 31);
-                                break :shift Value.num(@floatFromInt(l.toUint32() >> amount));
-                            },
-                            // `in` requires an object RHS even for numeric inputs.
-                            else => try vm.applyBinary(binOp(inst.op), l, r),
-                        };
+                const instruction = ip - 1;
+                const state = if (vm.bytecode_binary_quickening and inst.op != .in_op)
+                    chunk.quickBinaryState(instruction)
+                else
+                    null;
+                const result: Value = binary: {
+                    if (state) |quick| switch (quick.mode()) {
+                        .number => {
+                            if (quickNumberBinary(inst.op, l, r)) |number| {
+                                vm.recordExecutionTier(.vm_quick_kernel_hits);
+                                vm.recordQuickBinary(.number_hits);
+                                break :binary number;
+                            }
+                            // Guard failure has not coerced either operand. Record
+                            // the new kinds, publish generic, then execute the
+                            // ordinary operation once; exceptions/effects are
+                            // never replayed by the quickening machinery.
+                            vm.recordQuickBinary(.number_misses);
+                            chunk.observeOptimizerBinary(instruction, optimizerProfileKind(l), optimizerProfileKind(r));
+                            if (quick.dequicken()) vm.recordQuickBinary(.dequickenings);
+                            break :binary try vm.applyBinary(binOp(inst.op), l, r);
+                        },
+                        .generic => {
+                            // The first dynamic observation already forced the
+                            // optimizer's runtime operation. Avoid merging the
+                            // same profile atomics forever while retaining the
+                            // ordinary inline Number path for later numeric uses.
+                            if (quickNumberBinary(inst.op, l, r)) |number| break :binary number;
+                            break :binary try vm.applyBinary(binOp(inst.op), l, r);
+                        },
+                        .observing => {},
+                    };
+
+                    chunk.observeOptimizerBinary(instruction, optimizerProfileKind(l), optimizerProfileKind(r));
+                    if (quickNumberBinary(inst.op, l, r)) |number| {
+                        if (state) |quick| _ = quick.observeNumber();
+                        break :binary number;
                     }
-                    break :fast try vm.applyBinary(binOp(inst.op), l, r);
+                    if (state) |quick| quick.observeGeneric();
+                    break :binary try vm.applyBinary(binOp(inst.op), l, r);
                 };
                 try stack.append(stack_alloc, result);
             },

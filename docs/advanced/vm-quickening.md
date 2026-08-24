@@ -15,7 +15,7 @@ The complete machine contract—including every guard, miss/dequickening rule, m
 
 | classification | meaning | current families |
 | --- | --- | ---: |
-| `general_adaptive` | Site/opcode behavior selected from runtime identity, shape, or representation guards rather than a whole benchmark-shaped body. | 5 |
+| `general_adaptive` | Site/opcode behavior selected from runtime identity, shape, or representation guards rather than a whole benchmark-shaped body. | 6 |
 | `bounded_structural` | A bounded expression/trace decoder with explicit accepted operations and size limits. | 2 |
 | `legacy_narrow` | An exact bytecode-pattern kernel. It is useful implementation history, not broad dispatch-family coverage. | 9 |
 
@@ -38,6 +38,7 @@ The complete machine contract—including every guard, miss/dequickening rule, m
 | `reusable-immediate-closure` | `legacy_narrow` | checkpoint-spanning fallback iterations of the exact closure-template numeric call loop | allocate a fresh closure through makeClosure; never reuse when identity could escape or be observed |
 | `numeric-recurrence` | `legacy_narrow` | one exact pure two-branch additive self-recurrence bytecode body | perform the ordinary recursive JS call; cache an explicit unsupported recurrence plan |
 | `observable-numeric-recurrence` | `legacy_narrow` | one exact additive self-recurrence with an observable counter property update | perform ordinary recursive calls/property operations; unsupported shapes use the explicit recurrence-plan tag |
+| `binary-arithmetic-site` | `general_adaptive` | add/subtract/multiply/divide/remainder/power; relational and equality comparisons; bitwise operations and shifts | record both changed operand kinds; atomically publish terminal generic state; execute the canonical operation exactly once without replaying coercion or exceptions |
 | `native-direct-call` | `general_adaptive` | ordinary call of a ready baseline/optimizing numeric leaf without heap activation construction | build/run the ordinary VM activation or generic call; a managed native miss/deoptimization never becomes a completed direct call |
 
 Every legacy pattern above remains labeled `legacy_narrow`; none is used as evidence that its broader property, index, call, arithmetic, control, or allocation family is covered.
@@ -49,10 +50,9 @@ Every legacy pattern above remains labeled `legacy_narrow`; none is used as evid
 | `property-dispatch` | general megamorphic named access; arbitrary prototype depth; accessor/proxy/exotic get and set; general compound/update operations | ordinary get_prop/set_prop bytecode and the full interpreter property algorithms |
 | `index-dispatch` | sparse and holey arrays; prototype-indexed properties; typed arrays and arguments objects; dynamic ToPropertyKey and proxy/accessor cases | ordinary get_index/set_index bytecode with full ToPropertyKey and property semantics |
 | `call-dispatch` | general JS call and construct specialization; variadic/spread calls; async/generator calls; polymorphic call-site linking across arbitrary callees | ordinary activation/trampoline, callValue, invokeMethod, or construct dispatch |
-| `arithmetic-dispatch` | general opcode quickening across Number/BigInt/string coercions; site rewriting or adaptive specialized arithmetic opcodes; dequickening after representation changes | ordinary arithmetic bytecodes and canonical ECMAScript coercion helpers |
 | `control-dispatch` | general superinstructions; adaptive branch/control-flow fusion; exception/finally-aware trace formation; debugger-safe dequickening at every statement boundary | ordinary branch, completion, handler, and checkpoint bytecodes |
 | `allocation-dispatch` | general object/array/closure allocation specialization; arbitrary literal layouts; escape analysis and scalar replacement; general GC-safe allocation sinking | ordinary new_object/new_array/make_closure/literal bytecodes and allocator/GC paths |
 
 ## Drift gate
 
-The validator binds this inventory to 6 plan types, 14 tagged quickening types, 8 chunk metadata fields, 2 structural-candidate flags, and 30 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.
+The validator binds this inventory to 6 plan types, 14 tagged quickening types, 9 chunk metadata fields, 2 structural-candidate flags, and 33 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.

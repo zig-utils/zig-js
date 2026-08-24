@@ -546,6 +546,55 @@ const OptimizerBinaryProfile = struct {
     }
 };
 
+/// Race-free adaptive state for one binary bytecode. Values below the Number
+/// threshold are an observation count; the two terminal tags keep stable
+/// Number sites off the optimizer-profile atomics while permanently declining
+/// specialization after any dynamic operand appears. The state contains no
+/// managed pointer and dies with the owning Chunk arena.
+pub const QuickBinaryState = struct {
+    raw: std.atomic.Value(u8) = .init(0),
+
+    pub const number_threshold: u8 = 8;
+    const number_tag: u8 = 0xfe;
+    const generic_tag: u8 = 0xff;
+
+    pub const Mode = enum { observing, number, generic };
+
+    pub fn mode(self: *const QuickBinaryState) Mode {
+        return switch (self.raw.load(.acquire)) {
+            number_tag => .number,
+            generic_tag => .generic,
+            else => .observing,
+        };
+    }
+
+    /// Record one complete Number/Number execution. Returns true only to the
+    /// lane that publishes the terminal Number state.
+    pub fn observeNumber(self: *QuickBinaryState) bool {
+        var observed = self.raw.load(.monotonic);
+        while (observed != number_tag and observed != generic_tag) {
+            const next: u8 = if (observed + 1 >= number_threshold) number_tag else observed + 1;
+            observed = self.raw.cmpxchgWeak(observed, next, .release, .monotonic) orelse
+                return next == number_tag;
+        }
+        return false;
+    }
+
+    /// One non-Number observation is enough to make the optimizer require its
+    /// runtime operation. Generic is terminal: later numeric executions may
+    /// retain the ordinary inline Number path but never republish specialization.
+    pub fn observeGeneric(self: *QuickBinaryState) void {
+        self.raw.store(generic_tag, .release);
+    }
+
+    /// Dequicken a published Number site. Returns true only to the lane that
+    /// performs the Number -> generic transition; concurrent misses still run
+    /// their own ordinary operation exactly once.
+    pub fn dequicken(self: *QuickBinaryState) bool {
+        return self.raw.cmpxchgStrong(number_tag, generic_tag, .acq_rel, .acquire) == null;
+    }
+};
+
 pub const quick_call_loop_candidate: u8 = 1 << 0;
 pub const quick_array_loop_candidate: u8 = 1 << 1;
 
@@ -744,6 +793,9 @@ pub const Chunk = struct {
     /// selecting the canonical runtime operation only where dynamic operands
     /// have actually appeared.
     optimizer_binary_profiles: []OptimizerBinaryProfile = &.{},
+    /// One compact atomic adaptive state per immutable bytecode instruction.
+    /// Binary opcodes consume their own slot; other instructions stay cold.
+    quick_binary_states: []QuickBinaryState = &.{},
     /// Lazily allocated VM-owned quick-trace plans, indexed by their first
     /// bytecode. Kept type-erased here to avoid a bytecode → VM import cycle.
     /// Isolated execution publishes a plan only after fully decoding it and may
@@ -795,6 +847,8 @@ pub const Chunk = struct {
         @memset(self.ics, .{});
         self.optimizer_binary_profiles = try self.arena.alloc(OptimizerBinaryProfile, self.code.items.len);
         @memset(self.optimizer_binary_profiles, .{});
+        self.quick_binary_states = try self.arena.alloc(QuickBinaryState, self.code.items.len);
+        @memset(self.quick_binary_states, .{});
         self.quick_property_kernel_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
         @memset(self.quick_property_kernel_plans, null);
         self.quick_array_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
@@ -834,6 +888,10 @@ pub const Chunk = struct {
     pub fn optimizerBinaryRequiresRuntime(self: *const Chunk, instruction: usize) bool {
         return instruction < self.optimizer_binary_profiles.len and
             self.optimizer_binary_profiles[instruction].requiresRuntime();
+    }
+
+    pub fn quickBinaryState(self: *Chunk, instruction: usize) ?*QuickBinaryState {
+        return if (instruction < self.quick_binary_states.len) &self.quick_binary_states[instruction] else null;
     }
 
     /// Emit an instruction, returning its index (for later jump back-patching).
@@ -985,6 +1043,52 @@ test "optimizer binary profile observations merge race-free" {
     const all_kinds = (@as(u8, 1) << @intCast(kinds.len)) - 1;
     try std.testing.expectEqual(all_kinds, profile.lhs_kinds.load(.acquire));
     try std.testing.expectEqual(all_kinds, profile.rhs_kinds.load(.acquire));
+}
+
+test "quick binary state is byte-sized and publishes bounded Number observations" {
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(QuickBinaryState));
+    var state = QuickBinaryState{};
+    try std.testing.expectEqual(QuickBinaryState.Mode.observing, state.mode());
+    for (1..QuickBinaryState.number_threshold) |_| {
+        try std.testing.expect(!state.observeNumber());
+        try std.testing.expectEqual(QuickBinaryState.Mode.observing, state.mode());
+    }
+    try std.testing.expect(state.observeNumber());
+    try std.testing.expectEqual(QuickBinaryState.Mode.number, state.mode());
+    try std.testing.expect(state.dequicken());
+    try std.testing.expectEqual(QuickBinaryState.Mode.generic, state.mode());
+    try std.testing.expect(!state.observeNumber());
+    try std.testing.expect(!state.dequicken());
+}
+
+test "quick binary generic publication wins concurrent Number observations" {
+    const builtin = @import("builtin");
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const Shared = struct {
+        state: QuickBinaryState = .{},
+        start: std.atomic.Value(bool) = .init(false),
+
+        fn numbers(self: *@This()) void {
+            while (!self.start.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..10_000) |_| _ = self.state.observeNumber();
+        }
+
+        fn generic(self: *@This()) void {
+            while (!self.start.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..1_000) |_| self.state.observeGeneric();
+        }
+    };
+
+    var shared = Shared{};
+    const number_lane_a = try std.Thread.spawn(.{}, Shared.numbers, .{&shared});
+    const number_lane_b = try std.Thread.spawn(.{}, Shared.numbers, .{&shared});
+    const generic_lane = try std.Thread.spawn(.{}, Shared.generic, .{&shared});
+    shared.start.store(true, .release);
+    number_lane_a.join();
+    number_lane_b.join();
+    generic_lane.join();
+    try std.testing.expectEqual(QuickBinaryState.Mode.generic, shared.state.mode());
 }
 
 test "InlineCache observations merge race-free" {

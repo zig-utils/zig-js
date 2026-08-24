@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v20.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v21.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -25,10 +25,11 @@ export function loadManifest(
   root = ROOT,
   supersedingExactParent: any = null,
   supersedingContextLifecycle: any = null,
+  supersedingNoJit: any = null,
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 20, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 21, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -45,6 +46,8 @@ export function loadManifest(
       (child.schema_version >= 17 ? child.exact_parent_integration : null),
     supersedingContextLifecycle ||
       (child.schema_version >= 20 ? child.context_lifecycle_integration : null),
+    supersedingNoJit ||
+      (child.schema_version >= 21 ? child.no_jit_integration : null),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
@@ -52,13 +55,28 @@ export function loadManifest(
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
+  if (child.schema_version === 21) {
+    requireValue(child.tier_attribution === undefined, "v21 must inherit the scored attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v21 must not change scored workload coverage");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v21 must inherit completed panel inventory unchanged");
+    requireValue(child.context_lifecycle_integration && typeof child.context_lifecycle_integration === "object", "v21 must repin the context lifecycle runner");
+    requireValue(child.no_jit_integration && typeof child.no_jit_integration === "object", "v21 must repin the no-JIT integration");
+    const merged = { ...inherited, ...child };
+    validate(merged, root);
+    return merged;
+  }
   if (child.schema_version === 20) {
     requireValue(child.tier_attribution === undefined, "v20 must inherit the scored attribution contract unchanged");
     requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v20 must not change scored workload coverage");
     requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v20 must inherit completed panel inventory unchanged");
     requireValue(child.context_lifecycle_integration && typeof child.context_lifecycle_integration === "object", "v20 must repin the context lifecycle runner");
     requireValue(child.no_jit_integration && typeof child.no_jit_integration === "object", "v20 must add the no-JIT integration");
-    const merged = { ...inherited, ...child };
+    const merged = {
+      ...inherited,
+      ...child,
+      context_lifecycle_integration: supersedingContextLifecycle || child.context_lifecycle_integration,
+      no_jit_integration: supersedingNoJit || child.no_jit_integration,
+    };
     validate(merged, root);
     return merged;
   }
@@ -142,7 +160,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 20, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 21, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -337,6 +355,28 @@ export function validate(manifest: any, root = ROOT): void {
       requireValue(same(noJit.attribution?.required_nonzero || [], ["vm_entries", "vm_dispatches", "program_compiled", "template_plain_compiled"]), "V20 no-JIT required attribution inventory drift");
       requireValue(typeof noJit.timed_boundary === "string" && noJit.timed_boundary.length > 0, "V20 no-JIT timed boundary is missing");
       requireValue(typeof noJit.publication_boundary === "string" && noJit.publication_boundary.length > 0, "V20 no-JIT publication boundary is missing");
+    }
+    if (manifest.schema_version >= 21) {
+      const quick = manifest.no_jit_integration.quick_binary;
+      requireValue(quick && quick.issue === 734 && quick.number_observation_threshold === 8 && quick.state_bytes_per_instruction === 1, "V21 quick-binary identity/state contract drift");
+      requireValue(quick.generic_is_terminal === true && quick.specialized_miss_executes_ordinary_once === true, "V21 quick-binary miss contract drift");
+      requireValue(same(quick.counters || [], ["number_hits", "number_misses", "dequickenings"]), "V21 quick-binary counter inventory drift");
+      requireValue(quick.stable_number?.number_hits === "nonzero" && quick.stable_number?.number_misses === 0 && quick.stable_number?.dequickenings === 0, "V21 stable-Number attribution contract drift");
+      const expectedFullAttribution = [
+        ["representative_vm_arithmetic_number", 28, 3020460, 919643],
+        ["representative_vm_arithmetic_bigint", 28, 900541, 79982],
+        ["representative_vm_arithmetic_polymorphic", 28, 1180600, 164905],
+        ["representative_vm_arithmetic_coercion", 28, 810659, 157437],
+      ];
+      requireValue(Array.isArray(quick.full_attribution) && quick.full_attribution.length === expectedFullAttribution.length, "V21 quick-binary full attribution inventory drift");
+      for (let index = 0; index < expectedFullAttribution.length; index += 1) {
+        const actual = quick.full_attribution[index], expected = expectedFullAttribution[index];
+        requireValue(
+          actual?.workload === expected[0] && actual?.vm_entries === expected[1] && actual?.vm_dispatches === expected[2] && actual?.number_hits === expected[3] && actual?.number_misses === 0 && actual?.dequickenings === 0,
+          `V21 quick-binary full attribution drift: ${expected[0]}`,
+        );
+      }
+      requireValue(typeof quick.publication_boundary === "string" && quick.publication_boundary.length > 0, "V21 quick-binary publication boundary is missing");
     }
   } else if (manifest.schema_version >= 13) {
     const pending = manifest.pending_metric_panels;

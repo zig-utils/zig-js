@@ -41,4 +41,10 @@ rejects("no-JIT checksum drift", value => { value.no_jit_integration.workloads[0
 rejects("no-JIT native attribution drift", value => { value.no_jit_integration.attribution.generated_code_bytes = 1; }, "attribution boundary drift");
 rejects("no-JIT required attribution drift", value => value.no_jit_integration.attribution.required_nonzero.pop(), "required attribution inventory drift");
 rejects("no-JIT timed boundary missing", value => { value.no_jit_integration.timed_boundary = ""; }, "timed boundary is missing");
-console.log("representative matrix structural tests: 33/33 passed");
+rejects("quick-binary threshold drift", value => { value.no_jit_integration.quick_binary.number_observation_threshold = 7; }, "identity/state contract drift");
+rejects("quick-binary state size drift", value => { value.no_jit_integration.quick_binary.state_bytes_per_instruction = 2; }, "identity/state contract drift");
+rejects("quick-binary generic terminal drift", value => { value.no_jit_integration.quick_binary.generic_is_terminal = false; }, "miss contract drift");
+rejects("quick-binary counter drift", value => value.no_jit_integration.quick_binary.counters.pop(), "counter inventory drift");
+rejects("quick-binary stable miss drift", value => { value.no_jit_integration.quick_binary.stable_number.number_misses = 1; }, "stable-Number attribution contract drift");
+rejects("quick-binary full attribution drift", value => { value.no_jit_integration.quick_binary.full_attribution[0].number_hits += 1; }, "full attribution drift");
+console.log("representative matrix structural tests: 39/39 passed");

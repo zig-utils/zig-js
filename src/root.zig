@@ -36,6 +36,7 @@ pub const Environment = @import("interpreter.zig").Environment;
 pub const BytecodeAdmissionReason = @import("interpreter.zig").BytecodeAdmissionReason;
 pub const BytecodeAdmissionSnapshot = @import("interpreter.zig").BytecodeAdmissionSnapshot;
 pub const ExecutionTierMetric = @import("interpreter.zig").ExecutionTierMetric;
+pub const QuickBinaryMetric = @import("interpreter.zig").QuickBinaryMetric;
 pub const ExecutionTierSnapshot = @import("interpreter.zig").ExecutionTierSnapshot;
 pub const Lexer = @import("lexer.zig").Lexer;
 pub const Parser = @import("parser.zig").Parser;

@@ -1725,6 +1725,22 @@ pub const ExecutionTierSnapshot = struct {
     }
 };
 
+pub const QuickBinaryMetric = enum(u8) {
+    number_hits,
+    number_misses,
+    dequickenings,
+};
+
+pub const quick_binary_metric_count = std.meta.fieldNames(QuickBinaryMetric).len;
+
+pub const QuickBinarySnapshot = struct {
+    counts: [quick_binary_metric_count]u64,
+
+    pub fn count(self: *const QuickBinarySnapshot, metric: QuickBinaryMetric) u64 {
+        return self.counts[@backingInt(metric)];
+    }
+};
+
 pub const TierTimingSnapshot = struct {
     baseline_attempts: u64 = 0,
     baseline_tier_ups: u64 = 0,
@@ -1749,6 +1765,7 @@ pub const TierTimingSnapshot = struct {
 /// monotonic observational state and never changes an execution decision.
 pub const ExecutionTierInventory = struct {
     counts: [execution_tier_metric_count]std.atomic.Value(u64) = @splat(.init(0)),
+    quick_binary: [quick_binary_metric_count]std.atomic.Value(u64) = @splat(.init(0)),
     timing: AtomicTierTiming = .{},
 
     const AtomicTierTiming = struct {
@@ -1784,6 +1801,10 @@ pub const ExecutionTierInventory = struct {
 
     pub fn recordMany(self: *ExecutionTierInventory, metric: ExecutionTierMetric, count: u64) void {
         _ = self.counts[@backingInt(metric)].fetchAdd(count, .monotonic);
+    }
+
+    pub fn recordQuickBinary(self: *ExecutionTierInventory, metric: QuickBinaryMetric) void {
+        _ = self.quick_binary[@backingInt(metric)].fetchAdd(1, .monotonic);
     }
 
     pub fn recordBaselineTierUp(self: *ExecutionTierInventory, elapsed_ns: u64, succeeded: bool) void {
@@ -1822,6 +1843,12 @@ pub const ExecutionTierInventory = struct {
     pub fn snapshot(self: *const ExecutionTierInventory) ExecutionTierSnapshot {
         var result: ExecutionTierSnapshot = undefined;
         for (&self.counts, 0..) |*count, index| result.counts[index] = count.load(.monotonic);
+        return result;
+    }
+
+    pub fn quickBinarySnapshot(self: *const ExecutionTierInventory) QuickBinarySnapshot {
+        var result: QuickBinarySnapshot = undefined;
+        for (&self.quick_binary, 0..) |*count, index| result.counts[index] = count.load(.monotonic);
         return result;
     }
 
@@ -2105,6 +2132,9 @@ pub const Interpreter = struct {
     bytecode_admission_inventory: ?*BytecodeAdmissionInventory = null,
     /// Null unless a benchmark/profile explicitly requests attribution.
     execution_tier_inventory: ?*ExecutionTierInventory = null,
+    /// Test-only differential switch. Production Contexts always leave
+    /// instruction-local binary quickening enabled.
+    bytecode_binary_quickening: bool = true,
     /// Test-only forced tier contract inherited from the Context. Production
     /// contexts always use `automatic`.
     bytecode_execution_mode: BytecodeExecutionMode = .automatic,
@@ -6273,6 +6303,10 @@ pub const Interpreter = struct {
 
     pub fn recordExecutionTier(self: *Interpreter, metric: ExecutionTierMetric) void {
         if (self.execution_tier_inventory) |inventory| inventory.record(metric);
+    }
+
+    pub fn recordQuickBinary(self: *Interpreter, metric: QuickBinaryMetric) void {
+        if (self.execution_tier_inventory) |inventory| inventory.recordQuickBinary(metric);
     }
 
     pub fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {

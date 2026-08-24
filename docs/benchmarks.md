@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v20.json`. V20 hash-inherits every V19 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, external-suite boundary, exact-parent contract, and publication boundary unchanged. It retains the separate non-scored cold Context lifecycle profile below and adds a zig-js-only required-bytecode/no-JIT arithmetic profile for benchmark-first VM quickening work. Accepted historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v21.json`. V21 hash-inherits every V20 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, external-suite boundary, exact-parent contract, and publication boundary unchanged. It retains the separate non-scored cold Context lifecycle and required-bytecode/no-JIT arithmetic profiles below, re-pinning only the runner needed for exact adaptive-binary attribution. Accepted historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -48,7 +48,7 @@ still required before #479 can claim a lifecycle improvement.
 
 ## Required-bytecode/no-JIT arithmetic profile
 
-V20 adds four zig-js-only, non-scored rows from
+V20 added, and V21 retains, four zig-js-only non-scored rows from
 [`vm_arithmetic_comparison.js`](../bench/vm_arithmetic_comparison.js): stable
 Number arithmetic, a stable BigInt control, one Number/string/BigInt/object
 polymorphic site, and observable coercion plus exception controls. The
@@ -59,8 +59,9 @@ Unsupported lowering is an error rather than a silent tree-walker result.
 The frozen contract records quick and full work counts and checksums. Its
 separate attribution run requires nonzero VM entry/dispatch and compilation
 counters while tree-walker entry, baseline/optimizer publication, and generated
-native-code bytes remain zero. Ten reduced-work warm calls occur outside the
-single timed invocation. These rows are benchmark-first witnesses for
+native-code bytes remain zero. V21 additionally records exact Number-specialized
+hit, miss, and dequickening counts from Context-owned atomics. Ten reduced-work
+warm calls occur outside the single timed invocation. These rows are witnesses for
 [arithmetic quickening issue #734](https://github.com/zig-utils/zig-js/issues/734),
 not a JavaScriptCore comparison or performance result. Any speed claim still
 requires a clean exact-parent A/B on a quiet AC-powered reference host, with the

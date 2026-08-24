@@ -326,6 +326,28 @@
       "metrics": ["quick_observable_recurrence_hits"]
     },
     {
+      "id": "binary-arithmetic-site",
+      "title": "Adaptive Number binary dispatch",
+      "classification": "general_adaptive",
+      "implementation_kind": "adaptive_site_cache",
+      "coverage_status": "covered_guarded",
+      "surfaces": ["add/subtract/multiply/divide/remainder/power", "relational and equality comparisons", "bitwise operations and shifts"],
+      "guards": ["exact Number representation for both operands", "eight successful Number observations", "in remains generic because its RHS must be Object"],
+      "miss_behavior": ["record both changed operand kinds", "atomically publish terminal generic state", "execute the canonical operation exactly once without replaying coercion or exceptions"],
+      "metadata_lifetime": "One byte-sized atomic QuickBinaryState per immutable bytecode instruction in the owning Chunk arena; non-binary slots stay cold and teardown requires no separate reclamation.",
+      "no_gil_synchronization": "Observation/publication/dequickening use acquire-release atomics; generic is terminal under every interleaving and Context-owned attribution counters are atomic.",
+      "observable_steps_debugger": "A hit replaces only one already-counted binary opcode. Debugger, watchdog, handler/finally, OOM, and moving-GC boundaries remain in the ordinary dispatch loop; a miss performs no coercion before canonical fallback.",
+      "source_anchors": [
+        {"path": "src/bytecode.zig", "text": "pub const QuickBinaryState = struct {"},
+        {"path": "src/vm.zig", "text": "inline fn quickNumberBinary("}
+      ],
+      "test_anchors": [
+        {"path": "src/bytecode.zig", "text": "test \"quick binary generic publication wins concurrent Number observations\""},
+        {"path": "src/context.zig", "text": "test \"Number-specialized misses dequicken once without replaying coercion or throws\""}
+      ],
+      "metrics": ["quick_binary_number_hits", "quick_binary_number_misses", "quick_binary_dequickenings"]
+    },
+    {
       "id": "native-direct-call",
       "title": "Guarded native numeric-leaf call entry",
       "classification": "general_adaptive",
@@ -369,13 +391,6 @@
       "fallback": "ordinary activation/trampoline, callValue, invokeMethod, or construct dispatch"
     },
     {
-      "id": "arithmetic-dispatch",
-      "status": "unsupported",
-      "covered_by": [],
-      "remaining": ["general opcode quickening across Number/BigInt/string coercions", "site rewriting or adaptive specialized arithmetic opcodes", "dequickening after representation changes"],
-      "fallback": "ordinary arithmetic bytecodes and canonical ECMAScript coercion helpers"
-    },
-    {
       "id": "control-dispatch",
       "status": "unsupported",
       "covered_by": [],
@@ -417,6 +432,7 @@
     },
     "chunk_metadata_fields": [
       "quick_property_plans",
+      "quick_binary_states",
       "quick_property_kernel_plans",
       "quick_array_plans",
       "quick_call_plans",
@@ -430,6 +446,9 @@
       "quick_array_loop_candidate"
     ],
     "observability_counters": [
+      "quick_binary_number_hits",
+      "quick_binary_number_misses",
+      "quick_binary_dequickenings",
       "quick_property_update_hits",
       "quick_property_loop_tail_hits",
       "quick_property_specialized_hits",

@@ -1,0 +1,98 @@
+{
+  "schema_version": 21,
+  "matrix_id": "zig-js-representative-v21",
+  "status": "frozen",
+  "frozen_date": "2026-08-23",
+  "owner_issue": 734,
+  "history_policy": "This version hash-inherits every V20 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance decision, attribution metric, external-suite boundary, exact-parent contract, and publication boundary. It retains the V20 zig-js-only no-JIT required-bytecode rows, re-pins their runner, and adds exact Context-owned adaptive-binary attribution. No historical scored or accepted report is rewritten. Any later workload, option, checksum, mode, runner, quickening contract, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v20",
+    "path": "docs/.data/representative-benchmark-matrix-v20.json",
+    "sha256": "9f7f2bee6ad444fb7b0a42318ad6915ffa4b6ce4684e68bffdd2e328b9a19341",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "exact_parent_integration"
+    ]
+  },
+  "change": "Re-pins the comparison runner and adds exact hit/miss/dequickening attribution for the non-scored V20 required-bytecode/no-JIT arithmetic profile; every scored field remains unchanged.",
+  "context_lifecycle_integration": {
+    "issue": 661,
+    "status": "integrated_non_scored_profile",
+    "mode": "context_lifecycle",
+    "engines": ["zig-js"],
+    "lanes": [1],
+    "scenarios": ["context_no_evaluation", "context_first_source", "context_first_module", "context_full_feature"],
+    "profile": {
+      "path": "docs/.data/context-lifecycle-profile-v1.json",
+      "sha256": "3286810faef598fc62ce68f8a56825de48d749a7ae4778df270afd890780c6f2"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "7d94d54516ee2eb64b3f054c4599f5d0bb3b42fcb71ea4f162478fc8b3450087"
+    },
+    "telemetry": ["create_ns", "work_ns", "destroy_ns", "cpu_user_ns", "cpu_system_ns", "baseline_rss_bytes", "max_live_rss_bytes", "post_destroy_rss_bytes", "retained_delta_bytes", "peak_rss_bytes", "rss_checkpoints", "gc_finalizer_stats"],
+    "publication_boundary": "This remains the V19 zig-js-only cold lifecycle profile. V21 changes only the runner hash to expose Context-owned quick-binary attribution in separate tier rows; no lifecycle option, scenario, checksum, telemetry, or evidence ruling changes."
+  },
+  "no_jit_integration": {
+    "issue": 734,
+    "status": "integrated_non_scored_profile",
+    "engines": ["zig-js"],
+    "modes": ["single_no_jit", "attribution_no_jit"],
+    "lanes": [1],
+    "context_options": {
+      "enable_jit": false,
+      "bytecode_execution_mode": "required"
+    },
+    "source": {
+      "path": "bench/vm_arithmetic_comparison.js",
+      "sha256": "970e58bec6ab9978335e6f908219bf23154c9ec9ff96ccefc6a94f2917d77fa8"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "7d94d54516ee2eb64b3f054c4599f5d0bb3b42fcb71ea4f162478fc8b3450087"
+    },
+    "workloads": [
+      {"id": "representative_vm_arithmetic_number", "role": "stable_number", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 606036, "full": 5236590351}},
+      {"id": "representative_vm_arithmetic_bigint", "role": "stable_bigint_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 5412345, "full": 630334997}},
+      {"id": "representative_vm_arithmetic_polymorphic", "role": "number_string_bigint_object_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 29422, "full": 28806122}},
+      {"id": "representative_vm_arithmetic_coercion", "role": "effect_and_exception_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 101766, "full": 10176362}}
+    ],
+    "attribution": {
+      "tree_walker_entries": 0,
+      "baseline_publications": 0,
+      "optimizer_publications": 0,
+      "generated_code_bytes": 0,
+      "required_nonzero": ["vm_entries", "vm_dispatches", "program_compiled", "template_plain_compiled"]
+    },
+    "quick_binary": {
+      "issue": 734,
+      "number_observation_threshold": 8,
+      "state_bytes_per_instruction": 1,
+      "generic_is_terminal": true,
+      "specialized_miss_executes_ordinary_once": true,
+      "counters": ["number_hits", "number_misses", "dequickenings"],
+      "stable_number": {"number_hits": "nonzero", "number_misses": 0, "dequickenings": 0},
+      "full_attribution": [
+        {"workload": "representative_vm_arithmetic_number", "vm_entries": 28, "vm_dispatches": 3020460, "number_hits": 919643, "number_misses": 0, "dequickenings": 0},
+        {"workload": "representative_vm_arithmetic_bigint", "vm_entries": 28, "vm_dispatches": 900541, "number_hits": 79982, "number_misses": 0, "dequickenings": 0},
+        {"workload": "representative_vm_arithmetic_polymorphic", "vm_entries": 28, "vm_dispatches": 1180600, "number_hits": 164905, "number_misses": 0, "dequickenings": 0},
+        {"workload": "representative_vm_arithmetic_coercion", "vm_entries": 28, "vm_dispatches": 810659, "number_hits": 157437, "number_misses": 0, "dequickenings": 0}
+      ],
+      "publication_boundary": "Counters are exact Context-owned atomics read only in the separate attribution mode. Stable Number rows must hit without misses; per-site unit tests prove polymorphic/coercive sites become terminal generic and that one specialized miss dequickens without replay. Exact-parent timing remains a separate artifact."
+    },
+    "timed_boundary": "One invocation in one persistent production Context after ten reduced-work warmups; source/configuration, warmup, Context creation/destruction, attribution, and hardware snapshots are outside elapsed_ns.",
+    "publication_boundary": "These rows freeze logical work and prove required-bytecode/no-native execution. Battery diagnostics and structural attribution are not performance evidence. A speed claim requires exact-parent, order-balanced, quiet-reference AC samples with stable required counters and unchanged controls."
+  }
+}

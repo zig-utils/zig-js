@@ -3467,6 +3467,9 @@ pub const Context = struct {
     enable_jit: bool = true,
     /// Test-only forced execution contract. Public contexts remain automatic.
     bytecode_execution_mode: interp.BytecodeExecutionMode = .automatic,
+    /// Test-only differential switch; production contexts keep VM binary
+    /// quickening enabled.
+    bytecode_binary_quickening: bool = true,
     /// Reusable allocator used as the GC heap's cell backing. It recycles
     /// per-cell slabs for allocation/lifecycle performance and becomes
     /// internally locked under `parallel_gc`, so multiple mutators can allocate
@@ -4059,6 +4062,8 @@ pub const Context = struct {
         /// differentials. `required` throws instead of silently accepting a
         /// compiler or template fallback as VM coverage.
         bytecode_execution_mode: interp.BytecodeExecutionMode = .automatic,
+        /// Disable adaptive binary dispatch for exact VM differentials.
+        bytecode_binary_quickening: bool = true,
         enable_threads: bool = false,
         enable_gc: bool = false,
         concurrent_gc: bool = false,
@@ -4658,6 +4663,7 @@ pub const Context = struct {
             .shared_jit_owner = primary.shared_jit_owner orelse &primary.jit_owner,
             .enable_jit = primary.enable_jit,
             .bytecode_execution_mode = primary.bytecode_execution_mode,
+            .bytecode_binary_quickening = primary.bytecode_binary_quickening,
             .profile_execution_tiers = primary.profile_execution_tiers,
             .owner_thread = primary.owner_thread,
             .sab_retains = .{ .gpa = allocator },
@@ -4747,6 +4753,7 @@ pub const Context = struct {
         return createWithTestingOptionsForSharedOwner(primary.host_gpa, .{
             .enable_jit = primary.enable_jit,
             .bytecode_execution_mode = primary.bytecode_execution_mode,
+            .bytecode_binary_quickening = primary.bytecode_binary_quickening,
             .profile_execution_tiers = primary.profile_execution_tiers,
             .native_observability = primary.jit_owner.nativeObservabilityEnabled(),
             .native_code_publisher = primary.jit_owner.nativeCodePublisher(),
@@ -4839,6 +4846,7 @@ pub const Context = struct {
             .shared_jit_owner = if (shared_owner) |owner| owner.shared_jit_owner orelse &owner.jit_owner else null,
             .enable_jit = options.enable_jit,
             .bytecode_execution_mode = options.bytecode_execution_mode,
+            .bytecode_binary_quickening = options.bytecode_binary_quickening,
             .profile_execution_tiers = options.profile_execution_tiers,
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = context_gpa },
@@ -5098,6 +5106,7 @@ pub const Context = struct {
             .execution_tier_inventory = if (self.profile_execution_tiers) &self.execution_tier_inventory else null,
             .debug_registry_stats = if (self.runtime_attribution_profiler) |profile| &profile.debug_registry else null,
             .bytecode_execution_mode = self.bytecode_execution_mode,
+            .bytecode_binary_quickening = self.bytecode_binary_quickening,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
             .debug_script_ctx = self,
@@ -5202,6 +5211,7 @@ pub const Context = struct {
 
     pub const TierAttributionSnapshot = struct {
         execution: interp.ExecutionTierSnapshot,
+        quick_binary: interp.QuickBinarySnapshot,
         timing: interp.TierTimingSnapshot,
         admissions: interp.BytecodeAdmissionSnapshot,
         baseline_publications: u64,
@@ -5248,6 +5258,7 @@ pub const Context = struct {
         const code = owner.stats();
         return .{
             .execution = self.execution_tier_inventory.snapshot(),
+            .quick_binary = self.execution_tier_inventory.quickBinarySnapshot(),
             .timing = self.execution_tier_inventory.timingSnapshot(),
             .admissions = self.bytecode_admission_inventory.snapshot(),
             .baseline_publications = owner.baselinePublications(),
@@ -26218,6 +26229,191 @@ test "bytecode admission inventory merges concurrent realm records" {
     try std.testing.expectEqual(@as(u64, 0), snapshot.count(.program_compiled));
 }
 
+test "required bytecode quickens stable Number sites after the bounded threshold" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate("function quickAdd(left, right) { return left + right; }");
+
+    const extra_hits = 3;
+    for (0..bc.QuickBinaryState.number_threshold + extra_hits) |_| {
+        try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("quickAdd(40, 2)")).asNum());
+    }
+    const snapshot = ctx.tierAttributionSnapshot();
+    try std.testing.expectEqual(@as(u64, extra_hits), snapshot.quick_binary.count(.number_hits));
+    try std.testing.expectEqual(@as(u64, 0), snapshot.quick_binary.count(.number_misses));
+    try std.testing.expectEqual(@as(u64, 0), snapshot.quick_binary.count(.dequickenings));
+    try std.testing.expect(snapshot.execution.count(.vm_quick_kernel_hits) >= extra_hits);
+}
+
+test "required bytecode quickening off retains the ordinary VM result" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .required,
+        .bytecode_binary_quickening = false,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate("function ordinaryAdd(left, right) { return left + right; }");
+    for (0..bc.QuickBinaryState.number_threshold + 3) |_| {
+        try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("ordinaryAdd(40, 2)")).asNum());
+    }
+    const snapshot = ctx.tierAttributionSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), snapshot.quick_binary.count(.number_hits));
+    try std.testing.expectEqual(@as(u64, 0), snapshot.quick_binary.count(.number_misses));
+    try std.testing.expectEqual(@as(u64, 0), snapshot.quick_binary.count(.dequickenings));
+}
+
+test "Number-specialized misses dequicken once without replaying coercion or throws" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var quickEffects = 0;
+        \\var quickCaught = 0;
+        \\var quickAbrupt = { valueOf() { quickEffects = quickEffects + 1; throw 97; } };
+        \\var quickOrdinary = { valueOf() { quickEffects = quickEffects + 1; return 42; } };
+        \\function quickAddMiss(left, right) { return left + right; }
+        \\function quickSubMiss(left, right) { return left - right; }
+    );
+    for (0..bc.QuickBinaryState.number_threshold) |_| {
+        try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("quickAddMiss(40, 2)")).asNum());
+        try std.testing.expectEqual(@as(f64, 38), (try ctx.evaluate("quickSubMiss(40, 2)")).asNum());
+    }
+
+    try std.testing.expectEqual(@as(f64, 97), (try ctx.evaluate(
+        "try { quickAddMiss(quickAbrupt, 2); } catch (error) { quickCaught = error; } quickCaught;",
+    )).asNum());
+    try std.testing.expectEqual(@as(f64, 40), (try ctx.evaluate("quickSubMiss(quickOrdinary, 2)")).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try ctx.evaluate("quickEffects")).asNum());
+
+    // Both sites are now terminal generic. Later Number inputs retain the
+    // ordinary inline Number path but cannot republish specialization.
+    try std.testing.expectEqual(@as(f64, 3), (try ctx.evaluate("quickAddMiss(1, 2)")).asNum());
+    try std.testing.expectEqual(@as(f64, 3), (try ctx.evaluate("quickSubMiss(5, 2)")).asNum());
+    const snapshot = ctx.tierAttributionSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), snapshot.quick_binary.count(.number_hits));
+    try std.testing.expectEqual(@as(u64, 2), snapshot.quick_binary.count(.number_misses));
+    try std.testing.expectEqual(@as(u64, 2), snapshot.quick_binary.count(.dequickenings));
+}
+
+test "tree walker and VM binary quickening modes preserve every operator and control" {
+    const source =
+        \\function qbAdd(a, b) { return a + b; }
+        \\function qbSub(a, b) { return a - b; }
+        \\function qbMul(a, b) { return a * b; }
+        \\function qbDiv(a, b) { return a / b; }
+        \\function qbMod(a, b) { return a % b; }
+        \\function qbPow(a, b) { return a ** b; }
+        \\function qbLt(a, b) { return a < b; }
+        \\function qbLe(a, b) { return a <= b; }
+        \\function qbGt(a, b) { return a > b; }
+        \\function qbGe(a, b) { return a >= b; }
+        \\function qbEq(a, b) { return a == b; }
+        \\function qbNeq(a, b) { return a != b; }
+        \\function qbStrictEq(a, b) { return a === b; }
+        \\function qbStrictNeq(a, b) { return a !== b; }
+        \\function qbAnd(a, b) { return a & b; }
+        \\function qbOr(a, b) { return a | b; }
+        \\function qbXor(a, b) { return a ^ b; }
+        \\function qbShl(a, b) { return a << b; }
+        \\function qbShr(a, b) { return a >> b; }
+        \\function qbUshr(a, b) { return a >>> b; }
+        \\function qbIn(a, b) { return a in b; }
+        \\function qbWarm() {
+        \\  var sink = 0;
+        \\  for (var i = 0; i < 12; i = i + 1) {
+        \\    sink = sink + qbAdd(13.5, 3) + qbSub(13.5, 3) + qbMul(13.5, 3);
+        \\    sink = sink + qbDiv(13.5, 3) + qbMod(13.5, 3) + qbPow(2, 8);
+        \\    sink = sink + Number(qbLt(13.5, 3)) + Number(qbLe(13.5, 3));
+        \\    sink = sink + Number(qbGt(13.5, 3)) + Number(qbGe(13.5, 3));
+        \\    sink = sink + Number(qbEq(13.5, 3)) + Number(qbNeq(13.5, 3));
+        \\    sink = sink + Number(qbStrictEq(13.5, 3)) + Number(qbStrictNeq(13.5, 3));
+        \\    sink = sink + qbAnd(13, 3) + qbOr(13, 3) + qbXor(13, 3);
+        \\    sink = sink + qbShl(13, 3) + qbShr(13, 3) + qbUshr(13, 3);
+        \\  }
+        \\  return sink;
+        \\}
+        \\function qbProbe() {
+        \\  var effects = 0;
+        \\  var coerced = { valueOf() { effects = effects + 1; return 11; } };
+        \\  var bigintError = "";
+        \\  var symbolError = "";
+        \\  try { qbAdd(1n, 1); } catch (error) { bigintError = error.name; }
+        \\  try { qbMul(Symbol("quick"), 2); } catch (error) { symbolError = error.name; }
+        \\  return String(qbAdd(13.5, 3)) + "|" + String(qbSub(13.5, 3)) + "|" +
+        \\    String(qbMul(13.5, 3)) + "|" + String(qbDiv(13.5, 3)) + "|" +
+        \\    String(qbMod(13.5, 3)) + "|" + String(qbPow(2, 8)) + "|" +
+        \\    String(qbLt(13.5, 3)) + "|" + String(qbLe(13.5, 3)) + "|" +
+        \\    String(qbGt(13.5, 3)) + "|" + String(qbGe(13.5, 3)) + "|" +
+        \\    String(qbEq(13.5, 3)) + "|" + String(qbNeq(13.5, 3)) + "|" +
+        \\    String(qbStrictEq(13.5, 3)) + "|" + String(qbStrictNeq(13.5, 3)) + "|" +
+        \\    String(qbAnd(13, 3)) + "|" + String(qbOr(13, 3)) + "|" +
+        \\    String(qbXor(13, 3)) + "|" + String(qbShl(13, 3)) + "|" +
+        \\    String(qbShr(13, 3)) + "|" + String(qbUshr(13, 3)) + "|" +
+        \\    String(qbIn("owned", { owned: true })) + "|" +
+        \\    String(Object.is(qbAdd(-0, -0), -0)) + "|" +
+        \\    String(qbDiv(1, -0) === -Infinity) + "|" +
+        \\    String(Object.is(qbMod(-0, 3), -0)) + "|" +
+        \\    String(Number.isNaN(qbPow(-1, Infinity))) + "|" +
+        \\    qbAdd("quick", 2) + "|" + String(qbSub(coerced, 2)) + "|" +
+        \\    bigintError + "|" + symbolError + "|" + String(effects);
+        \\}
+    ;
+
+    const tree = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree.destroy();
+    const ordinary = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .required,
+        .bytecode_binary_quickening = false,
+    });
+    defer ordinary.destroy();
+    const quick = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .profile_execution_tiers = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer quick.destroy();
+
+    _ = try tree.evaluate(source);
+    _ = try ordinary.evaluate(source);
+    _ = try quick.evaluate(source);
+    const tree_warm = try tree.evaluate("qbWarm()");
+    const ordinary_warm = try ordinary.evaluate("qbWarm()");
+    const quick_warm = try quick.evaluate("qbWarm()");
+    try std.testing.expectEqual(tree_warm.rawBits(), ordinary_warm.rawBits());
+    try std.testing.expectEqual(tree_warm.rawBits(), quick_warm.rawBits());
+
+    const tree_result = try tree.evaluate("qbProbe()");
+    const ordinary_result = try ordinary.evaluate("qbProbe()");
+    const quick_result = try quick.evaluate("qbProbe()");
+    try std.testing.expectEqualStrings(tree_result.asStr(), ordinary_result.asStr());
+    try std.testing.expectEqualStrings(tree_result.asStr(), quick_result.asStr());
+
+    const ordinary_snapshot = ordinary.tierAttributionSnapshot();
+    const quick_snapshot = quick.tierAttributionSnapshot();
+    try std.testing.expectEqual(
+        ordinary_snapshot.execution.count(.vm_dispatches),
+        quick_snapshot.execution.count(.vm_dispatches),
+    );
+    try std.testing.expect(quick_snapshot.quick_binary.count(.number_hits) > 0);
+    try std.testing.expectEqual(@as(u64, 3), quick_snapshot.quick_binary.count(.number_misses));
+    try std.testing.expectEqual(@as(u64, 3), quick_snapshot.quick_binary.count(.dequickenings));
+    inline for (comptime std.meta.tags(interp.QuickBinaryMetric)) |metric|
+        try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.quick_binary.count(metric));
+}
+
 test "tier attribution is opt-in and separates execution runtime and host boundaries" {
     const ordinary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ordinary.destroy();
@@ -26236,6 +26432,8 @@ test "tier attribution is opt-in and separates execution runtime and host bounda
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.host_callbacks));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.wasm_dispatches));
     try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.execution.count(.environment_allocations));
+    inline for (comptime std.meta.tags(interp.QuickBinaryMetric)) |metric|
+        try std.testing.expectEqual(@as(u64, 0), ordinary_snapshot.quick_binary.count(metric));
     inline for (comptime std.meta.fieldNames(interp.DebugRegistrySnapshot)) |name|
         try std.testing.expectEqual(@as(u64, 0), @field(ordinary_snapshot.debug_registry, name));
     inline for (comptime std.meta.fieldNames(interp.TierTimingSnapshot)) |name|

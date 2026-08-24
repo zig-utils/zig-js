@@ -25,13 +25,13 @@ const ENTRY_IDS = [
   "reusable-immediate-closure",
   "numeric-recurrence",
   "observable-numeric-recurrence",
+  "binary-arithmetic-site",
   "native-direct-call",
 ];
 const UNSUPPORTED_IDS = [
   "property-dispatch",
   "index-dispatch",
   "call-dispatch",
-  "arithmetic-dispatch",
   "control-dispatch",
   "allocation-dispatch",
 ];
@@ -111,7 +111,20 @@ function unionTags(source: string, type: string): string[] {
   return tags;
 }
 
-function sourceContract(bytecode: string, vm: string): any {
+function enumTags(source: string, type: string): string[] {
+  const marker = `pub const ${type} = enum(u8) {`,
+    start = source.indexOf(marker);
+  requireValue(start >= 0, `missing attributed enum ${type}`);
+  const body = source.slice(start + marker.length), tags: string[] = [];
+  for (const line of body.split("\n")) {
+    if (line.startsWith("};")) break;
+    const match = /^    ([a-z][a-z0-9_]*),\s*/.exec(line);
+    if (match) tags.push(match[1]);
+  }
+  return tags;
+}
+
+function sourceContract(bytecode: string, vm: string, interpreter: string): any {
   const planTypes = Array.from(
     vm.matchAll(/^const (Quick[A-Za-z]+Plan) =/gm),
     (match) => match[1],
@@ -135,12 +148,14 @@ function sourceContract(bytecode: string, vm: string): any {
     bytecode.matchAll(/^pub const (quick_[a-z0-9_]+_candidate):/gm),
     (match) => match[1],
   ).sort();
-  const counters = Array.from(
+  const globalCounters = Array.from(
     vm.matchAll(/^var (quick_[a-z0-9_]+): std\.atomic\.Value/gm),
     (match) => match[1],
   )
-    .filter((name) => !name.endsWith("_test_enabled"))
-    .sort();
+    .filter((name) => !name.endsWith("_test_enabled"));
+  const attributedCounters = enumTags(interpreter, "QuickBinaryMetric")
+    .map((name) => `quick_binary_${name}`);
+  const counters = globalCounters.concat(attributedCounters).sort();
   return {
     plan_types: planTypes,
     tagged_types: taggedTypes,
@@ -230,7 +245,8 @@ function validateInventory(data: any): any {
 
   const bytecode = repositoryText("src/bytecode.zig", "bytecode source"),
     vm = repositoryText("src/vm.zig", "VM source"),
-    actual = sourceContract(bytecode, vm),
+    interpreter = repositoryText("src/interpreter.zig", "interpreter source"),
+    actual = sourceContract(bytecode, vm, interpreter),
     contract = data.runtime_contract;
   requireValue(contract && typeof contract === "object", "runtime_contract must be an object");
   requireValue(Array.isArray(contract.plan_types), "runtime_contract.plan_types must be an array");

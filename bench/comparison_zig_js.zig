@@ -442,6 +442,13 @@ fn printTierAttributionRow(
         const metric: js.ExecutionTierMetric = @fromBackingInt(@intCast(field_value));
         try writer.print("\"{s}\":{d}", .{ name, snapshot.execution.count(metric) });
     }
+    try writer.writeAll("},\"quick_binary\":{");
+    const quick_binary_info = @typeInfo(js.QuickBinaryMetric).@"enum";
+    inline for (quick_binary_info.field_names, quick_binary_info.field_values, 0..) |name, field_value, index| {
+        if (index != 0) try writer.writeByte(',');
+        const metric: js.QuickBinaryMetric = @fromBackingInt(@intCast(field_value));
+        try writer.print("\"{s}\":{d}", .{ name, snapshot.quick_binary.count(metric) });
+    }
     try writer.writeAll("},\"timing\":{");
     inline for (comptime std.meta.fieldNames(@TypeOf(snapshot.timing)), 0..) |name, index| {
         if (index != 0) try writer.writeByte(',');
