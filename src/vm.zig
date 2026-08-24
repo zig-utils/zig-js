@@ -3983,9 +3983,7 @@ fn nativeInheritedPropertyCacheValue(
 /// actually owns is separate work.
 fn nativeLoadVar(vm: *Interpreter, name: []const u8) EvalError!Value {
     if (builtin.is_test) _ = optimizer_native_environment_load_callbacks.fetchAdd(1, .monotonic);
-    return (try vm.lookupIdent(name)) orelse
-        (try vm.globalProp(name)) orelse
-        vm.throwError("ReferenceError", name);
+    return (try vm.resolveBindingValue(name, false)).value;
 }
 
 fn nativeGetProperty(
@@ -4098,6 +4096,13 @@ fn callEvalValue(vm: *Interpreter, callee: Value, args: []const Value) EvalError
     vm.direct_eval_call = vm.isDirectEvalCallee(callee);
     defer vm.direct_eval_call = saved;
     return callValue(vm, callee, args, Value.undef());
+}
+
+fn callEvalValueWithThis(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
+    const saved = vm.direct_eval_call;
+    vm.direct_eval_call = vm.isDirectEvalCallee(callee);
+    defer vm.direct_eval_call = saved;
+    return callValue(vm, callee, args, this_val);
 }
 
 fn callSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value) EvalError!Value {
@@ -6165,6 +6170,35 @@ fn storeStaticBindingFallback(
     }
 }
 
+fn loadStaticBindingFallback(
+    vm: *Interpreter,
+    frame: ?*Frame,
+    fallback: bc.BindingReferenceFallback,
+    parallel: bool,
+) EvalError!Value {
+    return switch (fallback.op) {
+        .store_local, .store_local_mapped => frame.?.readSlot(fallback.a, parallel),
+        .store_local_lexical => blk: {
+            const value_word = frame.?.readSlot(fallback.a, parallel);
+            if (vm.isTdz(value_word))
+                return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+            break :blk value_word;
+        },
+        .store_upval, .store_upval_mapped, .store_upval_lexical => blk: {
+            var target = frame.?;
+            var depth = fallback.a;
+            while (depth > 0) : (depth -= 1) target = target.parent.?;
+            const immutable_mask: u32 = @as(u32, 1) << 31;
+            const slot = if (fallback.op == .store_upval_lexical) fallback.b & ~immutable_mask else fallback.b;
+            const value_word = target.readSlot(slot, parallel);
+            if (fallback.op == .store_upval_lexical and vm.isTdz(value_word))
+                return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+            break :blk value_word;
+        },
+        else => vm.throwError("InternalError", "invalid binding-reference fallback"),
+    };
+}
+
 fn runChunk(
     vm: *Interpreter,
     exec: *Exec,
@@ -6253,8 +6287,7 @@ fn runChunk(
                         continue;
                     }
                 }
-                const v = (try vm.lookupIdent(name)) orelse (try vm.globalProp(name)) orelse return vm.throwError("ReferenceError", name);
-                if (vm.isTdz(v)) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                const v = (try vm.resolveBindingValue(name, false)).value;
                 if (!parallel_sync) recordQuickGlobalBinding(chunk, ip - 1, vm, name);
                 try stack.append(stack_alloc, v);
             },
@@ -6264,10 +6297,7 @@ fn runChunk(
             },
             .load_var_or_undef => {
                 const name = chunk.names.items[inst.a];
-                const v = (try vm.lookupIdent(name)) orelse (try vm.globalProp(name)) orelse Value.undef();
-                // `typeof` suppresses only an unresolvable reference; a lexical
-                // binding that exists but remains uninitialized still throws.
-                if (vm.isTdz(v)) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                const v = (try vm.resolveBindingValue(name, true)).value;
                 try stack.append(stack_alloc, v);
             },
             .store_var => {
@@ -6317,6 +6347,26 @@ fn runChunk(
                     environment_limit,
                 );
             },
+            .load_binding_ref => {
+                const plan = chunk.binding_reference_plans.items[inst.a];
+                const reference = exec.binding_references[inst.a];
+                const retain = (inst.b & bc.binding_ref_load_retain) != 0;
+                defer if (!retain) {
+                    exec.binding_references[inst.a] = .empty;
+                };
+                const loaded: interp.CapturedBindingValue = if (reference == .static)
+                    .{ .value = try loadStaticBindingFallback(vm, frame, plan.fallback, parallel_sync) }
+                else
+                    try vm.loadCapturedBindingReference(
+                        reference,
+                        chunk.names.items[plan.name_index],
+                        (inst.b & bc.binding_ref_load_allow_unresolvable) != 0,
+                    );
+                if ((inst.b & bc.binding_ref_load_with_base) != 0)
+                    try stack.append(stack_alloc, loaded.with_base);
+                try stack.append(stack_alloc, loaded.value);
+            },
+            .clear_binding_ref => exec.binding_references[inst.a] = .empty,
             .store_binding_ref => {
                 const plan = chunk.binding_reference_plans.items[inst.a];
                 const reference = exec.binding_references[inst.a];
@@ -7194,6 +7244,24 @@ fn runChunk(
                 }
                 return try callEvalValue(vm, callee, stack.items[base..]);
             },
+            .tail_call_eval_with_this => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const this_val = stack.items[base - 1];
+                const callee = stack.items[base - 2];
+                if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], this_val, Value.undef());
+                        stack.shrinkRetainingCapacity(base - 2);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callEvalValueWithThis(vm, callee, stack.items[base..], this_val);
+            },
             .call_eval => {
                 // A bare `eval(args)` call: mark it a DIRECT eval so, if the callee
                 // is the eval intrinsic, the eval'd code runs in this body's scope
@@ -7203,6 +7271,15 @@ fn runChunk(
                 const callee = stack.items[base - 1];
                 const result = try callEvalValue(vm, callee, stack.items[base..]);
                 stack.shrinkRetainingCapacity(base - 1);
+                try stack.append(stack_alloc, result);
+            },
+            .call_eval_with_this => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const this_val = stack.items[base - 1];
+                const callee = stack.items[base - 2];
+                const result = try callEvalValueWithThis(vm, callee, stack.items[base..], this_val);
+                stack.shrinkRetainingCapacity(base - 2);
                 try stack.append(stack_alloc, result);
             },
             .import_call => {
@@ -7257,6 +7334,12 @@ fn runChunk(
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
                 try stack.append(stack_alloc, try callEvalValue(vm, callee, try spreadArguments(vm, args_arr)));
+            },
+            .call_eval_with_this_spread => {
+                const args_arr = stack.pop().?;
+                const this_val = stack.pop().?;
+                const callee = stack.pop().?;
+                try stack.append(stack_alloc, try callEvalValueWithThis(vm, callee, try spreadArguments(vm, args_arr), this_val));
             },
             .call_with_this_spread => {
                 const args_arr = stack.pop().?;

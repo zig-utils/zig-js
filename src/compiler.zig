@@ -82,6 +82,10 @@ const FnScope = struct {
     /// name resolution must stop at this boundary before falling back to an
     /// enclosing non-deletable slot.
     parent_environment_depth: u32 = 0,
+    /// Object Environment Records between this frame and its parent frame at
+    /// closure creation. Kept separate from declarative environments so
+    /// ordinary no-`with` slot accesses retain their direct bytecodes.
+    parent_with_depth: u32 = 0,
     names: std.StringHashMapUnmanaged(SlotBinding) = .{},
     lexical_scopes: std.ArrayListUnmanaged(*std.StringHashMapUnmanaged(SlotBinding)) = .empty,
     slot_names: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -1017,6 +1021,9 @@ pub const Compiler = struct {
     /// Number of runtime declarative/with environments emitted above this
     /// activation's entry environment.
     environment_depth: u32 = 0,
+    /// Number of Object Environment Records among `environment_depth`.
+    /// Nested function scopes retain the parent contribution separately.
+    with_depth: u32 = 0,
     /// The single classification for the repeated loop body currently being
     /// lowered. Nested blocks reuse its exact captured-name and catch-pattern
     /// results instead of walking the root once per lexical declaration.
@@ -1553,8 +1560,27 @@ pub const Compiler = struct {
         return .global;
     }
 
+    /// Count only the `with` records that can intervene before the statically
+    /// resolved binding boundary. Declarative block/class environments are
+    /// already represented by `resolve`; treating them as dynamic would add
+    /// Reference slots to ordinary no-`with` code and block native fast paths.
+    fn withDepthToResolution(self: *Compiler, name: []const u8) u32 {
+        var depth = self.with_depth;
+        var scope = self.scope;
+        while (scope) |sc| {
+            if (sc.get(name) != null) return depth;
+            depth += sc.parent_with_depth;
+            scope = sc.parent;
+        }
+        return depth;
+    }
+
     /// Emit a load of `name` to the appropriate location (local / upvalue / global).
     fn emitLoad(self: *Compiler, name: []const u8) CompileError!void {
+        if (try self.dynamicBindingReferencePlan(name)) |reference| {
+            try self.emitLoadBindingReference(reference, false, false, false);
+            return;
+        }
         switch (self.resolve(name)) {
             .local => |binding| _ = try self.chunk.emit(if (binding.mapped_parameter) .load_local_mapped else if (binding.tdz_checked) .load_local_lexical else .load_local, binding.slot),
             .upval => |u| _ = try self.chunk.emitAB(if (u.binding.mapped_parameter) .load_upval_mapped else if (u.binding.tdz_checked) .load_upval_lexical else .load_upval, u.depth, u.binding.slot),
@@ -1627,6 +1653,46 @@ pub const Compiler = struct {
 
     fn emitStoreBindingReference(self: *Compiler, index: u32) CompileError!void {
         _ = try self.chunk.emit(.store_binding_ref, index);
+    }
+
+    fn emitStoreBindingReferenceLeavingValue(self: *Compiler, index: u32) CompileError!void {
+        _ = try self.chunk.emit(.dup, 0);
+        try self.emitStoreBindingReference(index);
+    }
+
+    fn emitLoadBindingReference(
+        self: *Compiler,
+        index: u32,
+        retain: bool,
+        with_base: bool,
+        allow_unresolvable: bool,
+    ) CompileError!void {
+        const flags = (if (retain) bc.binding_ref_load_retain else 0) |
+            (if (with_base) bc.binding_ref_load_with_base else 0) |
+            (if (allow_unresolvable) bc.binding_ref_load_allow_unresolvable else 0);
+        _ = try self.chunk.emitAB(.load_binding_ref, index, flags);
+    }
+
+    fn emitClearBindingReference(self: *Compiler, index: u32) CompileError!void {
+        _ = try self.chunk.emit(.clear_binding_ref, index);
+    }
+
+    fn dynamicBindingReferencePlan(self: *Compiler, name: []const u8) CompileError!?u32 {
+        if (self.withDepthToResolution(name) == 0) return null;
+        return try self.bindingReferencePlan(name);
+    }
+
+    /// Assignment creates its Reference before evaluating the RHS. Slot-backed
+    /// no-`with` targets are immutable compile-time References; name-backed
+    /// Environment/global targets require an activation-owned snapshot even
+    /// without `with` so strict unresolvable and deletion/creation ordering is
+    /// not delayed until PutValue.
+    fn assignmentBindingReferencePlan(self: *Compiler, name: []const u8) CompileError!?u32 {
+        if (self.withDepthToResolution(name) != 0) return try self.bindingReferencePlan(name);
+        return switch (self.resolve(name)) {
+            .environment, .global => try self.bindingReferencePlan(name),
+            .local, .upval => null,
+        };
     }
 
     /// Emit a definition of `name` (var/let/const/function decl) with its value
@@ -2346,8 +2412,10 @@ pub const Compiler = struct {
                 try self.compileExpr(w.obj);
                 _ = try self.chunk.emit(.enter_with, 0);
                 self.environment_depth += 1;
+                self.with_depth += 1;
                 try self.compileStmt(w.body);
                 _ = try self.chunk.emit(.exit_with, 0);
+                self.with_depth -= 1;
                 self.environment_depth -= 1;
             },
             else => return error.Unsupported,
@@ -3437,6 +3505,17 @@ pub const Compiler = struct {
         }
     }
 
+    /// Emit `[WithBaseObject-or-undefined, callee]` for an identifier whose
+    /// static target can be preceded by a `with` record. The Reference is
+    /// resolved and consumed once; argument evaluation then keeps both Values
+    /// precisely rooted on the operand stack.
+    fn emitDynamicIdentifierCallee(self: *Compiler, callee: *Node) CompileError!bool {
+        if (callee.* != .identifier) return false;
+        const reference = try self.dynamicBindingReferencePlan(callee.identifier) orelse return false;
+        try self.emitLoadBindingReference(reference, false, true, false);
+        return true;
+    }
+
     fn compileTailCall(self: *Compiler, c: anytype) CompileError!void {
         const spread = hasSpread(c.args);
         if (c.callee.* == .super_member) {
@@ -3495,6 +3574,21 @@ pub const Compiler = struct {
         // slot-backed locals and the owning arguments binding. Env-mode chunks
         // retain tail_call_eval; frame-mode functions stay on the tree walker.
         if (self.scope != null and is_eval) return error.Unsupported;
+        if (try self.emitDynamicIdentifierCallee(c.callee)) {
+            _ = try self.chunk.emit(.swap, 0); // [callee, WithBaseObject]
+            if (spread) {
+                if (is_eval) return error.Unsupported;
+                try self.compileArgsArray(c.args);
+                _ = try self.chunk.emit(.tail_call_with_this_spread, 0);
+            } else {
+                for (c.args) |arg| try self.compileExpr(arg);
+                _ = try self.chunk.emit(
+                    if (is_eval) .tail_call_eval_with_this else .tail_call_with_this,
+                    @intCast(c.args.len),
+                );
+            }
+            return;
+        }
         try self.compileExpr(c.callee);
         if (spread) {
             // A direct eval in a slot-backed function must observe that
@@ -3760,6 +3854,7 @@ pub const Compiler = struct {
         const spread = hasSpread(call.args);
 
         var has_receiver = false;
+        var identifier_eval_with_base = false;
         if (call.callee.* == .member) {
             try self.compileOptionalMemberReference(call.callee.member, exits);
             has_receiver = true;
@@ -3769,6 +3864,10 @@ pub const Compiler = struct {
         } else if (call.callee.* == .super_member) {
             try self.compileOptionalSuperReference(call.callee.super_member);
             has_receiver = true;
+        } else if (try self.emitDynamicIdentifierCallee(call.callee)) {
+            has_receiver = true;
+            identifier_eval_with_base = !call.optional and
+                std.mem.eql(u8, call.callee.identifier, "eval");
         } else {
             try self.compileOptionalValue(call.callee, exits);
         }
@@ -3777,9 +3876,12 @@ pub const Compiler = struct {
         if (has_receiver) _ = try self.chunk.emit(.swap, 0); // [method, receiver]
 
         if (spread) {
+            if (is_tail and identifier_eval_with_base) return error.Unsupported;
             try self.compileArgsArray(call.args);
             _ = try self.chunk.emit(
-                if (has_receiver)
+                if (identifier_eval_with_base)
+                    .call_eval_with_this_spread
+                else if (has_receiver)
                     if (is_tail) .tail_call_with_this_spread else .call_with_this_spread
                 else if (is_tail)
                     .tail_call_spread
@@ -3792,7 +3894,9 @@ pub const Compiler = struct {
 
         for (call.args) |arg| try self.compileExpr(arg);
         _ = try self.chunk.emit(
-            if (has_receiver)
+            if (identifier_eval_with_base)
+                if (is_tail) .tail_call_eval_with_this else .call_eval_with_this
+            else if (has_receiver)
                 if (is_tail) .tail_call_with_this else .call_with_this
             else if (is_tail)
                 .tail_call
@@ -3878,6 +3982,13 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
             return;
         }
+        if (try self.emitDynamicIdentifierCallee(tag)) {
+            _ = try self.chunk.emit(.swap, 0); // [tag, WithBaseObject]
+            _ = try self.chunk.emit(.template_object, ti);
+            for (exprs) |e| try self.compileExpr(e);
+            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
+            return;
+        }
         // Plain tag (identifier / call / …): this = undefined.
         try self.compileExpr(tag);
         _ = try self.chunk.emit(.template_object, ti);
@@ -3909,6 +4020,13 @@ pub const Compiler = struct {
             },
             .identifier => |name| try self.emitLoad(name),
             .unary => |u| {
+                if (u.op == .typeof and u.operand.* == .identifier) {
+                    if (try self.dynamicBindingReferencePlan(u.operand.identifier)) |reference| {
+                        try self.emitLoadBindingReference(reference, false, false, true);
+                        _ = try self.chunk.emit(.typeof_op, 0);
+                        return;
+                    }
+                }
                 // `typeof <unresolved global>` must yield "undefined", not throw,
                 // so a global-identifier operand loads non-throwingly.
                 if (u.op == .typeof and u.operand.* == .identifier and
@@ -3987,11 +4105,15 @@ pub const Compiler = struct {
             },
             .assign => |a| switch (a.target.*) {
                 .identifier => |name| {
+                    const reference = try self.assignmentBindingReferencePlan(name);
                     try self.compileExpr(a.value);
                     // NamedEvaluation names `x = function(){}` (a bare, unparenthesized
                     // identifier target); `(x) = …` is not an IdentifierRef.
                     if (!a.target_parenthesized) try self.emitNamedEval(a.value, name);
-                    try self.emitStore(name);
+                    if (reference) |binding|
+                        try self.emitStoreBindingReferenceLeavingValue(binding)
+                    else
+                        try self.emitStore(name);
                 },
                 .member => |m| {
                     try self.compileExpr(m.object);
@@ -4020,6 +4142,7 @@ pub const Compiler = struct {
             // Logical assignment on a member target must resolve the reference
             // once across the read, short-circuit, and possible write.
             .logical_assign => |a| switch (a.target.*) {
+                .identifier => try self.compileIdentifierLogicalAssign(a),
                 .member => try self.compileMemberLogicalAssign(a),
                 .super_member => try self.compileSuperLogicalAssign(a),
                 else => return error.Unsupported,
@@ -4031,10 +4154,17 @@ pub const Compiler = struct {
                 // its activation-owned lowering scoped to destructuring and
                 // simple `var` initialization.
                 .identifier => |name| {
-                    try self.emitLoad(name);
+                    const reference = try self.assignmentBindingReferencePlan(name);
+                    if (reference) |binding|
+                        try self.emitLoadBindingReference(binding, true, false, false)
+                    else
+                        try self.emitLoad(name);
                     try self.compileExpr(oa.value);
                     _ = try self.chunk.emit(try compoundAssignmentOp(oa.op), 0);
-                    try self.emitStore(name);
+                    if (reference) |binding|
+                        try self.emitStoreBindingReferenceLeavingValue(binding)
+                    else
+                        try self.emitStore(name);
                 },
                 .member => try self.compileMemberCompoundAssign(oa),
                 .super_member => try self.compileSuperCompoundAssign(oa),
@@ -4148,6 +4278,20 @@ pub const Compiler = struct {
                     const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
                     if (self.scope != null and is_eval)
                         return error.Unsupported;
+                    if (try self.emitDynamicIdentifierCallee(c.callee)) {
+                        _ = try self.chunk.emit(.swap, 0); // [callee, WithBaseObject]
+                        if (spread) {
+                            try self.compileArgsArray(c.args);
+                            _ = try self.chunk.emit(if (is_eval) .call_eval_with_this_spread else .call_with_this_spread, 0);
+                        } else {
+                            for (c.args) |arg| try self.compileExpr(arg);
+                            _ = try self.chunk.emit(
+                                if (is_eval) .call_eval_with_this else .call_with_this,
+                                @intCast(c.args.len),
+                            );
+                        }
+                        return;
+                    }
                     try self.compileExpr(c.callee);
                     if (spread) {
                         try self.compileArgsArray(c.args);
@@ -4298,17 +4442,31 @@ pub const Compiler = struct {
                 // would string-concatenate a string operand and TypeError a
                 // BigInt. The inc/dec opcodes add 1 of the numeric operand type.
                 const step: bc.Op = if (inc) .inc else .dec;
+                const reference = try self.assignmentBindingReferencePlan(name);
                 if (prefix) {
-                    try self.emitLoad(name);
+                    if (reference) |binding|
+                        try self.emitLoadBindingReference(binding, true, false, false)
+                    else
+                        try self.emitLoad(name);
                     _ = try self.chunk.emit(step, 0);
-                    try self.emitStore(name); // leaves the new value
+                    if (reference) |binding|
+                        try self.emitStoreBindingReferenceLeavingValue(binding)
+                    else
+                        try self.emitStore(name); // leaves the new value
                 } else {
-                    try self.emitLoad(name);
+                    if (reference) |binding|
+                        try self.emitLoadBindingReference(binding, true, false, false)
+                    else
+                        try self.emitLoad(name);
                     _ = try self.chunk.emit(.to_numeric, 0); // postfix result is the numeric old value
                     _ = try self.chunk.emit(.dup, 0); // keep the numeric old value
                     _ = try self.chunk.emit(step, 0);
-                    try self.emitStore(name);
-                    _ = try self.chunk.emit(.pop, 0); // discard the new value, leave the old
+                    if (reference) |binding|
+                        try self.emitStoreBindingReference(binding)
+                    else {
+                        try self.emitStore(name);
+                        _ = try self.chunk.emit(.pop, 0); // discard the new value, leave the old
+                    }
                 }
             },
             .member => try self.compileMemberUpdate(inc, prefix, target),
@@ -4620,6 +4778,36 @@ pub const Compiler = struct {
         try self.emitSetSuperRef(ref);
     }
 
+    fn compileIdentifierLogicalAssign(self: *Compiler, assignment: anytype) CompileError!void {
+        const name = assignment.target.identifier;
+        const reference = try self.assignmentBindingReferencePlan(name);
+        if (reference) |binding|
+            try self.emitLoadBindingReference(binding, true, false, false)
+        else
+            try self.emitLoad(name);
+        const short = try self.chunk.emit(switch (assignment.op) {
+            .@"and" => .jump_if_false_peek,
+            .@"or" => .jump_if_true_peek,
+            .nullish => .jump_if_not_nullish_peek,
+        }, 0);
+
+        _ = try self.chunk.emit(.pop, 0);
+        try self.compileExpr(assignment.value);
+        if (reference) |binding|
+            try self.emitStoreBindingReferenceLeavingValue(binding)
+        else
+            try self.emitStore(name);
+
+        if (reference) |binding| {
+            const to_end = try self.chunk.emit(.jump, 0);
+            self.chunk.patchToHere(short);
+            try self.emitClearBindingReference(binding);
+            self.chunk.patchToHere(to_end);
+        } else {
+            self.chunk.patchToHere(short);
+        }
+    }
+
     fn compileSuperLogicalAssign(self: *Compiler, assignment: anytype) CompileError!void {
         const ref = try self.compileSuperRef(assignment.target, true, true);
         try self.emitGetSuperRef(ref);
@@ -4924,6 +5112,7 @@ pub const Compiler = struct {
         scope.* = .{
             .parent = self.scope,
             .parent_environment_depth = self.environment_depth,
+            .parent_with_depth = self.with_depth,
             .tdz_checks = tdz_checks,
         };
 
@@ -6325,6 +6514,60 @@ test "compiler bounds identifier deletion before frame bindings" {
         },
         .rejected => return error.TestUnexpectedResult,
     }
+}
+
+test "compiler lowers with identifier references without perturbing direct slots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function direct(fn, value){ var local = value; local = local + 1; local += 2; local &&= 3; local++; var called = fn(); return local + called; } function dynamic(fn, object){ var local = 1, result; with (object) { result = local + fn(); local += 1; local ||= 2; local++; } return result + local; } function outer(object){ var local = 1, nested; with (object) { nested = function(){ return local; }; } return nested; }",
+    );
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 3), program.program.len);
+
+    const direct = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 0), direct.binding_reference_plans.items.len);
+    for (direct.code.items) |instruction| switch (instruction.op) {
+        .resolve_binding_ref, .load_binding_ref, .clear_binding_ref, .store_binding_ref => return error.TestUnexpectedResult,
+        else => {},
+    };
+
+    const dynamic = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[1].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(dynamic.binding_reference_plans.items.len > 0);
+    var saw_resolve = false;
+    var saw_load = false;
+    var saw_clear = false;
+    var saw_store = false;
+    var saw_call_with_this = false;
+    for (dynamic.code.items) |instruction| switch (instruction.op) {
+        .resolve_binding_ref => saw_resolve = true,
+        .load_binding_ref => saw_load = true,
+        .clear_binding_ref => saw_clear = true,
+        .store_binding_ref => saw_store = true,
+        .call_with_this => saw_call_with_this = true,
+        else => {},
+    };
+    try std.testing.expect(saw_resolve);
+    try std.testing.expect(saw_load);
+    try std.testing.expect(saw_clear);
+    try std.testing.expect(saw_store);
+    try std.testing.expect(saw_call_with_this);
+
+    const outer = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[2].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    const nested = outer.fns.items[0].chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(nested.binding_reference_plans.items.len > 0);
+    for (nested.binding_reference_plans.items) |plan|
+        try std.testing.expectEqual(@as(u32, 1), plan.environment_depth);
 }
 
 test "compiler lowers import.meta across module function tiers" {

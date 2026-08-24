@@ -32156,6 +32156,185 @@ test "forced tree-walker and required bytecode preserve captured with binding re
     }
 }
 
+test "forced tree-walker and required bytecode resolve ordinary identifiers through with" {
+    // #732: ordinary IdentifierReferences use the same exact Reference for
+    // GetValue, call WithBaseObject, and any later PutValue. Each source runs on
+    // the tree walker, required bytecode, and required no-GIL parallel JS.
+    const sources = [5][]const u8{
+        \\globalThis.referenceHasCounts = { readName: 0, callName: 0, tagName: 0, localOnly: 0 };
+        \\globalThis.referenceUnscopablesCount = 0;
+        \\globalThis.referenceGcBudget = 5;
+        \\function wrapReferenceTarget(target) {
+        \\  return new Proxy(target, {
+        \\    has: function (object, key) {
+        \\      if (key === "readName" || key === "callName" || key === "tagName" || key === "localOnly") {
+        \\        referenceHasCounts[key]++;
+        \\        if (referenceGcBudget > 0) { referenceGcBudget--; $vm.gc(); }
+        \\      }
+        \\      return Reflect.has(object, key);
+        \\    },
+        \\    get: function (object, key, receiver) {
+        \\      if (key === Symbol.unscopables) {
+        \\        referenceUnscopablesCount++;
+        \\        if (referenceGcBudget > 0) { referenceGcBudget--; $vm.gc(); }
+        \\      }
+        \\      return Reflect.get(object, key, receiver);
+        \\    }
+        \\  });
+        \\}
+        \\function ordinaryReferences() {
+        \\  var readResult, callResult, tagResult, missResult, closure;
+        \\  var localOnly = 4;
+        \\  var wrapped;
+        \\  var target = {
+        \\    readName: 2,
+        \\    callName: function (value) { return (this === wrapped ? 10 : 0) + value; },
+        \\    tagName: function (strings) { return (this === wrapped ? 20 : 0) + strings[0].length; }
+        \\  };
+        \\  wrapped = wrapReferenceTarget(target);
+        \\  with (wrapped) {
+        \\    readResult = readName;
+        \\    callResult = callName(3);
+        \\    tagResult = tagName`xy`;
+        \\    missResult = localOnly;
+        \\    closure = function () { return readName; };
+        \\  }
+        \\  target.readName = 9;
+        \\  return [readResult, callResult, tagResult, missResult, closure()].join(",") + ":" +
+        \\    [referenceHasCounts.readName, referenceHasCounts.callName, referenceHasCounts.tagName,
+        \\     referenceHasCounts.localOnly, referenceUnscopablesCount].join(",");
+        \\}
+        \\ordinaryReferences()
+        ,
+        \\function deletingGetter(object, value) {
+        \\  Object.defineProperty(object, "x", {
+        \\    configurable: true,
+        \\    get: function () { delete object.x; $vm.gc(); return value; }
+        \\  });
+        \\  return object;
+        \\}
+        \\function referenceWrites() {
+        \\  var x = 100;
+        \\  var simple = { x: 1 }, simpleResult;
+        \\  with (simple) { simpleResult = (x = (delete simple.x, 7)); }
+        \\  var compound = deletingGetter({}, 2), compoundResult;
+        \\  with (compound) { compoundResult = (x += 3); }
+        \\  var logical = { x: 1 }, logicalResult;
+        \\  with (logical) { logicalResult = (x &&= (delete logical.x, 8)); }
+        \\  var update = deletingGetter({}, 4), postResult;
+        \\  with (update) { postResult = x++; }
+        \\  var strictObject = deletingGetter({}, 6), strictCall;
+        \\  with (strictObject) {
+        \\    strictCall = function () { "use strict"; return x += 1; };
+        \\  }
+        \\  var strictResult;
+        \\  try { strictCall(); strictResult = "missed"; }
+        \\  catch (error) { strictResult = error.name + ":" + ("x" in strictObject); }
+        \\  return [x, simpleResult, simple.x, compoundResult, compound.x,
+        \\    logicalResult, logical.x, postResult, update.x, strictResult].join(",");
+        \\}
+        \\referenceWrites()
+        ,
+        \\function* directAndSuspended(target) {
+        \\  var local = 41, directResult, shadowResult;
+        \\  with ({}) { directResult = eval("local + 1"); }
+        \\  var shadow = { eval: function () { return this === shadow ? 7 : 0; } };
+        \\  with (shadow) { shadowResult = eval("ignored"); }
+        \\  var x = 100;
+        \\  with (target) { x += yield directResult + ":" + shadowResult; }
+        \\  return x + ":" + target.x;
+        \\}
+        \\var suspendedTarget = { x: 3 };
+        \\var suspendedIterator = directAndSuspended(suspendedTarget);
+        \\var suspendedFirst = suspendedIterator.next();
+        \\delete suspendedTarget.x;
+        \\suspendedTarget[Symbol.unscopables] = { x: true };
+        \\$vm.gc();
+        \\var suspendedSecond = suspendedIterator.next(4);
+        \\suspendedFirst.value + ":" + suspendedFirst.done + ":" + suspendedSecond.value + ":" + suspendedSecond.done
+        ,
+        \\globalThis.typeofHas = 0;
+        \\globalThis.typeofUnscopables = 0;
+        \\function typeofReferences() {
+        \\  var outer = 5, hiddenType, missingType, outerType;
+        \\  var object = { hidden: 1 };
+        \\  object[Symbol.unscopables] = { hidden: true };
+        \\  var wrapped = new Proxy(object, {
+        \\    has: function (target, key) { if (key === "hidden" || key === "missing" || key === "outer") typeofHas++; return Reflect.has(target, key); },
+        \\    get: function (target, key, receiver) { if (key === Symbol.unscopables) { typeofUnscopables++; $vm.gc(); } return Reflect.get(target, key, receiver); }
+        \\  });
+        \\  with (wrapped) {
+        \\    hiddenType = typeof hidden;
+        \\    missingType = typeof missing;
+        \\    outerType = typeof outer;
+        \\  }
+        \\  return [hiddenType, missingType, outerType, typeofHas, typeofUnscopables].join(",");
+        \\}
+        \\typeofReferences()
+        ,
+        \\globalThis.recursiveHas = 0;
+        \\globalThis.recursiveUnscopables = 0;
+        \\function recursiveReferences() {
+        \\  var recursive, wrapped;
+        \\  var target = { readName: 3 };
+        \\  wrapped = new Proxy(target, {
+        \\    has: function (object, key) { if (key === "readName" || key === "recur") recursiveHas++; return Reflect.has(object, key); },
+        \\    get: function (object, key, receiver) {
+        \\      if (key === Symbol.unscopables) { recursiveUnscopables++; $vm.gc(); }
+        \\      return Reflect.get(object, key, receiver);
+        \\    }
+        \\  });
+        \\  with (wrapped) {
+        \\    recursive = function recur(depth) {
+        \\      if (depth === 0) return readName;
+        \\      return readName + recur(depth - 1);
+        \\    };
+        \\  }
+        \\  return recursive(3) + ":" + recursiveHas + ":" + recursiveUnscopables;
+        \\}
+        \\recursiveReferences()
+        ,
+    };
+    const expected = [sources.len][]const u8{
+        "2,13,22,4,9:4,2,2,1,4",
+        "100,7,7,5,5,8,8,4,5,ReferenceError:false",
+        "42:7:false:100:7:true",
+        "undefined,undefined,number,3,1",
+        "12:8:4",
+    };
+
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    for (sources, expected) |source, expected_value| {
+        for (configurations) |configuration| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .enable_threads = configuration.parallel_js,
+                .parallel_gc = configuration.parallel_js,
+                .parallel_js = configuration.parallel_js,
+                .bytecode_execution_mode = configuration.mode,
+            });
+            defer ctx.destroy();
+            const outcome = try ctx.evaluate(source);
+            try std.testing.expect(outcome.kind() == .string);
+            try std.testing.expectEqualStrings(expected_value, outcome.asStr());
+            if (configuration.mode == .required) {
+                const inventory = ctx.bytecodeAdmissionSnapshot();
+                try std.testing.expect(inventory.count(.program_compiled) > 0);
+                try std.testing.expect(inventory.count(.template_plain_compiled) > 0);
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            }
+        }
+    }
+}
+
 test "required bytecode keeps program scratch rooted and isolated across collections and eval" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

@@ -2731,7 +2731,8 @@ pub const Parser = struct {
             const rhs = try self.parseAssignment();
             return self.alloc(.{ .op_assign = .{ .target = left, .op = op, .value = rhs } });
         }
-        // Logical assignment: `a &&= b` -> `a && (a = b)`, etc. (short-circuiting).
+        // Logical assignment retains one LeftHandSide Reference across GetValue,
+        // the short-circuit decision, RHS evaluation, and possible PutValue.
         const logassign: ?ast.LogicalOp = switch (self.cur().kind) {
             .amp_amp_eq => .@"and",
             .pipe_pipe_eq => .@"or",
@@ -2751,22 +2752,9 @@ pub const Parser = struct {
             self.paren_assign_target_name = null;
             _ = self.advance();
             const rhs = try self.parseAssignment();
-            // A member target must resolve its reference (base + computed key)
-            // exactly once, so it gets a dedicated node. An identifier target has
-            // no such hazard, so it keeps the `a && (a = b)` desugaring.
-            if (left.* != .identifier)
-                return self.alloc(.{ .logical_assign = .{ .target = left, .op = op, .value = rhs } });
             // NamedEvaluation: `a ||= function(){}` names the anonymous RHS "a".
-            // The desugared `a = b` node below is synthetic, so — unlike a source
-            // `a = b`, named at its own parse site — it must be named here (the
-            // runtime `.assign` handler names `??=` because that op tree-walks, but
-            // the VM-compiled `&&`/`||` desugaring would otherwise leave it anonymous).
-            if (!lhs_paren) nameAnon(rhs, left.identifier);
-            // Carry the parenthesization onto the synthetic assign so the runtime
-            // `.assign` handler (which re-runs NamedEvaluation for the tree-walked
-            // `??=`) also skips naming a parenthesized target.
-            const set = try self.alloc(.{ .assign = .{ .target = left, .value = rhs, .target_parenthesized = lhs_paren } });
-            return self.alloc(.{ .logical = .{ .op = op, .left = left, .right = set } });
+            if (left.* == .identifier and !lhs_paren) nameAnon(rhs, left.identifier);
+            return self.alloc(.{ .logical_assign = .{ .target = left, .op = op, .value = rhs } });
         }
         return left;
     }

@@ -2489,6 +2489,11 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
             f.unlockSlots(held);
         }
     }
+    for (machine.gc_binding_reference_roots.items) |reference| switch (reference) {
+        .environment => |environment| markManaged(v, environment),
+        .with_object, .global_object => |object| v.mark(object),
+        .empty, .static, .unresolvable => {},
+    };
     traceActiveNativeRoots(machine, v);
     for (machine.gc_wasm_roots.items) |roots| traceWasmExecutionRoots(roots, v);
     if (machine.microtasks) |q| {
@@ -2599,6 +2604,11 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
             for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
         }
     }
+    for (machine.gc_binding_reference_roots.items) |*reference| switch (reference.*) {
+        .environment => |*environment| gc_relocation.rewriteRequiredSlot(v, Environment, environment),
+        .with_object, .global_object => |*object| gc_relocation.rewriteRequiredSlot(v, Object, object),
+        .empty, .static, .unresolvable => {},
+    };
     relocateActiveNativeRoots(machine, v);
     for (machine.gc_wasm_roots.items) |roots| relocateWasmExecutionRoots(roots, v);
     if (machine.microtasks) |queue|

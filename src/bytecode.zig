@@ -310,6 +310,8 @@ pub const Op = enum(u8) {
     def_lex, // operand a: name index, b: 1 let / 2 const / 3 let-TDZ / 4 const-TDZ; pop value, define lexical binding
     bind_pattern, // operand a: pattern index, b: mode (0 var, 1 let, 2 const, 3 assign); pop value, destructure into the pattern
     resolve_binding_ref, // operand a: binding-reference plan; capture ResolveBinding before later observable work
+    load_binding_ref, // operand a: plan, b: binding_ref_load_* flags; GetValue through the captured Reference
+    clear_binding_ref, // operand a: plan; release a retained Reference on a short-circuit path
     store_binding_ref, // operand a: binding-reference plan; pop value, PutValue through the captured Reference
 
     // --- locals & upvalues (resolved to frame slots at compile time) ---
@@ -405,6 +407,7 @@ pub const Op = enum(u8) {
     register_disposable, // operand a: 0 = `using`, 1 = `await using`; pop value, register it for DisposeResources at body exit
     array_append_hole, // append an array-literal elision (a hole that reads as absent) to the array on the stack top
     call_eval, // operand a: argc; a bare `eval(args)` — marks direct-eval so a real eval runs in the current scope
+    call_eval_with_this, // operand a: argc; explicit WithBaseObject, direct only for the eval intrinsic
     import_call, // operand a: phase name index; pop options, pop specifier -> push import() promise
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
@@ -424,6 +427,7 @@ pub const Op = enum(u8) {
     call_method, // operand a: name index, b: argc; stack: recv, args... -> push result
     tail_call, // operand a: argc; stack: callee, arg0..argN-1 -> replace current activation
     tail_call_eval, // operand a: argc; direct-eval aware tail-position call
+    tail_call_eval_with_this, // operand a: argc; direct-eval-aware tail call with explicit WithBaseObject
     tail_call_method, // operand a: name index, b: argc; stack: recv, args... -> tail call recv.name
     tail_call_with_this, // operand a: argc; stack: func, this, args... -> tail call func with this
     new_call, // operand a: argc; stack: callee, args... -> push constructed object
@@ -431,6 +435,7 @@ pub const Op = enum(u8) {
     // (built with new_array/array_append/array_spread), so the call is variadic.
     call_spread, // stack: callee, args_array -> push result (this = undefined)
     call_eval_spread, // stack: eval candidate, args_array -> push direct/indirect eval result
+    call_eval_with_this_spread, // stack: eval candidate, this, args_array -> push direct/indirect eval result
     call_with_this_spread, // stack: callee, this, args_array -> push result
     tail_call_spread, // stack: callee, args_array -> replace current activation
     tail_call_with_this_spread, // stack: callee, this, args_array -> replace current activation
@@ -508,6 +513,14 @@ pub const BindingReferencePlan = struct {
     environment_depth: u32,
     fallback: BindingReferenceFallback,
 };
+
+/// `load_binding_ref` keeps the Reference for a later PutValue when `retain` is
+/// set; otherwise it clears the activation slot after GetValue. `with_base`
+/// pushes `[base, value]` so identifier calls can preserve WithBaseObject, and
+/// `allow_unresolvable` implements typeof's unresolvable-reference exception.
+pub const binding_ref_load_retain: u32 = 1 << 0;
+pub const binding_ref_load_with_base: u32 = 1 << 1;
+pub const binding_ref_load_allow_unresolvable: u32 = 1 << 2;
 
 const OptimizerBinaryProfile = struct {
     lhs_kinds: std.atomic.Value(u8) = .init(0),
