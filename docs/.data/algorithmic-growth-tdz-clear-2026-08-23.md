@@ -28,9 +28,9 @@ First→last (1024→4096) instruction growth: parent 15.7627x (exponent 1.989),
 
 ## Embedded source artifacts
 
-- 1024: `exact-parent-tdz-clear-1024-2026-08-23.json` (file SHA-256 `f3d1cdd910f266969ab46cad77285b8e86018b4d81d2072c73b0a45db25fe2dc`; embedded SHA-256 `1378500df2201adfa6d8baabaa1bf9d083f48cd7b19d8ef40f2496774c58db1c`)
-- 2048: `exact-parent-tdz-clear-2048-2026-08-23.json` (file SHA-256 `47a860d51e7e2b0fc4eeb9e486616304b6a90e77d8ce83713c3cbe3b1de14ab1`; embedded SHA-256 `8a194e4d33a1c9c51410bfa73ec727cf51ec1f97581d74aca5a4c65f08c0b7e9`)
-- 4096: `exact-parent-tdz-clear-4096-2026-08-23.json` (file SHA-256 `37bbb175176bd6d832c753696907f8fbecf0160ebfb0602fd0e3862ebf627227`; embedded SHA-256 `8632937f694fab8ba45740fc9987dfdaec587c7fbdab169b820d15ebb10544da`)
+- 1024: `exact-parent-tdz-clear-1024-2026-08-23.json` (file SHA-256 `e359f93212aa79da5d5e0384a3ea136691b9ca0713945d9b5b9677dd6a6f2e26`; embedded SHA-256 `bd675474f3a5f17ba86fd4f9473a3e8f8d528d82a77067cbfc2d3087f32df941`)
+- 2048: `exact-parent-tdz-clear-2048-2026-08-23.json` (file SHA-256 `f932425309401306d5f50c947326447f164f761ecceff2b390e94b63f42ec8d2`; embedded SHA-256 `a26101e1e71b6726a4459278055dca5b089ad14a51899b9ac5afc66c0694e1e8`)
+- 4096: `exact-parent-tdz-clear-4096-2026-08-23.json` (file SHA-256 `d38b3434f8c4de7df16fe27ddda439f475299771a107a1503066ceca1048f059`; embedded SHA-256 `cf1b79d3c6998a59b17eb26ea57d44a457e706b8afdcfae14558b67974672f8a`)
 
 Power observations: `Now drawing from 'AC Power' -InternalBattery-0 (id=38535267) 63%; charging; (no estimate) present: true`, `Now drawing from 'AC Power' -InternalBattery-0 (id=38535267) 75%; charging; (no estimate) present: true`, `Now drawing from 'AC Power' -InternalBattery-0 (id=38535267) 79%; charging; (no estimate) present: true`.
-Timed boundaries retained from the ordinary inputs: `ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns`.
+Timed boundaries retained from the ordinary inputs: `ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns`.

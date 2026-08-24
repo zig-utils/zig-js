@@ -21,7 +21,7 @@
     "candidate_binary_sha256": "f830c3b22daa829f283034a714c721485fba7d828a7195dfc83be1d1bf9a2612",
     "samples": 7,
     "minimum_process_cpu_occupancy": 0.6,
-    "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
+    "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
     "mode": "single",
     "workload": "representative_frontend_compile_tdz_clear_1024",
     "lanes": 1,

@@ -31,27 +31,27 @@
       "Now drawing from 'Battery Power' -InternalBattery-0 (id=38535267) 84%; discharging; (no estimate) present: true"
     ],
     "timed_boundaries": [
-      "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns"
+      "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns"
     ],
     "claim_boundary": "Only normalized retired instructions and exact allocation replay are scored across frozen input widths. Wall time, CPU time, RSS, cycles, energy, and thermal observations are retained from the embedded exact-parent artifacts as diagnostics and cannot support a throughput, latency, energy, or full-efficiency claim.",
     "source_artifacts": [
       {
         "width": 1024,
         "file": "exact-binding_inventory_unique-1024-2026-08-23.json",
-        "file_sha256": "e42046f943959019e3fa156ce3030ebd6936c6f4fe337aad2b7130f9d82adbf6",
-        "embedded_artifact_sha256": "a3be77a079aceb57e99241bae1f256b7ee4b3fbfe8435a76e14773e1276b1f9a"
+        "file_sha256": "2384578ea4fe12eee6aa499e6255a391350a3f0b0eb18e8f3e0c5128a1a5e6b8",
+        "embedded_artifact_sha256": "f429769b76b13c2c65d71ad4ec95d5f7faf2dde5653a4f6bfe4be4b5e5c31828"
       },
       {
         "width": 2048,
         "file": "exact-binding_inventory_unique-2048-2026-08-23.json",
-        "file_sha256": "4e8fd00f15fdab25b8365adbea50ca99cdc235229445f3fb8f60f807a905bf3b",
-        "embedded_artifact_sha256": "e5153fa054879ba7e9cfc392aee7123693d600f2e32165b7ddd4b95ff35fd549"
+        "file_sha256": "8835451543146e1b882a637a3639b7a193c55a34f4d0087f337a55ad4581716c",
+        "embedded_artifact_sha256": "34ec9bdf31a5be31df4857a6a0b2b9ee1598b769e83bab6f225ebc13ff9123fb"
       },
       {
         "width": 4096,
         "file": "exact-binding_inventory_unique-4096-2026-08-23.json",
-        "file_sha256": "6565a2d242c896cdc0e54987cb160a3298b05303f376f715d0ed53c61002988a",
-        "embedded_artifact_sha256": "1be9f3f15718574dcdaceee700514d442abb07002d8b7c7434ad872b541db850"
+        "file_sha256": "117478411b9e20814a273be123ce923addc188f70c97e70ec307d0cbfcb2eb3e",
+        "embedded_artifact_sha256": "fd5beb000198e442c0e1cc99942a2e920d0812cd940c27df9a77762fa96a390a"
       }
     ]
   },
@@ -59,8 +59,8 @@
     {
       "width": 1024,
       "source_file": "exact-binding_inventory_unique-1024-2026-08-23.json",
-      "source_file_sha256": "e42046f943959019e3fa156ce3030ebd6936c6f4fe337aad2b7130f9d82adbf6",
-      "embedded_artifact_sha256": "a3be77a079aceb57e99241bae1f256b7ee4b3fbfe8435a76e14773e1276b1f9a",
+      "source_file_sha256": "2384578ea4fe12eee6aa499e6255a391350a3f0b0eb18e8f3e0c5128a1a5e6b8",
+      "embedded_artifact_sha256": "f429769b76b13c2c65d71ad4ec95d5f7faf2dde5653a4f6bfe4be4b5e5c31828",
       "artifact": {
         "schema_version": 1,
         "profile_id": "zig-js-performance-attribution-v1",
@@ -84,7 +84,7 @@
           "candidate_binary_sha256": "8087331ab75764f0f070990f2d3932913734f139f63b45d774b15e948772bf48",
           "samples": 7,
           "minimum_process_cpu_occupancy": 0.6,
-          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
+          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
           "mode": "single",
           "workload": "representative_frontend_compile_binding_inventory_unique_1024",
           "lanes": 1,
@@ -5047,8 +5047,8 @@
     {
       "width": 2048,
       "source_file": "exact-binding_inventory_unique-2048-2026-08-23.json",
-      "source_file_sha256": "4e8fd00f15fdab25b8365adbea50ca99cdc235229445f3fb8f60f807a905bf3b",
-      "embedded_artifact_sha256": "e5153fa054879ba7e9cfc392aee7123693d600f2e32165b7ddd4b95ff35fd549",
+      "source_file_sha256": "8835451543146e1b882a637a3639b7a193c55a34f4d0087f337a55ad4581716c",
+      "embedded_artifact_sha256": "34ec9bdf31a5be31df4857a6a0b2b9ee1598b769e83bab6f225ebc13ff9123fb",
       "artifact": {
         "schema_version": 1,
         "profile_id": "zig-js-performance-attribution-v1",
@@ -5072,7 +5072,7 @@
           "candidate_binary_sha256": "8087331ab75764f0f070990f2d3932913734f139f63b45d774b15e948772bf48",
           "samples": 7,
           "minimum_process_cpu_occupancy": 0.6,
-          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
+          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
           "mode": "single",
           "workload": "representative_frontend_compile_binding_inventory_unique_2048",
           "lanes": 1,
@@ -10035,8 +10035,8 @@
     {
       "width": 4096,
       "source_file": "exact-binding_inventory_unique-4096-2026-08-23.json",
-      "source_file_sha256": "6565a2d242c896cdc0e54987cb160a3298b05303f376f715d0ed53c61002988a",
-      "embedded_artifact_sha256": "1be9f3f15718574dcdaceee700514d442abb07002d8b7c7434ad872b541db850",
+      "source_file_sha256": "117478411b9e20814a273be123ce923addc188f70c97e70ec307d0cbfcb2eb3e",
+      "embedded_artifact_sha256": "fd5beb000198e442c0e1cc99942a2e920d0812cd940c27df9a77762fa96a390a",
       "artifact": {
         "schema_version": 1,
         "profile_id": "zig-js-performance-attribution-v1",
@@ -10060,7 +10060,7 @@
           "candidate_binary_sha256": "8087331ab75764f0f070990f2d3932913734f139f63b45d774b15e948772bf48",
           "samples": 7,
           "minimum_process_cpu_occupancy": 0.6,
-          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
+          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
           "mode": "single",
           "workload": "representative_frontend_compile_binding_inventory_unique_4096",
           "lanes": 1,

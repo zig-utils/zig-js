@@ -8,7 +8,7 @@
 - material-change categories: `cpu_work`
 - sampling: 7 order-balanced pairs; no discarded samples
 - process quality: every complete process used at least 60% CPU occupancy; before/after snapshots reject persistent competing jobs
-- timed boundary: ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns
+- timed boundary: ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns
 
 | parent median | candidate median | candidate / parent | parent RSD | candidate RSD | assessment |
 | ---: | ---: | ---: | ---: | ---: | --- |

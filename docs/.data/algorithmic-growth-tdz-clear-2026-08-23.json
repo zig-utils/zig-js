@@ -31,27 +31,27 @@
       "Now drawing from 'AC Power' -InternalBattery-0 (id=38535267) 79%; charging; (no estimate) present: true"
     ],
     "timed_boundaries": [
-      "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns"
+      "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns"
     ],
     "claim_boundary": "Only normalized retired instructions and exact allocation replay are scored across frozen input widths. Wall time, CPU time, RSS, cycles, energy, and thermal observations are retained from the embedded exact-parent artifacts as diagnostics and cannot support a throughput, latency, energy, or full-efficiency claim.",
     "source_artifacts": [
       {
         "width": 1024,
         "file": "exact-parent-tdz-clear-1024-2026-08-23.json",
-        "file_sha256": "f3d1cdd910f266969ab46cad77285b8e86018b4d81d2072c73b0a45db25fe2dc",
-        "embedded_artifact_sha256": "1378500df2201adfa6d8baabaa1bf9d083f48cd7b19d8ef40f2496774c58db1c"
+        "file_sha256": "e359f93212aa79da5d5e0384a3ea136691b9ca0713945d9b5b9677dd6a6f2e26",
+        "embedded_artifact_sha256": "bd675474f3a5f17ba86fd4f9473a3e8f8d528d82a77067cbfc2d3087f32df941"
       },
       {
         "width": 2048,
         "file": "exact-parent-tdz-clear-2048-2026-08-23.json",
-        "file_sha256": "47a860d51e7e2b0fc4eeb9e486616304b6a90e77d8ce83713c3cbe3b1de14ab1",
-        "embedded_artifact_sha256": "8a194e4d33a1c9c51410bfa73ec727cf51ec1f97581d74aca5a4c65f08c0b7e9"
+        "file_sha256": "f932425309401306d5f50c947326447f164f761ecceff2b390e94b63f42ec8d2",
+        "embedded_artifact_sha256": "a26101e1e71b6726a4459278055dca5b089ad14a51899b9ac5afc66c0694e1e8"
       },
       {
         "width": 4096,
         "file": "exact-parent-tdz-clear-4096-2026-08-23.json",
-        "file_sha256": "37bbb175176bd6d832c753696907f8fbecf0160ebfb0602fd0e3862ebf627227",
-        "embedded_artifact_sha256": "8632937f694fab8ba45740fc9987dfdaec587c7fbdab169b820d15ebb10544da"
+        "file_sha256": "d38b3434f8c4de7df16fe27ddda439f475299771a107a1503066ceca1048f059",
+        "embedded_artifact_sha256": "cf1b79d3c6998a59b17eb26ea57d44a457e706b8afdcfae14558b67974672f8a"
       }
     ]
   },
@@ -59,8 +59,8 @@
     {
       "width": 1024,
       "source_file": "exact-parent-tdz-clear-1024-2026-08-23.json",
-      "source_file_sha256": "f3d1cdd910f266969ab46cad77285b8e86018b4d81d2072c73b0a45db25fe2dc",
-      "embedded_artifact_sha256": "1378500df2201adfa6d8baabaa1bf9d083f48cd7b19d8ef40f2496774c58db1c",
+      "source_file_sha256": "e359f93212aa79da5d5e0384a3ea136691b9ca0713945d9b5b9677dd6a6f2e26",
+      "embedded_artifact_sha256": "bd675474f3a5f17ba86fd4f9473a3e8f8d528d82a77067cbfc2d3087f32df941",
       "artifact": {
         "schema_version": 1,
         "profile_id": "zig-js-performance-attribution-v1",
@@ -84,7 +84,7 @@
           "candidate_binary_sha256": "f830c3b22daa829f283034a714c721485fba7d828a7195dfc83be1d1bf9a2612",
           "samples": 7,
           "minimum_process_cpu_occupancy": 0.6,
-          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
+          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
           "mode": "single",
           "workload": "representative_frontend_compile_tdz_clear_1024",
           "lanes": 1,
@@ -5047,8 +5047,8 @@
     {
       "width": 2048,
       "source_file": "exact-parent-tdz-clear-2048-2026-08-23.json",
-      "source_file_sha256": "47a860d51e7e2b0fc4eeb9e486616304b6a90e77d8ce83713c3cbe3b1de14ab1",
-      "embedded_artifact_sha256": "8a194e4d33a1c9c51410bfa73ec727cf51ec1f97581d74aca5a4c65f08c0b7e9",
+      "source_file_sha256": "f932425309401306d5f50c947326447f164f761ecceff2b390e94b63f42ec8d2",
+      "embedded_artifact_sha256": "a26101e1e71b6726a4459278055dca5b089ad14a51899b9ac5afc66c0694e1e8",
       "artifact": {
         "schema_version": 1,
         "profile_id": "zig-js-performance-attribution-v1",
@@ -5072,7 +5072,7 @@
           "candidate_binary_sha256": "f830c3b22daa829f283034a714c721485fba7d828a7195dfc83be1d1bf9a2612",
           "samples": 7,
           "minimum_process_cpu_occupancy": 0.6,
-          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
+          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
           "mode": "single",
           "workload": "representative_frontend_compile_tdz_clear_2048",
           "lanes": 1,
@@ -10035,8 +10035,8 @@
     {
       "width": 4096,
       "source_file": "exact-parent-tdz-clear-4096-2026-08-23.json",
-      "source_file_sha256": "37bbb175176bd6d832c753696907f8fbecf0160ebfb0602fd0e3862ebf627227",
-      "embedded_artifact_sha256": "8632937f694fab8ba45740fc9987dfdaec587c7fbdab169b820d15ebb10544da",
+      "source_file_sha256": "d38b3434f8c4de7df16fe27ddda439f475299771a107a1503066ceca1048f059",
+      "embedded_artifact_sha256": "cf1b79d3c6998a59b17eb26ea57d44a457e706b8afdcfae14558b67974672f8a",
       "artifact": {
         "schema_version": 1,
         "profile_id": "zig-js-performance-attribution-v1",
@@ -10060,7 +10060,7 @@
           "candidate_binary_sha256": "f830c3b22daa829f283034a714c721485fba7d828a7195dfc83be1d1bf9a2612",
           "samples": 7,
           "minimum_process_cpu_occupancy": 0.6,
-          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
+          "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated TDZ-clear source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
           "mode": "single",
           "workload": "representative_frontend_compile_tdz_clear_4096",
           "lanes": 1,

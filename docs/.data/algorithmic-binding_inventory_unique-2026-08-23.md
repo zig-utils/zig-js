@@ -28,9 +28,9 @@ First→last (1024→4096) instruction growth: parent 4.0146x (exponent 1.003), 
 
 ## Embedded source artifacts
 
-- 1024: `exact-binding_inventory_unique-1024-2026-08-23.json` (file SHA-256 `e42046f943959019e3fa156ce3030ebd6936c6f4fe337aad2b7130f9d82adbf6`; embedded SHA-256 `a3be77a079aceb57e99241bae1f256b7ee4b3fbfe8435a76e14773e1276b1f9a`)
-- 2048: `exact-binding_inventory_unique-2048-2026-08-23.json` (file SHA-256 `4e8fd00f15fdab25b8365adbea50ca99cdc235229445f3fb8f60f807a905bf3b`; embedded SHA-256 `e5153fa054879ba7e9cfc392aee7123693d600f2e32165b7ddd4b95ff35fd549`)
-- 4096: `exact-binding_inventory_unique-4096-2026-08-23.json` (file SHA-256 `6565a2d242c896cdc0e54987cb160a3298b05303f376f715d0ed53c61002988a`; embedded SHA-256 `1be9f3f15718574dcdaceee700514d442abb07002d8b7c7434ad872b541db850`)
+- 1024: `exact-binding_inventory_unique-1024-2026-08-23.json` (file SHA-256 `2384578ea4fe12eee6aa499e6255a391350a3f0b0eb18e8f3e0c5128a1a5e6b8`; embedded SHA-256 `f429769b76b13c2c65d71ad4ec95d5f7faf2dde5653a4f6bfe4be4b5e5c31828`)
+- 2048: `exact-binding_inventory_unique-2048-2026-08-23.json` (file SHA-256 `8835451543146e1b882a637a3639b7a193c55a34f4d0087f337a55ad4581716c`; embedded SHA-256 `34ec9bdf31a5be31df4857a6a0b2b9ee1598b769e83bab6f225ebc13ff9123fb`)
+- 4096: `exact-binding_inventory_unique-4096-2026-08-23.json` (file SHA-256 `117478411b9e20814a273be123ce923addc188f70c97e70ec307d0cbfcb2eb3e`; embedded SHA-256 `fd5beb000198e442c0e1cc99942a2e920d0812cd940c27df9a77762fa96a390a`)
 
 Power observations: `Now drawing from 'AC Power' -InternalBattery-0 (id=38535267) 100%; charged; 0:00 remaining present: true`, `Now drawing from 'Battery Power' -InternalBattery-0 (id=38535267) 72%; discharging; (no estimate) present: true`, `Now drawing from 'Battery Power' -InternalBattery-0 (id=38535267) 84%; discharging; (no estimate) present: true`.
-Timed boundaries retained from the ordinary inputs: `ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns`.
+Timed boundaries retained from the ordinary inputs: `ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns`.

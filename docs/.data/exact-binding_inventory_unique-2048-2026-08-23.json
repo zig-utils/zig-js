@@ -21,7 +21,7 @@
     "candidate_binary_sha256": "8087331ab75764f0f070990f2d3932913734f139f63b45d774b15e948772bf48",
     "samples": 7,
     "minimum_process_cpu_occupancy": 0.6,
-    "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, twenty warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
+    "timed_boundary": "ten production parse plus plain-function admission/compile jobs over one frozen generated source; process startup, two warmup jobs, hardware snapshots, and allocation replay are outside elapsed_ns",
     "mode": "single",
     "workload": "representative_frontend_compile_binding_inventory_unique_2048",
     "lanes": 1,
