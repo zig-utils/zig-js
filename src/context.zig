@@ -24792,6 +24792,86 @@ test "forced tree-walker and required bytecode preserve named rest parameters" {
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
 }
 
+test "parallel_js: shared named-rest chunk binds lane-local arrays" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const function_value = try ctx.evaluate(
+        \\function sharedRest(prefix, ...values) {
+        \\  values[0] = values[0] + prefix;
+        \\  return values[0] * 100 + values[1];
+        \\}
+        \\sharedRest;
+    );
+    const raw_function = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const function: *interp.Function = @ptrCast(@alignCast(raw_function));
+    const chunk = function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u32, 1), chunk.rest_parameter_index);
+
+    const lane_count = 4;
+    const iterations = 64;
+    const Worker = struct {
+        ctx: *Context,
+        function: *interp.Function,
+        chunk: *@import("bytecode.zig").Chunk,
+        lane: usize,
+        result: std.atomic.Value(i64) = .init(-1),
+
+        fn run(worker: *@This()) void {
+            const saved_heap = gc_mod.setActiveHeap(worker.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(saved_heap);
+            const saved_arena = strcell.setActiveArena(worker.ctx.arena());
+            defer _ = strcell.setActiveArena(saved_arena);
+            var machine = worker.ctx.interpreter();
+            worker.ctx.pushActiveInterpreter(&machine) catch return;
+            defer worker.ctx.popActiveInterpreter(&machine);
+
+            const lane_number: f64 = @floatFromInt(worker.lane);
+            const arguments = [_]Value{
+                Value.num(10 + lane_number),
+                Value.num(1 + lane_number),
+                Value.num(40 + lane_number),
+            };
+            var sum: i64 = 0;
+            for (0..iterations) |_| {
+                const value_out = vm.runFunction(
+                    &machine,
+                    worker.function,
+                    worker.chunk,
+                    &arguments,
+                    Value.undef(),
+                    Value.undef(),
+                ) catch return;
+                if (!value_out.isNumber()) return;
+                sum += @intFromFloat(value_out.asNum());
+            }
+            worker.result.store(sum, .release);
+        }
+    };
+    var workers: [lane_count]Worker = undefined;
+    for (&workers, 0..) |*worker, lane| worker.* = .{
+        .ctx = ctx,
+        .function = function,
+        .chunk = chunk,
+        .lane = lane,
+    };
+    var threads: [lane_count]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[lane]});
+    for (&threads) |*thread| thread.join();
+    for (&workers, 0..) |*worker, lane| {
+        const expected: i64 = @intCast(iterations * (1140 + 201 * lane));
+        try std.testing.expectEqual(expected, worker.result.load(.acquire));
+    }
+}
+
 test "forced tree-walker and required bytecode preserve sloppy mapped arguments frames" {
     const source =
         \\function basic(a, b) {
