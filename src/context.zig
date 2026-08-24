@@ -25419,6 +25419,114 @@ test "forced tree-walker and required bytecode preserve parameter-safe default e
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
 }
 
+test "forced tree-walker and required bytecode preserve parameter-local property defaults" {
+    const source =
+        \\var parameterPropertyEffects = [];
+        \\var parameterPropertyHolder = { value: 6, child: { value: 8 } };
+        \\var parameterPropertyKey = { [Symbol.toPrimitive](hint) { void arguments; parameterPropertyEffects.push("key:" + hint); $vm.gc(); return "value"; } };
+        \\var parameterPropertyReceiver;
+        \\var parameterPropertyProto = { get inherited() { void arguments; parameterPropertyEffects.push("getter:" + (this === parameterPropertyReceiver)); $vm.gc(); return this.value + 1; } };
+        \\parameterPropertyReceiver = Object.create(parameterPropertyProto);
+        \\parameterPropertyReceiver.value = 9;
+        \\var parameterPropertyProxy;
+        \\parameterPropertyProxy = new Proxy({ value: 12 }, { get(target, key, receiver) { void arguments; parameterPropertyEffects.push("proxy:" + String(key) + ":" + (receiver === parameterPropertyProxy)); return target[key]; } });
+        \\var parameterPropertySymbol = Symbol("parameter-property");
+        \\parameterPropertyHolder[parameterPropertySymbol] = 15;
+        \\function parameterReads(first, key, named = first.value, computed = first[key], nested = first.child.value) { return named + ":" + computed + ":" + nested; }
+        \\function parameterComputedRead(first, key, value = first[key]) { return value; }
+        \\function parameterInheritedRead(first, value = first.inherited) { return value; }
+        \\function parameterProxyRead(first, value = first.value) { return value; }
+        \\function parameterNullishRead(first, value = first.value) { return value; }
+        \\var parameterPropertyReentryCount = 0;
+        \\var parameterPropertyReentrant = { get value() { void arguments; parameterPropertyEffects.push("reentry"); parameterPropertyReentryCount += 1; $vm.gc(); return parameterProxyRead({ value: 4 }); } };
+        \\var parameterPropertyArrow = (first, value = first.value) => value;
+        \\class ParameterPropertyBase { constructor(first, value = first.value) { this.value = value; } }
+        \\var parameterPropertyMethod = { value: 14, method(value = this.value) { return value; } };
+        \\function ParameterPropertyTarget(value = new.target.name) { this.value = value; }
+        \\function parameterPropertyArguments(value = arguments.length) { return value; }
+        \\function recursiveParameterProperty(first, remaining, value = first.value) { return remaining === 0 ? value : recursiveParameterProperty(first, remaining - 1); }
+        \\function parameterPropertySummary() {
+        \\  void arguments;
+        \\  parameterPropertyEffects = [];
+        \\  var composed = parameterReads(parameterPropertyHolder, parameterPropertyKey);
+        \\  var inherited = parameterInheritedRead(parameterPropertyReceiver);
+        \\  var proxied = parameterProxyRead(parameterPropertyProxy);
+        \\  var reentered = parameterProxyRead(parameterPropertyReentrant);
+        \\  var bypass = parameterNullishRead(null, 5);
+        \\  var nullishThrow = "";
+        \\  try { parameterNullishRead(null); } catch (error) { nullishThrow = error.name; }
+        \\  return composed + "|" + inherited + "|" + proxied + "|" + reentered + ":" + parameterPropertyReentryCount + "|" + bypass + ":" + nullishThrow + "|" +
+        \\    parameterComputedRead(parameterPropertyHolder, parameterPropertySymbol) + "|" + parameterReads({ value: 1, child: { value: 2 } }, "value", 0, 0, 0) + "|" +
+        \\    "abc".length + ":" + "abc"[1] + "|" + parameterPropertyMethod.method() + "|" + (new ParameterPropertyBase({ value: 16 })).value + "|" +
+        \\    parameterPropertyArrow({ value: 17 }) + "|" + recursiveParameterProperty(parameterPropertyHolder, 2) + "|" + (new ParameterPropertyTarget()).value + "|" +
+        \\    parameterPropertyArguments() + "|" + parameterPropertyEffects.join(",");
+        \\}
+    ;
+    const expected = "6:6:8|10|12|4:1|5:TypeError|15|0:0:0|3:b|14|16|17|6|ParameterPropertyTarget|0|key:string,getter:true,proxy:value:true,reentry";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("parameterPropertySummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (configuration.mode == .required) {
+            const function_value = try ctx.evaluate("parameterReads");
+            const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualSlices(u32, &.{ 2, 3, 4 }, chunk.default_parameter_indices);
+            try std.testing.expect(chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 12);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
+        \\let parameterPropertyPolicyWitness = 0;
+        \\function automaticParameterProperty(first, second = first.value) { return [second][0]; }
+        \\automaticParameterProperty({ value: 9 });
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+}
+
 test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local prologues" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -25435,11 +25543,12 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         \\  return left * 100 + right * 10 + bias + rest.extra + literal;
         \\}
         \\function sharedInvocation(receiver = this, args = arguments, copy = receiver, score = copy === receiver ? 10 : -1) { return receiver.bias * score + args.length; }
+        \\function sharedProperty(input, named = input.bias, computed = input["bias"], nested = input.nested.value) { return named * 100 + computed * 10 + nested; }
         \\globalThis.sharedPatternInputs = [
-        \\  [[1, { right: 2 }], { bias: 3, extra: 4 }],
-        \\  [[2, { right: 3 }], { bias: 4, extra: 5 }],
-        \\  [[3, { right: 4 }], { bias: 5, extra: 6 }],
-        \\  [[4, { right: 5 }], { bias: 6, extra: 7 }]
+        \\  [[1, { right: 2 }], { bias: 3, extra: 4, nested: { value: 9 } }],
+        \\  [[2, { right: 3 }], { bias: 4, extra: 5, nested: { value: 10 } }],
+        \\  [[3, { right: 4 }], { bias: 5, extra: 6, nested: { value: 11 } }],
+        \\  [[4, { right: 5 }], { bias: 6, extra: 7, nested: { value: 12 } }]
         \\];
     );
     const function_value = try ctx.evaluate("sharedPattern");
@@ -25454,6 +25563,11 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     const invocation_chunk = invocation_function.chunk orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, invocation_chunk.default_parameter_indices);
     try std.testing.expect(invocation_chunk.arguments_slot != null);
+    const property_value = try ctx.evaluate("sharedProperty");
+    const raw_property = property_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const property_function: *interp.Function = @ptrCast(@alignCast(raw_property));
+    const property_chunk = property_function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, property_chunk.default_parameter_indices);
     const input_value = try ctx.evaluate("sharedPatternInputs");
     const inputs = input_value.asObj();
 
@@ -25465,6 +25579,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         chunk: *@import("bytecode.zig").Chunk,
         invocation_function: *interp.Function,
         invocation_chunk: *@import("bytecode.zig").Chunk,
+        property_function: *interp.Function,
+        property_chunk: *@import("bytecode.zig").Chunk,
         first: Value,
         second: Value,
         result: std.atomic.Value(i64) = .init(-1),
@@ -25501,6 +25617,16 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
                 ) catch return;
                 if (!invocation_out.isNumber()) return;
                 sum += @intFromFloat(invocation_out.asNum());
+                const property_out = vm.runFunction(
+                    &machine,
+                    worker.property_function,
+                    worker.property_chunk,
+                    &.{worker.second},
+                    Value.undef(),
+                    Value.undef(),
+                ) catch return;
+                if (!property_out.isNumber()) return;
+                sum += @intFromFloat(property_out.asNum());
             }
             worker.result.store(sum, .release);
         }
@@ -25515,6 +25641,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
             .chunk = chunk,
             .invocation_function = invocation_function,
             .invocation_chunk = invocation_chunk,
+            .property_function = property_function,
+            .property_chunk = property_chunk,
             .first = pair.atomicDenseElementLoad(0) orelse return error.TestUnexpectedResult,
             .second = pair.atomicDenseElementLoad(1) orelse return error.TestUnexpectedResult,
         };
@@ -25524,7 +25652,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         thread.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[lane]});
     for (&threads) |*thread| thread.join();
     for (&workers, 0..) |*worker, lane| {
-        const expected: i64 = @intCast(iterations * (165 + 122 * lane));
+        const expected: i64 = @intCast(iterations * (504 + 233 * lane));
         try std.testing.expectEqual(expected, worker.result.load(.acquire));
     }
 }

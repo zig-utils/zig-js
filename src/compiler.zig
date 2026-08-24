@@ -252,6 +252,10 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
             supportedPlainParameterDefault(conditional.alternate, fnode, parameter_index),
         .sequence => |sequence| supportedPlainParameterDefault(sequence.first, fnode, parameter_index) and
             supportedPlainParameterDefault(sequence.second, fnode, parameter_index),
+        .member => |member| !member.optional and
+            (member.computed != null or !value_mod.isRawPrivateName(member.property)) and
+            supportedPlainParameterDefault(member.object, fnode, parameter_index) and
+            (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode, parameter_index)),
         else => false,
     };
 }
@@ -5714,13 +5718,12 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = undefined){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = holder.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = this.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = new.target.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = arguments.length){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = first[outer]){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = first?.value){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = first.value()){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = value + 1){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = later + 1, later){}", .expected = .parameter_prologue },
         .{ .source = "function f(arguments = arguments){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, value = first.value){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = first + outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = /x/){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
@@ -5766,6 +5769,44 @@ test "compiler reports stable plain-function admission reasons" {
         return error.TestUnexpectedResult;
     const inherited_arguments_admission = try Compiler.admitPlainFunction(inherited_arguments_arena.allocator(), arrow_expression.function);
     switch (inherited_arguments_admission) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
+    }
+
+    var private_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer private_arena.deinit();
+    var private_parser = try @import("parser.zig").Parser.init(
+        private_arena.allocator(),
+        "class PrivateBox { #value = 1; method(first, value = first.#value) {} }",
+    );
+    const private_program = try private_parser.parseProgram();
+    const private_declaration = private_program.program[0];
+    if (private_declaration.* != .var_decl or private_declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const private_class = private_declaration.var_decl.init.?;
+    if (private_class.* != .class_expr or private_class.class_expr.members.len != 2)
+        return error.TestUnexpectedResult;
+    const private_method = private_class.class_expr.members[1].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitPlainFunction(private_arena.allocator(), private_method.function)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
+    }
+
+    var super_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer super_arena.deinit();
+    var super_parser = try @import("parser.zig").Parser.init(
+        super_arena.allocator(),
+        "class Derived extends Base { method(value = super.value) {} }",
+    );
+    const super_program = try super_parser.parseProgram();
+    const super_declaration = super_program.program[0];
+    if (super_declaration.* != .var_decl or super_declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const super_class = super_declaration.var_decl.init.?;
+    if (super_class.* != .class_expr or super_class.class_expr.members.len != 1)
+        return error.TestUnexpectedResult;
+    const super_method = super_class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
+    switch (try Compiler.admitPlainFunction(super_arena.allocator(), super_method.function)) {
         .compiled => return error.TestUnexpectedResult,
         .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
     }
@@ -5909,6 +5950,34 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expect(compiled.chunk.has_non_simple_parameters);
             try std.testing.expect(compiled.chunk.arguments_slot != null);
             try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var member_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer member_arena.deinit();
+    var member_parser = try @import("parser.zig").Parser.init(
+        member_arena.allocator(),
+        "function memberDefaults(first, key, named = first.value, computed = first[key], nested = first.child.value, receiver = this.value, target = new.target.name, own = arguments.length, primitive = 'abc'.length) { return named; }",
+    );
+    const member_program = try member_parser.parseProgram();
+    const member_admission = try Compiler.admitPlainFunction(member_arena.allocator(), member_program.program[0].func_decl);
+    switch (member_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 9), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 2, 3, 4, 5, 6, 7, 8 }, compiled.chunk.default_parameter_indices);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expect(compiled.chunk.arguments_slot != null);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+            var named_reads: usize = 0;
+            var computed_reads: usize = 0;
+            for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
+                .get_prop => named_reads += 1,
+                .get_index => computed_reads += 1,
+                else => {},
+            };
+            try std.testing.expectEqual(@as(usize, 7), named_reads);
+            try std.testing.expectEqual(@as(usize, 1), computed_reads);
         },
         .rejected => return error.TestUnexpectedResult,
     }

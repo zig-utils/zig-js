@@ -743,8 +743,8 @@ pub const Chunk = struct {
     /// metadata compact and branch-free.
     destructuring_parameter_indices: []const u32 = &.{},
     /// Sorted syntactic indices whose raw input is replaced at chunk entry only
-    /// when it is exactly undefined. The compiler admits recursively safe trees
-    /// over primitive, invocation-context, and earlier-parameter leaves.
+    /// when it is exactly undefined. The compiler admits recursively safe value
+    /// and public-property-read trees rooted in invocation context or prior formals.
     default_parameter_indices: []const u32 = &.{},
     /// Syntactic index of the final named rest formal. Its activation slot is
     /// `parameter_slots[index]`; null means every formal is positional.

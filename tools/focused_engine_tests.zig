@@ -112,6 +112,11 @@ const frontend_cases = [_]Case{
         .source = "function defaults(first, sum = first + 2, neg = -first, logical = first && 3, choice = first ? 4 : 5, sequence = (first, 6)) { return sum + neg + logical + choice + sequence; } defaults(2)",
         .expected = 15,
     },
+    .{
+        .name = "parameter local property defaults",
+        .source = "function reads(first, key, named = first.value, computed = first[key], nested = first.child.value) { return named + computed + nested; } reads({ value: 3, child: { value: 4 } }, 'value')",
+        .expected = 10,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{
