@@ -2,12 +2,14 @@
 //!
 //! Usage:
 //!   bench-comparison-zig-js single <workload> <jobs> <samples>
+//!   bench-comparison-zig-js single_no_jit <workload> <jobs> <samples>
 //!   bench-comparison-zig-js single_observed <workload> <jobs> <samples>
 //!   bench-comparison-zig-js independent_steady <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js independent_cold <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes> --gc-telemetry
 //!   bench-comparison-zig-js attribution <workload> <jobs> 1
+//!   bench-comparison-zig-js attribution_no_jit <workload> <jobs> 1
 //!   bench-comparison-zig-js shared_attribution <workload> <jobs> 1 <lanes>
 //!
 //! Independent modes use one creator-thread-affine context per OS worker. In
@@ -23,6 +25,7 @@ const representative_modules = @import("representative_modules.zig");
 const workload_source = @embedFile("comparison.js");
 // Workload-specific fixtures are selected and configured before warmup.
 const representative_workload_source = @embedFile("representative_comparison.js");
+const vm_arithmetic_workload_source = @embedFile("vm_arithmetic_comparison.js");
 const wasm_simd_workload_source = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source = @embedFile("wasm_threads_comparison.js");
 const invocation = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
@@ -59,7 +62,7 @@ const shared_harness =
     \\};
 ;
 
-const Mode = enum { single, single_profiled, single_observed, independent_steady, independent_cold, shared, attribution, shared_attribution, module_cold, module_attribution, context_lifecycle };
+const Mode = enum { single, single_no_jit, single_profiled, single_observed, independent_steady, independent_cold, shared, attribution, attribution_no_jit, shared_attribution, module_cold, module_attribution, context_lifecycle };
 
 const SteadyLane = struct {
     io: std.Io,
@@ -606,7 +609,9 @@ fn evaluateRegistered(ctx: *js.Context, source: []const u8, source_url: []const 
 }
 
 fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize, observed: bool) !bool {
-    const source_bytes = if (std.mem.startsWith(u8, workload, "wasm_threads_"))
+    const source_bytes = if (std.mem.startsWith(u8, workload, "representative_vm_arithmetic_"))
+        vm_arithmetic_workload_source
+    else if (std.mem.startsWith(u8, workload, "wasm_threads_"))
         wasm_threads_workload_source
     else if (std.mem.startsWith(u8, workload, "wasm_"))
         wasm_simd_workload_source
@@ -615,7 +620,9 @@ fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize, o
     else
         workload_source;
     if (observed) {
-        const source_url = if (std.mem.startsWith(u8, workload, "wasm_threads_"))
+        const source_url = if (std.mem.startsWith(u8, workload, "representative_vm_arithmetic_"))
+            "bench/vm_arithmetic_comparison.js"
+        else if (std.mem.startsWith(u8, workload, "wasm_threads_"))
             "bench/wasm_threads_comparison.js"
         else if (std.mem.startsWith(u8, workload, "wasm_"))
             "bench/wasm_simd_comparison.js"
@@ -669,7 +676,9 @@ fn runSingle(
     native_observability_telemetry: bool,
 ) !void {
     const observed = mode == .single_observed;
+    const no_jit = mode == .single_no_jit;
     const ctx = try js.Context.createWith(allocator, .{
+        .enable_jit = !no_jit,
         .enable_gc = true,
         .profile_execution_tiers = mode == .single_profiled,
         .native_code_publisher = if (observed) js.jit.gdbJitPublisher() else null,
@@ -681,6 +690,7 @@ fn runSingle(
     });
     var context_live = true;
     errdefer if (context_live) ctx.destroy();
+    if (no_jit) ctx.setBytecodeExecutionModeForTesting(.required);
     const checkpoint = try configure(ctx, workload, jobs, 0, observed);
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
     try preparePostWarmupFixture(ctx, workload);
@@ -718,12 +728,14 @@ fn runAttribution(
     writer: *std.Io.Writer,
     workload: []const u8,
     jobs: usize,
+    no_jit: bool,
 ) !void {
     js.jsthread.resetContentionStats();
     defer js.jsthread.disableContentionStats();
     js.shape.resetShapeStats();
     defer js.shape.disableShapeStats();
     const ctx = try js.Context.createWith(allocator, .{
+        .enable_jit = !no_jit,
         .enable_gc = true,
         .profile_execution_tiers = true,
         .wasm_features = .{
@@ -733,18 +745,20 @@ fn runAttribution(
         },
     });
     defer ctx.destroy();
+    if (no_jit) ctx.setBytecodeExecutionModeForTesting(.required);
+    const output_mode = if (no_jit) "single_no_jit" else "single";
     const checkpoint = try configure(ctx, workload, jobs, 0, false);
     const configuration = ctx.tierAttributionSnapshot();
     const configuration_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "single", workload, 1, jobs, "configuration", 0, configuration, configuration_process);
+    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "configuration", 0, configuration, configuration_process);
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0, checkpoint);
     const warmed = ctx.tierAttributionSnapshot();
     const warmed_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "single", workload, 1, jobs, "warmup", 0, warmed, warmed_process);
+    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "warmup", 0, warmed, warmed_process);
     const result = try invoke(ctx, checkpoint);
     const invoked = ctx.tierAttributionSnapshot();
     const invoked_process = try processResourceSnapshot();
-    try printTierAttributionRow(writer, "single", workload, 1, jobs, "invocation", result.toNumber(), invoked, invoked_process);
+    try printTierAttributionRow(writer, output_mode, workload, 1, jobs, "invocation", result.toNumber(), invoked, invoked_process);
     _ = io;
 }
 
@@ -1364,12 +1378,12 @@ pub fn main(init: std.process.Init) !void {
     const gc_telemetry = std.mem.eql(u8, option, "--gc-telemetry");
     const promise_profile_enabled = std.mem.eql(u8, option, "--promise-profile");
     if (option.len != 0 and !darwin_rusage and !gc_telemetry and !promise_profile_enabled) return error.InvalidArguments;
-    if (darwin_rusage and (mode == .attribution or mode == .shared_attribution or mode == .module_attribution)) return error.InvalidArguments;
+    if (darwin_rusage and (mode == .attribution or mode == .attribution_no_jit or mode == .shared_attribution or mode == .module_attribution)) return error.InvalidArguments;
     if (native_observability_telemetry and mode != .single and mode != .single_observed) return error.InvalidArguments;
     if (gc_telemetry and mode != .shared) return error.InvalidArguments;
     if (promise_profile_enabled and mode != .independent_steady) return error.InvalidArguments;
     if (mode == .context_lifecycle and !darwin_rusage) return error.InvalidArguments;
-    if ((mode == .attribution or mode == .shared_attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
+    if ((mode == .attribution or mode == .attribution_no_jit or mode == .shared_attribution or mode == .module_attribution) and samples != 1) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
     if (std.mem.eql(u8, workload, "wasm_threads_wait_notify") and
         ((mode != .shared and mode != .shared_attribution) or lanes < 2 or lanes % 2 != 0)) return error.InvalidArguments;
@@ -1378,11 +1392,11 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     switch (mode) {
-        .single, .single_profiled, .single_observed => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples, darwin_rusage, native_observability_telemetry),
+        .single, .single_no_jit, .single_profiled, .single_observed => try runSingle(benchmark_context_allocator, init.io, stdout, mode, workload, jobs, samples, darwin_rusage, native_observability_telemetry),
         .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage, promise_profile_enabled),
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
         .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry, darwin_rusage),
-        .attribution => try runAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),
+        .attribution, .attribution_no_jit => try runAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs, mode == .attribution_no_jit),
         .shared_attribution => try runSharedAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs, lanes),
         .module_cold => try runModuleCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes, darwin_rusage),
         .module_attribution => try runModuleAttribution(benchmark_context_allocator, init.io, stdout, workload, jobs),

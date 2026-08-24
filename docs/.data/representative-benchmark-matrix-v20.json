@@ -1,0 +1,82 @@
+{
+  "schema_version": 20,
+  "matrix_id": "zig-js-representative-v20",
+  "status": "frozen",
+  "frozen_date": "2026-08-23",
+  "owner_issue": 734,
+  "history_policy": "This version hash-inherits every V19 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance decision, attribution metric, external-suite boundary, exact-parent contract, and publication boundary. It adds a separate zig-js-only no-JIT required-bytecode profile and repins the comparison runner because that explicit mode is part of the runner contract. The four arithmetic workloads are non-scored benchmark-first witnesses and do not enter cross-engine or aggregate results. Any later workload, option, checksum, mode, runner, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v19",
+    "path": "docs/.data/representative-benchmark-matrix-v19.json",
+    "sha256": "9d79892c1cadd78e75ef1cb69e379a83c0f93b46fdac359a39f8bb880b0259df",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "exact_parent_integration"
+    ]
+  },
+  "change": "Adds explicit single_no_jit and attribution_no_jit modes with four arithmetic quickening witnesses while leaving every V19 scored row unchanged.",
+  "context_lifecycle_integration": {
+    "issue": 661,
+    "status": "integrated_non_scored_profile",
+    "mode": "context_lifecycle",
+    "engines": ["zig-js"],
+    "lanes": [1],
+    "scenarios": ["context_no_evaluation", "context_first_source", "context_first_module", "context_full_feature"],
+    "profile": {
+      "path": "docs/.data/context-lifecycle-profile-v1.json",
+      "sha256": "3286810faef598fc62ce68f8a56825de48d749a7ae4778df270afd890780c6f2"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "24843c3d6c2923dbb0300e46d3328df59f55f508427b4eba596c96a6dd740603"
+    },
+    "telemetry": ["create_ns", "work_ns", "destroy_ns", "cpu_user_ns", "cpu_system_ns", "baseline_rss_bytes", "max_live_rss_bytes", "post_destroy_rss_bytes", "retained_delta_bytes", "peak_rss_bytes", "rss_checkpoints", "gc_finalizer_stats"],
+    "publication_boundary": "This remains the V19 zig-js-only cold lifecycle profile. V20 changes only the runner hash to include explicit no-JIT modes; no lifecycle option, scenario, checksum, telemetry, or evidence ruling changes."
+  },
+  "no_jit_integration": {
+    "issue": 734,
+    "status": "integrated_non_scored_profile",
+    "engines": ["zig-js"],
+    "modes": ["single_no_jit", "attribution_no_jit"],
+    "lanes": [1],
+    "context_options": {
+      "enable_jit": false,
+      "bytecode_execution_mode": "required"
+    },
+    "source": {
+      "path": "bench/vm_arithmetic_comparison.js",
+      "sha256": "970e58bec6ab9978335e6f908219bf23154c9ec9ff96ccefc6a94f2917d77fa8"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "24843c3d6c2923dbb0300e46d3328df59f55f508427b4eba596c96a6dd740603"
+    },
+    "workloads": [
+      {"id": "representative_vm_arithmetic_number", "role": "stable_number", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 606036, "full": 5236590351}},
+      {"id": "representative_vm_arithmetic_bigint", "role": "stable_bigint_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 5412345, "full": 630334997}},
+      {"id": "representative_vm_arithmetic_polymorphic", "role": "number_string_bigint_object_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 29422, "full": 28806122}},
+      {"id": "representative_vm_arithmetic_coercion", "role": "effect_and_exception_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 101766, "full": 10176362}}
+    ],
+    "attribution": {
+      "tree_walker_entries": 0,
+      "baseline_publications": 0,
+      "optimizer_publications": 0,
+      "generated_code_bytes": 0,
+      "required_nonzero": ["vm_entries", "vm_dispatches", "program_compiled", "template_plain_compiled"]
+    },
+    "timed_boundary": "One invocation in one persistent production Context after ten reduced-work warmups; source/configuration, warmup, Context creation/destruction, attribution, and hardware snapshots are outside elapsed_ns.",
+    "publication_boundary": "These rows freeze logical work and prove required-bytecode/no-native execution. Battery diagnostics and structural attribution are not performance evidence. A speed claim requires exact-parent, order-balanced, quiet-reference AC samples with stable required counters and unchanged controls."
+  }
+}

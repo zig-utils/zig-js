@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v19.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v20.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -20,30 +20,47 @@ function validatePinnedFile(entry: any, label: string, root: string): void {
   requireValue(Home.fileExists(path), `${label} path does not exist: ${entry.path}`);
   requireValue(digest(path) === entry.sha256, `${label} changed without a matrix version bump: ${entry.path}`);
 }
-export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT, supersedingExactParent: any = null): any {
+export function loadManifest(
+  path = DEFAULT_MANIFEST,
+  root = ROOT,
+  supersedingExactParent: any = null,
+  supersedingContextLifecycle: any = null,
+): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 19, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 20, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
   requireValue(Home.fileExists(parentPath), "representative parent manifest does not exist");
   requireValue(digest(parentPath) === parent.sha256, `representative parent manifest changed after v${child.schema_version} froze`);
-  // A newer matrix may supersede the exact-parent source pin while retaining
-  // every other historical field. Thread that one replacement through the
-  // parent load so the parent is still fully validated against the current
-  // tree without requiring a historical source checkout.
+  // A newer matrix may supersede an integration's source/runner pin while
+  // retaining every other historical field. Thread those replacements through
+  // the parent load so it is still fully validated against the current tree
+  // without requiring a historical checkout.
   const inherited = loadManifest(
     parentPath,
     root,
     supersedingExactParent ||
       (child.schema_version >= 17 ? child.exact_parent_integration : null),
+    supersedingContextLifecycle ||
+      (child.schema_version >= 20 ? child.context_lifecycle_integration : null),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 20) {
+    requireValue(child.tier_attribution === undefined, "v20 must inherit the scored attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v20 must not change scored workload coverage");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v20 must inherit completed panel inventory unchanged");
+    requireValue(child.context_lifecycle_integration && typeof child.context_lifecycle_integration === "object", "v20 must repin the context lifecycle runner");
+    requireValue(child.no_jit_integration && typeof child.no_jit_integration === "object", "v20 must add the no-JIT integration");
+    const merged = { ...inherited, ...child };
+    validate(merged, root);
+    return merged;
   }
   if (child.schema_version === 19) {
     requireValue(child.tier_attribution === undefined, "v19 must inherit the attribution contract unchanged");
@@ -52,9 +69,11 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT, supersedingEx
     requireValue(child.exact_parent_integration && typeof child.exact_parent_integration === "object", "v19 must replace the exact-parent integration contract");
     requireValue(child.context_lifecycle_integration && typeof child.context_lifecycle_integration === "object", "v19 must add the context lifecycle integration");
     const exactParent = supersedingExactParent || child.exact_parent_integration;
+    const contextLifecycle = supersedingContextLifecycle || child.context_lifecycle_integration;
     const merged = {
       ...inherited,
       ...child,
+      context_lifecycle_integration: contextLifecycle,
       completed_metric_panels: {
         ...inherited.completed_metric_panels,
         efficiency_thermal: {
@@ -123,7 +142,7 @@ export function loadManifest(path = DEFAULT_MANIFEST, root = ROOT, supersedingEx
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 19, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 20, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -290,6 +309,34 @@ export function validate(manifest: any, root = ROOT): void {
       validatePinnedFile(lifecycle.runner, "V19 context lifecycle runner", root);
       requireValue(same(lifecycle.telemetry || [], ["create_ns", "work_ns", "destroy_ns", "cpu_user_ns", "cpu_system_ns", "baseline_rss_bytes", "max_live_rss_bytes", "post_destroy_rss_bytes", "retained_delta_bytes", "peak_rss_bytes", "rss_checkpoints", "gc_finalizer_stats"]), "V19 context lifecycle telemetry inventory drift");
       requireValue(typeof lifecycle.publication_boundary === "string" && lifecycle.publication_boundary.length > 0, "V19 context lifecycle publication boundary is missing");
+    }
+    if (manifest.schema_version >= 20) {
+      const noJit = manifest.no_jit_integration;
+      requireValue(noJit && noJit.issue === 734 && noJit.status === "integrated_non_scored_profile", "V20 no-JIT profile identity drift");
+      requireValue(same(noJit.modes || [], ["single_no_jit", "attribution_no_jit"]), "V20 no-JIT mode inventory drift");
+      requireValue(same(noJit.engines || [], ["zig-js"]) && same(noJit.lanes || [], [1]), "V20 no-JIT engine/lane boundary drift");
+      validatePinnedFile(noJit.source, "V20 no-JIT workload source", root);
+      validatePinnedFile(noJit.runner, "V20 no-JIT runner", root);
+      requireValue(noJit.context_options?.enable_jit === false && noJit.context_options?.bytecode_execution_mode === "required", "V20 no-JIT Context options drift");
+      const expectedWorkloads = [
+        ["representative_vm_arithmetic_number", "stable_number", 606036, 5236590351],
+        ["representative_vm_arithmetic_bigint", "stable_bigint_control", 5412345, 630334997],
+        ["representative_vm_arithmetic_polymorphic", "number_string_bigint_object_control", 29422, 28806122],
+        ["representative_vm_arithmetic_coercion", "effect_and_exception_control", 101766, 10176362],
+      ];
+      requireValue(Array.isArray(noJit.workloads) && same(noJit.workloads.map((entry: any) => entry.id), expectedWorkloads.map(entry => entry[0])), "V20 no-JIT workload inventory drift");
+      const source = readText(root + "/" + noJit.source.path);
+      for (let index = 0; index < noJit.workloads.length; index += 1) {
+        const workload = noJit.workloads[index], expected = expectedWorkloads[index];
+        requireValue(source.indexOf(`"${workload.id}"`) >= 0, `V20 no-JIT workload is absent from source: ${workload.id}`);
+        requireValue(workload.role === expected[1], `V20 no-JIT workload role drift: ${workload.id}`);
+        requireValue(workload.jobs?.quick === 100 && workload.jobs?.full === 10000, `V20 no-JIT job contract drift: ${workload.id}`);
+        requireValue(workload.checksums?.quick === expected[2] && workload.checksums?.full === expected[3], `V20 no-JIT checksum drift: ${workload.id}`);
+      }
+      requireValue(noJit.attribution?.tree_walker_entries === 0 && noJit.attribution?.baseline_publications === 0 && noJit.attribution?.optimizer_publications === 0 && noJit.attribution?.generated_code_bytes === 0, "V20 no-JIT attribution boundary drift");
+      requireValue(same(noJit.attribution?.required_nonzero || [], ["vm_entries", "vm_dispatches", "program_compiled", "template_plain_compiled"]), "V20 no-JIT required attribution inventory drift");
+      requireValue(typeof noJit.timed_boundary === "string" && noJit.timed_boundary.length > 0, "V20 no-JIT timed boundary is missing");
+      requireValue(typeof noJit.publication_boundary === "string" && noJit.publication_boundary.length > 0, "V20 no-JIT publication boundary is missing");
     }
   } else if (manifest.schema_version >= 13) {
     const pending = manifest.pending_metric_panels;

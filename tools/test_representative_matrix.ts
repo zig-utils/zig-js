@@ -33,4 +33,12 @@ rejects("independent adapter drift", value => value.completed_metric_panels.inde
 rejects("lifecycle scenario drift", value => value.context_lifecycle_integration.scenarios.pop(), "scenario inventory drift");
 rejects("lifecycle telemetry drift", value => value.context_lifecycle_integration.telemetry.pop(), "telemetry inventory drift");
 rejects("lifecycle runner drift", value => { value.context_lifecycle_integration.runner.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
-console.log("representative matrix structural tests: 25/25 passed");
+rejects("no-JIT mode drift", value => value.no_jit_integration.modes.pop(), "mode inventory drift");
+rejects("no-JIT Context drift", value => { value.no_jit_integration.context_options.enable_jit = true; }, "Context options drift");
+rejects("no-JIT source drift", value => { value.no_jit_integration.source.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+rejects("no-JIT workload role drift", value => { value.no_jit_integration.workloads[0].role = "generic"; }, "workload role drift");
+rejects("no-JIT checksum drift", value => { value.no_jit_integration.workloads[0].checksums.full += 1; }, "checksum drift");
+rejects("no-JIT native attribution drift", value => { value.no_jit_integration.attribution.generated_code_bytes = 1; }, "attribution boundary drift");
+rejects("no-JIT required attribution drift", value => value.no_jit_integration.attribution.required_nonzero.pop(), "required attribution inventory drift");
+rejects("no-JIT timed boundary missing", value => { value.no_jit_integration.timed_boundary = ""; }, "timed boundary is missing");
+console.log("representative matrix structural tests: 33/33 passed");
