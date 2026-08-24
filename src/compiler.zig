@@ -256,6 +256,16 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
             (member.computed != null or !value_mod.isRawPrivateName(member.property)) and
             supportedPlainParameterDefault(member.object, fnode, parameter_index) and
             (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode, parameter_index)),
+        .call => |call| blk: {
+            if (call.optional or
+                (call.callee.* == .identifier and std.mem.eql(u8, call.callee.identifier, "eval")) or
+                !supportedPlainParameterDefault(call.callee, fnode, parameter_index))
+                break :blk false;
+            for (call.args) |argument|
+                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode, parameter_index))
+                    break :blk false;
+            break :blk true;
+        },
         else => false,
     };
 }
@@ -5720,7 +5730,11 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = holder.value){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = first[outer]){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = first?.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, value = first.value()){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = first(outer)){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = first?.()){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, args, value = first(...args)){}", .expected = .parameter_prologue },
+        .{ .source = "function f(eval, value = eval('1')){}", .expected = .unsupported_lowering },
+        .{ .source = "function f(first, value = new first()){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = value + 1){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = later + 1, later){}", .expected = .parameter_prologue },
         .{ .source = "function f(arguments = arguments){}", .expected = .parameter_prologue },
@@ -5777,7 +5791,7 @@ test "compiler reports stable plain-function admission reasons" {
     defer private_arena.deinit();
     var private_parser = try @import("parser.zig").Parser.init(
         private_arena.allocator(),
-        "class PrivateBox { #value = 1; method(first, value = first.#value) {} }",
+        "class PrivateBox { #method() {} method(first, value = first.#method()) {} }",
     );
     const private_program = try private_parser.parseProgram();
     const private_declaration = private_program.program[0];
@@ -5796,7 +5810,7 @@ test "compiler reports stable plain-function admission reasons" {
     defer super_arena.deinit();
     var super_parser = try @import("parser.zig").Parser.init(
         super_arena.allocator(),
-        "class Derived extends Base { method(value = super.value) {} }",
+        "class Derived extends Base { method(value = super.method()) {} }",
     );
     const super_program = try super_parser.parseProgram();
     const super_declaration = super_program.program[0];
@@ -5978,6 +5992,33 @@ test "compiler reports stable plain-function admission reasons" {
             };
             try std.testing.expectEqual(@as(usize, 7), named_reads);
             try std.testing.expectEqual(@as(usize, 1), computed_reads);
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var call_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer call_arena.deinit();
+    var call_parser = try @import("parser.zig").Parser.init(
+        call_arena.allocator(),
+        "function callDefaults(callee, receiver, key, direct = callee(2), named = receiver.method(3), computed = receiver[key](4), nested = receiver.child.method(5), argument = callee(receiver.value)) { return direct; }",
+    );
+    const call_program = try call_parser.parseProgram();
+    const call_admission = try Compiler.admitPlainFunction(call_arena.allocator(), call_program.program[0].func_decl);
+    switch (call_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 8), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 3, 4, 5, 6, 7 }, compiled.chunk.default_parameter_indices);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+            var value_calls: usize = 0;
+            var receiver_calls: usize = 0;
+            for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
+                .call => value_calls += 1,
+                .call_with_this => receiver_calls += 1,
+                else => {},
+            };
+            try std.testing.expectEqual(@as(usize, 2), value_calls);
+            try std.testing.expectEqual(@as(usize, 3), receiver_calls);
         },
         .rejected => return error.TestUnexpectedResult,
     }
