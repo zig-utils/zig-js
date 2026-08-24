@@ -9760,6 +9760,65 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     return run(&machine, chunk, null);
 }
 
+test "vm: named rest allocation failure restores the caller activation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(
+        allocator,
+        "function collect(head, ...values) { return head + values.length; } collect",
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+    };
+
+    const function_value = try run(&machine, root, null);
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const arguments = [_]Value{ Value.num(4), Value.num(5), Value.num(6) };
+
+    // Warm the reusable activation so the fault below lands at the first fresh
+    // allocation: ArrayCreate for the rest binding, not frame construction.
+    try std.testing.expectEqual(
+        @as(f64, 6),
+        (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+    );
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    const saved_this = Value.num(71);
+    const saved_new_target = Value.num(72);
+    machine.this_value = saved_this;
+    machine.new_target = saved_new_target;
+    machine.strict = true;
+    var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    machine.arena = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef()),
+    );
+    machine.arena = allocator;
+
+    try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+    try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+    try std.testing.expect(machine.strict);
+    try std.testing.expectEqual(&env, machine.env);
+    try std.testing.expect(machine.vm_activation_free != null);
+    try std.testing.expectEqual(
+        @as(f64, 6),
+        (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+    );
+}
+
 test "vm: captured super references reject an uninitialized this binding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
