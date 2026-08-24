@@ -3265,12 +3265,11 @@ pub const Interpreter = struct {
         return self.toObject(v);
     }
 
-    /// Resolve an identifier through the lexical environment chain, consulting
-    /// each scope's bindings (live `import` aliases, then `var`/`let`/`const`),
-    /// and — at a `with` object Environment Record — that object's properties, in
-    /// chain order. Returns the value, or null when unresolved (the caller then
-    /// tries the global object and finally throws a ReferenceError).
-    pub fn lookupIdent(self: *Interpreter, name: []const u8) EvalError!?Value {
+    /// Resolve and immediately GetValue an identifier through the lexical
+    /// environment chain. Unlike a captured assignment Reference, an immediate
+    /// read needs only one binding-table probe. A `with` record additionally
+    /// carries its exact WithBaseObject for call/tag evaluation.
+    fn lookupIdentValue(self: *Interpreter, name: []const u8) EvalError!?CapturedBindingValue {
         // Read each scope's binding tables under its `binding_lock` (via the
         // flag-gated `lockBindings`, like `Environment.get`): a peer thread may
         // be mutating `vars`/`aliases` through `Environment.put` (which locks),
@@ -3304,32 +3303,56 @@ pub const Interpreter = struct {
             const global_shadowable = found_var != null and e.parent == null and
                 !e.consts.contains(name) and !e.lexicals.contains(name);
             e.unlockBindingsForRead(locked);
-            if (alias) |a| return a.env.get(a.name);
+            if (alias) |a| return .{ .value = a.env.get(a.name) orelse return null };
             if (found_var) |v| {
                 if (global_shadowable) {
-                    const g = self.currentGlobalObject() orelse return v;
-                    if (objectHasOwn(g, name)) return try self.getProperty(Value.obj(g), name);
+                    const g = self.currentGlobalObject() orelse return .{ .value = v };
+                    if (objectHasOwn(g, name)) return .{ .value = try self.getProperty(Value.obj(g), name) };
                 }
-                return v;
+                return .{ .value = v };
             }
-            if (e.with_object) |wo| {
-                if (try self.withHasBinding(wo, name)) {
+            if (e.with_object != null) {
+                // HasBinding and GetBindingValue can execute Proxy traps and
+                // @@unscopables accessors that move the heap. Root the owning
+                // Environment so the object, selected receiver, and next link
+                // are always refreshed from relocated storage.
+                const environment_root = try self.pushTempEnvRoot(e);
+                defer self.restoreTempEnvRoots(environment_root);
+                const with_object = self.tempEnvRoot(environment_root, e).with_object.?;
+                if (try self.withHasBinding(with_object, name)) {
+                    const rooted_environment = self.tempEnvRoot(environment_root, e);
+                    const object_fallback = Value.obj(rooted_environment.with_object.?);
+                    const object_root = try self.pushTempRoot(object_fallback);
+                    defer self.restoreTempRoots(object_root);
                     // Object Environment Record GetBindingValue does its OWN
                     // HasProperty(N) before Get(N) — distinct from the HasBinding
                     // check above — so a proxy env observes a second `has`. If the
                     // binding vanished in between (e.g. a `@@unscopables` getter
                     // deleted it), GetBindingValue with S=true throws a
                     // ReferenceError; a sloppy reference reads undefined.
-                    if (!try self.hasPropertyResult(wo, name)) {
+                    if (!try self.hasPropertyResult(self.tempRoot(object_root, object_fallback).asObj(), name)) {
                         if (self.strict) return self.throwError("ReferenceError", name);
-                        return Value.undef();
+                        return .{ .value = Value.undef() };
                     }
-                    return try self.getProperty(Value.obj(wo), name);
+                    const result = try self.getProperty(self.tempRoot(object_root, object_fallback), name);
+                    return .{
+                        .value = result,
+                        .with_base = self.tempRoot(object_root, object_fallback),
+                    };
                 }
+                env = self.tempEnvRoot(environment_root, e).parent;
+                continue;
             }
             env = e.parent;
         }
         return null;
+    }
+
+    /// Value-only compatibility wrapper for callers that do not need a
+    /// WithBaseObject. Global-object-only properties remain the caller's
+    /// fallback, matching the historical lookup contract.
+    pub fn lookupIdent(self: *Interpreter, name: []const u8) EvalError!?Value {
+        return if (try self.lookupIdentValue(name)) |resolved| resolved.value else null;
     }
 
     /// Resolve an identifier *for assignment*: a `with` object that provides the
@@ -4111,7 +4134,11 @@ pub const Interpreter = struct {
         };
     }
 
-    pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
+    /// Every AST node evaluation crosses the same debugger, budget, trap, GIL,
+    /// and GC checkpoint boundary. Specialized Reference evaluators must call
+    /// this before bypassing `eval`; otherwise a tier-local fast path can delay
+    /// host progress or lose the cooperative scheduling point the AST carries.
+    fn beginNodeEvaluation(self: *Interpreter, node: *const Node) EvalError!void {
         try self.serviceDebugStatement(node);
         self.steps += 1;
         if (self.steps > self.step_budget) return self.throwError("RangeError", "evaluation step budget exceeded");
@@ -4125,6 +4152,10 @@ pub const Interpreter = struct {
             // covers; run a guarded collection. No-op when the GC is off.
             if (self.gc_safepoint_fn != null) self.serviceGcSafepoint();
         }
+    }
+
+    pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
+        try self.beginNodeEvaluation(node);
         return switch (node.*) {
             .number => |n| Value.num(n),
             .bigint_lit => |b| if (b.text) |s| try self.makeBigIntText(s) else try self.makeBigInt(b.value),
@@ -7593,10 +7624,10 @@ pub const Interpreter = struct {
         // ResolveBinding/GetValue operation. Root both Values across argument
         // evaluation so a callback-triggered moving collection cannot stale the
         // selected callee or receiver.
-        const resolved: CapturedBindingValue = if (callee_node.* == .identifier)
-            try self.resolveBindingValue(callee_node.identifier, false)
-        else
-            .{ .value = try self.eval(callee_node) };
+        const resolved: CapturedBindingValue = if (callee_node.* == .identifier) resolved: {
+            try self.beginNodeEvaluation(callee_node);
+            break :resolved try self.resolveBindingValue(callee_node.identifier, false);
+        } else .{ .value = try self.eval(callee_node) };
         const callee_root = try self.pushTempRoot(resolved.value);
         defer self.restoreTempRoots(callee_root);
         const with_base_root = try self.pushTempRoot(resolved.with_base);
@@ -7629,6 +7660,7 @@ pub const Interpreter = struct {
         var environment: ?*Environment = self.env;
         while (environment) |current| : (environment = current.parent)
             if (current.with_object != null) return null;
+        try self.beginNodeEvaluation(c.callee);
         const callee = (try self.resolveBindingValue(c.callee.identifier, false)).value;
         if (self.isDirectEvalCallee(callee)) return null;
         const args = try self.evalArgs(c.args);
@@ -7688,6 +7720,7 @@ pub const Interpreter = struct {
                 receiver = self.this_value;
             },
             .identifier => |name| {
+                try self.beginNodeEvaluation(tag_node);
                 const resolved = try self.resolveBindingValue(name, false);
                 callee = resolved.value;
                 if (resolved.with_base.isObject()) receiver = resolved.with_base;
@@ -14267,8 +14300,17 @@ pub const Interpreter = struct {
     }
 
     pub fn resolveBindingValue(self: *Interpreter, name: []const u8, allow_unresolvable: bool) EvalError!CapturedBindingValue {
-        const reference = try self.captureBindingReference(name, null);
-        return self.loadCapturedBindingReference(reference, name, allow_unresolvable);
+        // GetValue is immediate: do not first create a captured Reference and
+        // then probe the same declarative binding a second time. Exact retained
+        // References remain mandatory for assignment/update/destructuring paths
+        // whose RHS can retarget the environment before PutValue.
+        if (try self.lookupIdentValue(name)) |resolved| {
+            if (self.isTdz(resolved.value)) return self.throwError("ReferenceError", name);
+            return resolved;
+        }
+        if (try self.globalProp(name)) |global| return .{ .value = global };
+        if (allow_unresolvable) return .{ .value = Value.undef() };
+        return self.throwError("ReferenceError", name);
     }
 
     /// PutValue for a dynamically captured identifier Reference. Static
