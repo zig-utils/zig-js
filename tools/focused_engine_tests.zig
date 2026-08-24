@@ -107,6 +107,11 @@ const frontend_cases = [_]Case{
         .source = "function defaults(first, second = first, [third], fourth = third, arguments, fifth = arguments) { return second + fourth + fifth; } defaults(2, undefined, [3], undefined, 4)",
         .expected = 9,
     },
+    .{
+        .name = "parameter safe default expression trees",
+        .source = "function defaults(first, sum = first + 2, neg = -first, logical = first && 3, choice = first ? 4 : 5, sequence = (first, 6)) { return sum + neg + logical + choice + sequence; } defaults(2)",
+        .expected = 15,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

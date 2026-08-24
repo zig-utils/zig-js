@@ -229,33 +229,29 @@ const PlainParameterLayout = struct {
     }
 };
 
-fn closedPrimitiveParameterDefault(node: *const ast.Node) bool {
-    return switch (node.*) {
-        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit => true,
-        .unary => |unary| closedPrimitiveParameterDefault(unary.operand),
-        .binary => |binary| closedPrimitiveParameterDefault(binary.left) and closedPrimitiveParameterDefault(binary.right),
-        .logical => |logical| closedPrimitiveParameterDefault(logical.left) and closedPrimitiveParameterDefault(logical.right),
-        .conditional => |conditional| closedPrimitiveParameterDefault(conditional.cond) and
-            closedPrimitiveParameterDefault(conditional.consequent) and
-            closedPrimitiveParameterDefault(conditional.alternate),
-        .sequence => |sequence| closedPrimitiveParameterDefault(sequence.first) and closedPrimitiveParameterDefault(sequence.second),
-        else => false,
-    };
-}
-
 fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode, parameter_index: usize) bool {
-    if (closedPrimitiveParameterDefault(node)) return true;
     // FunctionDeclarationInstantiation installs invocation context first, and
     // each prior formal completes BindingInitialization before the next one.
-    // Admit only a complete leaf: an enclosing operation could coerce or call
-    // through the value and needs the broader parameter-environment ruling.
+    // The recursive cases below use only these exact leaves and canonical VM
+    // operations; every unlisted AST kind remains a fail-closed barrier.
     return switch (node.*) {
+        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit => true,
         .this_expr, .new_target_expr => !fnode.requires_tree_walk_class_constructor,
         .identifier => |name| earlierParameterBindsName(fnode, parameter_index, name) or
             (!fnode.is_arrow and
                 fnode.uses_arguments and
                 std.mem.eql(u8, name, "arguments") and
                 !parametersBindName(fnode, "arguments")),
+        .unary => |unary| supportedPlainParameterDefault(unary.operand, fnode, parameter_index),
+        .binary => |binary| supportedPlainParameterDefault(binary.left, fnode, parameter_index) and
+            supportedPlainParameterDefault(binary.right, fnode, parameter_index),
+        .logical => |logical| supportedPlainParameterDefault(logical.left, fnode, parameter_index) and
+            supportedPlainParameterDefault(logical.right, fnode, parameter_index),
+        .conditional => |conditional| supportedPlainParameterDefault(conditional.cond, fnode, parameter_index) and
+            supportedPlainParameterDefault(conditional.consequent, fnode, parameter_index) and
+            supportedPlainParameterDefault(conditional.alternate, fnode, parameter_index),
+        .sequence => |sequence| supportedPlainParameterDefault(sequence.first, fnode, parameter_index) and
+            supportedPlainParameterDefault(sequence.second, fnode, parameter_index),
         else => false,
     };
 }
@@ -5719,14 +5715,13 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = undefined){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = holder.value){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = this.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = +this){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = new.target.value){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = arguments.length){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = later, later){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = value + 1){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = later + 1, later){}", .expected = .parameter_prologue },
         .{ .source = "function f(arguments = arguments){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = first.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, value = +first){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = first + outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = /x/){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = []){}", .expected = .parameter_prologue },
@@ -5894,6 +5889,25 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expectEqualSlices(u32, &.{ 3, 5 }, compiled.chunk.destructuring_parameter_indices);
             try std.testing.expect(compiled.chunk.has_non_simple_parameters);
             try std.testing.expectEqual(@as(?u32, null), compiled.chunk.arguments_slot);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var composed_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer composed_arena.deinit();
+    var composed_parser = try @import("parser.zig").Parser.init(
+        composed_arena.allocator(),
+        "function composedDefaults(first, neg = -first, sum = first + 2, logical = first || 3, choice = first ? first : 4, sequence = (first, 5), receiver = this === this, target = new.target ? 1 : 2, own = arguments === arguments) { return sum; }",
+    );
+    const composed_program = try composed_parser.parseProgram();
+    const composed_admission = try Compiler.admitPlainFunction(composed_arena.allocator(), composed_program.program[0].func_decl);
+    switch (composed_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 9), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, compiled.chunk.default_parameter_indices);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expect(compiled.chunk.arguments_slot != null);
             try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
         },
         .rejected => return error.TestUnexpectedResult,

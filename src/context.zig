@@ -25321,6 +25321,104 @@ test "forced tree-walker and required bytecode preserve earlier parameter defaul
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
 }
 
+test "forced tree-walker and required bytecode preserve parameter-safe default expressions" {
+    const source =
+        \\var parameterExpressionEffects = [];
+        \\var parameterCoercible = { [Symbol.toPrimitive](hint) { void arguments; parameterExpressionEffects.push(hint); $vm.gc(); return 6; } };
+        \\var parameterExpressionHolder = { method(first, sum = first + 1, neg = -first, logical = first && 8, choice = first ? 9 : 10, sequence = (first, 11), receiver = this === first, target = new.target === first, own = arguments === arguments) {
+        \\  return sum + ":" + neg + ":" + logical + ":" + choice + ":" + sequence + ":" + receiver + ":" + target + ":" + own;
+        \\} };
+        \\function shortParameterExpressions(first, logical = first && (1n / 0n), choice = first ? (1n / 0n) : 3) { return logical + ":" + choice; }
+        \\function edgeParameterExpressions(first, neg = -first, reciprocal = 1 / first, nan = first - first) { void arguments; return Object.is(neg, -0) + ":" + reciprocal + ":" + Number.isNaN(nan); }
+        \\function mixedParameterExpression(first, value = first + 1) { return value; }
+        \\function reenteredParameterExpression(first, second = first + 1) { return second; }
+        \\var parameterReentryCount = 0;
+        \\var parameterReentrant = { [Symbol.toPrimitive]() { void arguments; parameterReentryCount += 1; $vm.gc(); return reenteredParameterExpression(2); } };
+        \\var parameterArrow = (first, second = first + 1) => second;
+        \\class ParameterBase { constructor(first, second = first + 1) { this.value = second; } }
+        \\function recursiveParameterExpression(first, second = first + 1) { return first === 0 ? second : recursiveParameterExpression(first - 1); }
+        \\function parameterSafeExpressionSummary() {
+        \\  void arguments;
+        \\  parameterExpressionEffects = [];
+        \\  var composed = parameterExpressionHolder.method(parameterCoercible);
+        \\  var bypass = parameterExpressionHolder.method(2, 0, 0, 0, 0, 0, false, false, false);
+        \\  var shortValue = shortParameterExpressions(false);
+        \\  var shortThrow = "";
+        \\  try { shortParameterExpressions(true); } catch (error) { shortThrow = error.name; }
+        \\  var mixedThrow = "";
+        \\  try { mixedParameterExpression(1n); } catch (error) { mixedThrow = error.name; }
+        \\  var reentered = mixedParameterExpression(parameterReentrant);
+        \\  return composed + "|" + parameterExpressionEffects.join(",") + "|" + bypass + "|" + shortValue + ":" + shortThrow + "|" +
+        \\    edgeParameterExpressions(0) + "|" + mixedThrow + "|" + reentered + ":" + parameterReentryCount + "|" +
+        \\    parameterArrow(4) + ":" + (new ParameterBase(5)).value + ":" + recursiveParameterExpression(3);
+        \\}
+    ;
+    const expected = "7:-6:8:9:11:false:false:true|default,number|0:0:0:0:0:false:false:false|false:3:RangeError|true:Infinity:false|TypeError|4:1|5:6:1";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("parameterSafeExpressionSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (configuration.mode == .required) {
+            const function_value = try ctx.evaluate("parameterExpressionHolder.method");
+            const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, chunk.default_parameter_indices);
+            try std.testing.expect(chunk.has_non_simple_parameters);
+            try std.testing.expect(chunk.arguments_slot != null);
+            try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 8);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
+        \\let parameterExpressionPolicyWitness = 0;
+        \\function automaticParameterExpression(first, second = first + 2) { return [second][0]; }
+        \\automaticParameterExpression(7);
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+}
+
 test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local prologues" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -25336,7 +25434,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         \\function sharedPattern([left, { right }], { bias, ...rest }, literal = 4 + 4) {
         \\  return left * 100 + right * 10 + bias + rest.extra + literal;
         \\}
-        \\function sharedInvocation(receiver = this, args = arguments, copy = receiver) { return (copy === receiver ? receiver.bias * 10 : -1) + args.length; }
+        \\function sharedInvocation(receiver = this, args = arguments, copy = receiver, score = copy === receiver ? 10 : -1) { return receiver.bias * score + args.length; }
         \\globalThis.sharedPatternInputs = [
         \\  [[1, { right: 2 }], { bias: 3, extra: 4 }],
         \\  [[2, { right: 3 }], { bias: 4, extra: 5 }],
@@ -25354,7 +25452,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     const raw_invocation = invocation_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const invocation_function: *interp.Function = @ptrCast(@alignCast(raw_invocation));
     const invocation_chunk = invocation_function.chunk orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, invocation_chunk.default_parameter_indices);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, invocation_chunk.default_parameter_indices);
     try std.testing.expect(invocation_chunk.arguments_slot != null);
     const input_value = try ctx.evaluate("sharedPatternInputs");
     const inputs = input_value.asObj();
