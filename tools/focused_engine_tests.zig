@@ -77,6 +77,11 @@ const frontend_cases = [_]Case{
         ,
         .expected = 31,
     },
+    .{
+        .name = "named rest parameter frame",
+        .source = "function rest(head, ...tail) { return head + tail.length + tail[0]; } rest(3, 4, 5)",
+        .expected = 9,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

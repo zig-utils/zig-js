@@ -193,6 +193,11 @@ fn configureMappedParameters(
     arguments_slot: ?u32,
 ) CompileError![]const u32 {
     if (fnode.is_arrow or fnode.is_strict or arguments_slot == null or fnode.params.len == 0) return &.{};
+    // ECMA-262 creates an unmapped arguments object for every non-simple
+    // parameter list. Rest/default/pattern formals therefore never publish
+    // frame-slot aliases, even when the surrounding function is sloppy.
+    for (fnode.params) |param|
+        if (param.default != null or param.is_rest or param.pattern != null) return &.{};
 
     const unmapped = std.math.maxInt(u32);
     const indices = try arena.alloc(u32, scope.count);
@@ -1508,9 +1513,15 @@ pub const Compiler = struct {
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null, .tdz_checks = tdz_checks };
         const parameter_slots = try arena.alloc(u32, fnode.params.len);
+        var rest_parameter_index: ?u32 = null;
         for (fnode.params, 0..) |p, index| {
-            if (p.default != null or p.is_rest or p.pattern != null)
+            if (p.default != null or p.pattern != null)
                 return rejectPlainFunction(rejection, .parameter_prologue);
+            if (p.is_rest) {
+                if (index + 1 != fnode.params.len)
+                    return rejectPlainFunction(rejection, .parameter_prologue);
+                rest_parameter_index = @intCast(index);
+            }
             parameter_slots[index] = try scope.addLocal(arena, p.name, false, false);
         }
         const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
@@ -1521,6 +1532,8 @@ pub const Compiler = struct {
         chunk.* = Chunk.init(arena);
         chunk.param_count = @intCast(fnode.params.len);
         chunk.parameter_slots = parameter_slots;
+        chunk.rest_parameter_index = rest_parameter_index;
+        chunk.has_non_simple_parameters = rest_parameter_index != null;
         chunk.arguments_slot = arguments_slot;
         chunk.mapped_parameter_indices = mapped_parameter_indices;
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
@@ -5136,20 +5149,19 @@ pub const Compiler = struct {
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
             const parameter_slots = try self.arena.alloc(u32, fnode.params.len);
+            var rest_parameter_index: ?u32 = null;
             for (fnode.params, 0..) |p, index| {
-                // Default values and rest params need a runtime prologue the VM
-                // doesn't emit yet. Generator-body env-mode closures can fall
-                // back to the tree-walker because their names live in Environment
-                // records. A top-level function can also keep a null chunk and
-                // fall back independently because its captures resolve through
-                // the global Environment rather than an enclosing VM frame.
-                if (p.default != null or p.is_rest or p.pattern != null) {
+                // Defaults and pattern formals still need the distinct
+                // parameter Environment/prologue. A final named rest formal is
+                // allocation-only and binds directly into its precise frame slot.
+                if (p.default != null or p.pattern != null or (p.is_rest and index + 1 != fnode.params.len)) {
                     if (self.scope == null) {
                         template_admission = .plain_parameter_prologue;
                         break :blk null;
                     }
                     return error.Unsupported;
                 }
+                if (p.is_rest) rest_parameter_index = @intCast(index);
                 parameter_slots[index] = try scope.addLocal(self.arena, p.name, false, false);
             }
             const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode);
@@ -5158,6 +5170,8 @@ pub const Compiler = struct {
 
             compiled.param_count = @intCast(fnode.params.len);
             compiled.parameter_slots = parameter_slots;
+            compiled.rest_parameter_index = rest_parameter_index;
+            compiled.has_non_simple_parameters = rest_parameter_index != null;
             compiled.arguments_slot = arguments_slot;
             compiled.mapped_parameter_indices = mapped_parameter_indices;
 
@@ -5558,6 +5572,26 @@ test "compiler reports stable plain-function admission reasons" {
     const admission = try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl);
     switch (admission) {
         .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var rest_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer rest_arena.deinit();
+    var rest_parser = try @import("parser.zig").Parser.init(
+        rest_arena.allocator(),
+        "function restFrame(head, ...tail) { return head + tail.length; }",
+    );
+    const rest_program = try rest_parser.parseProgram();
+    const rest_admission = try Compiler.admitPlainFunction(rest_arena.allocator(), rest_program.program[0].func_decl);
+    switch (rest_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 2), compiled.chunk.param_count);
+            try std.testing.expectEqual(@as(usize, 2), compiled.chunk.parameter_slots.len);
+            try std.testing.expectEqual(@as(?u32, 1), compiled.chunk.rest_parameter_index);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(u32, 1), compiled.chunk.parameter_slots[1]);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+        },
         .rejected => return error.TestUnexpectedResult,
     }
 

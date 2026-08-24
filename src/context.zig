@@ -24679,6 +24679,119 @@ test "forced tree-walker and required bytecode preserve strict arguments objects
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_arguments));
 }
 
+test "forced tree-walker and required bytecode preserve named rest parameters" {
+    const source =
+        \\function restCollect(head, ...tail) {
+        \\  var poison = "";
+        \\  try { arguments.callee; } catch (error) { poison = error.name; }
+        \\  var before = arguments[1];
+        \\  if (tail.length !== 0) tail[0] = tail[0] + 1;
+        \\  var afterTail = arguments[1];
+        \\  arguments[1] = 99;
+        \\  return String(head) + ":" + tail.join(",") + ":" + arguments.length + ":" +
+        \\    String(before) + ":" + String(afterTail) + ":" + String(arguments[1]) + ":" +
+        \\    String(tail[0]) + ":" + poison;
+        \\}
+        \\function restEscape(...values) { return () => values; }
+        \\function restNamed(...arguments) { return arguments.join(","); }
+        \\var restArrow = (head, ...tail) => head + ":" + tail.join(",");
+        \\function restRecursive(depth, ...values) {
+        \\  if (depth === 0) return values.join(",");
+        \\  return restRecursive(depth - 1, ...values);
+        \\}
+        \\var restHolder = {
+        \\  tag: "holder",
+        \\  method(prefix, ...values) { return this.tag + ":" + prefix + ":" + values.join(","); }
+        \\};
+        \\function RestBox(prefix, ...values) { this.value = prefix + ":" + values.join(","); }
+        \\class RestClass {
+        \\  constructor(prefix, ...values) { this.value = prefix + ":" + values.join(","); }
+        \\}
+        \\var restEscapedA = restEscape({ tag: "live" }, 2);
+        \\var restEscapedB = restEscape(1);
+        \\function restSummary() {
+        \\  var restEscapedC = restEscape(1);
+        \\  return restCollect() + "|" + restCollect(1) + "|" + restCollect(1, 2, 3) + "|" +
+        \\    restEscapedA()[0].tag + ":" + restEscapedA()[1] + ":" +
+        \\    String(restEscapedB() !== restEscapedC()) + "|" + restRecursive(4, 7, 8) + "|" +
+        \\    restNamed(10, 11) + "|" + restArrow("a", 12, 13) + "|" +
+        \\    restHolder.method("p", 4, 5) + "|" + (new RestBox("b", 6, 7)).value + "|" +
+        \\    (new RestClass("c", 8, 9)).value + "|" + restCollect.length;
+        \\}
+    ;
+    const expected = "undefined::0:undefined:undefined:99:undefined:TypeError|1::1:undefined:undefined:99:undefined:TypeError|1:3,3:3:2:2:99:3:TypeError|live:2:true|7,8|10,11|a:12,13|holder:p:4,5|b:6,7|c:8,9|1";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        // Exercise the same immutable chunk metadata with the GIL disabled;
+        // threadfuzz supplies the concurrent shared-realm stress coverage.
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("restSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+
+        if (configuration.mode == .required) {
+            const function_value = try ctx.evaluate("restCollect");
+            const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(interp.BytecodeAdmissionReason.template_plain_compiled, function.bytecode_admission_reason);
+            try std.testing.expectEqual(@as(?u32, 1), chunk.rest_parameter_index);
+            try std.testing.expect(chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(u32, 1), chunk.parameter_slots[1]);
+            try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 10);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    // Force only the outer script through the tree walker so the ordinary
+    // function takes the independent on-demand admission path used by hot
+    // application functions in automatic mode.
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
+        \\let restPolicyWitness = 0;
+        \\function automaticRest(head, ...tail) { return head + tail.length + tail[0]; }
+        \\automaticRest(3, 4, 5);
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+}
+
 test "forced tree-walker and required bytecode preserve sloppy mapped arguments frames" {
     const source =
         \\function basic(a, b) {

@@ -9258,8 +9258,33 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     const frame = act.frame;
     const slot_storage = act.slot_storage;
     const slots = frame.slots;
+    const RestParameterLayout = struct { index: usize, slot: u32 };
+    const rest_layout: ?RestParameterLayout = if (fchunk.rest_parameter_index) |rest_index_u32| layout: {
+        const rest_index: usize = rest_index_u32;
+        if (fchunk.param_count != func.params.len or fchunk.parameter_slots.len != func.params.len or
+            rest_index + 1 != func.params.len or
+            !func.params[rest_index].is_rest or func.params[rest_index].default != null or
+            func.params[rest_index].pattern != null)
+        {
+            releaseActivation(vm, act);
+            return vm.throwError("InternalError", "invalid bytecode rest parameter layout");
+        }
+        const rest_slot = fchunk.parameter_slots[rest_index];
+        if (rest_slot >= slots.len) {
+            releaseActivation(vm, act);
+            return vm.throwError("InternalError", "invalid bytecode rest parameter slot");
+        }
+        break :layout .{ .index = rest_index, .slot = rest_slot };
+    } else null;
+    if (fchunk.has_non_simple_parameters != (rest_layout != null) or
+        (fchunk.has_non_simple_parameters and fchunk.mapped_parameter_indices.len != 0))
+    {
+        releaseActivation(vm, act);
+        return vm.throwError("InternalError", "invalid bytecode parameter simplicity metadata");
+    }
     if (fchunk.parameter_slots.len == func.params.len) {
-        for (fchunk.parameter_slots, 0..) |slot, argument_index| {
+        const positional_slots = if (rest_layout) |layout| fchunk.parameter_slots[0..layout.index] else fchunk.parameter_slots;
+        for (positional_slots, 0..) |slot, argument_index| {
             if (slot >= slots.len) {
                 releaseActivation(vm, act);
                 return vm.throwError("InternalError", "invalid bytecode parameter slot");
@@ -9346,12 +9371,26 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             };
         }
     }
+    // A rest call adds an allocation after arguments-object creation but before
+    // the activation reaches execLoop's registered frame roots. Reserve a
+    // precise temporary root first so a recovery collection cannot reclaim or
+    // relocate the arguments exotic in that window.
+    const arguments_root: ?usize = if (rest_layout != null and fchunk.arguments_slot != null)
+        vm.pushTempRoot(Value.undef()) catch |e| {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return e;
+        }
+    else
+        null;
+    defer if (arguments_root) |root| vm.restoreTempRoots(root);
     if (fchunk.arguments_slot) |slot| {
         // FunctionDeclarationInstantiation creates the arguments exotic after
         // base-instance initialization and before body evaluation. Strict
         // functions retain an unmapped object; sloppy simple functions publish
         // their exact frame-slot map into object-owned atomic cells.
-        const mapped_layout_valid = if (func.is_strict)
+        const non_simple_parameters = fchunk.has_non_simple_parameters;
+        const mapped_layout_valid = if (func.is_strict or non_simple_parameters)
             fchunk.mapped_parameter_indices.len == 0
         else if (func.params.len == 0)
             fchunk.mapped_parameter_indices.len == 0
@@ -9366,7 +9405,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             releaseActivation(vm, act);
             return vm.throwError("InternalError", "invalid bytecode arguments slot");
         }
-        const arguments_value = (if (func.is_strict)
+        const arguments_value = (if (func.is_strict or non_simple_parameters)
             vm.createArgumentsObject(func, args, func.closure)
         else
             vm.createFrameArgumentsObject(func, args, slots, fchunk.mapped_parameter_indices)) catch |e| {
@@ -9375,10 +9414,37 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             return e;
         };
         slots[slot] = arguments_value;
+        if (arguments_root) |root| vm.setTempRoot(root, arguments_value);
         if (!func.is_strict and fchunk.mapped_parameter_indices.len != 0) {
             frame.mapped_arguments = arguments_value.asObj();
             frame.mapped_parameter_indices = fchunk.mapped_parameter_indices;
         }
+    }
+    if (rest_layout) |layout| {
+        // Allocate the root slot before the Array itself. Element growth may
+        // invoke allocation-recovery collection, so every subsequent access
+        // reloads the possibly relocated Value from the registered root.
+        const rest_root = vm.pushTempRoot(Value.undef()) catch |e| {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return e;
+        };
+        defer vm.restoreTempRoots(rest_root);
+        const rest = vm.newArray() catch |e| {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return e;
+        };
+        vm.setTempRoot(rest_root, rest);
+        var argument_index = layout.index;
+        while (argument_index < args.len) : (argument_index += 1) {
+            vm.tempRoot(rest_root, rest).asObj().appendElement(vm.arena, args[argument_index]) catch |e| {
+                popActivation(vm, act);
+                releaseActivation(vm, act);
+                return e;
+            };
+        }
+        slots[layout.slot] = vm.tempRoot(rest_root, rest);
     }
     if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
         const debug_environment = try gc_mod.allocEnv(vm.arena);

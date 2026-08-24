@@ -738,6 +738,15 @@ pub const Chunk = struct {
     /// and FunctionDeclarationInstantiation assigns that binding once per
     /// occurrence from left to right (so the rightmost value wins).
     parameter_slots: []const u32 = &.{},
+    /// Syntactic index of the final named rest formal. Its activation slot is
+    /// `parameter_slots[index]`; null means every formal is positional.
+    /// Defaults and destructuring formals retain their separate admission
+    /// barrier and never impersonate this allocation-only prologue.
+    rest_parameter_index: ?u32 = null,
+    /// FunctionDeclarationInstantiation must create an unmapped arguments
+    /// exotic for a non-simple formal list. Frozen here so calls never rescan
+    /// parameter AST merely to select the arguments-object representation.
+    has_non_simple_parameters: bool = false,
     /// Frame slot initialized with this ordinary function's arguments exotic
     /// object. Strict functions use it directly; sloppy simple-parameter
     /// functions additionally route the exact mapped parameter slots below.
