@@ -742,10 +742,14 @@ pub const Chunk = struct {
     /// BindingInitialization at chunk entry. Empty keeps simple/rest entry
     /// metadata compact and branch-free.
     destructuring_parameter_indices: []const u32 = &.{},
+    /// Sorted syntactic indices whose raw input is replaced at chunk entry only
+    /// when it is exactly undefined. The compiler admits only primitive-literal
+    /// Initializers until expression-bearing parameter environments are native.
+    default_parameter_indices: []const u32 = &.{},
     /// Syntactic index of the final named rest formal. Its activation slot is
     /// `parameter_slots[index]`; null means every formal is positional.
-    /// Defaults and pattern/rest mixed entry retain their separate admission
-    /// barrier and never impersonate this allocation-only prologue.
+    /// Rest mixed with defaults/patterns retains its separate ordered-entry
+    /// barrier and never impersonates this allocation-only prologue.
     rest_parameter_index: ?u32 = null,
     /// FunctionDeclarationInstantiation must create an unmapped arguments
     /// exotic for a non-simple formal list. Frozen here so calls never rescan

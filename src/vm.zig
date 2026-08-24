@@ -9271,25 +9271,28 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     const slot_storage = act.slot_storage;
     const slots = frame.slots;
     const pattern_indices = fchunk.destructuring_parameter_indices;
-    if (pattern_indices.len != 0) {
-        var pattern_cursor: usize = 0;
-        for (func.params, 0..) |parameter, index| {
-            if (parameter.default != null or parameter.is_rest) {
+    const default_indices = fchunk.default_parameter_indices;
+    var pattern_cursor: usize = 0;
+    var default_cursor: usize = 0;
+    for (func.params, 0..) |parameter, index| {
+        if (parameter.pattern != null) {
+            if (parameter.is_rest or pattern_cursor >= pattern_indices.len or pattern_indices[pattern_cursor] != index) {
                 releaseActivation(vm, act);
                 return vm.throwError("InternalError", "invalid bytecode destructuring parameter layout");
             }
-            if (parameter.pattern != null) {
-                if (pattern_cursor >= pattern_indices.len or pattern_indices[pattern_cursor] != index) {
-                    releaseActivation(vm, act);
-                    return vm.throwError("InternalError", "invalid bytecode destructuring parameter layout");
-                }
-                pattern_cursor += 1;
+            pattern_cursor += 1;
+        }
+        if (parameter.default != null) {
+            if (parameter.is_rest or default_cursor >= default_indices.len or default_indices[default_cursor] != index) {
+                releaseActivation(vm, act);
+                return vm.throwError("InternalError", "invalid bytecode default parameter layout");
             }
+            default_cursor += 1;
         }
-        if (pattern_cursor != pattern_indices.len) {
-            releaseActivation(vm, act);
-            return vm.throwError("InternalError", "invalid bytecode destructuring parameter layout");
-        }
+    }
+    if (pattern_cursor != pattern_indices.len or default_cursor != default_indices.len) {
+        releaseActivation(vm, act);
+        return vm.throwError("InternalError", "invalid bytecode parameter entry metadata");
     }
     const RestParameterLayout = struct { index: usize, slot: u32 };
     const rest_layout: ?RestParameterLayout = if (fchunk.rest_parameter_index) |rest_index_u32| layout: {
@@ -9309,8 +9312,8 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         }
         break :layout .{ .index = rest_index, .slot = rest_slot };
     } else null;
-    const has_non_simple_layout = rest_layout != null or pattern_indices.len != 0;
-    if ((rest_layout != null and pattern_indices.len != 0) or
+    const has_non_simple_layout = rest_layout != null or pattern_indices.len != 0 or default_indices.len != 0;
+    if ((rest_layout != null and (pattern_indices.len != 0 or default_indices.len != 0)) or
         fchunk.has_non_simple_parameters != has_non_simple_layout or
         (has_non_simple_layout and
             (fchunk.param_count != func.params.len or fchunk.parameter_slots.len != func.params.len)) or
@@ -9927,6 +9930,75 @@ test "vm: destructuring parameter allocation failure restores the caller activat
         @as(f64, 13),
         (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
     );
+}
+
+test "vm: BigInt literal default allocation failure restores the caller activation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(
+        allocator,
+        "function literal(value = 9007199254740993123456789n) { return value; } literal",
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+    };
+    const function_value = try run(&machine, root, null);
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u32, &.{0}, function_chunk.default_parameter_indices);
+
+    const warm = try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
+    try std.testing.expect(warm.isObject() and warm.asObj().is_bigint);
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    const saved_this = Value.num(91);
+    const saved_new_target = Value.num(92);
+    defer machine.arena = allocator;
+    for ([_]usize{ 0, 1 }) |fail_index| {
+        machine.this_value = saved_this;
+        machine.new_target = saved_new_target;
+        machine.strict = true;
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        try std.testing.expectError(
+            error.OutOfMemory,
+            runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef()),
+        );
+        machine.arena = allocator;
+        try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+        try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+        try std.testing.expect(machine.strict);
+        try std.testing.expectEqual(&env, machine.env);
+        try std.testing.expect(machine.vm_activation_free != null);
+    }
+    const exact_default_indices = function_chunk.default_parameter_indices;
+    for ([_][]const u32{ &.{}, &.{1}, &.{ 0, 0 } }) |malformed_indices| {
+        function_chunk.default_parameter_indices = malformed_indices;
+        try std.testing.expectError(
+            error.Throw,
+            runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef()),
+        );
+        try std.testing.expectEqualStrings("InternalError", machine.exception.asObj().errorName());
+        machine.exception = Value.undef();
+        try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+        try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+        try std.testing.expect(machine.strict);
+        try std.testing.expectEqual(&env, machine.env);
+    }
+    function_chunk.default_parameter_indices = exact_default_indices;
+    const recovered = try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
+    try std.testing.expect(recovered.isObject() and recovered.asObj().is_bigint);
 }
 
 test "vm: captured super references reject an uninitialized this binding" {

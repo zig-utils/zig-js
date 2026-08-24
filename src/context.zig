@@ -22990,7 +22990,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
         try std.testing.expectEqual(entry.reason, function.bytecode_admission_reason);
     }
     const template_expected = [_]struct { name: []const u8, reason: interp.BytecodeAdmissionReason }{
-        .{ .name = "templateDefault", .reason = .template_plain_rejected_parameter_prologue },
+        .{ .name = "templateDefault", .reason = .template_plain_compiled },
         .{ .name = "templateAccessor", .reason = .template_plain_compiled },
     };
     for (template_expected) |entry| {
@@ -23010,8 +23010,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
         if (entry.reason == .plain_compiled or entry.reason == .generator_compiled or entry.reason == .async_compiled) continue;
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
     }
-    for (template_expected) |entry|
-        try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
+    try std.testing.expectEqual(before.count(.template_plain_compiled) + 2, after.count(.template_plain_compiled));
     try std.testing.expectEqual(before.count(.program_source_policy), after.count(.program_source_policy));
     try std.testing.expectEqual(before.count(.template_plain_fallback), after.count(.template_plain_fallback));
     try std.testing.expectEqual(before.count(.template_generator_fallback), after.count(.template_generator_fallback));
@@ -25009,7 +25008,117 @@ test "forced tree-walker and required bytecode preserve initializer-free destruc
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
 }
 
-test "parallel_js: shared destructuring-parameter chunk keeps lane-local prologues" {
+test "forced tree-walker and required bytecode preserve primitive literal default parameters" {
+    const source =
+        \\var literalDefaultLog = "";
+        \\function literalDefaults(number = 4, big = 9007199254740993n, text = "ok", flag = false, nil = null, [letter] = "z") {
+        \\  var number;
+        \\  return number + ":" + big.toString() + ":" + text + ":" + flag + ":" + (nil === null) + ":" + letter;
+        \\}
+        \\function provided(a = 9, b = "fallback", c = true, d = null) { return a + ":" + b + ":" + c + ":" + (d === null); }
+        \\function literalArguments(value = 3) {
+        \\  var poison = "";
+        \\  try { arguments.callee; } catch (error) { poison = error.name; }
+        \\  var rawMissing = arguments[0] === undefined;
+        \\  arguments[0] = 8;
+        \\  return value + ":" + rawMissing + ":" + arguments[0] + ":" + poison;
+        \\}
+        \\function reenteredDefault(value = 6) { return value; }
+        \\function orderedDefault({ value }, tail = 2) { literalDefaultLog += "body,"; return value + tail; }
+        \\var orderedDefaultResult = orderedDefault({ get value() { literalDefaultLog += "get,"; return reenteredDefault() - 1; } }, undefined);
+        \\function defaultClosure(value = 5) {
+        \\  var value;
+        \\  return { read: () => value, write: (next) => value = next };
+        \\}
+        \\var escapedDefault = defaultClosure();
+        \\function recursiveDefault(value = 4) { return value === 0 ? 0 : value + recursiveDefault(value - 1); }
+        \\var literalArrow = (value = 6) => value;
+        \\var literalHolder = { method(value = 7) { return this === literalHolder ? value : -1; } };
+        \\function LiteralBox(value = 8) { this.value = value; }
+        \\class LiteralClass { constructor(value = 9) { this.value = value; } }
+        \\function prefixLength(first, second = 2, third = 3) { return first + second + third; }
+        \\function nullPattern([value] = null) { return value; }
+        \\function literalDefaultSummary() {
+        \\  var nullPatternName = "";
+        \\  try { nullPattern(); } catch (error) { nullPatternName = error.name; }
+        \\  var before = escapedDefault.read();
+        \\  escapedDefault.write(12);
+        \\  return literalDefaults() + "|" + provided(0, "", false, undefined) + "|" + literalArguments() + "|" +
+        \\    orderedDefaultResult + ":" + literalDefaultLog + "|" + before + ":" + escapedDefault.read() + "|" +
+        \\    recursiveDefault() + "|" + literalArrow() + "|" + literalHolder.method() + "|" +
+        \\    (new LiteralBox()).value + "|" + (new LiteralClass()).value + "|" + prefixLength.length + "|" + nullPatternName;
+        \\}
+    ;
+    const expected = "4:9007199254740993:ok:false:true:z|0::false:true|3:true:8:TypeError|7:get,body,|5:12|10|6|7|8|9|1|TypeError";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("literalDefaultSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (configuration.mode == .required) {
+            const function_value = try ctx.evaluate("literalDefaults");
+            const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5 }, chunk.default_parameter_indices);
+            try std.testing.expectEqualSlices(u32, &.{5}, chunk.destructuring_parameter_indices);
+            try std.testing.expect(chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(?u32, null), chunk.rest_parameter_index);
+            try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
+            for (chunk.code.items) |instruction| if (instruction.op == .bind_pattern)
+                return error.TestUnexpectedResult;
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 13);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
+        \\let primitiveDefaultPolicyWitness = 0;
+        \\function automaticLiteralDefault(value = 9) { return [value][0]; }
+        \\automaticLiteralDefault();
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+}
+
+test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local prologues" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
@@ -25021,8 +25130,8 @@ test "parallel_js: shared destructuring-parameter chunk keeps lane-local prologu
     });
     defer ctx.destroy();
     _ = try ctx.evaluate(
-        \\function sharedPattern([left, { right }], { bias, ...rest }) {
-        \\  return left * 100 + right * 10 + bias + rest.extra;
+        \\function sharedPattern([left, { right }], { bias, ...rest }, literal = 8) {
+        \\  return left * 100 + right * 10 + bias + rest.extra + literal;
         \\}
         \\globalThis.sharedPatternInputs = [
         \\  [[1, { right: 2 }], { bias: 3, extra: 4 }],
@@ -25036,6 +25145,7 @@ test "parallel_js: shared destructuring-parameter chunk keeps lane-local prologu
     const function: *interp.Function = @ptrCast(@alignCast(raw_function));
     const chunk = function.chunk orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, chunk.destructuring_parameter_indices);
+    try std.testing.expectEqualSlices(u32, &.{2}, chunk.default_parameter_indices);
     const input_value = try ctx.evaluate("sharedPatternInputs");
     const inputs = input_value.asObj();
 
@@ -25092,7 +25202,7 @@ test "parallel_js: shared destructuring-parameter chunk keeps lane-local prologu
         thread.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[lane]});
     for (&threads) |*thread| thread.join();
     for (&workers, 0..) |*worker, lane| {
-        const expected: i64 = @intCast(iterations * (127 + 112 * lane));
+        const expected: i64 = @intCast(iterations * (135 + 112 * lane));
         try std.testing.expectEqual(expected, worker.result.load(.acquire));
     }
 }
@@ -25226,7 +25336,7 @@ test "moving GC relocates live severed and recycled mapped arguments cells" {
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
 }
 
-test "required bytecode rejects an uncompiled function instead of counting fallback coverage" {
+test "required bytecode rejects an expression-default function instead of counting fallback coverage" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,
         .bytecode_execution_mode = .required,
@@ -25234,7 +25344,7 @@ test "required bytecode rejects an uncompiled function instead of counting fallb
     defer ctx.destroy();
 
     try std.testing.expectError(error.Throw, ctx.evaluate(
-        \\function needsParameterPrologue(value = 1) { return value; }
+        \\function needsParameterPrologue(value = missingDefault) { return value; }
         \\needsParameterPrologue();
     ));
     const exception = ctx.exception orelse return error.TestUnexpectedResult;

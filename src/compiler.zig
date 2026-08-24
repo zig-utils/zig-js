@@ -206,13 +206,21 @@ fn patternBindsName(pattern: *const ast.Node, name: []const u8) bool {
 const PlainParameterLayout = struct {
     slots: []const u32,
     destructuring_indices: []const u32,
+    default_indices: []const u32,
     destructuring_input_names: []const ?[]const u8,
     rest_index: ?u32,
 
     fn hasNonSimple(self: *const PlainParameterLayout) bool {
-        return self.rest_index != null or self.destructuring_indices.len != 0;
+        return self.rest_index != null or self.destructuring_indices.len != 0 or self.default_indices.len != 0;
     }
 };
+
+fn primitiveLiteralParameterDefault(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit => true,
+        else => false,
+    };
+}
 
 fn configurePlainParameters(
     arena: std.mem.Allocator,
@@ -221,20 +229,26 @@ fn configurePlainParameters(
 ) CompileError!PlainParameterLayout {
     var has_pattern = false;
     var has_rest = false;
+    var has_default = false;
     for (fnode.params) |parameter| {
-        if (parameter.default != null) return error.Unsupported;
+        if (parameter.default) |default| {
+            if (!primitiveLiteralParameterDefault(default)) return error.Unsupported;
+            has_default = true;
+        }
         has_pattern = has_pattern or parameter.pattern != null;
         has_rest = has_rest or parameter.is_rest;
     }
-    // A pattern followed by a rest formal has observable left-to-right entry
-    // ordering: iterator/getter code must run before rest ArrayCreate. Keep that
-    // mixed prologue explicit until both operations share one bytecode entry.
-    if (has_pattern and has_rest) return error.Unsupported;
+    // A pattern/default followed by a rest formal has observable left-to-right
+    // entry ordering: iterator/default work must precede rest ArrayCreate. Keep
+    // that mixed prologue explicit until every operation shares one ordered
+    // bytecode entry stream.
+    if ((has_pattern or has_default) and has_rest) return error.Unsupported;
 
     const parameter_slots = try arena.alloc(u32, fnode.params.len);
     const input_names = try arena.alloc(?[]const u8, fnode.params.len);
     @memset(input_names, null);
     var pattern_indices: std.ArrayListUnmanaged(u32) = .empty;
+    var default_indices: std.ArrayListUnmanaged(u32) = .empty;
     var rest_index: ?u32 = null;
 
     const BindingCollector = struct {
@@ -244,6 +258,7 @@ fn configurePlainParameters(
         }
     };
     for (fnode.params, 0..) |parameter, index| {
+        if (parameter.default != null) try default_indices.append(arena, @intCast(index));
         if (parameter.pattern) |pattern| {
             if (parameter.is_rest or patternHasEvaluationExpressions(pattern)) return error.Unsupported;
             var collector = BindingCollector{ .scope = scope };
@@ -263,6 +278,7 @@ fn configurePlainParameters(
     return .{
         .slots = parameter_slots,
         .destructuring_indices = pattern_indices.items,
+        .default_indices = default_indices.items,
         .destructuring_input_names = input_names,
         .rest_index = rest_index,
     };
@@ -1573,6 +1589,35 @@ pub const Compiler = struct {
         return error.Unsupported;
     }
 
+    fn compilePlainParameterEntries(
+        self: *Compiler,
+        fnode: *const ast.FunctionNode,
+        layout: *const PlainParameterLayout,
+    ) CompileError!void {
+        for (fnode.params, 0..) |parameter, index| {
+            const input_name = layout.destructuring_input_names[index] orelse parameter.name;
+            if (parameter.default) |default| {
+                // IteratorBindingInitialization selects an Initializer only for
+                // exact undefined, never for null or another falsy primitive.
+                try self.emitLoad(input_name);
+                _ = try self.chunk.emit(.load_undefined, 0);
+                _ = try self.chunk.emit(.eq_strict, 0);
+                const provided = try self.chunk.emit(.jump_if_false, 0);
+                try self.compileExpr(default);
+                try self.emitStore(input_name);
+                _ = try self.chunk.emit(.pop, 0);
+                self.chunk.patchToHere(provided);
+            }
+            if (parameter.pattern) |pattern| {
+                try self.compilePattern(
+                    pattern,
+                    .{ .named = layout.destructuring_input_names[index].? },
+                    .var_declaration,
+                );
+            }
+        }
+    }
+
     fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
@@ -1611,19 +1656,13 @@ pub const Compiler = struct {
         chunk.param_count = @intCast(fnode.params.len);
         chunk.parameter_slots = parameter_layout.slots;
         chunk.destructuring_parameter_indices = parameter_layout.destructuring_indices;
+        chunk.default_parameter_indices = parameter_layout.default_indices;
         chunk.rest_parameter_index = parameter_layout.rest_index;
         chunk.has_non_simple_parameters = parameter_layout.hasNonSimple();
         chunk.arguments_slot = arguments_slot;
         chunk.mapped_parameter_indices = mapped_parameter_indices;
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
-        for (parameter_layout.destructuring_indices) |parameter_index| {
-            const index: usize = parameter_index;
-            try c.compilePattern(
-                fnode.params[index].pattern.?,
-                .{ .named = parameter_layout.destructuring_input_names[index].? },
-                .var_declaration,
-            );
-        }
+        try c.compilePlainParameterEntries(fnode, &parameter_layout);
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
         } else {
@@ -5257,20 +5296,14 @@ pub const Compiler = struct {
             compiled.param_count = @intCast(fnode.params.len);
             compiled.parameter_slots = parameter_layout.slots;
             compiled.destructuring_parameter_indices = parameter_layout.destructuring_indices;
+            compiled.default_parameter_indices = parameter_layout.default_indices;
             compiled.rest_parameter_index = parameter_layout.rest_index;
             compiled.has_non_simple_parameters = parameter_layout.hasNonSimple();
             compiled.arguments_slot = arguments_slot;
             compiled.mapped_parameter_indices = mapped_parameter_indices;
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
-            for (parameter_layout.destructuring_indices) |parameter_index| {
-                const index: usize = parameter_index;
-                try sub_c.compilePattern(
-                    fnode.params[index].pattern.?,
-                    .{ .named = parameter_layout.destructuring_input_names[index].? },
-                    .var_declaration,
-                );
-            }
+            try sub_c.compilePlainParameterEntries(fnode, &parameter_layout);
             if (fnode.is_expr_body) {
                 sub_c.compileExpr(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
@@ -5644,8 +5677,22 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function* f(){}", .expected = .generator_or_async },
         .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
         .{ .source = "function f(){ { function nested(){} } }", .expected = .block_nested_function_declaration },
-        .{ .source = "function f(value = 1){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = outer){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = undefined){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = -1){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = 1 + 2){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = holder.value){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = this){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = new.target){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = /x/){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = []){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = () => 1){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = class {}){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = side()){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = 1, ...tail){}", .expected = .parameter_prologue },
         .{ .source = "function f([value = 1]){}", .expected = .parameter_prologue },
+        .{ .source = "function f([value] = []){}", .expected = .parameter_prologue },
         .{ .source = "function f({ [key]: value }){}", .expected = .parameter_prologue },
         .{ .source = "function f([value], ...tail){}", .expected = .parameter_prologue },
         .{ .source = "function f(){ return eval('1'); }", .expected = .unsupported_lowering },
@@ -5687,8 +5734,39 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expectEqual(@as(usize, 2), compiled.chunk.parameter_slots.len);
             try std.testing.expectEqual(@as(?u32, 1), compiled.chunk.rest_parameter_index);
             try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.default_parameter_indices.len);
             try std.testing.expectEqual(@as(u32, 1), compiled.chunk.parameter_slots[1]);
             try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var default_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer default_arena.deinit();
+    var default_parser = try @import("parser.zig").Parser.init(
+        default_arena.allocator(),
+        "function literalDefaults(number = 1, big = 9007199254740993n, text = 'ok', flag = false, nil = null, [letter] = 'z') { return number; }",
+    );
+    const default_program = try default_parser.parseProgram();
+    const default_admission = try Compiler.admitPlainFunction(default_arena.allocator(), default_program.program[0].func_decl);
+    switch (default_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 6), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 6 }, compiled.chunk.parameter_slots);
+            try std.testing.expectEqualSlices(u32, &.{5}, compiled.chunk.destructuring_parameter_indices);
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5 }, compiled.chunk.default_parameter_indices);
+            try std.testing.expectEqual(@as(?u32, null), compiled.chunk.rest_parameter_index);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+            try std.testing.expectEqualStrings("number", compiled.chunk.debug_local_names[0]);
+            try std.testing.expectEqualStrings("big", compiled.chunk.debug_local_names[1]);
+            try std.testing.expectEqualStrings("text", compiled.chunk.debug_local_names[2]);
+            try std.testing.expectEqualStrings("flag", compiled.chunk.debug_local_names[3]);
+            try std.testing.expectEqualStrings("nil", compiled.chunk.debug_local_names[4]);
+            try std.testing.expectEqualStrings("letter", compiled.chunk.debug_local_names[5]);
+            try std.testing.expectEqualStrings("\x00param5", compiled.chunk.debug_local_names[6]);
+            for (compiled.chunk.code.items) |instruction| if (instruction.op == .bind_pattern)
+                return error.TestUnexpectedResult;
         },
         .rejected => return error.TestUnexpectedResult,
     }
@@ -5706,6 +5784,7 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expectEqual(@as(u32, 2), compiled.chunk.param_count);
             try std.testing.expectEqualSlices(u32, &.{ 3, 6 }, compiled.chunk.parameter_slots);
             try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, compiled.chunk.destructuring_parameter_indices);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.default_parameter_indices.len);
             try std.testing.expectEqualStrings("first", compiled.chunk.debug_local_names[0]);
             try std.testing.expectEqualStrings("value", compiled.chunk.debug_local_names[1]);
             try std.testing.expectEqualStrings("tail", compiled.chunk.debug_local_names[2]);

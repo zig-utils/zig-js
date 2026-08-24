@@ -87,6 +87,11 @@ const frontend_cases = [_]Case{
         .source = "function pick([first, { value }, ...tail], { keep, ...rest }) { return first + value + tail.length + keep + rest.extra; } pick([1, { value: 2 }, 3, 4], { keep: 5, extra: 6 })",
         .expected = 16,
     },
+    .{
+        .name = "primitive literal default parameter frame",
+        .source = "function defaults(number = 4, text = 'four', flag = false, [letter] = 'z') { return number + text.length + (flag ? 100 : 0) + letter.length; } defaults(undefined, undefined, undefined, undefined)",
+        .expected = 9,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{
