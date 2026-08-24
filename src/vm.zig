@@ -6789,7 +6789,9 @@ fn runChunk(
             },
 
             .load_this => try stack.append(stack_alloc, vm.this_value),
-            .load_new_target => try stack.append(stack_alloc, vm.new_target),
+            .load_new_target => try stack.append(stack_alloc, if (vm.in_field_initializer) Value.undef() else vm.new_target),
+            .enter_field_initializers => vm.in_field_initializer = true,
+            .exit_field_initializers => vm.in_field_initializer = false,
             .new_object => try stack.append(stack_alloc, try vm.newObject()),
             .new_array => try stack.append(stack_alloc, try vm.newArray()),
             .init_prop => {
@@ -7157,6 +7159,19 @@ fn runChunk(
                 if (!try vm.setMemberResult(parent, try propKey(vm, key), v, vm.this_value) and inst.a != 0)
                     return vm.throwError("TypeError", "Cannot set property");
                 try stack.append(stack_alloc, v);
+            },
+            .init_class_field => {
+                const field_value = stack.pop().?;
+                const receiver = stack.pop().?;
+                try vm.initializePublicClassField(receiver, chunk.names.items[inst.a], field_value);
+                try stack.append(stack_alloc, field_value);
+            },
+            .init_private_field => {
+                const field_value = stack.pop().?;
+                if (!vm.this_value.isObject())
+                    return vm.throwError("TypeError", "Class field receiver is not an object");
+                try vm.initializePrivateClassField(vm.this_value.asObj(), chunk.names.items[inst.a], field_value);
+                try stack.append(stack_alloc, field_value);
             },
             .delete_super => {
                 _ = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
@@ -9179,6 +9194,7 @@ const Activation = struct {
     saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
     saved_debug_call_frame: ?*interp.DebugCallFrame,
     saved_stack_trace_call_frame: ?*interp.StackTraceCallFrame,
+    saved_field_initializer: bool,
     debug_environment: ?*Environment = null,
     debug_call_frame: interp.DebugCallFrame = undefined,
     stack_trace_call_frame: interp.StackTraceCallFrame = undefined,
@@ -9251,6 +9267,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_pm = undefined,
         .saved_debug_call_frame = undefined,
         .saved_stack_trace_call_frame = undefined,
+        .saved_field_initializer = undefined,
     };
     vm.vm_activation_allocations += 1;
     return act;
@@ -9368,6 +9385,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_pm = vm.current_private_map,
         .saved_debug_call_frame = vm.debug_call_frame,
         .saved_stack_trace_call_frame = vm.stack_trace_call_frame,
+        .saved_field_initializer = vm.in_field_initializer,
     };
     act.exec.saved_home_object = vm.home_object;
     act.exec.saved_super_ctor = vm.super_ctor;
@@ -9394,6 +9412,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.import_meta_slot = func.import_meta_slot;
     vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
     vm.cur_module = func.module_referrer;
+    vm.in_field_initializer = func.is_arrow and func.field_init_ctx;
     vm.this_value = bindThisForCall(vm, func, this_val) catch |e| {
         popActivation(vm, act);
         releaseActivation(vm, act);
@@ -9533,6 +9552,7 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.current_private_map = act.saved_pm;
     vm.debug_call_frame = act.saved_debug_call_frame;
     vm.stack_trace_call_frame = act.saved_stack_trace_call_frame;
+    vm.in_field_initializer = act.saved_field_initializer;
 }
 
 fn inheritCallerState(dst: *Activation, src: *const Activation) void {
@@ -9551,6 +9571,7 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_pm = src.saved_pm;
     dst.saved_debug_call_frame = src.saved_debug_call_frame;
     dst.saved_stack_trace_call_frame = src.saved_stack_trace_call_frame;
+    dst.saved_field_initializer = src.saved_field_initializer;
     if (dst.debug_environment != null) dst.debug_call_frame.caller = src.debug_call_frame.caller;
     dst.stack_trace_call_frame.caller = src.stack_trace_call_frame.caller;
 }
@@ -10340,6 +10361,74 @@ test "vm: parameter construction allocation failure restores the caller activati
         "parameter-constructionparameter-construction",
         (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asStr(),
     );
+}
+
+test "vm: base class field allocation failure restores the caller activation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(
+        allocator,
+        "var fieldInput = 'base-field'; class FieldBox { object = { tag: fieldInput }; text = fieldInput + fieldInput; constructor(input) { this.input = input; } } FieldBox",
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+        .bytecode_execution_mode = .required,
+    };
+    const constructor = try run(&machine, root, null);
+    const function = Interpreter.funcOf(constructor) orelse return error.TestUnexpectedResult;
+    _ = function.chunk orelse return error.TestUnexpectedResult;
+    const input = try Value.strAlloc(allocator, "argument");
+    const arguments = [_]Value{input};
+
+    const baseline = try construct(&machine, constructor, &arguments);
+    try std.testing.expectEqualStrings("base-field", baseline.asObj().getOwn("object").?.asObj().getOwn("tag").?.asStr());
+    try std.testing.expectEqualStrings("base-fieldbase-field", baseline.asObj().getOwn("text").?.asStr());
+    try std.testing.expectEqualStrings("argument", baseline.asObj().getOwn("input").?.asStr());
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    const saved_this = Value.num(151);
+    const saved_new_target = Value.num(152);
+    var failures: usize = 0;
+    var recovered = false;
+    defer machine.arena = allocator;
+    for (0..64) |fail_index| {
+        machine.this_value = saved_this;
+        machine.new_target = saved_new_target;
+        machine.strict = true;
+        machine.in_field_initializer = true;
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        const result = construct(&machine, constructor, &arguments);
+        machine.arena = allocator;
+        if (result) |instance| {
+            try std.testing.expectEqualStrings("base-field", instance.asObj().getOwn("object").?.asObj().getOwn("tag").?.asStr());
+            try std.testing.expectEqualStrings("base-fieldbase-field", instance.asObj().getOwn("text").?.asStr());
+            try std.testing.expectEqualStrings("argument", instance.asObj().getOwn("input").?.asStr());
+            recovered = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+        try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+        try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+        try std.testing.expect(machine.strict);
+        try std.testing.expect(machine.in_field_initializer);
+        try std.testing.expectEqual(&env, machine.env);
+        try std.testing.expect(machine.vm_activation_free != null);
+        if (recovered) break;
+    }
+    try std.testing.expect(failures > 0 and recovered);
 }
 
 test "vm: captured super references reject an uninitialized this binding" {

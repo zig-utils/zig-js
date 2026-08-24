@@ -105,10 +105,20 @@ pub const FunctionNode = struct {
     /// A MethodDefinition (concise method, getter, or setter in an object literal
     /// or class body). Such functions get a [[HomeObject]] so `super` resolves.
     is_method: bool = false,
-    /// Runtime-synthesized class constructor whose derived/field initialization
-    /// state is not yet represented by a bytecode activation. Parsed functions
-    /// leave this false; `buildClass` sets it only for that exact barrier.
+    /// Runtime-synthesized derived class constructor whose `super()`/`this`
+    /// initialization state is not yet represented by a bytecode activation.
+    /// Parsed functions and base constructors leave this false.
     requires_tree_walk_class_constructor: bool = false,
+    /// Runtime-synthesized base-constructor instance element initializers. They
+    /// execute in source order before FunctionDeclarationInstantiation and
+    /// resolve names through the class-definition closure, not constructor slots.
+    /// Parsed functions leave this empty; `buildClass` owns the synthesized AST.
+    class_instance_initializers: []const *Node = &.{},
+    /// ClassDefinitionEvaluation creates the constructor object before it
+    /// evaluates computed element names. Base constructors with instance fields
+    /// therefore compile only after that pass bakes each one-time key into the
+    /// initializer AST. No function can observe the constructor in between.
+    defer_plain_bytecode_compilation: bool = false,
 };
 
 /// A `class` member: a method (`func` is a `.function` node) or a field

@@ -47,6 +47,11 @@ const frontend_cases = [_]Case{
         .expected = 7,
     },
     .{
+        .name = "base class instance initialization",
+        .source = "let outer = 3; let key = Symbol('field'); class C { value = outer; [key]; #private = 4; accessor auto = 5; constructor(outer = this.value + 3) { this.argument = outer; } score() { return this.value + this.#private + this.auto + this.argument + (Object.prototype.hasOwnProperty.call(this, key) ? 1 : 0); } } new C().score()",
+        .expected = 19,
+    },
+    .{
         .name = "optional chain with nullish fallback",
         .source = "let o = null; (o?.x ?? 41) + 1",
         .expected = 42,

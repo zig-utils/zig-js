@@ -1203,6 +1203,9 @@ pub const Compiler = struct {
     /// stack like any call and eventually throw RangeError (matching the
     /// tree-walker) rather than looping forever on `function f(){ return f(); }`.
     is_strict: bool = false,
+    /// Class instance initializer expressions are compiled into a constructor
+    /// prefix with environment-only name resolution and lexical field semantics.
+    in_field_initializer: bool = false,
     /// Emit per-statement VM checkpoints for debugger-enabled suspendable code.
     debug_checkpoints: bool = false,
     /// Highest #706 scratch slot handed out by this compiler. Program chunks
@@ -1674,6 +1677,22 @@ pub const Compiler = struct {
         }
     }
 
+    fn compileBaseClassInitializers(self: *Compiler, fnode: *const ast.FunctionNode) CompileError!void {
+        if (fnode.class_instance_initializers.len == 0) return;
+        const saved_scope = self.scope;
+        const saved_field_initializer = self.in_field_initializer;
+        self.scope = null;
+        self.in_field_initializer = true;
+        defer {
+            self.scope = saved_scope;
+            self.in_field_initializer = saved_field_initializer;
+        }
+
+        _ = try self.chunk.emit(.enter_field_initializers, 0);
+        for (fnode.class_instance_initializers) |initializer| try self.compileStmt(initializer);
+        _ = try self.chunk.emit(.exit_field_initializers, 0);
+    }
+
     fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
@@ -1718,6 +1737,7 @@ pub const Compiler = struct {
         chunk.arguments_slot = arguments_slot;
         chunk.mapped_parameter_indices = mapped_parameter_indices;
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
+        try c.compileBaseClassInitializers(fnode);
         try c.compilePlainParameterEntries(fnode, &parameter_layout);
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
@@ -2507,6 +2527,14 @@ pub const Compiler = struct {
                 // values are discarded. `active_finally` is compile-time region
                 // state, so no runtime completion scratch is introduced here.
                 _ = try self.chunk.emit(if (self.mode == .program and self.active_finally == 0) .set_acc else .pop, 0);
+            },
+            .private_field_def => |field| {
+                if (!self.in_field_initializer) return error.Unsupported;
+                try self.compileExpr(field.value);
+                const raw_value = if (field.value.* == .field_init_value) field.value.field_init_value else field.value;
+                try self.emitNamedEval(raw_value, std.mem.sliceTo(field.name, 0));
+                _ = try self.chunk.emit(.init_private_field, try self.chunk.addName(field.name));
+                _ = try self.chunk.emit(.pop, 0);
             },
             .debugger_stmt => _ = try self.chunk.emit(.nop, 0),
             .block => |stmts| {
@@ -4303,7 +4331,14 @@ pub const Compiler = struct {
                 try self.compileExpr(l.right);
                 self.chunk.patchToHere(short);
             },
-            .assign => |a| switch (a.target.*) {
+            .assign => |a| if (self.in_field_initializer and a.value.* == .field_init_value and a.target.* == .member) {
+                const member = a.target.member;
+                if (member.computed != null) return error.Unsupported;
+                try self.compileExpr(member.object);
+                try self.compileExpr(a.value);
+                try self.emitNamedEval(a.value.field_init_value, member.property);
+                _ = try self.chunk.emit(.init_class_field, try self.chunk.addName(member.property));
+            } else switch (a.target.*) {
                 .identifier => |name| {
                     const reference = try self.assignmentBindingReferencePlan(name);
                     try self.compileExpr(a.value);
@@ -4506,7 +4541,7 @@ pub const Compiler = struct {
             },
             .optional_chain => |inner| try self.compileOptionalChain(inner, false),
             .this_expr => _ = try self.chunk.emit(.load_this, 0),
-            .new_target_expr => _ = try self.chunk.emit(.load_new_target, 0),
+            .new_target_expr => _ = try self.chunk.emit(if (self.in_field_initializer) .load_undefined else .load_new_target, 0),
             .import_meta => _ = try self.chunk.emit(.load_import_meta, 0),
             .member => |m| {
                 try self.compileExpr(m.object);
@@ -4538,6 +4573,10 @@ pub const Compiler = struct {
                     for (n.args) |arg| try self.compileExpr(arg);
                     _ = try self.chunk.emit(.new_call, @intCast(n.args.len));
                 }
+            },
+            .field_init_value => |value| {
+                if (!self.in_field_initializer) return error.Unsupported;
+                try self.compileExpr(value);
             },
             .object_lit => |props| {
                 _ = try self.chunk.emit(.new_object, 0);

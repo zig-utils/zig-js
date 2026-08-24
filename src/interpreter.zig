@@ -3165,6 +3165,29 @@ pub const Interpreter = struct {
         }
     }
 
+    pub fn initializePrivateClassField(self: *Interpreter, o: *value.Object, name: []const u8, field_value: Value) EvalError!void {
+        try self.addPrivateBrandChecked(o, name);
+        try o.setOwn(self.arena, self.root_shape, name, field_value);
+        try o.setAttr(self.arena, name, .{ .writable = true, .enumerable = false, .configurable = false });
+    }
+
+    pub fn initializePublicClassField(self: *Interpreter, receiver: Value, key: []const u8, field_value: Value) EvalError!void {
+        if (!receiver.isObject()) return self.throwError("TypeError", "Class field receiver is not an object");
+        const o = receiver.asObj();
+        if (o.proxyHandler() != null or o.proxy_revoked or isModuleNs(o)) {
+            const desc = (try self.newObject()).asObj();
+            try self.setProp(desc, "value", field_value);
+            try self.setProp(desc, "writable", Value.boolVal(true));
+            try self.setProp(desc, "enumerable", Value.boolVal(true));
+            try self.setProp(desc, "configurable", Value.boolVal(true));
+            try builtins.defineOne(self, o, key, desc);
+            return;
+        }
+        if (!objectHasOwn(o, key) and !o.isExtensible())
+            return self.throwError("TypeError", "Cannot define class field on a non-extensible object");
+        try self.setProp(o, key, field_value);
+    }
+
     /// Pre-bind every identifier in a destructuring pattern to the TDZ sentinel.
     fn tdzBindPattern(self: *Interpreter, target: *Node, tdz: Value) void {
         switch (target.*) {
@@ -4285,26 +4308,7 @@ pub const Interpreter = struct {
                         try self.memberKey(m.property, m.computed);
                     const v = try self.eval(a.value);
                     try self.maybeNameAnon(v, a.value.field_init_value, key);
-                    if (obj.isObject()) {
-                        const o = obj.asObj();
-                        if (o.proxyHandler() != null or o.proxy_revoked or isModuleNs(o)) {
-                            // A Proxy / module-namespace receiver must observe the
-                            // field through [[DefineOwnProperty]] (the `defineProperty`
-                            // trap, or — for a deferred namespace — its evaluation
-                            // trigger), as a CreateDataPropertyOrThrow {w,e,c}=true
-                            // data descriptor.
-                            const desc = (try self.newObject()).asObj();
-                            try self.setProp(desc, "value", v);
-                            try self.setProp(desc, "writable", Value.boolVal(true));
-                            try self.setProp(desc, "enumerable", Value.boolVal(true));
-                            try self.setProp(desc, "configurable", Value.boolVal(true));
-                            try builtins.defineOne(self, o, key, desc);
-                        } else {
-                            if (!objectHasOwn(o, key) and !o.isExtensible())
-                                return self.throwError("TypeError", "Cannot define class field on a non-extensible object");
-                            try self.setProp(o, key, v);
-                        }
-                    }
+                    try self.initializePublicClassField(obj, key, v);
                     break :blk v;
                 }
                 if (a.target.* == .call) {
@@ -4714,12 +4718,8 @@ pub const Interpreter = struct {
                 // the part of the storage key before the NUL marker).
                 const raw_init = if (d.value.* == .field_init_value) d.value.field_init_value else d.value;
                 try self.maybeNameAnon(fv, raw_init, std.mem.sliceTo(d.name, 0));
-                if (self.this_value.isObject()) {
-                    const o = self.this_value.asObj();
-                    try self.addPrivateBrandChecked(o, d.name);
-                    try o.setOwn(self.arena, self.root_shape, d.name, fv);
-                    try o.setAttr(self.arena, d.name, .{ .writable = true, .enumerable = false, .configurable = false });
-                }
+                if (self.this_value.isObject())
+                    try self.initializePrivateClassField(self.this_value.asObj(), d.name, fv);
                 break :blk Value.undef();
             },
             .object_lit => |props| try self.evalObjectLit(props),
@@ -6359,6 +6359,7 @@ pub const Interpreter = struct {
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
         // generator throws a clear TypeError rather than running incorrectly.
         var admission_reason: BytecodeAdmissionReason = undefined;
+        var admission_deferred = false;
         if (fnode.is_generator) {
             switch (try Compiler.admitGenerator(self.arena, fnode, true)) {
                 .compiled => |chunk| {
@@ -6377,25 +6378,14 @@ pub const Interpreter = struct {
                 },
                 .rejected => |reason| admission_reason = asyncRejectionAdmission(reason),
             }
-        } else if (self.bytecode_execution_mode == .tree_walker) {
-            admission_reason = .plain_forced_tree_walker;
-        } else if (self.debug_statement_hook != null) {
-            admission_reason = .plain_policy_debugger;
-        } else if (plainFunctionPolicyRejection(fnode)) |reason| {
-            admission_reason = reason;
+        } else if (fnode.defer_plain_bytecode_compilation) {
+            admission_reason = .synthetic;
+            admission_deferred = true;
         } else {
-            switch (try Compiler.admitPlainFunction(self.arena, fnode)) {
-                .compiled => |code| {
-                    func.chunk = code.chunk;
-                    func.local_count = code.local_count;
-                    func.vm_inline_calls_safe = vmChunkAllowsInlineCalls(code.chunk);
-                    admission_reason = .plain_compiled;
-                },
-                .rejected => |reason| admission_reason = plainRejectionAdmission(reason),
-            }
+            admission_reason = try self.installPlainFunctionBytecode(func, fnode);
         }
         func.bytecode_admission_reason = admission_reason;
-        self.recordBytecodeAdmission(admission_reason);
+        if (!admission_deferred) self.recordBytecodeAdmission(admission_reason);
         // A function object's [[Prototype]] is the kind-specific function
         // prototype intrinsic: %GeneratorFunction.prototype% for `function*`,
         // %AsyncFunction.prototype% for `async function`,
@@ -6420,6 +6410,21 @@ pub const Interpreter = struct {
         func.obj = obj;
         try installFunctionProps(self.arena, self.root_shape, obj, fnode.params, func.name);
         return Value.obj(obj);
+    }
+
+    fn installPlainFunctionBytecode(self: *Interpreter, func: *Function, fnode: *const ast.FunctionNode) EvalError!BytecodeAdmissionReason {
+        if (self.bytecode_execution_mode == .tree_walker) return .plain_forced_tree_walker;
+        if (self.debug_statement_hook != null) return .plain_policy_debugger;
+        if (plainFunctionPolicyRejection(fnode)) |reason| return reason;
+        return switch (try Compiler.admitPlainFunction(self.arena, fnode)) {
+            .compiled => |code| blk: {
+                func.chunk = code.chunk;
+                func.local_count = code.local_count;
+                func.vm_inline_calls_safe = vmChunkAllowsInlineCalls(code.chunk);
+                break :blk .plain_compiled;
+            },
+            .rejected => |reason| plainRejectionAdmission(reason),
+        };
     }
 
     fn sourceMayHaveTailCall(source: []const u8) bool {
@@ -6519,6 +6524,7 @@ pub const Interpreter = struct {
             return .plain_policy_legacy_call_frame;
         if (fnode.uses_arguments) return null;
         if (fnode.requires_tree_walk_class_constructor) return .plain_policy_class_constructor_semantics;
+        if (fnode.class_instance_initializers.len != 0) return null;
         if (fnode.is_strict) return if (sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null)
             null
         else
@@ -7171,11 +7177,12 @@ pub const Interpreter = struct {
             };
             // Wrap the initializer so a direct eval inside it sees the
             // field-initializer context (no `super()` / `arguments`).
-            const value_node = if (m.field_init != null) vn: {
-                const w = try self.arena.create(Node);
-                w.* = .{ .field_init_value = raw_value };
-                break :vn w;
-            } else raw_value;
+            // Even a field without an explicit initializer performs DefineField
+            // with `undefined`; retain the wrapper so it cannot fall through to
+            // ordinary assignment semantics (notably for Symbol keys and an
+            // inherited setter).
+            const value_node = try self.arena.create(Node);
+            value_node.* = .{ .field_init_value = raw_value };
             const stmt = try self.arena.create(Node);
             // A private field is *defined* (PrivateFieldAdd) on `this`, not
             // assigned via PrivateSet; a public field is an ordinary assignment.
@@ -7234,7 +7241,9 @@ pub const Interpreter = struct {
             // constructor synthesized here.
             .uses_arguments = if (ctor_node) |cf| cf.uses_arguments else false,
             .uses_direct_eval = if (ctor_node) |cf| cf.uses_direct_eval else false,
-            .requires_tree_walk_class_constructor = derived or field_inits.items.len != 0,
+            .requires_tree_walk_class_constructor = derived,
+            .class_instance_initializers = if (derived) &.{} else field_inits.items,
+            .defer_plain_bytecode_compilation = !derived and field_inits.items.len != 0,
             // All class code is strict, so the constructor is a strict function
             // (e.g. its `.caller`/`.arguments` hit the %ThrowTypeError% poison pill
             // rather than the legacy sloppy `null`).
@@ -7332,7 +7341,12 @@ pub const Interpreter = struct {
             // every `new` (and its side effects happen exactly once).
             if (kv != null and m.is_field and !m.is_static) {
                 if (field_member_nodes[i]) |mn| {
-                    mn.member.property = key;
+                    // `key` may be a slice owned by a temporary StringCell. The
+                    // initializer AST and its deferred bytecode chunk outlive
+                    // that cell and are not relocation slots, so retain an
+                    // arena-owned encoded key before a moving collection can
+                    // invalidate the borrowed bytes.
+                    mn.member.property = try self.arena.dupe(u8, key);
                     mn.member.computed = null;
                 }
             }
@@ -7394,6 +7408,16 @@ pub const Interpreter = struct {
         }
         if (computed_keys) |keys| if (computed_i != keys.len)
             return self.throwError("TypeError", "too many computed class names");
+
+        // The constructor object must exist before computed names run, but its
+        // bytecode must see the one-time keys baked above. Complete admission
+        // exactly once now; no tree-walker callback or per-instance key work is
+        // introduced by this deferred compilation point.
+        if (fnode.defer_plain_bytecode_compilation) if (funcOf(class_val)) |cf| {
+            const reason = try self.installPlainFunctionBytecode(cf, fnode);
+            cf.bytecode_admission_reason = reason;
+            self.recordBytecodeAdmission(reason);
+        };
 
         // Computed element names run while the inner class binding is still in
         // TDZ. Once names/methods are installed, initialize the immutable

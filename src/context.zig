@@ -25758,6 +25758,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         \\function sharedCall(input, value = input.read(input.bias)) { return value; }
         \\function SharedParameterBox(value) { this.value = value + 1; }
         \\function sharedConstruction(Ctor, input, value = new Ctor(input.bias)) { return value.value; }
+        \\class SharedFieldBox { field = 13; constructor(input) { this.input = input.bias; } }
+        \\function sharedFieldConstruction(input) { var instance = new SharedFieldBox(input); return instance.field + instance.input; }
         \\globalThis.sharedPatternInputs = [
         \\  [[1, { right: 2 }], { bias: 3, extra: 4, nested: { value: 9 }, read(value) { return this.nested.value + value; } }],
         \\  [[2, { right: 3 }], { bias: 4, extra: 5, nested: { value: 10 }, read(value) { return this.nested.value + value; } }],
@@ -25794,6 +25796,14 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     const construction_function: *interp.Function = @ptrCast(@alignCast(raw_construction));
     const construction_chunk = construction_function.chunk orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u32, &.{2}, construction_chunk.default_parameter_indices);
+    const field_constructor_value = try ctx.evaluate("SharedFieldBox");
+    const raw_field_constructor = field_constructor_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const field_constructor: *interp.Function = @ptrCast(@alignCast(raw_field_constructor));
+    _ = field_constructor.chunk orelse return error.TestUnexpectedResult;
+    const field_construction_value = try ctx.evaluate("sharedFieldConstruction");
+    const raw_field_construction = field_construction_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const field_construction_function: *interp.Function = @ptrCast(@alignCast(raw_field_construction));
+    const field_construction_chunk = field_construction_function.chunk orelse return error.TestUnexpectedResult;
     const input_value = try ctx.evaluate("sharedPatternInputs");
     const inputs = input_value.asObj();
 
@@ -25812,6 +25822,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         constructor: Value,
         construction_function: *interp.Function,
         construction_chunk: *@import("bytecode.zig").Chunk,
+        field_construction_function: *interp.Function,
+        field_construction_chunk: *@import("bytecode.zig").Chunk,
         first: Value,
         second: Value,
         result: std.atomic.Value(i64) = .init(-1),
@@ -25878,6 +25890,16 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
                 ) catch return;
                 if (!construction_out.isNumber()) return;
                 sum += @intFromFloat(construction_out.asNum());
+                const field_construction_out = vm.runFunction(
+                    &machine,
+                    worker.field_construction_function,
+                    worker.field_construction_chunk,
+                    &.{worker.second},
+                    Value.undef(),
+                    Value.undef(),
+                ) catch return;
+                if (!field_construction_out.isNumber()) return;
+                sum += @intFromFloat(field_construction_out.asNum());
             }
             worker.result.store(sum, .release);
         }
@@ -25899,6 +25921,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
             .constructor = constructor_value,
             .construction_function = construction_function,
             .construction_chunk = construction_chunk,
+            .field_construction_function = field_construction_function,
+            .field_construction_chunk = field_construction_chunk,
             .first = pair.atomicDenseElementLoad(0) orelse return error.TestUnexpectedResult,
             .second = pair.atomicDenseElementLoad(1) orelse return error.TestUnexpectedResult,
         };
@@ -25908,7 +25932,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         thread.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[lane]});
     for (&threads) |*thread| thread.join();
     for (&workers, 0..) |*worker, lane| {
-        const expected: i64 = @intCast(iterations * (520 + 236 * lane));
+        const expected: i64 = @intCast(iterations * (536 + 237 * lane));
         try std.testing.expectEqual(expected, worker.result.load(.acquire));
     }
 }
@@ -26065,23 +26089,112 @@ test "required bytecode rejects an expression-default function instead of counti
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
 }
 
-test "required bytecode retains the exact class-constructor semantic barrier" {
-    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
-        .enable_jit = false,
-        .bytecode_execution_mode = .required,
-    });
-    defer ctx.destroy();
+test "forced tree-walker and required bytecode preserve base class instance initialization" {
+    const source =
+        \\var baseFieldOuter = 4;
+        \\var baseFieldKeyCount = 0;
+        \\var baseFieldSetterCount = 0;
+        \\var baseFieldSymbol = Symbol("field");
+        \\Object.prototype.baseFieldSuper = 11;
+        \\var baseFieldKey = { [Symbol.toPrimitive]() { baseFieldKeyCount += 1; return "computed"; } };
+        \\class BaseFieldActivation {
+        \\  order = ["field"];
+        \\  shadow = baseFieldOuter;
+        \\  [baseFieldSymbol];
+        \\  [baseFieldKey] = function() {};
+        \\  privateName = function() {};
+        \\  #secret = 6;
+        \\  #privateName = function() {};
+        \\  accessor auto = 7;
+        \\  methodBrand = this.#method();
+        \\  arrowThis = () => this;
+        \\  directTarget = eval("new.target");
+        \\  arrowTarget = () => this.directTarget;
+        \\  superValue = super.baseFieldSuper;
+        \\  gcValue = ($vm.gc(), 9);
+        \\  shadowed = 8;
+        \\  #method() { return 10; }
+        \\  constructor(baseFieldOuter = (this.order.push("param"), this.shadow + 1)) {
+        \\    this.order.push("body");
+        \\    this.parameter = baseFieldOuter;
+        \\  }
+        \\  summary() {
+        \\    var order = this.order === undefined ? "order-undefined" : this.order.join(",");
+        \\    var computed = this.computed === undefined ? "computed-undefined" : this.computed.name;
+        \\    var publicName = this.privateName === undefined ? "public-name-undefined" : this.privateName.name;
+        \\    var privateName = this.#privateName === undefined ? "private-name-undefined" : this.#privateName.name;
+        \\    return order + ":" + this.shadow + ":" + Object.prototype.hasOwnProperty.call(this, baseFieldSymbol) + ":" + (this[baseFieldSymbol] === undefined) + ":" + computed + ":" + publicName + ":" + privateName + ":" + this.#secret + ":" + this.auto + ":" + this.methodBrand + ":" + (this.arrowThis() === this) + ":" + (this.arrowTarget() === undefined) + ":" + (this.directTarget === undefined) + ":" + this.superValue + ":" + this.gcValue + ":" + this.shadowed + ":" + this.parameter;
+        \\  }
+        \\}
+        \\Object.defineProperty(BaseFieldActivation.prototype, "shadowed", { set(value) { baseFieldSetterCount += value; }, configurable: true });
+        \\class BaseFieldEvalRestriction { value = eval("arguments"); }
+        \\class BaseFieldNonExtensible { stop = Object.preventExtensions(this); after = 1; }
+        \\function baseFieldSummary() {
+        \\  var instance = new BaseFieldActivation();
+        \\  var evalError = "";
+        \\  try { new BaseFieldEvalRestriction(); } catch (error) { evalError = error.name; }
+        \\  var extensibleError = "";
+        \\  try { new BaseFieldNonExtensible(); } catch (error) { extensibleError = error.name; }
+        \\  return instance.summary() + "|" + baseFieldKeyCount + ":" + baseFieldSetterCount + ":" + Object.prototype.hasOwnProperty.call(instance, "shadowed") + "|" + evalError + ":" + extensibleError;
+        \\}
+    ;
+    const expected = "field,param,body:4:true:true:computed:privateName:#privateName:6:7:10:true:true:true:11:9:8:5|1:0:true|SyntaxError:TypeError";
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var actual: [modes.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
 
-    try std.testing.expectError(error.Throw, ctx.evaluate(
-        \\class WithField { value = 1; }
-        \\new WithField();
-    ));
-    const exception = ctx.exception orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("InternalError", exception.asObj().errorName());
-    const inventory = ctx.bytecodeAdmissionSnapshot();
-    try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
-    try std.testing.expectEqual(@as(u64, 1), inventory.count(.plain_policy_class_constructor_semantics));
-    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        if (mode == .required) {
+            const constructor = try ctx.evaluate("BaseFieldActivation");
+            const raw = constructor.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, function.bytecode_admission_reason);
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            var entered: ?usize = null;
+            var public_fields: usize = 0;
+            var private_fields: usize = 0;
+            var exited: ?usize = null;
+            for (chunk.code.items, 0..) |instruction, instruction_index| switch (instruction.op) {
+                .enter_field_initializers => entered = instruction_index,
+                .init_class_field => {
+                    try std.testing.expect(entered != null and exited == null);
+                    public_fields += 1;
+                },
+                .init_private_field => {
+                    try std.testing.expect(entered != null and exited == null);
+                    private_fields += 1;
+                },
+                .exit_field_initializers => exited = instruction_index,
+                else => {},
+            };
+            try std.testing.expect(entered != null and exited != null and entered.? < exited.?);
+            try std.testing.expectEqual(@as(usize, 12), public_fields);
+            // The third private initialization is the auto-accessor's hidden
+            // backing slot; it follows the same one-time brand path.
+            try std.testing.expectEqual(@as(usize, 3), private_fields);
+        }
+        const result = try ctx.evaluate("baseFieldSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_policy_class_constructor_semantics));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
 }
 
 test "forced tree-walker and required bytecode preserve class heritage ordering" {

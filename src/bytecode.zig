@@ -379,6 +379,8 @@ pub const Op = enum(u8) {
     // --- objects, arrays, members ---
     load_this, // push the current `this`
     load_new_target, // push the current `new.target`
+    enter_field_initializers, // enter the lexical class-field initializer context
+    exit_field_initializers, // leave the lexical class-field initializer context
     load_import_meta, // push the active declaring module's lazily created import.meta object
     new_object, // push a fresh {}
     new_array, // push a fresh []
@@ -412,6 +414,8 @@ pub const Op = enum(u8) {
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
     set_index, // pop value, pop key, pop object -> push value (after set)
+    init_class_field, // operand a: encoded name; pop value/object, CreateDataPropertyOrThrow, push value
+    init_private_field, // operand a: private name; pop value, PrivateFieldAdd on this, push value
     super_set_from, // operands a: name index, b: strict; pop value/base, [[Set]] with receiver = this, push value
     super_set_index_from, // operand a: strict; pop value/key/base, [[Set]] with receiver = this, push value
     delete_super, // validate the SuperReference and throw its mandatory ReferenceError
