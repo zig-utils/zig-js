@@ -102,6 +102,11 @@ const frontend_cases = [_]Case{
         .source = "function defaults(receiver = this, target = new.target, args = arguments) { return (receiver === globalThis ? 1 : 0) + (target === undefined ? 2 : 0) + args.length; } function Box(target = new.target) { this.score = target === Box ? 10 : 0; } defaults(undefined, undefined, undefined, 7) + (new Box()).score",
         .expected = 17,
     },
+    .{
+        .name = "earlier parameter default references",
+        .source = "function defaults(first, second = first, [third], fourth = third, arguments, fifth = arguments) { return second + fourth + fifth; } defaults(2, undefined, [3], undefined, 4)",
+        .expected = 9,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

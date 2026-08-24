@@ -25237,6 +25237,90 @@ test "forced tree-walker and required bytecode preserve invocation-context defau
     try std.testing.expect(policy_inventory.count(.plain_policy_class_constructor_semantics) > 0);
 }
 
+test "forced tree-walker and required bytecode preserve earlier parameter default references" {
+    const source =
+        \\function chain(first, second = first, third = second) { return first + ":" + second + ":" + third; }
+        \\var earlierIdentity = { tag: "identity" };
+        \\function identity(first, second = first) { $vm.gc(); return first === second; }
+        \\function patterns([first], second = first, { third }, fourth = third) { return second + ":" + fourth; }
+        \\function prior(first = 4, second = first) { return first + second; }
+        \\function namedArguments(arguments, next = arguments) { return next === arguments; }
+        \\var earlierHolder = { method(first = this, second = first) { return first === this && second === first; } };
+        \\var earlierArrow = (first, second = first) => second === first;
+        \\class EarlierBase { constructor(first, second = first) { this.same = second === first; } }
+        \\function recursiveEarlier(first, second = first) { return first === 0 ? second : recursiveEarlier(first - 1); }
+        \\function earlierParameterSummary() {
+        \\  return chain(1) + "|" + chain(undefined, 2, 3) + "|" + identity(earlierIdentity) + "|" +
+        \\    patterns([5], undefined, { third: 6 }) + "|" + prior() + "|" + namedArguments(earlierIdentity) + "|" +
+        \\    earlierHolder.method() + "|" + earlierArrow(earlierIdentity) + "|" + (new EarlierBase(earlierIdentity)).same + "|" + recursiveEarlier(3);
+        \\}
+    ;
+    const expected = "1:1:1|undefined:2:3|true|5:6|8|true|true|true|true|0";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("earlierParameterSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (configuration.mode == .required) {
+            const function_value = try ctx.evaluate("patterns");
+            const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualSlices(u32, &.{ 1, 3 }, chunk.default_parameter_indices);
+            try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, chunk.destructuring_parameter_indices);
+            try std.testing.expect(chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 8);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 7), (try automatic.evaluate(
+        \\let earlierParameterPolicyWitness = 0;
+        \\function automaticEarlier(first, second = first) { return [second][0]; }
+        \\automaticEarlier(7);
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+}
+
 test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local prologues" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -25252,7 +25336,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         \\function sharedPattern([left, { right }], { bias, ...rest }, literal = 4 + 4) {
         \\  return left * 100 + right * 10 + bias + rest.extra + literal;
         \\}
-        \\function sharedInvocation(receiver = this, args = arguments) { return receiver.bias * 10 + args.length; }
+        \\function sharedInvocation(receiver = this, args = arguments, copy = receiver) { return (copy === receiver ? receiver.bias * 10 : -1) + args.length; }
         \\globalThis.sharedPatternInputs = [
         \\  [[1, { right: 2 }], { bias: 3, extra: 4 }],
         \\  [[2, { right: 3 }], { bias: 4, extra: 5 }],
@@ -25270,7 +25354,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     const raw_invocation = invocation_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const invocation_function: *interp.Function = @ptrCast(@alignCast(raw_invocation));
     const invocation_chunk = invocation_function.chunk orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, invocation_chunk.default_parameter_indices);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, invocation_chunk.default_parameter_indices);
     try std.testing.expect(invocation_chunk.arguments_slot != null);
     const input_value = try ctx.evaluate("sharedPatternInputs");
     const inputs = input_value.asObj();

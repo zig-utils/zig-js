@@ -208,6 +208,15 @@ fn parametersBindName(fnode: *const ast.FunctionNode, name: []const u8) bool {
     return false;
 }
 
+fn earlierParameterBindsName(fnode: *const ast.FunctionNode, parameter_index: usize, name: []const u8) bool {
+    for (fnode.params[0..parameter_index]) |parameter| {
+        if (parameter.pattern) |pattern| {
+            if (patternBindsName(pattern, name)) return true;
+        } else if (std.mem.eql(u8, parameter.name, name)) return true;
+    }
+    return false;
+}
+
 const PlainParameterLayout = struct {
     slots: []const u32,
     destructuring_indices: []const u32,
@@ -234,18 +243,19 @@ fn closedPrimitiveParameterDefault(node: *const ast.Node) bool {
     };
 }
 
-fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode) bool {
+fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode, parameter_index: usize) bool {
     if (closedPrimitiveParameterDefault(node)) return true;
-    // FunctionDeclarationInstantiation installs these invocation-context values
-    // before IteratorBindingInitialization. Admit only the complete leaf: an
-    // enclosing operation could coerce/call through `this`, `new.target`, or the
-    // arguments exotic and needs the broader parameter-environment ruling.
+    // FunctionDeclarationInstantiation installs invocation context first, and
+    // each prior formal completes BindingInitialization before the next one.
+    // Admit only a complete leaf: an enclosing operation could coerce or call
+    // through the value and needs the broader parameter-environment ruling.
     return switch (node.*) {
         .this_expr, .new_target_expr => !fnode.requires_tree_walk_class_constructor,
-        .identifier => |name| !fnode.is_arrow and
-            fnode.uses_arguments and
-            std.mem.eql(u8, name, "arguments") and
-            !parametersBindName(fnode, "arguments"),
+        .identifier => |name| earlierParameterBindsName(fnode, parameter_index, name) or
+            (!fnode.is_arrow and
+                fnode.uses_arguments and
+                std.mem.eql(u8, name, "arguments") and
+                !parametersBindName(fnode, "arguments")),
         else => false,
     };
 }
@@ -258,9 +268,9 @@ fn configurePlainParameters(
     var has_pattern = false;
     var has_rest = false;
     var has_default = false;
-    for (fnode.params) |parameter| {
+    for (fnode.params, 0..) |parameter, index| {
         if (parameter.default) |default| {
-            if (!supportedPlainParameterDefault(default, fnode)) return error.Unsupported;
+            if (!supportedPlainParameterDefault(default, fnode, index)) return error.Unsupported;
             has_default = true;
         }
         has_pattern = has_pattern or parameter.pattern != null;
@@ -5712,8 +5722,11 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = +this){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = new.target.value){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = arguments.length){}", .expected = .parameter_prologue },
-        .{ .source = "function f(arguments, value = arguments){}", .expected = .parameter_prologue },
-        .{ .source = "function f([arguments], value = arguments){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = value){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = later, later){}", .expected = .parameter_prologue },
+        .{ .source = "function f(arguments = arguments){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = first.value){}", .expected = .parameter_prologue },
+        .{ .source = "function f(first, value = +first){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = /x/){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = []){}", .expected = .parameter_prologue },
@@ -5861,6 +5874,26 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, compiled.chunk.default_parameter_indices);
             try std.testing.expect(compiled.chunk.has_non_simple_parameters);
             try std.testing.expect(compiled.chunk.arguments_slot != null);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var earlier_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer earlier_arena.deinit();
+    var earlier_parser = try @import("parser.zig").Parser.init(
+        earlier_arena.allocator(),
+        "function earlierDefaults(first, second = first, third = second, [fourth], fifth = fourth, { sixth }, seventh = sixth, arguments, eighth = arguments) { return eighth; }",
+    );
+    const earlier_program = try earlier_parser.parseProgram();
+    const earlier_admission = try Compiler.admitPlainFunction(earlier_arena.allocator(), earlier_program.program[0].func_decl);
+    switch (earlier_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 9), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 1, 2, 4, 6, 8 }, compiled.chunk.default_parameter_indices);
+            try std.testing.expectEqualSlices(u32, &.{ 3, 5 }, compiled.chunk.destructuring_parameter_indices);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(?u32, null), compiled.chunk.arguments_slot);
             try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
         },
         .rejected => return error.TestUnexpectedResult,
