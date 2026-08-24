@@ -82,6 +82,11 @@ const frontend_cases = [_]Case{
         .source = "function rest(head, ...tail) { return head + tail.length + tail[0]; } rest(3, 4, 5)",
         .expected = 9,
     },
+    .{
+        .name = "destructuring parameter frame",
+        .source = "function pick([first, { value }, ...tail], { keep, ...rest }) { return first + value + tail.length + keep + rest.extra; } pick([1, { value: 2 }, 3, 4], { keep: 5, extra: 6 })",
+        .expected = 16,
+    },
 };
 
 const frontend_error_cases = [_]ErrorCase{

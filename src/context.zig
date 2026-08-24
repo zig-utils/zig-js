@@ -24872,6 +24872,231 @@ test "parallel_js: shared named-rest chunk binds lane-local arrays" {
     }
 }
 
+test "forced tree-walker and required bytecode preserve initializer-free destructuring parameters" {
+    const source =
+        \\var parameterLog = "";
+        \\function parameterIterable(values, label) {
+        \\  var index = 0;
+        \\  return {
+        \\    [Symbol.iterator]() {
+        \\      parameterLog += label + "-iter,";
+        \\      return {
+        \\        next() {
+        \\          parameterLog += label + "-next" + index + ",";
+        \\          if (index < values.length) return { value: values[index++], done: false };
+        \\          return { value: undefined, done: true };
+        \\        },
+        \\        return() { parameterLog += label + "-close,"; return { done: true }; }
+        \\      };
+        \\    }
+        \\  };
+        \\}
+        \\function pick([first, { value }, ...tail], { keep, ...rest }) {
+        \\  return first + ":" + value + ":" + tail.join(",") + ":" + keep + ":" + rest.extra;
+        \\}
+        \\function firstOnly([first]) { parameterLog += "first-body,"; return first; }
+        \\var firstResult = firstOnly(parameterIterable([4, 5], "first"));
+        \\function abrupt([{ value }]) { parameterLog += "abrupt-body,"; return value; }
+        \\var throwingParameter = { get value() { parameterLog += "get,"; throw new Error("boom"); } };
+        \\var abruptName = "";
+        \\try { abrupt(parameterIterable([throwingParameter, 9], "abrupt")); }
+        \\catch (error) { abruptName = error.message; }
+        \\function ownArguments([value]) {
+        \\  var poison = "";
+        \\  try { arguments.callee; } catch (error) { poison = error.name; }
+        \\  var before = arguments[0][0];
+        \\  arguments[0] = [9];
+        \\  return value + ":" + before + ":" + arguments[0][0] + ":" + poison;
+        \\}
+        \\function patternArguments([arguments]) { return typeof arguments + ":" + arguments; }
+        \\function escapeParameter([value]) { return () => value; }
+        \\var escapedParameter = escapeParameter([{ tag: "live" }]);
+        \\function recursiveParameter([value]) {
+        \\  if (value === 0) return 0;
+        \\  return value + recursiveParameter([value - 1]);
+        \\}
+        \\function reenterParameter({ value }) { return value; }
+        \\var reentrySource = { get value() { parameterLog += "reenter-get,"; return reenterParameter({ value: 2 }) + 1; } };
+        \\var reentryResult = reenterParameter(reentrySource);
+        \\function proxyParameter({ value }) { return value; }
+        \\var proxyResult = proxyParameter(new Proxy({ value: 13 }, {
+        \\  get(target, key) { parameterLog += "proxy-" + String(key) + ","; return target[key]; }
+        \\}));
+        \\function collidingParameter([value]) { var value; return value; }
+        \\var parameterArrow = ([value]) => value;
+        \\var parameterHolder = { tag: "holder", method([value]) { return this.tag + ":" + value; } };
+        \\function ParameterBox([value]) { this.value = value; }
+        \\class ParameterClass { constructor([value]) { this.value = value; } }
+        \\function missingArray([value]) { return value; }
+        \\function missingObject({ value }) { return value; }
+        \\function parameterSummary() {
+        \\  var missingArrayName = "", missingObjectName = "";
+        \\  try { missingArray(); } catch (error) { missingArrayName = error.name; }
+        \\  try { missingObject(null); } catch (error) { missingObjectName = error.name; }
+        \\  return pick([1, { value: 2 }, 3, 4], { keep: 5, extra: 6 }) + "|" +
+        \\    firstResult + ":" + abruptName + ":" + parameterLog + "|" + ownArguments([3]) + "|" +
+        \\    patternArguments([7]) + "|" + escapedParameter().tag + "|" + recursiveParameter([4]) + "|" +
+        \\    collidingParameter([8]) + "|" + parameterArrow([9]) + "|" + parameterHolder.method([10]) + "|" +
+        \\    (new ParameterBox([11])).value + "|" + (new ParameterClass([12])).value + "|" +
+        \\    missingArrayName + ":" + missingObjectName + "|" + reentryResult + "|" + proxyResult;
+        \\}
+    ;
+    const expected = "1:2:3,4:5:6|4:boom:first-iter,first-next0,first-close,first-body,abrupt-iter,abrupt-next0,get,abrupt-close,reenter-get,proxy-value,|3:3:9:TypeError|number:7|live|10|8|9|holder:10|11|12|TypeError:TypeError|3|13";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("parameterSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (configuration.mode == .required) {
+            const function_value = try ctx.evaluate("pick");
+            const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, chunk.destructuring_parameter_indices);
+            try std.testing.expect(chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(?u32, null), chunk.rest_parameter_index);
+            try std.testing.expectEqual(@as(usize, 0), chunk.mapped_parameter_indices.len);
+            for (chunk.code.items) |instruction| if (instruction.op == .bind_pattern)
+                return error.TestUnexpectedResult;
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 17);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 9), (try automatic.evaluate(
+        \\let destructuringParameterPolicyWitness = 0;
+        \\function automaticPattern([first, second]) { return first + second; }
+        \\automaticPattern([4, 5]);
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+}
+
+test "parallel_js: shared destructuring-parameter chunk keeps lane-local prologues" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\function sharedPattern([left, { right }], { bias, ...rest }) {
+        \\  return left * 100 + right * 10 + bias + rest.extra;
+        \\}
+        \\globalThis.sharedPatternInputs = [
+        \\  [[1, { right: 2 }], { bias: 3, extra: 4 }],
+        \\  [[2, { right: 3 }], { bias: 4, extra: 5 }],
+        \\  [[3, { right: 4 }], { bias: 5, extra: 6 }],
+        \\  [[4, { right: 5 }], { bias: 6, extra: 7 }]
+        \\];
+    );
+    const function_value = try ctx.evaluate("sharedPattern");
+    const raw_function = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const function: *interp.Function = @ptrCast(@alignCast(raw_function));
+    const chunk = function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, chunk.destructuring_parameter_indices);
+    const input_value = try ctx.evaluate("sharedPatternInputs");
+    const inputs = input_value.asObj();
+
+    const lane_count = 4;
+    const iterations = 64;
+    const Worker = struct {
+        ctx: *Context,
+        function: *interp.Function,
+        chunk: *@import("bytecode.zig").Chunk,
+        first: Value,
+        second: Value,
+        result: std.atomic.Value(i64) = .init(-1),
+
+        fn run(worker: *@This()) void {
+            const saved_heap = gc_mod.setActiveHeap(worker.ctx.gc);
+            defer _ = gc_mod.setActiveHeap(saved_heap);
+            const saved_arena = strcell.setActiveArena(worker.ctx.arena());
+            defer _ = strcell.setActiveArena(saved_arena);
+            var machine = worker.ctx.interpreter();
+            worker.ctx.pushActiveInterpreter(&machine) catch return;
+            defer worker.ctx.popActiveInterpreter(&machine);
+
+            const arguments = [_]Value{ worker.first, worker.second };
+            var sum: i64 = 0;
+            for (0..iterations) |_| {
+                const value_out = vm.runFunction(
+                    &machine,
+                    worker.function,
+                    worker.chunk,
+                    &arguments,
+                    Value.undef(),
+                    Value.undef(),
+                ) catch return;
+                if (!value_out.isNumber()) return;
+                sum += @intFromFloat(value_out.asNum());
+            }
+            worker.result.store(sum, .release);
+        }
+    };
+    var workers: [lane_count]Worker = undefined;
+    for (&workers, 0..) |*worker, lane| {
+        const entry = inputs.atomicDenseElementLoad(lane) orelse return error.TestUnexpectedResult;
+        const pair = entry.asObj();
+        worker.* = .{
+            .ctx = ctx,
+            .function = function,
+            .chunk = chunk,
+            .first = pair.atomicDenseElementLoad(0) orelse return error.TestUnexpectedResult,
+            .second = pair.atomicDenseElementLoad(1) orelse return error.TestUnexpectedResult,
+        };
+    }
+    var threads: [lane_count]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[lane]});
+    for (&threads) |*thread| thread.join();
+    for (&workers, 0..) |*worker, lane| {
+        const expected: i64 = @intCast(iterations * (127 + 112 * lane));
+        try std.testing.expectEqual(expected, worker.result.load(.acquire));
+    }
+}
+
 test "forced tree-walker and required bytecode preserve sloppy mapped arguments frames" {
     const source =
         \\function basic(a, b) {

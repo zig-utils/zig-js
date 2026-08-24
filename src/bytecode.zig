@@ -733,14 +733,18 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
-    /// Syntactic parameter index -> activation slot. This is intentionally
-    /// distinct from `param_count`: sloppy duplicate formals share one binding,
-    /// and FunctionDeclarationInstantiation assigns that binding once per
-    /// occurrence from left to right (so the rightmost value wins).
+    /// Syntactic parameter index -> activation input slot. Simple/rest
+    /// identifiers use their binding slot directly; a destructuring formal uses
+    /// a hidden raw-value slot consumed by its bytecode entry prologue. Sloppy
+    /// duplicate simple formals may share one binding slot.
     parameter_slots: []const u32 = &.{},
+    /// Sorted syntactic indices whose raw input slots feed native array/object
+    /// BindingInitialization at chunk entry. Empty keeps simple/rest entry
+    /// metadata compact and branch-free.
+    destructuring_parameter_indices: []const u32 = &.{},
     /// Syntactic index of the final named rest formal. Its activation slot is
     /// `parameter_slots[index]`; null means every formal is positional.
-    /// Defaults and destructuring formals retain their separate admission
+    /// Defaults and pattern/rest mixed entry retain their separate admission
     /// barrier and never impersonate this allocation-only prologue.
     rest_parameter_index: ?u32 = null,
     /// FunctionDeclarationInstantiation must create an unmapped arguments

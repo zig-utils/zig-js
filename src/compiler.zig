@@ -177,9 +177,95 @@ fn addArgumentsSlot(
     if (fnode.is_arrow or !fnode.uses_arguments) return null;
     // FunctionDeclarationInstantiation suppresses the implicit object when a
     // formal already owns the `arguments` binding.
-    for (fnode.params) |param|
-        if (param.pattern == null and std.mem.eql(u8, param.name, "arguments")) return null;
+    for (fnode.params) |param| {
+        if (param.pattern) |pattern| {
+            if (patternBindsName(pattern, "arguments")) return null;
+        } else if (std.mem.eql(u8, param.name, "arguments")) return null;
+    }
     return try scope.addLocal(arena, "arguments", false, false);
+}
+
+fn patternBindsName(pattern: *const ast.Node, name: []const u8) bool {
+    return switch (pattern.*) {
+        .identifier => |binding| std.mem.eql(u8, binding, name),
+        .obj_pattern => |object| blk: {
+            for (object.props) |property| if (patternBindsName(property.target, name)) break :blk true;
+            if (object.rest) |rest| if (patternBindsName(rest, name)) break :blk true;
+            break :blk false;
+        },
+        .arr_pattern => |array| blk: {
+            for (array.elems) |element| if (element.target) |target|
+                if (patternBindsName(target, name)) break :blk true;
+            if (array.rest) |rest| if (patternBindsName(rest, name)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+const PlainParameterLayout = struct {
+    slots: []const u32,
+    destructuring_indices: []const u32,
+    destructuring_input_names: []const ?[]const u8,
+    rest_index: ?u32,
+
+    fn hasNonSimple(self: *const PlainParameterLayout) bool {
+        return self.rest_index != null or self.destructuring_indices.len != 0;
+    }
+};
+
+fn configurePlainParameters(
+    arena: std.mem.Allocator,
+    scope: *FnScope,
+    fnode: *const ast.FunctionNode,
+) CompileError!PlainParameterLayout {
+    var has_pattern = false;
+    var has_rest = false;
+    for (fnode.params) |parameter| {
+        if (parameter.default != null) return error.Unsupported;
+        has_pattern = has_pattern or parameter.pattern != null;
+        has_rest = has_rest or parameter.is_rest;
+    }
+    // A pattern followed by a rest formal has observable left-to-right entry
+    // ordering: iterator/getter code must run before rest ArrayCreate. Keep that
+    // mixed prologue explicit until both operations share one bytecode entry.
+    if (has_pattern and has_rest) return error.Unsupported;
+
+    const parameter_slots = try arena.alloc(u32, fnode.params.len);
+    const input_names = try arena.alloc(?[]const u8, fnode.params.len);
+    @memset(input_names, null);
+    var pattern_indices: std.ArrayListUnmanaged(u32) = .empty;
+    var rest_index: ?u32 = null;
+
+    const BindingCollector = struct {
+        scope: *FnScope,
+        fn add(collector: *@This(), binding_arena: std.mem.Allocator, name: []const u8) CompileError!void {
+            _ = try collector.scope.addLocal(binding_arena, name, false, false);
+        }
+    };
+    for (fnode.params, 0..) |parameter, index| {
+        if (parameter.pattern) |pattern| {
+            if (parameter.is_rest or patternHasEvaluationExpressions(pattern)) return error.Unsupported;
+            var collector = BindingCollector{ .scope = scope };
+            try collectPatternBindingNames(arena, pattern, &collector);
+            const input_name = try std.fmt.allocPrint(arena, "\x00param{d}", .{index});
+            input_names[index] = input_name;
+            parameter_slots[index] = try scope.addLocal(arena, input_name, false, false);
+            try pattern_indices.append(arena, @intCast(index));
+            continue;
+        }
+        if (parameter.is_rest) {
+            if (index + 1 != fnode.params.len) return error.Unsupported;
+            rest_index = @intCast(index);
+        }
+        parameter_slots[index] = try scope.addLocal(arena, parameter.name, false, false);
+    }
+    return .{
+        .slots = parameter_slots,
+        .destructuring_indices = pattern_indices.items,
+        .destructuring_input_names = input_names,
+        .rest_index = rest_index,
+    };
 }
 
 /// Mark each distinct sloppy simple formal and freeze its rightmost arguments
@@ -1512,18 +1598,10 @@ pub const Compiler = struct {
         const tdz_checks = try functionNeedsTdzChecks(arena, fnode);
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null, .tdz_checks = tdz_checks };
-        const parameter_slots = try arena.alloc(u32, fnode.params.len);
-        var rest_parameter_index: ?u32 = null;
-        for (fnode.params, 0..) |p, index| {
-            if (p.default != null or p.pattern != null)
-                return rejectPlainFunction(rejection, .parameter_prologue);
-            if (p.is_rest) {
-                if (index + 1 != fnode.params.len)
-                    return rejectPlainFunction(rejection, .parameter_prologue);
-                rest_parameter_index = @intCast(index);
-            }
-            parameter_slots[index] = try scope.addLocal(arena, p.name, false, false);
-        }
+        const parameter_layout = configurePlainParameters(arena, scope, fnode) catch |err| switch (err) {
+            error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
         const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
         if (!fnode.is_expr_body) try collectFunctionLocals(arena, scope, fnode.body);
         const mapped_parameter_indices = try configureMappedParameters(arena, scope, fnode, arguments_slot);
@@ -1531,12 +1609,21 @@ pub const Compiler = struct {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         chunk.param_count = @intCast(fnode.params.len);
-        chunk.parameter_slots = parameter_slots;
-        chunk.rest_parameter_index = rest_parameter_index;
-        chunk.has_non_simple_parameters = rest_parameter_index != null;
+        chunk.parameter_slots = parameter_layout.slots;
+        chunk.destructuring_parameter_indices = parameter_layout.destructuring_indices;
+        chunk.rest_parameter_index = parameter_layout.rest_index;
+        chunk.has_non_simple_parameters = parameter_layout.hasNonSimple();
         chunk.arguments_slot = arguments_slot;
         chunk.mapped_parameter_indices = mapped_parameter_indices;
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
+        for (parameter_layout.destructuring_indices) |parameter_index| {
+            const index: usize = parameter_index;
+            try c.compilePattern(
+                fnode.params[index].pattern.?,
+                .{ .named = parameter_layout.destructuring_input_names[index].? },
+                .var_declaration,
+            );
+        }
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
         } else {
@@ -2217,6 +2304,11 @@ pub const Compiler = struct {
         if (self.debug_checkpoints) try self.chunk.markDebugStatement(node);
         switch (node.*) {
             .var_decl => |d| {
+                // FunctionDeclarationInstantiation already created every
+                // function-scoped `var` as undefined (or as the existing
+                // parameter value). A declaration without an initializer has
+                // no runtime assignment and must not erase that parameter.
+                if (self.scope != null and d.kind == .@"var" and d.init == null) return;
                 // BindingIdentifier evaluation creates the Reference before the
                 // initializer. Only an activation-local Environment Record can
                 // shadow this function's hoisted `var`, so ordinary declarations
@@ -5148,34 +5240,37 @@ pub const Compiler = struct {
             }
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
-            const parameter_slots = try self.arena.alloc(u32, fnode.params.len);
-            var rest_parameter_index: ?u32 = null;
-            for (fnode.params, 0..) |p, index| {
-                // Defaults and pattern formals still need the distinct
-                // parameter Environment/prologue. A final named rest formal is
-                // allocation-only and binds directly into its precise frame slot.
-                if (p.default != null or p.pattern != null or (p.is_rest and index + 1 != fnode.params.len)) {
+            const parameter_layout = configurePlainParameters(self.arena, scope, fnode) catch |err| switch (err) {
+                error.Unsupported => {
                     if (self.scope == null) {
                         template_admission = .plain_parameter_prologue;
                         break :blk null;
                     }
                     return error.Unsupported;
-                }
-                if (p.is_rest) rest_parameter_index = @intCast(index);
-                parameter_slots[index] = try scope.addLocal(self.arena, p.name, false, false);
-            }
+                },
+                error.OutOfMemory => return error.OutOfMemory,
+            };
             const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode);
             if (!fnode.is_expr_body) try collectFunctionLocals(self.arena, scope, fnode.body);
             const mapped_parameter_indices = try configureMappedParameters(self.arena, scope, fnode, arguments_slot);
 
             compiled.param_count = @intCast(fnode.params.len);
-            compiled.parameter_slots = parameter_slots;
-            compiled.rest_parameter_index = rest_parameter_index;
-            compiled.has_non_simple_parameters = rest_parameter_index != null;
+            compiled.parameter_slots = parameter_layout.slots;
+            compiled.destructuring_parameter_indices = parameter_layout.destructuring_indices;
+            compiled.rest_parameter_index = parameter_layout.rest_index;
+            compiled.has_non_simple_parameters = parameter_layout.hasNonSimple();
             compiled.arguments_slot = arguments_slot;
             compiled.mapped_parameter_indices = mapped_parameter_indices;
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
+            for (parameter_layout.destructuring_indices) |parameter_index| {
+                const index: usize = parameter_index;
+                try sub_c.compilePattern(
+                    fnode.params[index].pattern.?,
+                    .{ .named = parameter_layout.destructuring_input_names[index].? },
+                    .var_declaration,
+                );
+            }
             if (fnode.is_expr_body) {
                 sub_c.compileExpr(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
@@ -5550,6 +5645,9 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
         .{ .source = "function f(){ { function nested(){} } }", .expected = .block_nested_function_declaration },
         .{ .source = "function f(value = 1){}", .expected = .parameter_prologue },
+        .{ .source = "function f([value = 1]){}", .expected = .parameter_prologue },
+        .{ .source = "function f({ [key]: value }){}", .expected = .parameter_prologue },
+        .{ .source = "function f([value], ...tail){}", .expected = .parameter_prologue },
         .{ .source = "function f(){ return eval('1'); }", .expected = .unsupported_lowering },
     };
 
@@ -5591,6 +5689,44 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expect(compiled.chunk.has_non_simple_parameters);
             try std.testing.expectEqual(@as(u32, 1), compiled.chunk.parameter_slots[1]);
             try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+        },
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var pattern_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pattern_arena.deinit();
+    var pattern_parser = try @import("parser.zig").Parser.init(
+        pattern_arena.allocator(),
+        "function destructured([first, { value }, ...tail], { keep, ...rest }) { return first + value + tail.length + keep + Object.keys(rest).length; }",
+    );
+    const pattern_program = try pattern_parser.parseProgram();
+    const pattern_admission = try Compiler.admitPlainFunction(pattern_arena.allocator(), pattern_program.program[0].func_decl);
+    switch (pattern_admission) {
+        .compiled => |compiled| {
+            try std.testing.expectEqual(@as(u32, 2), compiled.chunk.param_count);
+            try std.testing.expectEqualSlices(u32, &.{ 3, 6 }, compiled.chunk.parameter_slots);
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, compiled.chunk.destructuring_parameter_indices);
+            try std.testing.expectEqualStrings("first", compiled.chunk.debug_local_names[0]);
+            try std.testing.expectEqualStrings("value", compiled.chunk.debug_local_names[1]);
+            try std.testing.expectEqualStrings("tail", compiled.chunk.debug_local_names[2]);
+            try std.testing.expectEqualStrings("\x00param0", compiled.chunk.debug_local_names[3]);
+            try std.testing.expectEqualStrings("keep", compiled.chunk.debug_local_names[4]);
+            try std.testing.expectEqualStrings("rest", compiled.chunk.debug_local_names[5]);
+            try std.testing.expectEqualStrings("\x00param1", compiled.chunk.debug_local_names[6]);
+            try std.testing.expectEqual(@as(?u32, null), compiled.chunk.rest_parameter_index);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+            try std.testing.expectEqual(@as(usize, 0), compiled.chunk.mapped_parameter_indices.len);
+            var saw_iterator = false;
+            var saw_object_rest = false;
+            var saw_frame_store = false;
+            for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
+                .bind_pattern => return error.TestUnexpectedResult,
+                .iter_of => saw_iterator = true,
+                .object_rest => saw_object_rest = true,
+                .store_local => saw_frame_store = true,
+                else => {},
+            };
+            try std.testing.expect(saw_iterator and saw_object_rest and saw_frame_store);
         },
         .rejected => return error.TestUnexpectedResult,
     }

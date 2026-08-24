@@ -2010,7 +2010,11 @@ fn specializeQuickLeaf(ops: []const QuickLeafOp) QuickLeafSpecialization {
 }
 
 fn compileQuickLeafPlan(chunk: *Chunk) QuickLeafPlan {
-    if (chunk.param_count == 0 or chunk.param_count > max_quick_leaf_stack or chunk.local_count != chunk.param_count)
+    // This kernel evaluates raw numeric arguments and never constructs a VM
+    // activation. Non-simple formal lists require rest allocation or a binding
+    // prologue even when the leaf body does not read those bindings.
+    if (chunk.has_non_simple_parameters or
+        chunk.param_count == 0 or chunk.param_count > max_quick_leaf_stack or chunk.local_count != chunk.param_count)
         return .unsupported;
     var ops: [max_quick_leaf_ops]QuickLeafOp = undefined;
     var op_count: usize = 0;
@@ -2572,6 +2576,10 @@ fn compileQuickObservableRecurrencePlan(chunk: *Chunk) ?QuickObservableAddRecurr
 }
 
 fn compileQuickRecurrencePlan(chunk: *Chunk) QuickRecurrencePlan {
+    // Recurrence kernels evaluate raw numeric arguments and elide every
+    // activation. Defaults, rest collection, and destructuring prologues must
+    // therefore retain the ordinary VM call path regardless of body shape.
+    if (chunk.has_non_simple_parameters) return .unsupported;
     if (compileQuickObservableRecurrencePlan(chunk)) |observable|
         return .{ .observable_add = observable };
     const code = chunk.code.items;
@@ -9262,6 +9270,27 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     const frame = act.frame;
     const slot_storage = act.slot_storage;
     const slots = frame.slots;
+    const pattern_indices = fchunk.destructuring_parameter_indices;
+    if (pattern_indices.len != 0) {
+        var pattern_cursor: usize = 0;
+        for (func.params, 0..) |parameter, index| {
+            if (parameter.default != null or parameter.is_rest) {
+                releaseActivation(vm, act);
+                return vm.throwError("InternalError", "invalid bytecode destructuring parameter layout");
+            }
+            if (parameter.pattern != null) {
+                if (pattern_cursor >= pattern_indices.len or pattern_indices[pattern_cursor] != index) {
+                    releaseActivation(vm, act);
+                    return vm.throwError("InternalError", "invalid bytecode destructuring parameter layout");
+                }
+                pattern_cursor += 1;
+            }
+        }
+        if (pattern_cursor != pattern_indices.len) {
+            releaseActivation(vm, act);
+            return vm.throwError("InternalError", "invalid bytecode destructuring parameter layout");
+        }
+    }
     const RestParameterLayout = struct { index: usize, slot: u32 };
     const rest_layout: ?RestParameterLayout = if (fchunk.rest_parameter_index) |rest_index_u32| layout: {
         const rest_index: usize = rest_index_u32;
@@ -9280,7 +9309,11 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         }
         break :layout .{ .index = rest_index, .slot = rest_slot };
     } else null;
-    if (fchunk.has_non_simple_parameters != (rest_layout != null) or
+    const has_non_simple_layout = rest_layout != null or pattern_indices.len != 0;
+    if ((rest_layout != null and pattern_indices.len != 0) or
+        fchunk.has_non_simple_parameters != has_non_simple_layout or
+        (has_non_simple_layout and
+            (fchunk.param_count != func.params.len or fchunk.parameter_slots.len != func.params.len)) or
         (fchunk.has_non_simple_parameters and fchunk.mapped_parameter_indices.len != 0))
     {
         releaseActivation(vm, act);
@@ -9638,7 +9671,15 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
     defer acts.deinit(vm.arena);
     initial.exec.frame = initial.frame;
     vm.pushExecRoot(&initial.exec);
-    try acts.append(vm.arena, initial);
+    acts.append(vm.arena, initial) catch |err| {
+        // buildActivation already installed callee state. The driver's own
+        // first bookkeeping allocation is still before execution, so failure
+        // must unregister/recycle the activation and restore the caller.
+        vm.popExecRoot(&initial.exec);
+        popActivation(vm, initial);
+        releaseActivation(vm, initial);
+        return err;
+    };
 
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
@@ -9819,6 +9860,71 @@ test "vm: named rest allocation failure restores the caller activation" {
     try std.testing.expect(machine.vm_activation_free != null);
     try std.testing.expectEqual(
         @as(f64, 6),
+        (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+    );
+}
+
+test "vm: destructuring parameter allocation failure restores the caller activation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(
+        allocator,
+        "function collect([value]) { return value; } collect",
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+    };
+    const function_value = try run(&machine, root, null);
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u32, &.{0}, function_chunk.destructuring_parameter_indices);
+    const input = try machine.newArray();
+    try input.asObj().appendElement(allocator, Value.num(13));
+    const arguments = [_]Value{input};
+
+    // Warm frame, operand-stack, and iterator bookkeeping. The trampoline's
+    // activation list performs allocation zero; allocation one belongs to
+    // GetIterator in the parameter BindingInitialization prologue.
+    try std.testing.expectEqual(
+        @as(f64, 13),
+        (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+    );
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    const saved_this = Value.num(81);
+    const saved_new_target = Value.num(82);
+    defer machine.arena = allocator;
+    for ([_]usize{ 0, 1 }) |fail_index| {
+        machine.this_value = saved_this;
+        machine.new_target = saved_new_target;
+        machine.strict = true;
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        try std.testing.expectError(
+            error.OutOfMemory,
+            runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef()),
+        );
+        machine.arena = allocator;
+
+        try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+        try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+        try std.testing.expect(machine.strict);
+        try std.testing.expectEqual(&env, machine.env);
+        try std.testing.expect(machine.vm_activation_free != null);
+    }
+    try std.testing.expectEqual(
+        @as(f64, 13),
         (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
     );
 }
@@ -15062,6 +15168,7 @@ test "vm: direct native calls reject non-simple parameter entry" {
     // advance the hit counter.
     simple_chunk.has_non_simple_parameters = true;
     defer simple_chunk.has_non_simple_parameters = false;
+    try std.testing.expectEqual(QuickLeafPlan.unsupported, compileQuickLeafPlan(simple_chunk));
     const before_non_simple = quick_native_direct_call_hits.load(.monotonic);
     try std.testing.expectEqual(
         @as(?Value, null),
@@ -15584,6 +15691,11 @@ test "vm: quickens guarded pure numeric recurrence" {
         var parser = try Parser.init(allocator, source);
         const program = try parser.parseProgram();
         const chunk = try Compiler.compileProgram(allocator, program);
+        const fib_chunk = chunk.fns.items[0].chunk.?;
+        try std.testing.expect(compileQuickRecurrencePlan(fib_chunk) == .add);
+        fib_chunk.has_non_simple_parameters = true;
+        try std.testing.expectEqual(QuickRecurrencePlan.unsupported, compileQuickRecurrencePlan(fib_chunk));
+        fib_chunk.has_non_simple_parameters = false;
         var env = Environment{ .arena = allocator, .fn_scope = true };
         const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
         try interp.installGlobals(&env, root_shape);
