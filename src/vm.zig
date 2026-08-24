@@ -5970,6 +5970,10 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     if (!nativeExecutionPermitted(vm, owner)) return null;
     if (func.is_class_constructor or func.uses_arguments) return null;
     const chunk = func.chunk orelse return null;
+    // Direct native calls copy argument i into slot i and skip buildActivation.
+    // Rest/destructuring/default entry metadata requires allocation or a
+    // bytecode prologue, so only a simple formal list has that identity layout.
+    if (chunk.has_non_simple_parameters) return null;
     // Lexical initialization and TDZ/const checks are observable bytecode
     // operations; the direct native leaf path cannot elide them.
     if (chunk.lexical_slots.len != 0) return null;
@@ -14994,6 +14998,85 @@ test "vm: numeric baseline tier preserves steps and non-number fallback" {
     machine.steps = interp.max_steps - 1;
     try std.testing.expectError(error.Throw, run(&machine, sum_chunk, &sum_frame));
     try std.testing.expectEqual(interp.max_steps + 1, machine.steps);
+}
+
+test "vm: direct native calls reject non-simple parameter entry" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function simple(a, b) { return a + b; }
+        \\function collected(a, ...tail) { return a + tail[0]; }
+        \\0;
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+        .jit_owner = &owner,
+    };
+    _ = try run(&machine, root, null);
+    const simple = Interpreter.funcOf(env.get("simple").?) orelse return error.TestUnexpectedResult;
+    const collected = Interpreter.funcOf(env.get("collected").?) orelse return error.TestUnexpectedResult;
+    const simple_chunk = simple.chunk orelse return error.TestUnexpectedResult;
+    const collected_chunk = collected.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!simple_chunk.has_non_simple_parameters);
+    try std.testing.expect(collected_chunk.has_non_simple_parameters);
+    const arguments = [_]Value{ Value.num(4), Value.num(5) };
+
+    for (0..4) |_| {
+        try std.testing.expectEqual(
+            @as(f64, 9),
+            (try runFunction(&machine, simple, simple_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+        );
+        try std.testing.expectEqual(
+            @as(f64, 9),
+            (try runFunction(&machine, collected, collected_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+        );
+    }
+    try std.testing.expectEqual(jit.TierState.ready, simple_chunk.tier.loadState());
+
+    machine.jit_execution_allowed = true;
+    defer machine.jit_execution_allowed = false;
+    const before_simple = quick_native_direct_call_hits.load(.monotonic);
+    const simple_result = (try tryRunNativeDirectCall(&machine, simple, &arguments)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 9), simple_result.asNum());
+    try std.testing.expect(quick_native_direct_call_hits.load(.monotonic) > before_simple);
+
+    // Do not let this witness depend on the rest body's current incidental
+    // baseline eligibility. Apply the immutable entry contract to an artifact
+    // already proven ready: removing the metadata guard would execute it and
+    // advance the hit counter.
+    simple_chunk.has_non_simple_parameters = true;
+    defer simple_chunk.has_non_simple_parameters = false;
+    const before_non_simple = quick_native_direct_call_hits.load(.monotonic);
+    try std.testing.expectEqual(
+        @as(?Value, null),
+        try tryRunNativeDirectCall(&machine, simple, &arguments),
+    );
+    try std.testing.expectEqual(before_non_simple, quick_native_direct_call_hits.load(.monotonic));
+    try std.testing.expectEqual(
+        @as(?Value, null),
+        try tryRunNativeDirectCall(&machine, collected, &arguments),
+    );
+    try std.testing.expectEqual(before_non_simple, quick_native_direct_call_hits.load(.monotonic));
+    try std.testing.expectEqual(
+        @as(f64, 9),
+        (try runFunction(&machine, collected, collected_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+    );
 }
 
 test "vm: numeric call-loop quickening preserves guards and exact steps" {
