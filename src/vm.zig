@@ -7626,7 +7626,7 @@ fn runChunk(
             },
             .iter_of => {
                 const v = stack.pop().?;
-                try stack.append(stack_alloc, try vm.iteratorOf(v));
+                try stack.append(stack_alloc, try vm.getIterator(v));
             },
             .async_iter_of => {
                 const v = stack.pop().?;

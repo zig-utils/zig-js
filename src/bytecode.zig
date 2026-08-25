@@ -458,7 +458,7 @@ pub const Op = enum(u8) {
     await_op, // pop -> awaited value, suspend (async); the driver resumes with the settled value
     call_with_this, // operand a: argc; stack: func, this, args... -> push func.call(this, args). Used by `yield*` so a method fetched once (GetMethod) is invoked without a second property lookup.
     assert_iter_result, // peek top; throw a TypeError if it is not an Object (the iterator-result-not-object check shared by next/throw/return)
-    iter_of, // pop iterable -> push an iterator object (has a `.next()`); for `yield*`
+    iter_of, // pop iterable -> GetIterator's iterator object; compiled site captures `.next` once
     async_iter_of, // pop iterable -> push its async iterator (Symbol.asyncIterator, else a sync iterator); for `for await`
     enum_keys, // pop value -> push [ToObject target, owned candidate array, cursor]
     enum_next, // peek state -> advance one candidate, push [key, present, has candidate]

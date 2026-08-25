@@ -23354,6 +23354,57 @@ test "forced tree-walker and required bytecode preserve exact observable state" 
     try std.testing.expectEqual(@as(u64, 0), bytecode.count(.template_plain_fallback));
 }
 
+test "required bytecode uses strict captured iterator records" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var manualNextCalls = 0;
+        \\var manual = { next: function() { manualNextCalls += 1; return { done: true }; } };
+        \\function rejectsForOf(input) {
+        \\  try { for (var value of input) {} return false; }
+        \\  catch (error) { return error instanceof TypeError; }
+        \\}
+        \\function rejectsPattern(input) {
+        \\  try { var [value] = input; return false; }
+        \\  catch (error) { return error instanceof TypeError; }
+        \\}
+        \\function* delegate(input) { yield* input; }
+        \\function rejectsYieldStar(input) {
+        \\  try { delegate(input).next(); return false; }
+        \\  catch (error) { return error instanceof TypeError; }
+        \\}
+        \\var iteratorGets = 0;
+        \\var nextGets = 0;
+        \\var receiverOk = false;
+        \\var iterator = {};
+        \\Object.defineProperty(iterator, "next", {
+        \\  get: function() {
+        \\    nextGets += 1;
+        \\    if (nextGets !== 1) return function() { throw new Error("next re-read"); };
+        \\    var i = 0;
+        \\    return function() { return i++ === 0 ? { value: 7, done: false } : { done: true }; };
+        \\  }
+        \\});
+        \\function* source() { yield 1; }
+        \\var generator = source();
+        \\Object.defineProperty(generator, Symbol.iterator, {
+        \\  get: function() {
+        \\    iteratorGets += 1;
+        \\    return function() { receiverOk = this === generator; return iterator; };
+        \\  }
+        \\});
+        \\function sum(input) { var total = 0; for (var value of input) total += value; return total; }
+        \\rejectsForOf(manual) && rejectsPattern(manual) && rejectsYieldStar(manual) &&
+        \\manualNextCalls === 0 && sum(generator) === 7 && iteratorGets === 1 &&
+        \\nextGets === 1 && receiverOk
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "forced tree-walker and required bytecode agree on nullish coalescing" {
     const source =
         \\var nullishHits = 0;

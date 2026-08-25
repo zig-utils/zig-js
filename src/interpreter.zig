@@ -15094,11 +15094,11 @@ pub const Interpreter = struct {
         next_method: Value,
     };
 
-    /// GetIterator(obj, sync): read and call the observable @@iterator method,
-    /// require its result to be an Object, and capture [[NextMethod]] exactly
-    /// once. GetIteratorDirect/GetIteratorFlattenable consumers use their own
-    /// entry points instead of the stricter language-iteration contract.
-    pub fn getIteratorRecord(self: *Interpreter, v: Value) EvalError!IteratorRecord {
+    /// The object-acquisition half of synchronous GetIterator: read and call the
+    /// observable @@iterator method and require its result to be an Object. VM
+    /// bytecode uses this boundary because compiled sites capture `next` in their
+    /// own activation immediately afterward.
+    pub fn getIterator(self: *Interpreter, v: Value) EvalError!Value {
         if (v.isUndefined() or v.isNull())
             return self.throwError("TypeError", "value is not iterable");
         const key = self.symbolIteratorKey() orelse
@@ -15106,7 +15106,14 @@ pub const Interpreter = struct {
         const method = try self.getProperty(v, key);
         if (!method.isCallable())
             return self.throwError("TypeError", "Symbol.iterator is not callable");
-        const iterator = try self.requireIteratorObject(try self.callValueWithThis(method, &.{}, v));
+        return self.requireIteratorObject(try self.callValueWithThis(method, &.{}, v));
+    }
+
+    /// GetIterator(obj, sync): acquire the iterator object and capture its
+    /// [[NextMethod]] exactly once. GetIteratorDirect/GetIteratorFlattenable
+    /// consumers use their own entry points instead of this language contract.
+    pub fn getIteratorRecord(self: *Interpreter, v: Value) EvalError!IteratorRecord {
+        const iterator = try self.getIterator(v);
         return .{
             .iterator = iterator,
             .next_method = try self.getProperty(iterator, "next"),
