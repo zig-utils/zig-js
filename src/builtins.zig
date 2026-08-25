@@ -527,7 +527,9 @@ pub fn mathHypot(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 // mantissa at bit position `e + 1074`, so no intermediate value overflows (the
 // `[1e308, 1e308, …, -1e308, -1e308]` cancellation is exact), and the result is
 // converted to f64 with a single round-to-nearest-even at the end.
-const SUM_WORDS = 72; // u32 limbs ≈ 2304 bits; max |sum| ≈ 2^2098 scaled, ample headroom
+// A maximum finite term is below 2^2098 after scaling. Fewer than 2^53 terms
+// therefore sum below 2^2151, leaving more than 150 signed-magnitude head bits.
+const SUM_WORDS = 72; // 2,304 bits
 
 /// Add `mantissa` (≤53 significant bits) shifted left by `bitpos` into the
 /// little-endian two's-complement accumulator, subtracting when `neg`.
