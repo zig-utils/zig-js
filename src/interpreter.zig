@@ -10186,23 +10186,7 @@ pub const Interpreter = struct {
             },
             .string => {
                 const s = try v.asWtf8(self.arena);
-                // StringToBigInt: trim whitespace; empty → 0n; otherwise a decimal
-                // (optional sign) or a `0x`/`0o`/`0b` literal (no sign).
-                const t = std.mem.trim(u8, s, " \t\r\n\x0b\x0c\u{00a0}\u{feff}");
-                if (t.len == 0) return self.makeBigInt(0);
-                if (t.len > 2 and t[0] == '0' and (t[1] == 'x' or t[1] == 'X')) {
-                    return self.makeBigIntText((try canonicalBigIntRadixString(self.arena, t[2..], 16)) orelse
-                        return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
-                }
-                if (t.len > 2 and t[0] == '0' and (t[1] == 'o' or t[1] == 'O')) {
-                    return self.makeBigIntText((try canonicalBigIntRadixString(self.arena, t[2..], 8)) orelse
-                        return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
-                }
-                if (t.len > 2 and t[0] == '0' and (t[1] == 'b' or t[1] == 'B')) {
-                    return self.makeBigIntText((try canonicalBigIntRadixString(self.arena, t[2..], 2)) orelse
-                        return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
-                }
-                return self.makeBigIntText((try canonicalBigIntDecimalString(self.arena, t)) orelse
+                return self.makeBigIntText((try canonicalStringToBigInt(self.arena, s)) orelse
                     return self.throwError("SyntaxError", "Cannot convert string to a BigInt"));
             },
             .null, .undefined => return self.throwError("TypeError", "Cannot convert undefined or null to a BigInt"),
@@ -21725,6 +21709,22 @@ fn canonicalBigIntRadixString(arena: std.mem.Allocator, digits: []const u8, radi
     return out;
 }
 
+/// StringToBigInt canonicalizes the complete StringIntegerLiteral grammar to
+/// decimal text. Its StrWhiteSpace is exactly the same WhiteSpace +
+/// LineTerminator set used by String.prototype.trim (ECMA-262 StringToBigInt),
+/// including non-ASCII boundary code points such as U+1680 and U+3000.
+fn canonicalStringToBigInt(arena: std.mem.Allocator, s: []const u8) error{OutOfMemory}!?[]const u8 {
+    const t = jsTrim(s, true, true);
+    if (t.len == 0) return "0";
+    if (t.len > 2 and t[0] == '0' and (t[1] == 'x' or t[1] == 'X'))
+        return canonicalBigIntRadixString(arena, t[2..], 16);
+    if (t.len > 2 and t[0] == '0' and (t[1] == 'o' or t[1] == 'O'))
+        return canonicalBigIntRadixString(arena, t[2..], 8);
+    if (t.len > 2 and t[0] == '0' and (t[1] == 'b' or t[1] == 'B'))
+        return canonicalBigIntRadixString(arena, t[2..], 2);
+    return canonicalBigIntDecimalString(arena, t);
+}
+
 /// `BigInt(value)` — NumberToBigInt for an integral Number, else ToBigInt.
 /// It has [[Construct]] so IsConstructor(BigInt) is true, but `new BigInt`
 /// throws before argument coercion.
@@ -21799,20 +21799,7 @@ fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 /// throwing). Mirrors the BigInt() string grammar: trim, then `0x`/`0o`/`0b`
 /// radix literals or an optionally-signed decimal; empty ⇒ 0n.
 fn stringToBigIntManaged(arena: std.mem.Allocator, s: []const u8) error{OutOfMemory}!?std.math.big.int.Managed {
-    const t = std.mem.trim(u8, s, " \t\r\n\x0b\x0c\u{00a0}\u{feff}");
-    var canon: ?[]const u8 = null;
-    if (t.len == 0) {
-        canon = "0";
-    } else if (t.len > 2 and t[0] == '0' and (t[1] == 'x' or t[1] == 'X')) {
-        canon = try canonicalBigIntRadixString(arena, t[2..], 16);
-    } else if (t.len > 2 and t[0] == '0' and (t[1] == 'o' or t[1] == 'O')) {
-        canon = try canonicalBigIntRadixString(arena, t[2..], 8);
-    } else if (t.len > 2 and t[0] == '0' and (t[1] == 'b' or t[1] == 'B')) {
-        canon = try canonicalBigIntRadixString(arena, t[2..], 2);
-    } else {
-        canon = try canonicalBigIntDecimalString(arena, t);
-    }
-    const cs = canon orelse return null;
+    const cs = (try canonicalStringToBigInt(arena, s)) orelse return null;
     var out = try std.math.big.int.Managed.init(arena);
     out.setString(10, cs) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

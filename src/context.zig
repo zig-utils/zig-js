@@ -15080,6 +15080,32 @@ test "BigInt constructor parses oversized radix strings and rejects construction
     )).asBool());
 }
 
+test "StringToBigInt trims the complete ECMAScript whitespace set" {
+    try std.testing.expect((try evalIn(
+        \\var spaces = [
+        \\  "\u0009", "\u000a", "\u000b", "\u000c", "\u000d", "\u0020",
+        \\  "\u00a0", "\u1680", "\u2000", "\u2001", "\u2002", "\u2003",
+        \\  "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009",
+        \\  "\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000", "\ufeff"
+        \\];
+        \\var huge = 340282366920938463463374607431768211456n;
+        \\var valid = true;
+        \\for (var i = 0; i < spaces.length; i++) {
+        \\  var ws = spaces[i];
+        \\  valid = valid && BigInt(ws + "17" + ws) === 17n;
+        \\  valid = valid && BigInt(ws + "0x10" + ws) === 16n;
+        \\  valid = valid && BigInt(ws + ws) === 0n;
+        \\  valid = valid && BigInt(ws + "340282366920938463463374607431768211456" + ws) === huge;
+        \\  valid = valid && 17n == ws + "17" + ws && !(17n != ws + "17" + ws);
+        \\  valid = valid && 16n < ws + "17" + ws && 17n >= ws + "17" + ws;
+        \\  var threw = false;
+        \\  try { BigInt("1" + ws + "7"); } catch (error) { threw = error instanceof SyntaxError; }
+        \\  valid = valid && threw && !(17n == "1" + ws + "7") && !(16n < "1" + ws + "7");
+        \\}
+        \\valid
+    )).asBool());
+}
+
 test "Object boxes BigInt primitives through BigInt.prototype" {
     try std.testing.expect((try evalIn(
         \\var boxed = Object(1n);
