@@ -17,6 +17,7 @@
 //! representation.
 
 const std = @import("std");
+const agent = @import("agent.zig");
 
 /// XXH3, the canonical content hash for a string cell. The fixed seed keeps
 /// compile-time literal cells compatible with runtime cells. Hash equality is
@@ -647,16 +648,75 @@ pub fn setActiveManagedFactory(factory: ?ManagedFactory) ?ManagedFactory {
 /// This is the Layer-C shared-string mechanism. It is opt-in: the engine stays
 /// uninterned until Layer C wires this in, so nothing today assumes equal
 /// strings share identity.
+const InternPlacementContext = struct {
+    seed: u64,
+
+    fn hash(context: @This(), bytes: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, bytes);
+    }
+};
+
+/// Retain one placement word per canonical key so shard selection and native
+/// bucket lookup share a single keyed byte scan. Equality still checks bytes.
+const InternKey = struct {
+    bytes: []const u8,
+    placement_hash: u64,
+};
+
+const InternStoredContext = struct {
+    pub fn hash(_: @This(), key: InternKey) u64 {
+        return key.placement_hash;
+    }
+
+    pub fn eql(_: @This(), left: InternKey, right: InternKey) bool {
+        return std.mem.eql(u8, left.bytes, right.bytes);
+    }
+};
+
+const InternLookup = struct {
+    bytes: []const u8,
+    placement_hash: u64,
+};
+
+const InternLookupContext = struct {
+    pub fn hash(_: @This(), lookup: InternLookup) u64 {
+        return lookup.placement_hash;
+    }
+
+    pub fn eql(_: @This(), lookup: InternLookup, stored: InternKey) bool {
+        return std.mem.eql(u8, lookup.bytes, stored.bytes);
+    }
+};
+
+const InternMap = std.HashMapUnmanaged(
+    InternKey,
+    *StringCell,
+    InternStoredContext,
+    std.hash_map.default_max_load_percentage,
+);
+const InternPlacementContextProvider = *const fn () std.mem.Allocator.Error!InternPlacementContext;
+
+fn newInternPlacementContext() std.mem.Allocator.Error!InternPlacementContext {
+    var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+    agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+    return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+}
+
 pub const InternTable = struct {
     pub const shard_count = 16; // power of two; hash low bits pick the shard
 
+    const placement_empty: u8 = 0;
+    const placement_initializing: u8 = 1;
+    const placement_ready: u8 = 2;
+
     const Shard = struct {
         lock: std.atomic.Value(u32) = .init(0), // 0 = free, 1 = held
-        map: std.StringHashMapUnmanaged(*StringCell) = .empty,
+        map: InternMap = .empty,
 
         fn acquire(self: *Shard) void {
-            while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-                std.atomic.spinLoopHint();
+            var spins: usize = 0;
+            while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) : (spins += 1) {
+                if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
             }
         }
         fn releaseLock(self: *Shard) void {
@@ -666,6 +726,12 @@ pub const InternTable = struct {
 
     allocator: std.mem.Allocator,
     shards: [shard_count]Shard = @splat(.{}),
+    /// `placement_context` is readable only after the release-published ready
+    /// state. The initializing owner inserts the first cell before publishing;
+    /// waiters cannot observe a map whose context is still provisional.
+    placement_state: std.atomic.Value(u8) = .init(placement_empty),
+    placement_context: InternPlacementContext = undefined,
+    context_provider: InternPlacementContextProvider = newInternPlacementContext,
 
     pub fn init(allocator: std.mem.Allocator) InternTable {
         return .{ .allocator = allocator };
@@ -677,7 +743,7 @@ pub const InternTable = struct {
             while (it.next()) |entry| {
                 // Key (WTF-8 content) and cell.bytes (stored image, possibly flat
                 // latin1) are separate allocations — free both.
-                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.key_ptr.bytes);
                 self.allocator.free(entry.value_ptr.*.bytes);
                 self.allocator.destroy(entry.value_ptr.*);
             }
@@ -690,13 +756,69 @@ pub const InternTable = struct {
     /// any thread. The returned cell is owned by the table (freed at `deinit`).
     pub fn intern(self: *InternTable, bytes: []const u8) std.mem.Allocator.Error!*StringCell {
         const h = contentHash(bytes);
-        const shard = &self.shards[h & (shard_count - 1)];
+        var spins: usize = 0;
+        while (true) : (spins += 1) switch (self.placement_state.load(.acquire)) {
+            placement_ready => return self.internWithContext(bytes, h, self.placement_context),
+            placement_empty => if (self.placement_state.cmpxchgStrong(
+                placement_empty,
+                placement_initializing,
+                .acq_rel,
+                .acquire,
+            ) == null) {
+                const context = self.context_provider() catch |err| {
+                    self.placement_state.store(placement_empty, .release);
+                    return err;
+                };
+                const cell = self.internWithContext(bytes, h, context) catch |err| {
+                    self.resetEmptyShardStorage();
+                    self.placement_state.store(placement_empty, .release);
+                    return err;
+                };
+                self.placement_context = context;
+                self.placement_state.store(placement_ready, .release);
+                return cell;
+            },
+            placement_initializing => {
+                if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            },
+            else => unreachable,
+        };
+    }
+
+    fn resetEmptyShardStorage(self: *InternTable) void {
+        for (&self.shards) |*shard| {
+            shard.acquire();
+            defer shard.releaseLock();
+            std.debug.assert(shard.map.count() == 0);
+            shard.map.deinit(self.allocator);
+            shard.map = .empty;
+        }
+    }
+
+    fn internWithContext(
+        self: *InternTable,
+        bytes: []const u8,
+        content_hash: u64,
+        context: InternPlacementContext,
+    ) std.mem.Allocator.Error!*StringCell {
+        const placement_hash = context.hash(bytes);
+        const lookup = InternLookup{ .bytes = bytes, .placement_hash = placement_hash };
+        const shard = &self.shards[placement_hash & (shard_count - 1)];
         shard.acquire();
         defer shard.releaseLock();
 
         // Look up by the WTF-8 CONTENT `bytes` (not the stored image): a flat
         // latin1 image can collide byte-for-byte with a different string's WTF-8.
-        if (shard.map.get(bytes)) |existing| return existing;
+        const result = try shard.map.getOrPutContextAdapted(
+            self.allocator,
+            lookup,
+            InternLookupContext{},
+            InternStoredContext{},
+        );
+        if (result.found_existing) return result.value_ptr.*;
+        result.key_ptr.* = .{ .bytes = bytes, .placement_hash = placement_hash };
+        var inserted = true;
+        errdefer if (inserted) std.debug.assert(shard.map.removeAdapted(lookup, InternLookupContext{}));
 
         // Miss: the map key is an owned copy of the WTF-8 content (collision-free
         // canonical key); the cell stores the representation-selected image
@@ -705,12 +827,14 @@ pub const InternTable = struct {
         const key = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(key);
         const canon = try self.allocator.dupe(u8, bytes);
-        const stored = try storedImage(self.allocator, canon, h); // consumes canon
+        const stored = try storedImage(self.allocator, canon, content_hash); // consumes canon
         errdefer self.allocator.free(stored);
         const cell = try self.allocator.create(StringCell);
         errdefer self.allocator.destroy(cell);
-        cell.* = .{ .bytes = stored, .hash = h };
-        try shard.map.put(self.allocator, key, cell);
+        cell.* = .{ .bytes = stored, .hash = content_hash };
+        result.key_ptr.bytes = key;
+        result.value_ptr.* = cell;
+        inserted = false;
         return cell;
     }
 
@@ -727,6 +851,10 @@ pub const InternTable = struct {
 
     /// Total interned cells across all shards (test/diagnostic helper).
     pub fn count(self: *InternTable) usize {
+        var spins: usize = 0;
+        while (self.placement_state.load(.acquire) == placement_initializing) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
         var n: usize = 0;
         for (&self.shards) |*shard| {
             shard.acquire();
@@ -1046,10 +1174,145 @@ test "strcell: interned bytes survive a mutated caller buffer" {
     try std.testing.expectEqual(c, try t.intern("abc"));
 }
 
+test "strcell: intern placement is lazy independent exact and distributed" {
+    const Sequence = struct {
+        var calls: std.atomic.Value(u64) = .init(0);
+
+        fn context() std.mem.Allocator.Error!InternPlacementContext {
+            return .{ .seed = 0x494e_5445_524e_0000 + calls.fetchAdd(1, .monotonic) };
+        }
+    };
+    Sequence.calls.store(0, .monotonic);
+
+    var first = InternTable.init(std.testing.allocator);
+    defer first.deinit();
+    first.context_provider = Sequence.context;
+    var second = InternTable.init(std.testing.allocator);
+    defer second.deinit();
+    second.context_provider = Sequence.context;
+
+    try std.testing.expectEqual(@as(usize, 0), first.count());
+    try std.testing.expectEqual(InternTable.placement_empty, first.placement_state.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), Sequence.calls.load(.monotonic));
+
+    const first_cell = try first.intern("\x00shared-\xf0\x9f\x99\x82");
+    const first_duplicate = try first.intern("\x00shared-\xf0\x9f\x99\x82");
+    var hit_allocator = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    const allocation_free_duplicate = duplicate: {
+        first.allocator = hit_allocator.allocator();
+        defer first.allocator = std.testing.allocator;
+        break :duplicate try first.intern("\x00shared-\xf0\x9f\x99\x82");
+    };
+    const second_cell = try second.intern("\x00shared-\xf0\x9f\x99\x82");
+    try std.testing.expectEqual(first_cell, first_duplicate);
+    try std.testing.expectEqual(first_cell, allocation_free_duplicate);
+    try std.testing.expectEqual(@as(usize, 0), hit_allocator.allocations);
+    try std.testing.expect(first_cell != second_cell);
+    try std.testing.expectEqual(first_cell.hashState(), second_cell.hashState());
+    try std.testing.expect(first.placement_context.seed != second.placement_context.seed);
+    try std.testing.expectEqual(@as(u64, 2), Sequence.calls.load(.monotonic));
+
+    var wide: [4096]u8 = @splat('w');
+    const wide_cell = try first.intern(&wide);
+    wide[0] = 'x';
+    try std.testing.expectEqual(@as(u8, 'w'), wide_cell.bytes[0]);
+    try std.testing.expectEqual(@as(usize, 2), first.count());
+
+    for (&first.shards, 0..) |*shard, shard_index| {
+        var iterator = shard.map.iterator();
+        while (iterator.next()) |entry| {
+            const expected = first.placement_context.hash(entry.key_ptr.bytes);
+            try std.testing.expectEqual(expected, entry.key_ptr.placement_hash);
+            try std.testing.expectEqual(shard_index, expected & (InternTable.shard_count - 1));
+        }
+    }
+
+    const adversarial_context = InternPlacementContext{ .seed = 0x4449_5354_5249_4255 };
+    var secure_shards: [InternTable.shard_count]usize = @splat(0);
+    var collision_count: usize = 0;
+    var candidate: usize = 0;
+    while (collision_count < 128) : (candidate += 1) {
+        var storage: [48]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&storage, "deterministic-shard-collision-{d}", .{candidate});
+        if (contentHash(bytes) & (InternTable.shard_count - 1) != 0) continue;
+        secure_shards[adversarial_context.hash(bytes) & (InternTable.shard_count - 1)] += 1;
+        collision_count += 1;
+    }
+    var occupied: usize = 0;
+    for (secure_shards) |count_| occupied += @intFromBool(count_ != 0);
+    try std.testing.expect(occupied >= 12);
+}
+
+test "strcell: intern first insertion failures are atomic and retryable" {
+    const Providers = struct {
+        fn unavailable() std.mem.Allocator.Error!InternPlacementContext {
+            return error.OutOfMemory;
+        }
+        fn fixed() std.mem.Allocator.Error!InternPlacementContext {
+            return .{ .seed = 0x4641_494c_5552_4501 };
+        }
+    };
+
+    var unavailable = InternTable.init(std.testing.allocator);
+    defer unavailable.deinit();
+    unavailable.context_provider = Providers.unavailable;
+    try std.testing.expectError(error.OutOfMemory, unavailable.intern("first"));
+    try std.testing.expectEqual(InternTable.placement_empty, unavailable.placement_state.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), unavailable.count());
+    for (&unavailable.shards) |*shard| try std.testing.expectEqual(@as(usize, 0), shard.map.capacity());
+    unavailable.context_provider = Providers.fixed;
+    try std.testing.expectEqualStrings("first", (try unavailable.intern("first")).bytes);
+
+    var induced_failures: usize = 0;
+    var reached_success = false;
+    for (0..16) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .fail_index = fail_index },
+        );
+        var table = InternTable.init(failing.allocator());
+        table.context_provider = Providers.fixed;
+        const outcome = table.intern("\x00first-\xf0\x9f\x99\x82");
+        if (outcome) |cell| {
+            try std.testing.expectEqualStrings("\x00first-\xf0\x9f\x99\x82", cell.bytes);
+            reached_success = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            induced_failures += 1;
+            try std.testing.expectEqual(InternTable.placement_empty, table.placement_state.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 0), table.count());
+            for (&table.shards) |*shard| try std.testing.expectEqual(@as(usize, 0), shard.map.capacity());
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            table.allocator = std.testing.allocator;
+            try std.testing.expectEqualStrings("\x00first-\xf0\x9f\x99\x82", (try table.intern("\x00first-\xf0\x9f\x99\x82")).bytes);
+        }
+        table.deinit();
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (reached_success) break;
+    }
+    try std.testing.expect(reached_success);
+    try std.testing.expect(induced_failures >= 4);
+}
+
 test "strcell: concurrent interning converges to one cell per string" {
     const a = std.testing.allocator;
     var t = InternTable.init(a);
     defer t.deinit();
+
+    const Provider = struct {
+        var calls: std.atomic.Value(usize) = .init(0);
+
+        fn context() std.mem.Allocator.Error!InternPlacementContext {
+            _ = calls.fetchAdd(1, .monotonic);
+            return .{ .seed = 0x434f_4e43_5552_0001 };
+        }
+    };
+    Provider.calls.store(0, .monotonic);
+    t.context_provider = Provider.context;
 
     // Many threads race to intern the same small set of strings. The table must
     // converge: exactly one cell per distinct string, no corruption, no leak
@@ -1081,6 +1344,8 @@ test "strcell: concurrent interning converges to one cell per string" {
 
     // Exactly one cell per distinct word.
     try std.testing.expectEqual(@as(usize, words.len), t.count());
+    try std.testing.expectEqual(@as(usize, 1), Provider.calls.load(.monotonic));
+    try std.testing.expectEqual(InternTable.placement_ready, t.placement_state.load(.acquire));
     // Every thread saw the SAME canonical cell for each word.
     for (0..words.len) |wi| {
         const canonical = results[0][wi];
