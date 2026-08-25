@@ -912,6 +912,105 @@ const PrivateCPUProfiler = struct {
 const private_cpu_sampling_interval_us_default: u32 = 1000;
 var private_cpu_sampling_interval_us: std.atomic.Value(u32) = .init(private_cpu_sampling_interval_us_default);
 
+const CPrivateStringHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, key);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+const CPrivateStringContextProvider = *const fn () std.mem.Allocator.Error!CPrivateStringHashContext;
+
+fn newCPrivateStringHashContext() std.mem.Allocator.Error!CPrivateStringHashContext {
+    var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+    agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+    return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+}
+
+/// Lazy exact-byte index for public C/private ABI boundary data. Each map owns
+/// its context: empty and lookup-only paths ask for no entropy, while a failed
+/// first mutation publishes neither a context nor a partial native table.
+fn CPrivateStringMapUnmanaged(comptime ValueType: type) type {
+    const Index = std.HashMapUnmanaged(
+        []const u8,
+        ValueType,
+        CPrivateStringHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        const Self = @This();
+
+        index: Index = .empty,
+        context: ?CPrivateStringHashContext = null,
+
+        fn getOrPutWithContext(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            key: []const u8,
+            context: CPrivateStringHashContext,
+        ) std.mem.Allocator.Error!Index.GetOrPutResult {
+            if (self.context) |installed| {
+                std.debug.assert(installed.seed == context.seed);
+                return self.index.getOrPutContext(allocator, key, installed);
+            }
+            const result = try self.index.getOrPutContext(allocator, key, context);
+            self.context = context;
+            return result;
+        }
+
+        fn getOrPutSecureUsing(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            key: []const u8,
+            context_provider: CPrivateStringContextProvider,
+        ) std.mem.Allocator.Error!Index.GetOrPutResult {
+            const context = self.context orelse try context_provider();
+            return self.getOrPutWithContext(allocator, key, context);
+        }
+
+        fn getOrPutSecure(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            key: []const u8,
+        ) std.mem.Allocator.Error!Index.GetOrPutResult {
+            return self.getOrPutSecureUsing(allocator, key, newCPrivateStringHashContext);
+        }
+
+        fn get(self: *const Self, key: []const u8) ?ValueType {
+            const context = self.context orelse return null;
+            return self.index.getContext(key, context);
+        }
+
+        fn contains(self: *const Self, key: []const u8) bool {
+            const context = self.context orelse return false;
+            return self.index.containsContext(key, context);
+        }
+
+        fn remove(self: *Self, key: []const u8) bool {
+            const context = self.context orelse return false;
+            return self.index.removeContext(key, context);
+        }
+
+        fn count(self: *const Self) usize {
+            return self.index.count();
+        }
+
+        fn iterator(self: *const Self) Index.Iterator {
+            return self.index.iterator();
+        }
+
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.index.deinit(allocator);
+        }
+    };
+}
+
 /// One public JavaScriptCore VM lifetime. The hidden primary Context owns the
 /// shared arena/JIT runtime; every exposed global context is a distinct realm on
 /// that runtime and retains this record until its own final release.
@@ -958,8 +1057,11 @@ const CContextGroup = struct {
     /// cell identity per VM, including across sibling realms.
     common_strings: [13]?*Boxed = @splat(null),
     /// Stable borrowed Latin-1/UTF-16 views returned to private ABI consumers.
-    /// Keys and backing buffers are group-owned so sibling realms share them.
-    zig_string_views: std.StringHashMapUnmanaged(PrivateZigStringView) = .empty,
+    /// Keys and backing buffers are group-owned so sibling realms share them;
+    /// the leaf mutex also covers private calls made outside an embedder's
+    /// optional VM API-lock scope.
+    zig_string_views: CPrivateStringMapUnmanaged(PrivateZigStringView) = .{},
+    zig_string_views_mutex: std.atomic.Mutex = .unlocked,
     /// Arena cells have stable addresses for the VM lifetime. Assign their
     /// diagnostic heap-snapshot IDs lazily and retain the mapping so repeated
     /// snapshots preserve identity. Precise-GC cells use zig-gc's relocation-
@@ -1186,8 +1288,9 @@ const PrivateHeapSnapshotNode = struct {
 
 const PrivateHeapSnapshotStrings = struct {
     allocator: std.mem.Allocator,
-    map: std.StringHashMapUnmanaged(u32) = .empty,
+    map: CPrivateStringMapUnmanaged(u32) = .{},
     items: std.ArrayListUnmanaged([]const u8) = .empty,
+    context_provider: CPrivateStringContextProvider = newCPrivateStringHashContext,
 
     fn deinit(self: *PrivateHeapSnapshotStrings) void {
         self.map.deinit(self.allocator);
@@ -1195,11 +1298,16 @@ const PrivateHeapSnapshotStrings = struct {
     }
 
     fn intern(self: *PrivateHeapSnapshotStrings, string: []const u8) !u32 {
-        const result = try self.map.getOrPut(self.allocator, string);
+        const was_empty = self.map.count() == 0;
+        const result = try self.map.getOrPutSecureUsing(self.allocator, string, self.context_provider);
         if (result.found_existing) return result.value_ptr.*;
         const index: u32 = @intCast(self.items.items.len);
         self.items.append(self.allocator, string) catch |err| {
             _ = self.map.remove(string);
+            if (was_empty) {
+                self.map.deinit(self.allocator);
+                self.map = .{};
+            }
             return err;
         };
         result.value_ptr.* = index;
@@ -2153,86 +2261,7 @@ const CClass = struct {
     parent: ?*CClass = null,
 };
 
-const CPropertyNameHashContext = struct {
-    seed: u64,
-
-    pub fn hash(context: @This(), key: []const u8) u64 {
-        return std.hash.Wyhash.hash(context.seed, key);
-    }
-
-    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
-        return std.mem.eql(u8, left, right);
-    }
-};
-
-const CPropertyNameIndex = std.HashMapUnmanaged(
-    []const u8,
-    void,
-    CPropertyNameHashContext,
-    std.hash_map.default_max_load_percentage,
-);
-const CPropertyNameContextProvider = *const fn () std.mem.Allocator.Error!CPropertyNameHashContext;
-
-fn newCPropertyNameHashContext() std.mem.Allocator.Error!CPropertyNameHashContext {
-    var seed_bytes: [@sizeOf(u64)]u8 = undefined;
-    agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
-    return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
-}
-
-/// Lazy exact-byte membership for host/private property-name snapshots. Each
-/// invocation owns its context; empty paths request no entropy, and a failed
-/// first mutation publishes neither a context nor partial native table.
-const CPropertyNameMembership = struct {
-    index: CPropertyNameIndex = .empty,
-    context: ?CPropertyNameHashContext = null,
-
-    fn putWithContext(
-        self: *@This(),
-        allocator: std.mem.Allocator,
-        key: []const u8,
-        context: CPropertyNameHashContext,
-    ) std.mem.Allocator.Error!bool {
-        if (self.context) |installed| {
-            std.debug.assert(installed.seed == context.seed);
-            return (try self.index.getOrPutContext(allocator, key, installed)).found_existing;
-        }
-        const result = try self.index.getOrPutContext(allocator, key, context);
-        self.context = context;
-        return result.found_existing;
-    }
-
-    fn putSecureUsing(
-        self: *@This(),
-        allocator: std.mem.Allocator,
-        key: []const u8,
-        context_provider: CPropertyNameContextProvider,
-    ) std.mem.Allocator.Error!bool {
-        const context = self.context orelse try context_provider();
-        return self.putWithContext(allocator, key, context);
-    }
-
-    fn putSecure(self: *@This(), allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!bool {
-        return self.putSecureUsing(allocator, key, newCPropertyNameHashContext);
-    }
-
-    fn contains(self: *const @This(), key: []const u8) bool {
-        const context = self.context orelse return false;
-        return self.index.containsContext(key, context);
-    }
-
-    fn remove(self: *@This(), key: []const u8) bool {
-        const context = self.context orelse return false;
-        return self.index.removeContext(key, context);
-    }
-
-    fn count(self: *const @This()) usize {
-        return self.index.count();
-    }
-
-    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-        self.index.deinit(allocator);
-    }
-};
+const CPropertyNameMembership = CPrivateStringMapUnmanaged(void);
 
 const PropertyNameAccumulator = struct {
     names: std.ArrayListUnmanaged(*JsString) = .empty,
@@ -2245,11 +2274,11 @@ const PropertyNameAccumulator = struct {
             self.failed = true;
             return;
         };
-        const found_existing = self.seen.putSecure(gpa, string.bytes) catch {
+        const found_existing = (self.seen.getOrPutSecure(gpa, string.bytes) catch {
             string.release();
             self.failed = true;
             return;
-        };
+        }).found_existing;
         std.debug.assert(!found_existing);
         self.names.append(gpa, string) catch {
             _ = self.seen.remove(string.bytes);
@@ -6635,21 +6664,23 @@ export fn StringBuilder__toString(raw: ?*anyopaque, global: JSContextRef) callco
     return encoded;
 }
 
-fn privateInternZigStringView(
-    views: *std.StringHashMapUnmanaged(PrivateZigStringView),
+fn privateInternZigStringViewUsing(
+    views: *CPrivateStringMapUnmanaged(PrivateZigStringView),
+    allocator: std.mem.Allocator,
     bytes: []const u8,
+    context_provider: CPrivateStringContextProvider,
 ) PrivateBunStringError!PrivateZigString {
     if (bytes.len == 0) return .{ .tagged_ptr = @intFromPtr("".ptr), .len = 0 };
     if (views.get(bytes)) |view| return view.result;
 
-    const units = try privateWTF8ToUTF16(gpa, bytes);
+    const units = try privateWTF8ToUTF16(allocator, bytes);
     var owns_units = true;
-    errdefer if (owns_units) gpa.free(units);
+    errdefer if (owns_units) allocator.free(units);
     const view: PrivateZigStringView = if (interp.Interpreter.jsStringIs8Bit(bytes)) latin1: {
-        const latin1_bytes = try gpa.alloc(u8, units.len);
-        errdefer gpa.free(latin1_bytes);
+        const latin1_bytes = try allocator.alloc(u8, units.len);
+        errdefer allocator.free(latin1_bytes);
         for (units, latin1_bytes) |unit, *byte| byte.* = @intCast(unit);
-        gpa.free(units);
+        allocator.free(units);
         owns_units = false;
         break :latin1 .{
             .result = .{ .tagged_ptr = @intFromPtr(latin1_bytes.ptr), .len = latin1_bytes.len },
@@ -6661,19 +6692,40 @@ fn privateInternZigStringView(
     };
     owns_units = false;
     errdefer switch (view.storage) {
-        .latin1 => |storage| gpa.free(storage),
-        .utf16 => |storage| gpa.free(storage),
+        .latin1 => |storage| allocator.free(storage),
+        .utf16 => |storage| allocator.free(storage),
     };
-    const key = try gpa.dupe(u8, bytes);
-    errdefer gpa.free(key);
-    try views.put(gpa, key, view);
+    const key = try allocator.dupe(u8, bytes);
+    errdefer allocator.free(key);
+    const result = try views.getOrPutSecureUsing(allocator, key, context_provider);
+    if (result.found_existing) {
+        allocator.free(key);
+        switch (view.storage) {
+            .latin1 => |storage| allocator.free(storage),
+            .utf16 => |storage| allocator.free(storage),
+        }
+        return result.value_ptr.result;
+    }
+    result.value_ptr.* = view;
     return view.result;
+}
+
+fn privateInternZigStringView(
+    views: *CPrivateStringMapUnmanaged(PrivateZigStringView),
+    bytes: []const u8,
+) PrivateBunStringError!PrivateZigString {
+    return privateInternZigStringViewUsing(views, gpa, bytes, newCPrivateStringHashContext);
 }
 
 fn privateBorrowedZigStringView(
     group: *CContextGroup,
     bytes: []const u8,
 ) PrivateBunStringError!PrivateZigString {
+    var spins: usize = 0;
+    while (!group.zig_string_views_mutex.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+    defer group.zig_string_views_mutex.unlock();
     return privateInternZigStringView(&group.zig_string_views, bytes);
 }
 
@@ -6682,7 +6734,7 @@ fn privateBorrowedZigStringView(
 /// bytes must outlive the call without a free hook. Same latin1/UTF-16
 /// conversion as the group-level store, mutex-guarded because it is not
 /// thread-affine.
-var private_global_zig_string_views: std.StringHashMapUnmanaged(PrivateZigStringView) = .empty;
+var private_global_zig_string_views: CPrivateStringMapUnmanaged(PrivateZigStringView) = .{};
 var private_global_zig_string_views_mutex: std.atomic.Mutex = .unlocked;
 
 fn privateGlobalZigStringView(bytes: []const u8) PrivateBunStringError!PrivateZigString {
@@ -8188,7 +8240,7 @@ fn privatePropertyIteratorKeys(
             if (value.isPrivateKey(key)) continue;
             if (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) continue;
             if (own_properties_only and only_non_index_properties and value.canonicalIndex(key) != null) continue;
-            if (try seen.putSecure(machine.arena, key)) continue;
+            if ((try seen.getOrPutSecure(machine.arena, key)).found_existing) continue;
             try result.append(machine.arena, key);
         }
         if (own_properties_only) break;
@@ -22555,8 +22607,8 @@ export fn JSWorkerRelease(worker: JSWorkerRef) callconv(.c) void {
 // ---------------------------------------------------------------------------
 
 test "C-API property-name membership is lazy exact and failure atomic" {
-    const first_context = CPropertyNameHashContext{ .seed = 0x435f_4150_495f_0001 };
-    const second_context = CPropertyNameHashContext{ .seed = 0x435f_4150_495f_0002 };
+    const first_context = CPrivateStringHashContext{ .seed = 0x435f_4150_495f_0001 };
+    const second_context = CPrivateStringHashContext{ .seed = 0x435f_4150_495f_0002 };
 
     var empty: CPropertyNameMembership = .{};
     defer empty.deinit(std.testing.allocator);
@@ -22564,13 +22616,13 @@ test "C-API property-name membership is lazy exact and failure atomic" {
     try std.testing.expectEqual(@as(usize, 0), empty.count());
 
     const UnavailableEntropy = struct {
-        fn context() std.mem.Allocator.Error!CPropertyNameHashContext {
+        fn context() std.mem.Allocator.Error!CPrivateStringHashContext {
             return error.OutOfMemory;
         }
     };
     try std.testing.expectError(
         error.OutOfMemory,
-        empty.putSecureUsing(std.testing.allocator, "first", UnavailableEntropy.context),
+        empty.getOrPutSecureUsing(std.testing.allocator, "first", UnavailableEntropy.context),
     );
     try std.testing.expect(empty.context == null);
     try std.testing.expectEqual(@as(usize, 0), empty.index.capacity());
@@ -22580,7 +22632,7 @@ test "C-API property-name membership is lazy exact and failure atomic" {
     defer failed.deinit(unavailable.allocator());
     try std.testing.expectError(
         error.OutOfMemory,
-        failed.putWithContext(unavailable.allocator(), "first", first_context),
+        failed.getOrPutWithContext(unavailable.allocator(), "first", first_context),
     );
     try std.testing.expect(failed.context == null);
     try std.testing.expectEqual(@as(usize, 0), failed.count());
@@ -22588,10 +22640,10 @@ test "C-API property-name membership is lazy exact and failure atomic" {
 
     var membership: CPropertyNameMembership = .{};
     defer membership.deinit(std.testing.allocator);
-    try std.testing.expect(!try membership.putWithContext(std.testing.allocator, "\x00name", first_context));
-    try std.testing.expect(try membership.putWithContext(std.testing.allocator, "\x00name", first_context));
+    try std.testing.expect(!(try membership.getOrPutWithContext(std.testing.allocator, "\x00name", first_context)).found_existing);
+    try std.testing.expect((try membership.getOrPutWithContext(std.testing.allocator, "\x00name", first_context)).found_existing);
     var wide_name: [4096]u8 = @splat('w');
-    try std.testing.expect(!try membership.putWithContext(std.testing.allocator, &wide_name, first_context));
+    try std.testing.expect(!(try membership.getOrPutWithContext(std.testing.allocator, &wide_name, first_context)).found_existing);
     try std.testing.expect(membership.contains("\x00name"));
     try std.testing.expect(membership.contains(&wide_name));
     try std.testing.expectEqual(@as(usize, 2), membership.count());
@@ -22606,6 +22658,207 @@ test "C-API property-name membership is lazy exact and failure atomic" {
     try std.testing.expect(!accumulator.failed);
     try std.testing.expectEqual(@as(usize, 1), accumulator.names.items.len);
     try std.testing.expectEqualStrings("\x00host", accumulator.names.items[0].bytes);
+}
+
+test "private borrowed string views use lazy secure exact-byte interning" {
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!CPrivateStringHashContext {
+            return .{ .seed = 0x5a49_4753_5452_0001 };
+        }
+        fn unavailable() std.mem.Allocator.Error!CPrivateStringHashContext {
+            return error.OutOfMemory;
+        }
+    };
+    const Cleanup = struct {
+        fn views(map: *CPrivateStringMapUnmanaged(PrivateZigStringView), allocator: std.mem.Allocator) void {
+            var iterator = map.iterator();
+            while (iterator.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                switch (entry.value_ptr.storage) {
+                    .latin1 => |bytes| allocator.free(bytes),
+                    .utf16 => |units| allocator.free(units),
+                }
+            }
+            map.deinit(allocator);
+        }
+    };
+
+    var empty: CPrivateStringMapUnmanaged(PrivateZigStringView) = .{};
+    defer Cleanup.views(&empty, std.testing.allocator);
+    const empty_view = try privateInternZigStringViewUsing(
+        &empty,
+        std.testing.allocator,
+        "",
+        FixedContext.unavailable,
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty_view.len);
+    try std.testing.expect(empty.context == null);
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
+
+    var unavailable: CPrivateStringMapUnmanaged(PrivateZigStringView) = .{};
+    defer Cleanup.views(&unavailable, std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        privateInternZigStringViewUsing(
+            &unavailable,
+            std.testing.allocator,
+            "first",
+            FixedContext.unavailable,
+        ),
+    );
+    try std.testing.expect(unavailable.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.count());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.index.capacity());
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
+    var failed: CPrivateStringMapUnmanaged(PrivateZigStringView) = .{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        privateInternZigStringViewUsing(&failed, failing.allocator(), "first", FixedContext.first),
+    );
+    try std.testing.expect(failed.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
+    Cleanup.views(&failed, failing.allocator());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+
+    var views: CPrivateStringMapUnmanaged(PrivateZigStringView) = .{};
+    defer Cleanup.views(&views, std.testing.allocator);
+    const latin1 = try privateInternZigStringViewUsing(
+        &views,
+        std.testing.allocator,
+        "\x00latin1",
+        FixedContext.first,
+    );
+    const duplicate = try privateInternZigStringViewUsing(
+        &views,
+        std.testing.allocator,
+        "\x00latin1",
+        FixedContext.first,
+    );
+    try std.testing.expectEqual(latin1.tagged_ptr, duplicate.tagged_ptr);
+    try std.testing.expectEqual(latin1.len, duplicate.len);
+    try std.testing.expect(latin1.tagged_ptr & (@as(usize, 1) << 63) == 0);
+
+    const utf16 = try privateInternZigStringViewUsing(
+        &views,
+        std.testing.allocator,
+        "\xf0\x9f\x99\x82",
+        FixedContext.first,
+    );
+    try std.testing.expect(utf16.tagged_ptr & (@as(usize, 1) << 63) != 0);
+    try std.testing.expectEqual(@as(usize, 2), utf16.len);
+
+    var wide: [4096]u8 = @splat('w');
+    const wide_view = try privateInternZigStringViewUsing(
+        &views,
+        std.testing.allocator,
+        &wide,
+        FixedContext.first,
+    );
+    try std.testing.expectEqual(wide.len, wide_view.len);
+    try std.testing.expectEqual(@as(usize, 3), views.count());
+    try std.testing.expectEqual(@as(u64, 0x5a49_4753_5452_0001), views.context.?.seed);
+}
+
+test "private borrowed string views remain stable under concurrent group access" {
+    const vm_ref = JSC__VM__create(0) orelse return error.VMCreateFailed;
+    defer JSContextGroupRelease(@ptrCast(vm_ref));
+    const group = privateGroupFromVM(vm_ref) orelse return error.MissingVM;
+
+    const State = struct {
+        group: *CContextGroup,
+        shared_pointer: std.atomic.Value(usize) = .init(0),
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn run(state: *@This(), thread_index: usize) void {
+            var unique_storage: [32]u8 = undefined;
+            const unique = std.fmt.bufPrint(&unique_storage, "thread-{d}-\x00-view", .{thread_index}) catch {
+                state.failed.store(true, .release);
+                return;
+            };
+            for (0..64) |_| {
+                const shared = privateBorrowedZigStringView(state.group, "shared-\xf0\x9f\x99\x82-view") catch {
+                    state.failed.store(true, .release);
+                    return;
+                };
+                var expected = state.shared_pointer.load(.acquire);
+                if (expected == 0) {
+                    expected = state.shared_pointer.cmpxchgStrong(
+                        0,
+                        shared.tagged_ptr,
+                        .acq_rel,
+                        .acquire,
+                    ) orelse shared.tagged_ptr;
+                }
+                if (expected != shared.tagged_ptr or shared.len != 14) {
+                    state.failed.store(true, .release);
+                    return;
+                }
+                _ = privateBorrowedZigStringView(state.group, unique) catch {
+                    state.failed.store(true, .release);
+                    return;
+                };
+            }
+        }
+    };
+
+    var state = State{ .group = group };
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*thread, thread_index|
+        thread.* = try std.Thread.spawn(.{}, State.run, .{ &state, thread_index });
+    for (&threads) |*thread| thread.join();
+
+    try std.testing.expect(!state.failed.load(.acquire));
+    try std.testing.expect(state.shared_pointer.load(.acquire) != 0);
+    try std.testing.expectEqual(@as(usize, threads.len + 1), group.zig_string_views.count());
+}
+
+test "private heap snapshot string interning is secure and failure atomic" {
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!CPrivateStringHashContext {
+            return .{ .seed = 0x4845_4150_5354_0001 };
+        }
+        fn unavailable() std.mem.Allocator.Error!CPrivateStringHashContext {
+            return error.OutOfMemory;
+        }
+    };
+
+    var unavailable = PrivateHeapSnapshotStrings{
+        .allocator = std.testing.allocator,
+        .context_provider = FixedContext.unavailable,
+    };
+    defer unavailable.deinit();
+    try std.testing.expectError(error.OutOfMemory, unavailable.intern("first"));
+    try std.testing.expect(unavailable.map.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.map.count());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.items.items.len);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var failed = PrivateHeapSnapshotStrings{
+        .allocator = failing.allocator(),
+        .context_provider = FixedContext.first,
+    };
+    try std.testing.expectError(error.OutOfMemory, failed.intern("first"));
+    try std.testing.expect(failed.map.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.map.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.items.items.len);
+    failed.deinit();
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+
+    var strings = PrivateHeapSnapshotStrings{
+        .allocator = std.testing.allocator,
+        .context_provider = FixedContext.first,
+    };
+    defer strings.deinit();
+    try std.testing.expectEqual(@as(u32, 0), try strings.intern(""));
+    try std.testing.expectEqual(@as(u32, 1), try strings.intern("\x00edge"));
+    try std.testing.expectEqual(@as(u32, 1), try strings.intern("\x00edge"));
+    var wide: [4096]u8 = @splat('w');
+    try std.testing.expectEqual(@as(u32, 2), try strings.intern(&wide));
+    try std.testing.expectEqual(@as(usize, 3), strings.items.items.len);
+    try std.testing.expectEqual(@as(usize, 3), strings.map.count());
+    try std.testing.expectEqual(@as(u64, 0x4845_4150_5354_0001), strings.map.context.?.seed);
 }
 
 test "C-API: create + release context, round-trip a number" {
