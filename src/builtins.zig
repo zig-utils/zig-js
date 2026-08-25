@@ -650,7 +650,15 @@ fn sumRoundToF64(acc: *[SUM_WORDS]u32) f64 {
     return if (neg) -val else val;
 }
 
+const math_sum_precise_max_count: u64 = (@as(u64, 1) << 53) - 1;
+
 pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
+    return mathSumPreciseWithElementLimit(ctx, this, args, math_sum_precise_max_count);
+}
+
+/// The explicit limit keeps the otherwise unreachable 2^53 - 1 boundary
+/// testable without weakening the production cap or changing the JS surface.
+pub fn mathSumPreciseWithElementLimit(ctx: *anyopaque, this: Value, args: []const Value, element_limit: u64) HostError!Value {
     _ = this;
     const self = interp(ctx);
     // GetIterator(items): a non-iterable argument is a TypeError.
@@ -660,7 +668,7 @@ pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostErr
     // the method partway through the sum.
     const next_method = try self.getProperty(iter, "next");
     var acc = std.mem.zeroes([SUM_WORDS]u32);
-    var count: usize = 0;
+    var count: u64 = 0;
     var has_nan = false;
     var has_pos_inf = false;
     var has_neg_inf = false;
@@ -670,9 +678,19 @@ pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostErr
         if (!isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
         if ((try self.getProperty(r, "done")).toBoolean()) break;
         const v = try self.getProperty(r, "value");
+        // Math.sumPrecise step 7.b.i: the bound precedes the Number check, so
+        // even a non-Number value at this position produces the RangeError.
+        if (count >= element_limit) {
+            self.exception = try self.makeError("RangeError", "Math.sumPrecise: too many elements");
+            self.iteratorCloseKeepingThrow(iter);
+            try self.notifyDebuggerException(false);
+            return error.Throw;
+        }
         if (!v.isNumber()) {
-            self.iteratorClose(iter) catch {};
-            return self.throwError("TypeError", "Math.sumPrecise: every element must be a Number");
+            self.exception = try self.makeError("TypeError", "Math.sumPrecise: every element must be a Number");
+            self.iteratorCloseKeepingThrow(iter);
+            try self.notifyDebuggerException(false);
+            return error.Throw;
         }
         count += 1;
         const x = v.asNum();

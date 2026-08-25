@@ -14843,6 +14843,32 @@ test "Math.sumPrecise captures the iterator next method once" {
     )).asBool());
 }
 
+fn mathSumPreciseLimitTwo(ctx: *anyopaque, this: value.Value, args: []const value.Value) value.HostError!value.Value {
+    return builtins.mathSumPreciseWithElementLimit(ctx, this, args, 2);
+}
+
+test "Math.sumPrecise enforces the element-count bound before type validation" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "sumPreciseLimitTwo", 1, mathSumPreciseLimitTwo);
+    try std.testing.expect((try ctx.evaluate(
+        \\const rangeError = { caught: undefined };
+        \\let calls = 0;
+        \\let closed = 0;
+        \\const iterator = {
+        \\  next() {
+        \\    calls += 1;
+        \\    if (calls <= 2) return { value: calls, done: false };
+        \\    return { value: "type validation must not win", done: false };
+        \\  },
+        \\  return() { closed += 1; throw new Error("close error must not win"); },
+        \\};
+        \\try { sumPreciseLimitTwo({ [Symbol.iterator]() { return iterator; } }); }
+        \\catch (error) { rangeError.caught = error; }
+        \\rangeError.caught instanceof RangeError && calls === 3 && closed === 1;
+    )).asBool());
+}
+
 test "Math.f16round rounds to binary16" {
     try std.testing.expect((try evalIn("typeof Math.f16round === 'function'")).asBool());
     try std.testing.expectEqual(@as(f64, 1.5), (try evalIn("Math.f16round(1.5)")).asNum()); // exact in f16
