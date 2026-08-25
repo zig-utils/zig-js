@@ -2557,7 +2557,7 @@ pub const Interpreter = struct {
     /// block-level function declaration whose name is in this set also creates/
     /// updates a var-scoped binding when its block is evaluated; one absent from
     /// the set stays purely block-scoped (the "skip" cases). Null in strict code.
-    annexb_legacy: ?*std.StringHashMapUnmanaged(void) = null,
+    annexb_legacy: ?*SecureStringMembership = null,
     /// The specific function-declaration nodes eligible for the legacy copy.
     /// Names are used to pre-create var bindings; nodes decide whether a
     /// particular same-named declaration updates that binding at runtime.
@@ -6073,13 +6073,13 @@ pub const Interpreter = struct {
     /// Entry point: collect the eligible legacy-binding function names of a
     /// variable scope's statement list. `stack` is seeded with parameter names,
     /// which block the legacy binding.
-    fn annexbAddCandidate(self: *Interpreter, node: *const Node, name: []const u8, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+    fn annexbAddCandidate(self: *Interpreter, node: *const Node, name: []const u8, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         const scratch = self.scratch_allocator orelse self.arena;
-        try out.put(scratch, name, {});
+        _ = try out.getOrPutSecure(self, scratch, name);
         try nodes.put(scratch, node, {});
     }
 
-    fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+    fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         const scratch = self.scratch_allocator orelse self.arena;
         var stack: NameStack = .empty;
         defer stack.deinit(scratch);
@@ -6088,7 +6088,7 @@ pub const Interpreter = struct {
         try self.annexbScanList(stmts, &stack, depth, out, nodes);
     }
 
-    fn annexbScanList(self: *Interpreter, stmts: []*Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+    fn annexbScanList(self: *Interpreter, stmts: []*Node, stack: *NameStack, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         const base = stack.items.len;
         // This block's own let/const/class names shadow the legacy binding.
         for (stmts) |s| try self.annexbPushLexical(s, stack);
@@ -6122,7 +6122,7 @@ pub const Interpreter = struct {
 
     /// Scan a single statement that is the *body* of an if/loop/label — a block,
     /// a bare function declaration (treated as a one-statement block), or other.
-    fn annexbScanBranch(self: *Interpreter, node: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+    fn annexbScanBranch(self: *Interpreter, node: *Node, stack: *NameStack, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         switch (node.*) {
             .block => |b| try self.annexbScanList(b, stack, depth + 1, out, nodes),
             .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try self.annexbAddCandidate(node, f.name, out, nodes),
@@ -6130,7 +6130,7 @@ pub const Interpreter = struct {
         }
     }
 
-    fn annexbScanStmt(self: *Interpreter, s: *Node, stack: *NameStack, depth: u32, out: *std.StringHashMapUnmanaged(void), nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+    fn annexbScanStmt(self: *Interpreter, s: *Node, stack: *NameStack, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
         switch (s.*) {
             .block => |b| try self.annexbScanList(b, stack, depth + 1, out, nodes),
             .if_stmt => |i| {
@@ -6204,7 +6204,7 @@ pub const Interpreter = struct {
         // function names get a legacy var binding, and pre-create those bindings
         // as `undefined`. Sloppy code only (strict block functions stay purely
         // block-scoped). The set stays live for nested blocks via `annexb_legacy`.
-        var annexb_set: std.StringHashMapUnmanaged(void) = .empty;
+        var annexb_set: SecureStringMembership = .{};
         var annexb_nodes: std.AutoHashMapUnmanaged(*const Node, void) = .empty;
         const saved_annexb = self.annexb_legacy;
         const saved_annexb_nodes = self.annexb_legacy_nodes;
@@ -13378,6 +13378,10 @@ pub const Interpreter = struct {
 
         fn count(membership: *const @This()) usize {
             return membership.index.count();
+        }
+
+        fn keyIterator(membership: *const @This()) SecureStringIndex.KeyIterator {
+            return membership.index.keyIterator();
         }
     };
 
@@ -56946,6 +56950,42 @@ test "Annex B labeled block function updates legacy binding" {
         \\  f();
         \\}
         \\f() === 4
+    )).asBool());
+}
+
+test "Annex B secure legacy name membership preserves exact eligibility" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The invocation-local name index hashes the exact decoded identifier bytes,
+    // including identifiers large enough to make collision resistance material.
+    const wide = try a.alloc(u8, 4096);
+    @memset(wide, 'w');
+    const wide_source = try std.fmt.allocPrint(
+        a,
+        "{{ function {s}() {{ return 41; }} }} {s}()",
+        .{ wide, wide },
+    );
+    try std.testing.expectEqual(@as(f64, 41), (try evalSource(a, wide_source)).asNum());
+
+    try std.testing.expect((try evalSource(a,
+        \\var duplicateResult, labeledResult, switchResult;
+        \\{ function duplicate() { return 1; } function duplicate() { return 2; } duplicateResult = duplicate(); }
+        \\label: function \u0065scaped() { return 3; }
+        \\labeledResult = escaped();
+        \\switch (1) { case 1: function switched() { return 4; } }
+        \\switchResult = switched();
+        \\var parameterExact = (function(parameterName) {
+        \\  { function parameterName() { return 5; } }
+        \\  return parameterName;
+        \\})(6);
+        \\{ let lexicalName = 7; { function lexicalName() { return 8; } } }
+        \\try { throw { catchName: 9 }; }
+        \\catch ({ catchName }) { { function catchName() { return 10; } } }
+        \\duplicateResult === 2 && labeledResult === 3 && switchResult === 4 &&
+        \\  parameterExact === 6 && typeof lexicalName === "undefined" &&
+        \\  typeof catchName === "undefined"
     )).asBool());
 }
 
