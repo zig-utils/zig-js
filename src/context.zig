@@ -16541,6 +16541,73 @@ test "Iterator concat and zip helpers produce expected records" {
     )).asBool());
 }
 
+test "Iterator direct records retain non-callable next methods" {
+    try std.testing.expect((try evalIn(
+        \\function probe(run) {
+        \\  let gets = 0;
+        \\  let replacementCalls = 0;
+        \\  const iterator = {};
+        \\  Object.defineProperty(iterator, "next", {
+        \\    get() {
+        \\      gets += 1;
+        \\      if (gets === 1) return 0;
+        \\      return function () { replacementCalls += 1; return { done: true }; };
+        \\    }
+        \\  });
+        \\  let threw = false;
+        \\  try { run(iterator); } catch (error) { threw = error instanceof TypeError; }
+        \\  return threw && gets === 1 && replacementCalls === 0;
+        \\}
+        \\probe(iterator => Iterator.prototype.toArray.call(iterator)) &&
+        \\probe(iterator => Iterator.prototype.map.call(iterator, value => value).next()) &&
+        \\probe(iterator => Iterator.prototype.drop.call(iterator, 1).next()) &&
+        \\probe(iterator => Iterator.zip([[1]], {
+        \\  mode: "longest",
+        \\  padding: { [Symbol.iterator]() { return iterator; } }
+        \\}))
+    )).asBool());
+}
+
+test "Iterator flattenable records retain inner next methods" {
+    try std.testing.expect((try evalIn(
+        \\function tracked(value) {
+        \\  const state = { gets: 0, replacementCalls: 0, done: false };
+        \\  const iterable = {
+        \\    [Symbol.iterator]() {
+        \\      const iterator = {};
+        \\      Object.defineProperty(iterator, "next", {
+        \\        get() {
+        \\          state.gets += 1;
+        \\          if (state.gets !== 1) {
+        \\            return function () { state.replacementCalls += 1; return { done: true }; };
+        \\          }
+        \\          return function () {
+        \\            if (state.done) return { done: true };
+        \\            state.done = true;
+        \\            return { value, done: false };
+        \\          };
+        \\        }
+        \\      });
+        \\      return iterator;
+        \\    }
+        \\  };
+        \\  return { state, iterable };
+        \\}
+        \\const flat = tracked(11);
+        \\const concat = tracked(12);
+        \\const zip = tracked(13);
+        \\const keyed = tracked(14);
+        \\const flatResult = Iterator.from([0]).flatMap(() => flat.iterable).toArray();
+        \\const concatResult = Iterator.concat(concat.iterable).toArray();
+        \\const zipResult = Iterator.zip([zip.iterable]).toArray();
+        \\const keyedResult = Iterator.zipKeyed({ key: keyed.iterable }).toArray();
+        \\flatResult[0] === 11 && concatResult[0] === 12 &&
+        \\zipResult[0][0] === 13 && keyedResult[0].key === 14 &&
+        \\[flat, concat, zip, keyed].every(entry =>
+        \\  entry.state.gets === 1 && entry.state.replacementCalls === 0)
+    )).asBool());
+}
+
 test "Date call remains string-returning through bind" {
     try std.testing.expect((try evalIn("typeof Date(0, 0, 0) === 'string'")).asBool());
     try std.testing.expect((try evalIn("typeof Date.bind(null)(0, 0, 0) === 'string'")).asBool());

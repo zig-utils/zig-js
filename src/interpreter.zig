@@ -15639,9 +15639,9 @@ pub const Interpreter = struct {
     /// GetIteratorFlattenable(obj, reject-primitives) per the joint-iteration
     /// proposal: `obj` must be an Object (strings and other primitives throw).
     /// Reads `@@iterator` (GetMethod); if absent uses `obj` itself, else calls
-    /// it. The resulting iterator must be an Object; its `next` is read eagerly
-    /// (GetIteratorDirect). Returns the iterator object.
-    pub fn getIteratorFlattenableObj(self: *Interpreter, obj: Value) EvalError!Value {
+    /// it. The resulting iterator must be an Object; its `next` is captured in
+    /// the returned GetIteratorDirect record.
+    pub fn getIteratorFlattenableRecord(self: *Interpreter, obj: Value) EvalError!IteratorRecord {
         if (!obj.isObject() or obj.asObj().is_bigint or obj.asObj().is_symbol)
             return self.throwError("TypeError", "value is not an iterable object");
         var iterator: Value = obj;
@@ -15654,9 +15654,10 @@ pub const Interpreter = struct {
             }
         }
         if (!iterator.isObject()) return self.throwError("TypeError", "iterator is not an object");
-        // GetIteratorDirect reads `next` (observable) before returning.
-        _ = try self.getProperty(iterator, "next");
-        return iterator;
+        return .{
+            .iterator = iterator,
+            .next_method = try self.getProperty(iterator, "next"),
+        };
     }
 
     fn arrayLikeToListLen(self: *Interpreter, v: Value, len: usize) EvalError![]Value {
@@ -15778,18 +15779,11 @@ pub const Interpreter = struct {
     /// Pull the next result from iterator `it`, returning `{ done, value }`.
     const IterStepResult = struct { done: bool, value: Value };
 
-    fn iterStep(self: *Interpreter, it: Value) EvalError!IterStepResult {
-        return self.iterStepM(it, Value.undef());
-    }
-
-    /// Pull one step from an iterator. If `next_method` is a callable (captured
-    /// once via GetIteratorDirect), call it with `it` as the receiver rather than
-    /// re-reading `it.next` each step — so a `next` accessor runs only once.
+    /// Pull one step from a GetIteratorDirect record. Call the captured
+    /// `next_method` exactly as recorded: if it is non-callable, Call throws
+    /// without re-reading `it.next` or observing a later replacement.
     fn iterStepM(self: *Interpreter, it: Value, next_method: Value) EvalError!IterStepResult {
-        const r = if (next_method.isObject() and next_method.asObj().isCallableObject())
-            try self.callValueWithThis(next_method, &.{}, it)
-        else
-            try self.callMethod(it, "next", &.{});
+        const r = try self.callValueWithThis(next_method, &.{}, it);
         if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
         const done = (try self.getProperty(r, "done")).toBoolean();
         const val = if (done) Value.undef() else try self.getProperty(r, "value");
@@ -15798,8 +15792,8 @@ pub const Interpreter = struct {
 
     /// IteratorStep: pull one step and report only whether the iterator is done
     /// (the `value` is not read). Used by `Iterator.zip` strict-mode checking.
-    fn iterStepDoneOnly(self: *Interpreter, it: Value) EvalError!bool {
-        const r = try self.callMethod(it, "next", &.{});
+    fn iterStepDoneOnlyM(self: *Interpreter, it: Value, next_method: Value) EvalError!bool {
+        const r = try self.callValueWithThis(next_method, &.{}, it);
         if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
         return (try self.getProperty(r, "done")).toBoolean();
     }
@@ -22352,14 +22346,15 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                     // GetIteratorFlattenable(mapped, reject-primitives): a primitive
                     // (including a primitive string) is a TypeError; an abrupt
                     // completion closes the source iterator.
-                    h.inner = self.getIteratorFlattenableObj(mapped) catch |e| {
+                    const inner_record = self.getIteratorFlattenableRecord(mapped) catch |e| {
                         if (e == error.Throw) {
                             h.done = true;
                             self.iteratorCloseKeepingThrow(h.src);
                         }
                         return e;
                     };
-                    h.inner_next = if (h.inner.?.isObject()) try self.getProperty(h.inner.?, "next") else Value.undef();
+                    h.inner = inner_record.iterator;
+                    h.inner_next = inner_record.next_method;
                 }
                 const is = self.iterStepM(h.inner.?, h.inner_next) catch |e| {
                     if (e == error.Throw) {
@@ -22370,6 +22365,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                 };
                 if (is.done) {
                     h.inner = null;
+                    h.inner_next = Value.undef();
                     continue;
                 }
                 return self.iterResultObj(is.value, false);
@@ -22394,10 +22390,12 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                     const it = try self.callValueWithThis(method, &.{}, src);
                     if (!it.isObject()) return self.throwError("TypeError", "Iterator.concat: @@iterator did not return an object");
                     h.inner = it;
+                    h.inner_next = try self.getProperty(it, "next");
                 }
-                const is = try self.iterStep(h.inner.?);
+                const is = try self.iterStepM(h.inner.?, h.inner_next);
                 if (is.done) {
                     h.inner = null;
+                    h.inner_next = Value.undef();
                     continue;
                 }
                 return self.iterResultObj(is.value, false);
@@ -22410,6 +22408,7 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
             // array (zip_keyed). Implements the IteratorZip abstract closure.
             h.started = true; // the generator has run (→ "suspended-yield")
             const iters = try h.src.asObj().internalElementsSnapshot(self.arena);
+            const next_methods = h.inner_next.asObj();
             const flags = h.inner.?.asObj();
             const n = iters.len;
             if (n == 0) {
@@ -22430,7 +22429,8 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                 }
                 // IteratorStepValue(openIters[i]); an abrupt completion closes the
                 // remaining open iterators (reverse order) and propagates.
-                const s = self.iterStep(iters[i]) catch {
+                const next_method = next_methods.elementAt(i) orelse Value.undef();
+                const s = self.iterStepM(iters[i], next_method) catch {
                     _ = flags.setElementAt(i, Value.boolVal(true));
                     h.done = true;
                     try zipCloseAll(self, iters, flags, true);
@@ -22459,7 +22459,8 @@ fn iterHelperNextFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
                         var k: usize = 1;
                         while (k < n) : (k += 1) {
                             if ((flags.elementAt(k) orelse Value.undef()).toBoolean()) continue;
-                            const kdone = self.iterStepDoneOnly(iters[k]) catch {
+                            const k_next_method = next_methods.elementAt(k) orelse Value.undef();
+                            const kdone = self.iterStepDoneOnlyM(iters[k], k_next_method) catch {
                                 _ = flags.setElementAt(k, Value.boolVal(true));
                                 try zipCloseAll(self, iters, flags, true);
                                 return error.Throw;
@@ -22961,6 +22962,7 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // GetIterator(iterables, sync): a strict `@@iterator` lookup (no array-like
     // fallback). Then drain it, flattening each yielded value into an iterator.
     const iters = (try self.newArray()).asObj();
+    const next_methods = (try self.newArray()).asObj();
     const ik = self.symbolIteratorKey();
     const method: Value = if (ik) |k| try self.getProperty(iterables, k) else Value.undef();
     if (method.isUndefined() or method.isNull() or !method.isObject() or !method.asObj().isCallableObject())
@@ -22994,12 +22996,13 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         };
         // GetIteratorFlattenable(item) abrupt → IfAbruptCloseIterators over the
         // list-concatenation « inputIter » ++ iters (reverse): iters then input.
-        const sub = self.getIteratorFlattenableObj(item) catch {
+        const sub = self.getIteratorFlattenableRecord(item) catch {
             self.closeListKeepingThrow(iters.elementsItems());
             self.iteratorCloseKeepingThrow(input_iter);
             return error.Throw;
         };
-        try iters.appendInternalElement(self.arena, sub);
+        try iters.appendInternalElement(self.arena, sub.iterator);
+        try next_methods.appendInternalElement(self.arena, sub.next_method);
     }
     // Per-source padding aligned to iterator order (longest mode only): pull
     // exactly `iterCount` values from the padding iterable, padding short. Any
@@ -23008,7 +23011,7 @@ fn iteratorZipFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         self.closeListKeepingThrow(iters.elementsItems());
         return error.Throw;
     };
-    return makeZipHelper(self, .zip, iters, Value.undef(), mode, pad_arr);
+    return makeZipHelper(self, .zip, iters, next_methods, Value.undef(), mode, pad_arr);
 }
 
 /// `Iterator.zipKeyed(iterables[, options])` — like zip but `iterables` is an
@@ -23028,6 +23031,7 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 
     const keys = (try self.newArray()).asObj();
     const iters = (try self.newArray()).asObj();
+    const next_methods = (try self.newArray()).asObj();
     // [[OwnPropertyKeys]] snapshot, then per key: [[GetOwnProperty]] (enumerable
     // check), [[Get]] (value), GetIteratorFlattenable. Both string and symbol
     // keys participate. An abrupt completion closes opened inputs (reverse).
@@ -23044,12 +23048,13 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         };
         // An `undefined` value excludes the key entirely (no result property).
         if (v.isUndefined()) continue;
-        const sub = self.getIteratorFlattenableObj(v) catch {
+        const sub = self.getIteratorFlattenableRecord(v) catch {
             self.closeListKeepingThrow(iters.elementsItems());
             return error.Throw;
         };
         try keys.appendInternalElement(self.arena, try Value.strAlloc(self.arena, key));
-        try iters.appendInternalElement(self.arena, sub);
+        try iters.appendInternalElement(self.arena, sub.iterator);
+        try next_methods.appendInternalElement(self.arena, sub.next_method);
     }
     // Per-key padding (longest mode): Get(padding, key) for each key, or all
     // undefined when padding is absent.
@@ -23071,7 +23076,7 @@ fn iteratorZipKeyedFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         }
         pad_arr = Value.obj(pads);
     }
-    return makeZipHelper(self, .zip_keyed, iters, Value.obj(keys), mode, pad_arr);
+    return makeZipHelper(self, .zip_keyed, iters, next_methods, Value.obj(keys), mode, pad_arr);
 }
 
 /// Build the per-source padding list for `Iterator.zip` longest mode: pull
@@ -23116,12 +23121,12 @@ fn buildZipPadding(self: *Interpreter, mode: u8, padding: Value, n: usize) EvalE
 }
 
 /// Build a zip/zipKeyed iterator-helper object with its per-source done flags.
-fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.Object, keys: Value, mode: u8, padding: Value) EvalError!Value {
+fn makeZipHelper(self: *Interpreter, kind: value.IterHelper.Kind, iters: *value.Object, next_methods: *value.Object, keys: Value, mode: u8, padding: Value) EvalError!Value {
     const flags = (try self.newArray()).asObj();
     for (iters.elementsItems()) |_| try flags.appendInternalElement(self.arena, Value.boolVal(false));
     const o = (try self.newObject()).asObj();
     const h = try gc_mod.allocIterHelper(self.arena);
-    h.* = .{ .src = Value.obj(iters), .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = Value.obj(flags), .padding = padding };
+    h.* = .{ .src = Value.obj(iters), .kind = kind, .func = keys, .limit = @floatFromInt(mode), .inner = Value.obj(flags), .inner_next = Value.obj(next_methods), .padding = padding };
     try o.setIteratorHelper(self.arena, h);
     if (self.env.get("\x00IterHelperProto")) |p| if (p.isObject()) {
         o.setProtoAtomic(p.asObj());
