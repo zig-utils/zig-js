@@ -14752,6 +14752,97 @@ test "Math.sumPrecise sums exactly" {
     try std.testing.expectError(error.Throw, evalIn("Math.sumPrecise(5)"));
 }
 
+test "Math.sumPrecise captures the iterator next method once" {
+    try std.testing.expect((try evalIn(
+        \\let gets = 0;
+        \\let calls = 0;
+        \\let closed = 0;
+        \\const iterator = {
+        \\  get next() {
+        \\    gets += 1;
+        \\    return function () {
+        \\      calls += 1;
+        \\      if (calls === 1) {
+        \\        Object.defineProperty(iterator, "next", {
+        \\          value() { throw new Error("replacement must not run"); },
+        \\          configurable: true,
+        \\        });
+        \\        return { value: 2, done: false };
+        \\      }
+        \\      if (calls === 2) return { value: 3, done: false };
+        \\      return { done: true };
+        \\    };
+        \\  },
+        \\  return() { closed += 1; return {}; },
+        \\};
+        \\const iterable = { [Symbol.iterator]() { return iterator; } };
+        \\Math.sumPrecise(iterable) === 5 && gets === 1 && calls === 3 && closed === 0;
+    )).asBool());
+
+    try std.testing.expect((try evalIn(
+        \\let gets = 0;
+        \\let calls = 0;
+        \\let closed = 0;
+        \\const iterator = {
+        \\  get next() { gets += 1; return 1; },
+        \\  return() { closed += 1; return {}; },
+        \\};
+        \\const iterable = { [Symbol.iterator]() { return iterator; } };
+        \\let typeError = false;
+        \\try { Math.sumPrecise(iterable); } catch (error) { typeError = error instanceof TypeError; }
+        \\typeError && gets === 1 && calls === 0 && closed === 0;
+    )).asBool());
+
+    try std.testing.expect((try evalIn(
+        \\const getterError = new Error("next getter");
+        \\const stepError = new Error("next call");
+        \\let getterGets = 0;
+        \\let getterClosed = 0;
+        \\const getterIterator = {
+        \\  get next() { getterGets += 1; throw getterError; },
+        \\  return() { getterClosed += 1; return {}; },
+        \\};
+        \\let caughtGetter;
+        \\try { Math.sumPrecise({ [Symbol.iterator]() { return getterIterator; } }); }
+        \\catch (error) { caughtGetter = error; }
+        \\let stepGets = 0;
+        \\let stepCalls = 0;
+        \\let stepClosed = 0;
+        \\const stepIterator = {
+        \\  get next() {
+        \\    stepGets += 1;
+        \\    return function () { stepCalls += 1; throw stepError; };
+        \\  },
+        \\  return() { stepClosed += 1; return {}; },
+        \\};
+        \\let caughtStep;
+        \\try { Math.sumPrecise({ [Symbol.iterator]() { return stepIterator; } }); }
+        \\catch (error) { caughtStep = error; }
+        \\caughtGetter === getterError && getterGets === 1 && getterClosed === 0 &&
+        \\caughtStep === stepError && stepGets === 1 && stepCalls === 1 && stepClosed === 0;
+    )).asBool());
+
+    try std.testing.expect((try evalIn(
+        \\let gets = 0;
+        \\let calls = 0;
+        \\let closed = 0;
+        \\const iterator = {
+        \\  get next() {
+        \\    gets += 1;
+        \\    return function () {
+        \\      calls += 1;
+        \\      return { value: "not a Number", done: false };
+        \\    };
+        \\  },
+        \\  return() { closed += 1; throw new Error("close error"); },
+        \\};
+        \\const iterable = { [Symbol.iterator]() { return iterator; } };
+        \\let typeError = false;
+        \\try { Math.sumPrecise(iterable); } catch (error) { typeError = error instanceof TypeError; }
+        \\typeError && gets === 1 && calls === 1 && closed === 1;
+    )).asBool());
+}
+
 test "Math.f16round rounds to binary16" {
     try std.testing.expect((try evalIn("typeof Math.f16round === 'function'")).asBool());
     try std.testing.expectEqual(@as(f64, 1.5), (try evalIn("Math.f16round(1.5)")).asNum()); // exact in f16

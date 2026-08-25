@@ -655,6 +655,10 @@ pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostErr
     const self = interp(ctx);
     // GetIterator(items): a non-iterable argument is a TypeError.
     const iter = try self.iteratorOf(arg(args, 0));
+    // GetIterator captures [[NextMethod]] once. Re-reading `iterator.next` on
+    // every step would repeat an observable getter and let a mutation replace
+    // the method partway through the sum.
+    const next_method = try self.getProperty(iter, "next");
     var acc = std.mem.zeroes([SUM_WORDS]u32);
     var count: usize = 0;
     var has_nan = false;
@@ -662,7 +666,7 @@ pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostErr
     var has_neg_inf = false;
     var all_neg_zero = true; // an exact-zero result is -0 only if every element was -0
     while (true) {
-        const r = try self.callMethod(iter, "next", &.{});
+        const r = try self.callValueWithThis(next_method, &.{}, iter);
         if (!isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
         if ((try self.getProperty(r, "done")).toBoolean()) break;
         const v = try self.getProperty(r, "value");
