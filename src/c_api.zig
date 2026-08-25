@@ -2153,9 +2153,90 @@ const CClass = struct {
     parent: ?*CClass = null,
 };
 
+const CPropertyNameHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, key);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+const CPropertyNameIndex = std.HashMapUnmanaged(
+    []const u8,
+    void,
+    CPropertyNameHashContext,
+    std.hash_map.default_max_load_percentage,
+);
+const CPropertyNameContextProvider = *const fn () std.mem.Allocator.Error!CPropertyNameHashContext;
+
+fn newCPropertyNameHashContext() std.mem.Allocator.Error!CPropertyNameHashContext {
+    var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+    agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+    return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+}
+
+/// Lazy exact-byte membership for host/private property-name snapshots. Each
+/// invocation owns its context; empty paths request no entropy, and a failed
+/// first mutation publishes neither a context nor partial native table.
+const CPropertyNameMembership = struct {
+    index: CPropertyNameIndex = .empty,
+    context: ?CPropertyNameHashContext = null,
+
+    fn putWithContext(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        context: CPropertyNameHashContext,
+    ) std.mem.Allocator.Error!bool {
+        if (self.context) |installed| {
+            std.debug.assert(installed.seed == context.seed);
+            return (try self.index.getOrPutContext(allocator, key, installed)).found_existing;
+        }
+        const result = try self.index.getOrPutContext(allocator, key, context);
+        self.context = context;
+        return result.found_existing;
+    }
+
+    fn putSecureUsing(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        context_provider: CPropertyNameContextProvider,
+    ) std.mem.Allocator.Error!bool {
+        const context = self.context orelse try context_provider();
+        return self.putWithContext(allocator, key, context);
+    }
+
+    fn putSecure(self: *@This(), allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!bool {
+        return self.putSecureUsing(allocator, key, newCPropertyNameHashContext);
+    }
+
+    fn contains(self: *const @This(), key: []const u8) bool {
+        const context = self.context orelse return false;
+        return self.index.containsContext(key, context);
+    }
+
+    fn remove(self: *@This(), key: []const u8) bool {
+        const context = self.context orelse return false;
+        return self.index.removeContext(key, context);
+    }
+
+    fn count(self: *const @This()) usize {
+        return self.index.count();
+    }
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.index.deinit(allocator);
+    }
+};
+
 const PropertyNameAccumulator = struct {
     names: std.ArrayListUnmanaged(*JsString) = .empty,
-    seen: std.StringHashMapUnmanaged(void) = .empty,
+    seen: CPropertyNameMembership = .{},
     failed: bool = false,
 
     fn addBytes(self: *PropertyNameAccumulator, bytes: []const u8) void {
@@ -2164,11 +2245,12 @@ const PropertyNameAccumulator = struct {
             self.failed = true;
             return;
         };
-        self.seen.put(gpa, string.bytes, {}) catch {
+        const found_existing = self.seen.putSecure(gpa, string.bytes) catch {
             string.release();
             self.failed = true;
             return;
         };
+        std.debug.assert(!found_existing);
         self.names.append(gpa, string) catch {
             _ = self.seen.remove(string.bytes);
             string.release();
@@ -8094,7 +8176,7 @@ fn privatePropertyIteratorKeys(
     only_non_index_properties: bool,
 ) interp.EvalError![]const []const u8 {
     var result: std.ArrayListUnmanaged([]const u8) = .empty;
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var seen: CPropertyNameMembership = .{};
     var current: ?*Object = start;
     var prototype_count: usize = 0;
 
@@ -8106,8 +8188,7 @@ fn privatePropertyIteratorKeys(
             if (value.isPrivateKey(key)) continue;
             if (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) continue;
             if (own_properties_only and only_non_index_properties and value.canonicalIndex(key) != null) continue;
-            if (seen.contains(key)) continue;
-            try seen.put(machine.arena, key, {});
+            if (try seen.putSecure(machine.arena, key)) continue;
             try result.append(machine.arena, key);
         }
         if (own_properties_only) break;
@@ -8552,17 +8633,14 @@ export fn JSC__JSValue__forEachPropertyNonIndexed(
         privateSetPendingAbrupt(context, &machine, err);
         return;
     };
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
     const to_string_tag = interp.objectToStringTagKey(&machine);
+    // `objectOwnKeysList` has already enforced the OrdinaryOwnPropertyKeys/Proxy
+    // uniqueness invariant across ordinary and host keys. Re-deduplicating this
+    // immutable snapshot here would only add another attacker-sized table.
     for (keys) |key| {
         if (value.canonicalIndex(key) != null or value.isPrivateKey(key)) continue;
         if (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) continue;
         if (std.mem.eql(u8, key, "length") or std.mem.eql(u8, key, "constructor")) continue;
-        if (seen.contains(key)) continue;
-        seen.put(machine.arena, key, {}) catch |err| {
-            privateSetPendingAbrupt(context, &machine, err);
-            return;
-        };
 
         var enumerable = true;
         var result = Value.undef();
@@ -22475,6 +22553,60 @@ export fn JSWorkerRelease(worker: JSWorkerRef) callconv(.c) void {
 // Tests — exercise the C-API exactly as a C/Zig consumer (e.g. Home's
 // extern_fns.zig) would, mirroring lang's M3 smoke tests plus real evaluation.
 // ---------------------------------------------------------------------------
+
+test "C-API property-name membership is lazy exact and failure atomic" {
+    const first_context = CPropertyNameHashContext{ .seed = 0x435f_4150_495f_0001 };
+    const second_context = CPropertyNameHashContext{ .seed = 0x435f_4150_495f_0002 };
+
+    var empty: CPropertyNameMembership = .{};
+    defer empty.deinit(std.testing.allocator);
+    try std.testing.expect(empty.context == null);
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
+
+    const UnavailableEntropy = struct {
+        fn context() std.mem.Allocator.Error!CPropertyNameHashContext {
+            return error.OutOfMemory;
+        }
+    };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        empty.putSecureUsing(std.testing.allocator, "first", UnavailableEntropy.context),
+    );
+    try std.testing.expect(empty.context == null);
+    try std.testing.expectEqual(@as(usize, 0), empty.index.capacity());
+
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed: CPropertyNameMembership = .{};
+    defer failed.deinit(unavailable.allocator());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed.putWithContext(unavailable.allocator(), "first", first_context),
+    );
+    try std.testing.expect(failed.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
+
+    var membership: CPropertyNameMembership = .{};
+    defer membership.deinit(std.testing.allocator);
+    try std.testing.expect(!try membership.putWithContext(std.testing.allocator, "\x00name", first_context));
+    try std.testing.expect(try membership.putWithContext(std.testing.allocator, "\x00name", first_context));
+    var wide_name: [4096]u8 = @splat('w');
+    try std.testing.expect(!try membership.putWithContext(std.testing.allocator, &wide_name, first_context));
+    try std.testing.expect(membership.contains("\x00name"));
+    try std.testing.expect(membership.contains(&wide_name));
+    try std.testing.expectEqual(@as(usize, 2), membership.count());
+    try std.testing.expect(first_context.hash(&wide_name) != second_context.hash(&wide_name));
+    try std.testing.expect(membership.remove("\x00name"));
+    try std.testing.expectEqual(@as(usize, 1), membership.count());
+
+    var accumulator: PropertyNameAccumulator = .{};
+    defer accumulator.deinit();
+    accumulator.addBytes("\x00host");
+    accumulator.addBytes("\x00host");
+    try std.testing.expect(!accumulator.failed);
+    try std.testing.expectEqual(@as(usize, 1), accumulator.names.items.len);
+    try std.testing.expectEqualStrings("\x00host", accumulator.names.items[0].bytes);
+}
 
 test "C-API: create + release context, round-trip a number" {
     const ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
