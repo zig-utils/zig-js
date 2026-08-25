@@ -5793,6 +5793,16 @@ fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, g
     return outcome;
 }
 
+/// Native entry and OSR exits carry the raw ECMAScript return value. Derived
+/// constructors share the same completion contract as bytecode returns, so the
+/// tier boundary applies it before any result escapes the activation.
+fn finishChunkResult(vm: *Interpreter, exec: *Exec, chunk: *const Chunk, result: Value) EvalError!Value {
+    return if (chunk.is_derived_constructor)
+        finishDerivedConstructor(vm, exec, result)
+    else
+        result;
+}
+
 fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!?Value {
     if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0 or
         statementHooksRequireBytecode(vm)) return null;
@@ -5809,7 +5819,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         if (!nativeExecutionPermitted(vm, owner)) return null;
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
         switch (try tryExecuteNative(vm, artifact, frame, exec)) {
-            .complete => |result| return result,
+            .complete => |result| return try finishChunkResult(vm, exec, chunk, result),
             .deoptimized => return null,
             .miss => {},
         }
@@ -5854,7 +5864,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     if (!nativeExecutionPermitted(vm, owner)) return null;
     const native = code orelse return null;
     return switch (try tryExecuteNative(vm, native, frame, exec)) {
-        .complete => |result| result,
+        .complete => |result| try finishChunkResult(vm, exec, chunk, result),
         .miss, .deoptimized => null,
     };
 }
@@ -6750,8 +6760,9 @@ fn runChunk(
                             ip = exec.ip;
                         },
                         .complete => |result| {
-                            optimizer_delta.observeValue(optimizerProfileKind(result));
-                            return result;
+                            const completion = try finishChunkResult(vm, exec, chunk, result);
+                            optimizer_delta.observeValue(optimizerProfileKind(completion));
+                            return completion;
                         },
                     }
                 }
@@ -6788,10 +6799,22 @@ fn runChunk(
                 if (taken) ip = inst.a;
             },
 
-            .load_this => try stack.append(stack_alloc, vm.this_value),
+            .load_this => {
+                try stack.append(stack_alloc, try initializedThis(vm));
+            },
             .load_new_target => try stack.append(stack_alloc, if (vm.in_field_initializer) Value.undef() else vm.new_target),
             .enter_field_initializers => vm.in_field_initializer = true,
             .exit_field_initializers => vm.in_field_initializer = false,
+            .load_super_constructor => {
+                if (!vm.in_derived_ctor)
+                    return vm.throwError("SyntaxError", "'super' keyword unexpected here");
+                try stack.append(stack_alloc, if (derivedConstructorObject(vm)) |owner|
+                    if (vm.effectiveProto(owner)) |super| Value.obj(super) else Value.nul()
+                else if (vm.super_ctor) |super|
+                    Value.obj(super)
+                else
+                    Value.nul());
+            },
             .new_object => try stack.append(stack_alloc, try vm.newObject()),
             .new_array => try stack.append(stack_alloc, try vm.newArray()),
             .init_prop => {
@@ -6984,25 +7007,25 @@ fn runChunk(
                 // `super.name`: GetSuperBase = home_object.[[Prototype]]; read with
                 // the current `this` as receiver (so an inherited getter sees it).
                 const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                const receiver = try initializedThis(vm);
                 const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
                 const name = chunk.names.items[inst.a];
-                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), name, vm.this_value));
+                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), name, receiver));
             },
             .super_get_index => {
                 const key = stack.pop().?;
                 const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
+                const receiver = try initializedThis(vm);
                 const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
-                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), try propKey(vm, key), vm.this_value));
+                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), try propKey(vm, key), receiver));
             },
             .check_super_this => {
                 _ = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
-                if (!vm.this_initialized)
-                    return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                _ = try initializedThis(vm);
             },
             .super_base => {
                 const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
-                if (!vm.this_initialized)
-                    return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                _ = try initializedThis(vm);
                 const parent = home.protoAtomic();
                 if (parent == null and inst.a != 0)
                     return vm.throwError("TypeError", "Cannot read property of null (super)");
@@ -7175,8 +7198,7 @@ fn runChunk(
             },
             .delete_super => {
                 _ = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
-                if (!vm.this_initialized)
-                    return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                _ = try initializedThis(vm);
                 return vm.throwError("ReferenceError", "Cannot delete a super property");
             },
             .delete_name => {
@@ -7388,6 +7410,36 @@ fn runChunk(
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
+            .super_construct => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const super_constructor = stack.items[base - 1];
+                const result = try constructSuper(vm, super_constructor, stack.items[base..]);
+                stack.shrinkRetainingCapacity(base - 1);
+                try stack.append(stack_alloc, result);
+            },
+            .super_construct_spread => {
+                const args_array = stack.pop().?;
+                const super_constructor = stack.pop().?;
+                try stack.append(stack_alloc, try constructSuper(vm, super_constructor, try spreadArguments(vm, args_array)));
+            },
+            .super_construct_default => {
+                const active_frame = frame orelse return vm.throwError("InternalError", "default derived constructor has no frame");
+                if (inst.a >= active_frame.slots.len)
+                    return vm.throwError("InternalError", "invalid default derived constructor rest slot");
+                const args_array = active_frame.readSlot(inst.a, parallel_sync);
+                if (!args_array.isObject() or !args_array.asObj().is_array)
+                    return vm.throwError("InternalError", "invalid default derived constructor arguments");
+                const super_constructor = stack.items[stack.items.len - 1];
+                const count = args_array.asObj().elementsLen();
+                try stack.ensureTotalCapacity(stack_alloc, stack.items.len + count);
+                for (0..count) |argument_index|
+                    stack.appendAssumeCapacity(args_array.asObj().atomicDenseElementLoad(argument_index) orelse Value.undef());
+                const base = stack.items.len - count;
+                const result = try constructSuper(vm, super_constructor, stack.items[base..]);
+                stack.shrinkRetainingCapacity(base - 1);
+                try stack.append(stack_alloc, result);
+            },
             .call_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
@@ -7452,13 +7504,20 @@ fn runChunk(
             },
 
             .ret => {
-                const result = stack.pop().?;
+                const result = if (chunk.is_derived_constructor)
+                    try finishDerivedConstructor(vm, exec, stack.pop().?)
+                else
+                    stack.pop().?;
                 optimizer_delta.observeValue(optimizerProfileKind(result));
                 return result;
             },
             .ret_undef => {
-                optimizer_delta.observeValue(.undefined);
-                return Value.undef();
+                const result = if (chunk.is_derived_constructor)
+                    try finishDerivedConstructor(vm, exec, Value.undef())
+                else
+                    Value.undef();
+                optimizer_delta.observeValue(optimizerProfileKind(result));
+                return result;
             },
             .abrupt_return => {
                 // A return that must run enclosing `finally` blocks first: unwind
@@ -7468,8 +7527,12 @@ fn runChunk(
                 if (try unwindToFinally(vm, gen, exec, rv, .ret)) |fpc| {
                     ip = fpc;
                 } else {
-                    optimizer_delta.observeValue(optimizerProfileKind(rv));
-                    return rv;
+                    const result = if (chunk.is_derived_constructor)
+                        try finishDerivedConstructor(vm, exec, rv)
+                    else
+                        rv;
+                    optimizer_delta.observeValue(optimizerProfileKind(result));
+                    return result;
                 }
             },
             .abrupt_break, .abrupt_continue => {
@@ -7738,8 +7801,12 @@ fn runChunk(
                         if (try unwindToFinally(vm, gen, exec, cval, .ret)) |fpc| {
                             ip = fpc;
                         } else {
-                            optimizer_delta.observeValue(optimizerProfileKind(cval));
-                            return cval;
+                            const result = if (chunk.is_derived_constructor)
+                                try finishDerivedConstructor(vm, exec, cval)
+                            else
+                                cval;
+                            optimizer_delta.observeValue(optimizerProfileKind(result));
+                            return result;
                         }
                     },
                     .break_, .continue_ => {
@@ -9080,8 +9147,12 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .arrow_new_target = if (tmpl.is_arrow) vm.new_target else Value.undef(),
         .arrow_direct_eval_new_target_allowed = tmpl.is_arrow and vm.direct_eval_new_target_allowed,
         .arrow_in_derived_ctor = tmpl.is_arrow and vm.in_derived_ctor,
+        .this_cell = if (tmpl.is_arrow) vm.this_cell else null,
         .home_object = if (tmpl.is_arrow) vm.home_object else null,
         .super_ctor = if (tmpl.is_arrow) vm.super_ctor else null,
+        .derived_constructor = if (tmpl.is_arrow) derivedConstructorObject(vm) else null,
+        .field_inits = if (tmpl.is_arrow) if (activeFunction(vm)) |active| active.field_inits else &.{} else &.{},
+        .private_brand_names = if (tmpl.is_arrow) if (activeFunction(vm)) |active| active.private_brand_names else &.{} else &.{},
         .field_init_ctx = tmpl.is_arrow and vm.in_field_initializer,
     };
     vm.recordBytecodeAdmission(admission_reason);
@@ -9135,6 +9206,76 @@ fn invokeMethod(vm: *Interpreter, recv: Value, name: []const u8, args: []const V
         return callValue(vm, method, args, recv);
     if (try vm.builtinMethod(recv, name, args)) |r| return r;
     return callValue(vm, method, args, recv);
+}
+
+fn activeFunction(vm: *Interpreter) ?*Function {
+    const object = vm.active_function orelse return null;
+    const erased = object.jsFunction() orelse return null;
+    return @ptrCast(@alignCast(erased));
+}
+
+fn derivedConstructorObject(vm: *Interpreter) ?*value.Object {
+    const function = activeFunction(vm) orelse return null;
+    if (function.is_derived_constructor) return function.obj;
+    return function.derived_constructor;
+}
+
+/// GetThisBinding must read a lexical arrow's shared cell live. Another no-GIL
+/// lane may have completed `super()` after this activation adopted the cell, so
+/// the ambient snapshot alone cannot decide whether `this` is initialized.
+fn initializedThis(vm: *Interpreter) EvalError!Value {
+    if (vm.this_cell) |cell| {
+        if (!cell.isInitialized())
+            return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+        const bound = cell.value();
+        vm.this_value = bound;
+        vm.this_initialized = true;
+        return bound;
+    }
+    if (!vm.this_initialized)
+        return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+    return vm.this_value;
+}
+
+/// SuperCall's construction/binding half. The compiler leaves the captured
+/// superclass and evaluated arguments rooted on the operand stack. Construct
+/// completes before the repeated-call check, so superclass side effects remain
+/// observable even when BindThisValue then rejects a second `super()`.
+fn constructSuper(vm: *Interpreter, super_constructor: Value, args: []const Value) EvalError!Value {
+    const result = try vm.constructNT(super_constructor, args, vm.new_target);
+    if (!result.isObject() or result.asObj().is_symbol or result.asObj().is_bigint)
+        return vm.throwError("TypeError", "Super constructor did not return an object");
+
+    const cell = vm.this_cell orelse return vm.throwError("InternalError", "derived constructor has no this binding");
+    if (!cell.bind(result))
+        return vm.throwError("ReferenceError", "Super constructor may only be called once");
+    vm.this_value = result;
+    vm.this_initialized = true;
+
+    const function = activeFunction(vm) orelse return vm.throwError("InternalError", "derived constructor activation has no function");
+    for (function.private_brand_names) |brand|
+        try vm.addPrivateMethodOrAccessorChecked(result.asObj(), function.home_object, brand);
+    return result;
+}
+
+/// Apply the DerivedClass constructor return rules after the body has completed.
+/// Any generated JS error is outside the constructor body's lexical handlers;
+/// clear stale handler records before propagating it to the caller activation.
+fn finishDerivedConstructor(vm: *Interpreter, exec: *Exec, result: Value) EvalError!Value {
+    if (result.isObject() and !result.asObj().is_symbol and !result.asObj().is_bigint) return result;
+    if (!result.isUndefined()) {
+        exec.handlers.clearRetainingCapacity();
+        return vm.throwError("TypeError", "Derived constructors may only return object or undefined");
+    }
+    const cell = vm.this_cell orelse {
+        exec.handlers.clearRetainingCapacity();
+        return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+    };
+    if (!cell.isInitialized()) {
+        exec.handlers.clearRetainingCapacity();
+        return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+    }
+    return cell.value();
 }
 
 /// `new callee(args)`. A VM-compiled constructor runs on the VM with a fresh
@@ -9195,6 +9336,13 @@ const Activation = struct {
     saved_debug_call_frame: ?*interp.DebugCallFrame,
     saved_stack_trace_call_frame: ?*interp.StackTraceCallFrame,
     saved_field_initializer: bool,
+    saved_this_initialized: bool,
+    saved_this_cell: ?*interp.ThisCell,
+    saved_in_derived_ctor: bool,
+    saved_in_default_ctor: bool,
+    saved_active_function: ?*value.Object,
+    saved_pending_field_inits: []const *ast.Node,
+    saved_pending_brand_names: []const []const u8,
     debug_environment: ?*Environment = null,
     debug_call_frame: interp.DebugCallFrame = undefined,
     stack_trace_call_frame: interp.StackTraceCallFrame = undefined,
@@ -9268,6 +9416,13 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_debug_call_frame = undefined,
         .saved_stack_trace_call_frame = undefined,
         .saved_field_initializer = undefined,
+        .saved_this_initialized = undefined,
+        .saved_this_cell = undefined,
+        .saved_in_derived_ctor = undefined,
+        .saved_in_default_ctor = undefined,
+        .saved_active_function = undefined,
+        .saved_pending_field_inits = undefined,
+        .saved_pending_brand_names = undefined,
     };
     vm.vm_activation_allocations += 1;
     return act;
@@ -9386,6 +9541,13 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_debug_call_frame = vm.debug_call_frame,
         .saved_stack_trace_call_frame = vm.stack_trace_call_frame,
         .saved_field_initializer = vm.in_field_initializer,
+        .saved_this_initialized = vm.this_initialized,
+        .saved_this_cell = vm.this_cell,
+        .saved_in_derived_ctor = vm.in_derived_ctor,
+        .saved_in_default_ctor = vm.in_default_ctor,
+        .saved_active_function = vm.active_function,
+        .saved_pending_field_inits = vm.pending_field_inits,
+        .saved_pending_brand_names = vm.pending_brand_names,
     };
     act.exec.saved_home_object = vm.home_object;
     act.exec.saved_super_ctor = vm.super_ctor;
@@ -9413,11 +9575,35 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
     vm.cur_module = func.module_referrer;
     vm.in_field_initializer = func.is_arrow and func.field_init_ctx;
+    vm.in_derived_ctor = if (func.is_arrow) func.arrow_in_derived_ctor else func.is_derived_constructor;
+    vm.in_default_ctor = !func.is_arrow and func.is_default_ctor;
+    vm.active_function = func.obj;
+    vm.pending_field_inits = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor)) func.field_inits else &.{};
+    vm.pending_brand_names = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor)) func.private_brand_names else &.{};
     vm.this_value = bindThisForCall(vm, func, this_val) catch |e| {
         popActivation(vm, act);
         releaseActivation(vm, act);
         return e;
     };
+    if (func.is_arrow) {
+        vm.this_cell = func.this_cell;
+        if (func.this_cell) |cell| {
+            vm.this_value = cell.value();
+            vm.this_initialized = cell.isInitialized();
+        }
+    } else if (func.is_derived_constructor) {
+        const cell = vm.arena.create(interp.ThisCell) catch |e| {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return e;
+        };
+        cell.* = interp.ThisCell.init(vm.this_value, false);
+        vm.this_cell = cell;
+        vm.this_initialized = false;
+    } else {
+        vm.this_cell = null;
+        vm.this_initialized = true;
+    }
     // Base-class instance private methods/accessors are installed before
     // parameter evaluation. Constructors with fields or derived initialization
     // retain their policy barrier; this is the complete remaining base case.
@@ -9553,6 +9739,17 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.debug_call_frame = act.saved_debug_call_frame;
     vm.stack_trace_call_frame = act.saved_stack_trace_call_frame;
     vm.in_field_initializer = act.saved_field_initializer;
+    vm.this_initialized = act.saved_this_initialized;
+    vm.this_cell = act.saved_this_cell;
+    vm.in_derived_ctor = act.saved_in_derived_ctor;
+    vm.in_default_ctor = act.saved_in_default_ctor;
+    vm.active_function = act.saved_active_function;
+    vm.pending_field_inits = act.saved_pending_field_inits;
+    vm.pending_brand_names = act.saved_pending_brand_names;
+    if (vm.this_cell) |cell| if (cell.isInitialized()) {
+        vm.this_value = cell.value();
+        vm.this_initialized = true;
+    };
 }
 
 fn inheritCallerState(dst: *Activation, src: *const Activation) void {
@@ -9572,6 +9769,13 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_debug_call_frame = src.saved_debug_call_frame;
     dst.saved_stack_trace_call_frame = src.saved_stack_trace_call_frame;
     dst.saved_field_initializer = src.saved_field_initializer;
+    dst.saved_this_initialized = src.saved_this_initialized;
+    dst.saved_this_cell = src.saved_this_cell;
+    dst.saved_in_derived_ctor = src.saved_in_derived_ctor;
+    dst.saved_in_default_ctor = src.saved_in_default_ctor;
+    dst.saved_active_function = src.saved_active_function;
+    dst.saved_pending_field_inits = src.saved_pending_field_inits;
+    dst.saved_pending_brand_names = src.saved_pending_brand_names;
     if (dst.debug_environment != null) dst.debug_call_frame.caller = src.debug_call_frame.caller;
     dst.stack_trace_call_frame.caller = src.stack_trace_call_frame.caller;
 }
@@ -10424,6 +10628,96 @@ test "vm: base class field allocation failure restores the caller activation" {
         try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
         try std.testing.expect(machine.strict);
         try std.testing.expect(machine.in_field_initializer);
+        try std.testing.expectEqual(&env, machine.env);
+        try std.testing.expect(machine.vm_activation_free != null);
+        if (recovered) break;
+    }
+    try std.testing.expect(failures > 0 and recovered);
+}
+
+test "vm: derived class field allocation failure restores the caller activation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(
+        allocator,
+        "var fieldInput = 'derived-field'; class Base { constructor(input) { this.input = input; } } class Derived extends Base { object = { tag: fieldInput }; text = fieldInput + fieldInput; constructor(input) { super(input); } } Derived",
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    const active_function = try gc_mod.allocObj(allocator);
+    active_function.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+        .bytecode_execution_mode = .required,
+    };
+    const constructor = try run(&machine, root, null);
+    const function = Interpreter.funcOf(constructor) orelse return error.TestUnexpectedResult;
+    const constructor_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(constructor_chunk.is_derived_constructor);
+    const input = try Value.strAlloc(allocator, "argument");
+    const arguments = [_]Value{input};
+
+    const baseline = try construct(&machine, constructor, &arguments);
+    try std.testing.expectEqualStrings("derived-field", baseline.asObj().getOwn("object").?.asObj().getOwn("tag").?.asStr());
+    try std.testing.expectEqualStrings("derived-fieldderived-field", baseline.asObj().getOwn("text").?.asStr());
+    try std.testing.expectEqualStrings("argument", baseline.asObj().getOwn("input").?.asStr());
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    const saved_this = Value.num(161);
+    const saved_new_target = Value.num(162);
+    var saved_this_cell = interp.ThisCell.init(saved_this, true);
+    var saved_pending_node: ast.Node = .undefined_lit;
+    const saved_pending_fields = [_]*ast.Node{&saved_pending_node};
+    const saved_pending_brands = [_][]const u8{"#saved"};
+    machine.pending_field_inits = &saved_pending_fields;
+    machine.pending_brand_names = &saved_pending_brands;
+    var failures: usize = 0;
+    var recovered = false;
+    defer machine.arena = allocator;
+    for (0..96) |fail_index| {
+        machine.this_value = saved_this;
+        machine.this_initialized = true;
+        machine.this_cell = &saved_this_cell;
+        machine.new_target = saved_new_target;
+        machine.strict = true;
+        machine.in_field_initializer = true;
+        machine.in_derived_ctor = true;
+        machine.in_default_ctor = true;
+        machine.active_function = active_function;
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        const result = construct(&machine, constructor, &arguments);
+        machine.arena = allocator;
+        if (result) |instance| {
+            try std.testing.expectEqualStrings("derived-field", instance.asObj().getOwn("object").?.asObj().getOwn("tag").?.asStr());
+            try std.testing.expectEqualStrings("derived-fieldderived-field", instance.asObj().getOwn("text").?.asStr());
+            try std.testing.expectEqualStrings("argument", instance.asObj().getOwn("input").?.asStr());
+            recovered = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+        try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+        try std.testing.expect(machine.this_initialized);
+        try std.testing.expectEqual(&saved_this_cell, machine.this_cell.?);
+        try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+        try std.testing.expect(machine.strict);
+        try std.testing.expect(machine.in_field_initializer);
+        try std.testing.expect(machine.in_derived_ctor);
+        try std.testing.expect(machine.in_default_ctor);
+        try std.testing.expectEqual(active_function, machine.active_function.?);
+        try std.testing.expectEqual(@as(usize, 1), machine.pending_field_inits.len);
+        try std.testing.expectEqual(&saved_pending_node, machine.pending_field_inits[0]);
+        try std.testing.expectEqualSlices(u8, "#saved", machine.pending_brand_names[0]);
         try std.testing.expectEqual(&env, machine.env);
         try std.testing.expect(machine.vm_activation_free != null);
         if (recovered) break;

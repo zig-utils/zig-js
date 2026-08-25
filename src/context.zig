@@ -25234,7 +25234,8 @@ test "forced tree-walker and required bytecode preserve invocation-context defau
         \\policyError;
     )).asStr());
     const policy_inventory = policy.bytecodeAdmissionSnapshot();
-    try std.testing.expect(policy_inventory.count(.plain_policy_class_constructor_semantics) > 0);
+    try std.testing.expect(policy_inventory.count(.plain_compiled) > 0);
+    try std.testing.expectEqual(@as(u64, 0), policy_inventory.count(.plain_policy_class_constructor_semantics));
 }
 
 test "forced tree-walker and required bytecode preserve earlier parameter default references" {
@@ -25760,6 +25761,9 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         \\function sharedConstruction(Ctor, input, value = new Ctor(input.bias)) { return value.value; }
         \\class SharedFieldBox { field = 13; constructor(input) { this.input = input.bias; } }
         \\function sharedFieldConstruction(input) { var instance = new SharedFieldBox(input); return instance.field + instance.input; }
+        \\class SharedDerivedBase { constructor(input) { this.base = input.bias; } }
+        \\class SharedDerivedBox extends SharedDerivedBase { field = 13; constructor(input) { super(input); } }
+        \\function sharedDerivedConstruction(input) { var instance = new SharedDerivedBox(input); return instance.field + instance.base; }
         \\globalThis.sharedPatternInputs = [
         \\  [[1, { right: 2 }], { bias: 3, extra: 4, nested: { value: 9 }, read(value) { return this.nested.value + value; } }],
         \\  [[2, { right: 3 }], { bias: 4, extra: 5, nested: { value: 10 }, read(value) { return this.nested.value + value; } }],
@@ -25804,6 +25808,15 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
     const raw_field_construction = field_construction_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const field_construction_function: *interp.Function = @ptrCast(@alignCast(raw_field_construction));
     const field_construction_chunk = field_construction_function.chunk orelse return error.TestUnexpectedResult;
+    const derived_construction_value = try ctx.evaluate("sharedDerivedConstruction");
+    const raw_derived_construction = derived_construction_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const derived_construction_function: *interp.Function = @ptrCast(@alignCast(raw_derived_construction));
+    const derived_construction_chunk = derived_construction_function.chunk orelse return error.TestUnexpectedResult;
+    const derived_constructor_value = try ctx.evaluate("SharedDerivedBox");
+    const raw_derived_constructor = derived_constructor_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const derived_constructor: *interp.Function = @ptrCast(@alignCast(raw_derived_constructor));
+    const derived_constructor_chunk = derived_constructor.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(derived_constructor_chunk.is_derived_constructor);
     const input_value = try ctx.evaluate("sharedPatternInputs");
     const inputs = input_value.asObj();
 
@@ -25824,6 +25837,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         construction_chunk: *@import("bytecode.zig").Chunk,
         field_construction_function: *interp.Function,
         field_construction_chunk: *@import("bytecode.zig").Chunk,
+        derived_construction_function: *interp.Function,
+        derived_construction_chunk: *@import("bytecode.zig").Chunk,
         first: Value,
         second: Value,
         result: std.atomic.Value(i64) = .init(-1),
@@ -25900,6 +25915,16 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
                 ) catch return;
                 if (!field_construction_out.isNumber()) return;
                 sum += @intFromFloat(field_construction_out.asNum());
+                const derived_construction_out = vm.runFunction(
+                    &machine,
+                    worker.derived_construction_function,
+                    worker.derived_construction_chunk,
+                    &.{worker.second},
+                    Value.undef(),
+                    Value.undef(),
+                ) catch return;
+                if (!derived_construction_out.isNumber()) return;
+                sum += @intFromFloat(derived_construction_out.asNum());
             }
             worker.result.store(sum, .release);
         }
@@ -25923,6 +25948,8 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
             .construction_chunk = construction_chunk,
             .field_construction_function = field_construction_function,
             .field_construction_chunk = field_construction_chunk,
+            .derived_construction_function = derived_construction_function,
+            .derived_construction_chunk = derived_construction_chunk,
             .first = pair.atomicDenseElementLoad(0) orelse return error.TestUnexpectedResult,
             .second = pair.atomicDenseElementLoad(1) orelse return error.TestUnexpectedResult,
         };
@@ -25932,7 +25959,7 @@ test "parallel_js: shared destructuring/default-parameter chunk keeps lane-local
         thread.* = try std.Thread.spawn(.{}, Worker.run, .{&workers[lane]});
     for (&threads) |*thread| thread.join();
     for (&workers, 0..) |*worker, lane| {
-        const expected: i64 = @intCast(iterations * (536 + 237 * lane));
+        const expected: i64 = @intCast(iterations * (552 + 238 * lane));
         try std.testing.expectEqual(expected, worker.result.load(.acquire));
     }
 }
@@ -26195,6 +26222,197 @@ test "forced tree-walker and required bytecode preserve base class instance init
     }
     try std.testing.expectEqualStrings(actual[0], actual[1]);
     try std.testing.expectEqualStrings(expected, actual[1]);
+}
+
+test "forced tree-walker and required bytecode preserve derived constructor activations" {
+    const source =
+        \\var derivedEffects = [];
+        \\var derivedKeyCount = 0;
+        \\var derivedKey = { [Symbol.toPrimitive]() { derivedKeyCount += 1; return "computed"; } };
+        \\class DerivedBase {
+        \\  constructor(value) { derivedEffects.push("base:" + value); this.base = value; this.target = new.target.name; }
+        \\  get inherited() { return this.base + 10; }
+        \\}
+        \\class DerivedActivation extends DerivedBase {
+        \\  order = (derivedEffects.push("field"), ["field"]);
+        \\  [derivedKey] = function() {};
+        \\  #secret = 3;
+        \\  accessor auto = 4;
+        \\  brand = this.#method();
+        \\  fieldTarget = eval("new.target");
+        \\  superValue = super.inherited;
+        \\  gcField = ($vm.gc(), this.base + 1);
+        \\  #method() { return 5; }
+        \\  constructor(value, adjusted = value + 1) {
+        \\    var before = "";
+        \\    try { this.base; } catch (error) { before = error.name; }
+        \\    derivedEffects.push("body-before");
+        \\    var invoke = function(callback) { return callback(); };
+        \\    var result = invoke(() => super(adjusted));
+        \\    derivedEffects.push("body-after");
+        \\    this.same = result === this;
+        \\    this.before = before;
+        \\  }
+        \\  summary() { return this.base + ":" + this.target + ":" + this.order.join(",") + ":" + this.computed.name + ":" + this.#secret + ":" + this.auto + ":" + this.brand + ":" + (this.fieldTarget === undefined) + ":" + this.superValue + ":" + this.gcField + ":" + this.same + ":" + this.before; }
+        \\}
+        \\class DefaultDerived extends DerivedBase {}
+        \\class DynamicFirst { constructor(value) { this.which = "first:" + value; } }
+        \\class DynamicSecond { constructor(value) { this.which = "second:" + value; } }
+        \\class DynamicDerived extends DynamicFirst { constructor() { super((Object.setPrototypeOf(DynamicDerived, DynamicSecond), 1)); } }
+        \\var repeatedBaseCount = 0;
+        \\class RepeatedBase { marker = 0; constructor() { repeatedBaseCount += 1; } }
+        \\class RepeatedDerived extends RepeatedBase { constructor() { super(); try { super(); } catch (error) { this.repeated = error.name + ":" + repeatedBaseCount; } } }
+        \\var skippedDerivedFieldCount = 0;
+        \\class ReturnObjectDerived extends DerivedBase { skipped = (skippedDerivedFieldCount += 1); constructor() { return { object: true }; } }
+        \\class MissingSuperDerived extends DerivedBase { constructor() {} }
+        \\class PrimitiveReturnDerived extends DerivedBase { constructor() { return 1; } }
+        \\class CaughtPrimitiveReturnDerived extends DerivedBase { constructor() { try { return 1; } catch (error) { return { caught: error.name }; } } }
+        \\var nullSuperEffects = 0;
+        \\class NullSuperDerived extends null { constructor() { super(nullSuperEffects += 1); } }
+        \\class AlternateObjectBase { marker = 0; constructor() { return { alternate: true }; } }
+        \\class AlternateObjectDerived extends AlternateObjectBase { field = 9; }
+        \\class FinallyDerived extends DerivedBase { constructor() { try { return super(2); } finally { this.finalized = true; } } }
+        \\var spreadIteratorReads = 0;
+        \\class SpreadDerived extends DerivedBase { spreadField = 12; constructor(values) { super(...values); } }
+        \\class ParameterSuperDerived extends DerivedBase { parameterField = 16; constructor(bound = super(12)) { this.parameterSame = bound === this; } }
+        \\class ReentrantBase { constructor(depth) { this.depth = depth; if (depth > 0) this.inner = new ReentrantDerived(depth - 1); } }
+        \\class ReentrantDerived extends ReentrantBase { reentrantField = 17; constructor(depth) { super(depth); } }
+        \\var taggedSuperBaseCount = 0;
+        \\class TaggedSuperBase { constructor() { taggedSuperBaseCount += 1; } }
+        \\class TaggedSuperDerived extends TaggedSuperBase { constructor() { super[super()]``; } }
+        \\function derivedSummary() {
+        \\  var value = new DerivedActivation(6);
+        \\  var originalIterator = Array.prototype[Symbol.iterator];
+        \\  var iteratorReads = 0;
+        \\  Array.prototype[Symbol.iterator] = function() { iteratorReads += 1; return originalIterator.call(this); };
+        \\  var defaultValue = new DefaultDerived(8);
+        \\  Array.prototype[Symbol.iterator] = originalIterator;
+        \\  var dynamicFirst = new DynamicDerived();
+        \\  var dynamicSecond = new DynamicDerived();
+        \\  var repeated = new RepeatedDerived();
+        \\  var returned = new ReturnObjectDerived();
+        \\  var missing = "";
+        \\  try { new MissingSuperDerived(); } catch (error) { missing = error.name; }
+        \\  var primitive = "";
+        \\  try { new PrimitiveReturnDerived(); } catch (error) { primitive = error.name; }
+        \\  var caughtPrimitive = "";
+        \\  try { new CaughtPrimitiveReturnDerived(); } catch (error) { caughtPrimitive = error.name; }
+        \\  var nullSuper = "";
+        \\  try { new NullSuperDerived(); } catch (error) { nullSuper = error.name; }
+        \\  var alternate = new AlternateObjectDerived();
+        \\  var finalized = new FinallyDerived();
+        \\  var spread = new SpreadDerived({ [Symbol.iterator]() { spreadIteratorReads += 1; return [11][Symbol.iterator](); } });
+        \\  var parameterSuper = new ParameterSuperDerived();
+        \\  var reentrant = new ReentrantDerived(1);
+        \\  var taggedSuper = "";
+        \\  try { new TaggedSuperDerived(); } catch (error) { taggedSuper = error.name; }
+        \\  return value.summary() + "|" + derivedEffects.join(",") + "|" + derivedKeyCount + "|" +
+        \\    defaultValue.base + ":" + iteratorReads + "|" + dynamicFirst.which + ":" + dynamicSecond.which + "|" +
+        \\    repeated.repeated + "|" + returned.object + ":" + skippedDerivedFieldCount + "|" + missing + ":" + primitive + ":" + caughtPrimitive + "|" +
+        \\    nullSuper + ":" + nullSuperEffects + "|" + alternate.alternate + ":" + alternate.field + "|" + finalized.base + ":" + finalized.finalized + "|" + spread.base + ":" + spread.spreadField + ":" + spreadIteratorReads + "|" +
+        \\    parameterSuper.base + ":" + parameterSuper.parameterField + ":" + parameterSuper.parameterSame + "|" + reentrant.depth + ":" + reentrant.reentrantField + ":" + reentrant.inner.depth + ":" + reentrant.inner.reentrantField + "|" + taggedSuper + ":" + taggedSuperBaseCount;
+        \\}
+    ;
+    const expected = "7:DerivedActivation:field:computed:3:4:5:true:17:8:true:ReferenceError|body-before,base:7,field,body-after,base:8,base:2,base:11,base:12|1|8:0|first:1:second:1|ReferenceError:2|true:0|ReferenceError:TypeError:TypeError|TypeError:1|true:9|2:true|11:12:1|12:16:true|1:17:0:17|ReferenceError:0";
+    const configurations = [_]struct {
+        mode: interp.BytecodeExecutionMode,
+        parallel_js: bool = false,
+    }{
+        .{ .mode = .tree_walker },
+        .{ .mode = .required },
+        .{ .mode = .required, .parallel_js = true },
+    };
+    var actual: [configurations.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+    for (configurations, 0..) |configuration, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = configuration.parallel_js,
+            .parallel_gc = configuration.parallel_js,
+            .parallel_js = configuration.parallel_js,
+            .enable_jit = false,
+            .bytecode_execution_mode = configuration.mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const result = try ctx.evaluate("derivedSummary()");
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (configuration.mode == .required) {
+            const constructor = try ctx.evaluate("DerivedActivation");
+            const raw = constructor.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, function.bytecode_admission_reason);
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expect(chunk.is_derived_constructor);
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_policy_class_constructor_semantics));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(actual[0], actual[1]);
+    try std.testing.expectEqualStrings(actual[1], actual[2]);
+    try std.testing.expectEqualStrings(expected, actual[1]);
+
+    // Direct eval remains a causal unsupported-lowering boundary: automatic
+    // mode deliberately executes the complete tree-walker activation, while
+    // required mode cannot silently callback or fall back from constructor
+    // bytecode. The old broad class-semantics policy reason stays removed.
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    _ = try automatic.evaluate(
+        \\class EvalDerivedBase { constructor(value) { this.base = value; } }
+        \\class EvalDerived extends EvalDerivedBase { field = 15; constructor(value) { eval("super(value)"); } }
+    );
+    automatic.collectGarbage();
+    _ = automatic.compactGarbage();
+    try std.testing.expectEqual(@as(f64, 28), (try automatic.evaluate("var evalDerived = new EvalDerived(13); evalDerived.base + evalDerived.field")).asNum());
+    const eval_constructor = try automatic.evaluate("EvalDerived");
+    const eval_raw = eval_constructor.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const eval_function: *interp.Function = @ptrCast(@alignCast(eval_raw));
+    try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_rejected_unsupported_lowering, eval_function.bytecode_admission_reason);
+    try std.testing.expect(eval_function.chunk == null);
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_class_constructor_semantics));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
+}
+
+test "native tiers apply derived constructor completion at the activation boundary" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    try std.testing.expectEqualStrings("ReferenceError:TypeError", (try ctx.evaluate(
+        \\class NativeCompletionBase {}
+        \\class NativeMissingSuper extends NativeCompletionBase { constructor() {} }
+        \\class NativePrimitiveReturn extends NativeCompletionBase { constructor() { return 42; } }
+        \\function nativeCompletionName(Constructor) { try { new Constructor(); } catch (error) { return error.name; } return "none"; }
+        \\var nativeMissing = "";
+        \\var nativePrimitive = "";
+        \\for (var nativeIndex = 0; nativeIndex < 16; nativeIndex += 1) {
+        \\  nativeMissing = nativeCompletionName(NativeMissingSuper);
+        \\  nativePrimitive = nativeCompletionName(NativePrimitiveReturn);
+        \\}
+        \\nativeMissing + ":" + nativePrimitive;
+    )).asStr());
+
+    const primitive_value = try ctx.evaluate("NativePrimitiveReturn");
+    const primitive_raw = primitive_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const primitive_function: *interp.Function = @ptrCast(@alignCast(primitive_raw));
+    const primitive_chunk = primitive_function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(primitive_chunk.tier.loadCode() != null or
+        primitive_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) != null);
 }
 
 test "forced tree-walker and required bytecode preserve class heritage ordering" {

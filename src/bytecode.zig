@@ -381,6 +381,7 @@ pub const Op = enum(u8) {
     load_new_target, // push the current `new.target`
     enter_field_initializers, // enter the lexical class-field initializer context
     exit_field_initializers, // leave the lexical class-field initializer context
+    load_super_constructor, // capture GetSuperConstructor before argument effects
     load_import_meta, // push the active declaring module's lazily created import.meta object
     new_object, // push a fresh {}
     new_array, // push a fresh []
@@ -435,6 +436,9 @@ pub const Op = enum(u8) {
     tail_call_method, // operand a: name index, b: argc; stack: recv, args... -> tail call recv.name
     tail_call_with_this, // operand a: argc; stack: func, this, args... -> tail call func with this
     new_call, // operand a: argc; stack: callee, args... -> push constructed object
+    super_construct, // operand a: argc; stack: captured super, args... -> bind derived this and push it
+    super_construct_spread, // stack: captured super, args array -> bind derived this and push it
+    super_construct_default, // operand a: rest-parameter slot; direct-forward without @@iterator
     // Spread-argument variants: the arguments are pre-collected into one array
     // (built with new_array/array_append/array_spread), so the call is variadic.
     call_spread, // stack: callee, args_array -> push result (this = undefined)
@@ -737,6 +741,9 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
+    /// This chunk is the body of a derived class constructor. Return completion
+    /// validates object/undefined results and reads the activation's bound `this`.
+    is_derived_constructor: bool = false,
     /// Syntactic parameter index -> activation input slot. Simple/rest
     /// identifiers use their binding slot directly; a destructuring formal uses
     /// a hidden raw-value slot consumed by its bytecode entry prologue. Sloppy

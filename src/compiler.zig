@@ -274,6 +274,15 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
                     break :blk false;
             break :blk true;
         },
+        .super_member => |member| fnode.is_derived_class_constructor and
+            (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode, parameter_index)),
+        .super_call => |arguments| blk: {
+            if (!fnode.is_derived_class_constructor) break :blk false;
+            for (arguments) |argument|
+                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode, parameter_index))
+                    break :blk false;
+            break :blk true;
+        },
         else => false,
     };
 }
@@ -1206,6 +1215,11 @@ pub const Compiler = struct {
     /// Class instance initializer expressions are compiled into a constructor
     /// prefix with environment-only name resolution and lexical field semantics.
     in_field_initializer: bool = false,
+    /// Derived-constructor activation context. Lexical arrows inherit the
+    /// initializer slice so `() => super()` runs the enclosing class elements.
+    is_derived_constructor: bool = false,
+    is_default_constructor: bool = false,
+    derived_instance_initializers: []const *ast.Node = &.{},
     /// Emit per-statement VM checkpoints for debugger-enabled suspendable code.
     debug_checkpoints: bool = false,
     /// Highest #706 scratch slot handed out by this compiler. Program chunks
@@ -1677,8 +1691,8 @@ pub const Compiler = struct {
         }
     }
 
-    fn compileBaseClassInitializers(self: *Compiler, fnode: *const ast.FunctionNode) CompileError!void {
-        if (fnode.class_instance_initializers.len == 0) return;
+    fn compileClassInitializers(self: *Compiler, initializers: []const *ast.Node) CompileError!void {
+        if (initializers.len == 0) return;
         const saved_scope = self.scope;
         const saved_field_initializer = self.in_field_initializer;
         self.scope = null;
@@ -1689,7 +1703,7 @@ pub const Compiler = struct {
         }
 
         _ = try self.chunk.emit(.enter_field_initializers, 0);
-        for (fnode.class_instance_initializers) |initializer| try self.compileStmt(initializer);
+        for (initializers) |initializer| try self.compileStmt(initializer);
         _ = try self.chunk.emit(.exit_field_initializers, 0);
     }
 
@@ -1736,8 +1750,19 @@ pub const Compiler = struct {
         chunk.has_non_simple_parameters = parameter_layout.hasNonSimple();
         chunk.arguments_slot = arguments_slot;
         chunk.mapped_parameter_indices = mapped_parameter_indices;
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
-        try c.compileBaseClassInitializers(fnode);
+        chunk.is_derived_constructor = fnode.is_derived_class_constructor;
+        var c = Compiler{
+            .arena = arena,
+            .chunk = chunk,
+            .mode = .function,
+            .scope = scope,
+            .is_strict = fnode.is_strict,
+            .is_derived_constructor = fnode.is_derived_class_constructor,
+            .is_default_constructor = fnode.is_default_class_constructor,
+            .derived_instance_initializers = if (fnode.is_derived_class_constructor) fnode.class_instance_initializers else &.{},
+            .debug_checkpoints = true,
+        };
+        if (!fnode.is_derived_class_constructor) try c.compileClassInitializers(fnode.class_instance_initializers);
         try c.compilePlainParameterEntries(fnode, &parameter_layout);
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
@@ -3677,7 +3702,7 @@ pub const Compiler = struct {
         // is not performed in sloppy mode), so a sloppy tail position grows the stack
         // like any call and eventually throws RangeError — reusing the frame would
         // turn `function f(){ return f(); }` into an infinite loop instead.
-        if (self.try_depth > 0 or !self.is_strict) {
+        if (self.is_derived_constructor or self.try_depth > 0 or !self.is_strict) {
             try self.compileExpr(node);
             _ = try self.chunk.emit(.ret, 0);
             return;
@@ -4198,13 +4223,14 @@ pub const Compiler = struct {
             // A super property Reference reads through the home object's parent
             // but calls with the current this binding, never the super base.
             const m = tag.super_member;
+            _ = try self.chunk.emit(.load_this, 0);
             if (m.computed) |key| {
                 try self.compileExpr(key);
                 _ = try self.chunk.emit(.super_get_index, 0);
             } else {
                 _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property)));
             }
-            _ = try self.chunk.emit(.load_this, 0);
+            _ = try self.chunk.emit(.swap, 0); // [tag, this]
             _ = try self.chunk.emit(.template_object, ti);
             for (exprs) |e| try self.compileExpr(e);
             _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
@@ -4558,11 +4584,31 @@ pub const Compiler = struct {
                 // receiver, via the super_get opcodes (home_object is live in the
                 // generator frame). The call form is handled in the `.call` arm.
                 if (m.computed) |ce| {
+                    // MakeSuperPropertyReference performs GetThisBinding before
+                    // evaluating the computed key. In a derived constructor,
+                    // `super[super()]` must therefore reject the uninitialized
+                    // outer receiver without executing the inner SuperCall.
+                    _ = try self.chunk.emit(.check_super_this, 0);
                     try self.compileExpr(ce);
                     _ = try self.chunk.emit(.super_get_index, 0);
                 } else {
                     _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property)));
                 }
+            },
+            .super_call => |args| {
+                _ = try self.chunk.emit(.load_super_constructor, 0);
+                if (self.is_default_constructor) {
+                    const rest_slot = self.chunk.rest_parameter_index orelse return error.Unsupported;
+                    if (rest_slot >= self.chunk.parameter_slots.len) return error.Unsupported;
+                    _ = try self.chunk.emit(.super_construct_default, self.chunk.parameter_slots[rest_slot]);
+                } else if (hasSpread(args)) {
+                    try self.compileArgsArray(args);
+                    _ = try self.chunk.emit(.super_construct_spread, 0);
+                } else {
+                    for (args) |arg| try self.compileExpr(arg);
+                    _ = try self.chunk.emit(.super_construct, @intCast(args.len));
+                }
+                try self.compileClassInitializers(self.derived_instance_initializers);
             },
             .new_expr => |n| {
                 try self.compileExpr(n.callee);
@@ -5397,7 +5443,16 @@ pub const Compiler = struct {
             compiled.arguments_slot = arguments_slot;
             compiled.mapped_parameter_indices = mapped_parameter_indices;
 
-            var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
+            var sub_c = Compiler{
+                .arena = self.arena,
+                .chunk = compiled,
+                .mode = .function,
+                .scope = scope,
+                .is_strict = fnode.is_strict,
+                .is_derived_constructor = false,
+                .derived_instance_initializers = if (fnode.is_arrow) self.derived_instance_initializers else &.{},
+                .debug_checkpoints = self.debug_checkpoints,
+            };
             try sub_c.compilePlainParameterEntries(fnode, &parameter_layout);
             if (fnode.is_expr_body) {
                 sub_c.compileExpr(fnode.body) catch |e| switch (e) {

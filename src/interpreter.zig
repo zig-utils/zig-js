@@ -1491,9 +1491,64 @@ test "Environment private activation writes use the collector handshake until ca
 /// `this` even when the arrow is invoked from an unrelated dynamic context (e.g.
 /// an iterator's `return()` running during the ctor's IteratorClose).
 pub const ThisCell = struct {
-    value: Value = Value.undef(),
-    initialized: bool = false,
+    value_bits: std.atomic.Value(u64),
+    /// 0 = uninitialized, 1 = a winning BindThisValue is publishing, 2 = bound.
+    state: std.atomic.Value(u8),
+
+    pub fn init(initial_value: Value, initialized: bool) ThisCell {
+        return .{
+            .value_bits = .init(initial_value.rawBits()),
+            .state = .init(if (initialized) 2 else 0),
+        };
+    }
+
+    pub fn isInitialized(self: *const ThisCell) bool {
+        var state = self.state.load(.acquire);
+        while (state == 1) : (state = self.state.load(.acquire)) std.atomic.spinLoopHint();
+        return state == 2;
+    }
+
+    pub fn value(self: *const ThisCell) Value {
+        while (self.state.load(.acquire) == 1) std.atomic.spinLoopHint();
+        return Value.fromRawBits(self.value_bits.load(.acquire));
+    }
+
+    /// BindThisValue is exactly-once even when an escaped lexical arrow is
+    /// invoked by concurrent no-GIL lanes after both superclass calls finish.
+    pub fn bind(self: *ThisCell, bound_value: Value) bool {
+        if (self.state.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) return false;
+        self.value_bits.store(bound_value.rawBits(), .release);
+        self.state.store(2, .release);
+        return true;
+    }
 };
+
+test "derived constructor this binding is published exactly once" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const lane_count = 8;
+    var cell = ThisCell.init(Value.undef(), false);
+    var won: [lane_count]bool = @splat(false);
+    const Worker = struct {
+        fn run(shared: *ThisCell, result: *bool, lane: usize) void {
+            result.* = shared.bind(Value.num(@floatFromInt(lane + 1)));
+        }
+    };
+    var threads: [lane_count]std.Thread = undefined;
+    for (&threads, 0..) |*thread, lane|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ &cell, &won[lane], lane });
+    for (&threads) |*thread| thread.join();
+
+    var winners: usize = 0;
+    var winner_value: f64 = 0;
+    for (won, 0..) |did_win, lane| if (did_win) {
+        winners += 1;
+        winner_value = @floatFromInt(lane + 1);
+    };
+    try std.testing.expectEqual(@as(usize, 1), winners);
+    try std.testing.expect(cell.isInitialized());
+    try std.testing.expectEqual(winner_value, cell.value().asNum());
+}
 
 pub const ImportMetaSlot = struct {
     /// Module functions may be entered concurrently by shared-realm threads.
@@ -1958,6 +2013,10 @@ pub const Function = struct {
     home_object: ?*value.Object = null,
     /// For a derived class constructor: the superclass object, called by `super(...)`.
     super_ctor: ?*value.Object = null,
+    /// The derived constructor whose lexical environment an arrow shares. This
+    /// keeps GetSuperConstructor live: `super()` reads that constructor object's
+    /// current [[Prototype]] at call time instead of a frozen superclass pointer.
+    derived_constructor: ?*value.Object = null,
     /// The declaring class evaluation's private-name map (`#x` → its unique storage
     /// key). A direct eval inside this function's body resolves the private names it
     /// references through this map (`getWithEval(){ return eval("this.#x") }`).
@@ -4227,8 +4286,8 @@ pub const Interpreter = struct {
             // ReferenceError. `this_initialized` is true everywhere else (base
             // ctors, methods, ordinary functions), so this only fires before super().
             .this_expr => if (self.this_cell) |c| blk: {
-                if (!c.initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-                break :blk c.value;
+                if (!c.isInitialized()) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                break :blk c.value();
             } else if (self.this_initialized) self.this_value else return self.throwError("ReferenceError", "Must call super constructor before using 'this'"),
             // A class field initializer / static block is run as a method-like
             // function (it is [[Call]]ed, never [[Construct]]ed), so `new.target`
@@ -4606,6 +4665,7 @@ pub const Interpreter = struct {
                     if (self.active_function) |fn_obj| if (fn_obj.jsFunction()) |erased| {
                         const active: *Function = @ptrCast(@alignCast(erased));
                         if (active.is_derived_constructor) break :blk2 self.effectiveProto(fn_obj);
+                        if (active.derived_constructor) |owner| break :blk2 self.effectiveProto(owner);
                     };
                     break :blk2 self.super_ctor;
                 };
@@ -4625,7 +4685,9 @@ pub const Interpreter = struct {
                 const sup_ret = try self.constructNT(Value.obj(sup), args, self.new_target);
                 // BindThisValue: `super()` initializes `this` exactly once — a
                 // second call (after the construct's side effects) is a ReferenceError.
-                if (self.this_initialized) return self.throwError("ReferenceError", "Super constructor may only be called once");
+                if (self.this_cell) |c| {
+                    if (!c.bind(sup_ret)) return self.throwError("ReferenceError", "Super constructor may only be called once");
+                } else if (self.this_initialized) return self.throwError("ReferenceError", "Super constructor may only be called once");
                 // The object the super constructor produces (a built-in exotic from
                 // `extends Map/Array/...`, or an object a JS base explicitly returns)
                 // *becomes* the `this` binding — its prototype was already set from
@@ -4633,13 +4695,6 @@ pub const Interpreter = struct {
                 // is discarded); the field initializers / private brands below target it.
                 self.this_value = sup_ret;
                 self.this_initialized = true;
-                // Persist the binding into the shared cell so it survives past this
-                // activation — the enclosing derived ctor (and any sibling arrow)
-                // reads `this` through the cell.
-                if (self.this_cell) |c| {
-                    c.value = sup_ret;
-                    c.initialized = true;
-                }
                 // InitializeInstanceElements: a derived class brands `this` with
                 // its private names and runs its field initializers now, once
                 // `super()` has returned and `this` exists. Clear the pending sets
@@ -6354,6 +6409,12 @@ pub const Interpreter = struct {
             func.arrow_in_derived_ctor = self.in_derived_ctor; // super()-legality is lexical
             func.this_cell = self.this_cell; // share the enclosing derived ctor's `this` binding
             func.field_init_ctx = self.in_field_initializer; // field-init eval restrictions are lexical
+            if (self.active_function) |active_object| if (active_object.jsFunction()) |erased| {
+                const active: *Function = @ptrCast(@alignCast(erased));
+                func.derived_constructor = if (active.is_derived_constructor) active_object else active.derived_constructor;
+                func.field_inits = active.field_inits;
+                func.private_brand_names = active.private_brand_names;
+            };
         }
         // Compile a generator body up front for the suspendable VM. Bodies
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
@@ -6524,6 +6585,7 @@ pub const Interpreter = struct {
             return .plain_policy_legacy_call_frame;
         if (fnode.uses_arguments) return null;
         if (fnode.requires_tree_walk_class_constructor) return .plain_policy_class_constructor_semantics;
+        if (fnode.is_derived_class_constructor) return null;
         if (fnode.class_instance_initializers.len != 0) return null;
         if (fnode.is_strict) return if (sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null)
             null
@@ -7241,9 +7303,11 @@ pub const Interpreter = struct {
             // constructor synthesized here.
             .uses_arguments = if (ctor_node) |cf| cf.uses_arguments else false,
             .uses_direct_eval = if (ctor_node) |cf| cf.uses_direct_eval else false,
-            .requires_tree_walk_class_constructor = derived,
-            .class_instance_initializers = if (derived) &.{} else field_inits.items,
-            .defer_plain_bytecode_compilation = !derived and field_inits.items.len != 0,
+            .requires_tree_walk_class_constructor = false,
+            .class_instance_initializers = field_inits.items,
+            .is_derived_class_constructor = derived,
+            .is_default_class_constructor = derived and ctor_node == null,
+            .defer_plain_bytecode_compilation = field_inits.items.len != 0,
             // All class code is strict, so the constructor is a strict function
             // (e.g. its `.caller`/`.arguments` hit the %ThrowTypeError% poison pill
             // rather than the legacy sloppy `null`).
@@ -7277,6 +7341,7 @@ pub const Interpreter = struct {
             cf.is_class_constructor = true;
             cf.is_derived_constructor = derived;
             cf.is_default_ctor = derived and ctor_node == null;
+            cf.derived_constructor = if (derived) class_obj else null;
             cf.field_inits = field_inits.items;
             // Private brands. Methods/accessors are added all at once before field
             // initializers run, so they brand the instance up front; *fields* are
@@ -8237,7 +8302,10 @@ pub const Interpreter = struct {
         // A derived constructor's field initializers + private brands wait for its
         // SuperCall.
         self.pending_field_inits = func.field_inits;
-        self.pending_brand_names = if (func.is_derived_constructor) func.private_brand_names else &.{};
+        self.pending_brand_names = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor))
+            func.private_brand_names
+        else
+            &.{};
         self.env = call_env;
         if (self.reusable_call_env == call_env) {
             self.reusable_call_env = null;
@@ -8308,12 +8376,12 @@ pub const Interpreter = struct {
         if (func.is_arrow) {
             self.this_cell = func.this_cell;
             if (func.this_cell) |c| {
-                self.this_value = c.value;
-                self.this_initialized = c.initialized;
+                self.this_value = c.value();
+                self.this_initialized = c.isInitialized();
             }
         } else if (func.is_derived_constructor) {
             const cell = try self.arena.create(ThisCell);
-            cell.* = .{ .value = self.this_value, .initialized = false };
+            cell.* = ThisCell.init(self.this_value, false);
             self.this_cell = cell;
         } else {
             self.this_cell = null;
@@ -8342,8 +8410,8 @@ pub const Interpreter = struct {
             // ctor's shared cell: a `super()` that ran during this call — possibly
             // via an arrow invoked from an unrelated context — initialized the
             // cell, and that binding must remain visible to the enclosing ctor.
-            if (self.this_cell) |c| if (c.initialized) {
-                self.this_value = c.value;
+            if (self.this_cell) |c| if (c.isInitialized()) {
+                self.this_value = c.value();
                 self.this_initialized = true;
             };
             self.direct_eval_new_target_allowed = saved_eval_nt;
@@ -8465,7 +8533,7 @@ pub const Interpreter = struct {
             // an intervening call (e.g. an iterator `return()` handler invoking a
             // `() => super()` arrow as the abrupt `return` was processed), so the
             // cell — not the ambient flag — is authoritative.
-            const inited = if (self.this_cell) |c| c.initialized else self.this_initialized;
+            const inited = if (self.this_cell) |c| c.isInitialized() else self.this_initialized;
             if (!inited) {
                 self.env = saved_env;
                 self.global_object = saved_global;
@@ -8473,7 +8541,7 @@ pub const Interpreter = struct {
             }
             // The bound `this` (the object `super()` produced) is what `new`
             // yields — not the discarded eager placeholder.
-            return if (self.this_cell) |c| c.value else self.this_value;
+            return if (self.this_cell) |c| c.value() else self.this_value;
         }
         return if (self.signal == .ret) self.ret_value else Value.undef();
     }

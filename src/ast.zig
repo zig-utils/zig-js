@@ -109,11 +109,15 @@ pub const FunctionNode = struct {
     /// initialization state is not yet represented by a bytecode activation.
     /// Parsed functions and base constructors leave this false.
     requires_tree_walk_class_constructor: bool = false,
-    /// Runtime-synthesized base-constructor instance element initializers. They
-    /// execute in source order before FunctionDeclarationInstantiation and
-    /// resolve names through the class-definition closure, not constructor slots.
-    /// Parsed functions leave this empty; `buildClass` owns the synthesized AST.
+    /// Runtime-synthesized class instance element initializers. Base constructors
+    /// execute them before FunctionDeclarationInstantiation; derived constructors
+    /// execute them immediately after `super()` binds `this`. In both cases names
+    /// resolve through the class-definition closure, not constructor slots.
     class_instance_initializers: []const *Node = &.{},
+    /// Runtime-synthesized derived/default constructor metadata used only by the
+    /// class activation lowering. Parsed ordinary functions leave both false.
+    is_derived_class_constructor: bool = false,
+    is_default_class_constructor: bool = false,
     /// ClassDefinitionEvaluation creates the constructor object before it
     /// evaluates computed element names. Base constructors with instance fields
     /// therefore compile only after that pass bakes each one-time key into the

@@ -1558,11 +1558,12 @@ pub fn traceFunction(f: *interp.Function, v: anytype) void {
     v.mark(f.realm_global);
     v.mark(f.home_object);
     v.mark(f.super_ctor);
+    v.mark(f.derived_constructor);
     v.mark(f.obj);
     if (f.import_meta_slot) |slot| if (slot.load()) |o| v.mark(o);
     markValue(v, f.arrow_this);
     markValue(v, f.arrow_new_target);
-    if (f.this_cell) |cell| markValue(v, cell.value);
+    if (f.this_cell) |cell| markValue(v, cell.value());
     for (f.with_stack) |object| v.mark(object);
     traceCapturedFrame(f.frame, v);
     if (f.chunk) |chunk| traceChunk(chunk, v);
@@ -1580,12 +1581,13 @@ pub fn relocateFunction(f: *interp.Function, v: anytype) void {
     gc_relocation.rewriteOptionalSlot(v, Object, &f.realm_global);
     gc_relocation.rewriteOptionalSlot(v, Object, &f.home_object);
     gc_relocation.rewriteOptionalSlot(v, Object, &f.super_ctor);
+    gc_relocation.rewriteOptionalSlot(v, Object, &f.derived_constructor);
     gc_relocation.rewriteOptionalSlot(v, Object, &f.obj);
     if (f.import_meta_slot) |slot|
         gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
     gc_relocation.rewriteValueSlot(v, &f.arrow_this);
     gc_relocation.rewriteValueSlot(v, &f.arrow_new_target);
-    if (f.this_cell) |cell| gc_relocation.rewriteValueSlot(v, &cell.value);
+    if (f.this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
     for (f.with_stack) |*object|
         gc_relocation.rewriteRequiredSlot(v, Object, object);
     relocateCapturedFrame(f.frame, v);
@@ -1603,14 +1605,11 @@ test "Function marking and relocation cover every managed field" {
         .arena = std.testing.allocator,
         .gc_managed = true,
     };
-    var old_objects: [15]Object = undefined;
-    var new_objects: [15]Object = undefined;
+    var old_objects: [16]Object = undefined;
+    var new_objects: [16]Object = undefined;
     var body: ast.Node = .undefined_lit;
     var import_meta = interp.ImportMetaSlot.init(&old_objects[4]);
-    var this_cell = interp.ThisCell{
-        .value = Value.obj(&old_objects[7]),
-        .initialized = true,
-    };
+    var this_cell = interp.ThisCell.init(Value.obj(&old_objects[7]), true);
     var with_stack = [_]*Object{ &old_objects[8], &old_objects[9] };
     var plain_constants = [_]Value{Value.obj(&old_objects[10])};
     var generator_constants = [_]Value{Value.obj(&old_objects[11])};
@@ -1633,6 +1632,7 @@ test "Function marking and relocation cover every managed field" {
         .realm_global = &old_objects[0],
         .home_object = &old_objects[1],
         .super_ctor = &old_objects[2],
+        .derived_constructor = &old_objects[15],
         .obj = &old_objects[3],
         .import_meta_slot = &import_meta,
         .arrow_this = Value.obj(&old_objects[5]),
@@ -1663,13 +1663,13 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expect(trace.seen.contains(@intFromPtr(&old_environment)));
     for (&old_objects) |*object|
         try std.testing.expect(trace.seen.contains(@intFromPtr(object)));
-    try std.testing.expectEqual(@as(usize, 16), trace.seen.count());
+    try std.testing.expectEqual(@as(usize, 17), trace.seen.count());
 
     const Plan = struct {
         old_environment: *Environment,
         new_environment: *Environment,
-        old_objects: *[15]Object,
-        new_objects: *[15]Object,
+        old_objects: *[16]Object,
+        new_objects: *[16]Object,
 
         pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
             if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
@@ -1692,11 +1692,12 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expectEqual(&new_objects[0], function.realm_global.?);
     try std.testing.expectEqual(&new_objects[1], function.home_object.?);
     try std.testing.expectEqual(&new_objects[2], function.super_ctor.?);
+    try std.testing.expectEqual(&new_objects[15], function.derived_constructor.?);
     try std.testing.expectEqual(&new_objects[3], function.obj.?);
     try std.testing.expectEqual(&new_objects[4], import_meta.load().?);
     try std.testing.expectEqual(&new_objects[5], function.arrow_this.asObj());
     try std.testing.expectEqual(&new_objects[6], function.arrow_new_target.asObj());
-    try std.testing.expectEqual(&new_objects[7], this_cell.value.asObj());
+    try std.testing.expectEqual(&new_objects[7], this_cell.value().asObj());
     try std.testing.expectEqual(&new_objects[8], with_stack[0]);
     try std.testing.expectEqual(&new_objects[9], with_stack[1]);
     try std.testing.expectEqual(&new_objects[10], plain_constants[0].asObj());
@@ -3616,7 +3617,7 @@ pub const Binding = struct {
     /// barriers. Mutable type-erased side cells have a wider set of lifecycle
     /// writes, so quiescent minor GC conservatively rescans those old kinds.
     /// Function cells are rescanned too: most edges are immutable after
-    /// publication, but a captured derived-constructor `this_cell.value` is
+    /// publication, but a captured derived-constructor `this_cell.value_bits` is
     /// initialized by `super()` and can therefore acquire a young object.
     pub fn traceOldOnMinor(kind: Kind) bool {
         return kind != .object and kind != .string and kind != .environment;

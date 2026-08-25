@@ -52,6 +52,11 @@ const frontend_cases = [_]Case{
         .expected = 19,
     },
     .{
+        .name = "derived constructor activation",
+        .source = "class Base { constructor(value) { this.base = value; } } class Derived extends Base { field = 3; #private = 4; constructor(value) { super(value + 1); } score() { return this.base + this.field + this.#private; } } new Derived(8).score()",
+        .expected = 16,
+    },
+    .{
         .name = "optional chain with nullish fallback",
         .source = "let o = null; (o?.x ?? 41) + 1",
         .expected = 42,
