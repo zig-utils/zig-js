@@ -23405,6 +23405,61 @@ test "required bytecode uses strict captured iterator records" {
     try std.testing.expect(result.asBool());
 }
 
+test "tree-walker sync iteration uses strict captured iterator records" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\var manualNextCalls = 0;
+        \\var manual = { next: function() { manualNextCalls += 1; return { done: true }; } };
+        \\function rejectsForOf(input) {
+        \\  try { for (var value of input) {} return false; }
+        \\  catch (error) { return error instanceof TypeError; }
+        \\}
+        \\function rejectsPattern(input) {
+        \\  try { var [value] = input; return false; }
+        \\  catch (error) { return error instanceof TypeError; }
+        \\}
+        \\var iteratorGets = 0;
+        \\var nextGets = 0;
+        \\var receiverOk = false;
+        \\var iterator = {};
+        \\Object.defineProperty(iterator, "next", {
+        \\  get: function() {
+        \\    nextGets += 1;
+        \\    if (nextGets !== 1) return function() { throw new Error("next re-read"); };
+        \\    var i = 0;
+        \\    return function() { return i++ === 0 ? { value: 7, done: false } : { done: true }; };
+        \\  }
+        \\});
+        \\function* source() { yield 1; }
+        \\var generator = source();
+        \\Object.defineProperty(generator, Symbol.iterator, {
+        \\  get: function() {
+        \\    iteratorGets += 1;
+        \\    return function() { receiverOk = this === generator; return iterator; };
+        \\  }
+        \\});
+        \\function sum(input) { var total = 0; for (var value of input) total += value; return total; }
+        \\var arrayNextCalls = 0;
+        \\var arrayIteratorProto = Object.getPrototypeOf([][Symbol.iterator]());
+        \\var intrinsicArrayNext = arrayIteratorProto.next;
+        \\arrayIteratorProto.next = function() {
+        \\  arrayNextCalls += 1;
+        \\  return intrinsicArrayNext.call(this);
+        \\};
+        \\var [left, right] = [2, 3];
+        \\var [named = function() {}] = [];
+        \\rejectsForOf(manual) && rejectsPattern(manual) && manualNextCalls === 0 &&
+        \\sum(generator) === 7 && iteratorGets === 1 && nextGets === 1 && receiverOk &&
+        \\left === 2 && right === 3 && arrayNextCalls === 3 && named.name === "named"
+    );
+    try std.testing.expect(result.asBool());
+}
+
 test "forced tree-walker and required bytecode agree on nullish coalescing" {
     const source =
         \\var nullishHits = 0;

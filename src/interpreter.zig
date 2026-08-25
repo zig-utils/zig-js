@@ -5183,13 +5183,14 @@ pub const Interpreter = struct {
             // `[Symbol.iterator]()` is honored), then pull `.next()` until done.
             // `for await`: the async iterator (Symbol.asyncIterator, else a sync
             // iterator) and each `next()` result is awaited.
-            const iter_obj = if (is_await) try self.asyncIteratorOf(iter) else try self.iteratorOf(iter);
+            const sync_record: ?IteratorRecord = if (is_await) null else try self.getIteratorRecord(iter);
+            const iter_obj = if (sync_record) |record| record.iterator else try self.asyncIteratorOf(iter);
             const iter_root = try self.pushTempRoot(iter_obj);
             defer self.restoreTempRoots(iter_root);
             // GetIterator reads the iterator's `next` method exactly ONCE (it
             // becomes the Iterator Record's [[NextMethod]]); IteratorNext reuses
             // it. A `next` accessor must therefore not be re-read per iteration.
-            const next_method = try self.getProperty(iter_obj, "next");
+            const next_method = if (sync_record) |record| record.next_method else try self.getProperty(iter_obj, "next");
             const next_root = try self.pushTempRoot(next_method);
             defer self.restoreTempRoots(next_root);
             var ienv: IterEnvState = .{};
@@ -14039,61 +14040,16 @@ pub const Interpreter = struct {
         if (val.isUndefined() or val.isNull())
             return self.throwError("TypeError", "cannot destructure null or undefined");
 
-        // Fast path: a real array whose `Array.prototype[Symbol.iterator]` is
-        // still the native one AND which has no own `[Symbol.iterator]` override
-        // — index directly, no iterator object churn. Strings go through the
-        // general path so astral chars destructure by code POINT (not the
-        // code-UNIT indexing `elementAt` would give). Overridden/deleted array
-        // iterators also fall through.
-        if (val.isObject() and val.asObj().is_array and self.arrayIterIntact() and !self.arrayHasOwnIterator(val.asObj())) {
-            var idx: usize = 0;
-            for (elems) |elem| {
-                const binding_reference = try self.capturePatternIdentifierReference(elem.target, declare);
-                const binding_reference_root = try self.pushOptionalBindingReferenceRoot(binding_reference);
-                defer if (binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
-                var v = try self.elementAt(val, idx);
-                idx += 1;
-                if (elem.target) |t| {
-                    if (v.isUndefined()) {
-                        if (elem.default) |d| {
-                            v = try self.eval(d);
-                            if (t.* == .identifier) try self.maybeNameAnon(v, d, t.identifier);
-                        }
-                    }
-                    try self.bindPatternWithReference(
-                        t,
-                        v,
-                        declare,
-                        self.tempOptionalBindingReferenceRoot(binding_reference_root, binding_reference),
-                    );
-                }
-            }
-            if (rest) |rest_target| {
-                const binding_reference = try self.capturePatternIdentifierReference(rest_target, declare);
-                const binding_reference_root = try self.pushOptionalBindingReferenceRoot(binding_reference);
-                defer if (binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
-                const rest_arr = try self.newArray();
-                const len = iterableLen(val);
-                while (idx < len) : (idx += 1) {
-                    try rest_arr.asObj().appendElement(self.arena, try self.elementAt(val, idx));
-                }
-                try self.bindPatternWithReference(
-                    rest_target,
-                    rest_arr,
-                    declare,
-                    self.tempOptionalBindingReferenceRoot(binding_reference_root, binding_reference),
-                );
-            }
-            return;
-        }
-
-        // General path: drive the iterator protocol, so array destructuring
-        // works over generators, Set/Map, the `arguments` object, and any user
-        // value with `[Symbol.iterator]`. `iteratorOf` throws the spec's
-        // TypeError for a genuinely non-iterable value (e.g. a number or a
-        // plain object), so destructuring those still fails the right way.
-        const iter_obj = try self.iteratorOf(val);
-        const next_method = try self.getProperty(iter_obj, "next");
+        // ArrayBindingPattern/AssignmentPattern always uses GetIterator, even for
+        // packed arrays: both @@iterator and the returned iterator's `next` are
+        // observable mutable properties.
+        const record = try self.getIteratorRecord(val);
+        const iter_obj = record.iterator;
+        const iter_root = try self.pushTempRoot(iter_obj);
+        defer self.restoreTempRoots(iter_root);
+        const next_method = record.next_method;
+        const next_root = try self.pushTempRoot(next_method);
+        defer self.restoreTempRoots(next_root);
         var done = false;
         // IteratorClose on an abrupt completion: if any element step (target
         // reference, default expression, assignment, or pattern) throws while the
@@ -14144,7 +14100,10 @@ pub const Interpreter = struct {
             }
             if (elem.target) |t| {
                 if (v.isUndefined()) {
-                    if (elem.default) |d| v = try self.eval(d);
+                    if (elem.default) |d| {
+                        v = try self.eval(d);
+                        if (t.* == .identifier) try self.maybeNameAnon(v, d, t.identifier);
+                    }
                 }
                 switch (member_kind) {
                     .member => {
@@ -15897,8 +15856,8 @@ pub const Interpreter = struct {
     }
 
     /// Does array `o` carry its OWN `[Symbol.iterator]` (data or accessor),
-    /// overriding `Array.prototype`'s? Remaining dense fast paths such as
-    /// destructuring must defer to the iterator protocol when so.
+    /// overriding `Array.prototype`'s? Internal collection snapshots must defer
+    /// to the iterator protocol when so.
     fn arrayHasOwnIterator(self: *Interpreter, o: *value.Object) bool {
         const ikey = self.wellKnownSymbolKey("iterator") orelse return false;
         return o.getOwn(ikey) != null or o.getAccessor(ikey) != null;
