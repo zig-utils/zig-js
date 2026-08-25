@@ -55900,6 +55900,20 @@ test "interpreter JSON, Object, Number builtins" {
         \\});
         \\sources.join("|") === "1|missing"
     )).asBool());
+    try std.testing.expectEqualStrings("1:4|nul:1|wide:2|01:3|dup:6|root:missing||1:2:6||1,nul,wide,01,dup||true,true,true", (try evalSource(a,
+        \\let wideKey = "w".repeat(4096);
+        \\let text = '{"\\u0000k":1,"' + wideKey + '":2,"01":3,"1":4,"dup":5,"dup":6}';
+        \\let visits = [];
+        \\let parsed = JSON.parse(text, function(key, value, context) {
+        \\  let label = key === "\u0000k" ? "nul" : key === wideKey ? "wide" : key === "" ? "root" : key;
+        \\  visits.push(label + ":" + (context.source === undefined ? "missing" : context.source));
+        \\  return value;
+        \\});
+        \\let keys = Object.keys(parsed).map(key => key === "\u0000k" ? "nul" : key === wideKey ? "wide" : key);
+        \\let descriptor = Object.getOwnPropertyDescriptor(parsed, "\u0000k");
+        \\visits.join("|") + "||" + parsed["\u0000k"] + ":" + parsed[wideKey] + ":" + parsed.dup +
+        \\  "||" + keys.join(",") + "||" + descriptor.writable + "," + descriptor.enumerable + "," + descriptor.configurable
+    )).asStr());
     // Object.create + getPrototypeOf
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let p = { x: 7 }; let o = Object.create(p); o.x")).asNum());
     try std.testing.expect((try evalSource(a, "let o = Object.create(null); Object.getPrototypeOf(o) === null && o.constructor === undefined && !('constructor' in o)")).asBool());

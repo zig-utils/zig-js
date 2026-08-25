@@ -3488,11 +3488,17 @@ const JsonParser = struct {
             if (p.i >= p.s.len or p.s[p.i] != ':') return error.Invalid;
             p.i += 1;
             const child = try p.parseValue();
+            // Parsed JSON strings are public property keys. Encode a leading
+            // NUL before touching engine storage so it cannot collide with or
+            // be hidden as a Symbol/private/internal key. The parse-record
+            // index uses that same canonical key because reviver traversal
+            // receives storage keys from [[OwnPropertyKeys]].
+            const storage_key = try value.encodeStringKey(p.interp.arena, key);
             // CreateDataPropertyOrThrow: define an own data property (default
             // attrs). Not [[Set]] — so "__proto__" becomes a normal own property
             // and duplicate keys overwrite without invoking inherited setters.
-            try result.asObj().setOwn(p.interp.arena, p.interp.root_shape, key, child.value);
-            if (p.track_records) try entries.put(p.interp.arena, key, child.record.?);
+            try result.asObj().setOwn(p.interp.arena, p.interp.root_shape, storage_key, child.value);
+            if (p.track_records) try entries.put(p.interp.arena, storage_key, child.record.?);
             p.skipWs();
             if (p.i >= p.s.len) return error.Invalid;
             if (p.s[p.i] == ',') {
