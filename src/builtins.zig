@@ -663,12 +663,9 @@ pub fn mathSumPrecise(ctx: *anyopaque, this: Value, args: []const Value) HostErr
 pub fn mathSumPreciseWithElementLimit(ctx: *anyopaque, this: Value, args: []const Value, element_limit: u64) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    // GetIterator(items): a non-iterable argument is a TypeError.
-    const iter = try self.iteratorOf(arg(args, 0));
-    // GetIterator captures [[NextMethod]] once. Re-reading `iterator.next` on
-    // every step would repeat an observable getter and let a mutation replace
-    // the method partway through the sum.
-    const next_method = try self.getProperty(iter, "next");
+    const iterator_record = try self.getIteratorRecord(arg(args, 0));
+    const iter = iterator_record.iterator;
+    const next_method = iterator_record.next_method;
     var acc = std.mem.zeroes([SUM_WORDS]u32);
     var count: u64 = 0;
     var has_nan = false;

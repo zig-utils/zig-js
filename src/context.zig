@@ -14843,6 +14843,44 @@ test "Math.sumPrecise captures the iterator next method once" {
     )).asBool());
 }
 
+test "Math.sumPrecise requires and honors Symbol.iterator" {
+    try std.testing.expect((try evalIn(
+        \\let manualCalls = 0;
+        \\const manual = { next() { manualCalls += 1; return { done: true }; } };
+        \\let manualError = false;
+        \\try { Math.sumPrecise(manual); } catch (error) { manualError = error instanceof TypeError; }
+        \\const generator = (function* () { yield 1; })();
+        \\let iteratorGets = 0;
+        \\let iteratorCalls = 0;
+        \\let iteratorThis;
+        \\Object.defineProperty(generator, Symbol.iterator, {
+        \\  get() {
+        \\    iteratorGets += 1;
+        \\    return function () {
+        \\      iteratorCalls += 1;
+        \\      iteratorThis = this;
+        \\      return [7][Symbol.iterator]();
+        \\    };
+        \\  },
+        \\});
+        \\manualError && manualCalls === 0 && Math.sumPrecise(generator) === 7 &&
+        \\iteratorGets === 1 && iteratorCalls === 1 && iteratorThis === generator;
+    )).asBool());
+
+    try std.testing.expect((try evalIn(
+        \\const deleted = (function* () { yield 1; })();
+        \\deleted[Symbol.iterator] = undefined;
+        \\let deletedError = false;
+        \\try { Math.sumPrecise(deleted); } catch (error) { deletedError = error instanceof TypeError; }
+        \\const badResult = {
+        \\  [Symbol.iterator]() { return 1; },
+        \\};
+        \\let resultError = false;
+        \\try { Math.sumPrecise(badResult); } catch (error) { resultError = error instanceof TypeError; }
+        \\deletedError && resultError;
+    )).asBool());
+}
+
 fn mathSumPreciseLimitTwo(ctx: *anyopaque, this: value.Value, args: []const value.Value) value.HostError!value.Value {
     return builtins.mathSumPreciseWithElementLimit(ctx, this, args, 2);
 }

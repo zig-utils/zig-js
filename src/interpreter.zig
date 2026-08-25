@@ -15094,6 +15094,30 @@ pub const Interpreter = struct {
         return self.callValueWithThis(method, args, recv);
     }
 
+    pub const IteratorRecord = struct {
+        iterator: Value,
+        next_method: Value,
+    };
+
+    /// GetIterator(obj, sync): read and call the observable @@iterator method,
+    /// require its result to be an Object, and capture [[NextMethod]] exactly
+    /// once. GetIteratorDirect/GetIteratorFlattenable consumers use their own
+    /// entry points instead of the stricter language-iteration contract.
+    pub fn getIteratorRecord(self: *Interpreter, v: Value) EvalError!IteratorRecord {
+        if (v.isUndefined() or v.isNull())
+            return self.throwError("TypeError", "value is not iterable");
+        const key = self.symbolIteratorKey() orelse
+            return self.throwError("TypeError", "value is not iterable");
+        const method = try self.getProperty(v, key);
+        if (!method.isCallable())
+            return self.throwError("TypeError", "Symbol.iterator is not callable");
+        const iterator = try self.requireIteratorObject(try self.callValueWithThis(method, &.{}, v));
+        return .{
+            .iterator = iterator,
+            .next_method = try self.getProperty(iterator, "next"),
+        };
+    }
+
     /// Obtain an iterator (an object with a `.next()` returning `{value, done}`)
     /// for `v` — the iterator-protocol entry point used by `yield*` (and, later,
     /// spread / `Array.from` / VM `for-of`). Generators are their own iterator;
