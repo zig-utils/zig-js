@@ -1584,8 +1584,9 @@ fn tagValueType(self: *Interpreter, input: Value) value.HostError!types.ValType 
 }
 
 fn sequenceValues(self: *Interpreter, input: Value) value.HostError![]const Value {
-    const iterator = try self.iteratorOf(input);
-    const next = try self.getProperty(iterator, "next");
+    const iterator_record = try self.getIteratorRecord(input);
+    const iterator = iterator_record.iterator;
+    const next = iterator_record.next_method;
     const next_root = try self.pushTempRoot(next);
     defer self.restoreTempRoots(next_root);
     var done = false;
@@ -1603,8 +1604,9 @@ fn sequenceValues(self: *Interpreter, input: Value) value.HostError![]const Valu
 }
 
 fn tagParameterTypes(self: *Interpreter, input: Value) value.HostError![]const types.ValType {
-    const iterator = try self.iteratorOf(input);
-    const next = try self.getProperty(iterator, "next");
+    const iterator_record = try self.getIteratorRecord(input);
+    const iterator = iterator_record.iterator;
+    const next = iterator_record.next_method;
     const next_root = try self.pushTempRoot(next);
     defer self.restoreTempRoots(next_root);
     var done = false;
@@ -3263,6 +3265,61 @@ test "wasm api exception descriptors preserve observable conversion order" {
         \\tagOrder.join(',') === 'parameters,iterator,next,convert,next,return' &&
         \\  payloadOrder.join(',') === 'iterator,next,next,options,coerce' &&
         \\  exception.getArg(tag, 0) === 7 && !payloadTouched && !indexTouched;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api exception sequences use strict captured iterator records" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{
+            .reference_types = true,
+            .exception_handling = true,
+        },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\let manualCalls = 0;
+        \\let manualError = false;
+        \\try {
+        \\  new WebAssembly.Tag({ parameters: { next() { manualCalls += 1; return { done: true }; } } });
+        \\} catch (error) { manualError = error instanceof TypeError; }
+        \\let tagGets = 0;
+        \\let tagCalls = 0;
+        \\const tagIterator = {
+        \\  get next() {
+        \\    tagGets += 1;
+        \\    return function () {
+        \\      tagCalls += 1;
+        \\      if (tagCalls === 1) {
+        \\        Object.defineProperty(tagIterator, "next", {
+        \\          value() { throw new Error("replacement must not run"); },
+        \\          configurable: true,
+        \\        });
+        \\        return { value: "i32", done: false };
+        \\      }
+        \\      return { done: true };
+        \\    };
+        \\  },
+        \\};
+        \\const tag = new WebAssembly.Tag({
+        \\  parameters: { [Symbol.iterator]() { return tagIterator; } },
+        \\});
+        \\let payloadGets = 0;
+        \\let payloadCalls = 0;
+        \\const payloadIterator = {
+        \\  get next() {
+        \\    payloadGets += 1;
+        \\    return function () {
+        \\      payloadCalls += 1;
+        \\      return payloadCalls === 1 ? { value: 9, done: false } : { done: true };
+        \\    };
+        \\  },
+        \\};
+        \\const exception = new WebAssembly.Exception(tag, {
+        \\  [Symbol.iterator]() { return payloadIterator; },
+        \\});
+        \\manualError && manualCalls === 0 && tagGets === 1 && tagCalls === 2 &&
+        \\payloadGets === 1 && payloadCalls === 2 && exception.getArg(tag, 0) === 9;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
 }
