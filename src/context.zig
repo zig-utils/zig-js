@@ -8418,6 +8418,7 @@ pub const Context = struct {
             self.last_evaluation_diagnostic = lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0);
             return err;
         };
+        parser.useRealmHashKeys(self.root_shape);
         const program = parser.parseProgram() catch |err| {
             self.last_evaluation_diagnostic = parser.errorLocation();
             return err;
@@ -8462,6 +8463,7 @@ pub const Context = struct {
             self.last_evaluation_diagnostic = lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0);
             return err;
         };
+        parser.useRealmHashKeys(self.root_shape);
         const prog = parser.parseProgram() catch |err| {
             self.last_evaluation_diagnostic = parser.errorLocation();
             return err;
@@ -8999,6 +9001,7 @@ pub const Context = struct {
 
         const owned_source = try a.dupe(u8, source);
         var parser = try Parser.initWithScratch(a, self.gpa, owned_source);
+        parser.useRealmHashKeys(self.root_shape);
         const prog = try parser.parseModule();
         _ = try self.registerDebugScriptWithLocations(
             owned_source,

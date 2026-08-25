@@ -5112,6 +5112,7 @@ pub const Interpreter = struct {
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
         var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
             return self.throwParserSyntaxErrorAt("debugger evaluation", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
+        parser.useRealmHashKeys(self.root_shape);
         parser.strict = strict;
         const program = parser.parseProgram() catch |err| return self.throwParserSyntaxError("debugger evaluation", source, &parser, err);
 
@@ -19240,6 +19241,7 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("eval", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
+    parser.useRealmHashKeys(self.root_shape);
     // Direct eval inherits the caller's strictness for early errors; indirect
     // eval is global code in the eval function's realm and only becomes strict
     // from its own directive prologue.
@@ -21277,6 +21279,7 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("evalScript", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
+    parser.useRealmHashKeys(self.root_shape);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("evalScript", src, &parser, err);
     const prog_strict = parser.strict;
     const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
@@ -21587,6 +21590,7 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAtInRealm(caller_env, "ShadowRealm.evaluate", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
+    parser.useRealmHashKeys(self.root_shape);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, &parser, err);
     const prog_strict = parser.strict;
     const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
@@ -23932,6 +23936,7 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             var param_lex_diagnostic: ?parser_mod.SourceLocation = null;
             var param_parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, param_source, &param_lex_diagnostic) catch |err|
                 return self.throwParserSyntaxErrorAt("Function parameters", param_lex_diagnostic orelse parser_mod.sourceLocationAt(param_source, 0), err);
+            param_parser.useRealmHashKeys(self.root_shape);
             param_parser.parseDynamicFunctionParams(kind == .generator or kind == .async_generator, kind == .async_fn or kind == .async_generator) catch |err|
                 return self.throwParserSyntaxError("Function parameters", param_source, &param_parser, err);
             const prefix = switch (kind) {
@@ -23943,6 +23948,7 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             var lex_diagnostic: ?parser_mod.SourceLocation = null;
             var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
                 return self.throwParserSyntaxErrorAt("Function body", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
+            parser.useRealmHashKeys(self.root_shape);
             const prog = parser.parseProgram() catch |err|
                 return self.throwParserSyntaxError("Function body", source, &parser, err);
             const fallback_url = switch (kind) {

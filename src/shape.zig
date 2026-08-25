@@ -317,12 +317,12 @@ fn ConcurrentStringSkipList(comptime ValueType: type) type {
     };
 }
 
-/// One secure root secret feeds independently domain-separated transition-map
-/// keys for this realm. Calling the host entropy source for every Shape fanout
-/// made builtin installation spend material time in the OS CSPRNG. SipHash is
-/// already the keyed map primitive; using it as the derivation PRF retains an
-/// undisclosed 128-bit key per map while reducing secure entropy to one request
-/// for the complete realm-owned Shape tree.
+/// One secure root secret feeds independently domain-separated
+/// algorithmic-complexity keys for this realm. Transition maps are the primary
+/// consumer; parser-owned transient indexes also borrow this source so parsing
+/// does not request OS entropy per table. SipHash acts as the derivation PRF,
+/// and the atomic domain allocator keeps every output distinct under parallel
+/// realm use.
 const TransitionKeySource = struct {
     const SipHash = std.crypto.auth.siphash.SipHash64(2, 4);
 
@@ -410,6 +410,15 @@ pub const Shape = struct {
         // secure entropy, matching attacker-controlled collection hashes.
         agent.engineIo().randomSecure(&root_secret) catch return error.OutOfMemory;
         return createRootWithSeed(arena, root_secret);
+    }
+
+    /// Derive one realm-secret seed for a transient native index. The root-owned
+    /// atomic domain source is shared by every Shape in the tree, so callers may
+    /// hold any current Shape without introducing another secret or
+    /// synchronization boundary.
+    pub fn deriveSecureHashSeed(self: *Shape) std.mem.Allocator.Error!u64 {
+        const key = try self.owner.transition_keys.derive();
+        return std.mem.readInt(u64, key[0..8], .little);
     }
 
     fn createRootWithSeed(arena: std.mem.Allocator, root_secret: [TransitionKeySource.SipHash.key_length]u8) std.mem.Allocator.Error!*Shape {

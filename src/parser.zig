@@ -2,6 +2,8 @@ const std = @import("std");
 const lex = @import("lexer.zig");
 const ast = @import("ast.zig");
 const value_mod = @import("value.zig");
+const agent = @import("agent.zig");
+const Shape = @import("shape.zig").Shape;
 const regex = @import("regex");
 const regexp_compat = @import("regexp_compat.zig");
 
@@ -109,6 +111,97 @@ inline fn bindingKeywordClass(text: []const u8) BindingKeywordClass {
     return binding_keyword_classes.get(text) orelse .{};
 }
 
+const SecureStringHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), value: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, value);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+/// One lazy keyed-hash context belongs to the complete parse, including nested
+/// template-substitution parsers. Production callers attach the realm's Shape
+/// key source; standalone parser users fall back to the engine entropy provider.
+const SecureHashState = struct {
+    context: ?SecureStringHashContext = null,
+    realm_shape: ?*Shape = null,
+
+    fn candidate(state: *@This()) std.mem.Allocator.Error!SecureStringHashContext {
+        if (state.context) |context| return context;
+        if (state.realm_shape) |shape|
+            return .{ .seed = try shape.deriveSecureHashSeed() };
+
+        var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+        agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+        return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+    }
+};
+
+fn SecureStringMapUnmanaged(comptime Value: type) type {
+    const Index = std.HashMapUnmanaged(
+        []const u8,
+        Value,
+        SecureStringHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        const Self = @This();
+
+        index: Index = .empty,
+        state: *SecureHashState,
+
+        fn publish(self: *Self, context: SecureStringHashContext) void {
+            if (self.state.context == null) self.state.context = context;
+        }
+
+        fn put(self: *Self, allocator: std.mem.Allocator, key: []const u8, value: Value) std.mem.Allocator.Error!void {
+            const context = try self.state.candidate();
+            try self.index.putContext(allocator, key, value, context);
+            self.publish(context);
+        }
+
+        fn getOrPut(self: *Self, allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!Index.GetOrPutResult {
+            const context = try self.state.candidate();
+            const result = try self.index.getOrPutContext(allocator, key, context);
+            self.publish(context);
+            return result;
+        }
+
+        fn ensureTotalCapacity(self: *Self, allocator: std.mem.Allocator, capacity: u32) std.mem.Allocator.Error!void {
+            const context = try self.state.candidate();
+            try self.index.ensureTotalCapacityContext(allocator, capacity, context);
+            self.publish(context);
+        }
+
+        fn get(self: *const Self, key: []const u8) ?Value {
+            const context = self.state.context orelse return null;
+            return self.index.getContext(key, context);
+        }
+
+        fn contains(self: *const Self, key: []const u8) bool {
+            const context = self.state.context orelse return false;
+            return self.index.containsContext(key, context);
+        }
+
+        fn count(self: *const Self) usize {
+            return self.index.count();
+        }
+
+        fn iterator(self: *const Self) Index.Iterator {
+            return self.index.iterator();
+        }
+
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.index.deinit(allocator);
+        }
+    };
+}
+
 pub fn sourceLocationAt(source: []const u8, raw_offset: usize) SourceLocation {
     const offset = @min(raw_offset, source.len);
     var line: usize = 1;
@@ -139,6 +232,10 @@ pub const Parser = struct {
     /// Freeable backing for invocation-local indexes. AST nodes, tokens, and
     /// source-derived names remain arena-owned; scratch tables never own keys.
     scratch_allocator: std.mem.Allocator,
+    /// Root parser storage for lazily derived source-string hashing. A nested
+    /// template parser points at this state instead of installing another key.
+    secure_hash_state: SecureHashState = .{},
+    shared_secure_hash_state: ?*SecureHashState = null,
     /// Parse entry points install one resettable arena here so every RegExp
     /// literal reuses the largest validation footprint seen by that parse. The
     /// pointer is stack-local to parsing and never escapes or enters the AST.
@@ -321,6 +418,23 @@ pub const Parser = struct {
             .source = source,
             .html_comment_offset = lx.htmlCommentOffset(),
         };
+    }
+
+    fn secureHashState(self: *Parser) *SecureHashState {
+        return self.shared_secure_hash_state orelse &self.secure_hash_state;
+    }
+
+    fn secureStringMap(self: *Parser, comptime Value: type) SecureStringMapUnmanaged(Value) {
+        return .{ .state = self.secureHashState() };
+    }
+
+    /// Attach the parse to an existing realm's domain-separated secret source.
+    /// This remains lazy: candidate-free parses derive no key and allocate no
+    /// declaration-name table.
+    pub fn useRealmHashKeys(self: *Parser, realm_shape: *Shape) void {
+        const state = self.secureHashState();
+        std.debug.assert(state.context == null);
+        state.realm_shape = realm_shape;
     }
 
     fn validateRegexLiteral(self: *Parser, pattern: []const u8, flags: []const u8) ParseError!void {
@@ -678,7 +792,7 @@ pub const Parser = struct {
         // Two *plain* function declarations in a sloppy block are allowed
         // (Annex B.3.3), so a collision is reported only when a rigid one is
         // involved — which keeps the check free of false positives.
-        var seen: std.StringHashMapUnmanaged(bool) = .empty;
+        var seen = self.secureStringMap(bool);
         for (stmts) |s| {
             switch (s.*) {
                 .var_decl => |d| if (d.kind != .@"var") try self.addDecl(&seen, d.name, true),
@@ -711,7 +825,7 @@ pub const Parser = struct {
         // subtree. At a function/script scope, top-level function declarations are
         // themselves var-scoped, so they participate too.
         if (seen.count() > 0) {
-            var var_names: std.StringHashMapUnmanaged(void) = .empty;
+            var var_names = self.secureStringMap(void);
             for (stmts) |s| try self.collectVarNames(s, &var_names);
             if (!funcs_lexical) for (stmts) |s| {
                 if (s.* == .func_decl and s.func_decl.name.len > 0)
@@ -748,7 +862,7 @@ pub const Parser = struct {
         }
         if (!may_conflict) return;
 
-        var pnames: std.StringHashMapUnmanaged(void) = .empty;
+        var pnames = self.secureStringMap(void);
         for (params) |p| {
             if (p.pattern) |pat| {
                 var names: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -794,7 +908,7 @@ pub const Parser = struct {
     /// of nested blocks and control-flow statements, so recurse through those but
     /// not into nested functions/classes. Block-level function declarations are
     /// *not* collected (they are lexical to their block per the static semantics).
-    fn collectVarNames(self: *Parser, node: *Node, out: *std.StringHashMapUnmanaged(void)) ParseError!void {
+    fn collectVarNames(self: *Parser, node: *Node, out: *SecureStringMapUnmanaged(void)) ParseError!void {
         switch (node.*) {
             .var_decl => |d| if (d.kind == .@"var" and d.name.len > 0) try out.put(self.arena, d.name, {}),
             .destructure_decl => |d| if (d.kind == .@"var") try self.putPatternVarNames(d.pattern, out),
@@ -826,7 +940,7 @@ pub const Parser = struct {
         }
     }
 
-    fn putPatternVarNames(self: *Parser, pattern: *Node, out: *std.StringHashMapUnmanaged(void)) ParseError!void {
+    fn putPatternVarNames(self: *Parser, pattern: *Node, out: *SecureStringMapUnmanaged(void)) ParseError!void {
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
         try self.addPatternNames(&names, pattern);
         for (names.items) |n| if (n.len > 0) try out.put(self.arena, n, {});
@@ -840,7 +954,7 @@ pub const Parser = struct {
     fn checkNoDuplicateBindings(self: *Parser, target: *Node) ParseError!void {
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
         try self.addPatternNames(&names, target);
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        var seen = self.secureStringMap(void);
         for (names.items) |n| {
             if (n.len == 0) continue;
             if (std.mem.eql(u8, n, "let")) return ParseError.UnexpectedToken;
@@ -852,7 +966,7 @@ pub const Parser = struct {
     fn checkNoDuplicateLexicalDeclNames(self: *Parser, decl: *Node) ParseError!void {
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
         try self.collectLexicalDeclNames(decl, &names);
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        var seen = self.secureStringMap(void);
         for (names.items) |n| {
             if (n.len == 0) continue;
             if (std.mem.eql(u8, n, "let")) return ParseError.UnexpectedToken;
@@ -869,7 +983,7 @@ pub const Parser = struct {
         var head: std.ArrayListUnmanaged([]const u8) = .empty;
         try self.addPatternNames(&head, target);
         if (head.items.len == 0) return;
-        var vars: std.StringHashMapUnmanaged(void) = .empty;
+        var vars = self.secureStringMap(void);
         try self.collectVarNames(body, &vars);
         for (head.items) |n| if (n.len > 0 and vars.contains(n)) return ParseError.UnexpectedToken;
     }
@@ -892,12 +1006,12 @@ pub const Parser = struct {
         var head: std.ArrayListUnmanaged([]const u8) = .empty;
         try self.collectLexicalDeclNames(decl, &head);
         if (head.items.len == 0) return;
-        var vars: std.StringHashMapUnmanaged(void) = .empty;
+        var vars = self.secureStringMap(void);
         try self.collectVarNames(body, &vars);
         for (head.items) |n| if (n.len > 0 and vars.contains(n)) return ParseError.UnexpectedToken;
     }
 
-    fn addDecl(self: *Parser, seen: *std.StringHashMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
+    fn addDecl(self: *Parser, seen: *SecureStringMapUnmanaged(bool), name: []const u8, rigid: bool) ParseError!void {
         if (seen.get(name)) |existing_rigid| {
             // A collision is an early error unless BOTH are plain functions.
             if (rigid or existing_rigid) return ParseError.UnexpectedToken;
@@ -951,8 +1065,8 @@ pub const Parser = struct {
 
     fn addModuleLexicalName(
         self: *Parser,
-        lexical: *std.StringHashMapUnmanaged(void),
-        vars: *std.StringHashMapUnmanaged(void),
+        lexical: *SecureStringMapUnmanaged(void),
+        vars: *SecureStringMapUnmanaged(void),
         name: []const u8,
     ) ParseError!void {
         if (name.len == 0) return;
@@ -962,8 +1076,8 @@ pub const Parser = struct {
 
     fn addModuleVarName(
         self: *Parser,
-        lexical: *std.StringHashMapUnmanaged(void),
-        vars: *std.StringHashMapUnmanaged(void),
+        lexical: *SecureStringMapUnmanaged(void),
+        vars: *SecureStringMapUnmanaged(void),
         name: []const u8,
     ) ParseError!void {
         if (name.len == 0) return;
@@ -994,8 +1108,8 @@ pub const Parser = struct {
     fn collectModuleDeclNames(
         self: *Parser,
         node: *Node,
-        lexical: *std.StringHashMapUnmanaged(void),
-        vars: *std.StringHashMapUnmanaged(void),
+        lexical: *SecureStringMapUnmanaged(void),
+        vars: *SecureStringMapUnmanaged(void),
     ) ParseError!void {
         switch (node.*) {
             .import_decl => |i| for (i.entries) |entry|
@@ -1029,7 +1143,7 @@ pub const Parser = struct {
 
     fn addExportedName(
         self: *Parser,
-        exported: *std.StringHashMapUnmanaged(void),
+        exported: *SecureStringMapUnmanaged(void),
         name: []const u8,
     ) ParseError!void {
         if (name.len == 0) return;
@@ -1039,7 +1153,7 @@ pub const Parser = struct {
 
     fn collectDeclExportedNames(
         self: *Parser,
-        exported: *std.StringHashMapUnmanaged(void),
+        exported: *SecureStringMapUnmanaged(void),
         decl: *Node,
     ) ParseError!void {
         switch (decl.*) {
@@ -1057,7 +1171,7 @@ pub const Parser = struct {
 
     fn collectExportedNames(
         self: *Parser,
-        exported: *std.StringHashMapUnmanaged(void),
+        exported: *SecureStringMapUnmanaged(void),
         node: *Node,
     ) ParseError!void {
         if (node.* != .export_decl) return;
@@ -1070,8 +1184,8 @@ pub const Parser = struct {
 
     fn checkLocalExportedBindings(
         node: *Node,
-        lexical: *const std.StringHashMapUnmanaged(void),
-        vars: *const std.StringHashMapUnmanaged(void),
+        lexical: *const SecureStringMapUnmanaged(void),
+        vars: *const SecureStringMapUnmanaged(void),
     ) ParseError!void {
         if (node.* != .export_decl) return;
         const e = node.export_decl;
@@ -1083,9 +1197,9 @@ pub const Parser = struct {
     }
 
     fn checkModuleEarlyErrors(self: *Parser, stmts: []const *Node) ParseError!void {
-        var lexical: std.StringHashMapUnmanaged(void) = .empty;
-        var vars: std.StringHashMapUnmanaged(void) = .empty;
-        var exported: std.StringHashMapUnmanaged(void) = .empty;
+        var lexical = self.secureStringMap(void);
+        var vars = self.secureStringMap(void);
+        var exported = self.secureStringMap(void);
         for (stmts) |stmt| {
             try self.collectModuleDeclNames(stmt, &lexical, &vars);
             try self.collectExportedNames(&exported, stmt);
@@ -1249,7 +1363,7 @@ pub const Parser = struct {
         if (!self.checkContextual("with")) return "";
         _ = self.advance();
         try self.expect(.lbrace);
-        var keys: std.StringHashMapUnmanaged(void) = .empty;
+        var keys = self.secureStringMap(void);
         var type_value: []const u8 = "";
         while (!self.check(.rbrace)) {
             const key = try self.moduleExportName();
@@ -2136,7 +2250,7 @@ pub const Parser = struct {
     fn checkCatchClause(self: *Parser, param: *Node, block: *Node) ParseError!void {
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
         try self.addPatternNames(&names, param);
-        var bound: std.StringHashMapUnmanaged(void) = .empty;
+        var bound = self.secureStringMap(void);
         for (names.items) |n| {
             if (n.len == 0) continue;
             if (bound.contains(n)) return ParseError.UnexpectedToken;
@@ -2305,7 +2419,7 @@ pub const Parser = struct {
         // its exact simple-name count once so an attacker-sized unique list
         // cannot force geometric allocation and repeated rehashing. Zero and
         // one name need only the semantic checks below and allocate no index.
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        var seen = self.secureStringMap(void);
         defer seen.deinit(self.scratch_allocator);
         if (simple_count > 1) try seen.ensureTotalCapacity(self.scratch_allocator, simple_count);
         for (params) |p| {
@@ -2329,7 +2443,7 @@ pub const Parser = struct {
         // BoundNames of the parameter list must contain no duplicates — including
         // names bound inside destructuring patterns, so `([a], {a}) => {}` and
         // `({a, a}) => {}` are early errors.
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        var seen = self.secureStringMap(void);
         for (params) |p| {
             var names: std.ArrayListUnmanaged([]const u8) = .empty;
             if (p.pattern) |pat| try self.addPatternNames(&names, pat) else if (p.name.len > 0) try names.append(self.arena, p.name);
@@ -3332,6 +3446,7 @@ pub const Parser = struct {
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
                 var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
+                sub.shared_secure_hash_state = self.secureHashState();
                 // A `${ }` substitution inherits the enclosing parsing context, so
                 // `yield`/`await`/`#x`/strict-mode keywords are recognized inside a
                 // template in a generator/async/class/strict/module body.
@@ -3387,6 +3502,7 @@ pub const Parser = struct {
                 const expr_start = i + 2;
                 const expr_end = substEnd(raw, expr_start);
                 var sub = try Parser.initWithScratch(self.arena, self.scratch_allocator, raw[expr_start..expr_end]);
+                sub.shared_secure_hash_state = self.secureHashState();
                 // A `${ }` substitution inherits the enclosing parsing context, so
                 // `yield`/`await`/`#x`/strict-mode keywords are recognized inside a
                 // template in a generator/async/class/strict/module body.
@@ -4009,7 +4125,7 @@ pub const Parser = struct {
     /// reject a direct eval that declares `arguments` inside a non-arrow
     /// function's parameter expression scope (an early error).
     pub fn evalDeclaresArguments(self: *Parser, stmts: []const *Node) ParseError!bool {
-        var vars: std.StringHashMapUnmanaged(void) = .empty;
+        var vars = self.secureStringMap(void);
         for (stmts) |s| try self.collectVarNames(s, &vars);
         if (vars.contains("arguments")) return true;
         // Top-level lexical / function / class named `arguments`.
@@ -4201,7 +4317,7 @@ pub const Parser = struct {
 
     fn requirePrivateName(
         self: *Parser,
-        declared: *std.StringHashMapUnmanaged(void),
+        declared: *SecureStringMapUnmanaged(void),
         name: []const u8,
     ) ParseError!void {
         _ = self;
@@ -4210,7 +4326,7 @@ pub const Parser = struct {
 
     fn checkPrivateUsesInPattern(
         self: *Parser,
-        declared: *std.StringHashMapUnmanaged(void),
+        declared: *SecureStringMapUnmanaged(void),
         pattern: *Node,
     ) ParseError!void {
         switch (pattern.*) {
@@ -4232,7 +4348,7 @@ pub const Parser = struct {
 
     fn checkPrivateUsesInParams(
         self: *Parser,
-        declared: *std.StringHashMapUnmanaged(void),
+        declared: *SecureStringMapUnmanaged(void),
         params: []const ast.Param,
     ) ParseError!void {
         for (params) |param| {
@@ -4243,7 +4359,7 @@ pub const Parser = struct {
 
     fn checkPrivateUsesInNode(
         self: *Parser,
-        declared: *std.StringHashMapUnmanaged(void),
+        declared: *SecureStringMapUnmanaged(void),
         node: *Node,
     ) ParseError!void {
         switch (node.*) {
@@ -4387,16 +4503,16 @@ pub const Parser = struct {
     }
 
     fn checkPrivateUsesInProgram(self: *Parser, stmts: []const *Node) ParseError!void {
-        var declared: std.StringHashMapUnmanaged(void) = .empty;
+        var declared = self.secureStringMap(void);
         for (stmts) |stmt| try self.checkPrivateUsesInNode(&declared, stmt);
     }
 
     fn checkPrivateNameUses(
         self: *Parser,
-        inherited: *std.StringHashMapUnmanaged(void),
+        inherited: *SecureStringMapUnmanaged(void),
         members: []const ast.ClassMember,
     ) ParseError!void {
-        var declared: std.StringHashMapUnmanaged(void) = .empty;
+        var declared = self.secureStringMap(void);
         var it = inherited.iterator();
         while (it.next()) |entry| try declared.put(self.arena, entry.key_ptr.*, {});
         for (members) |member| {
@@ -4766,6 +4882,8 @@ test "parser allocates parameter body conflict indexes only for direct lexical d
     var fixed = std.heap.FixedBufferAllocator.init(&no_memory);
     var parser: Parser = undefined;
     parser.arena = fixed.allocator();
+    parser.secure_hash_state = .{};
+    parser.shared_secure_hash_state = null;
     const params = [_]ast.Param{.{ .name = "value" }};
 
     var empty_body = Node{ .block = &.{} };
@@ -4958,6 +5076,8 @@ test "parser reserves strict parameter uniqueness storage once" {
     var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var parser: Parser = undefined;
     parser.scratch_allocator = measured.allocator();
+    parser.secure_hash_state = .{};
+    parser.shared_secure_hash_state = null;
     try parser.validateStrictParams(&params);
     try std.testing.expectEqual(@as(usize, 1), measured.allocations);
     try std.testing.expectEqual(@as(usize, 1), measured.deallocations);
@@ -4982,6 +5102,52 @@ test "parser reserves strict parameter uniqueness storage once" {
         &.{ .{ .name = "first" }, .{ .name = "implements" } },
     };
     for (invalid) |case| try std.testing.expectError(ParseError.UnexpectedToken, parser.validateStrictParams(case));
+}
+
+test "parser source-name indexes share one lazy secure parse-root context" {
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed_state: SecureHashState = .{};
+    var failed = SecureStringMapUnmanaged(void){ .state = &failed_state };
+    defer failed.deinit(unavailable.allocator());
+    try std.testing.expectError(error.OutOfMemory, failed.put(unavailable.allocator(), "first", {}));
+    try std.testing.expect(failed_state.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first_shape = try Shape.createRoot(a);
+    const second_shape = try Shape.createRoot(a);
+
+    var empty = try Parser.init(a, "1 + 2;");
+    empty.useRealmHashKeys(first_shape);
+    _ = try empty.parseProgram();
+    try std.testing.expect(empty.secure_hash_state.context == null);
+
+    var first = try Parser.init(a, "let first; let second;");
+    first.useRealmHashKeys(first_shape);
+    _ = try first.parseProgram();
+    const first_context = first.secure_hash_state.context orelse return error.TestUnexpectedResult;
+
+    var second = try Parser.init(a, "let first; let second;");
+    second.useRealmHashKeys(second_shape);
+    _ = try second.parseProgram();
+    const second_context = second.secure_hash_state.context orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_context.seed != second_context.seed);
+
+    var nested = try Parser.init(a, "`${function duplicate(first, second, first) { \"use strict\"; }}`");
+    nested.useRealmHashKeys(first_shape);
+    try std.testing.expectError(ParseError.UnexpectedToken, nested.parseProgram());
+    try std.testing.expect(nested.secure_hash_state.context != null);
+
+    var shared_state = SecureHashState{ .context = first_context };
+    var wide_index = SecureStringMapUnmanaged(void){ .state = &shared_state };
+    defer wide_index.deinit(std.testing.allocator);
+    var wide_name: [4096]u8 = @splat('w');
+    try wide_index.put(std.testing.allocator, &wide_name, {});
+    try std.testing.expect(wide_index.contains(&wide_name));
+    try std.testing.expectEqual(@as(usize, 1), wide_index.count());
 }
 
 test "parser builds precedence-correct tree" {
