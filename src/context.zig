@@ -13867,6 +13867,50 @@ test "Intl ListFormat and RelativeTimeFormat resolved enums use exact unmanaged 
     try std.testing.expectEqualStrings("auto", last.asStr());
 }
 
+test "Intl.ListFormat uses a strict captured iterator record" {
+    try std.testing.expect((try evalIn(
+        \\var formatter = new Intl.ListFormat("en");
+        \\var manualNextCalls = 0;
+        \\var manual = { next: function() { manualNextCalls += 1; return { done: true }; } };
+        \\var manualThrew = false;
+        \\try { formatter.format(manual); } catch (error) { manualThrew = error instanceof TypeError; }
+        \\var iteratorGets = 0;
+        \\var nextGets = 0;
+        \\var receiverOk = false;
+        \\var iterator = {};
+        \\Object.defineProperty(iterator, "next", {
+        \\  get: function() {
+        \\    nextGets += 1;
+        \\    if (nextGets !== 1) return function() { throw new Error("next re-read"); };
+        \\    var i = 0;
+        \\    return function() { return i < 2 ? { value: ++i === 1 ? "a" : "b", done: false } : { done: true }; };
+        \\  }
+        \\});
+        \\var iterable = {};
+        \\Object.defineProperty(iterable, Symbol.iterator, {
+        \\  get: function() {
+        \\    iteratorGets += 1;
+        \\    return function() { receiverOk = this === iterable; return iterator; };
+        \\  }
+        \\});
+        \\var formatted = formatter.format(iterable);
+        \\var closeCalls = 0;
+        \\var bad = {
+        \\  [Symbol.iterator]: function() {
+        \\    var stepped = false;
+        \\    return {
+        \\      next: function() { return stepped ? { done: true } : (stepped = true, { value: 1, done: false }); },
+        \\      return: function() { closeCalls += 1; throw new Error("close"); }
+        \\    };
+        \\  }
+        \\};
+        \\var primaryTypeError = false;
+        \\try { formatter.format(bad); } catch (error) { primaryTypeError = error instanceof TypeError; }
+        \\manualThrew && manualNextCalls === 0 && iteratorGets === 1 && nextGets === 1 &&
+        \\receiverOk && formatted === "a and b" && primaryTypeError && closeCalls === 1
+    )).asBool());
+}
+
 test "Intl structural part results are reclaimed under a bounded precise heap" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

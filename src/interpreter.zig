@@ -31958,14 +31958,23 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     // closing the iterator on the first non-string (the list is not fully
     // consumed past the offending element).
     var strs: std.ArrayListUnmanaged([]const u8) = .empty;
-    const it = try self.iteratorOf(v);
+    const record = try self.getIteratorRecord(v);
+    const it = record.iterator;
+    const iter_root = try self.pushTempRoot(it);
+    defer self.restoreTempRoots(iter_root);
+    const next_method = record.next_method;
+    const next_root = try self.pushTempRoot(next_method);
+    defer self.restoreTempRoots(next_root);
     while (true) {
-        const r = try self.callMethod(it, "next", &.{});
+        const r = try self.callValueWithThis(next_method, &.{}, it);
+        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
         if ((try self.getProperty(r, "done")).toBoolean()) break;
         const nv = try self.getProperty(r, "value");
         if (!nv.isString()) {
-            self.iteratorClose(it) catch {};
-            return self.throwError("TypeError", "Intl.ListFormat: list items must be strings");
+            self.exception = try self.makeError("TypeError", "Intl.ListFormat: list items must be strings");
+            self.iteratorCloseKeepingThrow(it);
+            try self.notifyDebuggerException(false);
+            return error.Throw;
         }
         try strs.append(self.arena, try nv.asWtf8(self.arena));
     }
