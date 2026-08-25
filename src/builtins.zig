@@ -3266,7 +3266,7 @@ const JsonParsed = struct {
 const JsonParseChildren = union(enum) {
     none,
     elements: std.ArrayListUnmanaged(*JsonParseRecord),
-    entries: std.StringHashMapUnmanaged(*JsonParseRecord),
+    entries: JsonParseEntries,
 };
 
 const JsonParseRecord = struct {
@@ -3275,11 +3275,70 @@ const JsonParseRecord = struct {
     children: JsonParseChildren = .none,
 };
 
+const JsonParseEntryHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, key);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+const JsonParseEntryIndex = std.HashMapUnmanaged(
+    []const u8,
+    *JsonParseRecord,
+    JsonParseEntryHashContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+/// Source records for object children are indexed only when a reviver exists.
+/// The first property lazily installs the parse's secret context; exact bytes
+/// remain authoritative, while precomputed collision sets cannot target Zig's
+/// process-default string hash seed.
+const JsonParseEntries = struct {
+    index: JsonParseEntryIndex = .empty,
+    context: ?JsonParseEntryHashContext = null,
+
+    fn get(entries: *const @This(), key: []const u8) ?*JsonParseRecord {
+        const context = entries.context orelse return null;
+        return entries.index.getContext(key, context);
+    }
+
+    fn putWithContext(
+        entries: *@This(),
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        record: *JsonParseRecord,
+        context: JsonParseEntryHashContext,
+    ) std.mem.Allocator.Error!void {
+        if (entries.context) |installed| {
+            std.debug.assert(installed.seed == context.seed);
+            try entries.index.putContext(allocator, key, record, installed);
+            return;
+        }
+        // Publish the context only after the first table mutation succeeds. An
+        // OOM cannot leave an empty index claiming a seed was installed.
+        try entries.index.putContext(allocator, key, record, context);
+        entries.context = context;
+    }
+};
+
 const JsonParser = struct {
     s: []const u8,
     i: usize,
     interp: *Interpreter,
     track_records: bool = false,
+    record_hash_context: ?JsonParseEntryHashContext = null,
+
+    fn recordHashContext(p: *JsonParser) HostError!JsonParseEntryHashContext {
+        if (p.record_hash_context) |context| return context;
+        const context = JsonParseEntryHashContext{ .seed = try p.interp.newSecureHashSeed() };
+        p.record_hash_context = context;
+        return context;
+    }
 
     fn parsed(p: *JsonParser, val: Value, source: ?[]const u8, children: JsonParseChildren) std.mem.Allocator.Error!JsonParsed {
         if (!p.track_records) return .{ .value = val };
@@ -3474,7 +3533,7 @@ const JsonParser = struct {
     fn parseObject(p: *JsonParser) JErr!JsonParsed {
         p.i += 1; // {
         const result = try p.interp.newObject();
-        var entries: std.StringHashMapUnmanaged(*JsonParseRecord) = .empty;
+        var entries: JsonParseEntries = .{};
         p.skipWs();
         if (p.i < p.s.len and p.s[p.i] == '}') {
             p.i += 1;
@@ -3498,7 +3557,12 @@ const JsonParser = struct {
             // attrs). Not [[Set]] — so "__proto__" becomes a normal own property
             // and duplicate keys overwrite without invoking inherited setters.
             try result.asObj().setOwn(p.interp.arena, p.interp.root_shape, storage_key, child.value);
-            if (p.track_records) try entries.put(p.interp.arena, storage_key, child.record.?);
+            if (p.track_records) try entries.putWithContext(
+                p.interp.arena,
+                storage_key,
+                child.record.?,
+                try p.recordHashContext(),
+            );
             p.skipWs();
             if (p.i >= p.s.len) return error.Invalid;
             if (p.s[p.i] == ',') {
@@ -3540,6 +3604,43 @@ test "JSON parser borrows validated unescaped strings without scratch allocation
 
     var control = JsonParser{ .s = "\"a\x01b\"", .i = 0, .interp = &machine };
     try std.testing.expectError(error.Invalid, control.parseString());
+}
+
+test "JSON parse record indexes install exact seeded contexts failure atomically" {
+    var first_record: JsonParseRecord = .{ .value = Value.num(1) };
+    var replacement_record: JsonParseRecord = .{ .value = Value.num(2) };
+    const first_context = JsonParseEntryHashContext{ .seed = 0x4a53_4f4e_5f41_0001 };
+    const second_context = JsonParseEntryHashContext{ .seed = 0x4a53_4f4e_5f42_0002 };
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed: JsonParseEntries = .{};
+    defer failed.index.deinit(unavailable.allocator());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed.putWithContext(unavailable.allocator(), "first", &first_record, first_context),
+    );
+    try std.testing.expect(failed.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.index.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
+
+    var entries: JsonParseEntries = .{};
+    defer entries.index.deinit(std.testing.allocator);
+    var wide_key: [4096]u8 = @splat('w');
+    try entries.putWithContext(std.testing.allocator, &wide_key, &first_record, first_context);
+    try std.testing.expectEqual(first_context.seed, entries.context.?.seed);
+    try std.testing.expect(entries.get(&wide_key) == &first_record);
+    try entries.putWithContext(std.testing.allocator, &wide_key, &replacement_record, first_context);
+    try std.testing.expect(entries.get(&wide_key) == &replacement_record);
+    try entries.putWithContext(std.testing.allocator, "\x00\x00\x00escaped", &first_record, first_context);
+    try entries.putWithContext(std.testing.allocator, "1", &first_record, first_context);
+    try std.testing.expect(entries.get("\x00\x00\x00escaped") == &first_record);
+    try std.testing.expect(entries.get("1") == &first_record);
+    try std.testing.expectEqual(@as(usize, 3), entries.index.count());
+
+    // Exact equality decides membership; changing the secret changes only
+    // placement, so the same attacker-controlled bytes cannot target one fixed
+    // process-default hash image across parses.
+    try std.testing.expect(first_context.hash(&wide_key) != second_context.hash(&wide_key));
 }
 
 test "JSON active cycle index promotes atomically and preserves path semantics" {

@@ -12174,7 +12174,10 @@ pub const Interpreter = struct {
         return self.makeMapWithIntrinsic(init_v, "Map");
     }
 
-    fn newSecureHashSeed(self: *Interpreter) EvalError!u64 {
+    /// Issue one unpredictable seed for an attacker-controlled native hash
+    /// table. Builtins with invocation-local side indexes share this stream so
+    /// they inherit the same fail-closed entropy boundary as Map/Set storage.
+    pub fn newSecureHashSeed(self: *Interpreter) EvalError!u64 {
         if (!self.secure_hash_prng_seeded) {
             var bytes: [8]u8 = undefined;
             // Hash tables on attacker-controlled content are an algorithmic-
