@@ -11232,6 +11232,30 @@ test "spread of iterables (generator, string, user iterator)" {
     )).asBool());
 }
 
+test "internal iterator factories bypass Array @@iterator dispatch" {
+    try std.testing.expect((try evalIn(
+        \\var iteratorCalls = 0;
+        \\Array.prototype[Symbol.iterator] = function() {
+        \\  iteratorCalls += 1;
+        \\  throw new Error("unexpected Array @@iterator dispatch");
+        \\};
+        \\var values = Array.prototype.values.call([3]);
+        \\var arrayStep = values.next();
+        \\var params = new URLSearchParams("a=1");
+        \\var paramsStep = params.entries().next();
+        \\var headers = new Headers();
+        \\headers.append("x-test", "ok");
+        \\var headersStep = headers.entries().next();
+        \\var form = new FormData();
+        \\form.append("field", "value");
+        \\var formStep = form.entries().next();
+        \\iteratorCalls === 0 && arrayStep.value === 3 &&
+        \\paramsStep.value[0] === "a" && paramsStep.value[1] === "1" &&
+        \\headersStep.value[0] === "x-test" && headersStep.value[1] === "ok" &&
+        \\formStep.value[0] === "field" && formStep.value[1] === "value"
+    )).asBool());
+}
+
 test "spread syntax requires and captures an iterator record" {
     try std.testing.expect((try evalIn(
         \\var manualNextCalls = 0;

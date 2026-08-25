@@ -17227,7 +17227,7 @@ pub const Interpreter = struct {
             }
             return if (want_index) Value.num(-1) else Value.undef();
         }
-        if (eq(name, "values")) return try self.iteratorOf(Value.obj(o));
+        if (eq(name, "values")) return try self.makeCursorIteratorWithKind(Value.obj(o), 0);
         if (eq(name, "keys")) return try self.makeCursorIteratorWithKind(Value.obj(o), 1);
         if (eq(name, "entries")) return try self.makeCursorIteratorWithKind(Value.obj(o), 2);
         if (eq(name, "toString")) {
@@ -48476,7 +48476,7 @@ fn uspIterFn(comptime which: enum { entries, keys, values }) value.NativeFn {
                     },
                 }
             }
-            return try self.iteratorOf(Value.obj(snap));
+            return try self.makeCursorIterator(Value.obj(snap));
         }
     }.call;
 }
@@ -48699,7 +48699,7 @@ fn headersIterFn(comptime which: enum { entries, keys, values }) value.NativeFn 
                     .entries => try snap.appendElement(self.arena, pair),
                 }
             }
-            return try self.iteratorOf(Value.obj(snap));
+            return try self.makeCursorIterator(Value.obj(snap));
         }
     }.call;
 }
@@ -48959,7 +48959,7 @@ fn fdIterFn(comptime which: enum { entries, keys, values }) value.NativeFn {
                     .entries => try snap.appendElement(self.arena, pair),
                 }
             }
-            return try self.iteratorOf(Value.obj(snap));
+            return try self.makeCursorIterator(Value.obj(snap));
         }
     }.call;
 }
