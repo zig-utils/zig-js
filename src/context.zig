@@ -23662,6 +23662,240 @@ test "tree-walker sync iteration uses strict captured iterator records" {
     try std.testing.expect(result.asBool());
 }
 
+test "seeded sync iterator protocol differential preserves exact tier observables" {
+    const source =
+        \\globalThis.iteratorTierTrace = [];
+        \\globalThis.iteratorTierMessage = "";
+        \\function iteratorTierStep(done, value, doneFailure, valueFailure) {
+        \\  var result = {};
+        \\  Object.defineProperty(result, "done", {
+        \\    get: function () {
+        \\      iteratorTierTrace.push("done:get");
+        \\      if (doneFailure) throw new Error("done-stop");
+        \\      return done;
+        \\    }
+        \\  });
+        \\  Object.defineProperty(result, "value", {
+        \\    get: function () {
+        \\      iteratorTierTrace.push("value:get");
+        \\      if (valueFailure) throw new Error("value-stop");
+        \\      return value;
+        \\    }
+        \\  });
+        \\  return result;
+        \\}
+        \\function iteratorTierRun(mode, payload, name) {
+        \\  "use strict";
+        \\  iteratorTierTrace = ["case:" + name];
+        \\  iteratorTierMessage = "";
+        \\  var step = 0;
+        \\  var input = {};
+        \\  var iterator = {};
+        \\  Object.defineProperty(input, Symbol.iterator, {
+        \\    get: function () {
+        \\      iteratorTierTrace.push("iterator:get");
+        \\      if (mode === 0) return undefined;
+        \\      if (mode === 1) return 1;
+        \\      return function () {
+        \\        iteratorTierTrace.push("iterator:call:" + (this === input));
+        \\        if (mode === 2) return 1;
+        \\        return iterator;
+        \\      };
+        \\    }
+        \\  });
+        \\  Object.defineProperty(iterator, "next", {
+        \\    configurable: true,
+        \\    get: function () {
+        \\      iteratorTierTrace.push("next:get");
+        \\      if (mode === 3) return 1;
+        \\      return function () {
+        \\        iteratorTierTrace.push("next:call:" + (this === iterator) + ":" + step);
+        \\        if (mode === 5) return 1;
+        \\        if (mode === 6) return iteratorTierStep(false, payload, true, false);
+        \\        if (mode === 7) return iteratorTierStep(true, payload, false, false);
+        \\        if (mode === 8) return iteratorTierStep(false, payload, false, true);
+        \\        if (step === 0) {
+        \\          step = 1;
+        \\          if (mode === 4) {
+        \\            Object.defineProperty(iterator, "next", {
+        \\              value: function () { iteratorTierTrace.push("replacement:next"); return iteratorTierStep(true, 0, false, false); }
+        \\            });
+        \\          }
+        \\          return iteratorTierStep(false, payload, false, false);
+        \\        }
+        \\        return iteratorTierStep(true, 0, false, false);
+        \\      };
+        \\    }
+        \\  });
+        \\  Object.defineProperty(iterator, "return", {
+        \\    get: function () {
+        \\      iteratorTierTrace.push("return:get");
+        \\      if (mode === 14) return 1;
+        \\      return function () {
+        \\        iteratorTierTrace.push("return:call:" + (this === iterator));
+        \\        if (mode === 16) throw new Error("return-stop");
+        \\        if (mode === 15) return 1;
+        \\        return {};
+        \\      };
+        \\    }
+        \\  });
+        \\  try {
+        \\    if (mode === 11) {
+        \\      var [single] = input;
+        \\      return single;
+        \\    }
+        \\    if (mode === 12) {
+        \\      var spread = [...input];
+        \\      iteratorTierTrace.push("spread:" + spread.length);
+        \\      return spread[0];
+        \\    }
+        \\    var total = 0;
+        \\    for (var value of input) {
+        \\      iteratorTierTrace.push("body:" + value);
+        \\      total = total + value;
+        \\      if (mode === 9 || mode === 14 || mode === 15) break;
+        \\      if (mode === 10 || mode === 16) throw new Error("body-stop");
+        \\    }
+        \\    return total;
+        \\  } catch (error) {
+        \\    iteratorTierMessage = String(error.message);
+        \\    iteratorTierTrace.push("error:" + error.name);
+        \\    return -1000 - mode;
+        \\  }
+        \\}
+    ;
+
+    const Case = struct {
+        name: []const u8,
+        mode: u8,
+    };
+    const cases = [_]Case{
+        .{ .name = "missing-method", .mode = 0 },
+        .{ .name = "noncallable-method", .mode = 1 },
+        .{ .name = "primitive-iterator", .mode = 2 },
+        .{ .name = "noncallable-next", .mode = 3 },
+        .{ .name = "captured-next", .mode = 4 },
+        .{ .name = "primitive-step", .mode = 5 },
+        .{ .name = "abrupt-done", .mode = 6 },
+        .{ .name = "done-skips-value", .mode = 7 },
+        .{ .name = "abrupt-value", .mode = 8 },
+        .{ .name = "break-close", .mode = 9 },
+        .{ .name = "throw-close", .mode = 10 },
+        .{ .name = "destructuring-close", .mode = 11 },
+        .{ .name = "spread-exhaust", .mode = 12 },
+        .{ .name = "normal-exhaust", .mode = 13 },
+        .{ .name = "noncallable-return", .mode = 14 },
+        .{ .name = "primitive-return", .mode = 15 },
+        .{ .name = "abrupt-return-preserves-throw", .mode = 16 },
+    };
+    const Seed = struct {
+        fn next(state: *u64) u32 {
+            state.* = state.* *% 6364136223846793005 +% 1442695040888963407;
+            return @truncate(state.* >> 32);
+        }
+    };
+
+    var order: [cases.len]usize = undefined;
+    for (&order, 0..) |*slot, index| slot.* = index;
+    var seed: u64 = 0x4954_4552_4154_4f52;
+    var remaining = order.len;
+    while (remaining > 1) {
+        const selected = Seed.next(&seed) % @as(u32, @intCast(remaining));
+        remaining -= 1;
+        std.mem.swap(usize, &order[remaining], &order[selected]);
+    }
+
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+    const contexts = [_]*Context{ tree_ctx, bytecode_ctx };
+    for (contexts) |ctx| _ = try ctx.evaluate(source);
+
+    var seen: [cases.len]bool = @splat(false);
+    for (order) |case_index| {
+        const case = cases[case_index];
+        try std.testing.expect(!seen[case.mode]);
+        seen[case.mode] = true;
+        const payload = Seed.next(&seed) % 89 + 10;
+        const expression = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "iteratorTierRun({d}, {d}, \"{s}\")",
+            .{ case.mode, payload, case.name },
+        );
+        defer std.testing.allocator.free(expression);
+
+        const expected_trace = switch (case.mode) {
+            0, 1 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|error:TypeError", .{case.name}),
+            2 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|error:TypeError", .{case.name}),
+            3 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|error:TypeError", .{case.name}),
+            4, 13 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|value:get|body:{d}|next:call:true:1|done:get", .{ case.name, payload }),
+            5 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|error:TypeError", .{case.name}),
+            6 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|error:Error", .{case.name}),
+            7 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get", .{case.name}),
+            8 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|value:get|error:Error", .{case.name}),
+            9 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|value:get|body:{d}|return:get|return:call:true", .{ case.name, payload }),
+            10, 16 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|value:get|body:{d}|return:get|return:call:true|error:Error", .{ case.name, payload }),
+            11 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|value:get|return:get|return:call:true", .{case.name}),
+            12 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|value:get|next:call:true:1|done:get|spread:1", .{case.name}),
+            14 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|value:get|body:{d}|return:get|error:TypeError", .{ case.name, payload }),
+            15 => try std.fmt.allocPrint(std.testing.allocator, "case:{s}|iterator:get|iterator:call:true|next:get|next:call:true:0|done:get|value:get|body:{d}|return:get|return:call:true|error:TypeError", .{ case.name, payload }),
+            else => unreachable,
+        };
+        defer std.testing.allocator.free(expected_trace);
+
+        var result_bits: [modes.len]u64 = undefined;
+        var states: [modes.len]?[]u8 = @splat(null);
+        defer for (states) |state| if (state) |owned| std.testing.allocator.free(owned);
+        for (contexts, 0..) |ctx, index| {
+            const result = try ctx.evaluate(expression);
+            result_bits[index] = result.rawBits();
+            const trace = (try ctx.evaluate("iteratorTierTrace.join('|')")).asStr();
+            try std.testing.expectEqualStrings(expected_trace, trace);
+            const trace_owned = try std.testing.allocator.dupe(u8, trace);
+            defer std.testing.allocator.free(trace_owned);
+            const message = (try ctx.evaluate("iteratorTierMessage")).asStr();
+            states[index] = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{s}||message:{s}",
+                .{ trace_owned, message },
+            );
+
+            const expected_result: f64 = switch (case.mode) {
+                4, 9, 11, 12, 13 => @floatFromInt(payload),
+                7 => 0,
+                else => -1000 - @as(f64, @floatFromInt(case.mode)),
+            };
+            try std.testing.expectEqual(expected_result, result.asNum());
+            const expected_message: ?[]const u8 = switch (case.mode) {
+                6 => "done-stop",
+                8 => "value-stop",
+                10, 16 => "body-stop",
+                else => null,
+            };
+            if (expected_message) |expected|
+                try std.testing.expectEqualStrings(expected, message);
+        }
+        try std.testing.expectEqual(result_bits[0], result_bits[1]);
+        try std.testing.expectEqualStrings(states[0].?, states[1].?);
+    }
+    for (seen) |was_seen| try std.testing.expect(was_seen);
+
+    const tree_inventory = contexts[0].bytecodeAdmissionSnapshot();
+    try std.testing.expect(tree_inventory.count(.plain_forced_tree_walker) >= 2);
+    try std.testing.expectEqual(@as(u64, 0), tree_inventory.count(.program_compiled));
+    const bytecode_inventory = contexts[1].bytecodeAdmissionSnapshot();
+    try std.testing.expect(bytecode_inventory.count(.template_plain_compiled) >= 2);
+    try std.testing.expectEqual(@as(u64, 0), bytecode_inventory.count(.template_plain_fallback));
+}
+
 test "forced tree-walker and required bytecode agree on nullish coalescing" {
     const source =
         \\var nullishHits = 0;

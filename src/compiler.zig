@@ -3137,8 +3137,9 @@ pub const Compiler = struct {
 
         const done_name = try self.freshTemp();
         // This flag tracks whether an abrupt completion must close the iterator.
-        // It becomes false only after a successful `{ done:false }` result; a
-        // throw from `next()`/`await next()` itself does not perform IteratorClose.
+        // It becomes false only after IteratorValue succeeds: throws from
+        // `next()`, `done`, or `value` precede the close-protected binding/body
+        // region in ForIn/OfBodyEvaluation and do not perform IteratorClose.
         _ = try self.chunk.emit(.load_true, 0);
         try self.emitDefine(done_name);
 
@@ -3166,6 +3167,11 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
         _ = try self.chunk.emit(.not, 0);
         const to_end = try self.chunk.emit(.jump_if_false, 0);
+        // IteratorValue itself is outside IteratorClose. Leave its value on the
+        // operand stack, then arm the close handler for environment creation,
+        // target binding, and body evaluation.
+        try self.emitLoad(r_name);
+        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
         _ = try self.chunk.emit(.load_false, 0);
         try self.emitStore(done_name);
         _ = try self.chunk.emit(.pop, 0);
@@ -3175,9 +3181,8 @@ pub const Compiler = struct {
             else
                 try self.emitFreshEnvironmentLexicalPattern(target, decl_kind.? == .@"const");
         }
-        // bind r.value to the loop target (identifier or destructuring pattern)
-        try self.emitLoad(r_name);
-        _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
+        // Bind the already-read value to the loop target. Abrupt target
+        // resolution/destructuring is inside the close-protected region.
         const native_pattern = self.scope != null and (target.* == .arr_pattern or target.* == .obj_pattern);
         try self.compileLoopBind(decl_kind, target, captured_binding, native_pattern);
         try self.compileRepeatedBody(body);
@@ -3201,6 +3206,13 @@ pub const Compiler = struct {
         if (loop.breaks.items.len > 0) {
             const skip_close = try self.chunk.emit(.jump, 0);
             for (loop.breaks.items) |j| self.chunk.patchToHere(j);
+            // The explicit normal-completion close owns this break. Disarm the
+            // enclosing abrupt handler before calling `return`: if IteratorClose
+            // itself throws (including for a primitive result), unwinding must
+            // not call the same iterator's `return` a second time.
+            _ = try self.chunk.emit(.load_true, 0);
+            try self.emitStore(done_name);
+            _ = try self.chunk.emit(.pop, 0);
             try self.emitLoad(it_name);
             if (await_each) try self.emitAsyncIteratorClose(false) else _ = try self.chunk.emit(.iter_close, 0);
             self.chunk.patchToHere(skip_close);
