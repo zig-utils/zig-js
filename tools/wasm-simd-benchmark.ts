@@ -416,7 +416,7 @@ function writeRaw(rows: Row[], path: string): void {
       "\n",
   );
 }
-function selfTest(): void {
+export function selfTest(): void {
   const rows = parseRows("zig-js\tsingle\twasm_integer_simd\t1\t2\t0\t3\t4\n");
   requireValue(
     rows.length === 1 && rows[0].elapsed_ns === 3,

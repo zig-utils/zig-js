@@ -448,7 +448,7 @@ export function render(artifact: Artifact, rawName: string): string {
   return lines.join("\n");
 }
 
-function selfTest(): void {
+export function selfTest(): void {
   const parsed = parseTime(
     "real 2.50\nuser 3.00\nsys 1.25\n             104857600  maximum resident set size\n",
   );

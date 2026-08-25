@@ -580,7 +580,7 @@ function expectFailure(action: () => void, pattern: string): void {
     `expected failure containing ${pattern}, got ${message}`,
   );
 }
-function selfTest(): void {
+export function selfTest(): void {
   const expected = fixture(),
     parsed = parseRow(
       FIELDS.map((field) => String(expected[field])).join("\t"),

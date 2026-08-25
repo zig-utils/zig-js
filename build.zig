@@ -2124,7 +2124,6 @@ pub fn build(b: *std.Build) void {
     // an out-of-tree artifact after each sample. A failed applicable row makes
     // the final aggregate unavailable and the step nonzero, after preserving
     // the complete failure record.
-    const independent_suite_collector_self_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-suite-collector.ts", "--self-test" });
     const independent_suite_collect_step = b.step("independent-suite-collect", "Collect repeated isolated Octane samples into a durable external artifact");
     if (independent_suite_checkout) |checkout| {
         if (independent_suite_zig_js_revision) |revision| {
@@ -2160,7 +2159,6 @@ pub fn build(b: *std.Build) void {
         independent_suite_collect_step.dependOn(&missing_checkout.step);
     }
 
-    const independent_suite_recognizer_self_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-suite-recognizer.ts", "--self-test" });
     const independent_suite_recognizer_step = b.step("independent-suite-recognizer", "Pair exact and source-hash-mutated Octane attribution diagnostics");
     if (independent_suite_checkout) |checkout| {
         if (independent_suite_zig_js_revision) |revision| {
@@ -2192,45 +2190,15 @@ pub fn build(b: *std.Build) void {
     // runners are deliberately separate executables so zig-js's JSC-shaped C
     // exports cannot interpose on the real framework symbols. Home TypeScript
     // only orchestrates runs, validates checksums, and renders raw/report data.
-    const comparison_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/benchmark-comparison.ts", "--self-test" });
-    const comparison_publication_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/benchmark-publication.ts", "--self-test" });
-    const representative_matrix_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/test_representative_matrix.ts" });
-    const representative_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-benchmark.ts", "--self-test" });
-    const representative_tier_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-tier-attribution.ts", "--self-test" });
-    const instrumentation_overhead_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/instrumentation-overhead.ts", "--self-test" });
     const build_feedback_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/build-feedback.ts", "--self-test" });
-    const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
-    const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
-    const algorithmic_growth_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/algorithmic-growth.ts", "--self-test" });
-    const generation_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-generation-benchmark.ts", "--self-test" });
-    const wasm_simd_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-simd-benchmark.ts", "--self-test" });
-    const wasm_threads_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-threads-benchmark.ts", "--self-test" });
-    const object_churn_gc_profile_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/object-churn-gc-profile.ts", "--self-test" });
-    const independent_object_churn_profile_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-object-churn-profile.ts", "--self-test" });
-    const shared_object_churn_ab_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/shared-object-churn-ab.ts", "--self-test" });
+    const benchmark_harness_self_tests = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/benchmark-harness-self-tests.ts", "--self-test" });
+    benchmark_harness_self_tests.setName("benchmark harness self-tests (18 validators, one Home compile)");
     const optimizer_release_inventory_check = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/optimizer-release-inventory.ts" });
     const comparison_harness_test_step = b.step("benchmark-comparison-test", "Test benchmark matrix validation without running benchmarks");
-    comparison_harness_test_step.dependOn(&comparison_harness_test.step);
-    comparison_harness_test_step.dependOn(&comparison_publication_test.step);
-    comparison_harness_test_step.dependOn(&representative_matrix_test.step);
-    comparison_harness_test_step.dependOn(&representative_benchmark_test.step);
-    comparison_harness_test_step.dependOn(&representative_tier_attribution_test.step);
-    comparison_harness_test_step.dependOn(&instrumentation_overhead_test.step);
-    comparison_harness_test_step.dependOn(&build_feedback_test.step);
-    comparison_harness_test_step.dependOn(&performance_attribution_test.step);
-    comparison_harness_test_step.dependOn(&exact_parent_regression_test.step);
-    comparison_harness_test_step.dependOn(&algorithmic_growth_test.step);
-    comparison_harness_test_step.dependOn(&generation_harness_test.step);
-    comparison_harness_test_step.dependOn(&wasm_simd_benchmark_test.step);
-    comparison_harness_test_step.dependOn(&wasm_threads_benchmark_test.step);
-    comparison_harness_test_step.dependOn(&object_churn_gc_profile_test.step);
-    comparison_harness_test_step.dependOn(&independent_object_churn_profile_test.step);
-    comparison_harness_test_step.dependOn(&shared_object_churn_ab_test.step);
+    comparison_harness_test_step.dependOn(&benchmark_harness_self_tests.step);
     comparison_harness_test_step.dependOn(&run_independent_suite_audit.step);
     comparison_harness_test_step.dependOn(&run_independent_suite_audit_tests.step);
     comparison_harness_test_step.dependOn(&independent_suite_zig_js_self_test.step);
-    comparison_harness_test_step.dependOn(&independent_suite_collector_self_test.step);
-    comparison_harness_test_step.dependOn(&independent_suite_recognizer_self_test.step);
     comparison_harness_test_step.dependOn(independent_suite_jsc_self_test_step);
     comparison_harness_test_step.dependOn(&vm_quickening_inventory_cmd.step);
     comparison_harness_test_step.dependOn(&vm_quickening_inventory_self_test.step);

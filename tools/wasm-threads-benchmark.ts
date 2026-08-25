@@ -350,7 +350,7 @@ function writeRaw(rows: Row[], path: string): void {
       "\n",
   );
 }
-function selfTest(): void {
+export function selfTest(): void {
   const rows = parseRows(
     "zig-js\tshared\twasm_threads_atomic_add\t2\t10\t0\t3\t20\n",
   );
