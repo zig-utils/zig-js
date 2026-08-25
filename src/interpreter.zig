@@ -5311,7 +5311,9 @@ pub const Interpreter = struct {
     /// keys are excluded.
     pub fn forInKeyList(self: *Interpreter, start: *value.Object) EvalError![]const []const u8 {
         var out: std.ArrayListUnmanaged([]const u8) = .empty;
-        var visited: std.StringHashMapUnmanaged(void) = .empty;
+        const scratch = self.scratch_allocator orelse self.arena;
+        var visited: SecureStringMembership = .{};
+        defer visited.deinit(scratch);
         var cur: ?*value.Object = start;
         while (cur) |o| {
             // A String wrapper's own enumerable character indices "0".."len-1".
@@ -5320,8 +5322,7 @@ pub const Interpreter = struct {
                 var i: usize = 0;
                 while (i < plen) : (i += 1) {
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-                    if (visited.contains(key)) continue;
-                    try visited.put(self.arena, key, {});
+                    if (try visited.getOrPutSecure(self, scratch, key)) continue;
                     try out.append(self.arena, key);
                 }
             };
@@ -5333,8 +5334,7 @@ pub const Interpreter = struct {
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
                     // Accessor at this index comes from ownKeys below.
                     if (o.getAccessor(key) != null) continue;
-                    if (visited.contains(key)) continue;
-                    try visited.put(self.arena, key, {});
+                    if (try visited.getOrPutSecure(self, scratch, key)) continue;
                     if (o.getAttr(key).enumerable) try out.append(self.arena, key);
                 }
             }
@@ -5346,8 +5346,7 @@ pub const Interpreter = struct {
                 const len = ta.currentLength() orelse 0;
                 while (i < len) : (i += 1) {
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-                    if (visited.contains(key)) continue;
-                    try visited.put(self.arena, key, {});
+                    if (try visited.getOrPutSecure(self, scratch, key)) continue;
                     try out.append(self.arena, key);
                 }
             }
@@ -5357,8 +5356,7 @@ pub const Interpreter = struct {
                 try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena);
             for (own_keys) |k| {
                 if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
-                if (visited.contains(k)) continue;
-                try visited.put(self.arena, k, {});
+                if (try visited.getOrPutSecure(self, scratch, k)) continue;
                 const enumerable = if (moduleNsOf(o) != null) blk: {
                     const desc = try moduleNsDesc(self, o, k);
                     break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |e| e.toBoolean() else false;
@@ -5379,12 +5377,14 @@ pub const Interpreter = struct {
     /// participate through the host-class own-key bridge.
     pub fn cApiPropertyNameSnapshot(self: *Interpreter, start: *value.Object) EvalError![]const []const u8 {
         var out: std.ArrayListUnmanaged([]const u8) = .empty;
-        var visited: std.StringHashMapUnmanaged(void) = .empty;
+        const scratch = self.scratch_allocator orelse self.arena;
+        var visited: SecureStringMembership = .{};
+        defer visited.deinit(scratch);
         var cur: ?*value.Object = start;
         while (cur) |object| {
             for (try self.objectOwnKeysList(object)) |key| {
-                if (value.isRealSymbolKey(key) or value.isHiddenInternalKey(key) or value.isPrivateKey(key) or visited.contains(key)) continue;
-                try visited.put(self.arena, key, {});
+                if (value.isRealSymbolKey(key) or value.isHiddenInternalKey(key) or value.isPrivateKey(key)) continue;
+                if (try visited.getOrPutSecure(self, scratch, key)) continue;
                 const enumerable = if (moduleNsOf(object) != null) blk: {
                     const desc = try moduleNsDesc(self, object, key);
                     break :blk desc.isObject() and if (desc.asObj().getOwn("enumerable")) |entry| entry.toBoolean() else false;
@@ -13257,8 +13257,10 @@ pub const Interpreter = struct {
         }
         var strings: std.ArrayListUnmanaged([]const u8) = .empty;
         var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
-        var seen_strings: std.StringHashMapUnmanaged(void) = .empty;
-        defer seen_strings.deinit(scratch);
+        // Ordinary own-key storage is already unique. Allocate membership only
+        // if a host hook contributes a string key that can overlap it.
+        var seen_strings: ?SecureStringMembership = null;
+        defer if (seen_strings) |*membership| membership.deinit(scratch);
         if (t.hostClassHooks()) |hooks| if (hooks.own_keys) |own_keys| {
             self.recordExecutionTier(.host_callbacks);
             for (try own_keys(@ptrCast(self), t)) |k| {
@@ -13269,8 +13271,8 @@ pub const Interpreter = struct {
                     const entry = try seen.getOrPut(scratch, idx);
                     if (!entry.found_existing) try indices.append(self.arena, k);
                 } else {
-                    const entry = try seen_strings.getOrPut(scratch, k);
-                    if (!entry.found_existing) try strings.append(self.arena, k);
+                    if (seen_strings == null) seen_strings = .{};
+                    if (!try seen_strings.?.getOrPutSecure(self, scratch, k)) try strings.append(self.arena, k);
                 }
             }
         };
@@ -13282,8 +13284,9 @@ pub const Interpreter = struct {
                 const entry = try seen.getOrPut(scratch, idx);
                 if (!entry.found_existing) try indices.append(self.arena, k);
             } else {
-                const entry = try seen_strings.getOrPut(scratch, k);
-                if (!entry.found_existing) try strings.append(self.arena, k);
+                if (seen_strings) |*membership| {
+                    if (!try membership.getOrPutSecure(self, scratch, k)) try strings.append(self.arena, k);
+                } else try strings.append(self.arena, k);
             }
         }
         std.mem.sort([]const u8, indices.items, {}, struct {
@@ -13314,7 +13317,7 @@ pub const Interpreter = struct {
         return list.items;
     }
 
-    const ProxyOwnKeysHashContext = struct {
+    const SecureStringHashContext = struct {
         seed: u64,
 
         pub fn hash(context: @This(), key: []const u8) u64 {
@@ -13326,16 +13329,16 @@ pub const Interpreter = struct {
         }
     };
 
-    const ProxyOwnKeysIndex = std.HashMapUnmanaged(
+    const SecureStringIndex = std.HashMapUnmanaged(
         []const u8,
         void,
-        ProxyOwnKeysHashContext,
+        SecureStringHashContext,
         std.hash_map.default_max_load_percentage,
     );
 
-    const ProxyOwnKeysMembership = struct {
-        index: ProxyOwnKeysIndex = .empty,
-        context: ?ProxyOwnKeysHashContext = null,
+    const SecureStringMembership = struct {
+        index: SecureStringIndex = .empty,
+        context: ?SecureStringHashContext = null,
 
         fn deinit(membership: *@This(), allocator: std.mem.Allocator) void {
             membership.index.deinit(allocator);
@@ -13345,7 +13348,7 @@ pub const Interpreter = struct {
             membership: *@This(),
             allocator: std.mem.Allocator,
             key: []const u8,
-            context: ProxyOwnKeysHashContext,
+            context: SecureStringHashContext,
         ) std.mem.Allocator.Error!bool {
             if (membership.context) |installed| {
                 std.debug.assert(installed.seed == context.seed);
@@ -13353,9 +13356,19 @@ pub const Interpreter = struct {
             }
             const entry = try membership.index.getOrPutContext(allocator, key, context);
             // A failed first allocation leaves no published seed or partially
-            // initialized membership index for the invariant checks below.
+            // initialized membership index for any enumeration caller.
             membership.context = context;
             return entry.found_existing;
+        }
+
+        fn getOrPutSecure(
+            membership: *@This(),
+            interpreter: *Interpreter,
+            allocator: std.mem.Allocator,
+            key: []const u8,
+        ) EvalError!bool {
+            const context = membership.context orelse SecureStringHashContext{ .seed = try interpreter.newSecureHashSeed() };
+            return membership.putWithContext(allocator, key, context);
         }
 
         fn remove(membership: *@This(), key: []const u8) bool {
@@ -13391,11 +13404,10 @@ pub const Interpreter = struct {
             // [[OwnPropertyKeys]] invariants: no duplicates; every
             // non-configurable target key must be present; for a non-extensible
             // target the result must be exactly the target's keys.
-            var seen: ProxyOwnKeysMembership = .{};
+            var seen: SecureStringMembership = .{};
             defer seen.deinit(scratch);
             for (list.items) |k| {
-                const hash_context = seen.context orelse ProxyOwnKeysHashContext{ .seed = try self.newSecureHashSeed() };
-                if (try seen.putWithContext(scratch, k, hash_context))
+                if (try seen.getOrPutSecure(self, scratch, k))
                     return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
             }
             const extensible = target.isExtensible();
@@ -52582,11 +52594,11 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
 }
 
 test "Proxy ownKeys membership installs exact seeded contexts failure atomically" {
-    const first_context = Interpreter.ProxyOwnKeysHashContext{ .seed = 0x5052_4f58_595f_0001 };
-    const second_context = Interpreter.ProxyOwnKeysHashContext{ .seed = 0x5052_4f58_595f_0002 };
+    const first_context = Interpreter.SecureStringHashContext{ .seed = 0x5052_4f58_595f_0001 };
+    const second_context = Interpreter.SecureStringHashContext{ .seed = 0x5052_4f58_595f_0002 };
 
     var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
-    var failed: Interpreter.ProxyOwnKeysMembership = .{};
+    var failed: Interpreter.SecureStringMembership = .{};
     defer failed.deinit(unavailable.allocator());
     try std.testing.expectError(
         error.OutOfMemory,
@@ -52596,7 +52608,7 @@ test "Proxy ownKeys membership installs exact seeded contexts failure atomically
     try std.testing.expectEqual(@as(usize, 0), failed.count());
     try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
 
-    var membership: Interpreter.ProxyOwnKeysMembership = .{};
+    var membership: Interpreter.SecureStringMembership = .{};
     defer membership.deinit(std.testing.allocator);
     var wide_key: [4096]u8 = @splat('w');
     try std.testing.expect(!try membership.putWithContext(std.testing.allocator, &wide_key, first_context));

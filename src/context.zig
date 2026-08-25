@@ -15637,6 +15637,60 @@ test "Proxy ownKeys preserves exact seeded trap membership" {
     )).asBool());
 }
 
+test "C-API property-name snapshot preserves exact secure membership" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const object = try ctx.evaluate(
+        \\(() => {
+        \\  const wide = "w".repeat(4096);
+        \\  const nul = "\u0000key";
+        \\  const proto = { shadowed: 1 };
+        \\  proto[wide] = 2;
+        \\  proto[nul] = 3;
+        \\  const value = Object.create(proto);
+        \\  value.own = 4;
+        \\  Object.defineProperty(value, "shadowed", { enumerable: false, value: 5 });
+        \\  return value;
+        \\})()
+    );
+    var machine = ctx.interpreter();
+    const keys = try machine.cApiPropertyNameSnapshot(object.asObj());
+    try std.testing.expectEqual(@as(usize, 3), keys.len);
+    try std.testing.expectEqualStrings("own", value.decodeStringKey(keys[0]));
+    try std.testing.expectEqual(@as(usize, 4096), value.decodeStringKey(keys[1]).len);
+    try std.testing.expectEqualStrings("\x00key", value.decodeStringKey(keys[2]));
+
+    const Host = struct {
+        fn finish(_: *value.CApiObjectOwner) void {}
+        fn ownKeys(raw_machine: *anyopaque, _: *value.Object) value.HostError![]const []const u8 {
+            const host_machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+            const wide = try host_machine.arena.alloc(u8, 4096);
+            @memset(wide, 'h');
+            const names = try host_machine.arena.alloc([]const u8, 4);
+            names[0] = "overlap";
+            names[1] = wide;
+            names[2] = "\x00\x00\x00host";
+            names[3] = "overlap";
+            return names;
+        }
+        fn attributes(_: *anyopaque, _: *value.Object, _: []const u8) value.HostError!?value.PropAttr {
+            return .{ .enumerable = true };
+        }
+        const hooks: value.HostClassHooks = .{ .own_keys = ownKeys, .attributes = attributes };
+    };
+    const host_object = (try machine.newObject()).asObj();
+    try host_object.setOwn(machine.arena, machine.root_shape, "overlap", Value.num(1));
+    try host_object.setOwn(machine.arena, machine.root_shape, "ordinary", Value.num(2));
+    const host_owner = try ctx.createCApiObjectOwner(@ptrCast(ctx), Host.finish);
+    try host_object.setCApiObjectClass(ctx.arena(), host_owner, &Host.hooks);
+    const host_keys = try machine.cApiPropertyNameSnapshot(host_object);
+    try std.testing.expectEqual(@as(usize, 4), host_keys.len);
+    try std.testing.expectEqualStrings("overlap", value.decodeStringKey(host_keys[0]));
+    try std.testing.expectEqual(@as(usize, 4096), value.decodeStringKey(host_keys[1]).len);
+    try std.testing.expectEqualStrings("\x00host", value.decodeStringKey(host_keys[2]));
+    try std.testing.expectEqualStrings("ordinary", value.decodeStringKey(host_keys[3]));
+}
+
 test "Reflect.* require a real Object target (Symbol/primitive throws)" {
     // A Symbol is internally object-tagged, but Reflect.* must reject it.
     try std.testing.expectError(error.Throw, evalIn("Reflect.get(Symbol(), 'x')"));
@@ -24072,6 +24126,19 @@ test "forced tree-walker and required bytecode agree on owned for-in enumeration
         \\  for (var key in object) out.push(key);
         \\  return out.join(",");
         \\}
+        \\function secureMembershipForIn() {
+        \\  var wide = "w".repeat(4096);
+        \\  var nul = "\u0000key";
+        \\  var proto = { shadowed: 1 };
+        \\  proto[wide] = 2;
+        \\  proto[nul] = 3;
+        \\  var object = Object.create(proto);
+        \\  object.own = 4;
+        \\  Object.defineProperty(object, "shadowed", { enumerable: false, value: 5 });
+        \\  var keys = [];
+        \\  for (var key in object) keys.push(key);
+        \\  return keys.length === 3 && keys[0] === "own" && keys[1] === wide && keys[2] === nul;
+        \\}
         \\function returnForIn(object) { for (var key in object) return key; return "none"; }
         \\function outerContinueForIn() { var out = ""; outer: for (var i = 0; i < 2; i++) { for (var key in { a: 1, b: 2 }) { out += i + key; continue outer; } } return out; }
         \\function throwingForIn() {
@@ -24096,6 +24163,7 @@ test "forced tree-walker and required bytecode agree on owned for-in enumeration
         \\var forInPlain = plainForIn({ a: 1, b: 2, c: 3 });
         \\var forInPrimitive = primitiveForIn();
         \\var forInPrototype = prototypeForIn();
+        \\var forInSecureMembership = secureMembershipForIn();
         \\var forInReturn = returnForIn({ r: 1, s: 2 });
         \\var forInOuterContinue = outerContinueForIn();
         \\var forInThrown = throwingForIn();
@@ -24108,7 +24176,7 @@ test "forced tree-walker and required bytecode agree on owned for-in enumeration
         \\  forInProgramHolder.key === "z" && forInProgramMemberKeyHits === 1 && forInProgramAssigned === "u" &&
         \\  forInPlain === "ac|x|df|2a|h|x|a,c" && forInPatternLog === "K" && forInPrimitive === "01" &&
         \\  forInPrototype === "own,inherited" && forInReturn === "r" && forInOuterContinue === "0a1a" && forInThrown === "has:a" &&
-        \\  forInProxyOut === "a" && forInGenerated === "g,h,true" && forInIteratorHits === 0;
+        \\  forInProxyOut === "a" && forInGenerated === "g,h,true" && forInIteratorHits === 0 && forInSecureMembership;
     ;
 
     const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -24126,10 +24194,10 @@ test "forced tree-walker and required bytecode agree on owned for-in enumeration
     const bytecode_result = try bytecode_ctx.evaluate(source);
     try std.testing.expect(tree_result.asBool());
     try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
-    const state = "forInProgram + '#' + forInProgramLexical + '#' + forInProgramCaptures[0]() + forInProgramCaptures[1]() + '#' + forInProgramHolder.key + '#' + forInProgramMemberKeyHits + '#' + forInProgramAssigned + '#' + forInPlain + '#' + forInPatternLog + '#' + forInPrimitive + '#' + forInPrototype + '#' + forInReturn + '#' + forInOuterContinue + '#' + forInThrown + '#' + forInProxyOut + '#' + forInProxyLog + '#' + forInGenerated + '#' + forInAsync + '#' + forInIteratorHits";
+    const state = "forInProgram + '#' + forInProgramLexical + '#' + forInProgramCaptures[0]() + forInProgramCaptures[1]() + '#' + forInProgramHolder.key + '#' + forInProgramMemberKeyHits + '#' + forInProgramAssigned + '#' + forInPlain + '#' + forInPatternLog + '#' + forInPrimitive + '#' + forInPrototype + '#' + forInReturn + '#' + forInOuterContinue + '#' + forInThrown + '#' + forInProxyOut + '#' + forInProxyLog + '#' + forInGenerated + '#' + forInAsync + '#' + forInIteratorHits + '#' + forInSecureMembership";
     const tree_state = (try tree_ctx.evaluate(state)).asStr();
     const bytecode_state = (try bytecode_ctx.evaluate(state)).asStr();
-    try std.testing.expectEqualStrings("ab#ce#pq#z#1#u#ac|x|df|2a|h|x|a,c#K#01#own,inherited#r#0a1a#has:a#a#ODaDbHaHb#g,h,true#mn#0", tree_state);
+    try std.testing.expectEqualStrings("ab#ce#pq#z#1#u#ac|x|df|2a|h|x|a,c#K#01#own,inherited#r#0a1a#has:a#a#ODaDbHaHb#g,h,true#mn#0#true", tree_state);
     try std.testing.expectEqualStrings(tree_state, bytecode_state);
     const tree = tree_ctx.bytecodeAdmissionSnapshot();
     try std.testing.expect(tree.count(.plain_forced_tree_walker) >= 2);
