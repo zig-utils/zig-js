@@ -13314,6 +13314,60 @@ pub const Interpreter = struct {
         return list.items;
     }
 
+    const ProxyOwnKeysHashContext = struct {
+        seed: u64,
+
+        pub fn hash(context: @This(), key: []const u8) u64 {
+            return std.hash.Wyhash.hash(context.seed, key);
+        }
+
+        pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+            return std.mem.eql(u8, left, right);
+        }
+    };
+
+    const ProxyOwnKeysIndex = std.HashMapUnmanaged(
+        []const u8,
+        void,
+        ProxyOwnKeysHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    const ProxyOwnKeysMembership = struct {
+        index: ProxyOwnKeysIndex = .empty,
+        context: ?ProxyOwnKeysHashContext = null,
+
+        fn deinit(membership: *@This(), allocator: std.mem.Allocator) void {
+            membership.index.deinit(allocator);
+        }
+
+        fn putWithContext(
+            membership: *@This(),
+            allocator: std.mem.Allocator,
+            key: []const u8,
+            context: ProxyOwnKeysHashContext,
+        ) std.mem.Allocator.Error!bool {
+            if (membership.context) |installed| {
+                std.debug.assert(installed.seed == context.seed);
+                return (try membership.index.getOrPutContext(allocator, key, installed)).found_existing;
+            }
+            const entry = try membership.index.getOrPutContext(allocator, key, context);
+            // A failed first allocation leaves no published seed or partially
+            // initialized membership index for the invariant checks below.
+            membership.context = context;
+            return entry.found_existing;
+        }
+
+        fn remove(membership: *@This(), key: []const u8) bool {
+            const context = membership.context orelse return false;
+            return membership.index.removeContext(key, context);
+        }
+
+        fn count(membership: *const @This()) usize {
+            return membership.index.count();
+        }
+    };
+
     pub fn proxyOwnKeys(self: *Interpreter, o: *value.Object) EvalError![]const []const u8 {
         try self.proxyDepth();
         self.depth += 1;
@@ -13337,11 +13391,12 @@ pub const Interpreter = struct {
             // [[OwnPropertyKeys]] invariants: no duplicates; every
             // non-configurable target key must be present; for a non-extensible
             // target the result must be exactly the target's keys.
-            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            var seen: ProxyOwnKeysMembership = .{};
             defer seen.deinit(scratch);
             for (list.items) |k| {
-                const entry = try seen.getOrPut(scratch, k);
-                if (entry.found_existing) return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
+                const hash_context = seen.context orelse ProxyOwnKeysHashContext{ .seed = try self.newSecureHashSeed() };
+                if (try seen.putWithContext(scratch, k, hash_context))
+                    return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
             }
             const extensible = target.isExtensible();
             const tkeys = try self.objectOwnKeysList(target);
@@ -52524,6 +52579,35 @@ fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     interp.tdz_marker = tdz;
     interp.strict = parser.strict;
     return interp.eval(prog);
+}
+
+test "Proxy ownKeys membership installs exact seeded contexts failure atomically" {
+    const first_context = Interpreter.ProxyOwnKeysHashContext{ .seed = 0x5052_4f58_595f_0001 };
+    const second_context = Interpreter.ProxyOwnKeysHashContext{ .seed = 0x5052_4f58_595f_0002 };
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed: Interpreter.ProxyOwnKeysMembership = .{};
+    defer failed.deinit(unavailable.allocator());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed.putWithContext(unavailable.allocator(), "first", first_context),
+    );
+    try std.testing.expect(failed.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
+
+    var membership: Interpreter.ProxyOwnKeysMembership = .{};
+    defer membership.deinit(std.testing.allocator);
+    var wide_key: [4096]u8 = @splat('w');
+    try std.testing.expect(!try membership.putWithContext(std.testing.allocator, &wide_key, first_context));
+    try std.testing.expect(try membership.putWithContext(std.testing.allocator, &wide_key, first_context));
+    try std.testing.expect(!try membership.putWithContext(std.testing.allocator, "\x00\x00\x00key", first_context));
+    try std.testing.expect(!try membership.putWithContext(std.testing.allocator, "\x00s42", first_context));
+    try std.testing.expectEqual(@as(usize, 3), membership.count());
+    try std.testing.expect(first_context.hash(&wide_key) != second_context.hash(&wide_key));
+    try std.testing.expect(membership.remove("\x00\x00\x00key"));
+    try std.testing.expect(membership.remove("\x00s42"));
+    try std.testing.expectEqual(@as(usize, 1), membership.count());
 }
 
 test "String value methods return the exact StringData cell" {

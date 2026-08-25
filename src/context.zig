@@ -15614,6 +15614,29 @@ test "own-key enumeration preserves ordinary sparse array and proxy semantics" {
     )).asBool());
 }
 
+test "Proxy ownKeys preserves exact seeded trap membership" {
+    try std.testing.expect((try evalIn(
+        \\var wide = "w".repeat(4096);
+        \\var nul = "\u0000key";
+        \\var symbol = Symbol("key");
+        \\var exact = Reflect.ownKeys(new Proxy({}, { ownKeys: function () { return [wide, nul, symbol]; } }));
+        \\var duplicateWide = false;
+        \\try { Reflect.ownKeys(new Proxy({}, { ownKeys: function () { return [wide, wide]; } })); }
+        \\catch (error) { duplicateWide = error instanceof TypeError; }
+        \\var duplicateSymbol = false;
+        \\try { Reflect.ownKeys(new Proxy({}, { ownKeys: function () { return [symbol, symbol]; } })); }
+        \\catch (error) { duplicateSymbol = error instanceof TypeError; }
+        \\var fixed = {};
+        \\Object.defineProperty(fixed, nul, { configurable: false });
+        \\Object.preventExtensions(fixed);
+        \\var omittedNul = false;
+        \\try { Reflect.ownKeys(new Proxy(fixed, { ownKeys: function () { return [wide]; } })); }
+        \\catch (error) { omittedNul = error instanceof TypeError; }
+        \\exact.length === 3 && exact[0] === wide && exact[1] === nul && exact[2] === symbol &&
+        \\  duplicateWide && duplicateSymbol && omittedNul
+    )).asBool());
+}
+
 test "Reflect.* require a real Object target (Symbol/primitive throws)" {
     // A Symbol is internally object-tagged, but Reflect.* must reject it.
     try std.testing.expectError(error.Throw, evalIn("Reflect.get(Symbol(), 'x')"));
