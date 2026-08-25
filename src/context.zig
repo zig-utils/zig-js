@@ -17473,6 +17473,49 @@ test "Object.keys/values/entries enumerate array indices" {
     try expectEvalStr("1", "var a = [10, 20]; Object.defineProperty(a, 0, { enumerable: false }); Object.keys(a).join(',')");
 }
 
+test "Object.fromEntries uses a strict captured iterator record" {
+    try std.testing.expect((try evalIn(
+        \\let manualCalls = 0;
+        \\const manual = { next() { manualCalls += 1; return { done: true }; } };
+        \\let manualError = false;
+        \\try { Object.fromEntries(manual); } catch (error) { manualError = error instanceof TypeError; }
+        \\let gets = 0;
+        \\let calls = 0;
+        \\const iterator = {
+        \\  get next() {
+        \\    gets += 1;
+        \\    return function () {
+        \\      calls += 1;
+        \\      if (calls === 1) {
+        \\        Object.defineProperty(iterator, "next", {
+        \\          value() { throw new Error("replacement must not run"); },
+        \\          configurable: true,
+        \\        });
+        \\        return { value: ["a", 1], done: false };
+        \\      }
+        \\      if (calls === 2) return { value: ["b", 2], done: false };
+        \\      return { done: true };
+        \\    };
+        \\  },
+        \\};
+        \\const result = Object.fromEntries({ [Symbol.iterator]() { return iterator; } });
+        \\manualError && manualCalls === 0 && gets === 1 && calls === 3 &&
+        \\result.a === 1 && result.b === 2;
+    )).asBool());
+
+    try std.testing.expect((try evalIn(
+        \\let closed = 0;
+        \\const iterator = {
+        \\  next() { return { value: Symbol("entry"), done: false }; },
+        \\  return() { closed += 1; throw new Error("close error must not win"); },
+        \\};
+        \\let typeError = false;
+        \\try { Object.fromEntries({ [Symbol.iterator]() { return iterator; } }); }
+        \\catch (error) { typeError = error instanceof TypeError; }
+        \\typeError && closed === 1;
+    )).asBool());
+}
+
 test "String exotic wrappers expose immutable indices and length" {
     try expectEvalStr("0,1,2,20,-20", "var s = new String('abc'); s[-20] = 1; s[20] = 2; Object.keys(s).join(',')");
     try expectEvalStr("0,1,2,20,length,-20", "var s = new String('abc'); s[-20] = 1; s[20] = 2; Object.getOwnPropertyNames(s).join(',')");

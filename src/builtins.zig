@@ -955,18 +955,23 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
     if (iterable.isNull() or iterable.isUndefined())
         return self.throwError("TypeError", "Object.fromEntries requires an iterable argument");
     const result = try self.newObject();
-    const iter = try self.iteratorOf(iterable); // GetIterator — non-iterable throws
+    const iterator_record = try self.getIteratorRecord(iterable);
+    const iter = iterator_record.iterator;
     while (true) {
         // IteratorStep: a next() that isn't callable / doesn't return an object
         // throws WITHOUT closing the iterator.
-        const r = try self.callMethod(iter, "next", &.{});
-        if (!r.isObject()) return self.throwError("TypeError", "iterator.next() did not return an object");
+        const r = try self.callValueWithThis(iterator_record.next_method, &.{}, iter);
+        if (!isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
         if ((try self.getProperty(r, "done")).toBoolean()) break;
         const entry = try self.getProperty(r, "value");
-        // Each entry must be an Object; otherwise close the iterator, then throw.
-        if (!entry.isObject()) {
-            self.iteratorClose(iter) catch {};
-            return self.throwError("TypeError", "Object.fromEntries entry is not an object");
+        // AddEntriesFromIterable requires an ECMAScript Object (the engine's
+        // Symbol/BigInt primitives are object-tagged). Create the throw
+        // completion before IteratorClose so an abrupt `return()` cannot win.
+        if (!isRealObject(entry)) {
+            self.exception = try self.makeError("TypeError", "Object.fromEntries entry is not an object");
+            self.iteratorCloseKeepingThrow(iter);
+            try self.notifyDebuggerException(false);
+            return error.Throw;
         }
         // AddEntriesFromIterable: k = Get(entry,"0"); v = Get(entry,"1"); THEN the
         // adder does ToPropertyKey(k) + CreateDataPropertyOrThrow — so the key's
