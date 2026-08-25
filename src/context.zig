@@ -12966,6 +12966,40 @@ test "AggregateError" {
     )).asBool());
 }
 
+test "AggregateError uses a strict captured iterator record" {
+    try std.testing.expect((try evalIn(
+        \\var manualNextCalls = 0;
+        \\var manual = { next: function() { manualNextCalls += 1; return { done: true }; } };
+        \\var manualThrew = false;
+        \\try { new AggregateError(manual); } catch (error) { manualThrew = error instanceof TypeError; }
+        \\var iteratorGets = 0;
+        \\var nextGets = 0;
+        \\var receiverOk = false;
+        \\var iterator = {};
+        \\Object.defineProperty(iterator, "next", {
+        \\  get: function() {
+        \\    nextGets += 1;
+        \\    if (nextGets !== 1) return function() { throw new Error("next re-read"); };
+        \\    var i = 0;
+        \\    return function() { return i < 2 ? { value: ++i, done: false } : { done: true }; };
+        \\  }
+        \\});
+        \\var iterable = {};
+        \\Object.defineProperty(iterable, Symbol.iterator, {
+        \\  get: function() {
+        \\    iteratorGets += 1;
+        \\    return function() { receiverOk = this === iterable; return iterator; };
+        \\  }
+        \\});
+        \\var error = new AggregateError(iterable);
+        \\var badNextThrew = false;
+        \\try { new AggregateError({ [Symbol.iterator]: function() { return { next: 0 }; } }); }
+        \\catch (badNextError) { badNextThrew = badNextError instanceof TypeError; }
+        \\manualThrew && manualNextCalls === 0 && iteratorGets === 1 && nextGets === 1 &&
+        \\receiverOk && error.errors.join(",") === "1,2" && badNextThrew
+    )).asBool());
+}
+
 test "SuppressedError creates message before error and suppressed" {
     try std.testing.expect((try evalIn(
         \\var e = new SuppressedError({}, {}, { toString: function () { return ""; } });

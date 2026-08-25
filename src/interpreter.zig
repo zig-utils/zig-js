@@ -8102,11 +8102,16 @@ pub const Interpreter = struct {
 
     fn iterableToArray(self: *Interpreter, v: Value, proto: ?*value.Object) EvalError!Value {
         const arr = try self.newArrayWithProto(proto);
-        const it = try self.iteratorOf(v);
+        const record = try self.getIteratorRecord(v);
+        const iter_root = try self.pushTempRoot(record.iterator);
+        defer self.restoreTempRoots(iter_root);
+        const next_root = try self.pushTempRoot(record.next_method);
+        defer self.restoreTempRoots(next_root);
         while (true) {
-            const step = try self.iterStep(it);
-            if (step.done) break;
-            try arr.asObj().appendElement(self.arena, step.value);
+            const result = try self.callValueWithThis(record.next_method, &.{}, record.iterator);
+            if (!builtins.isRealObject(result)) return self.throwError("TypeError", "iterator result is not an object");
+            if ((try self.getProperty(result, "done")).toBoolean()) break;
+            try arr.asObj().appendElement(self.arena, try self.getProperty(result, "value"));
         }
         return arr;
     }
