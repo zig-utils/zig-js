@@ -2657,8 +2657,9 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
             // so a Proxy/array-like replacer's traps run (and abrupts propagate).
             var allow: std.ArrayListUnmanaged([]const u8) = .empty;
             const membership_allocator = gc_mod.temporaryAllocator(a);
-            var allow_seen: std.StringHashMapUnmanaged(void) = .empty;
+            var allow_seen: JsonPropertyListIndex = .empty;
             defer allow_seen.deinit(membership_allocator);
+            var allow_hash_context: ?JsonStringHashContext = null;
             const rlen = interpreter.toLen(try self.toNumberV(try self.getProperty(replacer, "length")));
             var idx: usize = 0;
             while (idx < rlen) : (idx += 1) {
@@ -2680,7 +2681,17 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
                 }
                 if (k) |key| {
                     const storage_key = try value.encodeStringKey(a, key);
-                    const seen = try allow_seen.getOrPut(membership_allocator, storage_key);
+                    const seen = if (allow_hash_context) |hash_context|
+                        try allow_seen.getOrPutContext(membership_allocator, storage_key, hash_context)
+                    else blk: {
+                        const hash_context = JsonStringHashContext{ .seed = try self.newSecureHashSeed() };
+                        const entry = try allow_seen.getOrPutContext(membership_allocator, storage_key, hash_context);
+                        // Do not publish the invocation context until the first
+                        // table mutation succeeds. An OOM aborts stringify with
+                        // no half-installed membership state.
+                        allow_hash_context = hash_context;
+                        break :blk entry;
+                    };
                     if (!seen.found_existing) try allow.append(a, storage_key);
                 }
             }
@@ -3275,7 +3286,7 @@ const JsonParseRecord = struct {
     children: JsonParseChildren = .none,
 };
 
-const JsonParseEntryHashContext = struct {
+const JsonStringHashContext = struct {
     seed: u64,
 
     pub fn hash(context: @This(), key: []const u8) u64 {
@@ -3287,10 +3298,17 @@ const JsonParseEntryHashContext = struct {
     }
 };
 
+const JsonPropertyListIndex = std.HashMapUnmanaged(
+    []const u8,
+    void,
+    JsonStringHashContext,
+    std.hash_map.default_max_load_percentage,
+);
+
 const JsonParseEntryIndex = std.HashMapUnmanaged(
     []const u8,
     *JsonParseRecord,
-    JsonParseEntryHashContext,
+    JsonStringHashContext,
     std.hash_map.default_max_load_percentage,
 );
 
@@ -3300,7 +3318,7 @@ const JsonParseEntryIndex = std.HashMapUnmanaged(
 /// process-default string hash seed.
 const JsonParseEntries = struct {
     index: JsonParseEntryIndex = .empty,
-    context: ?JsonParseEntryHashContext = null,
+    context: ?JsonStringHashContext = null,
 
     fn get(entries: *const @This(), key: []const u8) ?*JsonParseRecord {
         const context = entries.context orelse return null;
@@ -3312,7 +3330,7 @@ const JsonParseEntries = struct {
         allocator: std.mem.Allocator,
         key: []const u8,
         record: *JsonParseRecord,
-        context: JsonParseEntryHashContext,
+        context: JsonStringHashContext,
     ) std.mem.Allocator.Error!void {
         if (entries.context) |installed| {
             std.debug.assert(installed.seed == context.seed);
@@ -3331,11 +3349,11 @@ const JsonParser = struct {
     i: usize,
     interp: *Interpreter,
     track_records: bool = false,
-    record_hash_context: ?JsonParseEntryHashContext = null,
+    record_hash_context: ?JsonStringHashContext = null,
 
-    fn recordHashContext(p: *JsonParser) HostError!JsonParseEntryHashContext {
+    fn recordHashContext(p: *JsonParser) HostError!JsonStringHashContext {
         if (p.record_hash_context) |context| return context;
-        const context = JsonParseEntryHashContext{ .seed = try p.interp.newSecureHashSeed() };
+        const context = JsonStringHashContext{ .seed = try p.interp.newSecureHashSeed() };
         p.record_hash_context = context;
         return context;
     }
@@ -3609,8 +3627,8 @@ test "JSON parser borrows validated unescaped strings without scratch allocation
 test "JSON parse record indexes install exact seeded contexts failure atomically" {
     var first_record: JsonParseRecord = .{ .value = Value.num(1) };
     var replacement_record: JsonParseRecord = .{ .value = Value.num(2) };
-    const first_context = JsonParseEntryHashContext{ .seed = 0x4a53_4f4e_5f41_0001 };
-    const second_context = JsonParseEntryHashContext{ .seed = 0x4a53_4f4e_5f42_0002 };
+    const first_context = JsonStringHashContext{ .seed = 0x4a53_4f4e_5f41_0001 };
+    const second_context = JsonStringHashContext{ .seed = 0x4a53_4f4e_5f42_0002 };
 
     var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
     var failed: JsonParseEntries = .{};

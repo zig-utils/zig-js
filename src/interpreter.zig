@@ -56203,6 +56203,27 @@ test "JSON stringify promotes deep active paths without rejecting aliases" {
     )).asBool());
 }
 
+test "JSON stringify replacer property list preserves exact seeded membership" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try evalSource(arena.allocator(),
+        \\let coercions = [];
+        \\let nulKey = "\u0000wide";
+        \\let wideKey = "w".repeat(4096);
+        \\let stringKey = new String("b");
+        \\stringKey.toString = function () { coercions.push("string"); return "b"; };
+        \\let numberKey = new Number(1);
+        \\numberKey.toString = function () { coercions.push("number"); return "1"; };
+        \\let ignored = { toString() { coercions.push("ignored"); return "ignored"; } };
+        \\let object = { b: 2, 1: 3 };
+        \\object[nulKey] = 4;
+        \\object[wideKey] = 5;
+        \\let encoded = JSON.stringify(object, [nulKey, wideKey, stringKey, nulKey, numberKey, wideKey, stringKey, ignored]);
+        \\encoded === '{"\\u0000wide":4,"' + wideKey + '":5,"b":2,"1":3}' &&
+        \\  coercions.join(",") === "string,number,string"
+    )).asBool());
+}
+
 test "JSON stringify truncates gap by UTF-16 code units" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
