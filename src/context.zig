@@ -18228,6 +18228,39 @@ test "TypedArray constructor processes arguments before prototype allocation" {
     )).asBool());
 }
 
+test "TypedArray constructors reuse the selected iterator method record" {
+    try std.testing.expect((try evalIn(
+        \\var arrayLikeNextCalls = 0;
+        \\var arrayLike = { 0: 5, length: 1, next: function() { arrayLikeNextCalls += 1; return { done: true }; } };
+        \\var fromArrayLike = new Uint8Array(arrayLike);
+        \\var iteratorGets = 0;
+        \\var methodCalls = 0;
+        \\var nextGets = 0;
+        \\var receiverOk = false;
+        \\var iterator = {};
+        \\Object.defineProperty(iterator, "next", {
+        \\  get: function() {
+        \\    nextGets += 1;
+        \\    if (nextGets !== 1) return function() { throw new Error("next re-read"); };
+        \\    var i = 0;
+        \\    return function() { return i++ === 0 ? { value: 7, done: false } : { done: true }; };
+        \\  }
+        \\});
+        \\var iterable = {};
+        \\Object.defineProperty(iterable, Symbol.iterator, {
+        \\  get: function() {
+        \\    iteratorGets += 1;
+        \\    if (iteratorGets !== 1) return function() { throw new Error("iterator re-read"); };
+        \\    return function() { methodCalls += 1; receiverOk = this === iterable; return iterator; };
+        \\  }
+        \\});
+        \\var fromIterable = new Uint8Array(iterable);
+        \\fromArrayLike.length === 1 && fromArrayLike[0] === 5 && arrayLikeNextCalls === 0 &&
+        \\fromIterable.length === 1 && fromIterable[0] === 7 && iteratorGets === 1 &&
+        \\methodCalls === 1 && nextGets === 1 && receiverOk
+    )).asBool());
+}
+
 test "TypedArray buffer constructor allocates before offset coercion" {
     try std.testing.expect((try evalIn(
         \\class ExpectedError extends Error {}

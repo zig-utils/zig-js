@@ -15143,23 +15143,6 @@ pub const Interpreter = struct {
         return it;
     }
 
-    /// Whether `v` is iterable: a string, array, generator, or an object with a
-    /// `[Symbol.iterator]` method. (Used by `Array.from` to choose the iterator
-    /// path vs the array-like/length path.)
-    pub fn isIterable(self: *Interpreter, v: Value) bool {
-        switch (v.kind()) {
-            .string => return true,
-            .object => {
-                const o = v.asObj();
-                if (o.is_array or o.is_set or o.is_map or o.generator() != null) return true;
-                if (hasProperty(o, "next")) return true; // a manual iterator object
-                if (self.symbolIteratorKey()) |ik| return hasProperty(o, ik);
-                return false;
-            },
-            else => return false,
-        }
-    }
-
     /// JavaScriptCore's private `hasIteratorMethod` boundary. Unlike the
     /// language iterator path, this helper deliberately rejects primitives
     /// without boxing. Object lookup is ordinary GetMethod: accessors run,
@@ -15533,7 +15516,7 @@ pub const Interpreter = struct {
             const itm = if (ik) |k| try self.getProperty(a0, k) else Value.undef();
             const use_iter = !itm.isUndefined() and !itm.isNull();
             if (use_iter and !itm.isCallable()) return self.throwError("TypeError", "@@iterator is not a function");
-            const list = if (use_iter) try self.iterableOrArrayLikeToList(a0) else blk: {
+            const list = if (use_iter) try self.iterableToListFromMethod(a0, itm) else blk: {
                 const len = toLen(try self.toNumberV(try self.getProperty(a0, "length")));
                 if (len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
                 break :blk try self.arrayLikeToListLen(a0, len);
@@ -15633,30 +15616,22 @@ pub const Interpreter = struct {
         value.copyArrayBufferBytes(dst_ab, dst_bytes, dst_off, src_ab, src_bytes, src_off, n);
     }
 
-    /// Collect an iterable's values (via `Symbol.iterator`) or an array-like's
-    /// `0..length` elements into a freshly-allocated slice.
-    fn iterableOrArrayLikeToList(self: *Interpreter, v: Value) EvalError![]Value {
+    /// TypedArray construction's iterable branch. `method` is the exact
+    /// GetMethod(@@iterator) result already read by the constructor; calling it
+    /// here avoids a second observable property lookup before capturing `next`.
+    fn iterableToListFromMethod(self: *Interpreter, v: Value, method: Value) EvalError![]Value {
         var out: std.ArrayListUnmanaged(Value) = .empty;
-        // An iterable (array, Set/Map, generator, string, or any object with a
-        // `Symbol.iterator`) is drained through its iterator; otherwise the value
-        // is treated as an array-like and read by `0..ToLength(length)`.
-        if ((v.isObject() and self.isIterable(v)) or v.isString()) {
-            const it = try self.iteratorOf(v);
-            while (true) {
-                const r = try self.callMethod(it, "next", &.{});
-                if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
-                if ((try self.getProperty(r, "done")).toBoolean()) break;
-                try out.append(self.arena, try self.getProperty(r, "value"));
-            }
-            return out.items;
-        }
-        // Array-like: read 0..ToLength(length).
-        const len = toLen((try self.toNumberV(try self.getProperty(v, "length"))));
-        var i: usize = 0;
-        while (i < len) : (i += 1) {
-            var kb: [24]u8 = undefined;
-            const k = std.fmt.bufPrint(&kb, "{d}", .{i}) catch unreachable;
-            try out.append(self.arena, try self.getProperty(v, k));
+        const iterator = try self.requireIteratorObject(try self.callValueWithThis(method, &.{}, v));
+        const iter_root = try self.pushTempRoot(iterator);
+        defer self.restoreTempRoots(iter_root);
+        const next_method = try self.getProperty(iterator, "next");
+        const next_root = try self.pushTempRoot(next_method);
+        defer self.restoreTempRoots(next_root);
+        while (true) {
+            const result = try self.callValueWithThis(next_method, &.{}, iterator);
+            if (!builtins.isRealObject(result)) return self.throwError("TypeError", "iterator result is not an object");
+            if ((try self.getProperty(result, "done")).toBoolean()) break;
+            try out.append(self.arena, try self.getProperty(result, "value"));
         }
         return out.items;
     }
