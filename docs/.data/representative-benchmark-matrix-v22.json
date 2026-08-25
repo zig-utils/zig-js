@@ -1,0 +1,57 @@
+{
+  "schema_version": 22,
+  "matrix_id": "zig-js-representative-v22",
+  "status": "frozen",
+  "frozen_date": "2026-08-24",
+  "owner_issue": 734,
+  "history_policy": "This version hash-inherits every V21 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance decision, attribution metric, external-suite boundary, lifecycle profile, no-JIT profile, exact-parent metric, collection guard, and publication boundary. It changes no scored row or production engine behavior. It re-pins only the exact-parent integration after that collector admitted the already-frozen single_no_jit runner mode. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v21",
+    "path": "docs/.data/representative-benchmark-matrix-v21.json",
+    "sha256": "a1efa8bcf31924e41b70ded23212af4c9a723814879646f0ace83b425deb4798",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "context_lifecycle_integration",
+      "no_jit_integration"
+    ]
+  },
+  "change": "Re-freezes the completed exact-parent integration after its runner-argument contract admitted the existing single_no_jit mode. The collector's identities, evidence schema, metrics, alternating order, quality guards, publication policy, and every scored workload remain inherited unchanged.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "7abb2c41fa36915d8872cd3377efcd7a2cd4498519f245ea13a989e62484ddf5",
+    "measured_metrics": [
+      "instructions",
+      "cycles",
+      "energy_joules",
+      "thermal_state"
+    ],
+    "material_change_categories": [
+      "cpu_work",
+      "threads",
+      "generated_code",
+      "cache_traffic"
+    ],
+    "contract_changes": [
+      "frontend compiler counters are retained with every sample",
+      "competing long-running jobs reject collection before sampling",
+      "transient overlap rejects the affected exact pair",
+      "contaminated build-feedback evidence is unavailable",
+      "structural self-test JSON fixtures are cloned without a host convenience global",
+      "context_lifecycle samples preserve and validate their frozen auxiliary telemetry row",
+      "single_no_jit samples preserve the frozen required-bytecode mode identity"
+    ],
+    "publication_boundary": "Only an explicitly selected quiet-reference host on AC power may support an efficiency or lifecycle claim. Required counters must be measured and stable at at most 5% RSD, every thermal observation must remain nominal, generated-code/cache claims additionally require their exact category metric, and every raw sample remains visible. Context lifecycle collection additionally requires the frozen options/checksum profile, exact phase and finalizer reconciliation, and bounded post-destroy RSS checkpoints. Required-bytecode/no-JIT collection additionally preserves the frozen single_no_jit mode and workload checksum. Diagnostic hosts never gate or support a public ratio."
+  }
+}
