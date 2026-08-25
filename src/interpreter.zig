@@ -7575,24 +7575,19 @@ pub const Interpreter = struct {
         return list.items;
     }
 
-    /// Expand an iterable into `list` — for `...spread`. Plain arrays take a fast
-    /// path; everything else (strings, generators, Sets/Maps, arguments objects,
-    /// user objects with `[Symbol.iterator]`) goes through the iterator protocol.
+    /// Expand an iterable into `list` for `...spread`. The full iterator protocol
+    /// is required even for packed arrays: `%ArrayIteratorPrototype%.next` is an
+    /// observable mutable property, so a direct element-copy shortcut would skip
+    /// both its lookup and calls.
     pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
-        if (v.isObject()) {
-            const o = v.asObj();
-            if (o.is_array and !o.is_arguments and self.arrayIterIntact() and !self.arrayHasOwnIterator(o)) {
-                if (try o.packedDenseElementsSnapshot(self.arena)) |items| {
-                    try list.appendSlice(self.arena, items);
-                    return;
-                }
-            }
-        }
-        const iter_obj = try self.iteratorOf(v); // throws TypeError if not iterable
+        const record = try self.getIteratorRecord(v); // throws TypeError if not iterable
+        const iter_obj = record.iterator;
+        const iter_root = try self.pushTempRoot(iter_obj);
+        defer self.restoreTempRoots(iter_root);
         // GetIterator reads the `next` method exactly ONCE and reuses it for every
         // step; re-reading it per step (a `get next()` accessor, or a mutated slot)
         // is observable and non-conformant.
-        const next_method = try self.getProperty(iter_obj, "next");
+        const next_method = record.next_method;
         const next_root = try self.pushTempRoot(next_method);
         defer self.restoreTempRoots(next_root);
         while (true) {
@@ -15118,11 +15113,11 @@ pub const Interpreter = struct {
         };
     }
 
-    /// Obtain an iterator (an object with a `.next()` returning `{value, done}`)
-    /// for `v` — the iterator-protocol entry point used by `yield*` (and, later,
-    /// spread / `Array.from` / VM `for-of`). Generators are their own iterator;
-    /// an object that already has a `next` method is returned as-is; arrays and
-    /// strings are wrapped in an index cursor.
+    /// Legacy iterator-object entry point retained while its remaining callers
+    /// are classified as GetIterator, GetIteratorDirect, or an internal cursor.
+    /// Unlike `getIteratorRecord`, this accepts a `.next`-only object and bypasses
+    /// an observable generator @@iterator; new language GetIterator consumers
+    /// must not use it.
     pub fn iteratorOf(self: *Interpreter, v: Value) EvalError!Value {
         switch (v.kind()) {
             .object => {
@@ -15895,8 +15890,8 @@ pub const Interpreter = struct {
     }
 
     /// Does array `o` carry its OWN `[Symbol.iterator]` (data or accessor),
-    /// overriding `Array.prototype`'s? The dense fast paths (spread /
-    /// destructuring) must defer to the iterator protocol when so.
+    /// overriding `Array.prototype`'s? Remaining dense fast paths such as
+    /// destructuring must defer to the iterator protocol when so.
     fn arrayHasOwnIterator(self: *Interpreter, o: *value.Object) bool {
         const ikey = self.wellKnownSymbolKey("iterator") orelse return false;
         return o.getOwn(ikey) != null or o.getAccessor(ikey) != null;

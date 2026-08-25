@@ -11232,6 +11232,50 @@ test "spread of iterables (generator, string, user iterator)" {
     )).asBool());
 }
 
+test "spread syntax requires and captures an iterator record" {
+    try std.testing.expect((try evalIn(
+        \\var manualNextCalls = 0;
+        \\var manual = { next: function() { manualNextCalls += 1; return { done: true }; } };
+        \\var manualThrew = false;
+        \\try { [...manual]; } catch (e) { manualThrew = e instanceof TypeError; }
+        \\var iteratorGets = 0;
+        \\var nextGets = 0;
+        \\var receiverOk = false;
+        \\var iterator = {};
+        \\Object.defineProperty(iterator, "next", {
+        \\  get: function() {
+        \\    nextGets += 1;
+        \\    if (nextGets !== 1) return function() { throw new Error("next re-read"); };
+        \\    var i = 0;
+        \\    return function() { return i++ === 0 ? { value: 7, done: false } : { done: true }; };
+        \\  }
+        \\});
+        \\function* values() { yield 1; }
+        \\var generator = values();
+        \\Object.defineProperty(generator, Symbol.iterator, {
+        \\  get: function() {
+        \\    iteratorGets += 1;
+        \\    return function() { receiverOk = this === generator; return iterator; };
+        \\  }
+        \\});
+        \\var out = [1, ...generator, 9];
+        \\var arrayNextCalls = 0;
+        \\var arrayIteratorProto = Object.getPrototypeOf([][Symbol.iterator]());
+        \\var intrinsicArrayNext = arrayIteratorProto.next;
+        \\arrayIteratorProto.next = function() {
+        \\  arrayNextCalls += 1;
+        \\  return intrinsicArrayNext.call(this);
+        \\};
+        \\var arrayOut = [...[2, 3]];
+        \\var badResultThrew = false;
+        \\try { (function() {})(...{ [Symbol.iterator]: function() { return 1; } }); }
+        \\catch (e) { badResultThrew = e instanceof TypeError; }
+        \\manualThrew && manualNextCalls === 0 && iteratorGets === 1 &&
+        \\nextGets === 1 && receiverOk && out.join(",") === "1,7,9" &&
+        \\arrayNextCalls === 3 && arrayOut.join(",") === "2,3" && badResultThrew
+    )).asBool());
+}
+
 test "Symbol: typeof, identity, description, property keys, iterator" {
     try expectEvalStr("symbol", "typeof Symbol()");
     try std.testing.expect((try evalIn("var s = Symbol(); s === s && Symbol() !== Symbol()")).asBool());
