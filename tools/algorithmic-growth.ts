@@ -247,20 +247,36 @@ function exactFixture(width: number, attributionSchema: any): any {
 
 function expectFailure(action: () => void, pattern: string): void { try { action(); } catch (error) { requireValue(String(error).includes(pattern), `expected ${pattern}, got ${String(error)}`); return; } throw new Error(`expected failure containing ${pattern}`); }
 export function selfTest(): void {
+  console.log("START algorithmic-growth phase: schemas and complete fixtures");
   const schema = loadSchema(), attributionSchema = loadAttributionSchema(ATTRIBUTION_SCHEMA), widths = [1024, 2048, 4096];
-  const inputs = widths.map((width) => inputDescriptor(width, exactFixture(width, attributionSchema)));
+  const inputs: GrowthInput[] = [];
+  for (const width of widths) {
+    console.log(`START algorithmic-growth fixture ${width}: construct and validate exact-parent artifact`);
+    const fixture = exactFixture(width, attributionSchema);
+    console.log(`PASS algorithmic-growth fixture ${width}: construct and validate exact-parent artifact`);
+    console.log(`START algorithmic-growth fixture ${width}: hash embedded artifact`);
+    inputs.push(inputDescriptor(width, fixture));
+    console.log(`PASS algorithmic-growth fixture ${width}: hash embedded artifact`);
+  }
+  console.log("PASS algorithmic-growth phase: schemas and complete fixtures");
+  console.log("START algorithmic-growth phase: accepted artifact and report");
   const artifact = buildArtifact(inputs, "fixture_growth_", schema, attributionSchema); validateArtifact(artifact, schema, attributionSchema);
   requireValue(Math.abs(artifact.summary.first_to_last.parent_growth_exponent - 2) < 0.01 && Math.abs(artifact.summary.first_to_last.candidate_growth_exponent - 1) < 0.01, "growth exponent derivation drift");
   requireValue(summarizeExactParent(inputs[0].artifact.samples, attributionSchema, "quiet_reference", ["cpu_work"]).status === "blocked_efficiency_evidence", "additive growth profile must not weaken the ordinary full-efficiency gate");
   requireValue(render(artifact).includes("does **not** score wall time"), "algorithmic-growth report lost its non-throughput boundary");
+  console.log("PASS algorithmic-growth phase: accepted artifact and report");
 
+  console.log("START algorithmic-growth phase: zero-allocation replay");
   const zeroAllocation = JSON.parse(JSON.stringify(inputs)); for (const sample of zeroAllocation[0].artifact.samples.filter((value: any) => value.identity.variant === "candidate")) { sample.metrics.allocations.value = 0; sample.metrics.allocated_bytes.value = 0; } zeroAllocation[0].artifact.summary = summarizeExactParent(zeroAllocation[0].artifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); zeroAllocation[0].embedded_artifact_sha256 = sha256Text(exactJson(zeroAllocation[0].artifact)); requireValue(buildArtifact(zeroAllocation, "fixture_growth_", schema, attributionSchema).summary.rows[0].candidate.allocations_total === 0, "zero-allocation replay must remain valid");
+  console.log("PASS algorithmic-growth phase: zero-allocation replay");
 
+  console.log("START algorithmic-growth phase: fail-closed mutations");
   expectFailure(() => buildArtifact(inputs.slice(0, 2), "fixture_growth_", schema, attributionSchema), "at least 3 widths");
   const revisionDrift = JSON.parse(JSON.stringify(inputs)); revisionDrift[1].artifact.metadata.candidate_revision = "9".repeat(40); revisionDrift[1].artifact.summary = summarizeExactParent(revisionDrift[1].artifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); revisionDrift[1].embedded_artifact_sha256 = sha256Text(exactJson(revisionDrift[1].artifact)); expectFailure(() => buildArtifact(revisionDrift, "fixture_growth_", schema, attributionSchema), "common metadata drift for candidate_revision");
   const noisyInstructions = JSON.parse(JSON.stringify(inputs)); const noisyArtifact = noisyInstructions[1].artifact, noisySample = noisyArtifact.samples.find((sample: any) => sample.identity.variant === "candidate" && sample.identity.pair_sample === 1); noisySample.metrics.instructions.value *= 2; noisyArtifact.summary = summarizeExactParent(noisyArtifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); noisyInstructions[1].embedded_artifact_sha256 = sha256Text(exactJson(noisyArtifact)); expectFailure(() => buildArtifact(noisyInstructions, "fixture_growth_", schema, attributionSchema), "normalized instruction RSD");
   const allocationDrift = JSON.parse(JSON.stringify(inputs)); const allocationArtifact = allocationDrift[2].artifact, allocationSample = allocationArtifact.samples.find((sample: any) => sample.identity.variant === "parent" && sample.identity.pair_sample === 2); allocationSample.metrics.allocations.value += 1; allocationArtifact.summary = summarizeExactParent(allocationArtifact.samples, attributionSchema, "diagnostic", ["cpu_work"]); allocationDrift[2].embedded_artifact_sha256 = sha256Text(exactJson(allocationArtifact)); expectFailure(() => buildArtifact(allocationDrift, "fixture_growth_", schema, attributionSchema), "allocation replay drift");
   const summaryDrift = JSON.parse(JSON.stringify(artifact)); summaryDrift.summary.first_to_last.candidate_growth_exponent = 99; expectFailure(() => validateArtifact(summaryDrift, schema, attributionSchema), "derived summary drift");
+  console.log("PASS algorithmic-growth phase: fail-closed mutations");
   console.log("OK algorithmic-growth self-test: exact identities, normalization, stability, replay, growth, and non-throughput boundaries verified");
 }
 
