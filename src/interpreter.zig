@@ -588,8 +588,96 @@ pub const CapturedBindingValue = struct {
     with_base: Value = Value.undef(),
 };
 
+/// A non-owning view of one ordinary VM activation's frame storage. A direct
+/// eval Environment retains this view only when the compiler's immutable scope
+/// plan names a live slot. It shares mapped-arguments cells and the frame's
+/// escaped-slot lock, so there is exactly one binding value and one no-GIL
+/// synchronization ruling rather than an Environment snapshot to reconcile.
+pub const ActivationFrameView = struct {
+    slots: []Value,
+    mapped_arguments: ?*value.Object,
+    mapped_parameter_indices: []const u32,
+    escaped: *std.atomic.Value(bool),
+    slot_lock: *std.atomic.Mutex,
+
+    fn lockSlots(self: *const ActivationFrameView) bool {
+        if (!bc.ic_seqlock_enabled.load(.monotonic) or !self.escaped.load(.monotonic)) return false;
+        var spins: usize = 0;
+        while (!self.slot_lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        return true;
+    }
+
+    fn unlockSlots(self: *const ActivationFrameView, held: bool) void {
+        if (held) self.slot_lock.unlock();
+    }
+
+    fn mappedArgumentIndex(self: *const ActivationFrameView, slot: usize) ?usize {
+        const object = self.mapped_arguments orelse return null;
+        if (slot >= self.mapped_parameter_indices.len) return null;
+        const raw_index = self.mapped_parameter_indices[slot];
+        if (raw_index == std.math.maxInt(u32)) return null;
+        const index: usize = @intCast(raw_index);
+        const cold = object.coldState() orelse return null;
+        if (index >= cold.arg_map_values.len) return null;
+        return index;
+    }
+
+    pub fn read(self: *const ActivationFrameView, slot: usize) Value {
+        std.debug.assert(slot < self.slots.len);
+        if (self.mappedArgumentIndex(slot)) |index|
+            return mappedParameterCellGet(self.mapped_arguments.?, index).?;
+        const held = self.lockSlots();
+        defer self.unlockSlots(held);
+        return self.slots[slot];
+    }
+
+    pub fn write(self: *const ActivationFrameView, slot: usize, stored: Value) void {
+        std.debug.assert(slot < self.slots.len);
+        if (self.mappedArgumentIndex(slot)) |index| {
+            std.debug.assert(mappedParameterCellSet(self.mapped_arguments.?, index, stored));
+            return;
+        }
+        const held = self.lockSlots();
+        self.slots[slot] = stored;
+        self.unlockSlots(held);
+    }
+
+    pub fn markEscaped(self: *const ActivationFrameView) void {
+        self.escaped.store(true, .release);
+    }
+};
+
+/// One declarative scope's binding table over a live activation frame. The
+/// compiler sorts `bindings` by name, giving lookups bounded logarithmic cost
+/// without an attacker-controlled hash table or a per-eval binding copy.
+pub const ActivationBindingsView = struct {
+    frame: ActivationFrameView,
+    bindings: []const bc.DirectEvalBinding,
+
+    pub fn binding(self: *const ActivationBindingsView, name: []const u8) ?bc.DirectEvalBinding {
+        var left: usize = 0;
+        var right = self.bindings.len;
+        while (left < right) {
+            const middle = left + (right - left) / 2;
+            const candidate = self.bindings[middle];
+            switch (std.mem.order(u8, name, candidate.name)) {
+                .lt => right = middle,
+                .gt => left = middle + 1,
+                .eq => return candidate,
+            }
+        }
+        return null;
+    }
+};
+
 pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
+    /// Present only on lazily materialized ordinary-VM direct-eval records. The
+    /// immutable name table resolves into the activation's real frame slots;
+    /// `vars` remains available for genuinely new sloppy-eval declarations.
+    activation: ?ActivationBindingsView = null,
     /// `using` resources declared in this scope, in declaration order (disposed
     /// in reverse when the scope exits).
     disposables: std.ArrayListUnmanaged(Disposable) = .empty,
@@ -698,6 +786,18 @@ pub const Environment = struct {
     /// an unheld mutex. Private writes use a separate per-interpreter handshake;
     /// this flag remains the fail-safe policy for every actual lock pair.
     pub var binding_locks_enabled: std.atomic.Value(bool) = .init(true);
+
+    fn activationBinding(self: *const Environment, name: []const u8) ?bc.DirectEvalBinding {
+        const view = self.activation orelse return null;
+        return view.binding(name);
+    }
+
+    pub fn hasOwnBinding(self: *const Environment, name: []const u8) bool {
+        if (self.activationBinding(name) != null) return true;
+        const locked = @constCast(self).lockBindingsForRead();
+        defer @constCast(self).unlockBindingsForRead(locked);
+        return self.aliases.contains(name) or self.vars.contains(name);
+    }
 
     pub fn lockBindings(self: *Environment) void {
         if (!self.binding_lock_required or !binding_locks_enabled.load(.acquire)) return;
@@ -814,6 +914,10 @@ pub const Environment = struct {
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
         self.barrierStoredValue(v);
+        if (self.activation) |*view| if (view.binding(name)) |binding| {
+            view.frame.write(binding.slot, v);
+            return;
+        };
         if (self.bindingsHaveSingleWriter()) {
             // The owning mutator is the only structural writer. Snapshot before
             // allocating so a private activation retains one collector handshake
@@ -989,6 +1093,7 @@ pub const Environment = struct {
     pub fn isFnName(self: *Environment, name: []const u8) bool {
         var env: ?*Environment = self;
         while (env) |e| {
+            if (e.activationBinding(name) != null) return false;
             const locked = e.lockBindingsForRead();
             if (e.vars.contains(name)) {
                 const r = e.fn_names.contains(name);
@@ -1006,6 +1111,7 @@ pub const Environment = struct {
     pub fn isConst(self: *Environment, name: []const u8) ?bool {
         var env: ?*Environment = self;
         while (env) |e| {
+            if (e.activationBinding(name)) |binding| return binding.immutable;
             const locked = e.lockBindingsForRead();
             if (e.vars.contains(name)) {
                 const r = e.consts.contains(name);
@@ -1033,6 +1139,7 @@ pub const Environment = struct {
             // as a concurrent mutator's structural writes.
             env.private_activation = false;
             env.captured = true;
+            if (env.activation) |*view| view.frame.markEscaped();
         }
     }
 
@@ -1051,6 +1158,11 @@ pub const Environment = struct {
     pub fn assign(self: *Environment, name: []const u8, v: Value) EvalError!void {
         var env: ?*Environment = self;
         while (env) |e| {
+            if (e.activation) |*view| if (view.binding(name)) |binding| {
+                e.barrierStoredValue(v);
+                view.frame.write(binding.slot, v);
+                return;
+            };
             // Hold `binding_lock` across BOTH the `getPtr` lookup and the value
             // write. Under no-GIL a peer thread's `put`/`getOrPut` on this scope
             // (e.g. globalDefine) can rehash `vars` concurrently, so an unlocked
@@ -1087,6 +1199,12 @@ pub const Environment = struct {
     /// must retain its original base even if intervening JavaScript mutates the
     /// surrounding environment chain before the store.
     pub fn resolvedBindingState(self: *Environment, name: []const u8, tdz_marker: ?*value.Object) ResolvedBindingState {
+        if (self.activation) |*view| if (view.binding(name)) |binding| {
+            const current = view.frame.read(binding.slot);
+            if (tdz_marker) |marker|
+                if (current.isObject() and current.asObj() == marker) return .tdz;
+            return if (binding.immutable) .immutable else .mutable;
+        };
         const locked = self.lockBindingsForRead();
         defer self.unlockBindingsForRead(locked);
         if (self.aliases.contains(name)) return .immutable;
@@ -1103,6 +1221,10 @@ pub const Environment = struct {
     /// different record if the binding disappeared after Reference creation.
     pub fn assignOwnResolved(self: *Environment, name: []const u8, v: Value) bool {
         self.barrierStoredValue(v);
+        if (self.activation) |*view| if (view.binding(name)) |binding| {
+            view.frame.write(binding.slot, v);
+            return true;
+        };
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
         const slot = self.vars.getPtr(name) orelse return false;
@@ -1153,6 +1275,7 @@ pub const Environment = struct {
     pub fn isAlias(self: *Environment, name: []const u8) bool {
         var env: ?*Environment = self;
         while (env) |e| {
+            if (e.activationBinding(name) != null) return false;
             const locked = e.lockBindingsForRead();
             if (e.aliases.contains(name)) {
                 e.unlockBindingsForRead(locked);
@@ -1173,6 +1296,8 @@ pub const Environment = struct {
     pub fn get(self: *Environment, name: []const u8) ?Value {
         var env: ?*Environment = self;
         while (env) |e| {
+            if (e.activation) |*view| if (view.binding(name)) |binding|
+                return view.frame.read(binding.slot);
             // Shared/captured scopes read under `binding_lock` so a concurrent
             // `put`/`putAlias` rehash cannot tear the read or free the table.
             // Uncaptured private activations have one mutator and may read
@@ -1199,6 +1324,8 @@ pub const Environment = struct {
     /// an outer scope or module alias, so the full parent-chain/alias walk only
     /// adds lock/hash churn on hot no-GIL readers.
     pub fn getLocal(self: *Environment, name: []const u8) ?Value {
+        if (self.activation) |*view| if (view.binding(name)) |binding|
+            return view.frame.read(binding.slot);
         const locked = self.lockBindingsForRead();
         defer self.unlockBindingsForRead(locked);
         return self.vars.get(name);
@@ -1208,6 +1335,8 @@ pub const Environment = struct {
     /// walking to a different record if the binding disappeared. Module import
     /// aliases remain live views of their target binding.
     pub fn getOwnResolved(self: *Environment, name: []const u8) ?Value {
+        if (self.activation) |*view| if (view.binding(name)) |binding|
+            return view.frame.read(binding.slot);
         const locked = self.lockBindingsForRead();
         const alias = if (self.aliases.count() != 0) self.aliases.get(name) else null;
         const local = if (alias == null) self.vars.get(name) else null;
@@ -1220,6 +1349,11 @@ pub const Environment = struct {
     /// Returns false if the binding is absent; callers that need sloppy global
     /// creation should use `assign` instead.
     pub fn assignLocal(self: *Environment, name: []const u8, v: Value) bool {
+        if (self.activation) |*view| if (view.binding(name)) |binding| {
+            self.barrierStoredValue(v);
+            view.frame.write(binding.slot, v);
+            return true;
+        };
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
         if (self.vars.getPtr(name)) |ptr| {
@@ -2889,9 +3023,7 @@ pub const Interpreter = struct {
     /// name)` and reflection see them (the test262 async harness relies on this).
     pub fn globalDefine(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
         const vs = self.env.varScope(); // `var`/function declarations hoist here
-        const locked = vs.lockBindingsForRead();
-        const existed_local = vs.vars.contains(name);
-        vs.unlockBindingsForRead(locked);
+        const existed_local = vs.hasOwnBinding(name);
         try vs.put(name, v);
         if (vs.parent == null) {
             if (self.global_object) |g| {
@@ -2919,7 +3051,7 @@ pub const Interpreter = struct {
     /// global property lets identifier resolution fall through to that property.
     fn createVarBinding(self: *Interpreter, name: []const u8) EvalError!void {
         const vs = self.env.varScope();
-        if (vs.vars.contains(name)) return; // param / hoisted function / earlier var
+        if (vs.hasOwnBinding(name)) return; // param / hoisted function / earlier var
         if (vs.parent == null) {
             if (self.global_object) |g| {
                 if (objectHasOwn(g, name)) return;
@@ -2972,7 +3104,7 @@ pub const Interpreter = struct {
             var vars: std.ArrayListUnmanaged([]const u8) = .empty;
             try self.collectEvalVarNames(stmts, &vars);
             for (vars.items) |nm| {
-                if (g.getOwn(nm) == null and self.env.varScope().vars.get(nm) == null)
+                if (g.getOwn(nm) == null and !self.env.varScope().hasOwnBinding(nm))
                     return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
             }
         }
@@ -3001,7 +3133,7 @@ pub const Interpreter = struct {
         // parameter scope); `arguments` has its own separate restriction.
         if (self.in_param_default) {
             for (vars.items) |n|
-                if (!eq(n, "arguments") and var_env.vars.contains(n))
+                if (!eq(n, "arguments") and var_env.hasOwnBinding(n))
                     return self.throwError("SyntaxError", "eval cannot var-declare a parameter name in a parameter default");
         }
         var env: *Environment = self.env;
@@ -3010,7 +3142,7 @@ pub const Interpreter = struct {
             // `var` may match it); other declarative records are checked.
             if (env.with_object == null and !env.is_catch_param) {
                 for (vars.items) |n|
-                    if (env.vars.contains(n))
+                    if (env.hasOwnBinding(n))
                         return self.throwError("SyntaxError", "var declaration in eval conflicts with a lexical binding");
             }
             env = env.parent orelse break;
@@ -3020,7 +3152,7 @@ pub const Interpreter = struct {
             // bindings without a matching own property on the global object.
             const g = self.global_object orelse return;
             for (vars.items) |n|
-                if (var_env.vars.contains(n) and !objectHasOwn(g, n))
+                if (var_env.hasOwnBinding(n) and !objectHasOwn(g, n))
                     return self.throwError("SyntaxError", "var declaration in eval conflicts with a global lexical binding");
         }
     }
@@ -3049,7 +3181,7 @@ pub const Interpreter = struct {
         for (lex_names.items) |n| {
             // HasLexicalDeclaration(n): in root `vars` but not an own global
             // property (a global `var`/function lives in both).
-            if (root.vars.contains(n) and !objectHasOwn(g, n))
+            if (root.hasOwnBinding(n) and !objectHasOwn(g, n))
                 return self.throwError("SyntaxError", "redeclaration of global lexical binding");
             // HasRestrictedGlobalProperty(n): an own non-configurable property.
             // (A `var` introduced by non-strict direct eval is configurable, so it
@@ -3066,7 +3198,7 @@ pub const Interpreter = struct {
             try vars.append(self.arena, s.func_decl.name);
         for (vars.items) |n| {
             // HasLexicalDeclaration(n): in root `vars` but not an own global property.
-            if (root.vars.contains(n) and !objectHasOwn(g, n))
+            if (root.hasOwnBinding(n) and !objectHasOwn(g, n))
                 return self.throwError("SyntaxError", "var declaration conflicts with global lexical binding");
         }
     }
@@ -3144,7 +3276,7 @@ pub const Interpreter = struct {
     pub fn globalDefineFunc(self: *Interpreter, name: []const u8, v: Value) EvalError!void {
         const vs = self.env.varScope();
         if (vs.parent != null or self.global_object == null) {
-            const existed = vs.vars.contains(name);
+            const existed = vs.hasOwnBinding(name);
             try vs.put(name, v);
             // A sloppy direct eval's top-level function declaration in a function
             // variable env is a deletable binding, like its `var` siblings.
@@ -3331,6 +3463,7 @@ pub const Interpreter = struct {
         const g = self.currentGlobalObject() orelse return null;
         var env: ?*Environment = self.env;
         while (env) |e| {
+            if (e.activationBinding(name) != null) return null;
             // Read `vars` under the binding lock: a peer thread's put/getOrPut on
             // this scope can rehash it concurrently (no-GIL Environment race,
             // Linux tsan-threadfuzz: globalDefine put vs this contains). Only a
@@ -3396,6 +3529,8 @@ pub const Interpreter = struct {
         // false→true transitions.
         var env: ?*Environment = self.env;
         while (env) |e| {
+            if (e.activation) |*activation| if (activation.binding(name)) |binding|
+                return .{ .value = activation.frame.read(binding.slot) };
             const locked = e.lockBindingsForRead();
             // Skip the `aliases` hash (which would still hash `name`) when the map
             // is empty — the common case for ordinary scopes (aliases exist only for
@@ -3481,6 +3616,7 @@ pub const Interpreter = struct {
     fn bindingEnvOf(start: *Environment, name: []const u8) ?*Environment {
         var env: ?*Environment = start;
         while (env) |e| {
+            if (e.activationBinding(name) != null) return e;
             // Existence check under the binding lock (same no-GIL race class as
             // lookupIdent); the `getPtr` result is not escaped, only its
             // presence, so nothing dangles after unlock.
@@ -3496,6 +3632,7 @@ pub const Interpreter = struct {
     pub fn assignWithObject(self: *Interpreter, name: []const u8) EvalError!?*value.Object {
         var env: ?*Environment = self.env;
         while (env) |e| {
+            if (e.activationBinding(name) != null) return null;
             const locked = e.lockBindingsForRead();
             const owned = e.aliases.get(name) != null or e.vars.get(name) != null;
             e.unlockBindingsForRead(locked);
@@ -3522,6 +3659,7 @@ pub const Interpreter = struct {
                 if (count == 0) return .static;
                 remaining = count - 1;
             }
+            if (e.activationBinding(name) != null) return .{ .environment = e };
             const locked = e.lockBindingsForRead();
             const owns_alias = e.aliases.contains(name);
             const owns_var = e.vars.contains(name);
@@ -3568,6 +3706,11 @@ pub const Interpreter = struct {
             if (remaining) |count| {
                 if (count == 0) return false;
                 remaining = count - 1;
+            }
+
+            if (e.activationBinding(name) != null) {
+                if (strict) return self.throwError("TypeError", "Cannot delete binding");
+                return false;
             }
 
             const locked = e.lockBindingsForRead();
@@ -6224,7 +6367,7 @@ pub const Interpreter = struct {
             const vs = self.env.varScope();
             var it = annexb_set.keyIterator();
             while (it.next()) |k| {
-                if (!vs.vars.contains(k.*)) try self.createVarBinding(k.*);
+                if (!vs.hasOwnBinding(k.*)) try self.createVarBinding(k.*);
             }
         }
         // Hoist function declarations to the top of the scope so forward
@@ -52618,6 +52761,46 @@ fn relationalNaN(a: Value, b: Value) bool {
 // ---------------------------------------------------------------------------
 
 const Parser = parser_mod.Parser;
+
+test "direct eval activation view keeps one live bounded binding cell" {
+    var slots = [_]Value{ Value.num(3), Value.num(7) };
+    var escaped: std.atomic.Value(bool) = .init(false);
+    var slot_lock: std.atomic.Mutex = .unlocked;
+    const bindings = [_]bc.DirectEvalBinding{
+        .{ .name = "constant", .slot = 1, .lexical = true, .immutable = true, .tdz_checked = true, .mapped_parameter = false },
+        .{ .name = "mutable", .slot = 0, .lexical = false, .immutable = false, .tdz_checked = false, .mapped_parameter = false },
+    };
+    var env = Environment{
+        .arena = std.testing.allocator,
+        .fn_scope = true,
+        .activation = .{
+            .frame = .{
+                .slots = &slots,
+                .mapped_arguments = null,
+                .mapped_parameter_indices = &.{},
+                .escaped = &escaped,
+                .slot_lock = &slot_lock,
+            },
+            .bindings = &bindings,
+        },
+    };
+
+    try std.testing.expect(env.hasOwnBinding("mutable"));
+    try std.testing.expect(!env.hasOwnBinding("missing"));
+    try std.testing.expectEqual(@as(f64, 3), env.get("mutable").?.asNum());
+    try std.testing.expectEqual(@as(?bool, false), env.isConst("mutable"));
+    try std.testing.expectEqual(@as(?bool, true), env.isConst("constant"));
+    try std.testing.expectEqual(Environment.ResolvedBindingState.immutable, env.resolvedBindingState("constant", null));
+
+    try env.assign("mutable", Value.num(11));
+    try std.testing.expectEqual(@as(f64, 11), slots[0].asNum());
+    try std.testing.expectEqual(@as(f64, 11), env.getLocal("mutable").?.asNum());
+    try std.testing.expect(env.assignOwnResolved("mutable", Value.num(13)));
+    try std.testing.expectEqual(@as(f64, 13), slots[0].asNum());
+
+    env.markCaptured();
+    try std.testing.expect(escaped.load(.acquire));
+}
 
 fn evalSource(arena: std.mem.Allocator, src: []const u8) !Value {
     var parser = try Parser.init(arena, src);

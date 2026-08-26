@@ -254,6 +254,97 @@ fn retainDebugLocalNames(arena: std.mem.Allocator, chunk: *Chunk, scope: *const 
     chunk.debug_local_names = try arena.dupe([]const u8, scope.slot_names.items);
 }
 
+fn isUserVisibleBindingName(name: []const u8) bool {
+    return name.len == 0 or name[0] != 0;
+}
+
+fn directEvalBindings(
+    arena: std.mem.Allocator,
+    bindings: *const SecureStringMapUnmanaged(SlotBinding),
+) CompileError![]const bc.DirectEvalBinding {
+    var visible_count: usize = 0;
+    var count_it = bindings.iterator();
+    while (count_it.next()) |entry|
+        visible_count += @intFromBool(isUserVisibleBindingName(entry.key_ptr.*));
+
+    const retained = try arena.alloc(bc.DirectEvalBinding, visible_count);
+    var retained_index: usize = 0;
+    var it = bindings.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (!isUserVisibleBindingName(name)) continue;
+        const binding = entry.value_ptr.*;
+        retained[retained_index] = .{
+            .name = name,
+            .slot = binding.slot,
+            .lexical = binding.lexical,
+            .immutable = binding.immutable,
+            .tdz_checked = binding.tdz_checked,
+            .mapped_parameter = binding.mapped_parameter,
+        };
+        retained_index += 1;
+    }
+    std.mem.sort(bc.DirectEvalBinding, retained, {}, struct {
+        fn lessThan(_: void, left: bc.DirectEvalBinding, right: bc.DirectEvalBinding) bool {
+            const order = std.mem.order(u8, left.name, right.name);
+            return order == .lt or (order == .eq and left.slot < right.slot);
+        }
+    }.lessThan);
+    return retained;
+}
+
+/// Freeze the active slot-backed scope stack without copying activation values.
+/// The function VariableEnvironment is always retained, even when empty, so a
+/// sloppy eval has the exact declaration target. Empty lexical scopes are
+/// semantically inert and omitted. Runtime Environment Records must be
+/// interleaved by a later admission-aware layer rather than guessed here.
+fn buildDirectEvalPlan(arena: std.mem.Allocator, scope: *const FnScope) CompileError!bc.DirectEvalPlan {
+    var frame_count: usize = 0;
+    var scope_count: usize = 0;
+    var cursor: ?*const FnScope = scope;
+    while (cursor) |frame_scope| : (cursor = frame_scope.parent) {
+        // A runtime Environment Record between two defining frames must appear
+        // at its exact lexical position. Do not flatten or reorder it into the
+        // static plan; admission stays causal until interleaving is represented.
+        if (frame_scope.parent != null and frame_scope.parent_environment_depth != 0)
+            return error.Unsupported;
+        frame_count += 1;
+        scope_count += 1;
+        for (frame_scope.lexical_scopes.items) |lexical|
+            scope_count += @intFromBool(lexical.count() != 0);
+    }
+
+    const scopes = try arena.alloc(bc.DirectEvalScope, scope_count);
+    const frames = try arena.alloc(*const FnScope, frame_count);
+    cursor = scope;
+    var current_depth: usize = 0;
+    while (cursor) |frame_scope| : (cursor = frame_scope.parent) {
+        frames[frame_count - current_depth - 1] = frame_scope;
+        current_depth += 1;
+    }
+
+    var scope_index: usize = 0;
+    for (frames, 0..) |frame_scope, outer_index| {
+        const frame_depth: u32 = @intCast(frame_count - outer_index - 1);
+        scopes[scope_index] = .{
+            .bindings = try directEvalBindings(arena, &frame_scope.names),
+            .function_scope = true,
+            .frame_depth = frame_depth,
+        };
+        scope_index += 1;
+        for (frame_scope.lexical_scopes.items) |lexical| {
+            if (lexical.count() == 0) continue;
+            scopes[scope_index] = .{
+                .bindings = try directEvalBindings(arena, lexical),
+                .function_scope = false,
+                .frame_depth = frame_depth,
+            };
+            scope_index += 1;
+        }
+    }
+    return .{ .scopes = scopes };
+}
+
 /// Every ordinary function that can observe its own arguments object receives
 /// one activation-local slot. Nested arrows resolve that owner slot like any
 /// other upvalue; arrows never manufacture an arguments binding themselves.
@@ -5822,6 +5913,102 @@ test "compiler binding indexes share one lazy failure-atomic secure context" {
     var sibling = SecureStringMapUnmanaged(void){ .state = &lazy_state };
     try sibling.put(arena.allocator(), "third", {});
     try std.testing.expectEqual(lazy_state.context.?.seed, sibling.state.context.?.seed);
+}
+
+test "compiler direct eval plan retains ordered live binding identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var hash_state: CompileHashState = .{};
+    var scope = FnScope{
+        .parent = null,
+        .hash_state = &hash_state,
+        .names = .{ .state = &hash_state },
+        .tdz_checks = true,
+    };
+    const parameter_slot = try scope.addLocal(allocator, "parameter", false, false);
+    const variable_slot = try scope.addLocal(allocator, "variable", false, false);
+    _ = try scope.addLocal(allocator, "\x00activation-temp", false, false);
+    scope.names.getPtr("parameter").?.mapped_parameter = true;
+
+    try scope.pushLexicalScope(allocator);
+    const outer_slot = try scope.addLexicalChecked(allocator, "value", false);
+    try scope.pushLexicalScope(allocator);
+    const inner_slot = try scope.addLexicalChecked(allocator, "value", true);
+
+    const plan = try buildDirectEvalPlan(allocator, &scope);
+    try std.testing.expectEqual(@as(usize, 3), plan.scopes.len);
+
+    const function_scope = plan.scopes[0];
+    try std.testing.expect(function_scope.function_scope);
+    try std.testing.expectEqual(@as(u32, 0), function_scope.frame_depth);
+    try std.testing.expectEqual(@as(usize, 2), function_scope.bindings.len);
+    try std.testing.expectEqualStrings("parameter", function_scope.bindings[0].name);
+    try std.testing.expectEqual(parameter_slot, function_scope.bindings[0].slot);
+    try std.testing.expect(function_scope.bindings[0].mapped_parameter);
+    try std.testing.expectEqualStrings("variable", function_scope.bindings[1].name);
+    try std.testing.expectEqual(variable_slot, function_scope.bindings[1].slot);
+
+    const outer = plan.scopes[1];
+    try std.testing.expect(!outer.function_scope);
+    try std.testing.expectEqual(@as(u32, 0), outer.frame_depth);
+    try std.testing.expectEqual(@as(usize, 1), outer.bindings.len);
+    try std.testing.expectEqualStrings("value", outer.bindings[0].name);
+    try std.testing.expectEqual(outer_slot, outer.bindings[0].slot);
+    try std.testing.expect(outer.bindings[0].lexical);
+    try std.testing.expect(outer.bindings[0].tdz_checked);
+    try std.testing.expect(!outer.bindings[0].immutable);
+
+    const inner = plan.scopes[2];
+    try std.testing.expect(!inner.function_scope);
+    try std.testing.expectEqual(@as(u32, 0), inner.frame_depth);
+    try std.testing.expectEqual(@as(usize, 1), inner.bindings.len);
+    try std.testing.expectEqualStrings("value", inner.bindings[0].name);
+    try std.testing.expectEqual(inner_slot, inner.bindings[0].slot);
+    try std.testing.expect(inner.bindings[0].lexical);
+    try std.testing.expect(inner.bindings[0].tdz_checked);
+    try std.testing.expect(inner.bindings[0].immutable);
+}
+
+test "compiler direct eval plan preserves defining-frame depth and rejects environment gaps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var hash_state: CompileHashState = .{};
+    var outer = FnScope{
+        .parent = null,
+        .hash_state = &hash_state,
+        .names = .{ .state = &hash_state },
+        .tdz_checks = true,
+    };
+    _ = try outer.addLocal(allocator, "outerVariable", false, false);
+    try outer.pushLexicalScope(allocator);
+    _ = try outer.addLexicalChecked(allocator, "outerLexical", false);
+
+    var inner = FnScope{
+        .parent = &outer,
+        .hash_state = &hash_state,
+        .names = .{ .state = &hash_state },
+        .tdz_checks = true,
+    };
+    _ = try inner.addLocal(allocator, "innerVariable", false, false);
+
+    const plan = try buildDirectEvalPlan(allocator, &inner);
+    try std.testing.expectEqual(@as(usize, 3), plan.scopes.len);
+    try std.testing.expectEqualStrings("outerVariable", plan.scopes[0].bindings[0].name);
+    try std.testing.expect(plan.scopes[0].function_scope);
+    try std.testing.expectEqual(@as(u32, 1), plan.scopes[0].frame_depth);
+    try std.testing.expectEqualStrings("outerLexical", plan.scopes[1].bindings[0].name);
+    try std.testing.expect(!plan.scopes[1].function_scope);
+    try std.testing.expectEqual(@as(u32, 1), plan.scopes[1].frame_depth);
+    try std.testing.expectEqualStrings("innerVariable", plan.scopes[2].bindings[0].name);
+    try std.testing.expect(plan.scopes[2].function_scope);
+    try std.testing.expectEqual(@as(u32, 0), plan.scopes[2].frame_depth);
+
+    inner.parent_environment_depth = 1;
+    try std.testing.expectError(error.Unsupported, buildDirectEvalPlan(allocator, &inner));
 }
 
 test "compiler keyed placement disperses a deterministic default collision family" {

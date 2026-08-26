@@ -151,6 +151,16 @@ pub const Frame = struct {
         self.unlockSlots(held);
     }
 
+    pub fn activationView(self: *Frame) interp.ActivationFrameView {
+        return .{
+            .slots = self.slots,
+            .mapped_arguments = self.mapped_arguments,
+            .mapped_parameter_indices = self.mapped_parameter_indices,
+            .escaped = &self.escaped,
+            .slot_lock = &self.slot_lock,
+        };
+    }
+
     /// Mark this frame and every ancestor as escaped — a closure capturing this
     /// frame can reach them all through the upvalue walk.
     fn markEscapedChain(self: *Frame) void {

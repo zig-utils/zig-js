@@ -1141,6 +1141,11 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     // so every edge reset before reuse is read under the same lock.
     const concurrent = v.concurrent();
     if (concurrent) e.lockBindingsForTrace();
+    if (e.activation) |*activation| {
+        if (activation.frame.mapped_arguments) |arguments| v.mark(arguments);
+        for (activation.bindings) |binding|
+            markValueInternal(v, "direct-eval VM activation binding", activation.frame.read(binding.slot));
+    }
     var vit = e.vars.iterator();
     while (vit.next()) |entry| markValueVariable(v, entry.key_ptr.*, entry.value_ptr.*);
     for (e.disposables.items) |d| {
@@ -1160,6 +1165,13 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
 /// arena/backing-owned hash tables and disposable list are stable and must not
 /// take `binding_lock` while their payload slots are rewritten.
 pub fn relocateEnv(e: *Environment, v: anytype) void {
+    if (e.activation) |*activation| {
+        gc_relocation.rewriteOptionalSlot(v, Object, &activation.frame.mapped_arguments);
+        for (activation.bindings) |binding| {
+            if (binding.slot < activation.frame.slots.len)
+                gc_relocation.rewriteValueSlot(v, &activation.frame.slots[binding.slot]);
+        }
+    }
     var values = e.vars.valueIterator();
     while (values.next()) |slot| gc_relocation.rewriteValueSlot(v, slot);
     for (e.disposables.items) |*disposable| {
@@ -1243,6 +1255,51 @@ test "Environment relocation rewrites every managed binding slot" {
     try std.testing.expectEqual(&new_environments[1], alias.env);
     try std.testing.expectEqualStrings("exported", alias.name);
     try std.testing.expectEqual(&new_objects[5], environment.with_object.?);
+}
+
+test "Environment relocation rewrites live direct eval activation slots" {
+    var old_object: Object = undefined;
+    var new_object: Object = undefined;
+    var slots = [_]Value{Value.obj(&old_object)};
+    var escaped: std.atomic.Value(bool) = .init(true);
+    var slot_lock: std.atomic.Mutex = .unlocked;
+    const bindings = [_]bytecode.DirectEvalBinding{.{
+        .name = "live",
+        .slot = 0,
+        .lexical = false,
+        .immutable = false,
+        .tdz_checked = false,
+        .mapped_parameter = false,
+    }};
+    var environment = Environment{
+        .arena = std.testing.allocator,
+        .gc_managed = true,
+        .activation = .{
+            .frame = .{
+                .slots = &slots,
+                .mapped_arguments = null,
+                .mapped_parameter_indices = &.{},
+                .escaped = &escaped,
+                .slot_lock = &slot_lock,
+            },
+            .bindings = &bindings,
+        },
+    };
+
+    const Plan = struct {
+        old: *Object,
+        new: *Object,
+
+        pub fn resolve(self: *const @This(), candidate: *anyopaque) *anyopaque {
+            if (candidate == @as(*anyopaque, @ptrCast(self.old))) return @ptrCast(self.new);
+            return candidate;
+        }
+    };
+    const plan = Plan{ .old = &old_object, .new = &new_object };
+    relocateEnv(&environment, &plan);
+
+    try std.testing.expectEqual(&new_object, slots[0].asObj());
+    try std.testing.expectEqual(&new_object, environment.get("live").?.asObj());
 }
 
 fn finalizeEnv(e: *Environment) void {

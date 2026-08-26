@@ -522,6 +522,40 @@ pub const BindingReferencePlan = struct {
     fallback: BindingReferenceFallback,
 };
 
+/// One user-visible binding in a slot-backed ordinary activation. Direct eval
+/// consumes these immutable, name-sorted descriptors to expose the *live* frame
+/// cell through a Declarative Environment Record; values are deliberately not
+/// copied into the plan. Compiler-only NUL-prefixed temporaries never appear.
+pub const DirectEvalBinding = struct {
+    name: []const u8,
+    slot: u32,
+    lexical: bool,
+    immutable: bool,
+    tdz_checked: bool,
+    mapped_parameter: bool,
+};
+
+/// One declarative scope visible at a direct-eval call site. `function_scope`
+/// identifies the VariableEnvironment that receives sloppy eval `var` and
+/// function declarations; every later entry is an enclosing-to-enclosed
+/// lexical scope layered above it.
+pub const DirectEvalScope = struct {
+    bindings: []const DirectEvalBinding,
+    function_scope: bool,
+    /// Number of defining-frame links from the currently running activation.
+    /// Zero addresses the direct-eval caller; one addresses its captured outer
+    /// frame, and so on.
+    frame_depth: u32,
+};
+
+/// Exact static scope stack for one direct-eval call site. Runtime Environment
+/// Records (captured loop heads, `with`, disposal scopes) are not flattened into
+/// this structure: admission must remain fail-closed until their interleaving is
+/// represented explicitly.
+pub const DirectEvalPlan = struct {
+    scopes: []const DirectEvalScope,
+};
+
 /// `load_binding_ref` keeps the Reference for a later PutValue when `retain` is
 /// set; otherwise it clears the activation slot after GetValue. `with_base`
 /// pushes `[base, value]` so identifier calls can preserve WithBaseObject, and
@@ -804,6 +838,11 @@ pub const Chunk = struct {
     /// resolution must precede iterator/property/default side effects. Each
     /// plan also owns one activation-local `Exec.binding_references` slot.
     binding_reference_plans: std.ArrayListUnmanaged(BindingReferencePlan) = .empty,
+    /// Slot-backed Environment views required by ordinary-function direct eval.
+    /// Plans contain binding identity/kind only; activation values remain in the
+    /// frame so reads, writes, mapped arguments, TDZ, and escaping closures share
+    /// one live cell rather than a snapshot.
+    direct_eval_plans: std.ArrayListUnmanaged(DirectEvalPlan) = .empty,
     /// Class-expression AST nodes referenced by `eval_class`; the compiler
     /// evaluates and prepares heritage plus any suspendable computed names first,
     /// then the VM delegates construction back to the interpreter while the
