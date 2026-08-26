@@ -41,6 +41,12 @@ export function validateSharedMeasurementOverlay(logicalParent: string, logicalC
   for (const path of expected) requireValue(revisionBlob(parentBinaryRevision, path, repository) === revisionBlob(candidateBinaryRevision, path, repository), `shared measurement overlay blob drift: ${path}`);
   return [parentBinaryRevision, candidateBinaryRevision];
 }
+export function validateDirectBinaryRevisions(logicalParent: string, logicalCandidate: string, parentBinary: string, candidateBinary: string, repository = ROOT): [string, string] {
+  const parentRevision = resolveRevision(logicalParent, repository), candidateRevision = resolveRevision(logicalCandidate, repository), parentBinaryRevision = resolveRevision(parentBinary, repository), candidateBinaryRevision = resolveRevision(candidateBinary, repository);
+  requireValue(parentBinaryRevision === parentRevision, "direct parent binary revision does not match the logical parent");
+  requireValue(candidateBinaryRevision === candidateRevision, "direct candidate binary revision does not match the logical candidate");
+  return [parentBinaryRevision, candidateBinaryRevision];
+}
 
 export function parseBenchmark(stdout: string, expectedMode: string, expectedWorkload: string, lanes: number, jobs: number): [string, number, number] {
   const rows = stdout.split("\n").filter((line) => line.startsWith("zig-js\t")); requireValue(rows.length === 1, `expected one zig-js benchmark row, got ${rows.length}`);
@@ -316,6 +322,8 @@ export function selfTest(): void {
     for (let commit = 0; commit < 3; commit += 1) { writeText(tracked, `fixture ${commit}\n`); checked(["git", "-C", directory, "add", "tracked.txt"], "stage fixture"); checked(["git", "-C", directory, "commit", "-qm", `fixture ${commit}`], "commit fixture"); }
     const logicalParent = resolveRevision("HEAD~2", directory), logicalCandidate = resolveRevision("HEAD~1", directory);
     requireValue(JSON.stringify(validateExactParent(logicalParent, logicalCandidate, directory)) === JSON.stringify([logicalParent, logicalCandidate]), "fixture exact parent did not validate");
+    requireValue(JSON.stringify(validateDirectBinaryRevisions(logicalParent, logicalCandidate, logicalParent, logicalCandidate, directory)) === JSON.stringify([logicalParent, logicalCandidate]), "direct binary revisions did not validate");
+    expectFailure(() => validateDirectBinaryRevisions(logicalParent, logicalCandidate, logicalCandidate, logicalCandidate, directory), "direct parent binary revision does not match");
     expectFailure(() => validateExactParent(logicalParent, resolveRevision("HEAD", directory), directory), "not requested exact parent");
     checked(["git", "-C", directory, "checkout", "-qb", "parent-overlay", logicalParent], "create parent overlay fixture"); writeText(overlay, "shared overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt"], "stage parent overlay"); checked(["git", "-C", directory, "commit", "-qm", "parent overlay"], "commit parent overlay"); const parentOverlay = resolveRevision("HEAD", directory);
     checked(["git", "-C", directory, "checkout", "-qb", "candidate-overlay", logicalCandidate], "create candidate overlay fixture"); writeText(overlay, "shared overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt"], "stage candidate overlay"); checked(["git", "-C", directory, "commit", "-qm", "candidate overlay"], "commit candidate overlay"); const candidateOverlay = resolveRevision("HEAD", directory);
@@ -344,12 +352,12 @@ function publishRow(parentBinary: string, candidateBinary: string, row: BatchRow
   }
   const metadata = {
     parent_revision: identities.parent_revision, candidate_revision: identities.candidate_revision, candidate_first_parent: identities.parent_revision,
-    parent_binary_revision: identities.parent_binary_revision, candidate_binary_revision: identities.candidate_binary_revision, shared_measurement_overlay_paths: SHARED_MEASUREMENT_OVERLAY_PATHS,
     zig_gc_revision: identities.zig_gc_revision, zig_regex_revision: identities.zig_regex_revision, zig_version: identities.zig_version, os: identities.os, hardware: identities.hardware,
     power: commandOutput(["pmset", "-g", "batt"], "unavailable").split(/\s+/).join(" "), host_class: options.host_class, material_change_categories: identities.material_categories,
     workload_source_sha256: identities.workload_source_sha256, parent_binary_sha256: identities.parent_binary_sha256, candidate_binary_sha256: identities.candidate_binary_sha256,
     samples: options.samples, minimum_measured_boundary_cpu_occupancy: MINIMUM_PROCESS_CPU_OCCUPANCY, timed_boundary: options.timed_boundary, mode: options.mode, workload: row.workload, lanes: options.lanes, jobs: row.jobs, expected_checksum: row.expected_checksum,
     ...(options.allocation_replay_mode ? { allocation_replay_mode: options.allocation_replay_mode } : {}),
+    ...(identities.schema.schema_version >= 3 ? { parent_binary_revision: identities.parent_binary_revision, candidate_binary_revision: identities.candidate_binary_revision, shared_measurement_overlay_paths: identities.shared_measurement_overlay_paths } : {}),
   };
   const artifact = { schema_version: identities.schema.schema_version, profile_id: identities.schema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarize(samples, identities.schema, options.host_class, identities.material_categories) };
   validateArtifact(artifact, identities.schema);
@@ -365,7 +373,7 @@ function main(): void {
   const names: any = { "--parent-revision": "parent_revision", "--candidate-revision": "candidate_revision", "--parent-binary-revision": "parent_binary_revision", "--candidate-binary-revision": "candidate_binary_revision", "--source": "source", "--mode": "mode", "--workload": "workload", "--jobs": "jobs", "--lanes": "lanes", "--expected-checksum": "expected_checksum", "--samples": "samples", "--host-class": "host_class", "--material-change": "material_change", "--timed-boundary": "timed_boundary", "--allocation-replay-mode": "allocation_replay_mode", "--batch": "batch", "--schema": "schema", "--raw-out": "raw_out", "--markdown-out": "markdown_out" };
   for (let index = 0; index < raw.length; index += 1) { if (!raw[index].startsWith("--")) positional.push(raw[index]); else { requireValue(names[raw[index]] && index + 1 < raw.length, `unknown or incomplete argument: ${raw[index]}`); const key = names[raw[index]], value = raw[++index]; options[key] = ["jobs", "lanes", "expected_checksum", "samples"].includes(key) ? Number(value) : value; } }
   requireValue(positional.length === 2, "usage: exact-parent-regression.ts PARENT_RUNNER CANDIDATE_RUNNER [options]");
-  for (const field of ["parent_revision", "parent_binary_revision", "candidate_binary_revision", "source", "mode", "timed_boundary"]) requireValue(options[field] !== undefined, `missing required option: ${field}`);
+  for (const field of ["parent_revision", "source", "mode", "timed_boundary"]) requireValue(options[field] !== undefined, `missing required option: ${field}`);
   const singleFields = ["workload", "jobs", "expected_checksum", "raw_out", "markdown_out"], batchMode = options.batch !== undefined;
   if (batchMode) for (const field of singleFields) requireValue(options[field] === undefined, `--batch cannot be combined with --${field.replaceAll("_", "-")}`); else for (const field of singleFields) requireValue(options[field] !== undefined, `missing required option: ${field}`);
   requireValue(Number.isSafeInteger(options.samples) && options.samples >= 2 && Number.isSafeInteger(options.lanes) && options.lanes > 0, "samples must be >=2 and lanes must be positive");
@@ -375,9 +383,19 @@ function main(): void {
   for (const row of rows) for (const output of [row.raw_out, row.markdown_out]) requireValue(!Home.fileExists(output), `refusing to overwrite exact-parent artifact: ${output}`);
   const materialCategories = options.material_change ? String(options.material_change).split(",").filter(Boolean) : ["cpu_work", ...(["independent_steady", "independent_cold", "shared"].includes(options.mode) ? ["threads"] : [])];
   requireValue(materialCategories.length > 0 && materialCategories.every((value: string) => MATERIAL_CATEGORIES.includes(value)) && new Set(materialCategories).size === materialCategories.length, `material-change categories must be unique values from ${MATERIAL_CATEGORIES.join(",")}`);
-  const schema = loadSchema(options.schema), [parentRevision, candidateRevision] = validateExactParent(options.parent_revision, options.candidate_revision), [parentBinaryRevision, candidateBinaryRevision] = validateSharedMeasurementOverlay(parentRevision, candidateRevision, options.parent_binary_revision, options.candidate_binary_revision);
+  const schema = loadSchema(options.schema), [parentRevision, candidateRevision] = validateExactParent(options.parent_revision, options.candidate_revision);
+  const binaryOptionsPresent = options.parent_binary_revision !== undefined || options.candidate_binary_revision !== undefined;
+  requireValue(!binaryOptionsPresent || (options.parent_binary_revision !== undefined && options.candidate_binary_revision !== undefined), "parent and candidate binary revisions must be provided together");
+  let parentBinaryRevision: string | undefined, candidateBinaryRevision: string | undefined, sharedMeasurementOverlayPaths: string[] | undefined;
+  if (schema.schema_version >= 3) {
+    requireValue(binaryOptionsPresent, "schema v3 requires parent and candidate binary revisions");
+    [parentBinaryRevision, candidateBinaryRevision] = validateSharedMeasurementOverlay(parentRevision, candidateRevision, options.parent_binary_revision, options.candidate_binary_revision);
+    sharedMeasurementOverlayPaths = SHARED_MEASUREMENT_OVERLAY_PATHS;
+  } else if (binaryOptionsPresent) {
+    [parentBinaryRevision, candidateBinaryRevision] = validateDirectBinaryRevisions(parentRevision, candidateRevision, options.parent_binary_revision, options.candidate_binary_revision);
+  }
   for (const repository of [ROOT, `${ROOT}/../zig-gc`, `${ROOT}/../zig-regex`]) requireClean(repository);
-  const identities = { schema, parent_revision: parentRevision, candidate_revision: candidateRevision, parent_binary_revision: parentBinaryRevision, candidate_binary_revision: candidateBinaryRevision, zig_gc_revision: repositoryRevision(`${ROOT}/../zig-gc`), zig_regex_revision: repositoryRevision(`${ROOT}/../zig-regex`), zig_version: commandOutput(["zig", "version"]), os: commandOutput(["uname", "-a"]), hardware: `${commandOutput(["uname", "-m"])}; ${commandOutput(["sysctl", "-n", "machdep.cpu.brand_string"])}`, material_categories: materialCategories, workload_source_sha256: sha256File(options.source), parent_binary_sha256: sha256File(positional[0]), candidate_binary_sha256: sha256File(positional[1]) };
+  const identities = { schema, parent_revision: parentRevision, candidate_revision: candidateRevision, parent_binary_revision: parentBinaryRevision, candidate_binary_revision: candidateBinaryRevision, shared_measurement_overlay_paths: sharedMeasurementOverlayPaths, zig_gc_revision: repositoryRevision(`${ROOT}/../zig-gc`), zig_regex_revision: repositoryRevision(`${ROOT}/../zig-regex`), zig_version: commandOutput(["zig", "version"]), os: commandOutput(["uname", "-a"]), hardware: `${commandOutput(["uname", "-m"])}; ${commandOutput(["sysctl", "-n", "machdep.cpu.brand_string"])}`, material_categories: materialCategories, workload_source_sha256: sha256File(options.source), parent_binary_sha256: sha256File(positional[0]), candidate_binary_sha256: sha256File(positional[1]) };
   for (const row of rows) publishRow(positional[0], positional[1], row, options, identities);
   if (batchMode) console.log(`OK exact-parent batch: ${rows.length}/${rows.length} rows published serially`);
 }
