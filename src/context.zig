@@ -24043,6 +24043,47 @@ test "forced tree-walker and required bytecode preserve direct eval catch record
     try std.testing.expectEqualStrings("7:8:11:9:SyntaxError|9:SyntaxError", results[1]);
 }
 
+test "forced tree-walker and required bytecode preserve direct eval expression-free non-simple parameters" {
+    const source =
+        \\function directEvalRest(head, ...tail) {
+        \\  var local = 1;
+        \\  eval("arguments[0] = 40; head += tail[0]; tail[1] += 1; var dynamic = head + tail[1]; local += dynamic;");
+        \\  return head + ":" + tail[0] + ":" + tail[1] + ":" + dynamic + ":" + local + ":" + arguments[0];
+        \\}
+        \\function directEvalPattern({ left, right }, [third]) {
+        \\  var body = 1;
+        \\  eval("left += right; third += left; var dynamic = body + third; body = dynamic;");
+        \\  return left + ":" + right + ":" + third + ":" + dynamic + ":" + body;
+        \\}
+        \\var directEvalRestArrow = (head, ...tail) => eval("head + tail[0]");
+        \\directEvalRest(1, 2, 3) + "|" + directEvalPattern({ left: 2, right: 3 }, [4]) + "|" + directEvalRestArrow(4, 5);
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len][]const u8 = undefined;
+    var result_count: usize = 0;
+    defer for (results[0..result_count]) |result| std.testing.allocator.free(result);
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(source);
+        try std.testing.expect(result.isString());
+        results[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        result_count += 1;
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 3);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+        }
+    }
+    try std.testing.expectEqualStrings(results[0], results[1]);
+    try std.testing.expectEqualStrings("3:2:4:7:8:40|5:3:9:10:10|9", results[1]);
+}
+
 test "required bytecode uses strict captured iterator records" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,

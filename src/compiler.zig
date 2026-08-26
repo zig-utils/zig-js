@@ -419,6 +419,14 @@ const PlainParameterLayout = struct {
     fn hasNonSimple(self: *const PlainParameterLayout) bool {
         return self.rest_index != null or self.destructuring_indices.len != 0 or self.default_indices.len != 0;
     }
+
+    fn hasParameterExpressions(self: *const PlainParameterLayout) bool {
+        // Supported destructuring patterns are already required to contain no
+        // computed keys or nested defaults. A top-level default is therefore
+        // the only admitted form that creates the separate parameter/body
+        // Environment Record pair.
+        return self.default_indices.len != 0;
+    }
 };
 
 fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode, parameter_index: usize) bool {
@@ -1947,11 +1955,11 @@ pub const Compiler = struct {
             error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
             error.OutOfMemory => return error.OutOfMemory,
         };
-        // A non-simple formal list creates a ParameterEnvironment outside the
-        // body VariableEnvironment. The flat ordinary frame does not yet encode
-        // that record boundary for direct eval, so retain a causal rejection
-        // even when the eval call itself occurs in the body.
-        if (fnode.uses_direct_eval and parameter_layout.hasNonSimple())
+        // Parameter expressions create a ParameterEnvironment outside the body
+        // VariableEnvironment. The flat ordinary frame does not yet encode that
+        // record boundary for direct eval. Rest-only and expression-free pattern
+        // lists share the function environment and need no synthetic boundary.
+        if (fnode.uses_direct_eval and parameter_layout.hasParameterExpressions())
             return rejectPlainFunction(rejection, .unsupported_lowering);
         const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
         if (!fnode.is_expr_body) try collectFunctionLocals(arena, scope, fnode.body);
@@ -5709,7 +5717,7 @@ pub const Compiler = struct {
                 },
                 error.OutOfMemory => return error.OutOfMemory,
             };
-            if (fnode.uses_direct_eval and parameter_layout.hasNonSimple()) {
+            if (fnode.uses_direct_eval and parameter_layout.hasParameterExpressions()) {
                 if (self.scope == null) {
                     template_admission = .plain_unsupported_lowering;
                     break :blk null;
@@ -6925,6 +6933,37 @@ test "compiler identifies only simple catch records for direct eval Annex B sema
             try std.testing.expectEqual(case.exempt, scope.is_catch_param);
         }
         try std.testing.expect(found);
+    }
+}
+
+test "compiler admits direct eval for expression-free non-simple parameter lists" {
+    const admitted = [_][]const u8{
+        "function f(head, ...tail){ return eval('head + tail[0]'); }",
+        "function f({ left, right }, [third]){ return eval('left + right + third'); }",
+    };
+    for (admitted) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
+        const program = try parser.parseProgram();
+        const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+            .compiled => |code| code,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+        try std.testing.expectEqual(@as(usize, 1), compiled.chunk.direct_eval_plans.items.len);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function f(value = 1){ return eval('value'); }",
+    );
+    const program = try parser.parseProgram();
+    switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
     }
 }
 
