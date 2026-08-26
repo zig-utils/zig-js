@@ -10801,13 +10801,13 @@ pub const Interpreter = struct {
     }
 
     /// UTF-16 length of a string `Value`, representation-aware and allocation
-    /// free: a flat-latin1 cell stores 1 byte per code unit, so its length is
-    /// `bytes.len` in O(1); any other cell is WTF-8 and is walked. Use this for
-    /// string `.length` and index-bound checks — including allocation-free
-    /// contexts (`hasProperty`, `objectHasOwn`) where `asWtf8` is unavailable.
-    /// Caller has checked `isString()`.
+    /// free: flat-latin1 and cached ASCII cells store 1 byte per code unit, so
+    /// their length is `bytes.len` in O(1); every other cell is walked as
+    /// WTF-8. Use this for string `.length` and index-bound checks — including
+    /// allocation-free contexts (`hasProperty`, `objectHasOwn`) where `asWtf8`
+    /// is unavailable. Caller has checked `isString()`.
     pub fn utf16LenOfValue(v: Value) usize {
-        if (v.strIsFlatLatin1()) return v.asStr().len;
+        if (v.strIsFlatLatin1() or v.strIsAscii()) return v.asStr().len;
         return utf16LenOfString(v.asStr());
     }
 
@@ -10899,6 +10899,17 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// ECMA string indices address UTF-16 code units. A cached ASCII cell is
+    /// already a one-byte-per-unit image, so indexed reads must not restart a
+    /// WTF-8 scan at byte zero and turn a sequential reader into O(n^2) work.
+    fn stringCodeUnitAtA(s: []const u8, index: usize, ascii: bool) ?StringCodeUnit {
+        if (ascii) {
+            if (index >= s.len) return null;
+            return .{ .unit = s[index] };
+        }
+        return stringCodeUnitAt(s, index);
+    }
+
     fn stringFromCodeUnit(self: *Interpreter, unit: u16) EvalError![]const u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         if (unit >= 0xD800 and unit <= 0xDFFF) {
@@ -10941,11 +10952,12 @@ pub const Interpreter = struct {
     }
 
     /// Read one UTF-16 code unit without confusing the StringCell's physical
-    /// representation for its ECMAScript index space. Flat latin1 is one raw
-    /// byte per unit and stays O(1); every other cell contains canonical WTF-8.
+    /// representation for its ECMAScript index space. Flat latin1 and ASCII
+    /// canonical WTF-8 are one raw byte per unit and stay O(1); every other
+    /// cell takes the exact representation-aware path.
     pub fn stringIndexValueOf(self: *Interpreter, v: Value, index: usize) EvalError!?Value {
         std.debug.assert(v.isString());
-        if (v.strIsFlatLatin1()) {
+        if (v.strIsFlatLatin1() or v.strIsAscii()) {
             const flat = v.asStr();
             if (index >= flat.len) return null;
             return try self.stringValueFromCodeUnit(flat[index]);
@@ -13818,7 +13830,7 @@ pub const Interpreter = struct {
         if (recv.isString()) {
             if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfValue(recv)));
             if (arrayIndex(key)) |i| {
-                if (try self.stringIndexValue(try recv.asWtf8(self.arena), i)) |v| return v;
+                if (try self.stringIndexValueOf(recv, i)) |v| return v;
                 return Value.undef();
             }
         }
@@ -17570,12 +17582,12 @@ pub const Interpreter = struct {
         if (check_protocol) if (try self.stringProtocolDispatch(name, try Value.strAlloc(self.arena, s), args)) |r| return r;
         if (eq(name, "charAt")) {
             const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.str("");
-            const cu = stringCodeUnitAt(s, pos) orelse return Value.str("");
+            const cu = stringCodeUnitAtA(s, pos, s_ascii) orelse return Value.str("");
             return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
         if (eq(name, "charCodeAt")) {
             const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.num(std.math.nan(f64));
-            const cu = stringCodeUnitAt(s, pos) orelse return Value.num(std.math.nan(f64));
+            const cu = stringCodeUnitAtA(s, pos, s_ascii) orelse return Value.num(std.math.nan(f64));
             return Value.num(@floatFromInt(cu.unit));
         }
         if (eq(name, "indexOf")) {
@@ -17778,7 +17790,7 @@ pub const Interpreter = struct {
             if (fl < -slen_f or fl >= slen_f) return Value.undef();
             const idx: i64 = if (fl < 0) @as(i64, @intCast(slen)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
             if (idx < 0 or idx >= slen) return Value.undef();
-            const cu = stringCodeUnitAt(s, @intCast(idx)) orelse return Value.undef();
+            const cu = stringCodeUnitAtA(s, @intCast(idx), s_ascii) orelse return Value.undef();
             return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
         if (eq(name, "trimStart")) return try Value.strAlloc(self.arena, jsTrim(s, true, false));
@@ -17929,10 +17941,10 @@ pub const Interpreter = struct {
             // ToIntegerOrInfinity(pos): a position outside [0, len) yields undefined
             // (so a negative position is undefined, not clamped to index 0).
             const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.undef();
-            const cu = stringCodeUnitAt(s, pos) orelse return Value.undef();
+            const cu = stringCodeUnitAtA(s, pos, s_ascii) orelse return Value.undef();
             if (cu.astral) |cp| return Value.num(@floatFromInt(cp));
             if (isHighSurrogate(cu.unit)) {
-                if (stringCodeUnitAt(s, pos + 1)) |next| if (isLowSurrogate(next.unit)) {
+                if (stringCodeUnitAtA(s, pos + 1, s_ascii)) |next| if (isLowSurrogate(next.unit)) {
                     const cp: u21 = 0x10000 + ((@as(u21, cu.unit) - 0xD800) << 10) + (@as(u21, next.unit) - 0xDC00);
                     return Value.num(@floatFromInt(cp));
                 };
@@ -53613,6 +53625,27 @@ test "interpreter String.prototype methods" {
         \\ok = ok && it.next().value === lo;
         \\ok = ok && it.next().done === true;
         \\ok
+    )).asBool());
+}
+
+test "interpreter known-ASCII indexed reads preserve linear access paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\let text = "Ab09".repeat(4096);
+        \\let methodChecksum = 0;
+        \\let propertyChecksum = 0;
+        \\for (let index = 0; index < text.length; index = index + 1) {
+        \\  methodChecksum = methodChecksum + text.charCodeAt(index);
+        \\  propertyChecksum = propertyChecksum + text[index].charCodeAt(0);
+        \\}
+        \\methodChecksum === 1097728 &&
+        \\propertyChecksum === 1097728 &&
+        \\text.charAt(16383) === "9" &&
+        \\text.at(-16384) === "A" &&
+        \\text.codePointAt(16382) === 48
     )).asBool());
 }
 
