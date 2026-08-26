@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "profile_id": "zig-js-performance-attribution-v2",
+  "owner_issue": 768,
+  "history_policy": "Version 2 inherits the immutable metric and identity inventory from performance-attribution-schema-v1.json. It changes only exact-parent sample quality: CPU occupancy is measured over the declared timed boundary, while complete-process occupancy is retained as diagnostic provenance.",
+  "base_schema": "performance-attribution-schema-v1.json",
+  "required_metadata_append": [
+    "minimum_measured_boundary_cpu_occupancy"
+  ],
+  "quality_policy": {
+    "occupancy_scope": "declared_timed_boundary",
+    "minimum_cpu_occupancy": 0.6,
+    "complete_process_occupancy": "diagnostic_only",
+    "legacy_validation": "Version 1 artifacts retain their original complete-process occupancy gate."
+  }
+}

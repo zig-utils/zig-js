@@ -1,0 +1,74 @@
+{
+  "schema_version": 24,
+  "matrix_id": "zig-js-representative-v24",
+  "status": "frozen",
+  "frozen_date": "2026-08-26",
+  "owner_issue": 768,
+  "history_policy": "This version hash-inherits every V23 workload, representation, width, logical job count, checksum, execution mode, scored operation, attribution counter, allocation replay, timing boundary, and publication ruling. It changes only evidence integration: native runner snapshots now report exact measured-boundary user/system CPU deltas, exact-parent samples gate the unchanged sixty-percent occupancy threshold over that boundary, and complete-process occupancy remains diagnostic. Historical V1 artifacts and schemas remain byte-identical.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v23",
+    "path": "docs/.data/representative-benchmark-matrix-v23.json",
+    "sha256": "10e26a59ff1c88978e51ac1867f2f456186d000525ecc559862a5dd04bceea46",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels"
+    ]
+  },
+  "change": "Re-pins evidence collectors and native runners after adding exact measured-boundary CPU-time telemetry. No workload source, representation, width, job count, checksum, Context option, execution mode, scored operation, attribution value, allocation replay, or performance acceptance changes.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "03f983e67bf462cd0edf0369a04cbb200a763fb739844a4dd8c407491f7e01e9",
+    "attribution_schema": {
+      "path": "docs/.data/performance-attribution-schema-v2.json",
+      "sha256": "688cf34a0c37ff398846f122980501b70d03d27b29672ce0321b51f6dd4f66af"
+    },
+    "attribution_validator": {
+      "path": "tools/performance-attribution.ts",
+      "sha256": "720314ab30a045e79fa80167cf25c041f684662a02b695c956dfff873fa94be6"
+    },
+    "algorithmic_growth_schema": {
+      "path": "docs/.data/algorithmic-growth-schema-v2.json",
+      "sha256": "d20cce9dacb56e1d2a135bb5286e647ceb14863af13d23004c5de1152808afee"
+    },
+    "algorithmic_growth_validator": {
+      "path": "tools/algorithmic-growth.ts",
+      "sha256": "6db556b03a2209771fa5e06d4d0c155c9f2442f4d008edcbbc9b7b4f7f55baf1"
+    },
+    "native_runners": [
+      {"path": "bench/comparison_zig_js.zig", "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"},
+      {"path": "bench/frontend_parse.zig", "sha256": "e599662a2df58229b100fabe544fb2d0f928272b850069b68476484861e1ee34"}
+    ],
+    "occupancy_scope": "declared_timed_boundary",
+    "minimum_cpu_occupancy": 0.6,
+    "complete_process_occupancy": "diagnostic_only",
+    "publication_boundary": "Every new sample must report exact native user/system CPU deltas around the declared timed boundary and meet the unchanged sixty-percent occupancy threshold there. Whole-process wall/user/system/RSS observations remain diagnostic because they include startup, warmup, teardown, thermal queries, and allocation replay. Exact revisions, checksums, balanced sampling, thermals, cleanliness, and before/after competing-process guards remain fail-closed."
+  },
+  "instrumentation_overhead_integration": {
+    "path": "tools/instrumentation-overhead.ts",
+    "sha256": "c95e1d476cc01e8c299473028d6139269f60af44fd20c4ad19e508b827d695c8",
+    "evidence_ruling": "V24 adds identity-checked parsing for the separate measured-boundary CPU-time row. Historical disabled-path samples and reports remain inherited byte-for-byte and are not reinterpreted."
+  },
+  "context_lifecycle_integration": {
+    "runner": {"path": "bench/comparison_zig_js.zig", "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"},
+    "publication_boundary": "V24 changes only the shared native telemetry row and runner hash. Lifecycle scenarios, options, checksums, phase/finalizer reconciliation, plateau policy, and evidence ruling are unchanged."
+  },
+  "no_jit_integration": {
+    "runner": {"path": "bench/comparison_zig_js.zig", "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"},
+    "publication_boundary": "V24 changes only measured-boundary CPU telemetry and the shared runner hash. Required-bytecode/no-native modes, logical work, checksums, attribution, quickening contracts, and exact-parent requirements are unchanged."
+  },
+  "string_indexing_integration": {
+    "runner": {"path": "bench/comparison_zig_js.zig", "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"},
+    "publication_boundary": "V24 preserves every V23 string-indexing representation, width, job count, checksum, required-bytecode boundary, attribution value, and exact allocation replay. New exact-parent evidence gates native CPU occupancy over the measured invocation and cannot turn diagnostic wall/cycle/energy observations into a public throughput claim."
+  }
+}

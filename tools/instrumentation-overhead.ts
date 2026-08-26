@@ -107,6 +107,17 @@ export function parseDarwinThermalState(stdout: string, mode: string, workload: 
   return { status: "measured", before: THERMAL_STATES[before], after: THERMAL_STATES[after] };
 }
 
+export function parseDarwinCpuTime(stdout: string, mode: string, workload: string, jobs: number): { user_ns: number; system_ns: number } {
+  const rows = stdout.split("\n").filter((line) => line.startsWith("zig-js-darwin-cpu-time\t"));
+  requireValue(rows.length === 1, `expected one Darwin CPU-time row, got ${rows.length}`);
+  const fields = rows[0].split("\t");
+  requireValue(fields.length === 8 && fields[1] === mode && fields[2] === workload && Number(fields[3]) === jobs && Number(fields[4]) === 0, "Darwin CPU-time identity drift");
+  requireValue(fields[5] === "measured", `Darwin CPU-time status is ${fields[5]}`);
+  const user_ns = Number(fields[6]), system_ns = Number(fields[7]);
+  requireValue(Number.isSafeInteger(user_ns) && user_ns >= 0 && Number.isSafeInteger(system_ns) && system_ns >= 0, "Darwin CPU-time counters are invalid");
+  return { user_ns, system_ns };
+}
+
 function parseCounters(stdout: string, stderr: string, mode: string, workload: string, jobs: number): CounterMeasurements {
   return {
     ...parseDarwinCounters(stdout, mode, workload, jobs),
@@ -689,9 +700,10 @@ export function selfTest(): void {
   requireValue(counterObservation(timing, "instructions retired").status === "measured", "measured counter classification drift");
   requireValue(counterObservation("operation not permitted", "cycles elapsed").status === "permission_denied", "permission counter classification drift");
   requireValue(counterObservation("", "cycles elapsed").status === "unavailable", "unavailable counter classification drift");
-  const darwinFixture = "zig-js-darwin-rusage\tsingle\trepresentative_json\t110\t0\tmeasured\t1000\t500\t200\t1\t2\t0\t3\t0\t0\n",
+  const darwinFixture = "zig-js-darwin-rusage\tsingle\trepresentative_json\t110\t0\tmeasured\t1000\t500\t200\t1\t2\t0\t3\t0\t0\nzig-js-darwin-cpu-time\tsingle\trepresentative_json\t110\t0\tmeasured\t700\t20\n",
     owned = parseDarwinCounters(darwinFixture, "single", "representative_json", 110), thermal = parseDarwinThermalState(darwinFixture, "single", "representative_json", 110);
   requireValue(owned.instructions.status === "measured" && owned.process_energy_nj.value === 200 && owned.page_cache_hits.value === 3 && thermal.status === "measured" && thermal.before === "nominal", "owned Darwin telemetry parse drift");
+  requireValue(JSON.stringify(parseDarwinCpuTime(darwinFixture, "single", "representative_json", 110)) === '{"user_ns":700,"system_ns":20}', "Darwin measured-boundary CPU parse drift");
   const nativeFixture = "zig-js-native-observability\tsingle_observed\trepresentative_json\t110\t0\t1\t16384\t0\t1\t1\t1335\t72\t1\t0\t10200000\t10100000\nzig-js-native-observability-retired\tsingle_observed\trepresentative_json\t110\t0\t0\t0\t1\t1\t10200000\t9100000\n",
     nativeParsed = parseNativeObservability(nativeFixture, "single_observed", "representative_json", 110);
   requireValue(nativeParsed.live_peak_rss_bytes === 10_200_000 && nativeParsed.retained_rss_bytes === 10_100_000 && nativeParsed.post_teardown_unregistrations === 1, "native observability telemetry parse drift");

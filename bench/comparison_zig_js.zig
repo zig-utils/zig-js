@@ -185,6 +185,8 @@ comptime {
 }
 
 const DarwinCounterSnapshot = struct {
+    user_time_ns: u64,
+    system_time_ns: u64,
     instructions: u64,
     cycles: u64,
     energy_nj: u64,
@@ -202,7 +204,13 @@ fn darwinCounterSnapshot() !DarwinCounterSnapshot {
     if (builtin.os.tag != .macos) return error.DarwinRusageUnavailable;
     var info = std.mem.zeroes(DarwinRusageInfoV6);
     if (proc_pid_rusage(std.c.getpid(), rusage_info_v6, &info) != 0) return error.DarwinRusageUnavailable;
+    const usage = std.posix.getrusage(std.c.rusage.SELF);
     return .{
+        // proc_pid_rusage may not charge the currently running thread until a
+        // scheduler boundary. getrusage snapshots include that live CPU burst,
+        // which is required for short measured invocations (#768).
+        .user_time_ns = timevalNs(usage.utime),
+        .system_time_ns = timevalNs(usage.stime),
         .package_idle_wakeups = info.ri_pkg_idle_wkups,
         .interrupt_wakeups = info.ri_interrupt_wkups,
         .pageins = info.ri_pageins,
@@ -245,6 +253,14 @@ fn printDarwinCounterRow(
         after.page_cache_hits -| before.page_cache_hits,
         thermal_before,
         thermal_after,
+    });
+    try writer.print("zig-js-darwin-cpu-time\t{s}\t{s}\t{d}\t{d}\tmeasured\t{d}\t{d}\n", .{
+        @tagName(mode),
+        workload,
+        jobs,
+        sample,
+        after.user_time_ns -| before.user_time_ns,
+        after.system_time_ns -| before.system_time_ns,
     });
 }
 

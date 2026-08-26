@@ -1,4 +1,4 @@
-/** Validate attribution-v1 artifacts and losslessly migrate legacy A/B TSVs. */
+/** Validate versioned attribution artifacts and losslessly migrate legacy A/B TSVs. */
 import { readText, sha256File, writeText } from "./lib/home";
 
 declare const __dirname: string;
@@ -14,11 +14,25 @@ const unique = (values: any[]): boolean => new Set(values.map((value) => JSON.st
 const isHex = (value: any, length: number): boolean => typeof value === "string" && value.length === length && /^[0-9a-f]+$/.test(value);
 const relativeRsd = (values: number[]): number => { if (values.length <= 1) return 0; const mean = values.reduce((sum, value) => sum + value, 0) / values.length; if (mean === 0) return Infinity; return Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1)) / mean; };
 
-export function loadSchema(path = DEFAULT_SCHEMA): any { const schema = JSON.parse(readText(path)); validateSchema(schema); return schema; }
+export function loadSchema(path = DEFAULT_SCHEMA): any {
+  const raw = JSON.parse(readText(path));
+  let schema = raw;
+  if (raw.base_schema) {
+    const slash = path.lastIndexOf("/"), base = JSON.parse(readText(`${slash >= 0 ? path.slice(0, slash + 1) : ""}${raw.base_schema}`));
+    schema = { ...base, ...raw, metric_states: base.metric_states, sample_identity: base.sample_identity, required_metadata: [...base.required_metadata, ...raw.required_metadata_append], regression_policy: base.regression_policy, metrics: base.metrics };
+  }
+  validateSchema(schema); return schema;
+}
 
 export function validateSchema(schema: any): void {
-  requireValue(schema.schema_version === 1, "unsupported attribution schema");
-  requireValue(schema.profile_id === "zig-js-performance-attribution-v1", "unexpected profile id");
+  const version = schema.schema_version;
+  requireValue(version === 1 || version === 2, "unsupported attribution schema");
+  requireValue(schema.profile_id === `zig-js-performance-attribution-v${version}`, "unexpected profile id");
+  if (version === 2) {
+    requireValue(schema.owner_issue === 768 && schema.base_schema === "performance-attribution-schema-v1.json", "attribution-v2 lineage drift");
+    requireValue(JSON.stringify(schema.required_metadata_append) === '["minimum_measured_boundary_cpu_occupancy"]', "attribution-v2 metadata extension drift");
+    requireValue(schema.quality_policy?.occupancy_scope === "declared_timed_boundary" && schema.quality_policy?.minimum_cpu_occupancy === 0.6 && schema.quality_policy?.complete_process_occupancy === "diagnostic_only", "attribution-v2 quality policy drift");
+  }
   requireValue(sameSet(Object.keys(schema.metric_states || {}), ALLOWED_STATES), "metric state inventory drift");
   const identity = ["variant", "pair_sample", "order", "engine", "mode", "workload", "lanes", "jobs", "checksum"];
   requireValue(JSON.stringify(schema.sample_identity) === JSON.stringify(identity), "sample identity drift");
@@ -49,7 +63,7 @@ export function validateSchema(schema: any): void {
     "cycles", "instructions", "cache_misses", "energy_joules", "thermal_state", "symbolized_native_samples", "anonymous_native_samples",
   ];
   const missing = expected.filter((name) => !names.includes(name)).sort(), extra = names.filter((name: string) => !expected.includes(name)).sort();
-  requireValue(!missing.length && !extra.length, `v1 metric inventory drift; missing=${JSON.stringify(missing)}, extra=${JSON.stringify(extra)}`);
+  requireValue(!missing.length && !extra.length, `attribution metric inventory drift; missing=${JSON.stringify(missing)}, extra=${JSON.stringify(extra)}`);
 }
 
 export function observation(status: string, value: any, source: string, reason = ""): any {

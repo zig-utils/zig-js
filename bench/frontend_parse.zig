@@ -69,6 +69,7 @@ const DarwinRusageInfoV6 = extern struct {
     ri_reserved: [6]u64,
 };
 comptime {
+    std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_user_time") == 16);
     std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_instructions") == 248);
     std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_energy_nj") == 336);
     std.debug.assert(@offsetOf(DarwinRusageInfoV6, "ri_page_cache_hits") == 408);
@@ -76,6 +77,8 @@ comptime {
 }
 
 const DarwinCounterSnapshot = struct {
+    user_time_ns: u64,
+    system_time_ns: u64,
     instructions: u64,
     cycles: u64,
     energy_nj: u64,
@@ -89,11 +92,21 @@ const rusage_info_v6 = 6;
 extern "c" fn proc_pid_rusage(pid: std.c.pid_t, flavor: c_int, buffer: *anyopaque) c_int;
 extern "c" fn zig_js_benchmark_thermal_state() i32;
 
+fn timevalNs(value: std.c.timeval) u64 {
+    return @as(u64, @intCast(value.sec)) * std.time.ns_per_s +
+        @as(u64, @intCast(value.usec)) * std.time.ns_per_us;
+}
+
 fn darwinCounterSnapshot() !DarwinCounterSnapshot {
     if (builtin.os.tag != .macos) return error.DarwinRusageUnavailable;
     var info = std.mem.zeroes(DarwinRusageInfoV6);
     if (proc_pid_rusage(std.c.getpid(), rusage_info_v6, &info) != 0) return error.DarwinRusageUnavailable;
+    const usage = std.posix.getrusage(std.c.rusage.SELF);
     return .{
+        // proc_pid_rusage may not charge the currently running thread until a
+        // scheduler boundary. getrusage includes that live CPU burst (#768).
+        .user_time_ns = timevalNs(usage.utime),
+        .system_time_ns = timevalNs(usage.stime),
         .instructions = info.ri_instructions,
         .cycles = info.ri_cycles,
         .energy_nj = info.ri_energy_nj,
@@ -134,6 +147,13 @@ fn printDarwinCounterRow(
         after.page_cache_hits -| before.page_cache_hits,
         thermal_before,
         thermal_after,
+    });
+    try writer.print("zig-js-darwin-cpu-time\tsingle\t{s}\t{d}\t{d}\tmeasured\t{d}\t{d}\n", .{
+        workload,
+        jobs,
+        sample,
+        after.user_time_ns -| before.user_time_ns,
+        after.system_time_ns -| before.system_time_ns,
     });
 }
 
