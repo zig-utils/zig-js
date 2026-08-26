@@ -5261,12 +5261,16 @@ pub const Interpreter = struct {
     /// control state and suppresses recursive debugger stops while the command
     /// itself runs.
     pub fn evaluateForDebugger(self: *Interpreter, source: []const u8, environment: *Environment, this_value: Value, strict: bool) EvalError!Value {
+        // Functions/classes created by the command retain AST slices into the
+        // parser input after this call returns. Match Context evaluation's
+        // ownership boundary instead of borrowing the debugger transport buffer.
+        const owned_source = try self.arena.dupe(u8, source);
         var lex_diagnostic: ?parser_mod.SourceLocation = null;
-        var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
-            return self.throwParserSyntaxErrorAt("debugger evaluation", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);
+        var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, owned_source, &lex_diagnostic) catch |err|
+            return self.throwParserSyntaxErrorAt("debugger evaluation", lex_diagnostic orelse parser_mod.sourceLocationAt(owned_source, 0), err);
         parser.useRealmHashKeys(self.root_shape);
         parser.strict = strict;
-        const program = parser.parseProgram() catch |err| return self.throwParserSyntaxError("debugger evaluation", source, &parser, err);
+        const program = parser.parseProgram() catch |err| return self.throwParserSyntaxError("debugger evaluation", owned_source, &parser, err);
 
         const saved_env = self.env;
         const saved_this = self.this_value;
@@ -6630,7 +6634,13 @@ pub const Interpreter = struct {
     fn installPlainFunctionBytecode(self: *Interpreter, func: *Function, fnode: *const ast.FunctionNode) EvalError!BytecodeAdmissionReason {
         if (self.bytecode_execution_mode == .tree_walker) return .plain_forced_tree_walker;
         if (self.debug_statement_hook != null) return .plain_policy_debugger;
-        if (plainFunctionPolicyRejection(fnode)) |reason| return reason;
+        // `required` is a coverage contract, not an automatic tier-selection
+        // hint. Dynamic eval is parsed and instantiated at runtime, so its
+        // nested functions cannot arrive as program FnTemplates; compile every
+        // lowerable function here even when it is too cold/simple for automatic
+        // admission. Genuine compiler barriers remain causal rejections below.
+        if (self.bytecode_execution_mode != .required)
+            if (plainFunctionPolicyRejection(fnode)) |reason| return reason;
         return switch (try Compiler.admitPlainFunction(self.arena, fnode)) {
             .compiled => |code| blk: {
                 func.chunk = code.chunk;
@@ -19386,9 +19396,10 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len == 0) return Value.undef();
     if (!args[0].isString()) return args[0]; // eval of a non-string is the identity
-    // The lexer consumes canonical WTF-8, not the StringCell's physical image.
-    // This borrows canonical/ASCII storage and only allocates for flat latin1.
-    const src = try args[0].asWtf8(self.arena);
+    // Parsed functions/classes retain AST slices into the source after eval
+    // returns. Own canonical WTF-8 in the Context arena just as top-level Script
+    // evaluation does; borrowing a movable StringCell leaves dangling names.
+    const src = try args[0].asWtf8Owned(self.arena);
     if (sourceOnlyEmptyBlocks(src)) return Value.undef();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
@@ -20053,8 +20064,32 @@ inline fn tracePrivateValue(v: anytype, val: Value) void {
 /// this file. The Object tracer already marks the closure object itself; this
 /// hook keeps type-erased side records from hiding GC-managed Values/Objects.
 pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
-    const nf = o.native orelse return;
     const pd = o.private_data orelse return;
+    // A ShadowRealm instance owns its child Realm through this otherwise-opaque
+    // slot. The realm (and its intrinsics/global graph) must move with the live
+    // instance even though the instance itself is not a native function.
+    if (o.behavior.is_shadow_realm) {
+        const realm: *Environment = @ptrCast(@alignCast(pd));
+        if (realm.gc_managed) v.mark(realm);
+        return;
+    }
+    const nf = o.native orelse return;
+
+    if (nf == srWrappedCallFn) {
+        const data: *SrWrappedData = @ptrCast(@alignCast(pd));
+        v.mark(data.target);
+        if (data.caller_env.gc_managed) v.mark(data.caller_env);
+        if (data.target_env.gc_managed) v.mark(data.target_env);
+        return;
+    }
+
+    if (nf == host262EvalScriptFn or nf == shadowRealmConstructorFn or
+        nf == shadowRealmEvaluateFn or nf == shadowRealmImportValueFn)
+    {
+        const realm: *Environment = @ptrCast(@alignCast(pd));
+        if (realm.gc_managed) v.mark(realm);
+        return;
+    }
 
     if (nf == finallyReactionFn or nf == finallyThunkFn) {
         const data: *FinallyData = @ptrCast(@alignCast(pd));
@@ -20088,8 +20123,29 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
 }
 
 pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
-    const nf = o.native orelse return;
     const pd = o.private_data orelse return;
+    if (o.behavior.is_shadow_realm) {
+        const realm: *Environment = @ptrCast(@alignCast(pd));
+        if (realm.gc_managed) gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
+        return;
+    }
+    const nf = o.native orelse return;
+
+    if (nf == srWrappedCallFn) {
+        const data: *SrWrappedData = @ptrCast(@alignCast(pd));
+        gc_relocation.rewriteRequiredSlot(v, value.Object, &data.target);
+        if (data.caller_env.gc_managed) gc_relocation.rewriteRequiredSlot(v, Environment, &data.caller_env);
+        if (data.target_env.gc_managed) gc_relocation.rewriteRequiredSlot(v, Environment, &data.target_env);
+        return;
+    }
+
+    if (nf == host262EvalScriptFn or nf == shadowRealmConstructorFn or
+        nf == shadowRealmEvaluateFn or nf == shadowRealmImportValueFn)
+    {
+        const realm: *Environment = @ptrCast(@alignCast(pd));
+        if (realm.gc_managed) gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
+        return;
+    }
 
     if (nf == finallyReactionFn or nf == finallyThunkFn) {
         const data: *FinallyData = @ptrCast(@alignCast(pd));
@@ -20120,8 +20176,14 @@ pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
 }
 
 test "interpreter native private relocation mirrors every traced payload" {
-    var old_objects: [9]value.Object = undefined;
-    var new_objects: [9]value.Object = undefined;
+    var old_objects: [10]value.Object = undefined;
+    var new_objects: [10]value.Object = undefined;
+    var old_environments = [_]Environment{
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+    };
+    var new_environments: [3]Environment = undefined;
     var old_promise: promise.Promise = .{};
     var new_promise: promise.Promise = .{};
     var finally_data = FinallyData{
@@ -20154,14 +20216,23 @@ test "interpreter native private relocation mirrors every traced payload" {
         .resolve = Value.obj(&old_objects[7]),
         .reject = Value.obj(&old_objects[8]),
     };
+    var wrapped = SrWrappedData{
+        .target = &old_objects[9],
+        .caller_env = &old_environments[0],
+        .target_env = &old_environments[1],
+    };
     var finally_object = value.Object{ .native = finallyReactionFn, .private_data = &finally_data };
     var async_object = value.Object{ .native = asyncFromSyncFulfillFn, .private_data = &async_data };
     var combine_object = value.Object{ .native = combineElemFn, .private_data = &elem };
     var capture_object = value.Object{ .native = capabilityExecutorFn, .private_data = &capture };
+    var wrapped_object = value.Object{ .native = srWrappedCallFn, .private_data = &wrapped };
+    var realm_object = value.Object{ .private_data = &old_environments[2], .behavior = .{ .is_shadow_realm = true } };
 
     const Plan = struct {
-        old_objects: *[9]value.Object,
-        new_objects: *[9]value.Object,
+        old_objects: *[10]value.Object,
+        new_objects: *[10]value.Object,
+        old_environments: *[3]Environment,
+        new_environments: *[3]Environment,
         old_promise: *promise.Promise,
         new_promise: *promise.Promise,
 
@@ -20169,6 +20240,9 @@ test "interpreter native private relocation mirrors every traced payload" {
             for (self.old_objects, 0..) |*object, index|
                 if (old == @as(*anyopaque, @ptrCast(object)))
                     return @ptrCast(&self.new_objects[index]);
+            for (self.old_environments, 0..) |*environment, index|
+                if (old == @as(*anyopaque, @ptrCast(environment)))
+                    return @ptrCast(&self.new_environments[index]);
             if (old == @as(*anyopaque, @ptrCast(self.old_promise))) return @ptrCast(self.new_promise);
             return old;
         }
@@ -20176,6 +20250,8 @@ test "interpreter native private relocation mirrors every traced payload" {
     const plan = Plan{
         .old_objects = &old_objects,
         .new_objects = &new_objects,
+        .old_environments = &old_environments,
+        .new_environments = &new_environments,
         .old_promise = &old_promise,
         .new_promise = &new_promise,
     };
@@ -20183,6 +20259,8 @@ test "interpreter native private relocation mirrors every traced payload" {
     relocateNativePrivateData(&async_object, &plan);
     relocateNativePrivateData(&combine_object, &plan);
     relocateNativePrivateData(&capture_object, &plan);
+    relocateNativePrivateData(&wrapped_object, &plan);
+    relocateNativePrivateData(&realm_object, &plan);
 
     try std.testing.expectEqual(&new_objects[0], finally_data.on_finally.asObj());
     try std.testing.expectEqual(&new_objects[1], finally_data.ctor.asObj());
@@ -20194,6 +20272,10 @@ test "interpreter native private relocation mirrors every traced payload" {
     try std.testing.expectEqual(&new_objects[6], combine.values);
     try std.testing.expectEqual(&new_objects[7], capture.resolve.asObj());
     try std.testing.expectEqual(&new_objects[8], capture.reject.asObj());
+    try std.testing.expectEqual(&new_objects[9], wrapped.target);
+    try std.testing.expectEqual(&new_environments[0], wrapped.caller_env);
+    try std.testing.expectEqual(&new_environments[1], wrapped.target_env);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_environments[2])), realm_object.private_data.?);
 }
 
 /// IteratorStep + IteratorValue: advance `iter`, returning the next value or
@@ -21438,7 +21520,8 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const fnobj = self.active_native orelse return Value.undef();
     const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return Value.undef()));
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else Value.undef();
-    const src = try args[0].asWtf8(self.arena);
+    // evalScript-created functions may escape into the target realm.
+    const src = try args[0].asWtf8Owned(self.arena);
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("evalScript", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
@@ -21749,7 +21832,8 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const src = if (args.len > 0) args[0] else Value.undef();
     if (!src.isString()) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate expects a string");
     const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
-    const source = try src.asWtf8(self.arena);
+    // A wrapped callable returned from this realm retains its parsed AST.
+    const source = try src.asWtf8Owned(self.arena);
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithScratchDiagnostic(self.arena, self.scratch_allocator orelse self.arena, source, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAtInRealm(caller_env, "ShadowRealm.evaluate", lex_diagnostic orelse parser_mod.sourceLocationAt(source, 0), err);

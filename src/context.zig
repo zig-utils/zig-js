@@ -23847,6 +23847,89 @@ test "forced tree-walker and required bytecode agree on simple-frame direct eval
     try std.testing.expectEqual(@as(f64, 8_885_769_865), Value.fromRawBits(results[0]).asNum());
 }
 
+test "forced tree-walker and required bytecode retain escaping direct eval contexts" {
+    const source =
+        \\function directEvalThis(value) { return eval("this.base + value"); }
+        \\function DirectEvalTarget() { this.matches = eval("new.target === DirectEvalTarget"); }
+        \\var directEvalNamed = function self(value) { return eval("self === directEvalNamed ? value : 0"); };
+        \\function directEvalArrow(value) { return (() => eval("value + arguments[0]"))(); }
+        \\function directEvalClosure(value) {
+        \\  var offset = 2;
+        \\  var closure = eval("(function(step) { return value + offset + step; })");
+        \\  value += 10;
+        \\  offset += 20;
+        \\  return closure;
+        \\}
+        \\function directEvalTdz() {
+        \\  var name = "";
+        \\  try { eval("later"); } catch (error) { name = error.name; }
+        \\  let later = 1;
+        \\  return name === "ReferenceError" ? 1 : 0;
+        \\}
+        \\globalThis.directEvalDiscard = [];
+        \\for (var i = 0; i < 4096; i++) directEvalDiscard.push({ dead: i, nested: { value: i } });
+        \\directEvalDiscard = null;
+        \\var escapedDirectEvalClosure = directEvalClosure(5);
+        \\$262.evalScript("globalThis.evalScriptEscaped = function evalScriptEscaped(value) { return value + 4; };");
+        \\var retainedShadowRealm = new ShadowRealm();
+        \\var shadowEscaped = retainedShadowRealm.evaluate("(function shadowEscaped(value) { return value + 6; })");
+    ;
+    const probes = [_]struct { source: []const u8, expected: f64 }{
+        .{ .source = "directEvalThis.call({ base: 7 }, 3)", .expected = 10 },
+        .{ .source = "(new DirectEvalTarget()).matches ? 1 : 0", .expected = 1 },
+        .{ .source = "directEvalNamed(7)", .expected = 7 },
+        .{ .source = "directEvalArrow(5)", .expected = 10 },
+        .{ .source = "escapedDirectEvalClosure(3)", .expected = 40 },
+        .{ .source = "directEvalTdz()", .expected = 1 },
+        .{ .source = "evalScriptEscaped(5)", .expected = 9 },
+        .{ .source = "shadowEscaped(5)", .expected = 11 },
+        .{ .source = "retainedShadowRealm.evaluate('6 + 6')", .expected = 12 },
+    };
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len][probes.len]u64 = undefined;
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        try std.testing.expectEqual(@as(f64, 40), (try ctx.evaluate("escapedDirectEvalClosure(3)")).asNum());
+        const compacted = ctx.compactGarbage();
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+        try std.testing.expect(compacted.moved_cells > 0);
+        for (probes, 0..) |probe, probe_index| {
+            const result = ctx.evaluate(probe.source) catch |err| {
+                std.debug.print("direct eval context probe failed in {s}: {s}", .{ @tagName(mode), probe.source });
+                if (ctx.exception) |exception| if (exception.isObject()) {
+                    const message = exception.asObj().getOwn("message") orelse Value.undef();
+                    if (message.isString()) std.debug.print(" ({s}: {s})", .{
+                        exception.asObj().errorName(), message.asStr(),
+                    });
+                };
+                std.debug.print("\n", .{});
+                return err;
+            };
+            results[index][probe_index] = result.rawBits();
+            if (!result.isNumber() or result.asNum() != probe.expected)
+                std.debug.print("direct eval context probe mismatch in {s}: {s} (expected {d}, found {})\n", .{
+                    @tagName(mode), probe.source, probe.expected, result,
+                });
+            try std.testing.expectEqual(probe.expected, result.asNum());
+        }
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 7);
+            try std.testing.expect(inventory.count(.plain_compiled) >= 3);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+        }
+    }
+    try std.testing.expectEqual(results[0], results[1]);
+}
+
 test "required bytecode uses strict captured iterator records" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,

@@ -1805,6 +1805,12 @@ pub const Compiler = struct {
         // With no lexical binding, no identifier can require a TDZ check. The
         // exhaustive inventory proves that negative without a second AST walk.
         if (!binding_inventory.has_lexical) return false;
+        // A direct eval string is opaque to the static pending-reference walk:
+        // it can name any lexical binding before that binding's declaration is
+        // evaluated. FunctionDeclarationInstantiation still creates every such
+        // binding uninitialized, so expose TDZ-marked activation slots to the
+        // materialized direct-eval Environment from the first instruction.
+        if (fnode.uses_direct_eval) return true;
         return functionHasTdzHazard(arena, fnode, &binding_inventory.bindings);
     }
 
@@ -6859,6 +6865,32 @@ test "compiler reports stable plain-function admission reasons" {
         .init_local_lexical, .load_local_lexical, .load_upval_lexical, .store_local_lexical, .store_upval_lexical => return error.TestUnexpectedResult,
         else => {},
     };
+}
+
+test "compiler exposes direct eval lexical bindings in their TDZ" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function f(){ eval('later'); let later = 1; }",
+    );
+    const program = try parser.parseProgram();
+    const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |code| code,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), compiled.chunk.lexical_slots.len);
+    try std.testing.expectEqual(@as(usize, 1), compiled.chunk.direct_eval_plans.items.len);
+    const plan = compiled.chunk.direct_eval_plans.items[0];
+    var found_later = false;
+    for (plan.scopes) |scope| for (scope.bindings) |binding| {
+        if (!std.mem.eql(u8, binding.name, "later")) continue;
+        found_later = true;
+        try std.testing.expect(binding.lexical);
+        try std.testing.expect(binding.tdz_checked);
+        try std.testing.expectEqual(compiled.chunk.lexical_slots[0], binding.slot);
+    };
+    try std.testing.expect(found_later);
 }
 
 test "compiler admits global-only class members and rejects frame captures" {
