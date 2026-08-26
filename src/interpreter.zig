@@ -27666,57 +27666,76 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, tag: []const u8, r_in: 
         r.hour_cycle = "";
         r.hour12 = null;
     }
-    var resolved: value.IntlDateTimeFormatData = .{
+    var selected_weekday = value.IntlDateTimeFormatData.Field.fromString(r.weekday);
+    const selected_era = value.IntlDateTimeFormatData.Field.fromString(r.era);
+    var selected_year = value.IntlDateTimeFormatData.Field.fromString(r.year);
+    var selected_month = value.IntlDateTimeFormatData.Field.fromString(r.month);
+    var selected_day = value.IntlDateTimeFormatData.Field.fromString(r.day);
+    var selected_day_period = value.IntlDateTimeFormatData.DayPeriod.fromRequested(r.day_period);
+    var selected_hour = value.IntlDateTimeFormatData.Field.fromString(r.hour);
+    var selected_minute = value.IntlDateTimeFormatData.Field.fromString(r.minute);
+    var selected_second = value.IntlDateTimeFormatData.Field.fromString(r.second);
+    var selected_time_zone_name = value.IntlDateTimeFormatData.Field.fromString(r.time_zone_name);
+    // DateTimeStyleFormat selected these concrete pattern fields. They remain
+    // native formatter state even though resolvedOptions reflects only the
+    // style name for this branch.
+    if (r.date_style.len > 0) {
+        selected_weekday = if (eq(r.date_style, "full")) .long else .none;
+        selected_month = if (eq(r.date_style, "short")) .numeric else if (eq(r.date_style, "medium")) .short else .long;
+        selected_day = .numeric;
+        selected_year = if (eq(r.date_style, "short")) .two_digit else .numeric;
+    }
+    if (r.time_style.len > 0) {
+        selected_hour = .numeric;
+        selected_minute = .two_digit;
+        selected_second = if (eq(r.time_style, "short")) .none else .two_digit;
+        selected_time_zone_name = if (eq(r.time_style, "full")) .long else if (eq(r.time_style, "long")) .short else .none;
+    }
+    // BasicFormatMatcher/BestFitFormatMatcher select a DateTime Format Record,
+    // not a copy of the requested components. Project the exact clock widths
+    // and pattern-added dayPeriod from the revision-pinned CLDR pattern. The
+    // same closed record feeds formatting and component reflection below.
+    if (selected_hour != .none) {
+        const twelve_hour = r.hour12 orelse false;
+        const pattern = cldr_timedata.clockPattern(tag, twelve_hour, selected_minute != .none, selected_second != .none);
+        selected_hour = dtfSelectPatternWidth(selected_hour, pattern.hour);
+        selected_minute = dtfSelectPatternWidth(selected_minute, pattern.minute);
+        selected_second = dtfSelectPatternWidth(selected_second, pattern.second);
+        if (twelve_hour) {
+            if (selected_day_period == .none) selected_day_period = dtfPatternDayPeriod(pattern.day_period);
+        } else {
+            selected_day_period = .none;
+        }
+    } else if (selected_minute != .none and selected_second != .none) {
+        const pattern = cldr_timedata.minuteSecondPattern(tag);
+        selected_minute = dtfSelectPatternWidth(selected_minute, pattern.minute);
+        selected_second = dtfSelectPatternWidth(selected_second, pattern.second);
+    }
+
+    const resolved: value.IntlDateTimeFormatData = .{
         .locale = tag,
         .resolved_locale = ext.loc,
         .calendar = r.calendar,
         .numbering_system = r.numbering_system,
         .hour_cycle = value.IntlDateTimeFormatData.HourCycle.fromString(r.hour_cycle),
         .time_zone = r.time_zone,
-        .weekday = value.IntlDateTimeFormatData.Field.fromString(r.weekday),
-        .era = value.IntlDateTimeFormatData.Field.fromString(r.era),
-        .year = value.IntlDateTimeFormatData.Field.fromString(r.year),
-        .month = value.IntlDateTimeFormatData.Field.fromString(r.month),
-        .day = value.IntlDateTimeFormatData.Field.fromString(r.day),
-        .day_period = value.IntlDateTimeFormatData.Field.fromString(r.day_period),
-        .hour = value.IntlDateTimeFormatData.Field.fromString(r.hour),
-        .minute = value.IntlDateTimeFormatData.Field.fromString(r.minute),
-        .second = value.IntlDateTimeFormatData.Field.fromString(r.second),
-        .time_zone_name = value.IntlDateTimeFormatData.Field.fromString(r.time_zone_name),
+        .weekday = selected_weekday,
+        .era = selected_era,
+        .year = selected_year,
+        .month = selected_month,
+        .day = selected_day,
+        .day_period = selected_day_period,
+        .hour = selected_hour,
+        .minute = selected_minute,
+        .second = selected_second,
+        .time_zone_name = selected_time_zone_name,
         .fractional_second_digits = r.frac_sec orelse 0,
-        .resolved_weekday = value.IntlDateTimeFormatData.Field.fromString(r.weekday),
-        .resolved_era = value.IntlDateTimeFormatData.Field.fromString(r.era),
-        .resolved_year = value.IntlDateTimeFormatData.Field.fromString(r.year),
-        .resolved_month = value.IntlDateTimeFormatData.Field.fromString(r.month),
-        .resolved_day = value.IntlDateTimeFormatData.Field.fromString(r.day),
-        .resolved_day_period = value.IntlDateTimeFormatData.Field.fromString(r.day_period),
-        .resolved_hour = value.IntlDateTimeFormatData.Field.fromString(r.hour),
-        .resolved_minute = value.IntlDateTimeFormatData.Field.fromString(r.minute),
-        .resolved_second = value.IntlDateTimeFormatData.Field.fromString(r.second),
-        .resolved_time_zone_name = value.IntlDateTimeFormatData.Field.fromString(r.time_zone_name),
-        .resolved_fractional_second_digits = r.frac_sec orelse 0,
         .date_style = value.IntlDateTimeFormatData.Field.fromString(r.date_style),
         .time_style = value.IntlDateTimeFormatData.Field.fromString(r.time_style),
         .hour12 = r.hour12 orelse true,
         .defaults_applied = r.defaults_applied,
         .allow_temporal_zoned_date_time = allow_temporal_zoned_date_time,
     };
-    // BasicFormatMatcher/BestFitMatcher selected these style patterns during
-    // construction. Expand them once, while retaining the original reflected
-    // fields above so resolvedOptions never exposes synthetic components.
-    if (r.date_style.len > 0) {
-        resolved.weekday = if (eq(r.date_style, "full")) .long else .none;
-        resolved.month = if (eq(r.date_style, "short")) .numeric else if (eq(r.date_style, "medium")) .short else .long;
-        resolved.day = .numeric;
-        resolved.year = if (eq(r.date_style, "short")) .two_digit else .numeric;
-    }
-    if (r.time_style.len > 0) {
-        resolved.hour = .numeric;
-        resolved.minute = .two_digit;
-        resolved.second = if (eq(r.time_style, "short")) .none else .two_digit;
-        resolved.time_zone_name = if (eq(r.time_style, "full")) .long else if (eq(r.time_style, "long")) .short else .none;
-    }
-
     const allocator = try o.intlDateTimeFormatAllocator(self.arena);
     const data = try allocator.create(value.IntlDateTimeFormatData);
     var installed = false;
@@ -27740,6 +27759,26 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, tag: []const u8, r_in: 
     data.time_zone = owned[4];
     try o.setIntlDateTimeFormatData(self.arena, data);
     installed = true;
+}
+
+fn dtfSelectPatternWidth(requested: value.IntlDateTimeFormatData.Field, pattern: cldr_timedata.PatternField) value.IntlDateTimeFormatData.Field {
+    if (requested != .numeric) return requested;
+    return switch (pattern) {
+        .none, .numeric => requested,
+        .two_digit => .two_digit,
+    };
+}
+
+fn dtfPatternDayPeriod(pattern: cldr_timedata.PatternDayPeriod) value.IntlDateTimeFormatData.DayPeriod {
+    return switch (pattern) {
+        .none => .none,
+        .am_pm_narrow => .am_pm_narrow,
+        .am_pm_short => .am_pm_short,
+        .am_pm_long => .am_pm_long,
+        .flexible_narrow => .flexible_narrow,
+        .flexible_short => .flexible_short,
+        .flexible_long => .flexible_long,
+    };
 }
 
 /// The single units sanctioned for use in ECMAScript (ECMA-402). A unit
@@ -28839,7 +28878,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
     var o_minute = data.minute.string();
     var o_second = data.second.string();
     var o_frac: usize = data.fractional_second_digits;
-    var o_day_period = data.day_period.string();
+    var o_day_period = data.day_period.field().string();
     var o_tzname = data.time_zone_name.string();
     const o_calendar = data.calendar;
     var hour12 = data.hour12;
@@ -29054,9 +29093,10 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
         var h = hour24;
         var ap: []const u8 = "";
         if (o_day_period.len > 0) {
-            // A flexible dayPeriod (en) replaces AM/PM.
-            ap = enDayPeriod(hour24, o_day_period);
-        } else if (hour12 and o_hour.len > 0) {
+            ap = if (data.day_period.isFlexible())
+                enDayPeriod(hour24, o_day_period)
+            else if (h < 12) "AM" else "PM";
+        } else if (temporal_kind != null and hour12 and o_hour.len > 0) {
             ap = if (h < 12) "AM" else "PM";
         }
         if (hour12 and o_hour.len > 0) {
@@ -29065,15 +29105,15 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
         } else if (std.mem.eql(u8, hour_cycle, "h24") and o_hour.len > 0 and h == 0) {
             h = 24;
         }
-        const two_hour = eq(o_hour, "2-digit") or (!hour12 and std.mem.eql(u8, hour_cycle, "h23") and h < 10);
+        const two_hour = eq(o_hour, "2-digit") or (temporal_kind != null and !hour12 and h < 10);
         if (o_hour.len > 0) try P.num(self, output, .hour, h, two_hour);
         if (o_minute.len > 0) {
             if (o_hour.len > 0) try P.lit(self, output, ":");
-            try P.num(self, output, .minute, minute, true);
+            try P.num(self, output, .minute, minute, eq(o_minute, "2-digit") or (temporal_kind != null and o_hour.len > 0));
         }
         if (o_second.len > 0) {
             if (o_hour.len > 0 or o_minute.len > 0) try P.lit(self, output, ":");
-            try P.num(self, output, .second, second, true);
+            try P.num(self, output, .second, second, eq(o_second, "2-digit") or (temporal_kind != null and o_hour.len > 0));
         }
         // fractionalSecondDigits: the first N digits of the millisecond (the
         // sub-second is truncated, not rounded), after the seconds.
@@ -33232,18 +33272,21 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                         if (resolved.value()) |projected| try s.setProp(target, name, projected);
                     }
                 }.field;
-                try put(self, o, "weekday", data.resolved_weekday);
-                try put(self, o, "era", data.resolved_era);
-                try put(self, o, "year", data.resolved_year);
-                try put(self, o, "month", data.resolved_month);
-                try put(self, o, "day", data.resolved_day);
-                try put(self, o, "dayPeriod", data.resolved_day_period);
-                try put(self, o, "hour", data.resolved_hour);
-                try put(self, o, "minute", data.resolved_minute);
-                try put(self, o, "second", data.resolved_second);
-                if (data.resolved_fractional_second_digits > 0)
-                    try self.setProp(o, "fractionalSecondDigits", Value.num(@floatFromInt(data.resolved_fractional_second_digits)));
-                try put(self, o, "timeZoneName", data.resolved_time_zone_name);
+                const component_record = data.date_style == .none and data.time_style == .none;
+                if (component_record) {
+                    try put(self, o, "weekday", data.weekday);
+                    try put(self, o, "era", data.era);
+                    try put(self, o, "year", data.year);
+                    try put(self, o, "month", data.month);
+                    try put(self, o, "day", data.day);
+                    try put(self, o, "dayPeriod", data.day_period.field());
+                    try put(self, o, "hour", data.hour);
+                    try put(self, o, "minute", data.minute);
+                    try put(self, o, "second", data.second);
+                    if (data.fractional_second_digits > 0)
+                        try self.setProp(o, "fractionalSecondDigits", Value.num(@floatFromInt(data.fractional_second_digits)));
+                    try put(self, o, "timeZoneName", data.time_zone_name);
+                }
                 try put(self, o, "dateStyle", data.date_style);
                 try put(self, o, "timeStyle", data.time_style);
             } else if (comptime std.mem.eql(u8, service, "RelativeTimeFormat")) {
@@ -55010,7 +55053,24 @@ test "Intl.DateTimeFormat resolved-state publication is OOM-safe" {
             try std.testing.expectEqualStrings("latn", data.numbering_system);
             try std.testing.expectEqual(value.IntlDateTimeFormatData.HourCycle.h23, data.hour_cycle);
             try std.testing.expectEqualStrings("h23", data.hour_cycle.string());
+            try std.testing.expectEqual(value.IntlDateTimeFormatData.DayPeriod.none, data.day_period);
+            try std.testing.expectEqual(value.IntlDateTimeFormatData.Field.two_digit, data.hour);
             try std.testing.expectEqualStrings("long", data.month.string());
+
+            var twelve_hour_formatter = value.Object{};
+            try dtfStoreOptions(&machine, &twelve_hour_formatter, "en-US", .{
+                .hour = "numeric",
+                .minute = "numeric",
+                .second = "numeric",
+                .hour_cycle = "h12",
+                .time_zone = "UTC",
+            }, false);
+            const twelve_hour = twelve_hour_formatter.intlDateTimeFormatData().?;
+            try std.testing.expectEqual(value.IntlDateTimeFormatData.DayPeriod.am_pm_short, twelve_hour.day_period);
+            try std.testing.expectEqual(value.IntlDateTimeFormatData.Field.short, twelve_hour.day_period.field());
+            try std.testing.expectEqual(value.IntlDateTimeFormatData.Field.numeric, twelve_hour.hour);
+            try std.testing.expectEqual(value.IntlDateTimeFormatData.Field.two_digit, twelve_hour.minute);
+            try std.testing.expectEqual(value.IntlDateTimeFormatData.Field.two_digit, twelve_hour.second);
 
             var structural_scratch = std.heap.ArenaAllocator.init(backing);
             defer structural_scratch.deinit();

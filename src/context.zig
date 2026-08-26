@@ -14205,6 +14205,8 @@ test "Intl.DateTimeFormat resolved enums use exact unmanaged static cells" {
         .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h12'}).resolvedOptions().hourCycle", .expected = "h12", .cell = strcell.staticCell("h12") },
         .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h23'}).resolvedOptions().hourCycle", .expected = "h23", .cell = strcell.staticCell("h23") },
         .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h24'}).resolvedOptions().hourCycle", .expected = "h24", .cell = strcell.staticCell("h24") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h12'}).resolvedOptions().dayPeriod", .expected = "short", .cell = strcell.staticCell("short") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h23'}).resolvedOptions().hour", .expected = "2-digit", .cell = strcell.staticCell("2-digit") },
     };
 
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -14252,8 +14254,8 @@ test "Intl.DateTimeFormat hour-cycle reflection agrees in tree-walker and requir
         \\];
         \\var expectedHourCycles = ["h11", "h12", "h23", "h24", "h11", "h23", "h12", undefined];
         \\var expectedHour12 = [true, true, false, false, true, false, true, undefined];
+        \\var expectedHours = ["numeric", "numeric", "2-digit", "2-digit", "numeric", "2-digit", "numeric", undefined];
         \\var twelveHourKeys = "locale,calendar,numberingSystem,timeZone,hourCycle,hour12,dayPeriod,hour";
-        \\var twelveHourKeysWithoutDayPeriod = "locale,calendar,numberingSystem,timeZone,hourCycle,hour12,hour";
         \\var twentyFourHourKeys = "locale,calendar,numberingSystem,timeZone,hourCycle,hour12,hour";
         \\var noHourKeys = "locale,calendar,numberingSystem,timeZone,year,month,day";
         \\function verifyHourCycleReflection() {
@@ -14262,19 +14264,84 @@ test "Intl.DateTimeFormat hour-cycle reflection agrees in tree-walker and requir
         \\    var second = hourCycleFormatters[index].resolvedOptions();
         \\    var cycle = expectedHourCycles[index];
         \\    var hour12 = expectedHour12[index];
+        \\    var expectedHour = expectedHours[index];
+        \\    var expectedDayPeriod = hour12 === true ? "short" : undefined;
         \\    if (first === second || first.hourCycle !== cycle || second.hourCycle !== cycle ||
-        \\        first.hour12 !== hour12 || second.hour12 !== hour12) return false;
+        \\        first.hour12 !== hour12 || second.hour12 !== hour12 || first.hour !== expectedHour || second.hour !== expectedHour ||
+        \\        first.dayPeriod !== expectedDayPeriod || second.dayPeriod !== expectedDayPeriod) return false;
         \\    var keys = Object.keys(first).join(",");
         \\    if (cycle === undefined ? keys !== noHourKeys :
-        \\        (hour12 ? keys !== twelveHourKeys && keys !== twelveHourKeysWithoutDayPeriod : keys !== twentyFourHourKeys)) return false;
+        \\        (hour12 ? keys !== twelveHourKeys : keys !== twentyFourHourKeys)) return false;
+        \\    var parts = hourCycleFormatters[index].formatToParts(43200000);
+        \\    var dayPeriodPart = undefined;
+        \\    for (var partIndex = 0; partIndex < parts.length; partIndex++)
+        \\      if (parts[partIndex].type === "dayPeriod") dayPeriodPart = parts[partIndex].value;
+        \\    if (expectedDayPeriod === undefined ? dayPeriodPart !== undefined : dayPeriodPart !== "PM") return false;
         \\    first.hourCycle = "mutated";
         \\    first.hour12 = !hour12;
+        \\    first.dayPeriod = "mutated";
         \\    var third = hourCycleFormatters[index].resolvedOptions();
-        \\    if (third.hourCycle !== cycle || third.hour12 !== hour12 || Object.keys(third).join(",") !== keys) return false;
+        \\    if (third.hourCycle !== cycle || third.hour12 !== hour12 || third.hour !== expectedHour ||
+        \\        third.dayPeriod !== expectedDayPeriod || Object.keys(third).join(",") !== keys) return false;
         \\  }
         \\  return true;
         \\}
-        \\verifyHourCycleReflection();
+        \\function verifySelectedPatternControls() {
+        \\  var basic = new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hour12:true,formatMatcher:"basic"});
+        \\  var best = new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hour12:true,formatMatcher:"best fit"});
+        \\  var flexible = new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hour12:true,dayPeriod:"long"});
+        \\  var dropped = new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hour12:false,dayPeriod:"long"});
+        \\  var style = new Intl.DateTimeFormat("en-US", {timeZone:"UTC",timeStyle:"short",hourCycle:"h11"});
+        \\  var german = new Intl.DateTimeFormat("de-DE", {timeZone:"UTC",hour:"numeric",hour12:true});
+        \\  var japanese = new Intl.DateTimeFormat("ja-JP", {timeZone:"UTC",hour:"numeric",hourCycle:"h23"});
+        \\  var korean = new Intl.DateTimeFormat("ko-KR", {timeZone:"UTC",hour:"numeric",minute:"numeric",second:"numeric",hourCycle:"h23"});
+        \\  var flexiblePattern = new Intl.DateTimeFormat("zh-Hant", {timeZone:"UTC",hour:"numeric",hourCycle:"h12"});
+        \\  var clock = new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",minute:"numeric",second:"numeric",hourCycle:"h24"});
+        \\  var basicOptions = basic.resolvedOptions();
+        \\  var bestOptions = best.resolvedOptions();
+        \\  var flexibleOptions = flexible.resolvedOptions();
+        \\  var droppedOptions = dropped.resolvedOptions();
+        \\  var styleOptions = style.resolvedOptions();
+        \\  var germanOptions = german.resolvedOptions();
+        \\  var japaneseOptions = japanese.resolvedOptions();
+        \\  var koreanOptions = korean.resolvedOptions();
+        \\  var flexiblePatternOptions = flexiblePattern.resolvedOptions();
+        \\  var clockOptions = clock.resolvedOptions();
+        \\  if (basicOptions.dayPeriod !== "short" || bestOptions.dayPeriod !== "short" ||
+        \\      flexibleOptions.dayPeriod !== "long" || droppedOptions.dayPeriod !== undefined ||
+        \\      droppedOptions.hour !== "2-digit" || styleOptions.dayPeriod !== undefined ||
+        \\      Object.keys(styleOptions).join(",") !== "locale,calendar,numberingSystem,timeZone,hourCycle,hour12,timeStyle" ||
+        \\      germanOptions.dayPeriod !== "short" || japaneseOptions.hour !== "numeric" ||
+        \\      koreanOptions.hour !== "numeric" || koreanOptions.minute !== "numeric" || koreanOptions.second !== "numeric" ||
+        \\      flexiblePatternOptions.dayPeriod !== "short" || flexiblePatternOptions.hour !== "numeric" ||
+        \\      clockOptions.hour !== "2-digit" ||
+        \\      clockOptions.minute !== "2-digit" || clockOptions.second !== "2-digit") return false;
+        \\  var flexibleParts = flexible.formatToParts(3600000);
+        \\  var styleParts = style.formatToParts(3600000);
+        \\  var flexiblePatternParts = flexiblePattern.formatToParts(46800000);
+        \\  var basicRangeParts = basic.formatRangeToParts(3600000, 43200000);
+        \\  var droppedRangeParts = dropped.formatRangeToParts(3600000, 43200000);
+        \\  var flexiblePeriod;
+        \\  var stylePeriod;
+        \\  var flexiblePatternPeriod;
+        \\  var basicRangeHasPeriod = false;
+        \\  var droppedRangeHasPeriod = false;
+        \\  for (var index = 0; index < flexibleParts.length; index++)
+        \\    if (flexibleParts[index].type === "dayPeriod") flexiblePeriod = flexibleParts[index].value;
+        \\  for (var index = 0; index < styleParts.length; index++)
+        \\    if (styleParts[index].type === "dayPeriod") stylePeriod = styleParts[index].value;
+        \\  for (var index = 0; index < flexiblePatternParts.length; index++)
+        \\    if (flexiblePatternParts[index].type === "dayPeriod") flexiblePatternPeriod = flexiblePatternParts[index].value;
+        \\  for (var index = 0; index < basicRangeParts.length; index++)
+        \\    if (basicRangeParts[index].type === "dayPeriod") basicRangeHasPeriod = true;
+        \\  for (var index = 0; index < droppedRangeParts.length; index++)
+        \\    if (droppedRangeParts[index].type === "dayPeriod") droppedRangeHasPeriod = true;
+        \\  return flexiblePeriod === "in the morning" && stylePeriod === "AM" && flexiblePatternPeriod === "in the afternoon" &&
+        \\    basic.format(3600000).indexOf("AM") >= 0 && flexible.format(3600000).indexOf("in the morning") >= 0 &&
+        \\    basic.formatRange(3600000, 43200000).indexOf("AM") >= 0 && basicRangeHasPeriod && !droppedRangeHasPeriod &&
+        \\    clock.format(3723000) === "01:02:03";
+        \\}
+        \\verifyHourCycleReflection() && verifySelectedPatternControls();
     ;
 
     const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -14294,8 +14361,8 @@ test "Intl.DateTimeFormat hour-cycle reflection agrees in tree-walker and requir
     try std.testing.expect((try bytecode_ctx.evaluate(source)).asBool());
     tree_ctx.collectGarbage();
     bytecode_ctx.collectGarbage();
-    try std.testing.expect((try tree_ctx.evaluate("verifyHourCycleReflection()")).asBool());
-    try std.testing.expect((try bytecode_ctx.evaluate("verifyHourCycleReflection()")).asBool());
+    try std.testing.expect((try tree_ctx.evaluate("verifyHourCycleReflection() && verifySelectedPatternControls()")).asBool());
+    try std.testing.expect((try bytecode_ctx.evaluate("verifyHourCycleReflection() && verifySelectedPatternControls()")).asBool());
 
     const tree = tree_ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(@as(u64, 2), tree.count(.program_forced_tree_walker));

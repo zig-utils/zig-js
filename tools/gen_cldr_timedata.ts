@@ -1,18 +1,26 @@
-// Generate src/cldr_timedata.zig from CLDR supplemental timeData.json. Each
-// region maps to its default hour cycle (_preferred) plus the 12-hour and
-// 24-hour variants drawn from _allowed, used by Intl.DateTimeFormat hour-cycle
-// resolution. Regions are looked up (by the maximized locale's territory) via
-// binary search; "001" is the world fallback.
+// Generate src/cldr_timedata.zig from a revision-pinned CLDR-JSON checkout.
+// The generated table carries both regional hour-cycle preferences and the
+// exact clock fields selected by the locale's h/hm/hms, H/Hm/Hms, and ms patterns.
 //
-//   home-tool run tools/gen_cldr_timedata.ts /tmp/timeData.json > src/cldr_timedata.zig
-import { readText } from "./lib/home";
+//   home-tool run tools/gen_cldr_timedata.ts /path/to/cldr-json > src/cldr_timedata.zig
+import { readText, run } from "./lib/home";
 
-const data = JSON.parse(readText(process.argv[2] || "/tmp/timeData.json")).supplemental.timeData;
+const CLDR_REVISION = "a79b499916d486dca4b0f74fe423ea457705fdd9";
+const CLDR_ROOT = process.argv[2];
+if (!CLDR_ROOT) throw new Error("usage: gen_cldr_timedata.ts <cldr-json-checkout>");
+const revision = run(["git", "-C", CLDR_ROOT, "rev-parse", "HEAD"]);
+if (revision.exitCode !== 0 || revision.stdout.trim() !== CLDR_REVISION) {
+  throw new Error(`CLDR checkout pin drift: expected ${CLDR_REVISION}, found ${revision.stdout.trim() || revision.stderr.trim()}`);
+}
+
+const root = CLDR_ROOT.replace(/\/$/, "");
+const timeDataPath = `${root}/cldr-json/cldr-core/supplemental/timeData.json`;
+const data = JSON.parse(readText(timeDataPath)).supplemental.timeData;
 
 // CLDR pattern symbols → ECMA-402 hour cycle.
 const SYM = { H: "h23", h: "h12", K: "h11", k: "h24" };
 
-function rowOf(entry) {
+function hourCyclesOf(entry) {
   const pref = SYM[entry._preferred] || "h23";
   let h12 = "h12";
   let h24 = "h23";
@@ -27,41 +35,219 @@ function rowOf(entry) {
   return { def: pref, h12, h24 };
 }
 
-const rows = Object.entries(data)
-  .map(([region, entry]) => [region.toLowerCase(), rowOf(entry)])
-  .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+const byteOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+const hourCycleRows = Object.entries(data)
+  .map(([region, entry]) => [region.toLowerCase(), hourCyclesOf(entry)])
+  .sort((a, b) => byteOrder(a[0], b[0]));
+
+function patternFields(pattern, requireHour = true) {
+  const fields = { hour: "none", minute: "none", second: "none", dayPeriod: "none" };
+  let quoted = false;
+  for (let i = 0; i < pattern.length;) {
+    const c = pattern[i];
+    if (c === "'") {
+      if (pattern[i + 1] === "'") { i += 2; continue; }
+      quoted = !quoted;
+      i++;
+      continue;
+    }
+    if (quoted) { i++; continue; }
+    let end = i + 1;
+    while (end < pattern.length && pattern[end] === c) end++;
+    const width = end - i;
+    if (c === "h" || c === "H" || c === "K" || c === "k") {
+      fields.hour = width === 1 ? "numeric" : "two_digit";
+    } else if (c === "m") {
+      fields.minute = width === 1 ? "numeric" : "two_digit";
+    } else if (c === "s") {
+      fields.second = width === 1 ? "numeric" : "two_digit";
+    } else if (c === "a" || c === "b" || c === "B") {
+      const kind = c === "a" ? "am_pm" : "flexible";
+      const name = width <= 3 ? "short" : width === 4 ? "long" : "narrow";
+      fields.dayPeriod = `${kind}_${name}`;
+    }
+    i = end;
+  }
+  if (quoted) throw new Error(`unterminated CLDR pattern quote: ${pattern}`);
+  if (requireHour && fields.hour === "none") throw new Error(`clock pattern has no hour field: ${pattern}`);
+  return fields;
+}
+
+const dateFilesResult = run(["git", "-C", CLDR_ROOT, "ls-files", "cldr-json/cldr-dates-full/main/*/ca-gregorian.json"]);
+if (dateFilesResult.exitCode !== 0) throw new Error(`cannot inventory CLDR date data: ${dateFilesResult.stderr.trim()}`);
+const dateFiles = dateFilesResult.stdout.trim().split("\n").filter(Boolean);
+if (!dateFiles.length) throw new Error("CLDR date-pattern inventory is empty");
+
+const patternSets = [];
+const patternSetByData = new Map();
+const patternRows = [];
+for (const relativePath of dateFiles) {
+  const locale = relativePath.split("/").slice(-2, -1)[0];
+  const json = JSON.parse(readText(`${root}/${relativePath}`));
+  const formats = json.main[locale].dates.calendars.gregorian.dateTimeFormats.availableFormats;
+  const sources = [formats.h, formats.hm, formats.hms, formats.H, formats.Hm, formats.Hms, formats.ms];
+  if (sources.some((pattern) => typeof pattern !== "string")) {
+    throw new Error(`incomplete h/hm/hms/H/Hm/Hms/ms clock patterns for ${locale}`);
+  }
+  const set = sources.map((pattern, index) => patternFields(pattern, index < 6));
+  const key = JSON.stringify(set);
+  let setIndex = patternSetByData.get(key);
+  if (setIndex === undefined) {
+    setIndex = patternSets.length;
+    patternSetByData.set(key, setIndex);
+    patternSets.push(set);
+  }
+  patternRows.push({ locale: locale.toLowerCase(), setIndex });
+}
+patternRows.sort((a, b) => byteOrder(a.locale, b.locale));
+const defaultPatternRow = patternRows.find((row) => row.locale === "en");
+if (!defaultPatternRow) throw new Error("CLDR date-pattern inventory has no en fallback");
 
 function zstr(s) {
   return '"' + s + '"';
 }
 
-let out = `// GENERATED by tools/gen_cldr_timedata.ts from CLDR timeData.json.
-// Region -> default/12-hour/24-hour hour cycle, binary searched at runtime.
+function zfield(field) {
+  return `.{ .hour = .${field.hour}, .minute = .${field.minute}, .second = .${field.second}, .day_period = .${field.dayPeriod} }`;
+}
+
+let out = `// GENERATED by tools/gen_cldr_timedata.ts from revision-pinned CLDR-JSON — do not edit.
+// Regional hour-cycle preferences and locale clock-pattern fields.
 const std = @import("std");
 
 pub const HourCycles = struct { def: []const u8, h12: []const u8, h24: []const u8 };
-const Row = struct { k: []const u8, v: HourCycles };
+const HourCycleRow = struct { k: []const u8, v: HourCycles };
 
-const rows = [_]Row{
+const hour_cycle_rows = [_]HourCycleRow{
 `;
-for (const [region, r] of rows) {
-  out += `    .{ .k = ${zstr(region)}, .v = .{ .def = ${zstr(r.def)}, .h12 = ${zstr(r.h12)}, .h24 = ${zstr(r.h24)} } },\n`;
+for (const [region, row] of hourCycleRows) {
+  out += `    .{ .k = ${zstr(region)}, .v = .{ .def = ${zstr(row.def)}, .h12 = ${zstr(row.h12)}, .h24 = ${zstr(row.h24)} } },\n`;
 }
 out += `};
 
 /// Hour-cycle data for a territory (lowercased), or the "001" world default.
 pub fn forRegion(region: []const u8) HourCycles {
     var lo: usize = 0;
-    var hi: usize = rows.len;
+    var hi: usize = hour_cycle_rows.len;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        switch (std.mem.order(u8, rows[mid].k, region)) {
+        switch (std.mem.order(u8, hour_cycle_rows[mid].k, region)) {
             .lt => lo = mid + 1,
             .gt => hi = mid,
-            .eq => return rows[mid].v,
+            .eq => return hour_cycle_rows[mid].v,
         }
     }
     return .{ .def = "h23", .h12 = "h12", .h24 = "h23" };
+}
+
+pub const PatternField = enum(u2) { none, numeric, two_digit };
+
+pub const PatternDayPeriod = enum(u3) {
+    none,
+    am_pm_narrow,
+    am_pm_short,
+    am_pm_long,
+    flexible_narrow,
+    flexible_short,
+    flexible_long,
+};
+
+pub const ClockPattern = struct {
+    hour: PatternField,
+    minute: PatternField,
+    second: PatternField,
+    day_period: PatternDayPeriod,
+};
+
+const PatternSet = struct {
+    h: ClockPattern,
+    hm: ClockPattern,
+    hms: ClockPattern,
+    H: ClockPattern,
+    Hm: ClockPattern,
+    Hms: ClockPattern,
+    ms: ClockPattern,
+};
+
+const pattern_sets = [_]PatternSet{
+`;
+for (const set of patternSets) {
+  out += `    .{ .h = ${zfield(set[0])}, .hm = ${zfield(set[1])}, .hms = ${zfield(set[2])}, .H = ${zfield(set[3])}, .Hm = ${zfield(set[4])}, .Hms = ${zfield(set[5])}, .ms = ${zfield(set[6])} },\n`;
+}
+out += `};
+
+const PatternRow = struct { locale: []const u8, set_index: u8 };
+const pattern_rows = [_]PatternRow{
+`;
+for (const row of patternRows) {
+  if (row.setIndex > 255) throw new Error(`too many distinct clock-pattern sets: ${patternSets.length}`);
+  out += `    .{ .locale = ${zstr(row.locale)}, .set_index = ${row.setIndex} },\n`;
+}
+out += `};
+
+fn asciiLower(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + ('a' - 'A') else c;
+}
+
+fn orderFolded(a: []const u8, b: []const u8) std.math.Order {
+    const n = @min(a.len, b.len);
+    for (a[0..n], b[0..n]) |ac, bc| {
+        const al = asciiLower(ac);
+        const bl = asciiLower(bc);
+        if (al < bl) return .lt;
+        if (al > bl) return .gt;
+    }
+    return std.math.order(a.len, b.len);
+}
+
+fn withoutExtensions(locale: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i + 2 < locale.len) : (i += 1) {
+        if (locale[i] == '-' and locale[i + 2] == '-') return locale[0..i];
+    }
+    return locale;
+}
+
+fn patternSetExact(locale: []const u8) ?PatternSet {
+    var lo: usize = 0;
+    var hi: usize = pattern_rows.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        switch (orderFolded(pattern_rows[mid].locale, locale)) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return pattern_sets[pattern_rows[mid].set_index],
+        }
+    }
+    return null;
+}
+
+fn patternSet(locale: []const u8) PatternSet {
+    var probe = withoutExtensions(locale);
+    while (true) {
+        if (patternSetExact(probe)) |set| return set;
+        if (std.mem.lastIndexOfScalar(u8, probe, '-')) |i| probe = probe[0..i] else break;
+    }
+    return pattern_sets[${defaultPatternRow.setIndex}];
+}
+
+/// Return the pinned locale pattern corresponding to the requested clock
+/// fields. An hour+second request has no standard CLDR skeleton, so it uses the
+/// hour pattern for hour/dayPeriod widths and preserves the requested second.
+pub fn clockPattern(locale: []const u8, twelve_hour: bool, has_minute: bool, has_second: bool) ClockPattern {
+    const set = patternSet(locale);
+    if (twelve_hour) {
+        if (has_minute and has_second) return set.hms;
+        if (has_minute) return set.hm;
+        return set.h;
+    }
+    if (has_minute and has_second) return set.Hms;
+    if (has_minute) return set.Hm;
+    return set.H;
+}
+
+pub fn minuteSecondPattern(locale: []const u8) ClockPattern {
+    return patternSet(locale).ms;
 }
 `;
 process.stdout.write(out);

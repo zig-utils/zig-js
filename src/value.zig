@@ -1244,6 +1244,43 @@ pub const IntlDateTimeFormatData = struct {
         }
     };
 
+    /// The selected DateTime Format Record distinguishes a pattern's ordinary
+    /// AM/PM marker from a requested flexible day-period field. Both reflect a
+    /// closed ECMA-402 width, but formatting must not turn AM/PM into a flexible
+    /// phrase merely because resolvedOptions reports "short".
+    pub const DayPeriod = enum(u8) {
+        none,
+        am_pm_narrow,
+        am_pm_short,
+        am_pm_long,
+        flexible_narrow,
+        flexible_short,
+        flexible_long,
+
+        pub fn fromRequested(bytes: []const u8) DayPeriod {
+            if (std.mem.eql(u8, bytes, "narrow")) return .flexible_narrow;
+            if (std.mem.eql(u8, bytes, "short")) return .flexible_short;
+            if (std.mem.eql(u8, bytes, "long")) return .flexible_long;
+            return .none;
+        }
+
+        pub fn field(self: DayPeriod) Field {
+            return switch (self) {
+                .none => .none,
+                .am_pm_narrow, .flexible_narrow => .narrow,
+                .am_pm_short, .flexible_short => .short,
+                .am_pm_long, .flexible_long => .long,
+            };
+        }
+
+        pub fn isFlexible(self: DayPeriod) bool {
+            return switch (self) {
+                .flexible_narrow, .flexible_short, .flexible_long => true,
+                .none, .am_pm_narrow, .am_pm_short, .am_pm_long => false,
+            };
+        }
+    };
+
     locale: []const u8 = "en",
     resolved_locale: []const u8 = "en",
     calendar: []const u8 = "gregory",
@@ -1258,26 +1295,15 @@ pub const IntlDateTimeFormatData = struct {
     year: Field = .none,
     month: Field = .none,
     day: Field = .none,
-    day_period: Field = .none,
+    day_period: DayPeriod = .none,
     hour: Field = .none,
     minute: Field = .none,
     second: Field = .none,
     time_zone_name: Field = .none,
     fractional_second_digits: u8 = 0,
 
-    // Original resolved fields reflected by resolvedOptions. Style expansion
-    // must not make its synthetic components observable.
-    resolved_weekday: Field = .none,
-    resolved_era: Field = .none,
-    resolved_year: Field = .none,
-    resolved_month: Field = .none,
-    resolved_day: Field = .none,
-    resolved_day_period: Field = .none,
-    resolved_hour: Field = .none,
-    resolved_minute: Field = .none,
-    resolved_second: Field = .none,
-    resolved_time_zone_name: Field = .none,
-    resolved_fractional_second_digits: u8 = 0,
+    // Styles still select the effective fields above, but resolvedOptions
+    // projects only dateStyle/timeStyle for a style record.
     date_style: Field = .none,
     time_style: Field = .none,
 
