@@ -171,6 +171,12 @@ fn workloadWidth(name: []const u8) !usize {
     if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_destructure_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_nested_control_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_compile_binding_inventory_forward_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_hash_ordinary_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_hash_ordinary_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_hash_ordinary_4096")) return 4096;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_hash_default_bucket_1024")) return 1024;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_hash_default_bucket_2048")) return 2048;
+    if (std.mem.eql(u8, name, "representative_frontend_compile_binding_hash_default_bucket_4096")) return 4096;
     if (std.mem.eql(u8, name, "representative_frontend_compile_class_frame_global_1024")) return 1024;
     if (std.mem.eql(u8, name, "representative_frontend_compile_class_frame_global_2048")) return 2048;
     if (std.mem.eql(u8, name, "representative_frontend_compile_class_frame_global_4096")) return 4096;
@@ -318,6 +324,7 @@ fn isUnicodeIdentifierWorkload(name: []const u8) bool {
 }
 
 const BindingInventoryCompileShape = enum { unique, var_only, shadowed, parameter_shadow, destructure, nested_control, forward };
+const BindingHashCompileShape = enum { ordinary, default_bucket };
 const TdzCompileShape = enum { clear, unrelated, forward, self, declared, nested, class_field, class_static };
 
 const LoopCaptureCompileShape = enum { clear, unrelated, first, last, for_of_clear, for_of_last };
@@ -384,6 +391,16 @@ fn bindingInventoryCompileShape(name: []const u8) ?BindingInventoryCompileShape 
     if (std.mem.eql(u8, shape, "destructure")) return .destructure;
     if (std.mem.eql(u8, shape, "nested_control")) return .nested_control;
     if (std.mem.eql(u8, shape, "forward")) return .forward;
+    return null;
+}
+
+fn bindingHashCompileShape(name: []const u8) ?BindingHashCompileShape {
+    const prefix = "representative_frontend_compile_binding_hash_";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const shape_end = std.mem.lastIndexOfScalar(u8, name, '_') orelse return null;
+    const shape = name[prefix.len..shape_end];
+    if (std.mem.eql(u8, shape, "ordinary")) return .ordinary;
+    if (std.mem.eql(u8, shape, "default_bucket")) return .default_bucket;
     return null;
 }
 
@@ -583,6 +600,44 @@ fn bindingInventoryCompileSource(
         },
     };
     try source.appendSlice(allocator, "return 0;}");
+    return source.items;
+}
+
+/// Produce paired, equal-length identifier corpora. The adversarial spelling
+/// shares fourteen low Wyhash(seed=0) bits, which targets every deterministic
+/// `std.StringHashMap` capacity up through that bucket prefix. The ordinary
+/// spelling uses the exact same numeric suffixes and byte lengths, so source
+/// size and source-construction work cannot explain an A/B difference.
+fn bindingHashCompileSource(
+    allocator: std.mem.Allocator,
+    width: usize,
+    shape: BindingHashCompileShape,
+) ![]const u8 {
+    const bucket_bits = 14;
+    const bucket_mask: u64 = (@as(u64, 1) << bucket_bits) - 1;
+    const prefix = if (shape == .default_bucket) "collision" else "ordinaryx";
+    comptime std.debug.assert("collision".len == "ordinaryx".len);
+
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(allocator, "function bindingHashWidth(){");
+    var accepted: usize = 0;
+    var probe: usize = 0;
+    var last_probe: usize = 0;
+    while (accepted < width) : (probe += 1) {
+        var candidate_buffer: [64]u8 = undefined;
+        const candidate = try std.fmt.bufPrint(&candidate_buffer, "collision{d}", .{probe});
+        if ((std.hash.Wyhash.hash(0, candidate) & bucket_mask) != 0) continue;
+        try source.appendSlice(allocator, "let ");
+        try source.appendSlice(allocator, prefix);
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d}", .{probe}));
+        try source.append(allocator, '=');
+        try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d};", .{accepted}));
+        last_probe = probe;
+        accepted += 1;
+    }
+    try source.appendSlice(allocator, "return ");
+    try source.appendSlice(allocator, prefix);
+    try source.appendSlice(allocator, try std.fmt.allocPrint(allocator, "{d};}}", .{last_probe}));
     return source.items;
 }
 
@@ -1277,6 +1332,36 @@ fn validateBindingInventoryCompileProgram(
     return foldChunk(checksum, code.chunk);
 }
 
+fn validateBindingHashCompileProgram(
+    allocator: std.mem.Allocator,
+    program: anytype,
+    source: []const u8,
+    width: usize,
+    shape: BindingHashCompileShape,
+) !usize {
+    if (program.* != .program or program.program.len != 1) return error.InvalidProgram;
+    const declaration = program.program[0];
+    if (declaration.* != .func_decl or
+        !std.mem.eql(u8, declaration.func_decl.name, "bindingHashWidth") or
+        declaration.func_decl.params.len != 0 or
+        declaration.func_decl.body.* != .block or
+        declaration.func_decl.body.block.len != width + 1)
+        return error.InvalidProgram;
+    const code = switch (try js.Compiler.admitPlainFunction(allocator, declaration.func_decl)) {
+        .rejected => return error.InvalidProgram,
+        .compiled => |compiled| compiled,
+    };
+    if (code.local_count != width or code.chunk.lexical_slots.len != 0 or
+        chunkHasOp(code.chunk, .init_local_lexical) or
+        chunkHasOp(code.chunk, .load_local_lexical) or
+        chunkHasOp(code.chunk, .load_upval_lexical))
+        return error.InvalidProgram;
+    var checksum = foldChecksum(source.len, width);
+    checksum = foldChecksum(checksum, @backingInt(shape));
+    checksum = foldChecksum(checksum, code.local_count);
+    return foldChunk(checksum, code.chunk);
+}
+
 fn validateTdzCompileProgram(
     allocator: std.mem.Allocator,
     program: anytype,
@@ -1428,6 +1513,8 @@ fn parseOnce(
     const scratch_allocator = if (observation != null) scratch_measured.allocator() else allocator;
     var parser = try js.Parser.initWithScratch(parser_allocator, scratch_allocator, source);
     const program = if (isModuleWorkload(workload)) try parser.parseModule() else try parser.parseProgram();
+    if (bindingHashCompileShape(workload)) |shape|
+        return validateBindingHashCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (classFrameCompileShape(workload)) |shape|
         return validateClassFrameCompileProgram(parser_allocator, program, source, try workloadWidth(workload), shape);
     if (repeatedBodyCompileShape(workload)) |shape|
@@ -1809,8 +1896,11 @@ pub fn main(init: std.process.Init) !void {
     const loop_capture_compile_shape = loopCaptureCompileShape(workload);
     const tdz_compile_shape = tdzCompileShape(workload);
     const binding_inventory_compile_shape = bindingInventoryCompileShape(workload);
+    const binding_hash_compile_shape = bindingHashCompileShape(workload);
     var expected_radix_bigint: ?[]const u8 = null;
-    const source = if (class_frame_compile_shape) |shape|
+    const source = if (binding_hash_compile_shape) |shape|
+        try bindingHashCompileSource(init.arena.allocator(), width, shape)
+    else if (class_frame_compile_shape) |shape|
         try classFrameCompileSource(init.arena.allocator(), width, shape)
     else if (repeated_body_compile_shape) |shape|
         try repeatedBodyCompileSource(init.arena.allocator(), width, shape)
@@ -1901,7 +1991,7 @@ pub fn main(init: std.process.Init) !void {
     // Compiler witnesses are intentionally cold/dynamic compilation rows. Two
     // complete untimed jobs settle process startup without turning repeated
     // attacker-sized classifier walks into an unreported timing boundary.
-    const workload_warmups: usize = if (binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
+    const workload_warmups: usize = if (binding_hash_compile_shape != null or binding_inventory_compile_shape != null or tdz_compile_shape != null or loop_capture_compile_shape != null or repeated_body_compile_shape != null or class_frame_compile_shape != null) 2 else warmup_calls;
     for (0..workload_warmups) |_| _ = try runJobs(init.gpa, source, @max(@as(usize, 1), jobs / 10), workload, expected_radix_bigint);
 
     var stdout_buffer: [4096]u8 = undefined;
