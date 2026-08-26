@@ -1132,6 +1132,48 @@ pub const IntlNumberFormatData = struct {
 /// observation completes before publication; every slice which can originate
 /// in movable JavaScript or arena storage is copied into object-owned backing.
 pub const IntlDateTimeFormatData = struct {
+    pub const HourCycle = enum(u8) {
+        none,
+        h11,
+        h12,
+        h23,
+        h24,
+
+        pub fn fromString(bytes: []const u8) HourCycle {
+            const pairs = [_]struct { []const u8, HourCycle }{
+                .{ "h11", .h11 },
+                .{ "h12", .h12 },
+                .{ "h23", .h23 },
+                .{ "h24", .h24 },
+            };
+            for (pairs) |pair| if (std.mem.eql(u8, bytes, pair[0])) return pair[1];
+            return .none;
+        }
+
+        pub fn string(self: HourCycle) []const u8 {
+            return switch (self) {
+                .none => "",
+                .h11 => "h11",
+                .h12 => "h12",
+                .h23 => "h23",
+                .h24 => "h24",
+            };
+        }
+
+        /// ECMA-402 limits [[HourCycle]] to this closed set. Static cells keep
+        /// resolvedOptions reflection allocation-free without interning or a
+        /// mutable cache shared by realms.
+        pub fn value(self: HourCycle) ?Value {
+            return switch (self) {
+                .none => null,
+                .h11 => Value.str("h11"),
+                .h12 => Value.str("h12"),
+                .h23 => Value.str("h23"),
+                .h24 => Value.str("h24"),
+            };
+        }
+    };
+
     pub const Field = enum(u8) {
         none,
         numeric,
@@ -1206,7 +1248,7 @@ pub const IntlDateTimeFormatData = struct {
     resolved_locale: []const u8 = "en",
     calendar: []const u8 = "gregory",
     numbering_system: []const u8 = "latn",
-    hour_cycle: []const u8 = "",
+    hour_cycle: HourCycle = .none,
     time_zone: []const u8 = "UTC",
 
     // Effective fields consumed by format/formatToParts. Date/time styles are
@@ -1240,7 +1282,6 @@ pub const IntlDateTimeFormatData = struct {
     time_style: Field = .none,
 
     hour12: bool = true,
-    has_hour_cycle: bool = false,
     defaults_applied: bool = false,
     allow_temporal_zoned_date_time: bool = false,
     owned_bytes: ?[]u8 = null,

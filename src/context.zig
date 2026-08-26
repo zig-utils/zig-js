@@ -14185,8 +14185,9 @@ test "parallel_js: Intl bound accessors publish one exact cached callable" {
     try std.testing.expect(result.asBool());
 }
 
-test "Intl.DateTimeFormat resolved field enums use exact unmanaged static cells" {
+test "Intl.DateTimeFormat resolved enums use exact unmanaged static cells" {
     try std.testing.expect(value.IntlDateTimeFormatData.Field.none.value() == null);
+    try std.testing.expect(value.IntlDateTimeFormatData.HourCycle.none.value() == null);
     const Case = struct { source: []const u8, expected: []const u8, cell: *const strcell.StringCell };
     const cases = [_]Case{
         .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',year:'numeric'}).resolvedOptions().year", .expected = "numeric", .cell = strcell.staticCell("numeric") },
@@ -14200,6 +14201,10 @@ test "Intl.DateTimeFormat resolved field enums use exact unmanaged static cells"
         .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',timeZoneName:'longOffset'}).resolvedOptions().timeZoneName", .expected = "longOffset", .cell = strcell.staticCell("longOffset") },
         .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',timeZoneName:'shortGeneric'}).resolvedOptions().timeZoneName", .expected = "shortGeneric", .cell = strcell.staticCell("shortGeneric") },
         .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',timeZoneName:'longGeneric'}).resolvedOptions().timeZoneName", .expected = "longGeneric", .cell = strcell.staticCell("longGeneric") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h11'}).resolvedOptions().hourCycle", .expected = "h11", .cell = strcell.staticCell("h11") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h12'}).resolvedOptions().hourCycle", .expected = "h12", .cell = strcell.staticCell("h12") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h23'}).resolvedOptions().hourCycle", .expected = "h23", .cell = strcell.staticCell("h23") },
+        .{ .source = "new Intl.DateTimeFormat('en', {timeZone:'UTC',hour:'numeric',hourCycle:'h24'}).resolvedOptions().hourCycle", .expected = "h24", .cell = strcell.staticCell("h24") },
     };
 
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
@@ -14215,6 +14220,73 @@ test "Intl.DateTimeFormat resolved field enums use exact unmanaged static cells"
         ctx.collectGarbage();
         try std.testing.expectEqualStrings(case.expected, result.asStr());
     }
+}
+
+test "Intl.DateTimeFormat hour-cycle reflection agrees in tree-walker and required bytecode" {
+    const source =
+        \\var hourCycleFormatters = [
+        \\  new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hourCycle:"h11"}),
+        \\  new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hourCycle:"h12"}),
+        \\  new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hourCycle:"h23"}),
+        \\  new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hourCycle:"h24"}),
+        \\  new Intl.DateTimeFormat("en-US-u-hc-h11", {timeZone:"UTC",hour:"numeric"}),
+        \\  new Intl.DateTimeFormat("en-US-u-hc-h11", {timeZone:"UTC",hour:"numeric",hour12:false}),
+        \\  new Intl.DateTimeFormat("en-US", {timeZone:"UTC",hour:"numeric",hourCycle:"h23",hour12:true}),
+        \\  new Intl.DateTimeFormat("en-US-u-hc-h24", {timeZone:"UTC",year:"numeric",month:"numeric",day:"numeric"})
+        \\];
+        \\var expectedHourCycles = ["h11", "h12", "h23", "h24", "h11", "h23", "h12", undefined];
+        \\var expectedHour12 = [true, true, false, false, true, false, true, undefined];
+        \\var twelveHourKeys = "locale,calendar,numberingSystem,timeZone,hourCycle,hour12,dayPeriod,hour";
+        \\var twelveHourKeysWithoutDayPeriod = "locale,calendar,numberingSystem,timeZone,hourCycle,hour12,hour";
+        \\var twentyFourHourKeys = "locale,calendar,numberingSystem,timeZone,hourCycle,hour12,hour";
+        \\var noHourKeys = "locale,calendar,numberingSystem,timeZone,year,month,day";
+        \\function verifyHourCycleReflection() {
+        \\  for (var index = 0; index < hourCycleFormatters.length; index++) {
+        \\    var first = hourCycleFormatters[index].resolvedOptions();
+        \\    var second = hourCycleFormatters[index].resolvedOptions();
+        \\    var cycle = expectedHourCycles[index];
+        \\    var hour12 = expectedHour12[index];
+        \\    if (first === second || first.hourCycle !== cycle || second.hourCycle !== cycle ||
+        \\        first.hour12 !== hour12 || second.hour12 !== hour12) return false;
+        \\    var keys = Object.keys(first).join(",");
+        \\    if (cycle === undefined ? keys !== noHourKeys :
+        \\        (hour12 ? keys !== twelveHourKeys && keys !== twelveHourKeysWithoutDayPeriod : keys !== twentyFourHourKeys)) return false;
+        \\    first.hourCycle = "mutated";
+        \\    first.hour12 = !hour12;
+        \\    var third = hourCycleFormatters[index].resolvedOptions();
+        \\    if (third.hourCycle !== cycle || third.hour12 !== hour12 || Object.keys(third).join(",") !== keys) return false;
+        \\  }
+        \\  return true;
+        \\}
+        \\verifyHourCycleReflection();
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    try std.testing.expect((try tree_ctx.evaluate(source)).asBool());
+    try std.testing.expect((try bytecode_ctx.evaluate(source)).asBool());
+    tree_ctx.collectGarbage();
+    bytecode_ctx.collectGarbage();
+    try std.testing.expect((try tree_ctx.evaluate("verifyHourCycleReflection()")).asBool());
+    try std.testing.expect((try bytecode_ctx.evaluate("verifyHourCycleReflection()")).asBool());
+
+    const tree = tree_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 2), tree.count(.program_forced_tree_walker));
+    try std.testing.expectEqual(@as(u64, 0), tree.count(.program_compiled));
+    const bytecode = bytecode_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 2), bytecode.count(.program_compiled));
+    try std.testing.expectEqual(@as(u64, 0), bytecode.count(.program_forced_tree_walker));
 }
 
 test "Intl.DateTimeFormat resolved state is reclaimed under a bounded precise heap" {

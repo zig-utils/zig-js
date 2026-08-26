@@ -27671,7 +27671,7 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, tag: []const u8, r_in: 
         .resolved_locale = ext.loc,
         .calendar = r.calendar,
         .numbering_system = r.numbering_system,
-        .hour_cycle = r.hour_cycle,
+        .hour_cycle = value.IntlDateTimeFormatData.HourCycle.fromString(r.hour_cycle),
         .time_zone = r.time_zone,
         .weekday = value.IntlDateTimeFormatData.Field.fromString(r.weekday),
         .era = value.IntlDateTimeFormatData.Field.fromString(r.era),
@@ -27698,7 +27698,6 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, tag: []const u8, r_in: 
         .date_style = value.IntlDateTimeFormatData.Field.fromString(r.date_style),
         .time_style = value.IntlDateTimeFormatData.Field.fromString(r.time_style),
         .hour12 = r.hour12 orelse true,
-        .has_hour_cycle = r.hour_cycle.len > 0,
         .defaults_applied = r.defaults_applied,
         .allow_temporal_zoned_date_time = allow_temporal_zoned_date_time,
     };
@@ -27723,7 +27722,7 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, tag: []const u8, r_in: 
     var installed = false;
     errdefer if (!installed) o.destroyUninstalledIntlDateTimeFormat(self.arena, data);
     data.* = resolved;
-    const sources = [_][]const u8{ resolved.locale, resolved.resolved_locale, resolved.calendar, resolved.numbering_system, resolved.hour_cycle, resolved.time_zone };
+    const sources = [_][]const u8{ resolved.locale, resolved.resolved_locale, resolved.calendar, resolved.numbering_system, resolved.time_zone };
     var total: usize = 0;
     for (sources) |source| total = std.math.add(usize, total, source.len) catch return error.OutOfMemory;
     data.owned_bytes = try allocator.alloc(u8, total);
@@ -27738,8 +27737,7 @@ fn dtfStoreOptions(self: *Interpreter, o: *value.Object, tag: []const u8, r_in: 
     data.resolved_locale = owned[1];
     data.calendar = owned[2];
     data.numbering_system = owned[3];
-    data.hour_cycle = owned[4];
-    data.time_zone = owned[5];
+    data.time_zone = owned[4];
     try o.setIntlDateTimeFormatData(self.arena, data);
     installed = true;
 }
@@ -28845,10 +28843,10 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
     var o_tzname = data.time_zone_name.string();
     const o_calendar = data.calendar;
     var hour12 = data.hour12;
-    var hour_cycle = data.hour_cycle;
+    var hour_cycle = data.hour_cycle.string();
     var any_comp = o_weekday.len + o_era.len + o_year.len + o_month.len + o_day.len + o_hour.len + o_minute.len + o_second.len + o_day_period.len + o_tzname.len + o_frac > 0;
     const defaults_applied = data.defaults_applied;
-    const explicit_hour_setting = data.has_hour_cycle;
+    const explicit_hour_setting = data.hour_cycle != .none;
     if (!any_comp) {
         o_year = "numeric";
         o_month = "numeric";
@@ -33225,8 +33223,8 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 try self.setProp(o, "calendar", try Value.strAlloc(self.arena, data.calendar));
                 try self.setProp(o, "numberingSystem", try Value.strAlloc(self.arena, data.numbering_system));
                 try self.setProp(o, "timeZone", try Value.strAlloc(self.arena, data.time_zone));
-                if (data.has_hour_cycle) {
-                    try self.setProp(o, "hourCycle", try Value.strAlloc(self.arena, data.hour_cycle));
+                if (data.hour_cycle.value()) |hour_cycle| {
+                    try self.setProp(o, "hourCycle", hour_cycle);
                     try self.setProp(o, "hour12", Value.boolVal(data.hour12));
                 }
                 const put = struct {
@@ -55010,7 +55008,8 @@ test "Intl.DateTimeFormat resolved-state publication is OOM-safe" {
             try std.testing.expectEqualStrings("de-DE-u-nu-latn", data.resolved_locale);
             try std.testing.expectEqualStrings("gregory", data.calendar);
             try std.testing.expectEqualStrings("latn", data.numbering_system);
-            try std.testing.expectEqualStrings("h23", data.hour_cycle);
+            try std.testing.expectEqual(value.IntlDateTimeFormatData.HourCycle.h23, data.hour_cycle);
+            try std.testing.expectEqualStrings("h23", data.hour_cycle.string());
             try std.testing.expectEqualStrings("long", data.month.string());
 
             var structural_scratch = std.heap.ArenaAllocator.init(backing);
