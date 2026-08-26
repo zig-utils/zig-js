@@ -2816,6 +2816,14 @@ pub const Interpreter = struct {
     /// Set only while invoking a syntactic `eval(...)` call. The eval native
     /// uses this to distinguish direct eval from member/indirect eval.
     direct_eval_call: bool = false,
+    /// One-shot ordinary-VM activation materializer. The eval native consumes
+    /// it only after parsing and inherited early-error checks succeed, so syntax
+    /// errors and non-string eval never allocate or publish activation records.
+    /// It is cleared before eval code runs; a nested direct eval then naturally
+    /// uses the freshly installed Environment chain rather than replaying the
+    /// outer bytecode call site's plan.
+    direct_eval_environment_hook: ?*const fn (*anyopaque, *Interpreter) EvalError!*Environment = null,
+    direct_eval_environment_hook_ctx: ?*anyopaque = null,
     /// A strict tree-walked function return-position call that can reuse the
     /// current activation. Used only for cases the slot VM cannot safely lower
     /// (notably functions whose source contains syntactic `eval`).
@@ -19430,6 +19438,17 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
                 return self.throwError("SyntaxError", "eval: cannot declare 'arguments' in a parameter expression");
         }
     }
+
+    if (self.direct_eval_call) if (self.direct_eval_environment_hook) |hook| {
+        const hook_ctx = self.direct_eval_environment_hook_ctx orelse
+            return self.throwError("InternalError", "direct-eval activation hook has no context");
+        // Consume before invoking the hook or running eval code. A nested eval
+        // resolves through the Environment installed below and must not reuse
+        // this bytecode call site's frame plan.
+        self.direct_eval_environment_hook = null;
+        self.direct_eval_environment_hook_ctx = null;
+        self.env = try hook(hook_ctx, self);
+    };
 
     const saved_env = self.env;
     const saved_this = self.this_value;

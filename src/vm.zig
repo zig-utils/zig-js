@@ -92,6 +92,10 @@ pub const Frame = struct {
     /// never a raw pointer from an escaped object back into recyclable storage.
     mapped_arguments: ?*value.Object = null,
     mapped_parameter_indices: []const u32 = &.{},
+    /// Lazily published variable Environment for this activation's direct eval.
+    /// The pointer is atomic because a concurrent marker can traverse an active
+    /// or escaped frame while the owning mutator installs the first view.
+    direct_eval_environment: std.atomic.Value(?*Environment) = .init(null),
     // Once a closure captures this frame (`makeClosure` walks the chain marking
     // `escaped`), its slots can be read/written concurrently: the defining
     // function via load/store_local on its own frame, and any escaped closure via
@@ -4170,39 +4174,69 @@ fn callEvalValueWithThis(vm: *Interpreter, callee: Value, args: []const Value, t
     return callValue(vm, callee, args, this_val);
 }
 
+const MaterializedDirectEvalEnvironment = struct {
+    environment: *Environment,
+    function_environment: *Environment,
+};
+
+fn sameDirectEvalBindings(left: []const bc.DirectEvalBinding, right: []const bc.DirectEvalBinding) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| {
+        if (!std.mem.eql(u8, a.name, b.name) or
+            a.slot != b.slot or
+            a.lexical != b.lexical or
+            a.immutable != b.immutable or
+            a.tdz_checked != b.tdz_checked or
+            a.mapped_parameter != b.mapped_parameter)
+            return false;
+    }
+    return true;
+}
+
 /// Lazily install declarative Environment Records whose bindings are live views
 /// over an ordinary VM activation. The compiler orders scopes outer-to-inner;
-/// allocation consumes them in reverse so defining frames are visited once from
-/// the current frame outward. The unpublished records temporarily form the
-/// opposite linked list, then a no-allocation reversal connects the exact
-/// lexical chain to the function's closure Environment and publishes `vm.env`.
-/// Any allocation failure drops the rooted unpublished chain and leaves the
-/// interpreter state unchanged.
+/// validation walks it inner-to-outer once, then allocation links the verified
+/// scopes directly from their defining closure. The current frame's variable
+/// Environment is retained for later sloppy eval declarations, while call-site
+/// lexical wrappers remain transient. Any validation/allocation failure leaves
+/// both the frame cache and `vm.env` unchanged.
 fn materializeDirectEvalEnvironment(
     vm: *Interpreter,
     current_frame: *Frame,
     plan: *const bc.DirectEvalPlan,
-) EvalError!*Environment {
+) EvalError!MaterializedDirectEvalEnvironment {
     if (plan.scopes.len == 0)
         return vm.throwError("InternalError", "empty direct-eval activation plan");
 
-    const base_environment = vm.env;
-    const base_root = try vm.pushTempEnvRoot(base_environment);
-    defer vm.restoreTempEnvRoots(base_root);
-    const list_root = try vm.pushTempEnvRoot(vm.tempEnvRoot(base_root, base_environment));
-
-    var list_head: ?*Environment = null;
+    // Validate the complete immutable plan before allocating or publishing any
+    // record. Reverse order is inner-to-outer, so frame depths can only rise and
+    // each depth must end in exactly one function scope.
     var selected_frame = current_frame;
     var selected_depth: u32 = 0;
+    var saw_function_scope = false;
+    var current_function_index: ?usize = null;
     var scope_index = plan.scopes.len;
     while (scope_index > 0) {
         scope_index -= 1;
         const scope = plan.scopes[scope_index];
-        if (scope.frame_depth < selected_depth)
+        if (scope.frame_depth < selected_depth or scope.frame_depth - selected_depth > 1)
             return vm.throwError("InternalError", "unordered direct-eval activation plan");
-        while (selected_depth < scope.frame_depth) : (selected_depth += 1)
+        if (scope.frame_depth != selected_depth) {
+            if (!saw_function_scope)
+                return vm.throwError("InternalError", "missing direct-eval function scope");
             selected_frame = selected_frame.parent orelse
                 return vm.throwError("InternalError", "direct-eval defining frame is unavailable");
+            selected_depth = scope.frame_depth;
+            saw_function_scope = false;
+        }
+        if (scope.function_scope) {
+            if (saw_function_scope)
+                return vm.throwError("InternalError", "duplicate direct-eval function scope");
+            saw_function_scope = true;
+            if (scope.frame_depth == 0) current_function_index = scope_index;
+        } else if (saw_function_scope) {
+            return vm.throwError("InternalError", "misordered direct-eval lexical scope");
+        }
 
         var previous_name: ?[]const u8 = null;
         for (scope.bindings) |binding| {
@@ -4213,37 +4247,122 @@ fn materializeDirectEvalEnvironment(
                     return vm.throwError("InternalError", "unsorted direct-eval activation bindings");
             previous_name = binding.name;
         }
+    }
+    if (!saw_function_scope or current_function_index == null)
+        return vm.throwError("InternalError", "missing direct-eval function scope");
 
+    if (current_frame.direct_eval_environment.load(.acquire)) |cached| {
+        const activation = cached.activation orelse
+            return vm.throwError("InternalError", "invalid cached direct-eval environment");
+        const function_scope = plan.scopes[current_function_index.?];
+        if (!cached.fn_scope or
+            activation.frame.slots.ptr != current_frame.slots.ptr or
+            activation.frame.slots.len != current_frame.slots.len or
+            !sameDirectEvalBindings(activation.bindings, function_scope.bindings))
+            return vm.throwError("InternalError", "mismatched cached direct-eval environment");
+
+        const function_root = try vm.pushTempEnvRoot(cached);
+        defer vm.restoreTempEnvRoots(function_root);
+        const chain_root = try vm.pushTempEnvRoot(vm.tempEnvRoot(function_root, cached));
+        var outward = vm.tempEnvRoot(chain_root, cached);
+        for (plan.scopes[current_function_index.? + 1 ..]) |scope| {
+            if (scope.frame_depth != 0 or scope.function_scope)
+                return vm.throwError("InternalError", "invalid current direct-eval lexical scope");
+            const environment = try gc_mod.allocEnv(vm.arena);
+            vm.initEnvironment(environment, vm.tempEnvRoot(chain_root, outward), false);
+            environment.private_activation = true;
+            environment.activation = .{
+                .frame = current_frame.activationView(),
+                .bindings = scope.bindings,
+            };
+            outward = environment;
+            vm.setTempEnvRoot(chain_root, environment);
+        }
+        const installed = vm.tempEnvRoot(chain_root, outward);
+        const function_environment = vm.tempEnvRoot(function_root, cached);
+        vm.env = installed;
+        return .{ .environment = installed, .function_environment = function_environment };
+    }
+
+    const frame_count = std.math.add(usize, @intCast(selected_depth), 1) catch
+        return vm.throwError("InternalError", "direct-eval frame depth overflow");
+    const frames = try vm.arena.alloc(*Frame, frame_count);
+    frames[0] = current_frame;
+    for (1..frames.len) |depth|
+        frames[depth] = frames[depth - 1].parent.?;
+
+    // A defining activation may already own a persistent direct-eval variable
+    // Environment (for example, an outer eval declared a `var` after this
+    // closure was created). Anchor at the nearest such frame so the inner eval
+    // observes those dynamic declarations without rebuilding or mutating the
+    // published outer record.
+    var base_environment = vm.env;
+    var start_index: usize = 0;
+    var anchor_depth: usize = 1;
+    while (anchor_depth < frames.len) : (anchor_depth += 1) {
+        const cached = frames[anchor_depth].direct_eval_environment.load(.acquire) orelse continue;
+        var function_index: ?usize = null;
+        for (plan.scopes, 0..) |scope, index| {
+            if (scope.frame_depth == @as(u32, @intCast(anchor_depth)) and scope.function_scope) {
+                function_index = index;
+                break;
+            }
+        }
+        const index = function_index orelse
+            return vm.throwError("InternalError", "missing cached direct-eval function scope");
+        const activation = cached.activation orelse
+            return vm.throwError("InternalError", "invalid cached defining environment");
+        if (!cached.fn_scope or
+            activation.frame.slots.ptr != frames[anchor_depth].slots.ptr or
+            activation.frame.slots.len != frames[anchor_depth].slots.len or
+            !sameDirectEvalBindings(activation.bindings, plan.scopes[index].bindings))
+            return vm.throwError("InternalError", "mismatched cached defining environment");
+        base_environment = cached;
+        start_index = index + 1;
+        break;
+    }
+
+    const base_root = try vm.pushTempEnvRoot(base_environment);
+    defer vm.restoreTempEnvRoots(base_root);
+    const chain_root = try vm.pushTempEnvRoot(vm.tempEnvRoot(base_root, base_environment));
+    const function_root = try vm.pushTempEnvRoot(vm.tempEnvRoot(base_root, base_environment));
+
+    var outward = vm.tempEnvRoot(chain_root, base_environment);
+    var unrooted_function_environment: ?*Environment = null;
+    for (plan.scopes[start_index..], start_index..) |scope, index| {
         const environment = try gc_mod.allocEnv(vm.arena);
-        const rooted_head: ?*Environment = if (list_head) |head|
-            vm.tempEnvRoot(list_root, head)
-        else
-            null;
-        vm.initEnvironment(environment, rooted_head, scope.function_scope);
+        vm.initEnvironment(environment, vm.tempEnvRoot(chain_root, outward), scope.function_scope);
         environment.private_activation = true;
         environment.activation = .{
-            .frame = selected_frame.activationView(),
+            .frame = frames[@intCast(scope.frame_depth)].activationView(),
             .bindings = scope.bindings,
         };
-        list_head = environment;
-        vm.setTempEnvRoot(list_root, environment);
+        outward = environment;
+        vm.setTempEnvRoot(chain_root, environment);
+        if (index == current_function_index.?) {
+            unrooted_function_environment = environment;
+            vm.setTempEnvRoot(function_root, environment);
+        }
     }
 
-    var outward: ?*Environment = vm.tempEnvRoot(base_root, base_environment);
-    var cursor: ?*Environment = if (list_head) |head|
-        vm.tempEnvRoot(list_root, head)
-    else
-        null;
-    while (cursor) |environment| {
-        const inward = environment.parent;
-        environment.parent = outward;
-        outward = environment;
-        cursor = inward;
-    }
-    const installed = outward orelse unreachable;
-    vm.setTempEnvRoot(list_root, installed);
+    const installed = vm.tempEnvRoot(chain_root, outward);
+    const function_environment = vm.tempEnvRoot(function_root, unrooted_function_environment orelse unreachable);
+    current_frame.direct_eval_environment.store(function_environment, .release);
     vm.env = installed;
-    return installed;
+    return .{ .environment = installed, .function_environment = function_environment };
+}
+
+const DirectEvalActivationHookContext = struct {
+    frame: *Frame,
+    plan: *const bc.DirectEvalPlan,
+    function_environment: ?*Environment = null,
+};
+
+fn materializeDirectEvalEnvironmentHook(raw_context: *anyopaque, vm: *Interpreter) EvalError!*Environment {
+    const context: *DirectEvalActivationHookContext = @ptrCast(@alignCast(raw_context));
+    const materialized = try materializeDirectEvalEnvironment(vm, context.frame, context.plan);
+    context.function_environment = materialized.function_environment;
+    return materialized.environment;
 }
 
 fn callActivationEvalValue(
@@ -4266,9 +4385,26 @@ fn callActivationEvalValue(
     if (!vm.isDirectEvalCallee(callee))
         return callValue(vm, callee, args, this_value orelse Value.undef());
 
+    if (args.len == 0 or !args[0].isString())
+        return if (this_value) |receiver|
+            callEvalValueWithThis(vm, callee, args, receiver)
+        else
+            callEvalValue(vm, callee, args);
+
     const saved_environment = vm.env;
-    _ = try materializeDirectEvalEnvironment(vm, frame, &chunk.direct_eval_plans.items[plan_index]);
-    defer vm.env = saved_environment;
+    const saved_hook = vm.direct_eval_environment_hook;
+    const saved_hook_context = vm.direct_eval_environment_hook_ctx;
+    var hook_context = DirectEvalActivationHookContext{
+        .frame = frame,
+        .plan = &chunk.direct_eval_plans.items[plan_index],
+    };
+    vm.direct_eval_environment_hook = materializeDirectEvalEnvironmentHook;
+    vm.direct_eval_environment_hook_ctx = @ptrCast(&hook_context);
+    defer {
+        vm.direct_eval_environment_hook = saved_hook;
+        vm.direct_eval_environment_hook_ctx = saved_hook_context;
+        vm.env = hook_context.function_environment orelse saved_environment;
+    }
     return if (this_value) |receiver|
         callEvalValueWithThis(vm, callee, args, receiver)
     else
@@ -4318,8 +4454,10 @@ test "vm materializes direct eval environments over exact defining frames failur
     };
     const plan = bc.DirectEvalPlan{ .scopes = &scopes };
 
-    const installed = try materializeDirectEvalEnvironment(&machine, &inner, &plan);
+    const materialized = try materializeDirectEvalEnvironment(&machine, &inner, &plan);
+    const installed = materialized.environment;
     try std.testing.expectEqual(installed, machine.env);
+    try std.testing.expectEqual(inner.direct_eval_environment.load(.acquire).?, materialized.function_environment);
     try std.testing.expect(!installed.fn_scope);
     try std.testing.expectEqual(@as(f64, 30), installed.get("lexical").?.asNum());
     try std.testing.expectEqual(@as(?bool, true), installed.isConst("lexical"));
@@ -4339,9 +4477,34 @@ test "vm materializes direct eval environments over exact defining frames failur
     try std.testing.expect(outer.escaped.load(.acquire));
 
     machine.env = &root;
+    const outer_only_scopes = [_]bc.DirectEvalScope{.{
+        .bindings = &outer_bindings,
+        .function_scope = true,
+        .frame_depth = 0,
+    }};
+    const outer_materialized = try materializeDirectEvalEnvironment(
+        &machine,
+        &outer,
+        &.{ .scopes = &outer_only_scopes },
+    );
+    try outer_materialized.function_environment.put("lateOuter", Value.num(9));
+    machine.env = &root;
+    var anchored_inner = Frame{ .slots = &inner_slots, .parent = &outer };
+    const anchored = try materializeDirectEvalEnvironment(&machine, &anchored_inner, &plan);
+    try std.testing.expectEqual(@as(f64, 9), anchored.environment.get("lateOuter").?.asNum());
+
+    machine.env = &root;
     var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     machine.arena = unavailable.allocator();
     try std.testing.expectError(error.OutOfMemory, materializeDirectEvalEnvironment(&machine, &inner, &plan));
+    try std.testing.expectEqual(&root, machine.env);
+    try std.testing.expectEqual(materialized.function_environment, inner.direct_eval_environment.load(.acquire).?);
+
+    var cold_inner = Frame{ .slots = &inner_slots, .parent = &outer };
+    var cold_unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = cold_unavailable.allocator();
+    try std.testing.expectError(error.OutOfMemory, materializeDirectEvalEnvironment(&machine, &cold_inner, &plan));
+    try std.testing.expectEqual(@as(?*Environment, null), cold_inner.direct_eval_environment.load(.acquire));
     try std.testing.expectEqual(&root, machine.env);
 }
 
@@ -4372,19 +4535,72 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
 
     var chunk = bc.Chunk.init(allocator);
     const eval_index = try chunk.addConst(root.get("eval") orelse return error.TestUnexpectedResult);
-    const source_index = try chunk.addConst(Value.str("local += 1; local"));
+    const first_source_index = try chunk.addConst(Value.str("var dynamic = 1; local += dynamic; local"));
+    const second_source_index = try chunk.addConst(Value.str("dynamic += 1; local += dynamic; local"));
     const plan_index = try chunk.addDirectEvalPlan(.{ .scopes = &scopes });
     _ = try chunk.emit(.load_const, eval_index);
-    _ = try chunk.emit(.load_const, source_index);
+    _ = try chunk.emit(.load_const, first_source_index);
+    _ = try chunk.emitAB(.call_eval_activation, 1, plan_index);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, eval_index);
+    _ = try chunk.emit(.load_const, second_source_index);
     _ = try chunk.emitAB(.call_eval_activation, 1, plan_index);
     _ = try chunk.emit(.ret, 0);
     try chunk.finalize();
 
     const result = try run(&machine, &chunk, &frame);
-    try std.testing.expectEqual(@as(f64, 42), result.asNum());
-    try std.testing.expectEqual(@as(f64, 42), slots[0].asNum());
-    try std.testing.expectEqual(&root, machine.env);
+    try std.testing.expectEqual(@as(f64, 44), result.asNum());
+    try std.testing.expectEqual(@as(f64, 44), slots[0].asNum());
+    try std.testing.expectEqual(frame.direct_eval_environment.load(.acquire).?, machine.env);
+    try std.testing.expectEqual(@as(f64, 2), machine.env.get("dynamic").?.asNum());
+    try std.testing.expectEqual(&root, machine.env.parent.?);
     try std.testing.expect(!machine.direct_eval_call);
+
+    var syntax_slots = [_]Value{Value.num(0)};
+    var syntax_frame = Frame{ .slots = &syntax_slots, .parent = null };
+    machine.env = &root;
+    try std.testing.expectError(error.Throw, callActivationEvalValue(
+        &machine,
+        &chunk,
+        &syntax_frame,
+        plan_index,
+        root.get("eval") orelse return error.TestUnexpectedResult,
+        &.{Value.str("let =")},
+        null,
+    ));
+    try std.testing.expectEqual(@as(?*Environment, null), syntax_frame.direct_eval_environment.load(.acquire));
+    try std.testing.expectEqual(&root, machine.env);
+    machine.exception = Value.undef();
+
+    var identity_slots = [_]Value{Value.num(0)};
+    var identity_frame = Frame{ .slots = &identity_slots, .parent = null };
+    machine.env = &root;
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    const identity = try callActivationEvalValue(
+        &machine,
+        &chunk,
+        &identity_frame,
+        plan_index,
+        root.get("eval") orelse return error.TestUnexpectedResult,
+        &.{Value.num(7)},
+        null,
+    );
+    try std.testing.expectEqual(@as(f64, 7), identity.asNum());
+    try std.testing.expectEqual(@as(?*Environment, null), identity_frame.direct_eval_environment.load(.acquire));
+    try std.testing.expectEqual(&root, machine.env);
+    const empty = try callActivationEvalValue(
+        &machine,
+        &chunk,
+        &identity_frame,
+        plan_index,
+        root.get("eval") orelse return error.TestUnexpectedResult,
+        &.{Value.str("{}")},
+        null,
+    );
+    try std.testing.expect(empty.isUndefined());
+    try std.testing.expectEqual(@as(?*Environment, null), identity_frame.direct_eval_environment.load(.acquire));
+    try std.testing.expectEqual(&root, machine.env);
 }
 
 fn callSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value) EvalError!Value {
@@ -9714,6 +9930,7 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     @memset(act.exec.binding_references, .empty);
     act.frame.mapped_arguments = null;
     act.frame.mapped_parameter_indices = &.{};
+    act.frame.direct_eval_environment.store(null, .release);
     act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
     vm.vm_activation_free = act;
 }
@@ -9728,6 +9945,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
             act.frame.parent = null;
             act.frame.mapped_arguments = null;
             act.frame.mapped_parameter_indices = &.{};
+            act.frame.direct_eval_environment.store(null, .release);
             act.frame.escaped.store(false, .monotonic);
             @memset(act.frame.slots, Value.undef());
             return act;
