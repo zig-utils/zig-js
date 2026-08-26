@@ -30,11 +30,11 @@ pub fn hashBytes(bytes: []const u8) u64 {
 /// (every byte < 0x80). For ASCII, the WTF-8 storage is already a flat
 /// 1-byte-per-code-unit image, so `byte offset == UTF-16 index`: charAt/indexOf/
 /// slice and regexp offset math become O(1) instead of walking the string. The
-/// lower bits carry the XXH3 content hash once bit 61 marks it ready. Interning
-/// and `eql` stay exact
+/// payload bits carry the UTF-16 length and the masked XXH3 content hash once
+/// bit 61 marks it ready. Interning and `eql` stay exact
 /// because ASCII-ness is a deterministic function of content — two equal strings
-/// classify identically and so carry an identical `hash` word — and the intern
-/// shard pick uses only low bits. This is the first brick of the flat-string
+/// classify identically and so carry an identical `hash` word. Intern placement
+/// uses an independent keyed hash. This is the first brick of the flat-string
 /// model (Phase 1); later phases widen to true latin1/UTF-16 flat storage.
 pub const ascii_flag: u64 = @as(u64, 1) << 63;
 
@@ -48,8 +48,7 @@ pub const ascii_flag: u64 = @as(u64, 1) << 63;
 /// storage flip keys on (a flat-latin1 cell is exactly an is8Bit, non-ASCII
 /// cell) and it makes the ABI `is8Bit` predicate an O(1) cell read. Same
 /// safety argument as `ascii_flag`: latin1-ness is a deterministic function of
-/// content, so equal strings classify identically and share one hash state;
-/// the low bits (intern shard pick, `eql` fast-reject) are unaffected.
+/// content, so equal strings classify identically and share one hash state.
 pub const latin1_flag: u64 = @as(u64, 1) << 62;
 
 /// Bit 61 distinguishes a published content hash from classification-only
@@ -60,8 +59,23 @@ pub const hash_ready_flag: u64 = @as(u64, 1) << 61;
 
 pub const classification_mask: u64 = ascii_flag | latin1_flag;
 
-/// The bits that hold XXH3 content after `hash_ready_flag` is set.
-pub const content_hash_mask: u64 = ~(classification_mask | hash_ready_flag);
+/// The low 27 bits retain the exact UTF-16 length for every ordinary engine
+/// string (the runtime cap is 2^26 bytes). The all-ones value is an explicit
+/// fallback sentinel for oversized embedding inputs, which remain exact by
+/// walking their immutable bytes. Keeping length in the existing hash-state
+/// word makes String exotic `length` and bounds probes O(1) without growing the
+/// 32-byte cell or allocating lazy metadata in nominally allocation-free paths.
+pub const utf16_length_bits = 27;
+pub const utf16_length_mask: u64 = (@as(u64, 1) << utf16_length_bits) - 1;
+pub const utf16_length_unknown: u64 = utf16_length_mask;
+
+/// The remaining 34 payload bits hold XXH3 content after `hash_ready_flag` is
+/// set. Equality always confirms exact bytes, and intern-table placement uses
+/// its independent keyed 64-bit hash, so shortening this fast-reject cache does
+/// not weaken semantic equality or adversarial shard placement.
+pub const content_hash_mask: u64 = ~(classification_mask | hash_ready_flag | utf16_length_mask);
+
+const persistent_state_mask = classification_mask | utf16_length_mask;
 
 /// Master switch for the flat-latin1 storage representation (the flat-string
 /// model). While **false** every cell stores canonical WTF-8, `isFlatLatin1` is
@@ -111,10 +125,31 @@ fn classificationBits(bytes: []const u8) u64 {
     return bits;
 }
 
+/// Exact UTF-16 length of canonical WTF-8 without decoding scalar values.
+/// Each continuation byte reduces the scalar count by one; each four-byte lead
+/// adds the second surrogate code unit represented by that scalar.
+pub fn utf16LengthOfWtf8(bytes: []const u8) usize {
+    var units = bytes.len;
+    for (bytes) |byte| {
+        if (byte & 0xC0 == 0x80) {
+            units -= 1;
+        } else if (byte >= 0xF0) {
+            units += 1;
+        }
+    }
+    return units;
+}
+
+fn utf16LengthState(bytes: []const u8) u64 {
+    const units = utf16LengthOfWtf8(bytes);
+    return if (units < utf16_length_unknown) @intCast(units) else utf16_length_unknown;
+}
+
 /// XXH3 content hash with eager classification and a ready marker. Static
 /// literals and intern-table entries consume this during construction.
 pub fn contentHash(bytes: []const u8) u64 {
-    return classificationBits(bytes) | hash_ready_flag | (hashBytes(bytes) & content_hash_mask);
+    return classificationBits(bytes) | utf16LengthState(bytes) | hash_ready_flag |
+        (hashBytes(bytes) & content_hash_mask);
 }
 
 /// Initial state for an uninterned runtime cell. Flat-latin1 storage would
@@ -122,7 +157,7 @@ pub fn contentHash(bytes: []const u8) u64 {
 /// the current canonical WTF-8 representation can derive it from stored bytes
 /// on first equality.
 pub fn uninternedHashState(bytes: []const u8) u64 {
-    const classification = classificationBits(bytes);
+    const classification = classificationBits(bytes) | utf16LengthState(bytes);
     if (isFlatLatin1(classification))
         return classification | hash_ready_flag | (hashBytes(bytes) & content_hash_mask);
     return classification;
@@ -226,7 +261,7 @@ pub const StringCell = struct {
         // Flat storage changes the byte image, so those cells are deliberately
         // eager in `uninternedHashState` and can never enter this path.
         std.debug.assert(!isFlatLatin1(pending));
-        const computed = (pending & classification_mask) | hash_ready_flag |
+        const computed = (pending & persistent_state_mask) | hash_ready_flag |
             (hashBytes(self.bytes) & content_hash_mask);
         return @cmpxchgStrong(
             u64,
@@ -251,6 +286,17 @@ pub const StringCell = struct {
     /// ASCII ⇒ latin1, so this is a superset of `isAscii()`.
     pub fn isLatin1(self: *const StringCell) bool {
         return self.hashState() & latin1_flag != 0;
+    }
+
+    /// Exact ECMAScript String length. Ordinary cells read the construction-time
+    /// cache; only an embedding input beyond the cache's representable range
+    /// takes the exact representation-aware fallback.
+    pub fn utf16Len(self: *const StringCell) usize {
+        const state = self.hashState();
+        const cached = state & utf16_length_mask;
+        if (cached != utf16_length_unknown) return @intCast(cached);
+        if (isFlatLatin1(state)) return self.bytes.len;
+        return utf16LengthOfWtf8(self.bytes);
     }
 };
 
@@ -502,7 +548,11 @@ pub fn prepareAsciiAffixedString(
     var out: usize = 0;
     @memcpy(stored[out..][0..prefix.len], prefix);
     out += prefix.len;
-    var hash = classification;
+    const middle_units = if (middle_flat_latin1) middle.len else utf16LengthOfWtf8(middle);
+    const utf16_len = std.math.add(usize, prefix.len, middle_units) catch return error.OutOfMemory;
+    const final_utf16_len = std.math.add(usize, utf16_len, suffix.len) catch return error.OutOfMemory;
+    var hash = classification |
+        (if (final_utf16_len < utf16_length_unknown) @as(u64, @intCast(final_utf16_len)) else utf16_length_unknown);
     if (store_flat) {
         var hasher = std.hash.XxHash3.init(0);
         hasher.update(prefix);
@@ -1050,6 +1100,32 @@ test "strcell: isLatin1 tracks the is8Bit boundary (≤ 0xFF) at construction" {
     }
 }
 
+test "strcell: construction caches exact UTF-16 length across representations" {
+    const a = std.testing.allocator;
+    const Case = struct { bytes: []const u8, units: usize };
+    const cases = [_]Case{
+        .{ .bytes = "", .units = 0 },
+        .{ .bytes = "ascii", .units = 5 },
+        .{ .bytes = "caf\xc3\xa9", .units = 4 },
+        .{ .bytes = "\xe6\xb0\xb4\xce\xa9", .units = 2 },
+        .{ .bytes = "\xf0\x9f\x98\x80", .units = 2 },
+        .{ .bytes = "\xed\xa0\x80x", .units = 2 },
+        .{ .bytes = "A\xc3\xa9\xe6\xb0\xb4\xf0\x9f\x98\x80\xed\xa0\x80x", .units = 7 },
+    };
+    for (cases) |case| {
+        const cell = try createCell(a, case.bytes);
+        defer {
+            a.free(cell.bytes);
+            a.destroy(cell);
+        }
+        try std.testing.expectEqual(case.units, utf16LengthOfWtf8(case.bytes));
+        try std.testing.expectEqual(case.units, cell.utf16Len());
+        try std.testing.expectEqual(@as(u64, @intCast(case.units)), cell.hashState() & utf16_length_mask);
+        _ = cell.eql(staticCell("different"));
+        try std.testing.expectEqual(case.units, cell.utf16Len());
+    }
+}
+
 test "strcell: static and runtime states converge and hash collisions stay exact" {
     const a = std.testing.allocator;
     const Case = struct { bytes: []const u8, static: *const StringCell };
@@ -1237,7 +1313,10 @@ test "strcell: intern placement is lazy independent exact and distributed" {
     while (collision_count < 128) : (candidate += 1) {
         var storage: [48]u8 = undefined;
         const bytes = try std.fmt.bufPrint(&storage, "deterministic-shard-collision-{d}", .{candidate});
-        if (contentHash(bytes) & (InternTable.shard_count - 1) != 0) continue;
+        // Collide four retained XXH3 bits, not the low UTF-16-length cache.
+        // Keyed placement must still distribute attacker-selected content-hash
+        // collisions independently across the secure shards.
+        if ((contentHash(bytes) >> utf16_length_bits) & (InternTable.shard_count - 1) != 0) continue;
         secure_shards[adversarial_context.hash(bytes) & (InternTable.shard_count - 1)] += 1;
         collision_count += 1;
     }

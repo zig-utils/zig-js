@@ -10800,15 +10800,15 @@ pub const Interpreter = struct {
         return units;
     }
 
-    /// UTF-16 length of a string `Value`, representation-aware and allocation
-    /// free: flat-latin1 and cached ASCII cells store 1 byte per code unit, so
-    /// their length is `bytes.len` in O(1); every other cell is walked as
-    /// WTF-8. Use this for string `.length` and index-bound checks — including
-    /// allocation-free contexts (`hasProperty`, `objectHasOwn`) where `asWtf8`
-    /// is unavailable. Caller has checked `isString()`.
+    /// UTF-16 length of a string `Value`, representation-aware, allocation free,
+    /// and O(1) for ordinary engine strings through StringCell's construction-
+    /// time cache. Only oversized embedding inputs beyond the cache's explicit
+    /// sentinel use the exact WTF-8 walk. Use this for `.length` and index-bound
+    /// checks, including `hasProperty`/`objectHasOwn` where allocation is
+    /// forbidden. Caller has checked `isString()`.
     pub fn utf16LenOfValue(v: Value) usize {
-        if (v.strIsFlatLatin1() or v.strIsAscii()) return v.asStr().len;
-        return utf16LenOfString(v.asStr());
+        std.debug.assert(v.isString());
+        return v.asStringCell().utf16Len();
     }
 
     pub fn jsStringIs8Bit(s: []const u8) bool {
@@ -53318,6 +53318,13 @@ test "interpreter string length and indexing" {
     const a = arena.allocator();
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "'hello'.length")).asNum());
     try std.testing.expectEqualStrings("e", (try evalSource(a, "'hello'[1]")).asStr());
+    try std.testing.expectEqual(@as(f64, 30), (try evalSource(a,
+        \\let latin1 = "éÿ", bmp = "水Ω", astral = "😀";
+        \\let lone = "\ud800x", mixed = "Aé水😀\ud800x";
+        \\latin1.length + bmp.length + astral.length + lone.length + mixed.length +
+        \\  new String(latin1).length + new String(bmp).length + new String(astral).length +
+        \\  new String(lone).length + new String(mixed).length
+    )).asNum());
 }
 
 test "interpreter throw / try / catch / finally" {
