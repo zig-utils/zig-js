@@ -63,11 +63,18 @@ export function selfTest(): void {
   rejects("string-indexing timed boundary drift", value => { value.string_indexing_integration.timed_boundary = ""; }, "timed boundary is missing");
   rejects("exact-parent integration mirror drift", value => { value.exact_parent_integration.native_allocation_replay.phase = "warmup"; }, "exact-parent integration mirror drift");
   rejects("native allocation replay phase drift", value => { value.exact_parent_integration.native_allocation_replay.phase = "warmup"; value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.phase = "warmup"; }, "native allocation replay policy drift");
+  rejects("mixed replay phase boundary drift", value => { value.exact_parent_integration.native_allocation_replay.phase_boundary = "cumulative"; value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.phase_boundary = "cumulative"; }, "phase contract drift");
+  rejects("mixed replay snapshot inventory drift", value => { value.exact_parent_integration.native_allocation_replay.required_snapshots.pop(); value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.required_snapshots.pop(); }, "phase contract drift");
+  rejects("mixed replay signature inventory drift", value => { value.exact_parent_integration.native_allocation_replay.signature_sections.pop(); value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.signature_sections.pop(); }, "signature inventory drift");
+  rejects("mixed replay contract hash drift", value => { value.exact_parent_integration.native_allocation_replay.signature_contracts[0].sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.signature_contracts[0].sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+  rejects("mixed replay contract checksum drift", value => { value.exact_parent_integration.native_allocation_replay.signature_contracts[0].checksum += 1; value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.signature_contracts[0].checksum += 1; }, "contract checksum drift");
+  rejects("mixed replay legacy ruling drift", value => { value.exact_parent_integration.native_allocation_replay.legacy_vm_only = ""; value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.legacy_vm_only = ""; }, "compatibility ruling drift");
+  rejects("mixed replay cross-variant ruling drift", value => { value.exact_parent_integration.native_allocation_replay.cross_variant_ruling = ""; value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.cross_variant_ruling = ""; }, "compatibility ruling drift");
   rejects("exact-parent batch concurrency drift", value => { value.exact_parent_integration.serial_batch.execution = "parallel"; value.completed_metric_panels.efficiency_thermal.scored_integration.serial_batch.execution = "parallel"; }, "exact-parent batch policy drift");
   rejects("direct binary provenance drift", value => { value.exact_parent_integration.binary_provenance_profiles.schema_v2 = "unchecked"; value.completed_metric_panels.efficiency_thermal.scored_integration.binary_provenance_profiles.schema_v2 = "unchecked"; }, "binary provenance profile drift");
   rejects("frontend native runner drift", value => { value.exact_parent_integration.native_runners[1].sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.native_runners[1].sha256 = "0".repeat(64); }, "changed without a matrix version bump");
-  rejects("unsupported future matrix", value => { value.schema_version = 28; }, "unsupported representative matrix schema");
-  console.log("representative matrix structural tests: 58/58 passed");
+  rejects("unsupported future matrix", value => { value.schema_version = 29; }, "unsupported representative matrix schema");
+  console.log("representative matrix structural tests: 65/65 passed");
 }
 
 if (process.argv[1] === __filename) selfTest();

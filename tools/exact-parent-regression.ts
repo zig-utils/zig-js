@@ -16,9 +16,10 @@ const SHARED_MEASUREMENT_OVERLAY_PATHS = [
   "docs/.data/algorithmic-growth-schema-v2.json", "docs/.data/bunpress-output-v1.json", "docs/.data/performance-attribution-schema-v2.json", "docs/.data/representative-benchmark-matrix-v24.json", "docs/benchmarks.md",
   "tools/algorithmic-growth.ts", "tools/exact-parent-regression.ts", "tools/instrumentation-overhead.ts", "tools/performance-attribution.ts", "tools/representative-matrix.ts",
 ];
-export type RunnerRow = { engine: string; mode: string; workload: string; lanes: number; jobs: number; elapsed_ns: number; checksum: number; measured_boundary_cpu_user_ns: number; measured_boundary_cpu_system_ns: number; measured_boundary_cpu_occupancy: number; process_wall_time_ns: number; process_cpu_user_ns: number; process_cpu_system_ns: number; process_cpu_occupancy: number; peak_rss_bytes: number; retained_rss_bytes: number | null; allocations: number | null; allocated_bytes: number | null; allocation_source: string | null; instructions: number; cycles: number; energy_joules: number; thermal_state: string; lifecycle?: LifecycleTelemetry };
+export type RunnerRow = { engine: string; mode: string; workload: string; lanes: number; jobs: number; elapsed_ns: number; checksum: number; measured_boundary_cpu_user_ns: number; measured_boundary_cpu_system_ns: number; measured_boundary_cpu_occupancy: number; process_wall_time_ns: number; process_cpu_user_ns: number; process_cpu_system_ns: number; process_cpu_occupancy: number; peak_rss_bytes: number; retained_rss_bytes: number | null; allocations: number | null; allocated_bytes: number | null; allocation_source: string | null; allocation_replay_signature: any | null; instructions: number; cycles: number; energy_joules: number; thermal_state: string; lifecycle?: LifecycleTelemetry };
 export type BatchRow = { workload: string; jobs: number; expected_checksum: number; raw_out: string; markdown_out: string };
 export type LifecycleTelemetry = { schema_version: number; scenario: string; context_options_profile: string; iterations: number; sample: number; create_ns: number; work_ns: number; destroy_ns: number; phase_total_ns: number; cpu_user_ns: number; cpu_system_ns: number; baseline_rss_bytes: number; max_live_rss_bytes: number; post_destroy_rss_bytes: number; retained_delta_bytes: number; peak_rss_bytes: number; rss_checkpoints: number[]; finalizers: Record<string, number> };
+export type AllocationReplayContract = { schema_version: number; profile_id: string; status: string; owner_issue: number; history_policy: string; replay: { mode: string; phase: string; workload: string; lanes: number; jobs: number; checksum: number }; signature: any };
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function requireNoCompetingEvidenceProcess(phase: string, listing = commandOutput(["ps", "-axo", "pid=,ppid=,command="], ""), selfPid = process.pid): void {
   const competitors = competingEvidenceProcesses(listing, selfPid);
@@ -124,13 +125,74 @@ export function parseFrontendAllocations(stdout: string, mode: string, workload:
   requireValue(Number.isInteger(allocations) && allocations > 0 && Number.isInteger(allocatedBytes) && allocatedBytes > 0, "frontend-allocation counters are invalid");
   return [allocations, allocatedBytes];
 }
-export function parseNativeAllocationReplay(stdout: string, replayMode: string, workload: string, jobs: number, lanes: number, checksum: number): [number, number] {
+const REPLAY_SIGNATURE_MAPS = ["execution", "quick_binary", "admissions", "shape", "native_code"];
+const REPLAY_SIGNATURE_SCALARS = ["baseline_publications", "optimizer_publications", "generated_code_bytes"];
+function exactKeys(value: any, expected: string[], label: string): void {
+  requireValue(value && typeof value === "object" && !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) === JSON.stringify(expected.slice().sort()), `${label} fields drift`);
+}
+function exactCounterMap(value: any, label: string): void {
+  requireValue(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0 && Object.values(value).every((entry) => Number.isSafeInteger(entry) && Number(entry) >= 0), `${label} counters are invalid`);
+}
+function exactJson(value: any): string {
+  if (Array.isArray(value)) return `[${value.map(exactJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((name) => `${JSON.stringify(name)}:${exactJson(value[name])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+export function validateAllocationReplayContract(value: any): AllocationReplayContract {
+  exactKeys(value, ["schema_version", "profile_id", "status", "owner_issue", "history_policy", "replay", "signature"], "allocation replay contract");
+  requireValue(value.schema_version === 1 && /^zig-js-allocation-replay-signature-v1:[a-z0-9_]+$/.test(value.profile_id) && value.status === "frozen" && value.owner_issue === 775 && typeof value.history_policy === "string" && value.history_policy.length > 0, "allocation replay contract identity drift");
+  exactKeys(value.replay, ["mode", "phase", "workload", "lanes", "jobs", "checksum"], "allocation replay identity");
+  requireValue(["attribution", "attribution_no_jit"].includes(value.replay.mode) && value.replay.phase === "invocation" && typeof value.replay.workload === "string" && value.replay.workload.length > 0 && Number.isSafeInteger(value.replay.lanes) && value.replay.lanes > 0 && Number.isSafeInteger(value.replay.jobs) && value.replay.jobs > 0 && Number.isSafeInteger(value.replay.checksum) && value.replay.checksum >= 0, "allocation replay identity is invalid");
+  exactKeys(value.signature, [...REPLAY_SIGNATURE_MAPS, ...REPLAY_SIGNATURE_SCALARS], "allocation replay signature");
+  for (const name of REPLAY_SIGNATURE_MAPS) exactCounterMap(value.signature[name], `allocation replay ${name}`);
+  for (const name of REPLAY_SIGNATURE_SCALARS) requireValue(Number.isSafeInteger(value.signature[name]) && value.signature[name] >= 0, `allocation replay ${name} is invalid`);
+  return value as AllocationReplayContract;
+}
+export function loadAllocationReplayContract(path: string): AllocationReplayContract { return validateAllocationReplayContract(JSON.parse(readText(path))); }
+function subtractReplayMap(after: any, before: any, label: string): any {
+  exactCounterMap(after, `${label} after`); exactCounterMap(before, `${label} before`);
+  const keys = Object.keys(after).sort(); requireValue(JSON.stringify(keys) === JSON.stringify(Object.keys(before).sort()), `${label} inventory drift`);
+  return Object.fromEntries(keys.map((name) => { requireValue(after[name] >= before[name], `${label}.${name} counter regressed`); return [name, after[name] - before[name]]; }));
+}
+function requireExactReplayMap(actual: any, expected: any, label: string): void {
+  requireValue(exactJson(actual) === exactJson(expected), `native allocation replay ${label} signature drift`);
+}
+function contractedReplay(records: any[], contract: AllocationReplayContract, expectedMode: string, workload: string, jobs: number, lanes: number, checksum: number): [number, number, any] {
+  const snapshots = records.filter((record) => record?.kind === "zig-js-tier-attribution");
+  requireValue(snapshots.length === 3 && JSON.stringify(snapshots.map((record) => record.phase)) === '["configuration","warmup","invocation"]', "native allocation replay phase inventory drift");
+  for (const record of snapshots) requireValue(record.mode === expectedMode && record.workload === workload && record.lanes === lanes && record.jobs === jobs, "native allocation replay identity drift");
+  const expectedReplay = contract.replay;
+  requireValue(expectedReplay.mode === (expectedMode === "single_no_jit" ? "attribution_no_jit" : "attribution") && expectedReplay.phase === "invocation" && expectedReplay.workload === workload && expectedReplay.lanes === lanes && expectedReplay.jobs === jobs && expectedReplay.checksum === checksum, "native allocation replay contract identity drift");
+  const warmup = snapshots[1], invocation = snapshots[2]; requireValue(invocation.checksum === checksum, "native allocation replay checksum drift");
+  const signature: any = {
+    execution: subtractReplayMap(invocation.execution, warmup.execution, "execution"),
+    quick_binary: subtractReplayMap(invocation.quick_binary, warmup.quick_binary, "quick_binary"),
+    admissions: subtractReplayMap(invocation.admissions, warmup.admissions, "admissions"),
+    shape: subtractReplayMap(invocation.shape, warmup.shape, "shape"),
+    native_code: invocation.native_code,
+    baseline_publications: invocation.baseline_publications - warmup.baseline_publications,
+    optimizer_publications: invocation.optimizer_publications - warmup.optimizer_publications,
+    generated_code_bytes: invocation.generated_code_bytes,
+  };
+  exactCounterMap(signature.native_code, "native_code");
+  for (const name of ["baseline_publications", "optimizer_publications"]) requireValue(Number.isSafeInteger(signature[name]) && signature[name] >= 0, `${name} counter regressed`);
+  requireValue(Number.isSafeInteger(signature.generated_code_bytes) && signature.generated_code_bytes >= 0, "generated_code_bytes is invalid");
+  for (const name of REPLAY_SIGNATURE_MAPS) requireExactReplayMap(signature[name], contract.signature[name], name);
+  for (const name of REPLAY_SIGNATURE_SCALARS) requireValue(signature[name] === contract.signature[name], `native allocation replay ${name} signature drift`);
+  exactCounterMap(invocation.allocation, "allocation after"); exactCounterMap(warmup.allocation, "allocation before");
+  requireValue(JSON.stringify(Object.keys(invocation.allocation).sort()) === JSON.stringify(Object.keys(warmup.allocation).sort()), "allocation inventory drift");
+  const allocations = invocation.allocation.backing_allocations - warmup.allocation.backing_allocations, allocatedBytes = invocation.allocation.backing_allocation_bytes - warmup.allocation.backing_allocation_bytes;
+  requireValue(Number.isSafeInteger(allocations) && allocations > 0 && Number.isSafeInteger(allocatedBytes) && allocatedBytes > 0, "native allocation replay counters are invalid");
+  return [allocations, allocatedBytes, signature];
+}
+export function parseNativeAllocationReplay(stdout: string, replayMode: string, workload: string, jobs: number, lanes: number, checksum: number, contract: AllocationReplayContract | null = null): [number, number] | [number, number, any] {
   requireValue(replayMode === "attribution" || replayMode === "attribution_no_jit", `unsupported allocation replay mode: ${replayMode}`);
   const records: any[] = [];
   for (const line of stdout.split("\n").filter(Boolean)) { try { records.push(JSON.parse(line)); } catch { throw new Error("native allocation replay JSON is invalid"); } }
   const invocations = records.filter((record) => record?.kind === "zig-js-tier-attribution" && record?.phase === "invocation");
   requireValue(invocations.length === 1, `expected one native allocation invocation row, got ${invocations.length}`);
   const record = invocations[0], expectedMode = replayMode === "attribution_no_jit" ? "single_no_jit" : "single";
+  if (contract) return contractedReplay(records, contract, expectedMode, workload, jobs, lanes, checksum);
   requireValue(record.mode === expectedMode && record.workload === workload && record.lanes === lanes && record.jobs === jobs, "native allocation replay identity drift");
   requireValue(record.checksum === checksum, "native allocation replay checksum drift");
   const execution = record.execution, admissions = record.admissions;
@@ -140,7 +202,7 @@ export function parseNativeAllocationReplay(stdout: string, replayMode: string, 
   requireValue(Number.isSafeInteger(allocations) && allocations > 0 && Number.isSafeInteger(allocatedBytes) && allocatedBytes > 0, "native allocation replay counters are invalid");
   return [allocations, allocatedBytes];
 }
-export function runOne(binary: string, mode: string, workload: string, jobs: number, lanes: number, allocationReplayMode = ""): RunnerRow {
+export function runOne(binary: string, mode: string, workload: string, jobs: number, lanes: number, allocationReplayMode = "", allocationReplayContract: AllocationReplayContract | null = null): RunnerRow {
   requireNoCompetingEvidenceProcess("before benchmark invocation");
   const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", binary, ...runnerArguments(mode, workload, jobs, lanes)]; console.error(`+ ${command.join(" ")}`);
   const completed = run(command); requireValue(completed.exitCode === 0, completed.stderr || `benchmark exited ${completed.exitCode}`);
@@ -149,7 +211,7 @@ export function runOne(binary: string, mode: string, workload: string, jobs: num
   const counters: any = parseDarwinCounters(completed.stdout, mode, workload, jobs), cpu = parseDarwinCpuTime(completed.stdout, mode, workload, jobs), thermal: any = parseDarwinThermalState(completed.stdout, mode, workload, jobs);
   requireValue(counters.instructions.status === "measured" && counters.cycles.status === "measured" && counters.process_energy_nj.status === "measured", "exact-parent Darwin counters are unavailable");
   requireValue(thermal.status === "measured", "exact-parent thermal state is unavailable");
-  let allocationCounters = parseFrontendAllocations(completed.stdout, mode, workload, jobs), allocationSource = allocationCounters ? "untimed exact-work frontend parse/compile allocator replay" : null;
+  let allocationCounters = parseFrontendAllocations(completed.stdout, mode, workload, jobs), allocationSource = allocationCounters ? "untimed exact-work frontend parse/compile allocator replay" : null, allocationReplaySignature: any | null = null;
   if (allocationReplayMode) {
     requireValue(allocationCounters === null, "benchmark exposes both inline and native allocation replays");
     requireValue((mode === "single" && allocationReplayMode === "attribution") || (mode === "single_no_jit" && allocationReplayMode === "attribution_no_jit"), "native allocation replay does not match the timed mode");
@@ -157,14 +219,16 @@ export function runOne(binary: string, mode: string, workload: string, jobs: num
     const replayCommand = [binary, allocationReplayMode, workload, String(jobs), String(lanes)]; console.error(`+ ${replayCommand.join(" ")}`);
     const replay = run(replayCommand); requireValue(replay.exitCode === 0, replay.stderr || `native allocation replay exited ${replay.exitCode}`);
     requireNoCompetingEvidenceProcess("after native allocation replay");
-    allocationCounters = parseNativeAllocationReplay(replay.stdout, allocationReplayMode, workload, jobs, lanes, checksum);
-    allocationSource = `untimed exact-work ${allocationReplayMode} invocation-phase Context backing allocation replay`;
+    const parsed = parseNativeAllocationReplay(replay.stdout, allocationReplayMode, workload, jobs, lanes, checksum, allocationReplayContract);
+    allocationCounters = [parsed[0], parsed[1]];
+    allocationReplaySignature = parsed[2] || null;
+    allocationSource = `untimed exact-work ${allocationReplayMode} invocation-phase Context backing allocation replay${allocationReplayContract ? ` under ${allocationReplayContract.profile_id}` : ""}`;
   }
   const lifecycle = mode === "context_lifecycle" ? parseLifecycleTelemetry(completed.stdout, workload, jobs) : undefined;
   const measuredBoundaryOccupancy = processCpuOccupancy(elapsed_ns, cpu.user_ns, cpu.system_ns);
   requireValue(measuredBoundaryOccupancy >= MINIMUM_PROCESS_CPU_OCCUPANCY, `benchmark measured-boundary CPU occupancy ${(measuredBoundaryOccupancy * 100).toFixed(1)}% is below ${(MINIMUM_PROCESS_CPU_OCCUPANCY * 100).toFixed(0)}%; transient competing work overlapped the scored invocation`);
   const processWallNs = Math.round(timeMetric(completed.stderr, "real") * 1e9), userNs = Math.round(timeMetric(completed.stderr, "user") * 1e9), systemNs = Math.round(timeMetric(completed.stderr, "sys") * 1e9), processOccupancy = processCpuOccupancy(processWallNs, userNs, systemNs);
-  return { engine, mode, workload, lanes, jobs, elapsed_ns, checksum, measured_boundary_cpu_user_ns: cpu.user_ns, measured_boundary_cpu_system_ns: cpu.system_ns, measured_boundary_cpu_occupancy: measuredBoundaryOccupancy, process_wall_time_ns: processWallNs, process_cpu_user_ns: userNs, process_cpu_system_ns: systemNs, process_cpu_occupancy: processOccupancy, peak_rss_bytes: parsePeakRss(completed.stderr), retained_rss_bytes: mode === "single_observed" ? parseRetainedRss(completed.stdout, mode, workload, jobs) : lifecycle?.post_destroy_rss_bytes ?? null, allocations: allocationCounters?.[0] ?? null, allocated_bytes: allocationCounters?.[1] ?? null, allocation_source: allocationSource, instructions: counters.instructions.value, cycles: counters.cycles.value, energy_joules: counters.process_energy_nj.value / 1e9, thermal_state: `${thermal.before}->${thermal.after}`, lifecycle };
+  return { engine, mode, workload, lanes, jobs, elapsed_ns, checksum, measured_boundary_cpu_user_ns: cpu.user_ns, measured_boundary_cpu_system_ns: cpu.system_ns, measured_boundary_cpu_occupancy: measuredBoundaryOccupancy, process_wall_time_ns: processWallNs, process_cpu_user_ns: userNs, process_cpu_system_ns: systemNs, process_cpu_occupancy: processOccupancy, peak_rss_bytes: parsePeakRss(completed.stderr), retained_rss_bytes: mode === "single_observed" ? parseRetainedRss(completed.stdout, mode, workload, jobs) : lifecycle?.post_destroy_rss_bytes ?? null, allocations: allocationCounters?.[0] ?? null, allocated_bytes: allocationCounters?.[1] ?? null, allocation_source: allocationSource, allocation_replay_signature: allocationReplaySignature, instructions: counters.instructions.value, cycles: counters.cycles.value, energy_joules: counters.process_energy_nj.value / 1e9, thermal_state: `${thermal.before}->${thermal.after}`, lifecycle };
 }
 export function sampleRecord(row: RunnerRow, variant: string, pairSample: number, order: number, schema: any): any {
   const metrics = unavailableMetrics(schema, "instrumentation is not yet connected for this metric; absence is explicit and is not a zero");
@@ -181,7 +245,7 @@ export function sampleRecord(row: RunnerRow, variant: string, pairSample: number
   measured(metrics, "cycles", row.cycles, "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta");
   measured(metrics, "energy_joules", row.energy_joules, "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9");
   metrics.thermal_state = { status: "measured", value: row.thermal_state, source: "NSProcessInfo.thermalState before->after", reason: "" };
-  return { identity: { variant, pair_sample: pairSample, order, engine: row.engine, mode: row.mode, workload: row.workload, lanes: row.lanes, jobs: row.jobs, checksum: row.checksum }, quality: { measured_boundary_cpu_user_ns: row.measured_boundary_cpu_user_ns, measured_boundary_cpu_system_ns: row.measured_boundary_cpu_system_ns, measured_boundary_cpu_occupancy: row.measured_boundary_cpu_occupancy, minimum_measured_boundary_cpu_occupancy: MINIMUM_PROCESS_CPU_OCCUPANCY, process_wall_time_ns: row.process_wall_time_ns, process_cpu_occupancy: row.process_cpu_occupancy }, metrics, ...(row.lifecycle ? { lifecycle: row.lifecycle } : {}) };
+  return { identity: { variant, pair_sample: pairSample, order, engine: row.engine, mode: row.mode, workload: row.workload, lanes: row.lanes, jobs: row.jobs, checksum: row.checksum }, quality: { measured_boundary_cpu_user_ns: row.measured_boundary_cpu_user_ns, measured_boundary_cpu_system_ns: row.measured_boundary_cpu_system_ns, measured_boundary_cpu_occupancy: row.measured_boundary_cpu_occupancy, minimum_measured_boundary_cpu_occupancy: MINIMUM_PROCESS_CPU_OCCUPANCY, process_wall_time_ns: row.process_wall_time_ns, process_cpu_occupancy: row.process_cpu_occupancy }, metrics, ...(row.allocation_replay_signature ? { allocation_replay_signature: row.allocation_replay_signature } : {}), ...(row.lifecycle ? { lifecycle: row.lifecycle } : {}) };
 }
 export function validateSampleQuality(samples: any[]): void {
   requireValue(samples.length > 0, "exact-parent artifact has no samples");
@@ -225,13 +289,13 @@ export function summarize(samples: any[], schema: any, hostClass: string, materi
   const status = blocks ? "blocked_regression" : efficiencyBlocks ? "blocked_efficiency_evidence" : !gatingHost ? "diagnostic_only" : !stable ? "inconclusive_noise" : regression ? "visible_non_gating_regression" : "pass";
   return { parent_wall_median_ns: parentMedian, candidate_wall_median_ns: candidateMedian, candidate_over_parent: ratio, parent_wall_rsd: parentRsd, candidate_wall_rsd: candidateRsd, stable, gating_host: gatingHost, regression, efficiency: { metrics: efficiency, thermal_states: thermalStates, required_categories: materialCategories, unmet_metrics: unmetMetrics, stable: efficiencyStable, blocks_publication: efficiencyBlocks }, blocks_publication: blocksPublication, status };
 }
-export function collect(parentBinary: string, candidateBinary: string, mode: string, workload: string, jobs: number, lanes: number, expectedChecksum: number, samples: number, schema: any, allocationReplayMode = ""): any[] {
+export function collect(parentBinary: string, candidateBinary: string, mode: string, workload: string, jobs: number, lanes: number, expectedChecksum: number, samples: number, schema: any, allocationReplayMode = "", allocationReplayContract: AllocationReplayContract | null = null): any[] {
   if (mode === "context_lifecycle") validateLifecycleCollectionRequest(workload, jobs, expectedChecksum);
   const binaries: any = { parent: parentBinary, candidate: candidateBinary }, result: any[] = [];
   for (let pairSample = 0; pairSample < samples; pairSample += 1) {
     const order = pairSample % 2 === 0 ? ["parent", "candidate"] : ["candidate", "parent"];
     order.forEach((variant, position) => {
-      const row = runOne(binaries[variant], mode, workload, jobs, lanes, allocationReplayMode);
+      const row = runOne(binaries[variant], mode, workload, jobs, lanes, allocationReplayMode, allocationReplayContract);
       requireValue(row.checksum === expectedChecksum, `${variant} pair ${pairSample} checksum ${row.checksum} != frozen ${expectedChecksum}`);
       result.push(sampleRecord(row, variant, pairSample, position, schema));
     });
@@ -243,9 +307,10 @@ export function render(artifact: any): string {
   const memoryRows = ["peak_rss_bytes", "retained_rss_bytes", "allocations", "allocated_bytes"].map((metric) => [metric, measuredMetricSummary(artifact.samples, metric)] as const).filter((entry) => entry[1] !== null).map(([metric, value]) => `| \`${metric}\` | ${value.parent_median} | ${value.candidate_median} | ${value.candidate_over_parent.toFixed(4)}x | ${(value.parent_rsd * 100).toFixed(2)}% | ${(value.candidate_rsd * 100).toFixed(2)}% |`);
   const qualityBoundary = metadata.minimum_measured_boundary_cpu_occupancy !== undefined ? `every measured invocation used at least ${(metadata.minimum_measured_boundary_cpu_occupancy * 100).toFixed(0)}% CPU occupancy; complete-process occupancy remains diagnostic` : `every complete process used at least ${(metadata.minimum_process_cpu_occupancy * 100).toFixed(0)}% CPU occupancy`;
   const binaryProvenance = metadata.parent_binary_revision ? [`- parent binary revision: \`${metadata.parent_binary_revision}\``, `- candidate binary revision: \`${metadata.candidate_binary_revision}\``, `- shared measurement overlay: ${metadata.shared_measurement_overlay_paths.map((path: string) => `\`${path}\``).join(", ")}`] : [];
+  const replayContract = metadata.allocation_replay_contract ? [`- allocation replay signature: \`${metadata.allocation_replay_contract.profile_id}\` from \`${metadata.allocation_replay_contract.path}\` (\`${metadata.allocation_replay_contract.sha256}\`)`] : [];
   return [
     `# Exact-parent performance A/B — ${metadata.workload} (${metadata.mode}, ${metadata.lanes} lane(s))`, "",
-    `- logical parent: \`${metadata.parent_revision}\``, `- logical candidate: \`${metadata.candidate_revision}\``, ...binaryProvenance,
+    `- logical parent: \`${metadata.parent_revision}\``, `- logical candidate: \`${metadata.candidate_revision}\``, ...binaryProvenance, ...replayContract,
     `- zig-gc: \`${metadata.zig_gc_revision}\``, `- zig-regex: \`${metadata.zig_regex_revision}\``, `- host class: \`${metadata.host_class}\``,
     `- material-change categories: ${efficiency.required_categories.map((value: string) => `\`${value}\``).join(", ")}`,
     `- sampling: ${metadata.samples} order-balanced pairs; no discarded samples`, `- process quality: ${qualityBoundary}; before/after snapshots reject persistent competing jobs`, `- timed boundary: ${metadata.timed_boundary}`, "",
@@ -259,7 +324,7 @@ export function render(artifact: any): string {
   ].join("\n");
 }
 
-function syntheticSamples(parent: number[], candidate: number[], schema: any): any[] { const result: any[] = []; parent.forEach((parentWall, pairSample) => { const walls: any = { parent: parentWall, candidate: candidate[pairSample] }, order = pairSample % 2 === 0 ? ["parent", "candidate"] : ["candidate", "parent"]; order.forEach((variant, position) => result.push(sampleRecord({ engine: "zig-js", mode: "single", workload: "representative_json", lanes: 1, jobs: 2200, elapsed_ns: walls[variant], checksum: 324952086, measured_boundary_cpu_user_ns: Math.max(0, walls[variant] - 100), measured_boundary_cpu_system_ns: 100, measured_boundary_cpu_occupancy: 1, process_wall_time_ns: walls[variant] * 10, process_cpu_user_ns: walls[variant], process_cpu_system_ns: 0, process_cpu_occupancy: 0.1, peak_rss_bytes: 10000000, retained_rss_bytes: null, allocations: null, allocated_bytes: null, allocation_source: null, instructions: 1000 + pairSample, cycles: 500 + pairSample, energy_joules: 0.2 + pairSample / 1000, thermal_state: "nominal->nominal" }, variant, pairSample, position, schema))); }); return result; }
+function syntheticSamples(parent: number[], candidate: number[], schema: any): any[] { const result: any[] = []; parent.forEach((parentWall, pairSample) => { const walls: any = { parent: parentWall, candidate: candidate[pairSample] }, order = pairSample % 2 === 0 ? ["parent", "candidate"] : ["candidate", "parent"]; order.forEach((variant, position) => result.push(sampleRecord({ engine: "zig-js", mode: "single", workload: "representative_json", lanes: 1, jobs: 2200, elapsed_ns: walls[variant], checksum: 324952086, measured_boundary_cpu_user_ns: Math.max(0, walls[variant] - 100), measured_boundary_cpu_system_ns: 100, measured_boundary_cpu_occupancy: 1, process_wall_time_ns: walls[variant] * 10, process_cpu_user_ns: walls[variant], process_cpu_system_ns: 0, process_cpu_occupancy: 0.1, peak_rss_bytes: 10000000, retained_rss_bytes: null, allocations: null, allocated_bytes: null, allocation_source: null, allocation_replay_signature: null, instructions: 1000 + pairSample, cycles: 500 + pairSample, energy_joules: 0.2 + pairSample / 1000, thermal_state: "nominal->nominal" }, variant, pairSample, position, schema))); }); return result; }
 function expectFailure(action: () => void, pattern: string): void { try { action(); } catch (error) { requireValue(String(error).includes(pattern), `expected ${pattern}, got ${String(error)}`); return; } throw new Error(`expected failure containing ${pattern}`); }
 export function validateBatchRows(value: any): BatchRow[] {
   requireValue(Array.isArray(value) && value.length > 0, "exact-parent batch must contain at least one row");
@@ -290,6 +355,27 @@ export function selfTest(): void {
   const wrongChecksum = { ...allocationReplay, checksum: allocationReplay.checksum + 1 }; expectFailure(() => parseNativeAllocationReplay(replayText(wrongChecksum), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "checksum drift");
   const wrongTier = JSON.parse(JSON.stringify(allocationReplay)); wrongTier.execution.tree_walker_entries = 1; expectFailure(() => parseNativeAllocationReplay(replayText(wrongTier), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "tier boundary drift");
   const wrongAllocation = JSON.parse(JSON.stringify(allocationReplay)); wrongAllocation.allocation.backing_allocations = 0; expectFailure(() => parseNativeAllocationReplay(replayText(wrongAllocation), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "counters are invalid");
+  const mixedSignature = { execution: { tree_walker_entries: 84, vm_entries: 2, vm_dispatches: 1932, vm_quick_kernel_hits: 200, baseline_entries: 0, optimizer_entries: 0, optimizer_osr_entries: 0, deoptimizations: 0, runtime_operation_calls: 0, host_callbacks: 0, wasm_dispatches: 0, environment_allocations: 2 }, quick_binary: { number_hits: 200, number_misses: 0, dequickenings: 0 }, admissions: { program_compiled: 1, template_plain_compiled: 0, plain_compiled: 0 }, shape: { transition_requests: 89, transition_hits: 89, transition_misses: 0, transition_lock_yields: 0 }, native_code: { live_artifacts: 1, live_bytes: 16384, retired_artifacts: 0 }, baseline_publications: 0, optimizer_publications: 0, generated_code_bytes: 16384 };
+  const mixedContract = validateAllocationReplayContract({ schema_version: 1, profile_id: "zig-js-allocation-replay-signature-v1:fixture_mixed_tier", status: "frozen", owner_issue: 775, history_policy: "Fixture freezes every declared counter without changing legacy VM-only replay.", replay: { mode: "attribution", phase: "invocation", workload: "representative_intl_date_time_format_resolved_hour_cycle", lanes: 1, jobs: 100, checksum: 705814248 }, signature: mixedSignature });
+  const mixedSnapshot = (phase: string, multiplier: number, checksum = 0): any => ({ kind: "zig-js-tier-attribution", phase, mode: "single", workload: mixedContract.replay.workload, lanes: 1, jobs: 100, checksum, execution: Object.fromEntries(Object.entries(mixedSignature.execution).map(([name, value]) => [name, Number(value) * multiplier])), quick_binary: Object.fromEntries(Object.entries(mixedSignature.quick_binary).map(([name, value]) => [name, Number(value) * multiplier])), admissions: Object.fromEntries(Object.entries(mixedSignature.admissions).map(([name, value]) => [name, Number(value) * multiplier])), shape: Object.fromEntries(Object.entries(mixedSignature.shape).map(([name, value]) => [name, Number(value) * multiplier])), native_code: mixedSignature.native_code, baseline_publications: 0, optimizer_publications: 0, generated_code_bytes: 16384, allocation: { backing_allocations: 1000 * multiplier, backing_allocation_bytes: 2000 * multiplier } });
+  const mixedRows = [mixedSnapshot("configuration", 0), mixedSnapshot("warmup", 1), mixedSnapshot("invocation", 2, mixedContract.replay.checksum)];
+  const mixedParsed = parseNativeAllocationReplay(mixedRows.map(replayText).join(""), "attribution", mixedContract.replay.workload, 100, 1, mixedContract.replay.checksum, mixedContract);
+  requireValue(mixedParsed[0] === 1000 && mixedParsed[1] === 2000 && exactJson(mixedParsed[2]) === exactJson(mixedSignature), "mixed-tier allocation replay parse drift");
+  for (const section of REPLAY_SIGNATURE_MAPS) for (const field of Object.keys(mixedSignature[section])) {
+    const mutated = JSON.parse(JSON.stringify(mixedRows));
+    mutated[2][section][field] += 1;
+    expectFailure(() => parseNativeAllocationReplay(mutated.map(replayText).join(""), "attribution", mixedContract.replay.workload, 100, 1, mixedContract.replay.checksum, mixedContract), `${section} signature drift`);
+  }
+  for (const field of REPLAY_SIGNATURE_SCALARS) {
+    const mutated = JSON.parse(JSON.stringify(mixedRows)); mutated[2][field] += 1;
+    expectFailure(() => parseNativeAllocationReplay(mutated.map(replayText).join(""), "attribution", mixedContract.replay.workload, 100, 1, mixedContract.replay.checksum, mixedContract), `${field} signature drift`);
+  }
+  const mixedPhaseDrift = JSON.parse(JSON.stringify(mixedRows)); mixedPhaseDrift[1].phase = "configuration"; expectFailure(() => parseNativeAllocationReplay(mixedPhaseDrift.map(replayText).join(""), "attribution", mixedContract.replay.workload, 100, 1, mixedContract.replay.checksum, mixedContract), "phase inventory drift");
+  const mixedAllocationDrift = JSON.parse(JSON.stringify(mixedRows)); mixedAllocationDrift[2].allocation.backing_allocations = mixedAllocationDrift[1].allocation.backing_allocations; expectFailure(() => parseNativeAllocationReplay(mixedAllocationDrift.map(replayText).join(""), "attribution", mixedContract.replay.workload, 100, 1, mixedContract.replay.checksum, mixedContract), "counters are invalid");
+  const contractIdentityDrift = JSON.parse(JSON.stringify(mixedContract)); contractIdentityDrift.replay.phase = "warmup"; expectFailure(() => validateAllocationReplayContract(contractIdentityDrift), "allocation replay identity is invalid");
+  const contractFieldDrift = JSON.parse(JSON.stringify(mixedContract)); contractFieldDrift.extra = true; expectFailure(() => validateAllocationReplayContract(contractFieldDrift), "contract fields drift");
+  const frozenMixedContract = loadAllocationReplayContract(`${ROOT}/docs/.data/allocation-replay-signature-intl-date-time-format-hour-cycle-v1.json`);
+  requireValue(frozenMixedContract.replay.checksum === 705814248 && frozenMixedContract.signature.execution.tree_walker_entries === 84001 && frozenMixedContract.signature.execution.vm_entries === 2 && frozenMixedContract.signature.shape.transition_requests === 89600, "frozen mixed-tier allocation replay contract drift");
   const batchRows = [{ workload: allocationReplay.workload, jobs: 10, expected_checksum: allocationReplay.checksum, raw_out: "docs/.data/fixture.json", markdown_out: "docs/.data/fixture.md" }]; requireValue(validateBatchRows(batchRows).length === 1, "exact-parent batch fixture drift");
   expectFailure(() => validateBatchRows([...batchRows, { ...batchRows[0], raw_out: "docs/.data/fixture-2.json", markdown_out: "docs/.data/fixture-2.md" }]), "repeats a workload");
   expectFailure(() => validateBatchRows([{ ...batchRows[0], extra: true }]), "row fields drift");
@@ -340,15 +426,20 @@ export function selfTest(): void {
   requireValue(JSON.stringify(competingEvidenceProcesses(processFixture, 120)) === JSON.stringify(expectedCompetitors), "competing evidence-process classification drift");
   expectFailure(() => requireNoCompetingEvidenceProcess("before fixture", processFixture, 120), "competing build/test process detected before fixture");
   requireNoCompetingEvidenceProcess("clean fixture", processFixture.split("\n").filter((line) => !/^(200|210|220|230|240|250|260|270|280) /.test(line)).join("\n"), 120);
-  console.log("OK exact-parent self-test: identity, pairing, native allocation replay, serial batch, regression, cleanliness, and competing-job gates verified");
+  console.log("OK exact-parent self-test: identity, pairing, legacy and contracted allocation replay, serial batch, regression, cleanliness, and competing-job gates verified");
 }
 
 function publishRow(parentBinary: string, candidateBinary: string, row: BatchRow, options: any, identities: any): void {
-  const samples = collect(parentBinary, candidateBinary, options.mode, row.workload, row.jobs, options.lanes, row.expected_checksum, options.samples, identities.schema, options.allocation_replay_mode || "");
+  const replayContract: AllocationReplayContract | null = options.allocation_replay_contract_value || null;
+  const samples = collect(parentBinary, candidateBinary, options.mode, row.workload, row.jobs, options.lanes, row.expected_checksum, options.samples, identities.schema, options.allocation_replay_mode || "", replayContract);
   validateSampleQuality(samples);
   if (options.allocation_replay_mode) {
     requireValue(samples.every((sample: any) => sample.metrics.allocations.status === "measured" && sample.metrics.allocated_bytes.status === "measured"), `native allocation replay evidence is incomplete at ${row.workload}`);
     for (const variant of ["parent", "candidate"]) for (const metric of ["allocations", "allocated_bytes"]) requireValue(new Set(samples.filter((sample: any) => sample.identity.variant === variant).map((sample: any) => sample.metrics[metric].value)).size === 1, `${variant} ${metric} replay is not exact at ${row.workload}`);
+  }
+  if (replayContract) {
+    requireValue(samples.every((sample: any) => exactJson(sample.allocation_replay_signature) === exactJson(replayContract.signature)), `allocation replay signature is not exact at ${row.workload}`);
+    requireValue(new Set(samples.map((sample: any) => exactJson(sample.allocation_replay_signature))).size === 1, `parent/candidate allocation replay signatures diverge at ${row.workload}`);
   }
   const metadata = {
     parent_revision: identities.parent_revision, candidate_revision: identities.candidate_revision, candidate_first_parent: identities.parent_revision,
@@ -357,6 +448,7 @@ function publishRow(parentBinary: string, candidateBinary: string, row: BatchRow
     workload_source_sha256: identities.workload_source_sha256, parent_binary_sha256: identities.parent_binary_sha256, candidate_binary_sha256: identities.candidate_binary_sha256,
     samples: options.samples, minimum_measured_boundary_cpu_occupancy: MINIMUM_PROCESS_CPU_OCCUPANCY, timed_boundary: options.timed_boundary, mode: options.mode, workload: row.workload, lanes: options.lanes, jobs: row.jobs, expected_checksum: row.expected_checksum,
     ...(options.allocation_replay_mode ? { allocation_replay_mode: options.allocation_replay_mode } : {}),
+    ...(replayContract ? { allocation_replay_contract: { schema_version: replayContract.schema_version, profile_id: replayContract.profile_id, path: options.allocation_replay_contract, sha256: sha256File(options.allocation_replay_contract) } } : {}),
     ...(identities.schema.schema_version >= 3 ? { parent_binary_revision: identities.parent_binary_revision, candidate_binary_revision: identities.candidate_binary_revision, shared_measurement_overlay_paths: identities.shared_measurement_overlay_paths } : {}),
   };
   const artifact = { schema_version: identities.schema.schema_version, profile_id: identities.schema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarize(samples, identities.schema, options.host_class, identities.material_categories) };
@@ -370,16 +462,23 @@ function publishRow(parentBinary: string, candidateBinary: string, row: BatchRow
 function main(): void {
   const raw = process.argv.slice(2); if (raw.length === 1 && raw[0] === "--self-test") { selfTest(); return; }
   const positional: string[] = [], options: any = { candidate_revision: "HEAD", lanes: 1, samples: 7, host_class: "diagnostic", schema: DEFAULT_SCHEMA };
-  const names: any = { "--parent-revision": "parent_revision", "--candidate-revision": "candidate_revision", "--parent-binary-revision": "parent_binary_revision", "--candidate-binary-revision": "candidate_binary_revision", "--source": "source", "--mode": "mode", "--workload": "workload", "--jobs": "jobs", "--lanes": "lanes", "--expected-checksum": "expected_checksum", "--samples": "samples", "--host-class": "host_class", "--material-change": "material_change", "--timed-boundary": "timed_boundary", "--allocation-replay-mode": "allocation_replay_mode", "--batch": "batch", "--schema": "schema", "--raw-out": "raw_out", "--markdown-out": "markdown_out" };
+  const names: any = { "--parent-revision": "parent_revision", "--candidate-revision": "candidate_revision", "--parent-binary-revision": "parent_binary_revision", "--candidate-binary-revision": "candidate_binary_revision", "--source": "source", "--mode": "mode", "--workload": "workload", "--jobs": "jobs", "--lanes": "lanes", "--expected-checksum": "expected_checksum", "--samples": "samples", "--host-class": "host_class", "--material-change": "material_change", "--timed-boundary": "timed_boundary", "--allocation-replay-mode": "allocation_replay_mode", "--allocation-replay-contract": "allocation_replay_contract", "--batch": "batch", "--schema": "schema", "--raw-out": "raw_out", "--markdown-out": "markdown_out" };
   for (let index = 0; index < raw.length; index += 1) { if (!raw[index].startsWith("--")) positional.push(raw[index]); else { requireValue(names[raw[index]] && index + 1 < raw.length, `unknown or incomplete argument: ${raw[index]}`); const key = names[raw[index]], value = raw[++index]; options[key] = ["jobs", "lanes", "expected_checksum", "samples"].includes(key) ? Number(value) : value; } }
   requireValue(positional.length === 2, "usage: exact-parent-regression.ts PARENT_RUNNER CANDIDATE_RUNNER [options]");
   for (const field of ["parent_revision", "source", "mode", "timed_boundary"]) requireValue(options[field] !== undefined, `missing required option: ${field}`);
   const singleFields = ["workload", "jobs", "expected_checksum", "raw_out", "markdown_out"], batchMode = options.batch !== undefined;
   if (batchMode) for (const field of singleFields) requireValue(options[field] === undefined, `--batch cannot be combined with --${field.replaceAll("_", "-")}`); else for (const field of singleFields) requireValue(options[field] !== undefined, `missing required option: ${field}`);
   requireValue(Number.isSafeInteger(options.samples) && options.samples >= 2 && Number.isSafeInteger(options.lanes) && options.lanes > 0, "samples must be >=2 and lanes must be positive");
-  for (const path of [positional[0], positional[1], options.source, ...(batchMode ? [options.batch] : [])]) requireValue(Home.fileExists(path), `input does not exist: ${path}`);
+  for (const path of [positional[0], positional[1], options.source, ...(batchMode ? [options.batch] : []), ...(options.allocation_replay_contract ? [options.allocation_replay_contract] : [])]) requireValue(Home.fileExists(path), `input does not exist: ${path}`);
   if (options.allocation_replay_mode) requireValue((options.mode === "single" && options.allocation_replay_mode === "attribution") || (options.mode === "single_no_jit" && options.allocation_replay_mode === "attribution_no_jit"), "native allocation replay does not match the timed mode");
+  requireValue(!options.allocation_replay_contract || (options.allocation_replay_mode && !batchMode), "allocation replay contract requires a single-row native allocation replay");
   const rows = batchMode ? loadBatchRows(options.batch) : validateBatchRows([{ workload: options.workload, jobs: options.jobs, expected_checksum: options.expected_checksum, raw_out: options.raw_out, markdown_out: options.markdown_out }]);
+  if (options.allocation_replay_contract) {
+    requireValue(!options.allocation_replay_contract.startsWith("/") && !options.allocation_replay_contract.split("/").includes(".."), "allocation replay contract path is unsafe");
+    const contract = loadAllocationReplayContract(options.allocation_replay_contract), row = rows[0];
+    requireValue(contract.replay.mode === options.allocation_replay_mode && contract.replay.workload === row.workload && contract.replay.jobs === row.jobs && contract.replay.lanes === options.lanes && contract.replay.checksum === row.expected_checksum, "allocation replay contract does not match the requested row");
+    options.allocation_replay_contract_value = contract;
+  }
   for (const row of rows) for (const output of [row.raw_out, row.markdown_out]) requireValue(!Home.fileExists(output), `refusing to overwrite exact-parent artifact: ${output}`);
   const materialCategories = options.material_change ? String(options.material_change).split(",").filter(Boolean) : ["cpu_work", ...(["independent_steady", "independent_cold", "shared"].includes(options.mode) ? ["threads"] : [])];
   requireValue(materialCategories.length > 0 && materialCategories.every((value: string) => MATERIAL_CATEGORIES.includes(value)) && new Set(materialCategories).size === materialCategories.length, `material-change categories must be unique values from ${MATERIAL_CATEGORIES.join(",")}`);

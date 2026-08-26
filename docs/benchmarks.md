@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v27.json`. V27 hash-inherits every V26 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, allocation replay, timing boundary, occupancy rule, and publication ruling. It adds #461's schema-v2 direct-binary provenance profile—declared binary revisions must equal both logical revisions exactly, while schema-v3 retains identical one-commit measurement overlays and partial assertions remain refused—and repins the frontend evidence runner after #770 added separately scored classifier-growth rows outside representative coverage. Benchmark children never overlap, complete-process occupancy remains diagnostic, the scored boundary retains the 60% gate, historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v28.json`. V28 hash-inherits every V27 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, timing boundary, occupancy rule, binary-provenance profile, and publication ruling. It adds #775's opt-in mixed-tier allocation-replay signature contract: all three attribution phases are required, invocation counters are exact deltas from warmup, every declared tier/admission/quickening/Shape/native field remains visible, and parent/candidate replays must match the same pinned signature. Historical VM-only replay and artifacts remain unchanged. Benchmark children never overlap, complete-process occupancy remains diagnostic, the scored boundary retains the 60% gate, historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -709,6 +709,19 @@ tool refuses a dirty tracked zig-js, zig-gc, or zig-regex worktree.
   --raw-out docs/.data/exact-parent-YYYY-MM-DD.json \
   --markdown-out docs/.data/exact-parent-YYYY-MM-DD.md
 ```
+
+An ordinary VM-only allocation replay may continue to use
+`--allocation-replay-mode attribution_no_jit` under its historical fail-closed
+predicate. A mixed-tier row must additionally name a versioned contract with
+`--allocation-replay-contract`. The contract freezes the complete exact
+execution, quickening, admission, Shape, native-code, publication, and
+generated-code signature. The driver requires configuration, warmup, and
+invocation snapshots in order, records the invocation-minus-warmup allocation
+requests and bytes, embeds the raw signature in every parent/candidate sample,
+and rejects any field, checksum, phase, or identity drift. The first contract
+is [`allocation-replay-signature-intl-date-time-format-hour-cycle-v1.json`](.data/allocation-replay-signature-intl-date-time-format-hour-cycle-v1.json);
+it preserves #772's mixed 84,001 tree-walker entries, 2 VM entries, and 89,600
+Shape transition requests without normalizing any tier.
 
 The default host class is `diagnostic`, which never blocks publication. Only a
 deliberately declared `quiet_reference` run gates: candidate wall time must be

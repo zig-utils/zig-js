@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v27.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v28.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 27, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 28, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,7 +49,7 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 27),
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 28),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
@@ -57,7 +57,7 @@ export function loadManifest(
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
-  if (child.schema_version >= 24 && child.schema_version <= 27) {
+  if (child.schema_version >= 24 && child.schema_version <= 28) {
     const version = `v${child.schema_version}`;
     requireValue(child.tier_attribution === undefined, `${version} must inherit the scored attribution contract unchanged`);
     requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, `${version} changes evidence integration only`);
@@ -210,7 +210,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 27, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 28, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -348,6 +348,16 @@ export function validate(manifest: any, root = ROOT): void {
         const replay = efficiency.scored_integration.native_allocation_replay, batch = efficiency.scored_integration.serial_batch;
         requireValue(replay && same(replay.modes, ["attribution", "attribution_no_jit"]) && replay.phase === "invocation" && replay.timing === "outside_elapsed_ns" && same(replay.metrics, ["backing_allocations", "backing_allocation_bytes"]), "V26 native allocation replay policy drift");
         requireValue(batch && batch.execution === "strictly_serial" && batch.home_compilations === 1 && batch.artifact_boundary === "one_validated_artifact_per_row" && batch.existing_outputs === "refuse", "V26 exact-parent batch policy drift");
+        if (manifest.schema_version >= 28) {
+          requireValue(replay.phase_boundary === "invocation snapshot minus warmup snapshot" && same(replay.required_snapshots || [], ["configuration", "warmup", "invocation"]), "V28 allocation replay phase contract drift");
+          requireValue(replay.signature_schema_version === 1 && same(replay.signature_sections || [], ["execution", "quick_binary", "admissions", "shape", "native_code", "baseline_publications", "optimizer_publications", "generated_code_bytes"]), "V28 allocation replay signature inventory drift");
+          requireValue(Array.isArray(replay.signature_contracts) && replay.signature_contracts.length === 1, "V28 allocation replay contract inventory drift");
+          const contractEntry = replay.signature_contracts[0]; validatePinnedFile(contractEntry, "V28 allocation replay signature contract", root);
+          const contract = JSON.parse(readText(root + "/" + contractEntry.path));
+          requireValue(contract.schema_version === replay.signature_schema_version && contract.profile_id === contractEntry.profile_id && contract.status === "frozen" && contract.owner_issue === 775, "V28 allocation replay contract identity drift");
+          for (const field of ["mode", "phase", "workload", "lanes", "jobs", "checksum"]) requireValue(contract.replay[field] === contractEntry[field], `V28 allocation replay contract ${field} drift`);
+          requireValue(typeof replay.legacy_vm_only === "string" && replay.legacy_vm_only.length > 0 && typeof replay.cross_variant_ruling === "string" && replay.cross_variant_ruling.length > 0, "V28 allocation replay compatibility ruling drift");
+        }
       }
     }
     validatePinnedFile(efficiency.disabled_path_fixture, `${version} instrumentation fixture`, root);

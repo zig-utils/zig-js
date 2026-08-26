@@ -1,0 +1,128 @@
+{
+  "schema_version": 28,
+  "matrix_id": "zig-js-representative-v28",
+  "status": "frozen",
+  "frozen_date": "2026-08-26",
+  "owner_issue": 775,
+  "history_policy": "This version hash-inherits every V27 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, timing boundary, occupancy rule, binary-provenance profile, and publication ruling. It versions a machine-readable mixed-tier allocation-replay signature while preserving historical VM-only replay and artifacts byte-for-byte.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v27",
+    "path": "docs/.data/representative-benchmark-matrix-v27.json",
+    "sha256": "843f5f556644d62068ff26933c142622781bc7f212512fcc28c0b9e3d5567daf",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels"
+    ]
+  },
+  "change": "Repins the exact-parent validator after #775 added opt-in, exact invocation-delta signature contracts. The #772 hour-cycle row declares and preserves its full mixed tree-walker/VM, quickening, admission, Shape, publication, generated-code, and native-code signature. Parent and candidate must match the same pinned contract on every replay; allocation requests and bytes remain exact per variant. No tier field is normalized or omitted, and legacy VM-only replay remains unchanged.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "a3a4b556cecda6d719b0a139d0ad17f2978a7d8537f194b39498e92b2275cad8",
+    "binary_provenance": "schema_v2_direct_or_schema_v3_identical_one_commit_measurement_overlay",
+    "binary_provenance_profiles": {
+      "schema_v2": "declared_binary_revisions_equal_logical_revisions",
+      "schema_v3": "identical_one_commit_measurement_overlay",
+      "partial_assertions": "refuse"
+    },
+    "native_runners": [
+      {
+        "path": "bench/comparison_zig_js.zig",
+        "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"
+      },
+      {
+        "path": "bench/frontend_parse.zig",
+        "sha256": "b463a6cf911cf561a90f8796207a02b106c119906d4600eb66182893f2324f8f"
+      }
+    ],
+    "native_allocation_replay": {
+      "modes": [
+        "attribution",
+        "attribution_no_jit"
+      ],
+      "phase": "invocation",
+      "phase_boundary": "invocation snapshot minus warmup snapshot",
+      "required_snapshots": [
+        "configuration",
+        "warmup",
+        "invocation"
+      ],
+      "timing": "outside_elapsed_ns",
+      "metrics": [
+        "backing_allocations",
+        "backing_allocation_bytes"
+      ],
+      "identity": [
+        "kind",
+        "mode",
+        "workload",
+        "lanes",
+        "jobs",
+        "checksum",
+        "execution",
+        "quick_binary",
+        "admissions",
+        "shape",
+        "baseline_publications",
+        "optimizer_publications",
+        "generated_code_bytes",
+        "native_code"
+      ],
+      "signature_schema_version": 1,
+      "signature_sections": [
+        "execution",
+        "quick_binary",
+        "admissions",
+        "shape",
+        "native_code",
+        "baseline_publications",
+        "optimizer_publications",
+        "generated_code_bytes"
+      ],
+      "signature_contracts": [
+        {
+          "profile_id": "zig-js-allocation-replay-signature-v1:representative_intl_date_time_format_resolved_hour_cycle",
+          "path": "docs/.data/allocation-replay-signature-intl-date-time-format-hour-cycle-v1.json",
+          "sha256": "c3e60e497bcb022ff96a0e160938f9f057c4b010b7b8248f9d8fc22d7b41aa34",
+          "mode": "attribution",
+          "phase": "invocation",
+          "workload": "representative_intl_date_time_format_resolved_hour_cycle",
+          "lanes": 1,
+          "jobs": 100,
+          "checksum": 705814248
+        }
+      ],
+      "legacy_vm_only": "unchanged fail-closed predicate when no signature contract is supplied",
+      "cross_variant_ruling": "every replay retains the exact raw signature and parent/candidate must match the same pinned contract"
+    },
+    "serial_batch": {
+      "execution": "strictly_serial",
+      "home_compilations": 1,
+      "artifact_boundary": "one_validated_artifact_per_row",
+      "existing_outputs": "refuse"
+    },
+    "publication_boundary": "V28 preserves every V27 timing, efficiency, provenance, cleanliness, checksum, and serial-child gate. A declared allocation-replay contract additionally requires the exact configuration/warmup/invocation phase inventory, subtracts the warmup snapshot from the invocation snapshot, retains every raw signature map in each sample, and rejects any tier, quickening, admission, Shape, publication, generated-code, native-code, identity, or allocation drift. Undeclared mixed-tier replay remains refused; historical VM-only profiles are unchanged."
+  },
+  "instrumentation_overhead_integration": {
+    "evidence_ruling": "Unchanged V27 parser, disabled-path evidence, allocation replay, serial batch, and binary provenance boundaries; V28 adds only an opt-in exact mixed-tier replay signature."
+  },
+  "context_lifecycle_integration": {
+    "publication_boundary": "Unchanged V27 lifecycle scenarios, telemetry, checksums, reconciliation, plateau, measured-boundary occupancy, and binary provenance."
+  },
+  "no_jit_integration": {
+    "publication_boundary": "Unchanged V27 required-bytecode modes, logical work, checksums, attribution, quickening, measured-boundary occupancy, binary provenance, and legacy VM-only allocation replay."
+  },
+  "string_indexing_integration": {
+    "publication_boundary": "Unchanged V27 string representations, widths, jobs, checksums, attribution, timing, allocation replay, serial collection, binary provenance, and non-throughput boundary."
+  }
+}
