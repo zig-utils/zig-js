@@ -7,9 +7,11 @@ import { summarize as summarizeExactParent, validateSampleQuality } from "./exac
 declare const __dirname: string;
 declare const __filename: string;
 export const ROOT = __dirname === "tools" ? "." : __dirname.slice(0, __dirname.lastIndexOf("/tools"));
-export const DEFAULT_SCHEMA = `${ROOT}/docs/.data/algorithmic-growth-schema-v2.json`;
+export const DEFAULT_SCHEMA = `${ROOT}/docs/.data/algorithmic-growth-schema-v3.json`;
 const ALGORITHMIC_SCHEMA_V1 = `${ROOT}/docs/.data/algorithmic-growth-schema-v1.json`;
+const ALGORITHMIC_SCHEMA_V2 = `${ROOT}/docs/.data/algorithmic-growth-schema-v2.json`;
 const ATTRIBUTION_SCHEMA_V2 = `${ROOT}/docs/.data/performance-attribution-schema-v2.json`;
+const ATTRIBUTION_SCHEMA_V3 = `${ROOT}/docs/.data/performance-attribution-schema-v3.json`;
 const HEX_40 = /^[0-9a-f]{40}$/, HEX_64 = /^[0-9a-f]{64}$/;
 
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
@@ -21,12 +23,13 @@ const exactJson = (value: any): string => JSON.stringify(value);
 
 export function validateSchema(schema: any): any {
   const version = schema?.schema_version;
-  requireValue((version === 1 || version === 2) && schema.profile_id === `zig-js-algorithmic-growth-v${version}` && schema.owner_issue === (version === 1 ? 670 : 768), "algorithmic-growth schema identity drift");
+  requireValue((version === 1 || version === 2 || version === 3) && schema.profile_id === `zig-js-algorithmic-growth-v${version}` && schema.owner_issue === (version === 1 ? 670 : 768), "algorithmic-growth schema identity drift");
   requireValue(schema.input_profile_id === `zig-js-performance-attribution-v${version}` && schema.input_kind === "exact_parent_ab", "algorithmic-growth input contract drift");
   requireValue(schema.minimum_widths === 3 && schema.minimum_pairs_per_width === 2 && schema.maximum_instruction_rsd === 0.05, "algorithmic-growth stability policy drift");
   requireValue(exactJson(schema.required_scored_metrics) === '["instructions","allocations","allocated_bytes"]', "algorithmic-growth scored metric inventory drift");
   requireValue(exactJson(schema.diagnostic_only_metrics) === '["wall_time_ns","process_cpu_user_ns","process_cpu_system_ns","peak_rss_bytes","retained_rss_bytes","cycles","energy_joules","thermal_state"]', "algorithmic-growth diagnostic metric inventory drift");
   const common = ["parent_revision", "candidate_revision", "candidate_first_parent", "zig_gc_revision", "zig_regex_revision", "zig_version", "os", "hardware", "host_class", "workload_source_sha256", "parent_binary_sha256", "candidate_binary_sha256", "samples", version === 1 ? "minimum_process_cpu_occupancy" : "minimum_measured_boundary_cpu_occupancy", "mode", "lanes"];
+  if (version === 3) common.push("parent_binary_revision", "candidate_binary_revision", "shared_measurement_overlay_paths");
   requireValue(exactJson(schema.required_common_metadata) === exactJson(common), "algorithmic-growth common metadata inventory drift");
   requireValue(typeof schema.claim_boundary === "string" && schema.claim_boundary.startsWith("Only normalized retired instructions") && schema.claim_boundary.includes("cannot support a throughput"), "algorithmic-growth claim boundary drift");
   requireValue(Array.isArray(schema.publication_guards) && schema.publication_guards.length === 8, "algorithmic-growth publication guard inventory drift");
@@ -145,6 +148,11 @@ function derivedMetadata(inputs: GrowthInput[], familyPrefix: string, schema: an
   };
   const minimumField = schema.schema_version === 1 ? "minimum_process_cpu_occupancy" : "minimum_measured_boundary_cpu_occupancy";
   result[minimumField] = first[minimumField];
+  if (schema.schema_version === 3) {
+    result.parent_binary_revision = first.parent_binary_revision;
+    result.candidate_binary_revision = first.candidate_binary_revision;
+    result.shared_measurement_overlay_paths = first.shared_measurement_overlay_paths;
+  }
   return result;
 }
 
@@ -202,7 +210,7 @@ export function validateArtifact(artifact: any, schema = loadSchema(), attributi
 
 function formatCount(value: number): string { return Number.isInteger(value) ? String(value) : value.toFixed(2); }
 export function render(artifact: any): string {
-  const schema = loadSchema(artifact.schema_version === 1 ? ALGORITHMIC_SCHEMA_V1 : DEFAULT_SCHEMA), attributionSchema = loadAttributionSchema(artifact.schema_version === 1 ? ATTRIBUTION_SCHEMA : ATTRIBUTION_SCHEMA_V2);
+  const schema = loadSchema(artifact.schema_version === 1 ? ALGORITHMIC_SCHEMA_V1 : artifact.schema_version === 2 ? ALGORITHMIC_SCHEMA_V2 : DEFAULT_SCHEMA), attributionSchema = loadAttributionSchema(artifact.schema_version === 1 ? ATTRIBUTION_SCHEMA : artifact.schema_version === 2 ? ATTRIBUTION_SCHEMA_V2 : ATTRIBUTION_SCHEMA_V3);
   validateArtifact(artifact, schema, attributionSchema);
   const metadata = artifact.metadata, summary = artifact.summary;
   const rows = summary.rows.map((row: any) => `| ${row.width} | ${row.jobs} | ${row.checksum} | ${row.parent.instructions_per_job_median.toFixed(2)} | ${(row.parent.instructions_per_job_rsd * 100).toFixed(2)}% | ${row.candidate.instructions_per_job_median.toFixed(2)} | ${(row.candidate.instructions_per_job_rsd * 100).toFixed(2)}% | ${row.candidate_over_parent_instructions.toFixed(4)}x | ${formatCount(row.parent.allocations_per_job)} / ${formatCount(row.candidate.allocations_per_job)} | ${formatCount(row.parent.allocated_bytes_per_job)} / ${formatCount(row.candidate.allocated_bytes_per_job)} | ${row.full_efficiency_status} |`);
@@ -250,6 +258,7 @@ function exactFixture(width: number, attributionSchema: any): any {
   }
   const metadata: any = { parent_revision: "a".repeat(40), candidate_revision: "b".repeat(40), candidate_first_parent: "a".repeat(40), zig_gc_revision: "c".repeat(40), zig_regex_revision: "d".repeat(40), zig_version: "fixture-zig", os: "fixture-os", hardware: "fixture-hardware", power: `Battery ${width}`, host_class: "diagnostic", material_change_categories: ["cpu_work"], workload_source_sha256: "e".repeat(64), parent_binary_sha256: "f".repeat(64), candidate_binary_sha256: "1".repeat(64), samples: pairCount, timed_boundary: "fixture exact logical jobs", mode: "single", workload, lanes: 1, jobs, expected_checksum: width * 17 };
   metadata[attributionSchema.schema_version === 1 ? "minimum_process_cpu_occupancy" : "minimum_measured_boundary_cpu_occupancy"] = 0.6;
+  if (attributionSchema.schema_version === 3) Object.assign(metadata, { parent_binary_revision: "2".repeat(40), candidate_binary_revision: "3".repeat(40), shared_measurement_overlay_paths: ["bench/fixture.zig"] });
   const artifact = { schema_version: attributionSchema.schema_version, profile_id: attributionSchema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarizeExactParent(samples, attributionSchema, "diagnostic", ["cpu_work"]) };
   validateAttributionArtifact(artifact, attributionSchema); return artifact;
 }
@@ -257,7 +266,7 @@ function exactFixture(width: number, attributionSchema: any): any {
 function expectFailure(action: () => void, pattern: string): void { try { action(); } catch (error) { requireValue(String(error).includes(pattern), `expected ${pattern}, got ${String(error)}`); return; } throw new Error(`expected failure containing ${pattern}`); }
 export function selfTest(): void {
   console.log("START algorithmic-growth phase: schemas and complete fixtures");
-  const schema = loadSchema(), attributionSchema = loadAttributionSchema(ATTRIBUTION_SCHEMA_V2), widths = [1024, 2048, 4096];
+  const schema = loadSchema(), attributionSchema = loadAttributionSchema(ATTRIBUTION_SCHEMA_V3), widths = [1024, 2048, 4096];
   const inputs: GrowthInput[] = [];
   for (const width of widths) {
     console.log(`START algorithmic-growth fixture ${width}: construct and validate exact-parent artifact`);
@@ -301,7 +310,7 @@ function main(): void {
       const value = raw[++index]; if (arg === "--schema") schemaPath = value; else if (arg === "--artifact") artifactPath = value; else if (arg === "--family-prefix") familyPrefix = value; else if (arg === "--row") rowSpecs.push(value); else if (arg === "--raw-out") rawOut = value; else markdownOut = value;
     } else throw new Error(`unknown or incomplete argument: ${arg}`);
   }
-  const schema = loadSchema(schemaPath), attributionSchema = loadAttributionSchema(schema.schema_version === 1 ? ATTRIBUTION_SCHEMA : ATTRIBUTION_SCHEMA_V2);
+  const schema = loadSchema(schemaPath), attributionSchema = loadAttributionSchema(schema.schema_version === 1 ? ATTRIBUTION_SCHEMA : schema.schema_version === 2 ? ATTRIBUTION_SCHEMA_V2 : ATTRIBUTION_SCHEMA_V3);
   if (artifactPath) { requireValue(rowSpecs.length === 0 && !familyPrefix && !rawOut && !markdownOut, "--artifact cannot be combined with generation options"); validateArtifact(JSON.parse(readText(artifactPath)), schema, attributionSchema); console.log(`OK ${artifactPath}: ${schema.profile_id}`); return; }
   requireValue(familyPrefix && rawOut && markdownOut && rowSpecs.length >= schema.minimum_widths, "usage: algorithmic-growth.ts --family-prefix PREFIX --row WIDTH:EXACT.json [--row ...] --raw-out OUT.json --markdown-out OUT.md");
   for (const repository of [ROOT, `${ROOT}/../zig-gc`, `${ROOT}/../zig-regex`]) requireClean(repository);

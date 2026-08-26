@@ -14,24 +14,30 @@ const unique = (values: any[]): boolean => new Set(values.map((value) => JSON.st
 const isHex = (value: any, length: number): boolean => typeof value === "string" && value.length === length && /^[0-9a-f]+$/.test(value);
 const relativeRsd = (values: number[]): number => { if (values.length <= 1) return 0; const mean = values.reduce((sum, value) => sum + value, 0) / values.length; if (mean === 0) return Infinity; return Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1)) / mean; };
 
-export function loadSchema(path = DEFAULT_SCHEMA): any {
+function materializeSchema(path: string): any {
   const raw = JSON.parse(readText(path));
   let schema = raw;
   if (raw.base_schema) {
-    const slash = path.lastIndexOf("/"), base = JSON.parse(readText(`${slash >= 0 ? path.slice(0, slash + 1) : ""}${raw.base_schema}`));
+    const slash = path.lastIndexOf("/"), base = materializeSchema(`${slash >= 0 ? path.slice(0, slash + 1) : ""}${raw.base_schema}`);
     schema = { ...base, ...raw, metric_states: base.metric_states, sample_identity: base.sample_identity, required_metadata: [...base.required_metadata, ...raw.required_metadata_append], regression_policy: base.regression_policy, metrics: base.metrics };
   }
-  validateSchema(schema); return schema;
+  return schema;
 }
+export function loadSchema(path = DEFAULT_SCHEMA): any { const schema = materializeSchema(path); validateSchema(schema); return schema; }
 
 export function validateSchema(schema: any): void {
   const version = schema.schema_version;
-  requireValue(version === 1 || version === 2, "unsupported attribution schema");
+  requireValue(version === 1 || version === 2 || version === 3, "unsupported attribution schema");
   requireValue(schema.profile_id === `zig-js-performance-attribution-v${version}`, "unexpected profile id");
   if (version === 2) {
     requireValue(schema.owner_issue === 768 && schema.base_schema === "performance-attribution-schema-v1.json", "attribution-v2 lineage drift");
     requireValue(JSON.stringify(schema.required_metadata_append) === '["minimum_measured_boundary_cpu_occupancy"]', "attribution-v2 metadata extension drift");
     requireValue(schema.quality_policy?.occupancy_scope === "declared_timed_boundary" && schema.quality_policy?.minimum_cpu_occupancy === 0.6 && schema.quality_policy?.complete_process_occupancy === "diagnostic_only", "attribution-v2 quality policy drift");
+  }
+  if (version === 3) {
+    requireValue(schema.owner_issue === 768 && schema.base_schema === "performance-attribution-schema-v2.json", "attribution-v3 lineage drift");
+    requireValue(JSON.stringify(schema.required_metadata_append) === '["parent_binary_revision","candidate_binary_revision","shared_measurement_overlay_paths"]', "attribution-v3 metadata extension drift");
+    requireValue(schema.quality_policy?.occupancy_scope === "declared_timed_boundary" && schema.quality_policy?.minimum_cpu_occupancy === 0.6 && schema.quality_policy?.complete_process_occupancy === "diagnostic_only" && schema.quality_policy?.binary_provenance === "identical_one-commit_measurement_overlay", "attribution-v3 quality policy drift");
   }
   requireValue(sameSet(Object.keys(schema.metric_states || {}), ALLOWED_STATES), "metric state inventory drift");
   const identity = ["variant", "pair_sample", "order", "engine", "mode", "workload", "lanes", "jobs", "checksum"];
@@ -125,6 +131,13 @@ export function validateArtifact(artifact: any, schema: any): void {
   if (artifact.kind !== "exact_parent_ab") return;
   for (const field of ["parent_revision", "candidate_revision", "candidate_first_parent", "zig_gc_revision", "zig_regex_revision"]) requireValue(isHex(metadata[field], 40), `exact-parent metadata has invalid ${field}`);
   requireValue(metadata.candidate_first_parent === metadata.parent_revision, "candidate first parent does not match parent revision");
+  if (schema.schema_version >= 3) {
+    for (const field of ["parent_binary_revision", "candidate_binary_revision"]) requireValue(isHex(metadata[field], 40), `exact-parent metadata has invalid ${field}`);
+    const overlayPaths = metadata.shared_measurement_overlay_paths;
+    requireValue(Array.isArray(overlayPaths) && overlayPaths.length > 0 && unique(overlayPaths), "exact-parent measurement overlay path inventory is invalid");
+    requireValue(overlayPaths.every((path: any) => typeof path === "string" && path.split("/").every((segment: string) => segment.length > 0 && segment !== "." && segment !== "..")), "exact-parent measurement overlay path is unsafe");
+    requireValue(JSON.stringify(overlayPaths) === JSON.stringify(overlayPaths.slice().sort()), "exact-parent measurement overlay paths are not canonical");
+  }
   for (const field of ["workload_source_sha256", "parent_binary_sha256", "candidate_binary_sha256"]) requireValue(isHex(metadata[field], 64), `exact-parent metadata has invalid ${field}`);
   requireValue(["diagnostic", "quiet_reference"].includes(metadata.host_class), "exact-parent host class is invalid");
   requireValue(Number.isInteger(metadata.samples) && metadata.samples >= 2, "exact-parent sample count is invalid");

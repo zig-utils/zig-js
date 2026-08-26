@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v24.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v25.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 24, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 25, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,7 +49,7 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || child.schema_version === 24,
+    deferIntegrationValidation || child.schema_version === 24 || child.schema_version === 25,
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
@@ -57,12 +57,13 @@ export function loadManifest(
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
-  if (child.schema_version === 24) {
-    requireValue(child.tier_attribution === undefined, "v24 must inherit the scored attribution contract unchanged");
-    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v24 changes evidence integration only");
-    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v24 must inherit completed panel inventory unchanged");
+  if (child.schema_version === 24 || child.schema_version === 25) {
+    const version = `v${child.schema_version}`;
+    requireValue(child.tier_attribution === undefined, `${version} must inherit the scored attribution contract unchanged`);
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, `${version} changes evidence integration only`);
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, `${version} must inherit completed panel inventory unchanged`);
     for (const name of ["exact_parent_integration", "instrumentation_overhead_integration", "context_lifecycle_integration", "no_jit_integration", "string_indexing_integration"])
-      requireValue(child[name] && typeof child[name] === "object", `v24 must replace ${name}`);
+      requireValue(child[name] && typeof child[name] === "object", `${version} must replace ${name}`);
     const exactParent = { ...inherited.exact_parent_integration, ...child.exact_parent_integration };
     const merged = {
       ...inherited,
@@ -80,7 +81,7 @@ export function loadManifest(
         },
       },
     };
-    validate(merged, root);
+    if (!deferIntegrationValidation) validate(merged, root);
     return merged;
   }
   if (child.schema_version === 23) {
@@ -209,7 +210,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 24, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 25, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -327,13 +328,15 @@ export function validate(manifest: any, root = ROOT): void {
     requireValue(efficiency.issue === 503 && efficiency.status === "integrated", `${version} efficiency panel identity drift`);
     validatePinnedFile(efficiency.scored_integration, `${version} exact-parent integration`, root);
     if (manifest.schema_version >= 24) {
-      requireValue(efficiency.scored_integration.occupancy_scope === "declared_timed_boundary" && efficiency.scored_integration.minimum_cpu_occupancy === 0.6 && efficiency.scored_integration.complete_process_occupancy === "diagnostic_only", "V24 exact-parent occupancy policy drift");
-      validatePinnedFile(efficiency.scored_integration.attribution_schema, "V24 attribution schema", root);
-      validatePinnedFile(efficiency.scored_integration.attribution_validator, "V24 attribution validator", root);
-      validatePinnedFile(efficiency.scored_integration.algorithmic_growth_schema, "V24 algorithmic-growth schema", root);
-      validatePinnedFile(efficiency.scored_integration.algorithmic_growth_validator, "V24 algorithmic-growth validator", root);
-      requireValue(Array.isArray(efficiency.scored_integration.native_runners) && efficiency.scored_integration.native_runners.length === 2, "V24 native runner inventory drift");
-      for (const runner of efficiency.scored_integration.native_runners) validatePinnedFile(runner, "V24 measured-boundary native runner", root);
+      const evidenceVersion = `V${manifest.schema_version}`;
+      requireValue(efficiency.scored_integration.occupancy_scope === "declared_timed_boundary" && efficiency.scored_integration.minimum_cpu_occupancy === 0.6 && efficiency.scored_integration.complete_process_occupancy === "diagnostic_only", `${evidenceVersion} exact-parent occupancy policy drift`);
+      validatePinnedFile(efficiency.scored_integration.attribution_schema, `${evidenceVersion} attribution schema`, root);
+      validatePinnedFile(efficiency.scored_integration.attribution_validator, `${evidenceVersion} attribution validator`, root);
+      validatePinnedFile(efficiency.scored_integration.algorithmic_growth_schema, `${evidenceVersion} algorithmic-growth schema`, root);
+      validatePinnedFile(efficiency.scored_integration.algorithmic_growth_validator, `${evidenceVersion} algorithmic-growth validator`, root);
+      requireValue(Array.isArray(efficiency.scored_integration.native_runners) && efficiency.scored_integration.native_runners.length === 2, `${evidenceVersion} native runner inventory drift`);
+      for (const runner of efficiency.scored_integration.native_runners) validatePinnedFile(runner, `${evidenceVersion} measured-boundary native runner`, root);
+      if (manifest.schema_version >= 25) requireValue(efficiency.scored_integration.binary_provenance === "identical_one-commit_measurement_overlay", "V25 binary provenance policy drift");
     }
     validatePinnedFile(efficiency.disabled_path_fixture, `${version} instrumentation fixture`, root);
     validatePinnedFile(efficiency.disabled_path_fixture.raw_evidence, `${version} instrumentation raw evidence`, root);

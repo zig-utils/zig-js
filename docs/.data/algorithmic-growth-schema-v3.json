@@ -1,0 +1,27 @@
+{
+  "schema_version": 3,
+  "profile_id": "zig-js-algorithmic-growth-v3",
+  "owner_issue": 768,
+  "history_policy": "Published version 1 and version 2 artifacts retain their original bytes. Version 3 consumes attribution-v3 inputs and requires identical one-commit measurement-overlay provenance for both logical engine revisions.",
+  "input_profile_id": "zig-js-performance-attribution-v3",
+  "input_kind": "exact_parent_ab",
+  "minimum_widths": 3,
+  "minimum_pairs_per_width": 2,
+  "maximum_instruction_rsd": 0.05,
+  "required_scored_metrics": ["instructions", "allocations", "allocated_bytes"],
+  "diagnostic_only_metrics": ["wall_time_ns", "process_cpu_user_ns", "process_cpu_system_ns", "peak_rss_bytes", "retained_rss_bytes", "cycles", "energy_joules", "thermal_state"],
+  "required_common_metadata": [
+    "parent_revision", "candidate_revision", "candidate_first_parent", "zig_gc_revision", "zig_regex_revision", "zig_version", "os", "hardware", "host_class", "workload_source_sha256", "parent_binary_sha256", "candidate_binary_sha256", "samples", "minimum_measured_boundary_cpu_occupancy", "mode", "lanes", "parent_binary_revision", "candidate_binary_revision", "shared_measurement_overlay_paths"
+  ],
+  "claim_boundary": "Only normalized retired instructions and exact allocation replay are scored across frozen input widths. Wall time, CPU time, RSS, cycles, energy, and thermal observations are retained from the embedded exact-parent artifacts as diagnostics and cannot support a throughput, latency, energy, or full-efficiency claim.",
+  "publication_guards": [
+    "every input is a complete validated exact-parent artifact with identical logical parent, logical candidate, dependency, binary, source, toolchain, host, sample-count, mode, and lane identities",
+    "each binary revision is a one-commit child of its named logical engine revision and both overlays change the same fixed paths to byte-identical blobs",
+    "at least three strictly increasing widths map exactly to the declared workload family prefix",
+    "parent and candidate execute the same positive logical-job count and checksum at each width",
+    "every measured boundary has at least sixty-percent native CPU occupancy while complete-process occupancy remains diagnostic and before/after snapshots reject competing jobs",
+    "every retired-instruction observation is measured, positive, normalized by logical jobs, and at or below five-percent relative standard deviation per variant and width",
+    "allocation requests and allocated bytes are measured, non-negative safe integers, and exact across repeated samples within each variant and width",
+    "all original exact-parent samples, metric states, quality fields, binary provenance, power states, thermal states, command boundaries, and rejected full-efficiency summaries remain embedded without sample removal or substitution"
+  ]
+}

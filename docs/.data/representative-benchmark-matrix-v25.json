@@ -1,0 +1,49 @@
+{
+  "schema_version": 25,
+  "matrix_id": "zig-js-representative-v25",
+  "status": "frozen",
+  "frozen_date": "2026-08-26",
+  "owner_issue": 768,
+  "history_policy": "This version hash-inherits every V24 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, allocation replay, timing boundary, measured-boundary occupancy rule, and publication ruling. It adds only fail-closed binary provenance for applying the identical one-commit V24 measurement overlay to both named logical engine revisions. Historical V1 and V2 attribution/growth artifacts remain byte-identical.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v24",
+    "path": "docs/.data/representative-benchmark-matrix-v24.json",
+    "sha256": "7a9758b901321da56564bbe08fcb95d0d9d8b01ebe5c8062e5211773a5542387",
+    "inherit": ["compatibility_panel", "engines", "lanes", "protocol", "modes", "acceptance", "required_families", "implemented_families", "deferred_families", "additional_panels", "tier_attribution", "pending_metric_panels", "completed_metric_panels"]
+  },
+  "change": "Requires each benchmark binary revision to be a one-commit child of its named logical engine revision, requires both overlay commits to change the same fixed harness paths, and requires byte-identical overlay blobs on every path. No engine source, workload, logical work, checksum, attribution, allocation, occupancy, stability, or publication threshold changes.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "37c8f1057408e8cded6a4f0cac6486b0a85d02e2a34250acd6fc6d98e720f273",
+    "attribution_schema": {"path": "docs/.data/performance-attribution-schema-v3.json", "sha256": "936f4a0441ff321a2379c6cb3f65172c0e96de0305379ca68cb9d00b94523a04"},
+    "attribution_validator": {"path": "tools/performance-attribution.ts", "sha256": "d610db9a36307517d7ced50aefa726ae66a5c0a371424ae5e0026fb708ec30fe"},
+    "algorithmic_growth_schema": {"path": "docs/.data/algorithmic-growth-schema-v3.json", "sha256": "42b871777f267945b6870398b075b23cb527c4aadbd2f737bc72653a7ec356f1"},
+    "algorithmic_growth_validator": {"path": "tools/algorithmic-growth.ts", "sha256": "dc226197d75893709c99236a1b15ba2e4dcfacb280951d9ab72bdb6b05f31978"},
+    "native_runners": [
+      {"path": "bench/comparison_zig_js.zig", "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"},
+      {"path": "bench/frontend_parse.zig", "sha256": "e599662a2df58229b100fabe544fb2d0f928272b850069b68476484861e1ee34"}
+    ],
+    "occupancy_scope": "declared_timed_boundary",
+    "minimum_cpu_occupancy": 0.6,
+    "complete_process_occupancy": "diagnostic_only",
+    "binary_provenance": "identical_one-commit_measurement_overlay",
+    "publication_boundary": "The artifact names logical parent/candidate revisions separately from binary revisions. Each binary revision must be exactly one commit above its logical revision; both commits must change the fixed shared measurement-overlay inventory to byte-identical blobs. Measured-boundary occupancy, checksums, balanced samples, thermals, cleanliness, and competing-process guards remain independently fail-closed."
+  },
+  "instrumentation_overhead_integration": {
+    "path": "tools/instrumentation-overhead.ts",
+    "sha256": "c95e1d476cc01e8c299473028d6139269f60af44fd20c4ad19e508b827d695c8",
+    "evidence_ruling": "Unchanged V24 parser and historical disabled-path evidence; V25 adds binary provenance only."
+  },
+  "context_lifecycle_integration": {
+    "runner": {"path": "bench/comparison_zig_js.zig", "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"},
+    "publication_boundary": "Unchanged V24 lifecycle scenarios, telemetry, checksums, reconciliation, plateau, and measured-boundary occupancy; V25 adds binary provenance only."
+  },
+  "no_jit_integration": {
+    "runner": {"path": "bench/comparison_zig_js.zig", "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"},
+    "publication_boundary": "Unchanged V24 required-bytecode modes, logical work, checksums, attribution, quickening, and measured-boundary occupancy; V25 adds binary provenance only."
+  },
+  "string_indexing_integration": {
+    "runner": {"path": "bench/comparison_zig_js.zig", "sha256": "646a5843884d1f8ff9a1bdcc3a5751393dd48afdf30d135a2a3e874761741a3f"},
+    "publication_boundary": "Unchanged V24 string representations, widths, jobs, checksums, attribution, allocation replay, and non-throughput boundary; V25 adds exact logical-versus-binary revision provenance only."
+  }
+}

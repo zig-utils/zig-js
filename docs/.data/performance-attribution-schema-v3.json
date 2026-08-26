@@ -1,0 +1,19 @@
+{
+  "schema_version": 3,
+  "profile_id": "zig-js-performance-attribution-v3",
+  "owner_issue": 768,
+  "history_policy": "Version 3 inherits the immutable metric, identity, and measured-boundary occupancy contract from performance-attribution-schema-v2.json. It adds fail-closed logical-engine versus binary-revision provenance for an identical one-commit measurement overlay. Version 1 and version 2 artifacts remain byte-identical.",
+  "base_schema": "performance-attribution-schema-v2.json",
+  "required_metadata_append": [
+    "parent_binary_revision",
+    "candidate_binary_revision",
+    "shared_measurement_overlay_paths"
+  ],
+  "quality_policy": {
+    "occupancy_scope": "declared_timed_boundary",
+    "minimum_cpu_occupancy": 0.6,
+    "complete_process_occupancy": "diagnostic_only",
+    "binary_provenance": "identical_one-commit_measurement_overlay",
+    "legacy_validation": "Version 1 artifacts retain complete-process occupancy; version 2 artifacts retain measured-boundary occupancy without binary-overlay identity."
+  }
+}
