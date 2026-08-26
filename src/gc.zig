@@ -3768,6 +3768,7 @@ pub const Binding = struct {
                     ctx.queueExternalStringRelease(owner);
                     string.setExternalOwner(null);
                 }
+                string.deinitUtf16Index(ctx.gpa);
                 if (string.bytes.len > 0) ctx.gpa.free(@constCast(string.bytes));
                 _ = @atomicRmw(usize, &ctx.gc_string_bytes_live, .Sub, string.bytes.len, .monotonic);
                 string.bytes = &.{};

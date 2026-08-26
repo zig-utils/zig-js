@@ -57,6 +57,12 @@ pub const latin1_flag: u64 = @as(u64, 1) << 62;
 /// construction because their consumers need the hash immediately.
 pub const hash_ready_flag: u64 = @as(u64, 1) << 61;
 
+/// Managed-cell classification is cell identity, not StringData content. It
+/// lives outside every equality/hash mask but inside the same atomic word so
+/// the auxiliary pointer can represent typed lifetime/index state without
+/// growing StringCell.
+pub const gc_managed_flag: u64 = @as(u64, 1) << 60;
+
 pub const classification_mask: u64 = ascii_flag | latin1_flag;
 
 /// The low 27 bits retain the exact UTF-16 length for every ordinary engine
@@ -69,13 +75,13 @@ pub const utf16_length_bits = 27;
 pub const utf16_length_mask: u64 = (@as(u64, 1) << utf16_length_bits) - 1;
 pub const utf16_length_unknown: u64 = utf16_length_mask;
 
-/// The remaining 34 payload bits hold XXH3 content after `hash_ready_flag` is
+/// The remaining 33 payload bits hold XXH3 content after `hash_ready_flag` is
 /// set. Equality always confirms exact bytes, and intern-table placement uses
 /// its independent keyed 64-bit hash, so shortening this fast-reject cache does
 /// not weaken semantic equality or adversarial shard placement.
-pub const content_hash_mask: u64 = ~(classification_mask | hash_ready_flag | utf16_length_mask);
+pub const content_hash_mask: u64 = ~(classification_mask | hash_ready_flag | gc_managed_flag | utf16_length_mask);
 
-const persistent_state_mask = classification_mask | utf16_length_mask;
+const persistent_state_mask = classification_mask | gc_managed_flag | utf16_length_mask;
 
 /// Master switch for the flat-latin1 storage representation (the flat-string
 /// model). While **false** every cell stores canonical WTF-8, `isFlatLatin1` is
@@ -169,10 +175,27 @@ pub const ExternalStringDeallocator = *const fn (
     len: usize,
 ) callconv(.c) void;
 
+pub const StringAuxKind = enum(u8) {
+    external_owner,
+    intern_owner,
+    utf16_index,
+    static_utf16_index,
+};
+
+const StringAuxHeader = struct {
+    kind: StringAuxKind,
+};
+
+fn stringAuxKind(raw: *anyopaque) StringAuxKind {
+    const header: *const StringAuxHeader = @ptrCast(raw);
+    return header.kind;
+}
+
 /// Context-owned exact-once obligation for an embedder string allocation.
 /// The StringCell keeps this pointer until collection; the Context owns the
 /// record itself so arena-mode teardown provides the same lifetime contract.
 pub const ExternalStringOwner = struct {
+    aux_header: StringAuxHeader = .{ .kind = .external_owner },
     pointer: ?*anyopaque,
     len: usize,
     context: ?*anyopaque,
@@ -188,48 +211,239 @@ pub const ExternalStringOwner = struct {
     }
 };
 
+const InternStringOwner = struct {
+    aux_header: StringAuxHeader = .{ .kind = .intern_owner },
+    allocator: std.mem.Allocator,
+};
+
+pub const utf16_index_stride: usize = 64;
+pub const utf16_index_min_bytes: usize = 128;
+
+pub const Utf16CodeUnit = struct {
+    unit: u16,
+    astral: ?u21 = null,
+};
+
+/// Representation-aware UTF-16 iterator shared by the immutable stride index
+/// and the interpreter's existing streaming algorithms.
+pub const Utf16CodeUnitIterator = struct {
+    bytes: []const u8,
+    flat_latin1: bool,
+    byte_index: usize = 0,
+    pending_low: ?u16 = null,
+
+    pub fn init(bytes: []const u8, flat_latin1: bool) Utf16CodeUnitIterator {
+        return .{ .bytes = bytes, .flat_latin1 = flat_latin1 };
+    }
+
+    fn wtf8SurrogateAt(bytes: []const u8, index: usize) ?u21 {
+        if (index + 2 >= bytes.len or bytes[index] != 0xED) return null;
+        const second = bytes[index + 1];
+        const third = bytes[index + 2];
+        if (second < 0xA0 or second > 0xBF or third & 0xC0 != 0x80) return null;
+        return (@as(u21, bytes[index] & 0x0F) << 12) |
+            (@as(u21, second & 0x3F) << 6) | @as(u21, third & 0x3F);
+    }
+
+    fn sequenceLength(bytes: []const u8, index: usize) usize {
+        const byte = bytes[index];
+        if (byte < 0x80) return 1;
+        if (byte & 0xE0 == 0xC0) return 2;
+        if (byte & 0xF0 == 0xE0) return 3;
+        return 4;
+    }
+
+    pub fn next(self: *Utf16CodeUnitIterator) ?Utf16CodeUnit {
+        if (self.pending_low) |unit| {
+            self.pending_low = null;
+            return .{ .unit = unit };
+        }
+        if (self.byte_index >= self.bytes.len) return null;
+        if (self.flat_latin1) {
+            const unit = self.bytes[self.byte_index];
+            self.byte_index += 1;
+            return .{ .unit = unit };
+        }
+
+        const index = self.byte_index;
+        if (wtf8SurrogateAt(self.bytes, index)) |codepoint| {
+            self.byte_index += 3;
+            return .{ .unit = @intCast(codepoint) };
+        }
+
+        const sequence_len = sequenceLength(self.bytes, index);
+        if (sequence_len == 4 and index + sequence_len <= self.bytes.len) {
+            if (std.unicode.utf8Decode(self.bytes[index .. index + sequence_len])) |codepoint| {
+                if (codepoint > 0xFFFF) {
+                    const scalar = codepoint - 0x10000;
+                    self.byte_index += sequence_len;
+                    self.pending_low = @intCast(0xDC00 + (scalar & 0x3FF));
+                    return .{ .unit = @intCast(0xD800 + (scalar >> 10)), .astral = codepoint };
+                }
+            } else |_| {}
+        }
+
+        const codepoint = if (sequence_len > 1 and index + sequence_len <= self.bytes.len)
+            std.unicode.utf8Decode(self.bytes[index .. index + sequence_len]) catch @as(u21, self.bytes[index])
+        else
+            @as(u21, self.bytes[index]);
+        self.byte_index += sequence_len;
+        return .{ .unit = @intCast(codepoint & 0xFFFF) };
+    }
+
+    fn encodedState(self: *const Utf16CodeUnitIterator) usize {
+        return (self.byte_index << 1) | @intFromBool(self.pending_low != null);
+    }
+
+    fn restore(bytes: []const u8, encoded: usize) Utf16CodeUnitIterator {
+        const byte_index = encoded >> 1;
+        var iterator = Utf16CodeUnitIterator.init(bytes, false);
+        iterator.byte_index = byte_index;
+        if (encoded & 1 != 0) {
+            std.debug.assert(byte_index >= 4);
+            const codepoint = std.unicode.utf8Decode(bytes[byte_index - 4 .. byte_index]) catch unreachable;
+            std.debug.assert(codepoint > 0xFFFF);
+            iterator.pending_low = @intCast(0xDC00 + ((codepoint - 0x10000) & 0x3FF));
+        }
+        return iterator;
+    }
+};
+
+pub const Utf16Index = struct {
+    aux_header: StringAuxHeader,
+    previous_owner: std.atomic.Value(?*anyopaque),
+    units: usize,
+    checkpoints: []const usize,
+
+    fn checkpointCount(units: usize) usize {
+        return if (units == 0) 0 else (units - 1) / utf16_index_stride + 1;
+    }
+
+    fn create(
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+        units: usize,
+        previous_owner: ?*anyopaque,
+    ) std.mem.Allocator.Error!*Utf16Index {
+        const checkpoints = try allocator.alloc(usize, checkpointCount(units));
+        errdefer allocator.free(checkpoints);
+        var iterator = Utf16CodeUnitIterator.init(bytes, false);
+        var unit_index: usize = 0;
+        for (checkpoints, 0..) |*checkpoint, checkpoint_index| {
+            const target = checkpoint_index * utf16_index_stride;
+            while (unit_index < target) : (unit_index += 1)
+                _ = iterator.next() orelse unreachable;
+            checkpoint.* = iterator.encodedState();
+        }
+        const index = try allocator.create(Utf16Index);
+        index.* = .{
+            .aux_header = .{ .kind = .utf16_index },
+            .previous_owner = .init(previous_owner),
+            .units = units,
+            .checkpoints = checkpoints,
+        };
+        return index;
+    }
+
+    fn destroy(self: *Utf16Index, allocator: std.mem.Allocator) void {
+        allocator.free(@constCast(self.checkpoints));
+        allocator.destroy(self);
+    }
+
+    fn codeUnitAt(self: *const Utf16Index, bytes: []const u8, index: usize) ?Utf16CodeUnit {
+        if (index >= self.units) return null;
+        const checkpoint_index = index / utf16_index_stride;
+        if (checkpoint_index >= self.checkpoints.len) return null;
+        var iterator = Utf16CodeUnitIterator.restore(bytes, self.checkpoints[checkpoint_index]);
+        var remaining = index - checkpoint_index * utf16_index_stride;
+        while (remaining > 0) : (remaining -= 1) _ = iterator.next() orelse return null;
+        return iterator.next();
+    }
+};
+
+fn staticUtf16Checkpoints(comptime bytes: []const u8) [Utf16Index.checkpointCount(utf16LengthOfWtf8(bytes))]usize {
+    comptime {
+        var checkpoints: [Utf16Index.checkpointCount(utf16LengthOfWtf8(bytes))]usize = undefined;
+        var iterator = Utf16CodeUnitIterator.init(bytes, false);
+        var unit_index: usize = 0;
+        for (&checkpoints, 0..) |*checkpoint, checkpoint_index| {
+            const target = checkpoint_index * utf16_index_stride;
+            while (unit_index < target) : (unit_index += 1)
+                _ = iterator.next() orelse unreachable;
+            checkpoint.* = iterator.encodedState();
+        }
+        return checkpoints;
+    }
+}
+
 /// An immutable string cell: a single allocation the engine can point at with
 /// one 48-bit word. `bytes` is owned by whoever allocated the cell (the GC heap
 /// or an arena); `hash` atomically publishes a deterministic XXH3 cache on
-/// first equality. Bytes and classification are immutable after creation; the
-/// monotonic cache does not publish any other state and is safe across threads.
+/// first equality and retains managed-cell classification. `aux` atomically
+/// publishes typed lifetime/index metadata. Bytes and content classification
+/// are immutable after creation; both monotonic publications are thread-safe.
 pub const StringCell = struct {
-    const gc_managed_mask: usize = 1;
-
     bytes: []const u8,
     hash: u64,
-    /// The aligned owner pointer leaves its low bit available for managed-cell
-    /// classification. Keeping both facts in one word preserves StringCell's
-    /// 32-byte hot footprint even when a string retains external storage.
-    owner_and_gc: usize = 0,
+    /// Null, an ExternalStringOwner, a stable InternStringOwner, or a UTF-16
+    /// index that retains the previous owner. Every target starts with
+    /// StringAuxKind.
+    /// Static cells may point at compile-time index storage; runtime cells
+    /// publish a dynamic index with compare-and-swap.
+    aux: std.atomic.Value(?*anyopaque) = .init(null),
 
     /// True only when the cell itself was allocated by zig-gc. Static literals,
     /// arena strings, and intern-table entries remain outside the heap and must
     /// never be handed to the collector's strict `mark` entry point.
     pub fn isGcManaged(self: *const StringCell) bool {
-        return self.owner_and_gc & gc_managed_mask != 0;
+        return self.hashState() & gc_managed_flag != 0;
     }
 
     pub fn setGcManaged(self: *StringCell, managed: bool) void {
         if (managed) {
-            self.owner_and_gc |= gc_managed_mask;
+            _ = @atomicRmw(u64, &self.hash, .Or, gc_managed_flag, .monotonic);
         } else {
-            self.owner_and_gc &= ~gc_managed_mask;
+            _ = @atomicRmw(u64, &self.hash, .And, ~gc_managed_flag, .monotonic);
         }
+    }
+
+    fn indexFromAux(raw: ?*anyopaque) ?*const Utf16Index {
+        const pointer = raw orelse return null;
+        return switch (stringAuxKind(pointer)) {
+            .utf16_index, .static_utf16_index => blk: {
+                const header: *const StringAuxHeader = @ptrCast(pointer);
+                const unaligned: *align(1) const Utf16Index = @fieldParentPtr("aux_header", header);
+                break :blk @alignCast(unaligned);
+            },
+            else => null,
+        };
+    }
+
+    fn priorOwner(raw: ?*anyopaque) ?*anyopaque {
+        const index = indexFromAux(raw) orelse return raw;
+        return index.previous_owner.load(.acquire);
     }
 
     /// Original embedder allocation retained by private external-string
     /// constructors. Internal bytes may be canonical WTF-8; this obligation is
     /// released only when the cell dies or its arena Context is destroyed.
     pub fn externalOwner(self: *const StringCell) ?*ExternalStringOwner {
-        const address = self.owner_and_gc & ~gc_managed_mask;
-        return if (address == 0) null else @ptrFromInt(address);
+        const owner = priorOwner(self.aux.load(.acquire)) orelse return null;
+        if (stringAuxKind(owner) != .external_owner) return null;
+        const header: *const StringAuxHeader = @ptrCast(owner);
+        const unaligned: *align(1) const ExternalStringOwner = @fieldParentPtr("aux_header", header);
+        return @alignCast(@constCast(unaligned));
     }
 
     pub fn setExternalOwner(self: *StringCell, owner: ?*ExternalStringOwner) void {
-        const address = if (owner) |record| @intFromPtr(record) else 0;
-        std.debug.assert(address & gc_managed_mask == 0);
-        self.owner_and_gc = address | (self.owner_and_gc & gc_managed_mask);
+        const raw_owner: ?*anyopaque = if (owner) |record| @ptrCast(&record.aux_header) else null;
+        const current = self.aux.load(.acquire);
+        if (indexFromAux(current)) |index| {
+            @constCast(index).previous_owner.store(raw_owner, .release);
+            return;
+        }
+        std.debug.assert(current == null or stringAuxKind(current.?) == .external_owner);
+        self.aux.store(raw_owner, .release);
     }
 
     pub fn eql(self: *const StringCell, other: *const StringCell) bool {
@@ -295,8 +509,102 @@ pub const StringCell = struct {
         const state = self.hashState();
         const cached = state & utf16_length_mask;
         if (cached != utf16_length_unknown) return @intCast(cached);
+        if (indexFromAux(self.aux.load(.acquire))) |index| return index.units;
         if (isFlatLatin1(state)) return self.bytes.len;
         return utf16LengthOfWtf8(self.bytes);
+    }
+
+    fn indexAllocator(raw: ?*anyopaque, fallback: std.mem.Allocator) std.mem.Allocator {
+        const owner = priorOwner(raw) orelse return fallback;
+        if (stringAuxKind(owner) != .intern_owner) return fallback;
+        const header: *const StringAuxHeader = @ptrCast(owner);
+        const unaligned: *align(1) const InternStringOwner = @fieldParentPtr("aux_header", header);
+        const intern_owner: *const InternStringOwner = @alignCast(unaligned);
+        return intern_owner.allocator;
+    }
+
+    /// Publish one immutable sparse index. A loser frees its complete candidate;
+    /// an allocation failure leaves the cell byte-for-byte unchanged. Interned
+    /// cells select their table allocator, managed callers pass the realm's
+    /// accounted allocator, and arena callers pass their owning arena.
+    fn publishUtf16Index(
+        self: *const StringCell,
+        fallback_allocator: std.mem.Allocator,
+        units: usize,
+    ) std.mem.Allocator.Error!?*const Utf16Index {
+        const state = self.hashState();
+        if (state & ascii_flag != 0 or isFlatLatin1(state) or self.bytes.len < utf16_index_min_bytes)
+            return null;
+
+        var observed = self.aux.load(.acquire);
+        while (true) {
+            if (indexFromAux(observed)) |index| return index;
+            const allocator = indexAllocator(observed, fallback_allocator);
+            const candidate = try Utf16Index.create(allocator, self.bytes, units, observed);
+            if (@constCast(self).aux.cmpxchgStrong(observed, @ptrCast(&candidate.aux_header), .release, .acquire)) |actual| {
+                candidate.destroy(allocator);
+                observed = actual;
+                continue;
+            }
+            return candidate;
+        }
+    }
+
+    pub fn ensureUtf16Index(
+        self: *const StringCell,
+        fallback_allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!?*const Utf16Index {
+        return self.publishUtf16Index(fallback_allocator, self.utf16Len());
+    }
+
+    /// Release dynamic index backing during the cell owner's normal teardown.
+    /// Static metadata is part of the executable image and is never freed.
+    pub fn deinitUtf16Index(self: *StringCell, allocator: std.mem.Allocator) void {
+        const raw = self.aux.load(.acquire);
+        const index = indexFromAux(raw) orelse return;
+        if (index.aux_header.kind == .static_utf16_index) return;
+        const previous = index.previous_owner.load(.acquire);
+        self.aux.store(previous, .release);
+        @constCast(index).destroy(allocator);
+    }
+
+    pub fn hasUtf16Index(self: *const StringCell) bool {
+        return indexFromAux(self.aux.load(.acquire)) != null;
+    }
+
+    fn linearCodeUnitAt(self: *const StringCell, index: usize) ?Utf16CodeUnit {
+        var iterator = Utf16CodeUnitIterator.init(self.bytes, isFlatLatin1(self.hashState()));
+        var current: usize = 0;
+        while (iterator.next()) |unit| : (current += 1)
+            if (current == index) return unit;
+        return null;
+    }
+
+    /// Exact random UTF-16 read: O(1) for one-byte cells, at most one O(n)
+    /// index construction for long WTF-8 cells, then O(stride) per access.
+    pub fn codeUnitAt(
+        self: *const StringCell,
+        allocator: std.mem.Allocator,
+        index: usize,
+    ) std.mem.Allocator.Error!?Utf16CodeUnit {
+        const state = self.hashState();
+        if (state & ascii_flag != 0 or isFlatLatin1(state)) {
+            if (index >= self.bytes.len) return null;
+            return .{ .unit = self.bytes[index] };
+        }
+        const cached_units: usize = @intCast(state & utf16_length_mask);
+        if (cached_units != utf16_length_unknown and index >= cached_units) return null;
+        if (indexFromAux(self.aux.load(.acquire))) |sparse| return sparse.codeUnitAt(self.bytes, index);
+        if (self.bytes.len >= utf16_index_min_bytes) {
+            const exact_units = if (cached_units == utf16_length_unknown)
+                utf16LengthOfWtf8(self.bytes)
+            else
+                cached_units;
+            if (index >= exact_units) return null;
+            if (try self.publishUtf16Index(allocator, exact_units)) |sparse|
+                return sparse.codeUnitAt(self.bytes, index);
+        }
+        return self.linearCodeUnitAt(index);
     }
 };
 
@@ -317,7 +625,19 @@ pub fn staticCell(comptime s: []const u8) *const StringCell {
         // equal): a latin1-but-not-ASCII literal is stored flat when the master
         // switch is on.
         const stored = comptimeStored(s, h);
-        const cell = StringCell{ .bytes = stored, .hash = h };
+        const needs_index = h & ascii_flag == 0 and !isFlatLatin1(h) and stored.len >= utf16_index_min_bytes;
+        const checkpoints = staticUtf16Checkpoints(stored);
+        const index = Utf16Index{
+            .aux_header = .{ .kind = .static_utf16_index },
+            .previous_owner = .init(null),
+            .units = utf16LengthOfWtf8(stored),
+            .checkpoints = &checkpoints,
+        };
+        const cell = StringCell{
+            .bytes = stored,
+            .hash = h,
+            .aux = .init(if (needs_index) @ptrCast(@constCast(&index.aux_header)) else null),
+        };
     }.cell;
 }
 
@@ -775,6 +1095,7 @@ pub const InternTable = struct {
     };
 
     allocator: std.mem.Allocator,
+    string_owner: std.atomic.Value(?*InternStringOwner) = .init(null),
     shards: [shard_count]Shard = @splat(.{}),
     /// `placement_context` is readable only after the release-published ready
     /// state. The initializing owner inserts the first cell before publishing;
@@ -787,18 +1108,34 @@ pub const InternTable = struct {
         return .{ .allocator = allocator };
     }
 
+    fn ensureStringOwner(self: *InternTable) std.mem.Allocator.Error!*InternStringOwner {
+        if (self.string_owner.load(.acquire)) |owner| return owner;
+        const candidate = try self.allocator.create(InternStringOwner);
+        candidate.* = .{ .allocator = self.allocator };
+        if (self.string_owner.cmpxchgStrong(null, candidate, .release, .acquire)) |owner| {
+            self.allocator.destroy(candidate);
+            return owner.?;
+        }
+        return candidate;
+    }
+
     pub fn deinit(self: *InternTable) void {
+        const string_owner = self.string_owner.load(.acquire);
+        const string_allocator = if (string_owner) |owner| owner.allocator else self.allocator;
         for (&self.shards) |*shard| {
             var it = shard.map.iterator();
             while (it.next()) |entry| {
                 // Key (WTF-8 content) and cell.bytes (stored image, possibly flat
                 // latin1) are separate allocations — free both.
                 self.allocator.free(entry.key_ptr.bytes);
+                entry.value_ptr.*.deinitUtf16Index(string_allocator);
                 self.allocator.free(entry.value_ptr.*.bytes);
                 self.allocator.destroy(entry.value_ptr.*);
             }
             shard.map.deinit(self.allocator);
         }
+        if (string_owner) |owner| owner.allocator.destroy(owner);
+        self.string_owner.store(null, .release);
     }
 
     /// Return the canonical cell for `bytes`, creating + inserting it on first
@@ -821,6 +1158,7 @@ pub const InternTable = struct {
                 };
                 const cell = self.internWithContext(bytes, h, context) catch |err| {
                     self.resetEmptyShardStorage();
+                    self.resetStringOwner();
                     self.placement_state.store(placement_empty, .release);
                     return err;
                 };
@@ -843,6 +1181,10 @@ pub const InternTable = struct {
             shard.map.deinit(self.allocator);
             shard.map = .empty;
         }
+    }
+
+    fn resetStringOwner(self: *InternTable) void {
+        if (self.string_owner.swap(null, .acq_rel)) |owner| owner.allocator.destroy(owner);
     }
 
     fn internWithContext(
@@ -879,9 +1221,10 @@ pub const InternTable = struct {
         const canon = try self.allocator.dupe(u8, bytes);
         const stored = try storedImage(self.allocator, canon, content_hash); // consumes canon
         errdefer self.allocator.free(stored);
+        const string_owner = try self.ensureStringOwner();
         const cell = try self.allocator.create(StringCell);
         errdefer self.allocator.destroy(cell);
-        cell.* = .{ .bytes = stored, .hash = content_hash };
+        cell.* = .{ .bytes = stored, .hash = content_hash, .aux = .init(@ptrCast(&string_owner.aux_header)) };
         result.key_ptr.bytes = key;
         result.value_ptr.* = cell;
         inserted = false;
@@ -1472,6 +1815,150 @@ test "strcell: ASCII affixes materialize one final backing image" {
     try std.testing.expectEqual(@as(usize, 1), fail_cell.allocations);
     try std.testing.expectEqual(@as(usize, 1), fail_cell.deallocations);
     try std.testing.expectEqual(fail_cell.allocated_bytes, fail_cell.freed_bytes);
+}
+
+fn repeatedTestBytes(comptime pattern: []const u8, comptime count: usize) [pattern.len * count]u8 {
+    var result: [pattern.len * count]u8 = undefined;
+    for (0..count) |index|
+        @memcpy(result[index * pattern.len ..][0..pattern.len], pattern);
+    return result;
+}
+
+test "strcell: UTF-16 stride index is exact across representation boundaries" {
+    const a = std.testing.allocator;
+    const pattern = "A\xc3\xa9\xe6\xb0\xb4\xf0\x9f\x98\x80\xed\xa0\x80x";
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(a);
+    for (0..40) |_| try source.appendSlice(a, pattern);
+    const cell = try createCell(a, source.items);
+    defer {
+        cell.deinitUtf16Index(a);
+        a.free(cell.bytes);
+        a.destroy(cell);
+    }
+
+    // Exercise the oversized-embedding sentinel without allocating a giant
+    // fixture: an out-of-bounds probe stays allocation-free, while the first
+    // in-bounds read publishes the exact length alongside the checkpoints.
+    const exact_units = utf16LengthOfWtf8(cell.bytes);
+    @atomicStore(u64, &cell.hash, (cell.hashState() & ~utf16_length_mask) | utf16_length_unknown, .monotonic);
+    var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expect((try cell.codeUnitAt(unavailable.allocator(), exact_units)) == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+    try std.testing.expect(cell.aux.load(.acquire) == null);
+    var expected = Utf16CodeUnitIterator.init(cell.bytes, false);
+    var unit_index: usize = 0;
+    while (expected.next()) |unit| : (unit_index += 1) {
+        const actual = (try cell.codeUnitAt(a, unit_index)).?;
+        try std.testing.expectEqual(unit.unit, actual.unit);
+        try std.testing.expectEqual(unit.astral, actual.astral);
+    }
+    try std.testing.expectEqual(exact_units, unit_index);
+    try std.testing.expectEqual(exact_units, cell.utf16Len());
+    const raw_index = cell.aux.load(.acquire).?;
+    try std.testing.expectEqual(StringAuxKind.utf16_index, stringAuxKind(raw_index));
+    const sparse = StringCell.indexFromAux(raw_index).?;
+    try std.testing.expectEqual(Utf16Index.checkpointCount(unit_index), sparse.checkpoints.len);
+    try std.testing.expect((try cell.codeUnitAt(a, unit_index)) == null);
+}
+
+test "strcell: UTF-16 index allocation failures leave the cell unchanged" {
+    const a = std.testing.allocator;
+    const pattern = "\xe6\xb0\xb4\xf0\x9f\x98\x80\xed\xa0\x80";
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(a);
+    for (0..40) |_| try source.appendSlice(a, pattern);
+    const cell = try createCell(a, source.items);
+    defer {
+        cell.deinitUtf16Index(a);
+        a.free(cell.bytes);
+        a.destroy(cell);
+    }
+
+    for (0..2) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, cell.codeUnitAt(failing.allocator(), 100));
+        try std.testing.expect(cell.aux.load(.acquire) == null);
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+    try std.testing.expect((try cell.codeUnitAt(a, 100)) != null);
+}
+
+test "strcell: concurrent UTF-16 index publication retains one complete winner" {
+    const a = std.testing.allocator;
+    const pattern = "\xf0\x9f\x98\x80\xe6\xb0\xb4\xed\xa0\x80x";
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(a);
+    for (0..64) |_| try source.appendSlice(a, pattern);
+    const cell = try createCell(a, source.items);
+    defer {
+        cell.deinitUtf16Index(a);
+        a.free(cell.bytes);
+        a.destroy(cell);
+    }
+
+    const Worker = struct {
+        fn run(target: *const StringCell, allocator: std.mem.Allocator, seed: usize) void {
+            for (0..200) |iteration| {
+                const index = (seed * 31 + iteration * 17) % target.utf16Len();
+                std.debug.assert((target.codeUnitAt(allocator, index) catch unreachable) != null);
+            }
+        }
+    };
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ cell, a, index });
+    for (threads) |thread| thread.join();
+    try std.testing.expectEqual(StringAuxKind.utf16_index, stringAuxKind(cell.aux.load(.acquire).?));
+}
+
+test "strcell: interned UTF-16 index uses its stable owner allocator" {
+    const a = std.testing.allocator;
+    var table = InternTable.init(a);
+    defer table.deinit();
+    const source = repeatedTestBytes("\xe6\xb0\xb4\xf0\x9f\x98\x80", 32);
+    const cell = try table.intern(&source);
+    var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expect((try cell.codeUnitAt(unavailable.allocator(), 70)) != null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+    try std.testing.expectEqual(StringAuxKind.utf16_index, stringAuxKind(cell.aux.load(.acquire).?));
+}
+
+test "strcell: UTF-16 index preserves external ownership until release" {
+    const Callback = struct {
+        fn run(_: ?*anyopaque, _: ?*anyopaque, _: usize) callconv(.c) void {}
+    };
+    const a = std.testing.allocator;
+    const source = repeatedTestBytes("\xe6\xb0\xb4\xf0\x9f\x98\x80", 32);
+    const cell = try createCell(a, &source);
+    defer {
+        cell.deinitUtf16Index(a);
+        a.free(cell.bytes);
+        a.destroy(cell);
+    }
+    var owner = ExternalStringOwner{
+        .pointer = null,
+        .len = source.len,
+        .context = null,
+        .deallocator = Callback.run,
+    };
+    cell.setExternalOwner(&owner);
+    try std.testing.expectEqual(&owner, cell.externalOwner().?);
+    try std.testing.expect((try cell.codeUnitAt(a, 70)) != null);
+    try std.testing.expect(cell.hasUtf16Index());
+    try std.testing.expectEqual(&owner, cell.externalOwner().?);
+    cell.setExternalOwner(null);
+    try std.testing.expect(cell.externalOwner() == null);
+}
+
+test "strcell: static UTF-16 index is allocation free" {
+    const source = comptime repeatedTestBytes("\xe6\xb0\xb4\xf0\x9f\x98\x80", 32);
+    const cell = staticCell(&source);
+    try std.testing.expectEqual(StringAuxKind.static_utf16_index, stringAuxKind(cell.aux.load(.acquire).?));
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expect((try cell.codeUnitAt(unavailable.allocator(), 70)) != null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
 }
 
 test "strcell: StringCell stays a compact NaN-box payload target" {

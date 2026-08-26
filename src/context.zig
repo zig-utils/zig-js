@@ -34246,6 +34246,38 @@ test "enable_gc: runtime StringCells are traced and finalized" {
     try std.testing.expectEqual(@as(usize, 3), stats.strings);
 }
 
+test "enable_gc: moving StringCell preserves and finalizes UTF-16 index" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    const expected = try ctx.evaluate(
+        \\globalThis.__movingIndexedString = "水😀\ud800x".repeat(64);
+        \\__movingIndexedString.charCodeAt(130)
+    );
+    const before_value = ctx.global_object.getOwn("__movingIndexedString") orelse
+        return error.TestUnexpectedResult;
+    const before = before_value.asStringCell();
+    try std.testing.expect(before.isGcManaged());
+    try std.testing.expect(before.hasUtf16Index());
+    const stable_id = heap.cellMetadata(@constCast(before)).?.id;
+
+    const moved = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    const after = ctx.global_object.getOwn("__movingIndexedString").?.asStringCell();
+    try std.testing.expect(before != after);
+    try std.testing.expectEqual(stable_id, heap.cellMetadata(@constCast(after)).?.id);
+    try std.testing.expect(after.isGcManaged());
+    try std.testing.expect(after.hasUtf16Index());
+    try std.testing.expectEqual(expected.asNum(), (try ctx.evaluate("__movingIndexedString.charCodeAt(130)")).asNum());
+
+    _ = try ctx.evaluate("globalThis.__movingIndexedString = undefined");
+    ctx.collectGarbage();
+}
+
 test "enable_gc: Object.prototype.toString publishes managed affixed strings" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

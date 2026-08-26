@@ -26709,22 +26709,47 @@ test "private external ZigString callbacks are exact-once and post-sweep" {
     const utf16_value = privateValueFrom(global, utf16_encoded) orelse return error.ValueInitFailed;
     try std.testing.expectEqualStrings("A😀\xed\xa0\x80Z", utf16_value.asStr());
 
+    var indexed_utf16: [160]u16 = undefined;
+    for (0..32) |index|
+        @memcpy(indexed_utf16[index * 5 ..][0..5], &[_]u16{ 'A', 0xd83d, 0xde00, 0xd800, 'Z' });
+    var indexed_state = State{
+        .context = global,
+        .expected_context = undefined,
+        .expected_pointer = @ptrCast(&indexed_utf16),
+        .expected_len = indexed_utf16.len,
+    };
+    indexed_state.expected_context = &indexed_state;
+    const indexed_input = PrivateZigString{
+        .tagged_ptr = @intFromPtr(&indexed_utf16) | (@as(usize, 1) << 63),
+        .len = indexed_utf16.len,
+    };
+    const indexed_encoded = ZigString__external(&indexed_input, global, &indexed_state, State.release);
+    const indexed_value = privateValueFrom(global, indexed_encoded) orelse return error.ValueInitFailed;
+    try std.testing.expect((try indexed_value.asStringCell().codeUnitAt(context.gpa, 100)) != null);
+    try std.testing.expect(indexed_value.asStringCell().hasUtf16Index());
+
     try context.global_object.setOwn(context.arena(), context.root_shape, "__external_latin1", latin1_value);
     try context.global_object.setOwn(context.arena(), context.root_shape, "__external_utf16", utf16_value);
+    try context.global_object.setOwn(context.arena(), context.root_shape, "__external_indexed_utf16", indexed_value);
     JSGarbageCollect(global);
     try std.testing.expectEqual(@as(usize, 0), latin1_state.calls);
     try std.testing.expectEqual(@as(usize, 0), utf16_state.calls);
+    try std.testing.expectEqual(@as(usize, 0), indexed_state.calls);
 
     try context.global_object.setOwn(context.arena(), context.root_shape, "__external_latin1", Value.undef());
     try context.global_object.setOwn(context.arena(), context.root_shape, "__external_utf16", Value.undef());
+    try context.global_object.setOwn(context.arena(), context.root_shape, "__external_indexed_utf16", Value.undef());
     JSGarbageCollect(global);
     try std.testing.expectEqual(@as(usize, 1), latin1_state.calls);
     try std.testing.expect(latin1_state.exact_args and latin1_state.reentered);
     try std.testing.expectEqual(@as(usize, 1), utf16_state.calls);
     try std.testing.expect(utf16_state.exact_args and utf16_state.reentered);
+    try std.testing.expectEqual(@as(usize, 1), indexed_state.calls);
+    try std.testing.expect(indexed_state.exact_args and indexed_state.reentered);
     JSGarbageCollect(global);
     try std.testing.expectEqual(@as(usize, 1), latin1_state.calls);
     try std.testing.expectEqual(@as(usize, 1), utf16_state.calls);
+    try std.testing.expectEqual(@as(usize, 1), indexed_state.calls);
 
     const u16_releases = private_external_u16_release_count.load(.monotonic);
     const transferred_raw = std.c.malloc(4 * @sizeOf(u16)) orelse return error.OutOfMemory;
@@ -26764,6 +26789,7 @@ test "private external ZigString callbacks are exact-once and post-sweep" {
     if (group.release()) group.destroy();
     try std.testing.expectEqual(@as(usize, 3), latin1_state.calls);
     try std.testing.expectEqual(@as(usize, 1), utf16_state.calls);
+    try std.testing.expectEqual(@as(usize, 1), indexed_state.calls);
 }
 
 test "C-API: JSValueIsEqual uses JavaScript abstract equality semantics" {

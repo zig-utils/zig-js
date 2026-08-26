@@ -44,6 +44,7 @@ const cldr_tzalias = @import("cldr_tzalias.zig");
 const wasm_api = @import("wasm/api.zig");
 const fetch_headers = @import("fetch_headers.zig");
 const strcell = @import("strcell.zig");
+const StringCell = strcell.StringCell;
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -10833,62 +10834,22 @@ pub const Interpreter = struct {
         return units;
     }
 
-    const StringCodeUnit = struct {
-        unit: u16,
-        astral: ?u21 = null,
-    };
+    const StringCodeUnit = strcell.Utf16CodeUnit;
 
     const StringCodeUnitIterator = struct {
-        bytes: []const u8,
-        flat_latin1: bool,
-        byte_index: usize = 0,
-        pending_low: ?u16 = null,
+        inner: strcell.Utf16CodeUnitIterator,
 
         fn initValue(v: Value) StringCodeUnitIterator {
             std.debug.assert(v.isString());
-            return .{ .bytes = v.asStr(), .flat_latin1 = v.strIsFlatLatin1() };
+            return .{ .inner = .init(v.asStr(), v.strIsFlatLatin1()) };
         }
 
         fn initWtf8(bytes: []const u8) StringCodeUnitIterator {
-            return .{ .bytes = bytes, .flat_latin1 = false };
+            return .{ .inner = .init(bytes, false) };
         }
 
         fn next(self: *StringCodeUnitIterator) ?StringCodeUnit {
-            if (self.pending_low) |unit| {
-                self.pending_low = null;
-                return .{ .unit = unit };
-            }
-            if (self.byte_index >= self.bytes.len) return null;
-            if (self.flat_latin1) {
-                const unit = self.bytes[self.byte_index];
-                self.byte_index += 1;
-                return .{ .unit = unit };
-            }
-
-            const i = self.byte_index;
-            if (wtf8SurrogateAt(self.bytes, i)) |cp| {
-                self.byte_index += 3;
-                return .{ .unit = @intCast(cp) };
-            }
-
-            const seq_len = utf8SeqLen(self.bytes, i);
-            if (seq_len == 4 and i + seq_len <= self.bytes.len) {
-                if (std.unicode.utf8Decode(self.bytes[i .. i + seq_len])) |cp| {
-                    if (cp > 0xFFFF) {
-                        const u = cp - 0x10000;
-                        self.byte_index += seq_len;
-                        self.pending_low = @intCast(0xDC00 + (u & 0x3FF));
-                        return .{ .unit = @intCast(0xD800 + (u >> 10)), .astral = cp };
-                    }
-                } else |_| {}
-            }
-
-            const cp = if (seq_len > 1 and i + seq_len <= self.bytes.len)
-                std.unicode.utf8Decode(self.bytes[i .. i + seq_len]) catch @as(u21, self.bytes[i])
-            else
-                @as(u21, self.bytes[i]);
-            self.byte_index += seq_len;
-            return .{ .unit = @intCast(cp & 0xFFFF) };
+            return self.inner.next();
         }
     };
 
@@ -10926,11 +10887,6 @@ pub const Interpreter = struct {
         return buf.toOwnedSlice(self.arena);
     }
 
-    fn stringIndexValue(self: *Interpreter, s: []const u8, index: usize) EvalError!?Value {
-        const cu = stringCodeUnitAt(s, index) orelse return null;
-        return try self.stringValueFromCodeUnit(cu.unit);
-    }
-
     fn stringValueFromCodeUnit(self: *Interpreter, unit: u16) EvalError!Value {
         return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(unit));
     }
@@ -10957,12 +10913,8 @@ pub const Interpreter = struct {
     /// cell takes the exact representation-aware path.
     pub fn stringIndexValueOf(self: *Interpreter, v: Value, index: usize) EvalError!?Value {
         std.debug.assert(v.isString());
-        if (v.strIsFlatLatin1() or v.strIsAscii()) {
-            const flat = v.asStr();
-            if (index >= flat.len) return null;
-            return try self.stringValueFromCodeUnit(flat[index]);
-        }
-        return self.stringIndexValue(v.asStr(), index);
+        const unit = try v.asStringCell().codeUnitAt(gc_mod.temporaryAllocator(self.arena), index) orelse return null;
+        return try self.stringValueFromCodeUnit(unit.unit);
     }
 
     fn ensureStringAppend(self: *Interpreter, buf: *const std.ArrayListUnmanaged(u8), add_len: usize) EvalError!void {
@@ -11047,18 +10999,36 @@ pub const Interpreter = struct {
         return s;
     }
 
-    fn stringPosition(self: *Interpreter, s: []const u8, v: Value, ascii: bool) EvalError!?usize {
+    fn stringLengthForAccess(s: []const u8, ascii: bool, cell: ?*const StringCell) usize {
+        return if (cell) |string_cell| string_cell.utf16Len() else utf16LenOfStringA(s, ascii);
+    }
+
+    fn stringCodeUnitAtAccess(
+        self: *Interpreter,
+        s: []const u8,
+        index: usize,
+        ascii: bool,
+        cell: ?*const StringCell,
+    ) EvalError!?StringCodeUnit {
+        if (cell) |string_cell| {
+            const unit = try string_cell.codeUnitAt(gc_mod.temporaryAllocator(self.arena), index) orelse return null;
+            return .{ .unit = unit.unit, .astral = unit.astral };
+        }
+        return stringCodeUnitAtA(s, index, ascii);
+    }
+
+    fn stringPosition(self: *Interpreter, s: []const u8, v: Value, ascii: bool, cell: ?*const StringCell) EvalError!?usize {
         const n = try self.toNumberV(v);
         const pos = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
-        if (pos < 0 or pos >= @as(f64, @floatFromInt(utf16LenOfStringA(s, ascii)))) return null;
+        if (pos < 0 or pos >= @as(f64, @floatFromInt(stringLengthForAccess(s, ascii, cell)))) return null;
         return @intFromFloat(pos);
     }
 
-    fn stringClampPosition(self: *Interpreter, s: []const u8, v: Value, default_pos: usize, ascii: bool) EvalError!usize {
+    fn stringClampPosition(self: *Interpreter, s: []const u8, v: Value, default_pos: usize, ascii: bool, cell: ?*const StringCell) EvalError!usize {
         if (v.isUndefined()) return default_pos;
         const n = try self.toNumberV(v);
         if (std.math.isNan(n) or n <= 0) return 0;
-        const len = utf16LenOfStringA(s, ascii);
+        const len = stringLengthForAccess(s, ascii, cell);
         if (n >= @as(f64, @floatFromInt(len))) return len;
         return @intFromFloat(@trunc(n));
     }
@@ -16161,7 +16131,7 @@ pub const Interpreter = struct {
                 if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString() and o.getOwn(name) == null) {
                     const bp = o.boxedPrimitive().?;
                     if (eq(name, "valueOf") or eq(name, "toString")) return bp;
-                    if (try self.stringMethod(try bp.asWtf8(self.arena), name, args, true, bp.strIsAscii())) |r| return r;
+                    if (try self.stringMethod(try bp.asWtf8(self.arena), name, args, true, bp.asStringCell())) |r| return r;
                 }
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
                 // Generic Array.prototype methods on an array-like `this`
@@ -16172,7 +16142,7 @@ pub const Interpreter = struct {
                 // Generic String.prototype methods coerce `this` to string
                 // (`String.prototype.split.call(obj)`).
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
-                    return try self.stringMethod(try self.toStringWtf8(recv), name, args, true, false);
+                    return try self.stringMethod(try self.toStringWtf8(recv), name, args, true, null);
                 }
                 // `Object.prototype.valueOf` for an ordinary object returns the
                 // object itself (ToObject(this)). Reached only after the kind
@@ -16190,15 +16160,15 @@ pub const Interpreter = struct {
             },
             .string => {
                 if (eq(name, "valueOf") or eq(name, "toString")) return recv;
-                return try self.stringMethod(try recv.asWtf8(self.arena), name, args, true, recv.strIsAscii());
+                return try self.stringMethod(try recv.asWtf8(self.arena), name, args, true, recv.asStringCell());
             },
             .number => {
                 if (try self.numberMethod(recv.asNum(), name, args)) |r| return r;
-                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, false);
+                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, null);
             },
             .boolean => {
                 if (try self.booleanMethod(recv.asBool(), name, args)) |r| return r;
-                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, false);
+                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, null);
             },
             else => {},
         }
@@ -17567,11 +17537,11 @@ pub const Interpreter = struct {
         return @intFromFloat(@trunc(n));
     }
 
-    // `s_ascii` is the receiver string's cached `StringCell.isAscii()` flag (or
-    // false when the caller only has coerced bytes with no cell). When true, the
-    // WTF-8 bytes are a flat 1-byte-per-unit image so UTF-16↔byte offset
-    // conversions are O(1) — used by indexOf/lastIndexOf to stay O(n) in a loop.
-    fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool, s_ascii: bool) EvalError!?Value {
+    // `s_cell` retains immutable receiver metadata when ToString returned an
+    // existing StringData cell. Raw coerced bytes pass null. ASCII byte-offset
+    // fast paths and the bounded non-ASCII index are selected from the cell.
+    fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool, s_cell: ?*const StringCell) EvalError!?Value {
+        const s_ascii = if (s_cell) |cell| cell.isAscii() else false;
         if (check_protocol and eq(name, "replaceAll"))
             if (try self.replaceAllProtocolDispatch(try Value.strAlloc(self.arena, s), args)) |r| return r;
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
@@ -17581,13 +17551,13 @@ pub const Interpreter = struct {
         // use the protocol for methods whose spec algorithms are implemented.
         if (check_protocol) if (try self.stringProtocolDispatch(name, try Value.strAlloc(self.arena, s), args)) |r| return r;
         if (eq(name, "charAt")) {
-            const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.str("");
-            const cu = stringCodeUnitAtA(s, pos, s_ascii) orelse return Value.str("");
+            const pos = try self.stringPosition(s, arg0(args), s_ascii, s_cell) orelse return Value.str("");
+            const cu = try self.stringCodeUnitAtAccess(s, pos, s_ascii, s_cell) orelse return Value.str("");
             return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
         if (eq(name, "charCodeAt")) {
-            const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.num(std.math.nan(f64));
-            const cu = stringCodeUnitAtA(s, pos, s_ascii) orelse return Value.num(std.math.nan(f64));
+            const pos = try self.stringPosition(s, arg0(args), s_ascii, s_cell) orelse return Value.num(std.math.nan(f64));
+            const cu = try self.stringCodeUnitAtAccess(s, pos, s_ascii, s_cell) orelse return Value.num(std.math.nan(f64));
             return Value.num(@floatFromInt(cu.unit));
         }
         if (eq(name, "indexOf")) {
@@ -17597,7 +17567,7 @@ pub const Interpreter = struct {
             const sub = try self.toStringWtf8(arg0(args));
             // ECMA-262 String.prototype.indexOf steps 5–10: both `start` and
             // StringIndexOf are defined over UTF-16 code units.
-            const len = utf16LenOfStringA(s, s_ascii);
+            const len = stringLengthForAccess(s, s_ascii, s_cell);
             const start = try self.clampPos(arg(args, 1), len);
             return Value.num(if (try self.stringIndexOfUtf16(s, sub, start, len, s_ascii)) |index| @floatFromInt(index) else -1);
         }
@@ -17606,7 +17576,7 @@ pub const Interpreter = struct {
             const sub = try self.toStringWtf8(arg0(args));
             // ECMA-262 String.prototype.includes steps 7–10: positions and
             // StringIndexOf operate on UTF-16 code units, not backing bytes.
-            const len = utf16LenOfStringA(s, s_ascii);
+            const len = stringLengthForAccess(s, s_ascii, s_cell);
             const pos = try self.clampPos(arg(args, 1), len);
             return Value.boolVal((try self.stringIndexOfUtf16(s, sub, pos, len, s_ascii)) != null);
         }
@@ -17615,7 +17585,7 @@ pub const Interpreter = struct {
             const sub = try self.toStringWtf8(arg0(args));
             // ECMA-262 String.prototype.startsWith steps 7–15: `start` and the
             // extracted substring are UTF-16 code-unit boundaries.
-            const len = utf16LenOfStringA(s, s_ascii);
+            const len = stringLengthForAccess(s, s_ascii, s_cell);
             const pos = try self.clampPos(arg(args, 1), len);
             const sub_len = utf16LenOfStringA(sub, stringBytesAreAscii(sub));
             if (sub_len > len - pos) return Value.boolVal(false);
@@ -17626,23 +17596,23 @@ pub const Interpreter = struct {
             const sub = try self.toStringWtf8(arg0(args));
             // ECMA-262 String.prototype.endsWith steps 7–14: compute the
             // candidate substring entirely in UTF-16 code-unit space.
-            const len = utf16LenOfStringA(s, s_ascii);
+            const len = stringLengthForAccess(s, s_ascii, s_cell);
             const end_pos = if (args.len > 1 and !args[1].isUndefined()) try self.clampPos(args[1], len) else len;
             const sub_len = utf16LenOfStringA(sub, stringBytesAreAscii(sub));
             if (sub_len > end_pos) return Value.boolVal(false);
             return Value.boolVal(stringCodeUnitsEqualAt(s, sub, end_pos - sub_len, s_ascii));
         }
         if (eq(name, "slice")) {
-            const len = utf16LenOfStringA(s, s_ascii);
+            const len = stringLengthForAccess(s, s_ascii, s_cell);
             const start = try relIndex(self, arg0(args), len, 0);
             const end = try relIndex(self, arg(args, 1), len, @floatFromInt(len));
             if (start < end) return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, start, end));
             return Value.str("");
         }
         if (eq(name, "substring")) {
-            const len = utf16LenOfStringA(s, s_ascii);
-            var a0 = try self.stringClampPosition(s, arg0(args), 0, s_ascii);
-            var b0 = try self.stringClampPosition(s, arg(args, 1), len, s_ascii);
+            const len = stringLengthForAccess(s, s_ascii, s_cell);
+            var a0 = try self.stringClampPosition(s, arg0(args), 0, s_ascii, s_cell);
+            var b0 = try self.stringClampPosition(s, arg(args, 1), len, s_ascii, s_cell);
             if (a0 > b0) {
                 const t = a0;
                 a0 = b0;
@@ -17739,12 +17709,16 @@ pub const Interpreter = struct {
             if (lim == 0) return result;
             if (sep.len == 0) {
                 // Empty separator splits into individual UTF-16 code units (an
-                // astral character becomes its two surrogate halves), not bytes.
-                const cu_len = utf16LenOfStringA(s, s_ascii);
-                var i: usize = 0;
-                while (i < cu_len) : (i += 1) {
+                // astral character becomes its two surrogate halves), not
+                // bytes. Stream once instead of restarting at byte zero for
+                // every result, which would make a long non-ASCII split O(n²).
+                var code_units = if (s_cell) |cell|
+                    StringCodeUnitIterator.initValue(Value.strCell(cell))
+                else
+                    StringCodeUnitIterator.initWtf8(s);
+                while (code_units.next()) |code_unit| {
                     if (out.items.len >= lim) return result;
-                    try out.append(self.arena, try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, i, i + 1)));
+                    try out.append(self.arena, try self.stringValueFromCodeUnit(code_unit.unit));
                 }
                 return result;
             }
@@ -17761,7 +17735,7 @@ pub const Interpreter = struct {
             // ECMA-262 split steps 14–15 repeatedly apply StringIndexOf and
             // form substrings in UTF-16 code-unit space. A byte split cannot
             // observe a surrogate half inside an astral scalar.
-            const s_len = utf16LenOfStringA(s, s_ascii);
+            const s_len = stringLengthForAccess(s, s_ascii, s_cell);
             const sep_len = utf16LenOfString(sep);
             const scratch = self.scratch_allocator orelse self.arena;
             var positions = try self.stringMatchPositionsUtf16(s, sep, s_len, s_ascii, lim);
@@ -17785,12 +17759,12 @@ pub const Interpreter = struct {
             const n = try self.toNumberV(arg0(args));
             const fl = if (std.math.isNan(n)) 0 else @trunc(n);
             if (std.math.isInf(fl)) return Value.undef();
-            const slen = utf16LenOfStringA(s, s_ascii);
+            const slen = stringLengthForAccess(s, s_ascii, s_cell);
             const slen_f = @as(f64, @floatFromInt(slen));
             if (fl < -slen_f or fl >= slen_f) return Value.undef();
             const idx: i64 = if (fl < 0) @as(i64, @intCast(slen)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
             if (idx < 0 or idx >= slen) return Value.undef();
-            const cu = stringCodeUnitAtA(s, @intCast(idx), s_ascii) orelse return Value.undef();
+            const cu = try self.stringCodeUnitAtAccess(s, @intCast(idx), s_ascii, s_cell) orelse return Value.undef();
             return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
         if (eq(name, "trimStart")) return try Value.strAlloc(self.arena, jsTrim(s, true, false));
@@ -17839,7 +17813,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "padStart") or eq(name, "padEnd")) {
             const target = toLen(try self.toNumberV(arg0(args)));
-            const len = utf16LenOfStringA(s, s_ascii);
+            const len = stringLengthForAccess(s, s_ascii, s_cell);
             if (len >= target) return try Value.strOwned(self.arena, try self.arena.dupe(u8, s));
             const pad = if (args.len > 1 and !args[1].isUndefined()) try self.toStringWtf8(args[1]) else " ";
             const pad_units = utf16LenOfString(pad);
@@ -17899,7 +17873,7 @@ pub const Interpreter = struct {
             // String pattern: replace the first occurrence (or all for replaceAll).
             const pat = try self.toStringWtf8(arg0(args));
             const template: []const u8 = if (is_func) "" else try self.toStringWtf8(repl_val);
-            const s_len = utf16LenOfStringA(s, s_ascii);
+            const s_len = stringLengthForAccess(s, s_ascii, s_cell);
             const pat_len = utf16LenOfString(pat);
             const scratch = self.scratch_allocator orelse self.arena;
             var positions: std.ArrayListUnmanaged(u32) = .empty;
@@ -17940,11 +17914,11 @@ pub const Interpreter = struct {
         if (eq(name, "codePointAt")) {
             // ToIntegerOrInfinity(pos): a position outside [0, len) yields undefined
             // (so a negative position is undefined, not clamped to index 0).
-            const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.undef();
-            const cu = stringCodeUnitAtA(s, pos, s_ascii) orelse return Value.undef();
+            const pos = try self.stringPosition(s, arg0(args), s_ascii, s_cell) orelse return Value.undef();
+            const cu = try self.stringCodeUnitAtAccess(s, pos, s_ascii, s_cell) orelse return Value.undef();
             if (cu.astral) |cp| return Value.num(@floatFromInt(cp));
             if (isHighSurrogate(cu.unit)) {
-                if (stringCodeUnitAtA(s, pos + 1, s_ascii)) |next| if (isLowSurrogate(next.unit)) {
+                if (try self.stringCodeUnitAtAccess(s, pos + 1, s_ascii, s_cell)) |next| if (isLowSurrogate(next.unit)) {
                     const cp: u21 = 0x10000 + ((@as(u21, cu.unit) - 0xD800) << 10) + (@as(u21, next.unit) - 0xDC00);
                     return Value.num(@floatFromInt(cp));
                 };
@@ -17957,7 +17931,7 @@ pub const Interpreter = struct {
             // the match must start at or before the clamped position.
             const sub = try self.toStringWtf8(arg0(args));
             // `position` and the returned index are UTF-16 code-unit offsets.
-            const cu_len = utf16LenOfStringA(s, s_ascii);
+            const cu_len = stringLengthForAccess(s, s_ascii, s_cell);
             const np = try self.toNumberV(arg(args, 1));
             const limit_cu: usize = if (std.math.isNan(np)) cu_len else if (np <= 0)
                 0
@@ -17968,7 +17942,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "substr")) {
             // `substr(start, length)`: start may count from the end.
-            const size = utf16LenOfStringA(s, s_ascii);
+            const size = stringLengthForAccess(s, s_ascii, s_cell);
             const start = try relIndex(self, arg0(args), size, 0);
             const remaining = size - start;
             const len: usize = if (args.len > 1 and !arg(args, 1).isUndefined()) blk: {
@@ -35915,7 +35889,13 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
                 if (try self.replaceAllProtocolDispatch(this, args)) |r| return r;
             if (try self.stringProtocolDispatch(name, this, args)) |r| return r;
             const s = try self.toStringWtf8(this);
-            return (try self.stringMethod(s, name, args, false, this.isString() and this.strIsAscii())) orelse Value.undef();
+            const cell: ?*const StringCell = if (this.isString())
+                this.asStringCell()
+            else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isString())
+                this.asObj().boxedPrimitive().?.asStringCell()
+            else
+                null;
+            return (try self.stringMethod(s, name, args, false, cell)) orelse Value.undef();
         }
     }.call;
 }
@@ -36395,7 +36375,8 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, op, "matchAll")) {
                 return try self.regexpMatchAll(this, str);
             }
-            return (try self.stringMethod(str, op, &.{this}, false, str_src.isString() and str_src.strIsAscii())) orelse Value.undef();
+            const cell: ?*const StringCell = if (str_src.isString()) str_src.asStringCell() else null;
+            return (try self.stringMethod(str, op, &.{this}, false, cell)) orelse Value.undef();
         }
     }.call;
 }
@@ -53325,6 +53306,66 @@ test "interpreter string length and indexing" {
         \\  new String(latin1).length + new String(bmp).length + new String(astral).length +
         \\  new String(lone).length + new String(mixed).length
     )).asNum());
+}
+
+test "String indexed access publishes one bounded immutable cell index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..64) |_| try source.appendSlice(a, "A\xc3\xa9\xe6\xb0\xb4\xf0\x9f\x98\x80\xed\xa0\x80x");
+    const string = try Value.strAlloc(a, source.items);
+    try std.testing.expect(!string.asStringCell().hasUtf16Index());
+    const bytes = try string.asWtf8(a);
+    const char_code = (try machine.stringMethod(bytes, "charCodeAt", &.{Value.num(100)}, false, string.asStringCell())).?;
+    try std.testing.expect(char_code.isNumber());
+    try std.testing.expect(string.asStringCell().hasUtf16Index());
+    const primitive = try machine.getPrimitiveMember(string, "100");
+    const wrapper = try machine.makeWrapper(string);
+    const boxed = try machine.getProperty(wrapper, "100");
+    try std.testing.expect(primitive.isString() and boxed.isString());
+    try std.testing.expectEqual(@as(f64, @floatFromInt(Interpreter.stringCodeUnitAt(bytes, 100).?.unit)), char_code.asNum());
+    try std.testing.expect(primitive.asStringCell().eql(boxed.asStringCell()));
+
+    const failing_string = try Value.strAlloc(a, source.items);
+    const failing_bytes = try failing_string.asWtf8(a);
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        machine.stringMethod(failing_bytes, "charCodeAt", &.{Value.num(100)}, false, failing_string.asStringCell()),
+    );
+    try std.testing.expect(!failing_string.asStringCell().hasUtf16Index());
+    machine.arena = a;
+}
+
+test "bounded non-ASCII access preserves String methods and exotic boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect((try evalSource(a,
+        \\let text = "Aé水😀\ud800x".repeat(64);
+        \\let boxed = new String(text);
+        \\let descriptor = Object.getOwnPropertyDescriptor(boxed, "100");
+        \\let deleted = delete boxed[100];
+        \\boxed[100] = "q";
+        \\boxed[448] = "tail";
+        \\text.length === 448 && boxed.length === 448 &&
+        \\text.charAt(100) === "水" && text.charCodeAt(100) === 0x6c34 &&
+        \\text.at(102) === "\ude00" && text.codePointAt(101) === 0x1f600 &&
+        \\text.codePointAt(102) === 0xde00 && text.charCodeAt(103) === 0xd800 &&
+        \\text[100] === "水" && boxed[100] === "水" &&
+        \\descriptor.value === "水" && descriptor.writable === false &&
+        \\descriptor.enumerable === true && descriptor.configurable === false &&
+        \\deleted === false && (100 in boxed) && !(448 in new String(text)) &&
+        \\boxed[448] === "tail" && Object.keys(new String(text)).length === 448 &&
+        \\"😀".repeat(128).split("").length === 256
+    )).asBool());
 }
 
 test "interpreter throw / try / catch / finally" {
