@@ -353,7 +353,7 @@ fn addArgumentsSlot(
     scope: *FnScope,
     fnode: *const ast.FunctionNode,
 ) CompileError!?u32 {
-    if (fnode.is_arrow or !fnode.uses_arguments) return null;
+    if (fnode.is_arrow or (!fnode.uses_arguments and !fnode.uses_direct_eval)) return null;
     // FunctionDeclarationInstantiation suppresses the implicit object when a
     // formal already owns the `arguments` binding.
     if (parametersBindName(fnode, "arguments")) return null;
@@ -1904,7 +1904,10 @@ pub const Compiler = struct {
     fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, hash_state: *CompileHashState, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
-        if (fnode.uses_direct_eval)
+        // Method and derived-constructor eval may require [[HomeObject]], SuperCall,
+        // and uninitialized-this state that are not lexical bindings in an
+        // ordinary activation. Admit that surface only with its own evidence.
+        if (fnode.uses_direct_eval and (fnode.is_method or fnode.is_derived_class_constructor))
             return rejectPlainFunction(rejection, .unsupported_lowering);
         // Function-scope `using` resources are disposed at function exit. The
         // frame-mode VM only emits block-level DisposeResources today, so keep
@@ -1930,6 +1933,12 @@ pub const Compiler = struct {
             error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
             error.OutOfMemory => return error.OutOfMemory,
         };
+        // A non-simple formal list creates a ParameterEnvironment outside the
+        // body VariableEnvironment. The flat ordinary frame does not yet encode
+        // that record boundary for direct eval, so retain a causal rejection
+        // even when the eval call itself occurs in the body.
+        if (fnode.uses_direct_eval and parameter_layout.hasNonSimple())
+            return rejectPlainFunction(rejection, .unsupported_lowering);
         const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
         if (!fnode.is_expr_body) try collectFunctionLocals(arena, scope, fnode.body);
         const mapped_parameter_indices = try configureMappedParameters(arena, scope, fnode, arguments_slot);
@@ -5673,7 +5682,7 @@ pub const Compiler = struct {
             template_admission = .async_compiled;
             break :blk compiled;
         } else blk: {
-            if (fnode.uses_direct_eval) {
+            if (fnode.uses_direct_eval and (fnode.is_method or fnode.is_derived_class_constructor)) {
                 if (self.scope == null) {
                     template_admission = .plain_unsupported_lowering;
                     break :blk null;
@@ -5692,6 +5701,13 @@ pub const Compiler = struct {
                 },
                 error.OutOfMemory => return error.OutOfMemory,
             };
+            if (fnode.uses_direct_eval and parameter_layout.hasNonSimple()) {
+                if (self.scope == null) {
+                    template_admission = .plain_unsupported_lowering;
+                    break :blk null;
+                }
+                return error.Unsupported;
+            }
             const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode);
             if (!fnode.is_expr_body) try collectFunctionLocals(self.arena, scope, fnode.body);
             const mapped_parameter_indices = try configureMappedParameters(self.arena, scope, fnode, arguments_slot);
@@ -6387,7 +6403,8 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(first, value = first(outer)){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = first?.()){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, args, value = first(...args)){}", .expected = .parameter_prologue },
-        .{ .source = "function f(eval, value = eval('1')){}", .expected = .unsupported_lowering },
+        .{ .source = "function f(eval, value = eval('1')){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = 1){ return eval('value'); }", .expected = .unsupported_lowering },
         .{ .source = "function f(first, value = new first(outer)){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, args, value = new first(...args)){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = value + 1){}", .expected = .parameter_prologue },
@@ -6411,7 +6428,6 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f([value] = []){}", .expected = .parameter_prologue },
         .{ .source = "function f({ [key]: value }){}", .expected = .parameter_prologue },
         .{ .source = "function f([value], ...tail){}", .expected = .parameter_prologue },
-        .{ .source = "function f(){ return eval('1'); }", .expected = .unsupported_lowering },
     };
 
     for (cases) |case| {
@@ -6425,6 +6441,26 @@ test "compiler reports stable plain-function admission reasons" {
             .rejected => |reason| try std.testing.expectEqual(case.expected, reason),
         }
     }
+
+    var direct_eval_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer direct_eval_arena.deinit();
+    var direct_eval_parser = try @import("parser.zig").Parser.init(
+        direct_eval_arena.allocator(),
+        "function f(value){ \"use strict\"; return eval('value'); }",
+    );
+    const direct_eval_program = try direct_eval_parser.parseProgram();
+    const direct_eval = switch (try Compiler.admitPlainFunction(
+        direct_eval_arena.allocator(),
+        direct_eval_program.program[0].func_decl,
+    )) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), direct_eval.direct_eval_plans.items.len);
+    var saw_activation_eval = false;
+    for (direct_eval.code.items) |instruction|
+        saw_activation_eval = saw_activation_eval or instruction.op == .tail_call_eval_activation;
+    try std.testing.expect(saw_activation_eval);
 
     var inherited_arguments_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer inherited_arguments_arena.deinit();
@@ -7161,10 +7197,14 @@ test "compiler lowers ordinary spread calls and constructors across tiers" {
     };
     try std.testing.expect(saw_tail_spread);
 
-    switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[3].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
-    }
+    const eval_barrier = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[3].func_decl)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_eval_activation_spread = false;
+    for (eval_barrier.code.items) |instruction|
+        saw_eval_activation_spread = saw_eval_activation_spread or instruction.op == .call_eval_activation_spread;
+    try std.testing.expect(saw_eval_activation_spread);
 
     const optional = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[4].func_decl)) {
         .compiled => |compiled| compiled.chunk,
@@ -7247,12 +7287,19 @@ test "compiler lowers proper tail calls with spread arguments across tiers" {
         try std.testing.expect(saw_expected);
     }
 
-    // Spread and fixed-arity direct eval both require the function's dynamic
-    // environment; tail position cannot make frame-local bindings observable.
-    for (program.program[6..8]) |declaration| switch (try Compiler.admitPlainFunction(arena.allocator(), declaration.func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
-    };
+    // Activation-aware tail opcodes retain the retiring frame for direct eval;
+    // fixed and spread forms therefore remain proper-tail-call eligible.
+    for (program.program[6..8], 0..) |declaration, index| {
+        const chunk = switch (try Compiler.admitPlainFunction(arena.allocator(), declaration.func_decl)) {
+            .compiled => |compiled| compiled.chunk,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        const expected: bc.Op = if (index == 0) .tail_call_eval_activation_spread else .tail_call_eval_activation;
+        var saw_expected = false;
+        for (chunk.code.items) |instruction|
+            saw_expected = saw_expected or instruction.op == expected;
+        try std.testing.expect(saw_expected);
+    }
 
     const generated = switch (try Compiler.admitGenerator(arena.allocator(), program.program[8].func_decl, true)) {
         .compiled => |chunk| chunk,
@@ -7637,10 +7684,18 @@ test "compiler gives arguments owners precise frame slots" {
     try std.testing.expectEqual(@as(usize, 0), parameter_arguments_chunk.mapped_parameter_indices.len);
 
     const eval_owner = Helper.named(chunk, "evalOwner") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(bc.FnTemplateAdmission.plain_unsupported_lowering, eval_owner.admission);
+    try std.testing.expectEqual(bc.FnTemplateAdmission.plain_compiled, eval_owner.admission);
     try std.testing.expect(eval_owner.uses_direct_eval);
     try std.testing.expect(!eval_owner.uses_arguments);
-    try std.testing.expectEqual(@as(?*Chunk, null), eval_owner.chunk);
+    const eval_owner_chunk = eval_owner.chunk orelse return error.TestUnexpectedResult;
+    const eval_arguments_slot = eval_owner_chunk.arguments_slot orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(eval_owner_chunk.param_count, eval_arguments_slot);
+    try std.testing.expectEqualStrings("arguments", eval_owner_chunk.debug_local_names[eval_arguments_slot]);
+    try std.testing.expectEqual(@as(usize, 1), eval_owner_chunk.direct_eval_plans.items.len);
+    var saw_eval_activation = false;
+    for (eval_owner_chunk.code.items) |instruction|
+        saw_eval_activation = saw_eval_activation or instruction.op == .tail_call_eval_activation;
+    try std.testing.expect(saw_eval_activation);
 
     const eval_reference = Helper.named(chunk, "evalReference") orelse return error.TestUnexpectedResult;
     try std.testing.expect(!eval_reference.uses_direct_eval);

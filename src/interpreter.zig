@@ -2101,8 +2101,8 @@ pub const Function = struct {
     uses_arguments: bool = true,
     /// A syntactic direct-eval call in this ordinary-function scope. It may
     /// resolve `arguments` dynamically even when the parsed body has no explicit
-    /// reference, and frame-mode compilation remains barred until eval can see
-    /// activation slots exactly.
+    /// reference. Frame-mode admission requires an exact activation binding
+    /// plan and stays causally barred for incomplete environment contexts.
     uses_direct_eval: bool = false,
     closure: *Environment,
     /// The function's [[Realm]] global object, captured when the function is
@@ -6655,7 +6655,7 @@ pub const Interpreter = struct {
         return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
     }
 
-    fn sourceBodyMayCallOtherThan(source: []const u8, allowed_name: []const u8) bool {
+    fn sourceBodyMayCallOtherThan(source: []const u8, allowed_name: []const u8, second_allowed_name: []const u8) bool {
         // A traditional function's own parameter list is not a body call. The
         // old whole-source scan therefore rejected every sloppy function before
         // the named-property and self-recursion exceptions below could apply.
@@ -6695,8 +6695,9 @@ pub const Interpreter = struct {
                 std.mem.eql(u8, token, "switch") or
                 std.mem.eql(u8, token, "catch") or
                 std.mem.eql(u8, token, "with");
-            if (!control and (allowed_name.len == 0 or !std.mem.eql(u8, token, allowed_name)))
-                return true;
+            const allowed = (allowed_name.len != 0 and std.mem.eql(u8, token, allowed_name)) or
+                (second_allowed_name.len != 0 and std.mem.eql(u8, token, second_allowed_name));
+            if (!control and !allowed) return true;
             search = paren + 1;
         }
         return false;
@@ -6741,14 +6742,22 @@ pub const Interpreter = struct {
         if (fnode.requires_tree_walk_class_constructor) return .plain_policy_class_constructor_semantics;
         if (fnode.is_derived_class_constructor) return null;
         if (fnode.class_instance_initializers.len != 0) return null;
-        if (fnode.is_strict) return if (sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null)
+        if (fnode.is_strict) return if (fnode.uses_direct_eval or sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null)
             null
         else
             .plain_policy_not_candidate;
         const named_self_recursion = sourceHasNamedSelfCall(fnode.source, fnode.name);
-        if (sourceBodyMayCallOtherThan(fnode.source, if (named_self_recursion) fnode.name else ""))
+        // The compiler/runtime direct-eval admission is itself fail-closed on
+        // incomplete activation contexts. Exempt only the syntactic eval callee
+        // from the legacy dynamic-call policy; any additional call still keeps
+        // a sloppy function on the tree walker.
+        if (sourceBodyMayCallOtherThan(
+            fnode.source,
+            if (named_self_recursion) fnode.name else "",
+            if (fnode.uses_direct_eval) "eval" else "",
+        ))
             return .plain_policy_dynamic_call;
-        if (!named_self_recursion and
+        if (!named_self_recursion and !fnode.uses_direct_eval and
             std.mem.indexOfScalar(u8, fnode.source, '.') == null and
             std.mem.indexOfScalar(u8, fnode.source, '[') == null)
             return .plain_policy_not_candidate;

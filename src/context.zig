@@ -23791,6 +23791,62 @@ test "forced tree-walker and required bytecode preserve exact observable state" 
     try std.testing.expectEqual(@as(u64, 0), bytecode.count(.template_plain_fallback));
 }
 
+test "forced tree-walker and required bytecode agree on simple-frame direct eval" {
+    const source =
+        \\function directEvalSloppy(value) {
+        \\  var local = 1;
+        \\  eval("value += 1; arguments[0] += 2; var dynamic = 3; local += dynamic;");
+        \\  eval("dynamic += 1; local += dynamic;");
+        \\  return value * 1000 + arguments[0] * 100 + local * 10 + dynamic;
+        \\}
+        \\function directEvalStrict(value) {
+        \\  "use strict";
+        \\  let lexical = 2;
+        \\  const fixed = 3;
+        \\  var local = 1;
+        \\  var first = eval("local += value; lexical += 1; var hidden = 9; local + lexical + fixed + arguments[0]");
+        \\  return first * 100 + local * 10 + lexical + (typeof hidden === "undefined" ? 1 : 0);
+        \\}
+        \\function directEvalShadow(eval, value) { return eval(value); }
+        \\function directEvalOuter(seed) {
+        \\  var outer = seed;
+        \\  function inner(step) {
+        \\    var inner = step;
+        \\    eval("outer += inner; var dynamic = outer;");
+        \\    eval("dynamic += 1; inner += dynamic;");
+        \\    return outer * 100 + inner * 10 + dynamic;
+        \\  }
+        \\  return inner(2);
+        \\}
+        \\function directEvalIndirect() {
+        \\  "use strict";
+        \\  var local = 1;
+        \\  return (0, eval)("typeof local") === "undefined" ? 1 : 0;
+        \\}
+        \\directEvalSloppy(5) * 1000000 + directEvalStrict(5) * 1000 +
+        \\  directEvalOuter(3) * 10 + directEvalShadow(Math.abs, -4) + directEvalIndirect();
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len]u64 = undefined;
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        results[index] = (try ctx.evaluate(source)).rawBits();
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 6);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+        }
+    }
+    try std.testing.expectEqual(results[0], results[1]);
+    try std.testing.expectEqual(@as(f64, 8_885_769_865), Value.fromRawBits(results[0]).asNum());
+}
+
 test "required bytecode uses strict captured iterator records" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,

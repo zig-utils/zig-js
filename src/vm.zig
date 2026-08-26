@@ -10304,7 +10304,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             fchunk.mapped_parameter_indices.len == 0
         else
             fchunk.mapped_parameter_indices.len == slots.len;
-        if (func.is_arrow or !func.uses_arguments or func.uses_direct_eval or
+        if (func.is_arrow or (!func.uses_arguments and !func.uses_direct_eval) or
             slot >= slots.len or !mapped_layout_valid or
             (slot < fchunk.mapped_parameter_indices.len and
                 fchunk.mapped_parameter_indices[slot] != std.math.maxInt(u32)))
