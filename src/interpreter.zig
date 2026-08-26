@@ -9824,19 +9824,25 @@ pub const Interpreter = struct {
         return self.gc_temp_roots.items[mark];
     }
 
-    fn pushTempEnvRoot(self: *Interpreter, environment: *Environment) EvalError!usize {
+    pub fn pushTempEnvRoot(self: *Interpreter, environment: *Environment) EvalError!usize {
         if (self.gc == null) return 0;
         const mark = self.gc_env_roots.items.len;
         try self.gc_env_roots.append(self.arena, environment);
         return mark;
     }
 
-    fn restoreTempEnvRoots(self: *Interpreter, mark: usize) void {
+    pub fn restoreTempEnvRoots(self: *Interpreter, mark: usize) void {
         if (self.gc == null) return;
         self.gc_env_roots.shrinkRetainingCapacity(mark);
     }
 
-    fn tempEnvRoot(self: *Interpreter, mark: usize, fallback: *Environment) *Environment {
+    pub fn setTempEnvRoot(self: *Interpreter, mark: usize, environment: *Environment) void {
+        if (self.gc == null) return;
+        std.debug.assert(mark < self.gc_env_roots.items.len);
+        self.gc_env_roots.items[mark] = environment;
+    }
+
+    pub fn tempEnvRoot(self: *Interpreter, mark: usize, fallback: *Environment) *Environment {
         if (self.gc == null) return fallback;
         return self.gc_env_roots.items[mark];
     }
