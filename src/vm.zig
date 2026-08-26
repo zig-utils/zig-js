@@ -4268,12 +4268,20 @@ fn materializeDirectEvalEnvironment(
             saw_function_scope = false;
         }
         if (scope.function_scope) {
+            if (scope.is_catch_param)
+                return vm.throwError("InternalError", "function scope marked as direct-eval catch scope");
             if (saw_function_scope)
                 return vm.throwError("InternalError", "duplicate direct-eval function scope");
             saw_function_scope = true;
             if (scope.frame_depth == 0) current_function_index = scope_index;
         } else if (saw_function_scope) {
             return vm.throwError("InternalError", "misordered direct-eval lexical scope");
+        } else if (scope.is_catch_param and
+            (scope.bindings.len != 1 or
+                !scope.bindings[0].lexical or
+                scope.bindings[0].immutable))
+        {
+            return vm.throwError("InternalError", "invalid direct-eval catch scope");
         }
 
         var previous_name: ?[]const u8 = null;
@@ -4303,6 +4311,7 @@ fn materializeDirectEvalEnvironment(
                 return vm.throwError("InternalError", "invalid current direct-eval lexical scope");
             const environment = try gc_mod.allocEnv(vm.arena);
             vm.initEnvironment(environment, vm.tempEnvRoot(chain_root, outward), false);
+            environment.is_catch_param = scope.is_catch_param;
             environment.activation = .{
                 .frame = current_frame.activationView(),
                 .bindings = scope.bindings,
@@ -4364,6 +4373,7 @@ fn materializeDirectEvalEnvironment(
     for (plan.scopes[start_index..], start_index..) |scope, index| {
         const environment = try gc_mod.allocEnv(vm.arena);
         vm.initEnvironment(environment, vm.tempEnvRoot(chain_root, outward), scope.function_scope);
+        environment.is_catch_param = scope.is_catch_param;
         environment.private_activation = !frames[@intCast(scope.frame_depth)].escaped.load(.acquire);
         environment.activation = .{
             .frame = frames[@intCast(scope.frame_depth)].activationView(),

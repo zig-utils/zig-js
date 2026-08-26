@@ -176,6 +176,10 @@ const FnScope = struct {
     parent_with_depth: u32 = 0,
     names: SecureStringMapUnmanaged(SlotBinding),
     lexical_scopes: std.ArrayListUnmanaged(*SecureStringMapUnmanaged(SlotBinding)) = .empty,
+    /// Parallel to `lexical_scopes`: true only for the scope introduced by a
+    /// lone catch BindingIdentifier. Direct eval needs the Environment Record
+    /// identity to apply Annex B.3.5 without weakening destructuring catches.
+    lexical_scope_is_catch_param: std.ArrayListUnmanaged(bool) = .empty,
     slot_names: std.ArrayListUnmanaged([]const u8) = .empty,
     count: u32 = 0,
     lexical_slots: std.ArrayListUnmanaged(u32) = .empty,
@@ -200,10 +204,18 @@ const FnScope = struct {
         const bindings = try arena.create(SecureStringMapUnmanaged(SlotBinding));
         bindings.* = .{ .state = self.hash_state };
         try self.lexical_scopes.append(arena, bindings);
+        try self.lexical_scope_is_catch_param.append(arena, false);
     }
 
     fn popLexicalScope(self: *FnScope) void {
         _ = self.lexical_scopes.pop();
+        _ = self.lexical_scope_is_catch_param.pop();
+    }
+
+    fn markCurrentLexicalScopeCatchParameter(self: *FnScope) void {
+        std.debug.assert(self.lexical_scope_is_catch_param.items.len == self.lexical_scopes.items.len);
+        std.debug.assert(self.lexical_scope_is_catch_param.items.len != 0);
+        self.lexical_scope_is_catch_param.items[self.lexical_scope_is_catch_param.items.len - 1] = true;
     }
 
     fn currentLexicalScope(self: *FnScope) *SecureStringMapUnmanaged(SlotBinding) {
@@ -332,11 +344,12 @@ fn buildDirectEvalPlan(arena: std.mem.Allocator, scope: *const FnScope) CompileE
             .frame_depth = frame_depth,
         };
         scope_index += 1;
-        for (frame_scope.lexical_scopes.items) |lexical| {
+        for (frame_scope.lexical_scopes.items, frame_scope.lexical_scope_is_catch_param.items) |lexical, is_catch_param| {
             if (lexical.count() == 0) continue;
             scopes[scope_index] = .{
                 .bindings = try directEvalBindings(arena, lexical),
                 .function_scope = false,
+                .is_catch_param = is_catch_param,
                 .frame_depth = frame_depth,
             };
             scope_index += 1;
@@ -2907,6 +2920,7 @@ pub const Compiler = struct {
             // sentinel in a function-local frame slot.
             const scope = self.scope.?;
             _ = try scope.addLexical(self.arena, pattern.identifier, false);
+            scope.markCurrentLexicalScopeCatchParameter();
         } else {
             try self.predeclareCheckedLexicalPattern(pattern, false);
             try self.emitLexicalInitializersForPattern(pattern);
@@ -6879,6 +6893,39 @@ test "compiler exposes direct eval lexical bindings in their TDZ" {
         try std.testing.expectEqual(compiled.chunk.lexical_slots[0], binding.slot);
     };
     try std.testing.expect(found_later);
+}
+
+test "compiler identifies only simple catch records for direct eval Annex B semantics" {
+    const cases = [_]struct { source: []const u8, catch_name: []const u8, exempt: bool }{
+        .{
+            .source = "function f(){ try { throw 1; } catch (caught) { eval('var caught;'); } }",
+            .catch_name = "caught",
+            .exempt = true,
+        },
+        .{
+            .source = "function f(){ try { throw { value: 1 }; } catch ({ value }) { eval('var value;'); } }",
+            .catch_name = "value",
+            .exempt = false,
+        },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
+        const program = try parser.parseProgram();
+        const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+            .compiled => |code| code,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(usize, 1), compiled.chunk.direct_eval_plans.items.len);
+        var found = false;
+        for (compiled.chunk.direct_eval_plans.items[0].scopes) |scope| {
+            if (scope.bindings.len != 1 or !std.mem.eql(u8, scope.bindings[0].name, case.catch_name)) continue;
+            found = true;
+            try std.testing.expectEqual(case.exempt, scope.is_catch_param);
+        }
+        try std.testing.expect(found);
+    }
 }
 
 test "compiler admits direct eval methods and derived constructors" {

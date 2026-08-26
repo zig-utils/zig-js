@@ -550,6 +550,11 @@ pub const DirectEvalBinding = struct {
 pub const DirectEvalScope = struct {
     bindings: []const DirectEvalBinding,
     function_scope: bool,
+    /// Annex B.3.5 exempts the declarative record for a lone catch
+    /// BindingIdentifier from sloppy eval `var`/function conflicts. This is a
+    /// property of the scope record, not of the binding, because destructuring
+    /// catch parameters deliberately retain the ordinary conflict rule.
+    is_catch_param: bool = false,
     /// Number of defining-frame links from the currently running activation.
     /// Zero addresses the direct-eval caller; one addresses its captured outer
     /// frame, and so on.
