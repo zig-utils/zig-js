@@ -83,6 +83,11 @@ pub const FunctionNode = struct {
     /// but remains distinct because slot-backed locals require an exact dynamic
     /// environment bridge before the function can enter the VM.
     uses_direct_eval: bool = false,
+    /// Whether the direct-eval use occurs while evaluating a formal parameter
+    /// initializer, including inside a nested arrow. Non-simple parameters have
+    /// a distinct ParameterEnvironment and body VariableEnvironment, so VM
+    /// admission must retain this phase boundary rather than infer it from text.
+    uses_direct_eval_in_parameters: bool = false,
     /// Arrow functions don't get their own `arguments` (or `this`).
     is_arrow: bool = false,
     /// Explicit named function expressions have an internal immutable self-name

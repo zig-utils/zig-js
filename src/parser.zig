@@ -2494,15 +2494,18 @@ pub const Parser = struct {
         if (self.isForbiddenBindingName(name_tok.text)) return ParseError.UnexpectedToken;
         var uses_arguments = false;
         var uses_direct_eval = false;
+        var uses_direct_eval_in_parameters = false;
         const saved_arguments_use = self.current_arguments_use;
         const saved_direct_eval_use = self.current_direct_eval_use;
         self.current_arguments_use = &uses_arguments;
-        self.current_direct_eval_use = &uses_direct_eval;
+        self.current_direct_eval_use = &uses_direct_eval_in_parameters;
         defer {
             self.current_arguments_use = saved_arguments_use;
             self.current_direct_eval_use = saved_direct_eval_use;
         }
         const params = try self.parseFunctionParamList(is_gen, is_async);
+        uses_direct_eval = uses_direct_eval_in_parameters;
+        self.current_direct_eval_use = &uses_direct_eval;
         const own_use_strict = self.peekUseStrict();
         // This function's strictness: inherited OR its own "use strict" prologue.
         // Captured BEFORE parseFnBody, which clobbers `last_fn_strict` when it
@@ -2521,7 +2524,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval };
+        fnode.* = .{ .name = name_tok.text, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval, .uses_direct_eval_in_parameters = uses_direct_eval_in_parameters };
         return self.alloc(.{ .func_decl = fnode });
     }
 
@@ -2552,15 +2555,18 @@ pub const Parser = struct {
         }
         var uses_arguments = false;
         var uses_direct_eval = false;
+        var uses_direct_eval_in_parameters = false;
         const saved_arguments_use = self.current_arguments_use;
         const saved_direct_eval_use = self.current_direct_eval_use;
         self.current_arguments_use = &uses_arguments;
-        self.current_direct_eval_use = &uses_direct_eval;
+        self.current_direct_eval_use = &uses_direct_eval_in_parameters;
         defer {
             self.current_arguments_use = saved_arguments_use;
             self.current_direct_eval_use = saved_direct_eval_use;
         }
         const params = try self.parseFunctionParamList(is_gen, is_async);
+        uses_direct_eval = uses_direct_eval_in_parameters;
+        self.current_direct_eval_use = &uses_direct_eval;
         const own_use_strict = self.peekUseStrict();
         const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
         const body = try self.parseFnBody(is_gen, is_async);
@@ -2576,7 +2582,7 @@ pub const Parser = struct {
         if (is_gen or is_async or hasNonSimpleParams(params)) try self.checkDuplicateParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .has_name_binding = name.len > 0, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval, .uses_direct_eval_in_parameters = uses_direct_eval_in_parameters };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -4532,15 +4538,18 @@ pub const Parser = struct {
     fn parseMethodTail(self: *Parser, name: []const u8, is_gen: bool, is_async: bool, start: usize) ParseError!*Node {
         var uses_arguments = false;
         var uses_direct_eval = false;
+        var uses_direct_eval_in_parameters = false;
         const saved_arguments_use = self.current_arguments_use;
         const saved_direct_eval_use = self.current_direct_eval_use;
         self.current_arguments_use = &uses_arguments;
-        self.current_direct_eval_use = &uses_direct_eval;
+        self.current_direct_eval_use = &uses_direct_eval_in_parameters;
         defer {
             self.current_arguments_use = saved_arguments_use;
             self.current_direct_eval_use = saved_direct_eval_use;
         }
         const params = try self.parseFunctionParamList(is_gen, is_async);
+        uses_direct_eval = uses_direct_eval_in_parameters;
+        self.current_direct_eval_use = &uses_direct_eval;
         try self.checkDuplicateParams(params); // method definitions forbid duplicate params in all modes
         const own_use_strict = self.peekUseStrict();
         const fn_strict = self.strict or own_use_strict; // captured before parseFnBody (see parseFunctionDecl)
@@ -4549,7 +4558,7 @@ pub const Parser = struct {
         if (fn_strict) try self.validateStrictParams(params);
         try self.checkParamBodyConflict(params, body);
         const fnode = try self.arena.create(ast.FunctionNode);
-        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval };
+        fnode.* = .{ .name = name, .params = params, .body = body, .source = self.sourceFrom(start), .is_expr_body = false, .is_generator = is_gen, .is_async = is_async, .is_strict = fn_strict, .is_method = true, .uses_arguments = uses_arguments, .uses_direct_eval = uses_direct_eval, .uses_direct_eval_in_parameters = uses_direct_eval_in_parameters };
         return self.alloc(.{ .function = fnode });
     }
 
@@ -5009,6 +5018,33 @@ test "parser derives arguments use in the active ordinary function scope" {
 
     const expression_decl = program.program[8].var_decl.init orelse return error.TestUnexpectedResult;
     try std.testing.expect(expression_decl.* == .function and expression_decl.function.uses_arguments);
+}
+
+test "parser distinguishes parameter-phase direct eval structurally" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try Parser.init(arena.allocator(),
+        \\function bodyOnly(value) { return eval("value"); }
+        \\function parameter(value = eval("1")) { return value; }
+        \\function arrowParameter(value = (() => eval("2"))()) { return value; }
+        \\function indirect(value = eval?.("3")) { return value; }
+    );
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 4), program.program.len);
+
+    const body_only = program.program[0].func_decl;
+    try std.testing.expect(body_only.uses_direct_eval);
+    try std.testing.expect(!body_only.uses_direct_eval_in_parameters);
+
+    for (program.program[1..3]) |declaration| {
+        const function = declaration.func_decl;
+        try std.testing.expect(function.uses_direct_eval);
+        try std.testing.expect(function.uses_direct_eval_in_parameters);
+    }
+
+    const indirect = program.program[3].func_decl;
+    try std.testing.expect(!indirect.uses_direct_eval);
+    try std.testing.expect(!indirect.uses_direct_eval_in_parameters);
 }
 
 test "parser records current token source location for expected-token failures" {
