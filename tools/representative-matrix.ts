@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v26.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v27.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 26, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 27, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,7 +49,7 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || child.schema_version === 24 || child.schema_version === 25 || child.schema_version === 26,
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 27),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
@@ -57,7 +57,7 @@ export function loadManifest(
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
-  if (child.schema_version === 24 || child.schema_version === 25 || child.schema_version === 26) {
+  if (child.schema_version >= 24 && child.schema_version <= 27) {
     const version = `v${child.schema_version}`;
     requireValue(child.tier_attribution === undefined, `${version} must inherit the scored attribution contract unchanged`);
     requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, `${version} changes evidence integration only`);
@@ -210,7 +210,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 26, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 27, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -337,7 +337,13 @@ export function validate(manifest: any, root = ROOT): void {
       validatePinnedFile(efficiency.scored_integration.algorithmic_growth_validator, `${evidenceVersion} algorithmic-growth validator`, root);
       requireValue(Array.isArray(efficiency.scored_integration.native_runners) && efficiency.scored_integration.native_runners.length === 2, `${evidenceVersion} native runner inventory drift`);
       for (const runner of efficiency.scored_integration.native_runners) validatePinnedFile(runner, `${evidenceVersion} measured-boundary native runner`, root);
-      if (manifest.schema_version >= 25) requireValue(efficiency.scored_integration.binary_provenance === "identical_one-commit_measurement_overlay", "V25 binary provenance policy drift");
+      if (manifest.schema_version >= 25 && manifest.schema_version <= 26)
+        requireValue(efficiency.scored_integration.binary_provenance === "identical_one-commit_measurement_overlay", "V25 binary provenance policy drift");
+      if (manifest.schema_version >= 27) {
+        const profiles = efficiency.scored_integration.binary_provenance_profiles;
+        requireValue(efficiency.scored_integration.binary_provenance === "schema_v2_direct_or_schema_v3_identical_one_commit_measurement_overlay", "V27 binary provenance policy drift");
+        requireValue(profiles && profiles.schema_v2 === "declared_binary_revisions_equal_logical_revisions" && profiles.schema_v3 === "identical_one_commit_measurement_overlay" && profiles.partial_assertions === "refuse", "V27 binary provenance profile drift");
+      }
       if (manifest.schema_version >= 26) {
         const replay = efficiency.scored_integration.native_allocation_replay, batch = efficiency.scored_integration.serial_batch;
         requireValue(replay && same(replay.modes, ["attribution", "attribution_no_jit"]) && replay.phase === "invocation" && replay.timing === "outside_elapsed_ns" && same(replay.metrics, ["backing_allocations", "backing_allocation_bytes"]), "V26 native allocation replay policy drift");
