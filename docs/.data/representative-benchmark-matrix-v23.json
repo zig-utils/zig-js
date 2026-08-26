@@ -1,0 +1,189 @@
+{
+  "schema_version": 23,
+  "matrix_id": "zig-js-representative-v23",
+  "status": "frozen",
+  "frozen_date": "2026-08-25",
+  "owner_issue": 767,
+  "history_policy": "This version hash-inherits every V22 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance decision, attribution metric, external-suite boundary, lifecycle profile, exact-parent metric, collection guard, and publication boundary. It re-pins the unchanged lifecycle and no-JIT profile runners because their shared runner now embeds a separate string-indexing source, then adds one zig-js-only non-scored UTF-16 indexing growth profile. Accepted historical reports are never rewritten. Any later workload, representation, width, boundary, jobs, checksum, metric source, adapter, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v22",
+    "path": "docs/.data/representative-benchmark-matrix-v22.json",
+    "sha256": "062c5523274745fdd1a75ce414ba00c711d885c1d25fce9271d372c569939945",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "exact_parent_integration"
+    ]
+  },
+  "change": "Adds benchmark-first 1K/2K/4K UTF-16 indexing growth rows for ASCII, Latin-1, BMP, astral, lone-surrogate, and mixed immutable strings. Each invocation exercises String builtin indexing, primitive and boxed exotic indices, repeated primitive/boxed length, charAt, at, and codePointAt in required-bytecode/no-native mode. Fixture construction remains outside warmup and timing. The unchanged lifecycle and no-JIT profiles are re-pinned only because their shared runner embeds the new source. No production string behavior changes in this version.",
+  "context_lifecycle_integration": {
+    "issue": 661,
+    "status": "integrated_non_scored_profile",
+    "mode": "context_lifecycle",
+    "engines": ["zig-js"],
+    "lanes": [1],
+    "scenarios": ["context_no_evaluation", "context_first_source", "context_first_module", "context_full_feature"],
+    "profile": {
+      "path": "docs/.data/context-lifecycle-profile-v1.json",
+      "sha256": "3286810faef598fc62ce68f8a56825de48d749a7ae4778df270afd890780c6f2"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "5f843c1ac1771247c9c44574c0eeeac7dfcf34be250055604b21a8858cd253d9"
+    },
+    "telemetry": ["create_ns", "work_ns", "destroy_ns", "cpu_user_ns", "cpu_system_ns", "baseline_rss_bytes", "max_live_rss_bytes", "post_destroy_rss_bytes", "retained_delta_bytes", "peak_rss_bytes", "rss_checkpoints", "gc_finalizer_stats"],
+    "publication_boundary": "This remains the V19 zig-js-only cold lifecycle profile. V23 changes only the shared runner hash after it embedded a separate string-indexing source; no lifecycle option, scenario, checksum, telemetry, or evidence ruling changes."
+  },
+  "no_jit_integration": {
+    "issue": 734,
+    "status": "integrated_non_scored_profile",
+    "engines": ["zig-js"],
+    "modes": ["single_no_jit", "attribution_no_jit"],
+    "lanes": [1],
+    "context_options": {
+      "enable_jit": false,
+      "bytecode_execution_mode": "required"
+    },
+    "source": {
+      "path": "bench/vm_arithmetic_comparison.js",
+      "sha256": "970e58bec6ab9978335e6f908219bf23154c9ec9ff96ccefc6a94f2917d77fa8"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "5f843c1ac1771247c9c44574c0eeeac7dfcf34be250055604b21a8858cd253d9"
+    },
+    "workloads": [
+      {"id": "representative_vm_arithmetic_number", "role": "stable_number", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 606036, "full": 5236590351}},
+      {"id": "representative_vm_arithmetic_bigint", "role": "stable_bigint_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 5412345, "full": 630334997}},
+      {"id": "representative_vm_arithmetic_polymorphic", "role": "number_string_bigint_object_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 29422, "full": 28806122}},
+      {"id": "representative_vm_arithmetic_coercion", "role": "effect_and_exception_control", "jobs": {"quick": 100, "full": 10000}, "checksums": {"quick": 101766, "full": 10176362}}
+    ],
+    "attribution": {
+      "tree_walker_entries": 0,
+      "baseline_publications": 0,
+      "optimizer_publications": 0,
+      "generated_code_bytes": 0,
+      "required_nonzero": ["vm_entries", "vm_dispatches", "program_compiled", "template_plain_compiled"]
+    },
+    "quick_binary": {
+      "issue": 734,
+      "number_observation_threshold": 8,
+      "state_bytes_per_instruction": 1,
+      "generic_is_terminal": true,
+      "specialized_miss_executes_ordinary_once": true,
+      "counters": ["number_hits", "number_misses", "dequickenings"],
+      "stable_number": {"number_hits": "nonzero", "number_misses": 0, "dequickenings": 0},
+      "full_attribution": [
+        {"workload": "representative_vm_arithmetic_number", "vm_entries": 28, "vm_dispatches": 3020460, "number_hits": 919643, "number_misses": 0, "dequickenings": 0},
+        {"workload": "representative_vm_arithmetic_bigint", "vm_entries": 28, "vm_dispatches": 900541, "number_hits": 79982, "number_misses": 0, "dequickenings": 0},
+        {"workload": "representative_vm_arithmetic_polymorphic", "vm_entries": 28, "vm_dispatches": 1180600, "number_hits": 164905, "number_misses": 0, "dequickenings": 0},
+        {"workload": "representative_vm_arithmetic_coercion", "vm_entries": 28, "vm_dispatches": 810659, "number_hits": 157437, "number_misses": 0, "dequickenings": 0}
+      ],
+      "publication_boundary": "Counters are exact Context-owned atomics read only in the separate attribution mode. Stable Number rows must hit without misses; per-site unit tests prove polymorphic/coercive sites become terminal generic and that one specialized miss dequickens without replay. Exact-parent timing remains a separate artifact."
+    },
+    "timed_boundary": "One invocation in one persistent production Context after ten reduced-work warmups; source/configuration, warmup, Context creation/destruction, attribution, and hardware snapshots are outside elapsed_ns.",
+    "publication_boundary": "These rows freeze logical work and prove required-bytecode/no-native execution. Battery diagnostics and structural attribution are not performance evidence. A speed claim requires exact-parent, order-balanced, quiet-reference AC samples with stable required counters and unchanged controls."
+  },
+  "string_indexing_integration": {
+    "issue": 767,
+    "status": "benchmark_first_non_scored_profile",
+    "engines": ["zig-js"],
+    "modes": ["single_no_jit", "attribution_no_jit"],
+    "lanes": [1],
+    "context_options": {
+      "enable_jit": false,
+      "bytecode_execution_mode": "required"
+    },
+    "source": {
+      "path": "bench/string_indexing_comparison.js",
+      "sha256": "e3d22c4bbae0354c7fa29558138204fa23f1c9257d7a2c9b301f9fdc9d769cbc"
+    },
+    "runner": {
+      "path": "bench/comparison_zig_js.zig",
+      "sha256": "5f843c1ac1771247c9c44574c0eeeac7dfcf34be250055604b21a8858cd253d9"
+    },
+    "widths": [1024, 2048, 4096],
+    "representations": [
+      {"id": "ascii", "role": "one_byte_control", "pattern": "Ax"},
+      {"id": "latin1", "role": "non_ascii_latin1", "pattern": "éÿ"},
+      {"id": "bmp", "role": "non_latin1_bmp", "pattern": "水Ω"},
+      {"id": "astral", "role": "surrogate_pair", "pattern": "😀"},
+      {"id": "lone", "role": "lone_surrogate", "pattern": "\\ud800x"},
+      {"id": "mixed", "role": "mixed_code_units", "pattern": "Aé水😀\\ud800x"}
+    ],
+    "workloads": [
+      {"id": "representative_string_utf16_ascii_1024", "representation": "ascii", "width": 1024, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 2386682, "full": 23880132}},
+      {"id": "representative_string_utf16_ascii_2048", "representation": "ascii", "width": 2048, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 8967418, "full": 89700804}},
+      {"id": "representative_string_utf16_ascii_4096", "representation": "ascii", "width": 4096, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 34711802, "full": 347171268}},
+      {"id": "representative_string_utf16_latin1_1024", "representation": "latin1", "width": 1024, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 2852561, "full": 28538922}},
+      {"id": "representative_string_utf16_latin1_2048", "representation": "latin1", "width": 2048, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 9898705, "full": 99013674}},
+      {"id": "representative_string_utf16_latin1_4096", "representation": "latin1", "width": 4096, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 36573905, "full": 365792298}},
+      {"id": "representative_string_utf16_bmp_1024", "representation": "bmp", "width": 1024, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 46145041, "full": 461463722}},
+      {"id": "representative_string_utf16_bmp_2048", "representation": "bmp", "width": 2048, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 96428049, "full": 964307114}},
+      {"id": "representative_string_utf16_bmp_4096", "representation": "bmp", "width": 4096, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 209576977, "full": 2095823018}},
+      {"id": "representative_string_utf16_astral_1024", "representation": "astral", "width": 1024, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 174665277, "full": 1746666082}},
+      {"id": "representative_string_utf16_astral_2048", "representation": "astral", "width": 2048, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 353284157, "full": 3532868194}},
+      {"id": "representative_string_utf16_astral_4096", "representation": "astral", "width": 4096, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 723104829, "full": 7231101538}},
+      {"id": "representative_string_utf16_lone_1024", "representation": "lone", "width": 1024, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 87331960, "full": 873332912}},
+      {"id": "representative_string_utf16_lone_2048", "representation": "lone", "width": 2048, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 178747512, "full": 1787501744}},
+      {"id": "representative_string_utf16_lone_4096", "representation": "lone", "width": 4096, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 374161528, "full": 3741668528}},
+      {"id": "representative_string_utf16_mixed_1024", "representation": "mixed", "width": 1024, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 87777979, "full": 877793102}},
+      {"id": "representative_string_utf16_mixed_2048", "representation": "mixed", "width": 2048, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 180107898, "full": 1801105604}},
+      {"id": "representative_string_utf16_mixed_4096", "representation": "mixed", "width": 4096, "jobs": {"quick": 1, "full": 10}, "checksums": {"quick": 376972101, "full": 3769774258}}
+    ],
+    "scored_operations_per_code_unit": {
+      "char_code_at": 1,
+      "primitive_exotic_index": 1,
+      "boxed_exotic_index": 1,
+      "primitive_length": 1,
+      "boxed_length": 1
+    },
+    "per_job_boundary_probes": ["charAt(middle)", "at(-1)", "codePointAt(middle)"],
+    "allocation_replay": {
+      "mode": "attribution_no_jit",
+      "replays": 2,
+      "required_exact_metrics": ["backing_allocations", "backing_allocation_bytes"],
+      "ruling": "Both separate full-work attribution replays must retain the exact admission, result checksum, Context backing-allocation count, and Context backing-allocation byte count for every workload before an implementation changes representation or indexing metadata."
+    },
+    "full_attribution": [
+      {"workload": "representative_string_utf16_ascii_1024", "checksum": 23880132, "vm_entries": 30, "vm_dispatches": 1956966, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 176365, "backing_allocation_bytes": 24257955},
+      {"workload": "representative_string_utf16_ascii_2048", "checksum": 89700804, "vm_entries": 30, "vm_dispatches": 3911786, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 340214, "backing_allocation_bytes": 42514047},
+      {"workload": "representative_string_utf16_ascii_4096", "checksum": 347171268, "vm_entries": 30, "vm_dispatches": 7821422, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 667894, "backing_allocation_bytes": 77006481},
+      {"workload": "representative_string_utf16_latin1_1024", "checksum": 28538922, "vm_entries": 30, "vm_dispatches": 1956974, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 176365, "backing_allocation_bytes": 24301006},
+      {"workload": "representative_string_utf16_latin1_2048", "checksum": 99013674, "vm_entries": 30, "vm_dispatches": 3911794, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 340214, "backing_allocation_bytes": 42600918},
+      {"workload": "representative_string_utf16_latin1_4096", "checksum": 365792298, "vm_entries": 30, "vm_dispatches": 7821430, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 667894, "backing_allocation_bytes": 77178556},
+      {"workload": "representative_string_utf16_bmp_1024", "checksum": 461463722, "vm_entries": 30, "vm_dispatches": 1956982, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 176366, "backing_allocation_bytes": 25060023},
+      {"workload": "representative_string_utf16_bmp_2048", "checksum": 964307114, "vm_entries": 30, "vm_dispatches": 3911802, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 340214, "backing_allocation_bytes": 42643143},
+      {"workload": "representative_string_utf16_bmp_4096", "checksum": 2095823018, "vm_entries": 30, "vm_dispatches": 7821438, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 667895, "backing_allocation_bytes": 78395211},
+      {"workload": "representative_string_utf16_astral_1024", "checksum": 1746666082, "vm_entries": 30, "vm_dispatches": 1956990, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 176366, "backing_allocation_bytes": 25079506},
+      {"workload": "representative_string_utf16_astral_2048", "checksum": 3532868194, "vm_entries": 30, "vm_dispatches": 3911810, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 340214, "backing_allocation_bytes": 42682602},
+      {"workload": "representative_string_utf16_astral_4096", "checksum": 7231101538, "vm_entries": 30, "vm_dispatches": 7821446, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 667895, "backing_allocation_bytes": 78472956},
+      {"workload": "representative_string_utf16_lone_1024", "checksum": 873332912, "vm_entries": 30, "vm_dispatches": 1956998, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 176365, "backing_allocation_bytes": 24301000},
+      {"workload": "representative_string_utf16_lone_2048", "checksum": 1787501744, "vm_entries": 30, "vm_dispatches": 3911818, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 340214, "backing_allocation_bytes": 42600912},
+      {"workload": "representative_string_utf16_lone_4096", "checksum": 3741668528, "vm_entries": 30, "vm_dispatches": 7821454, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 667894, "backing_allocation_bytes": 77178550},
+      {"workload": "representative_string_utf16_mixed_1024", "checksum": 877793102, "vm_entries": 30, "vm_dispatches": 1950445, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 176368, "backing_allocation_bytes": 24314979},
+      {"workload": "representative_string_utf16_mixed_2048", "checksum": 1801105604, "vm_entries": 30, "vm_dispatches": 3898677, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 340217, "backing_allocation_bytes": 42627945},
+      {"workload": "representative_string_utf16_mixed_4096", "checksum": 3769774258, "vm_entries": 30, "vm_dispatches": 7795155, "program_compiled": 16, "template_plain_compiled": 5, "backing_allocations": 667898, "backing_allocation_bytes": 78364389}
+    ],
+    "attribution": {
+      "tree_walker_entries": 0,
+      "baseline_publications": 0,
+      "optimizer_publications": 0,
+      "generated_code_bytes": 0,
+      "required_nonzero": ["vm_entries", "vm_dispatches", "program_compiled", "template_plain_compiled"]
+    },
+    "timed_boundary": "One full-work invocation in one persistent production Context after ten one-job warmups. Fixture pattern expansion, exact-width slicing, String boxing, source/configuration, Context creation/destruction, attribution, and hardware snapshots are outside elapsed_ns. Each job performs the declared five operations once per UTF-16 code unit plus the three named boundary probes.",
+    "publication_boundary": "This profile freezes required-bytecode logical work, representation, widths, checksums, and allocation replay before the runtime change. It is not part of repository-owned aggregate scores. A complexity claim requires exact-parent normalized retired-instruction growth across 1K/2K/4K; a throughput or efficiency claim separately requires quiet-reference AC evidence under the ordinary exact-parent policy."
+  }
+}

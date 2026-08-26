@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v22.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v23.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -29,7 +29,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 22, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 23, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -55,13 +55,34 @@ export function loadManifest(
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
   }
+  if (child.schema_version === 23) {
+    requireValue(child.tier_attribution === undefined, "v23 must inherit the scored attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v23 must not change scored workload coverage");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v23 must inherit completed panel inventory unchanged");
+    requireValue(child.context_lifecycle_integration && typeof child.context_lifecycle_integration === "object", "v23 must repin the context lifecycle runner");
+    requireValue(child.no_jit_integration && typeof child.no_jit_integration === "object", "v23 must repin the no-JIT runner");
+    requireValue(child.string_indexing_integration && typeof child.string_indexing_integration === "object", "v23 must add the string-indexing integration");
+    const merged = {
+      ...inherited,
+      ...child,
+      context_lifecycle_integration: supersedingContextLifecycle || child.context_lifecycle_integration,
+      no_jit_integration: supersedingNoJit || child.no_jit_integration,
+    };
+    validate(merged, root);
+    return merged;
+  }
   if (child.schema_version === 21) {
     requireValue(child.tier_attribution === undefined, "v21 must inherit the scored attribution contract unchanged");
     requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v21 must not change scored workload coverage");
     requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v21 must inherit completed panel inventory unchanged");
     requireValue(child.context_lifecycle_integration && typeof child.context_lifecycle_integration === "object", "v21 must repin the context lifecycle runner");
     requireValue(child.no_jit_integration && typeof child.no_jit_integration === "object", "v21 must repin the no-JIT integration");
-    const merged = { ...inherited, ...child };
+    const merged = {
+      ...inherited,
+      ...child,
+      context_lifecycle_integration: supersedingContextLifecycle || child.context_lifecycle_integration,
+      no_jit_integration: supersedingNoJit || child.no_jit_integration,
+    };
     validate(merged, root);
     return merged;
   }
@@ -160,7 +181,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 22, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 23, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -377,6 +398,72 @@ export function validate(manifest: any, root = ROOT): void {
         );
       }
       requireValue(typeof quick.publication_boundary === "string" && quick.publication_boundary.length > 0, "V21 quick-binary publication boundary is missing");
+    }
+    if (manifest.schema_version >= 23) {
+      const indexing = manifest.string_indexing_integration;
+      requireValue(indexing && indexing.issue === 767 && indexing.status === "benchmark_first_non_scored_profile", "V23 string-indexing profile identity drift");
+      requireValue(same(indexing.engines || [], ["zig-js"]) && same(indexing.modes || [], ["single_no_jit", "attribution_no_jit"]) && same(indexing.lanes || [], [1]), "V23 string-indexing execution boundary drift");
+      requireValue(indexing.context_options?.enable_jit === false && indexing.context_options?.bytecode_execution_mode === "required", "V23 string-indexing Context options drift");
+      validatePinnedFile(indexing.source, "V23 string-indexing workload source", root);
+      validatePinnedFile(indexing.runner, "V23 string-indexing runner", root);
+      requireValue(same(indexing.widths || [], [1024, 2048, 4096]), "V23 string-indexing width inventory drift");
+      const expectedRepresentations = [
+        ["ascii", "one_byte_control", "Ax"],
+        ["latin1", "non_ascii_latin1", "éÿ"],
+        ["bmp", "non_latin1_bmp", "水Ω"],
+        ["astral", "surrogate_pair", "😀"],
+        ["lone", "lone_surrogate", "\\ud800x"],
+        ["mixed", "mixed_code_units", "Aé水😀\\ud800x"],
+      ];
+      requireValue(Array.isArray(indexing.representations) && indexing.representations.length === expectedRepresentations.length, "V23 string-indexing representation inventory drift");
+      for (let index = 0; index < expectedRepresentations.length; index += 1) {
+        const actual = indexing.representations[index], expected = expectedRepresentations[index];
+        requireValue(actual?.id === expected[0] && actual?.role === expected[1] && actual?.pattern === expected[2], `V23 string-indexing representation drift: ${expected[0]}`);
+      }
+      const expectedChecksums: Record<string, [number, number]> = {
+        ascii_1024: [2386682, 23880132], ascii_2048: [8967418, 89700804], ascii_4096: [34711802, 347171268],
+        latin1_1024: [2852561, 28538922], latin1_2048: [9898705, 99013674], latin1_4096: [36573905, 365792298],
+        bmp_1024: [46145041, 461463722], bmp_2048: [96428049, 964307114], bmp_4096: [209576977, 2095823018],
+        astral_1024: [174665277, 1746666082], astral_2048: [353284157, 3532868194], astral_4096: [723104829, 7231101538],
+        lone_1024: [87331960, 873332912], lone_2048: [178747512, 1787501744], lone_4096: [374161528, 3741668528],
+        mixed_1024: [87777979, 877793102], mixed_2048: [180107898, 1801105604], mixed_4096: [376972101, 3769774258],
+      };
+      const expectedFullAttribution: Record<string, [number, number, number]> = {
+        ascii_1024: [1956966, 176365, 24257955], ascii_2048: [3911786, 340214, 42514047], ascii_4096: [7821422, 667894, 77006481],
+        latin1_1024: [1956974, 176365, 24301006], latin1_2048: [3911794, 340214, 42600918], latin1_4096: [7821430, 667894, 77178556],
+        bmp_1024: [1956982, 176366, 25060023], bmp_2048: [3911802, 340214, 42643143], bmp_4096: [7821438, 667895, 78395211],
+        astral_1024: [1956990, 176366, 25079506], astral_2048: [3911810, 340214, 42682602], astral_4096: [7821446, 667895, 78472956],
+        lone_1024: [1956998, 176365, 24301000], lone_2048: [3911818, 340214, 42600912], lone_4096: [7821454, 667894, 77178550],
+        mixed_1024: [1950445, 176368, 24314979], mixed_2048: [3898677, 340217, 42627945], mixed_4096: [7795155, 667898, 78364389],
+      };
+      const expectedWorkloads = expectedRepresentations.flatMap(([representation]) =>
+        indexing.widths.map((width: number) => `representative_string_utf16_${representation}_${width}`),
+      );
+      requireValue(Array.isArray(indexing.workloads) && same(indexing.workloads.map((entry: any) => entry.id), expectedWorkloads), "V23 string-indexing workload inventory drift");
+      for (const workload of indexing.workloads) {
+        const suffix = `${workload.representation}_${workload.width}`, expected = expectedChecksums[suffix];
+        requireValue(Boolean(expected) && workload.id === `representative_string_utf16_${suffix}`, `V23 string-indexing workload identity drift: ${workload.id}`);
+        requireValue(workload.jobs?.quick === 1 && workload.jobs?.full === 10, `V23 string-indexing job contract drift: ${workload.id}`);
+        requireValue(workload.checksums?.quick === expected[0] && workload.checksums?.full === expected[1], `V23 string-indexing checksum drift: ${workload.id}`);
+        requireValue(Number.isSafeInteger(workload.checksums.quick) && Number.isSafeInteger(workload.checksums.full), `V23 string-indexing checksum is not exactly representable: ${workload.id}`);
+      }
+      const indexingSource = readText(root + "/" + indexing.source.path);
+      requireValue(indexingSource.includes('"representative_string_utf16_"') && indexingSource.includes("selectRepresentativeStringIndex"), "V23 string-indexing dispatch is absent from the declared source");
+      requireValue(
+        JSON.stringify(indexing.scored_operations_per_code_unit) === JSON.stringify({ char_code_at: 1, primitive_exotic_index: 1, boxed_exotic_index: 1, primitive_length: 1, boxed_length: 1 }),
+        "V23 string-indexing scored-operation inventory drift",
+      );
+      requireValue(same(indexing.per_job_boundary_probes || [], ["charAt(middle)", "at(-1)", "codePointAt(middle)"]), "V23 string-indexing boundary-probe inventory drift");
+      requireValue(indexing.allocation_replay?.mode === "attribution_no_jit" && indexing.allocation_replay?.replays === 2 && same(indexing.allocation_replay?.required_exact_metrics || [], ["backing_allocations", "backing_allocation_bytes"]) && typeof indexing.allocation_replay?.ruling === "string" && indexing.allocation_replay.ruling.length > 0, "V23 string-indexing allocation-replay contract drift");
+      requireValue(Array.isArray(indexing.full_attribution) && same(indexing.full_attribution.map((entry: any) => entry.workload), expectedWorkloads), "V23 string-indexing full attribution inventory drift");
+      for (const entry of indexing.full_attribution) {
+        const suffix = entry.workload.replace("representative_string_utf16_", ""), expected = expectedFullAttribution[suffix];
+        requireValue(Boolean(expected) && entry.checksum === expectedChecksums[suffix][1] && entry.vm_entries === 30 && entry.vm_dispatches === expected[0] && entry.program_compiled === 16 && entry.template_plain_compiled === 5 && entry.backing_allocations === expected[1] && entry.backing_allocation_bytes === expected[2], `V23 string-indexing full attribution drift: ${entry.workload}`);
+      }
+      requireValue(indexing.attribution?.tree_walker_entries === 0 && indexing.attribution?.baseline_publications === 0 && indexing.attribution?.optimizer_publications === 0 && indexing.attribution?.generated_code_bytes === 0, "V23 string-indexing attribution boundary drift");
+      requireValue(same(indexing.attribution?.required_nonzero || [], ["vm_entries", "vm_dispatches", "program_compiled", "template_plain_compiled"]), "V23 string-indexing required attribution inventory drift");
+      requireValue(typeof indexing.timed_boundary === "string" && indexing.timed_boundary.length > 0, "V23 string-indexing timed boundary is missing");
+      requireValue(typeof indexing.publication_boundary === "string" && indexing.publication_boundary.length > 0, "V23 string-indexing publication boundary is missing");
     }
   } else if (manifest.schema_version >= 13) {
     const pending = manifest.pending_metric_panels;

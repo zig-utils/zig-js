@@ -26,6 +26,7 @@ const workload_source = @embedFile("comparison.js");
 // Workload-specific fixtures are selected and configured before warmup.
 const representative_workload_source = @embedFile("representative_comparison.js");
 const vm_arithmetic_workload_source = @embedFile("vm_arithmetic_comparison.js");
+const string_indexing_workload_source = @embedFile("string_indexing_comparison.js");
 const wasm_simd_workload_source = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source = @embedFile("wasm_threads_comparison.js");
 const invocation = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
@@ -618,6 +619,8 @@ fn evaluateRegistered(ctx: *js.Context, source: []const u8, source_url: []const 
 fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize, observed: bool) !bool {
     const source_bytes = if (std.mem.startsWith(u8, workload, "representative_vm_arithmetic_"))
         vm_arithmetic_workload_source
+    else if (std.mem.startsWith(u8, workload, "representative_string_utf16_"))
+        string_indexing_workload_source
     else if (std.mem.startsWith(u8, workload, "wasm_threads_"))
         wasm_threads_workload_source
     else if (std.mem.startsWith(u8, workload, "wasm_"))
@@ -629,6 +632,8 @@ fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize, o
     if (observed) {
         const source_url = if (std.mem.startsWith(u8, workload, "representative_vm_arithmetic_"))
             "bench/vm_arithmetic_comparison.js"
+        else if (std.mem.startsWith(u8, workload, "representative_string_utf16_"))
+            "bench/string_indexing_comparison.js"
         else if (std.mem.startsWith(u8, workload, "wasm_threads_"))
             "bench/wasm_threads_comparison.js"
         else if (std.mem.startsWith(u8, workload, "wasm_"))

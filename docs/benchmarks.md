@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v22.json`. V22 hash-inherits every V21 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, external-suite boundary, lifecycle/no-JIT profile, and publication boundary unchanged. It re-pins only the exact-parent collector after that audited path admitted the already-frozen `single_no_jit` mode. Accepted historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v23.json`. V23 hash-inherits every V22 scored workload, mode, job count, checksum, timing boundary, engine-availability ruling, acceptance, attribution metric, external-suite boundary, lifecycle profile, exact-parent metric, and publication boundary unchanged. It re-pins the unchanged lifecycle and no-JIT profiles after their shared runner embeds a separately selected string-indexing source, then adds only that zig-js non-scored profile. Accepted historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -48,7 +48,7 @@ still required before #479 can claim a lifecycle improvement.
 
 ## Required-bytecode/no-JIT arithmetic profile
 
-V20 added, and V22 retains, four zig-js-only non-scored rows from
+V20 added, and V23 retains, four zig-js-only non-scored rows from
 [`vm_arithmetic_comparison.js`](../bench/vm_arithmetic_comparison.js): stable
 Number arithmetic, a stable BigInt control, one Number/string/BigInt/object
 polymorphic site, and observable coercion plus exception controls. The
@@ -66,6 +66,36 @@ warm calls occur outside the single timed invocation. These rows are witnesses f
 not a JavaScriptCore comparison or performance result. Any speed claim still
 requires a clean exact-parent A/B on a quiet AC-powered reference host, with the
 polymorphic and coercion controls reported beside the stable Number row.
+
+## Required-bytecode UTF-16 indexing growth profile
+
+V23 adds a separate zig-js-only non-scored profile from
+[`string_indexing_comparison.js`](../bench/string_indexing_comparison.js) for
+[#767](https://github.com/zig-utils/zig-js/issues/767). It freezes 1,024,
+2,048, and 4,096 UTF-16-code-unit strings across ASCII, non-ASCII Latin-1,
+non-Latin-1 BMP, astral, lone-surrogate, and mixed representations. Fixture
+pattern expansion, exact-width slicing, and String boxing happen during
+configuration, before the runner's ten one-job warmups and timed full-work
+invocation.
+
+Each job performs one `charCodeAt`, primitive exotic index, boxed exotic
+index, primitive `length`, and boxed `length` operation per abstract code
+unit. It also validates `charAt` at the middle, `at(-1)`, and
+`codePointAt` at the middle. Every indexed character is checked across the
+three access paths before it contributes to the frozen checksum. Both modes
+disable native tiers and require bytecode, so tree-walker entry or generated
+code is a contract failure rather than an unreported fallback.
+
+Two separate full-work attribution replays must agree exactly on result,
+admission, Context backing-allocation requests, and Context
+backing-allocation bytes before a representation or indexing implementation
+can change. The V23 manifest freezes each invocation snapshot; these cumulative
+counters start before Context construction and include configuration and
+warmup, while scored timing does not. The widths are intended for normalized
+retired-instruction growth evidence under the additive algorithmic-growth
+profile. They are not a JavaScriptCore comparison or a wall-time claim; an
+efficiency claim still requires the ordinary quiet-reference AC exact-parent
+gate.
 
 ## Representative WebAssembly rows
 

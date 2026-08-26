@@ -48,7 +48,20 @@ export function selfTest(): void {
   rejects("quick-binary counter drift", value => value.no_jit_integration.quick_binary.counters.pop(), "counter inventory drift");
   rejects("quick-binary stable miss drift", value => { value.no_jit_integration.quick_binary.stable_number.number_misses = 1; }, "stable-Number attribution contract drift");
   rejects("quick-binary full attribution drift", value => { value.no_jit_integration.quick_binary.full_attribution[0].number_hits += 1; }, "full attribution drift");
-  console.log("representative matrix structural tests: 39/39 passed");
+  rejects("string-indexing Context drift", value => { value.string_indexing_integration.context_options.enable_jit = true; }, "Context options drift");
+  rejects("string-indexing source drift", value => { value.string_indexing_integration.source.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+  rejects("string-indexing runner drift", value => { value.string_indexing_integration.runner.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+  rejects("string-indexing width drift", value => value.string_indexing_integration.widths.pop(), "width inventory drift");
+  rejects("string-indexing representation drift", value => { value.string_indexing_integration.representations[1].role = "control"; }, "representation drift");
+  rejects("string-indexing workload drift", value => { value.string_indexing_integration.workloads[0].id = "renamed"; }, "workload inventory drift");
+  rejects("string-indexing checksum drift", value => { value.string_indexing_integration.workloads[0].checksums.full += 1; }, "checksum drift");
+  rejects("string-indexing operation drift", value => { value.string_indexing_integration.scored_operations_per_code_unit.char_code_at = 2; }, "scored-operation inventory drift");
+  rejects("string-indexing probe drift", value => value.string_indexing_integration.per_job_boundary_probes.pop(), "boundary-probe inventory drift");
+  rejects("string-indexing allocation replay drift", value => value.string_indexing_integration.allocation_replay.required_exact_metrics.pop(), "allocation-replay contract drift");
+  rejects("string-indexing full attribution drift", value => { value.string_indexing_integration.full_attribution[0].backing_allocations += 1; }, "full attribution drift");
+  rejects("string-indexing attribution drift", value => { value.string_indexing_integration.attribution.generated_code_bytes = 1; }, "attribution boundary drift");
+  rejects("string-indexing timed boundary drift", value => { value.string_indexing_integration.timed_boundary = ""; }, "timed boundary is missing");
+  console.log("representative matrix structural tests: 52/52 passed");
 }
 
 if (process.argv[1] === __filename) selfTest();
