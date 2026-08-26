@@ -23930,6 +23930,72 @@ test "forced tree-walker and required bytecode retain escaping direct eval conte
     try std.testing.expectEqual(results[0], results[1]);
 }
 
+test "forced tree-walker and required bytecode preserve direct eval method and constructor context" {
+    const source =
+        \\class DirectEvalBase {
+        \\  constructor(value) { this.base = value; }
+        \\  method(value) { return this.base + value; }
+        \\}
+        \\class DirectEvalDerived extends DirectEvalBase {
+        \\  #secret = 7;
+        \\  constructor(value) {
+        \\    var before = "";
+        \\    try { eval("this"); } catch (error) { before = error.name; }
+        \\    var target = eval("new.target === DirectEvalDerived");
+        \\    eval("super(value + 1)");
+        \\    var local = 2;
+        \\    eval("local += this.#secret");
+        \\    this.trace = before + ":" + target;
+        \\    this.local = local;
+        \\  }
+        \\  method(value) {
+        \\    let local = 3;
+        \\    let target = eval("new.target === undefined");
+        \\    return eval("local += this.#secret; super.method(value) + local") + (target ? 100 : 0);
+        \\  }
+        \\}
+        \\class DirectEvalStaticBase {
+        \\  static method(value) { return this.bias + value; }
+        \\}
+        \\class DirectEvalStaticDerived extends DirectEvalStaticBase {
+        \\  static #secret = 4;
+        \\  static method(value) {
+        \\    let local = 1;
+        \\    return eval("super.method(value) + this.#secret + local");
+        \\  }
+        \\}
+        \\DirectEvalStaticDerived.bias = 10;
+        \\var directEvalInstance = new DirectEvalDerived(4);
+        \\directEvalInstance.trace + "|" + directEvalInstance.base + "|" + directEvalInstance.local + "|" +
+        \\  directEvalInstance.method(5) + "|" + DirectEvalStaticDerived.method(2);
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len][]const u8 = undefined;
+    var result_count: usize = 0;
+    defer for (results[0..result_count]) |result| std.testing.allocator.free(result);
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(source);
+        try std.testing.expect(result.isString());
+        results[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        result_count += 1;
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 6);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_unsupported_lowering));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    try std.testing.expectEqualStrings(results[0], results[1]);
+    try std.testing.expectEqualStrings("ReferenceError:true|5|9|120|17", results[1]);
+}
+
 test "required bytecode uses strict captured iterator records" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,

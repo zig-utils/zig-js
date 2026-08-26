@@ -1910,11 +1910,6 @@ pub const Compiler = struct {
     fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, hash_state: *CompileHashState, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
-        // Method and derived-constructor eval may require [[HomeObject]], SuperCall,
-        // and uninitialized-this state that are not lexical bindings in an
-        // ordinary activation. Admit that surface only with its own evidence.
-        if (fnode.uses_direct_eval and (fnode.is_method or fnode.is_derived_class_constructor))
-            return rejectPlainFunction(rejection, .unsupported_lowering);
         // Function-scope `using` resources are disposed at function exit. The
         // frame-mode VM only emits block-level DisposeResources today, so keep
         // these bodies on the tree-walker until function-exit disposal is lowered.
@@ -5688,13 +5683,6 @@ pub const Compiler = struct {
             template_admission = .async_compiled;
             break :blk compiled;
         } else blk: {
-            if (fnode.uses_direct_eval and (fnode.is_method or fnode.is_derived_class_constructor)) {
-                if (self.scope == null) {
-                    template_admission = .plain_unsupported_lowering;
-                    break :blk null;
-                }
-                return error.Unsupported;
-            }
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
             const parameter_layout = configurePlainParameters(self.arena, scope, fnode) catch |err| switch (err) {
@@ -6891,6 +6879,35 @@ test "compiler exposes direct eval lexical bindings in their TDZ" {
         try std.testing.expectEqual(compiled.chunk.lexical_slots[0], binding.slot);
     };
     try std.testing.expect(found_later);
+}
+
+test "compiler admits direct eval methods and derived constructors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "class Base { method(value) { return value; } } class Derived extends Base { constructor(value) { eval('super(value)'); } method(value) { return eval('super.method(value)'); } }",
+    );
+    const program = try parser.parseProgram();
+    const declaration = program.program[1];
+    if (declaration.* != .var_decl or declaration.var_decl.init == null)
+        return error.TestUnexpectedResult;
+    const class = declaration.var_decl.init.?;
+    if (class.* != .class_expr or class.class_expr.members.len != 2)
+        return error.TestUnexpectedResult;
+
+    for (class.class_expr.members, 0..) |member, index| {
+        var function = (member.func orelse return error.TestUnexpectedResult).function.*;
+        // Class evaluation synthesizes this flag on the executable constructor
+        // node after resolving heritage; the parser member alone cannot know it.
+        if (index == 0) function.is_derived_class_constructor = true;
+        const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), &function)) {
+            .compiled => |code| code,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(usize, 1), compiled.chunk.direct_eval_plans.items.len);
+        try std.testing.expectEqual(index == 0, compiled.chunk.is_derived_constructor);
+    }
 }
 
 test "compiler admits global-only class members and rejects frame captures" {
