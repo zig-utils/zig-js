@@ -4246,6 +4246,35 @@ fn materializeDirectEvalEnvironment(
     return installed;
 }
 
+fn callActivationEvalValue(
+    vm: *Interpreter,
+    chunk: *Chunk,
+    current_frame: ?*Frame,
+    plan_index: u32,
+    callee: Value,
+    args: []const Value,
+    this_value: ?Value,
+) EvalError!Value {
+    if (plan_index >= chunk.direct_eval_plans.items.len)
+        return vm.throwError("InternalError", "invalid direct-eval activation plan");
+    const frame = current_frame orelse
+        return vm.throwError("InternalError", "direct eval requires an ordinary activation");
+
+    // A shadowing binding named `eval` is an ordinary call. It must not expose
+    // the activation or allocate an Environment merely because the call site
+    // was syntactically spelled `eval(...)`.
+    if (!vm.isDirectEvalCallee(callee))
+        return callValue(vm, callee, args, this_value orelse Value.undef());
+
+    const saved_environment = vm.env;
+    _ = try materializeDirectEvalEnvironment(vm, frame, &chunk.direct_eval_plans.items[plan_index]);
+    defer vm.env = saved_environment;
+    return if (this_value) |receiver|
+        callEvalValueWithThis(vm, callee, args, receiver)
+    else
+        callEvalValue(vm, callee, args);
+}
+
 test "vm materializes direct eval environments over exact defining frames failure atomically" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -4314,6 +4343,48 @@ test "vm materializes direct eval environments over exact defining frames failur
     machine.arena = unavailable.allocator();
     try std.testing.expectError(error.OutOfMemory, materializeDirectEvalEnvironment(&machine, &inner, &plan));
     try std.testing.expectEqual(&root, machine.env);
+}
+
+test "vm activation eval opcode reads and mutates the exact live slot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var root = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&root, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &root, .root_shape = root_shape };
+
+    var slots = [_]Value{Value.num(41)};
+    var frame = Frame{ .slots = &slots, .parent = null };
+    const bindings = [_]bc.DirectEvalBinding{.{
+        .name = "local",
+        .slot = 0,
+        .lexical = false,
+        .immutable = false,
+        .tdz_checked = false,
+        .mapped_parameter = false,
+    }};
+    const scopes = [_]bc.DirectEvalScope{.{
+        .bindings = &bindings,
+        .function_scope = true,
+        .frame_depth = 0,
+    }};
+
+    var chunk = bc.Chunk.init(allocator);
+    const eval_index = try chunk.addConst(root.get("eval") orelse return error.TestUnexpectedResult);
+    const source_index = try chunk.addConst(Value.str("local += 1; local"));
+    const plan_index = try chunk.addDirectEvalPlan(.{ .scopes = &scopes });
+    _ = try chunk.emit(.load_const, eval_index);
+    _ = try chunk.emit(.load_const, source_index);
+    _ = try chunk.emitAB(.call_eval_activation, 1, plan_index);
+    _ = try chunk.emit(.ret, 0);
+    try chunk.finalize();
+
+    const result = try run(&machine, &chunk, &frame);
+    try std.testing.expectEqual(@as(f64, 42), result.asNum());
+    try std.testing.expectEqual(@as(f64, 42), slots[0].asNum());
+    try std.testing.expectEqual(&root, machine.env);
+    try std.testing.expect(!machine.direct_eval_call);
 }
 
 fn callSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value) EvalError!Value {
@@ -7503,6 +7574,41 @@ fn runChunk(
                 }
                 return try callEvalValueWithThis(vm, callee, stack.items[base..], this_val);
             },
+            .tail_call_eval_activation => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const callee = stack.items[base - 1];
+                if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef());
+                        stack.shrinkRetainingCapacity(base - 1);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callActivationEvalValue(vm, chunk, frame, inst.b, callee, stack.items[base..], null);
+            },
+            .tail_call_eval_activation_with_this => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const this_val = stack.items[base - 1];
+                const callee = stack.items[base - 2];
+                if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, stack.items[base..], this_val, Value.undef());
+                        stack.shrinkRetainingCapacity(base - 2);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callActivationEvalValue(vm, chunk, frame, inst.b, callee, stack.items[base..], this_val);
+            },
             .call_eval => {
                 // A bare `eval(args)` call: mark it a DIRECT eval so, if the callee
                 // is the eval intrinsic, the eval'd code runs in this body's scope
@@ -7514,12 +7620,29 @@ fn runChunk(
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
+            .call_eval_activation => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const callee = stack.items[base - 1];
+                const result = try callActivationEvalValue(vm, chunk, frame, inst.b, callee, stack.items[base..], null);
+                stack.shrinkRetainingCapacity(base - 1);
+                try stack.append(stack_alloc, result);
+            },
             .call_eval_with_this => {
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const this_val = stack.items[base - 1];
                 const callee = stack.items[base - 2];
                 const result = try callEvalValueWithThis(vm, callee, stack.items[base..], this_val);
+                stack.shrinkRetainingCapacity(base - 2);
+                try stack.append(stack_alloc, result);
+            },
+            .call_eval_activation_with_this => {
+                const argc = inst.a;
+                const base = stack.items.len - argc;
+                const this_val = stack.items[base - 1];
+                const callee = stack.items[base - 2];
+                const result = try callActivationEvalValue(vm, chunk, frame, inst.b, callee, stack.items[base..], this_val);
                 stack.shrinkRetainingCapacity(base - 2);
                 try stack.append(stack_alloc, result);
             },
@@ -7612,6 +7735,33 @@ fn runChunk(
                 const callee = stack.pop().?;
                 try stack.append(stack_alloc, try callEvalValueWithThis(vm, callee, try spreadArguments(vm, args_arr), this_val));
             },
+            .call_eval_activation_spread => {
+                const args_arr = stack.pop().?;
+                const callee = stack.pop().?;
+                try stack.append(stack_alloc, try callActivationEvalValue(
+                    vm,
+                    chunk,
+                    frame,
+                    inst.a,
+                    callee,
+                    try spreadArguments(vm, args_arr),
+                    null,
+                ));
+            },
+            .call_eval_activation_with_this_spread => {
+                const args_arr = stack.pop().?;
+                const this_val = stack.pop().?;
+                const callee = stack.pop().?;
+                try stack.append(stack_alloc, try callActivationEvalValue(
+                    vm,
+                    chunk,
+                    frame,
+                    inst.a,
+                    callee,
+                    try spreadArguments(vm, args_arr),
+                    this_val,
+                ));
+            },
             .call_with_this_spread => {
                 const args_arr = stack.pop().?;
                 const this_val = stack.pop().?;
@@ -7652,6 +7802,41 @@ fn runChunk(
                     }
                 }
                 return try callValue(vm, callee, args, this_val);
+            },
+            .tail_call_eval_activation_spread => {
+                const args_arr = stack.items[stack.items.len - 1];
+                const callee = stack.items[stack.items.len - 2];
+                const args = try spreadArguments(vm, args_arr);
+                if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, args, Value.undef(), Value.undef());
+                        stack.shrinkRetainingCapacity(stack.items.len - 2);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callActivationEvalValue(vm, chunk, frame, inst.a, callee, args, null);
+            },
+            .tail_call_eval_activation_with_this_spread => {
+                const args_arr = stack.items[stack.items.len - 1];
+                const this_val = stack.items[stack.items.len - 2];
+                const callee = stack.items[stack.items.len - 3];
+                const args = try spreadArguments(vm, args_arr);
+                if (vm.driver_active and !vm.isDirectEvalCallee(callee)) {
+                    if (jsChunkFn(callee)) |func| {
+                        const act = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
+                        stack.shrinkRetainingCapacity(stack.items.len - 3);
+                        exec.acc = acc;
+                        exec.ip = ip;
+                        vm.pending_activation = act;
+                        vm.pending_tail_call = true;
+                        return acc;
+                    }
+                }
+                return try callActivationEvalValue(vm, chunk, frame, inst.a, callee, args, this_val);
             },
             .new_spread => {
                 const args_arr = stack.pop().?;

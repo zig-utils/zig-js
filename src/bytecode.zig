@@ -411,6 +411,8 @@ pub const Op = enum(u8) {
     array_append_hole, // append an array-literal elision (a hole that reads as absent) to the array on the stack top
     call_eval, // operand a: argc; a bare `eval(args)` — marks direct-eval so a real eval runs in the current scope
     call_eval_with_this, // operand a: argc; explicit WithBaseObject, direct only for the eval intrinsic
+    call_eval_activation, // operands a: argc, b: DirectEvalPlan; expose the live ordinary activation only for the eval intrinsic
+    call_eval_activation_with_this, // operands a: argc, b: DirectEvalPlan; explicit WithBaseObject form
     import_call, // operand a: phase name index; pop options, pop specifier -> push import() promise
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
@@ -433,6 +435,8 @@ pub const Op = enum(u8) {
     tail_call, // operand a: argc; stack: callee, arg0..argN-1 -> replace current activation
     tail_call_eval, // operand a: argc; direct-eval aware tail-position call
     tail_call_eval_with_this, // operand a: argc; direct-eval-aware tail call with explicit WithBaseObject
+    tail_call_eval_activation, // operands a: argc, b: DirectEvalPlan; direct eval over the retiring ordinary activation
+    tail_call_eval_activation_with_this, // operands a: argc, b: DirectEvalPlan; explicit WithBaseObject form
     tail_call_method, // operand a: name index, b: argc; stack: recv, args... -> tail call recv.name
     tail_call_with_this, // operand a: argc; stack: func, this, args... -> tail call func with this
     new_call, // operand a: argc; stack: callee, args... -> push constructed object
@@ -444,6 +448,10 @@ pub const Op = enum(u8) {
     call_spread, // stack: callee, args_array -> push result (this = undefined)
     call_eval_spread, // stack: eval candidate, args_array -> push direct/indirect eval result
     call_eval_with_this_spread, // stack: eval candidate, this, args_array -> push direct/indirect eval result
+    call_eval_activation_spread, // operand a: DirectEvalPlan; stack: eval candidate, args_array
+    call_eval_activation_with_this_spread, // operand a: DirectEvalPlan; stack: eval candidate, this, args_array
+    tail_call_eval_activation_spread, // operand a: DirectEvalPlan; tail-position spread direct eval
+    tail_call_eval_activation_with_this_spread, // operand a: DirectEvalPlan; explicit WithBaseObject tail-position form
     call_with_this_spread, // stack: callee, this, args_array -> push result
     tail_call_spread, // stack: callee, args_array -> replace current activation
     tail_call_with_this_spread, // stack: callee, this, args_array -> replace current activation
@@ -1002,6 +1010,12 @@ pub const Chunk = struct {
     pub fn addBindingReferencePlan(self: *Chunk, plan: BindingReferencePlan) std.mem.Allocator.Error!u32 {
         const idx: u32 = @intCast(self.binding_reference_plans.items.len);
         try self.binding_reference_plans.append(self.arena, plan);
+        return idx;
+    }
+
+    pub fn addDirectEvalPlan(self: *Chunk, plan: DirectEvalPlan) std.mem.Allocator.Error!u32 {
+        const idx: u32 = @intCast(self.direct_eval_plans.items.len);
+        try self.direct_eval_plans.append(self.arena, plan);
         return idx;
     }
 

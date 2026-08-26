@@ -4030,37 +4030,46 @@ pub const Compiler = struct {
             return;
         }
         const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
-        // Tail position does not relax direct eval's requirement to observe
-        // slot-backed locals and the owning arguments binding. Env-mode chunks
-        // retain tail_call_eval; frame-mode functions stay on the tree walker.
-        if (self.scope != null and is_eval) return error.Unsupported;
+        const eval_plan: ?u32 = if (self.scope != null and is_eval)
+            try self.addCurrentDirectEvalPlan()
+        else
+            null;
         if (try self.emitDynamicIdentifierCallee(c.callee)) {
             _ = try self.chunk.emit(.swap, 0); // [callee, WithBaseObject]
             if (spread) {
-                if (is_eval) return error.Unsupported;
+                if (is_eval and eval_plan == null) return error.Unsupported;
                 try self.compileArgsArray(c.args);
-                _ = try self.chunk.emit(.tail_call_with_this_spread, 0);
+                _ = try self.chunk.emit(
+                    if (eval_plan != null) .tail_call_eval_activation_with_this_spread else .tail_call_with_this_spread,
+                    eval_plan orelse 0,
+                );
             } else {
                 for (c.args) |arg| try self.compileExpr(arg);
-                _ = try self.chunk.emit(
-                    if (is_eval) .tail_call_eval_with_this else .tail_call_with_this,
-                    @intCast(c.args.len),
-                );
+                if (eval_plan) |plan_index|
+                    _ = try self.chunk.emitAB(.tail_call_eval_activation_with_this, @intCast(c.args.len), plan_index)
+                else
+                    _ = try self.chunk.emit(
+                        if (is_eval) .tail_call_eval_with_this else .tail_call_with_this,
+                        @intCast(c.args.len),
+                    );
             }
             return;
         }
         try self.compileExpr(c.callee);
         if (spread) {
-            // A direct eval in a slot-backed function must observe that
-            // function's locals. Keep the existing dynamic-environment barrier;
-            // optional `eval?.(...)` remains indirect and lowers normally.
-            if (is_eval) return error.Unsupported;
+            if (is_eval and eval_plan == null) return error.Unsupported;
             try self.compileArgsArray(c.args);
-            _ = try self.chunk.emit(.tail_call_spread, 0);
+            _ = try self.chunk.emit(
+                if (eval_plan != null) .tail_call_eval_activation_spread else .tail_call_spread,
+                eval_plan orelse 0,
+            );
             return;
         }
         for (c.args) |arg| try self.compileExpr(arg);
-        _ = try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len));
+        if (eval_plan) |plan_index|
+            _ = try self.chunk.emitAB(.tail_call_eval_activation, @intCast(c.args.len), plan_index)
+        else
+            _ = try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len));
     }
 
     const OptionalExit = struct {
@@ -4334,12 +4343,18 @@ pub const Compiler = struct {
 
         if (call.optional) try self.emitOptionalExit(exits, if (has_receiver) 2 else 1);
         if (has_receiver) _ = try self.chunk.emit(.swap, 0); // [method, receiver]
+        const eval_plan: ?u32 = if (identifier_eval_with_base and self.scope != null)
+            try self.addCurrentDirectEvalPlan()
+        else
+            null;
 
         if (spread) {
-            if (is_tail and identifier_eval_with_base) return error.Unsupported;
+            if (is_tail and identifier_eval_with_base and eval_plan == null) return error.Unsupported;
             try self.compileArgsArray(call.args);
             _ = try self.chunk.emit(
-                if (identifier_eval_with_base)
+                if (eval_plan != null)
+                    if (is_tail) .tail_call_eval_activation_with_this_spread else .call_eval_activation_with_this_spread
+                else if (identifier_eval_with_base)
                     .call_eval_with_this_spread
                 else if (has_receiver)
                     if (is_tail) .tail_call_with_this_spread else .call_with_this_spread
@@ -4347,23 +4362,30 @@ pub const Compiler = struct {
                     .tail_call_spread
                 else
                     .call_spread,
-                0,
+                eval_plan orelse 0,
             );
             return;
         }
 
         for (call.args) |arg| try self.compileExpr(arg);
-        _ = try self.chunk.emit(
-            if (identifier_eval_with_base)
-                if (is_tail) .tail_call_eval_with_this else .call_eval_with_this
-            else if (has_receiver)
-                if (is_tail) .tail_call_with_this else .call_with_this
-            else if (is_tail)
-                .tail_call
-            else
-                .call,
-            @intCast(call.args.len),
-        );
+        if (eval_plan) |plan_index|
+            _ = try self.chunk.emitAB(
+                if (is_tail) .tail_call_eval_activation_with_this else .call_eval_activation_with_this,
+                @intCast(call.args.len),
+                plan_index,
+            )
+        else
+            _ = try self.chunk.emit(
+                if (identifier_eval_with_base)
+                    if (is_tail) .tail_call_eval_with_this else .call_eval_with_this
+                else if (has_receiver)
+                    if (is_tail) .tail_call_with_this else .call_with_this
+                else if (is_tail)
+                    .tail_call
+                else
+                    .call,
+                @intCast(call.args.len),
+            );
     }
 
     fn compileSuperCall(self: *Compiler, call: anytype, is_tail: bool) CompileError!void {
@@ -4739,36 +4761,56 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
                     }
                 } else {
-                    // A direct `eval(...)` inside a slot-based function must see the
-                    // function's locals (and correct `this`/private names), which
-                    // live in the environment only on the tree-walker — so bail to
-                    // it. Generators/top level (scope == null, env-mode) are fine.
                     const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
-                    if (self.scope != null and is_eval)
-                        return error.Unsupported;
+                    const eval_plan: ?u32 = if (self.scope != null and is_eval)
+                        try self.addCurrentDirectEvalPlan()
+                    else
+                        null;
                     if (try self.emitDynamicIdentifierCallee(c.callee)) {
                         _ = try self.chunk.emit(.swap, 0); // [callee, WithBaseObject]
                         if (spread) {
                             try self.compileArgsArray(c.args);
-                            _ = try self.chunk.emit(if (is_eval) .call_eval_with_this_spread else .call_with_this_spread, 0);
+                            _ = try self.chunk.emit(
+                                if (eval_plan != null)
+                                    .call_eval_activation_with_this_spread
+                                else if (is_eval)
+                                    .call_eval_with_this_spread
+                                else
+                                    .call_with_this_spread,
+                                eval_plan orelse 0,
+                            );
                         } else {
                             for (c.args) |arg| try self.compileExpr(arg);
-                            _ = try self.chunk.emit(
-                                if (is_eval) .call_eval_with_this else .call_with_this,
-                                @intCast(c.args.len),
-                            );
+                            if (eval_plan) |plan_index|
+                                _ = try self.chunk.emitAB(.call_eval_activation_with_this, @intCast(c.args.len), plan_index)
+                            else
+                                _ = try self.chunk.emit(
+                                    if (is_eval) .call_eval_with_this else .call_with_this,
+                                    @intCast(c.args.len),
+                                );
                         }
                         return;
                     }
                     try self.compileExpr(c.callee);
                     if (spread) {
                         try self.compileArgsArray(c.args);
-                        _ = try self.chunk.emit(if (is_eval) .call_eval_spread else .call_spread, 0);
+                        _ = try self.chunk.emit(
+                            if (eval_plan != null)
+                                .call_eval_activation_spread
+                            else if (is_eval)
+                                .call_eval_spread
+                            else
+                                .call_spread,
+                            eval_plan orelse 0,
+                        );
                     } else {
                         for (c.args) |arg| try self.compileExpr(arg);
-                        // A bare `eval(...)` in an env-mode body is a candidate direct
-                        // eval (runs in this scope if the callee is the eval intrinsic).
-                        _ = try self.chunk.emit(if (is_eval) .call_eval else .call, @intCast(c.args.len));
+                        if (eval_plan) |plan_index|
+                            _ = try self.chunk.emitAB(.call_eval_activation, @intCast(c.args.len), plan_index)
+                        else
+                            // A bare `eval(...)` in an env-mode body is a candidate
+                            // direct eval if the callee is the eval intrinsic.
+                            _ = try self.chunk.emit(if (is_eval) .call_eval else .call, @intCast(c.args.len));
                     }
                 }
             },
@@ -5581,6 +5623,15 @@ pub const Compiler = struct {
         }
     }
 
+    fn addCurrentDirectEvalPlan(self: *Compiler) CompileError!u32 {
+        const scope = self.scope orelse return error.Unsupported;
+        // A runtime Environment Record at the call site must be interleaved at
+        // its exact lexical position. Static frame scopes alone cannot describe
+        // that chain, so keep this call site causally fail-closed.
+        if (self.environment_depth != 0) return error.Unsupported;
+        return self.chunk.addDirectEvalPlan(try buildDirectEvalPlan(self.arena, scope));
+    }
+
     fn compileFunction(
         self: *Compiler,
         definition_node: *const Node,
@@ -6009,6 +6060,57 @@ test "compiler direct eval plan preserves defining-frame depth and rejects envir
 
     inner.parent_environment_depth = 1;
     try std.testing.expectError(error.Unsupported, buildDirectEvalPlan(allocator, &inner));
+}
+
+test "compiler threads activation plans through fixed spread and tail eval calls" {
+    const cases = [_]struct {
+        source: []const u8,
+        tail: bool,
+        expected: bc.Op,
+        plan_in_b: bool,
+    }{
+        .{ .source = "eval('local')", .tail = false, .expected = .call_eval_activation, .plan_in_b = true },
+        .{ .source = "eval(...args)", .tail = false, .expected = .call_eval_activation_spread, .plan_in_b = false },
+        .{ .source = "eval('local')", .tail = true, .expected = .tail_call_eval_activation, .plan_in_b = true },
+        .{ .source = "eval(...args)", .tail = true, .expected = .tail_call_eval_activation_spread, .plan_in_b = false },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try @import("parser.zig").Parser.init(allocator, case.source);
+        const program = try parser.parseProgram();
+        const expression = program.program[0].expr_stmt;
+
+        var hash_state: CompileHashState = .{};
+        var scope = FnScope{
+            .parent = null,
+            .hash_state = &hash_state,
+            .names = .{ .state = &hash_state },
+        };
+        _ = try scope.addLocal(allocator, "local", false, false);
+        _ = try scope.addLocal(allocator, "args", false, false);
+        var chunk = bc.Chunk.init(allocator);
+        var compiler = Compiler{
+            .arena = allocator,
+            .chunk = &chunk,
+            .mode = .function,
+            .hash_state = &hash_state,
+            .scope = &scope,
+            .is_strict = true,
+        };
+        if (case.tail)
+            try compiler.compileTailExpr(expression)
+        else
+            try compiler.compileExpr(expression);
+
+        try std.testing.expectEqual(@as(usize, 1), chunk.direct_eval_plans.items.len);
+        const instruction = chunk.code.items[chunk.code.items.len - 1];
+        try std.testing.expectEqual(case.expected, instruction.op);
+        try std.testing.expectEqual(@as(u32, 0), if (case.plan_in_b) instruction.b else instruction.a);
+        try std.testing.expectEqual(@as(usize, 2), chunk.direct_eval_plans.items[0].scopes[0].bindings.len);
+    }
 }
 
 test "compiler keyed placement disperses a deterministic default collision family" {
