@@ -16,7 +16,8 @@ const SHARED_MEASUREMENT_OVERLAY_PATHS = [
   "docs/.data/algorithmic-growth-schema-v2.json", "docs/.data/bunpress-output-v1.json", "docs/.data/performance-attribution-schema-v2.json", "docs/.data/representative-benchmark-matrix-v24.json", "docs/benchmarks.md",
   "tools/algorithmic-growth.ts", "tools/exact-parent-regression.ts", "tools/instrumentation-overhead.ts", "tools/performance-attribution.ts", "tools/representative-matrix.ts",
 ];
-export type RunnerRow = { engine: string; mode: string; workload: string; lanes: number; jobs: number; elapsed_ns: number; checksum: number; measured_boundary_cpu_user_ns: number; measured_boundary_cpu_system_ns: number; measured_boundary_cpu_occupancy: number; process_wall_time_ns: number; process_cpu_user_ns: number; process_cpu_system_ns: number; process_cpu_occupancy: number; peak_rss_bytes: number; retained_rss_bytes: number | null; allocations: number | null; allocated_bytes: number | null; instructions: number; cycles: number; energy_joules: number; thermal_state: string; lifecycle?: LifecycleTelemetry };
+export type RunnerRow = { engine: string; mode: string; workload: string; lanes: number; jobs: number; elapsed_ns: number; checksum: number; measured_boundary_cpu_user_ns: number; measured_boundary_cpu_system_ns: number; measured_boundary_cpu_occupancy: number; process_wall_time_ns: number; process_cpu_user_ns: number; process_cpu_system_ns: number; process_cpu_occupancy: number; peak_rss_bytes: number; retained_rss_bytes: number | null; allocations: number | null; allocated_bytes: number | null; allocation_source: string | null; instructions: number; cycles: number; energy_joules: number; thermal_state: string; lifecycle?: LifecycleTelemetry };
+export type BatchRow = { workload: string; jobs: number; expected_checksum: number; raw_out: string; markdown_out: string };
 export type LifecycleTelemetry = { schema_version: number; scenario: string; context_options_profile: string; iterations: number; sample: number; create_ns: number; work_ns: number; destroy_ns: number; phase_total_ns: number; cpu_user_ns: number; cpu_system_ns: number; baseline_rss_bytes: number; max_live_rss_bytes: number; post_destroy_rss_bytes: number; retained_delta_bytes: number; peak_rss_bytes: number; rss_checkpoints: number[]; finalizers: Record<string, number> };
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function requireNoCompetingEvidenceProcess(phase: string, listing = commandOutput(["ps", "-axo", "pid=,ppid=,command="], ""), selfPid = process.pid): void {
@@ -117,7 +118,23 @@ export function parseFrontendAllocations(stdout: string, mode: string, workload:
   requireValue(Number.isInteger(allocations) && allocations > 0 && Number.isInteger(allocatedBytes) && allocatedBytes > 0, "frontend-allocation counters are invalid");
   return [allocations, allocatedBytes];
 }
-export function runOne(binary: string, mode: string, workload: string, jobs: number, lanes: number): RunnerRow {
+export function parseNativeAllocationReplay(stdout: string, replayMode: string, workload: string, jobs: number, lanes: number, checksum: number): [number, number] {
+  requireValue(replayMode === "attribution" || replayMode === "attribution_no_jit", `unsupported allocation replay mode: ${replayMode}`);
+  const records: any[] = [];
+  for (const line of stdout.split("\n").filter(Boolean)) { try { records.push(JSON.parse(line)); } catch { throw new Error("native allocation replay JSON is invalid"); } }
+  const invocations = records.filter((record) => record?.kind === "zig-js-tier-attribution" && record?.phase === "invocation");
+  requireValue(invocations.length === 1, `expected one native allocation invocation row, got ${invocations.length}`);
+  const record = invocations[0], expectedMode = replayMode === "attribution_no_jit" ? "single_no_jit" : "single";
+  requireValue(record.mode === expectedMode && record.workload === workload && record.lanes === lanes && record.jobs === jobs, "native allocation replay identity drift");
+  requireValue(record.checksum === checksum, "native allocation replay checksum drift");
+  const execution = record.execution, admissions = record.admissions;
+  requireValue(execution && execution.tree_walker_entries === 0 && execution.vm_entries > 0 && execution.vm_dispatches > 0 && execution.baseline_entries === 0 && execution.optimizer_entries === 0 && record.baseline_publications === 0 && record.optimizer_publications === 0 && record.generated_code_bytes === 0, "native allocation replay tier boundary drift");
+  requireValue(admissions && admissions.program_compiled > 0 && admissions.template_plain_compiled > 0, "native allocation replay admission boundary drift");
+  const allocations = record.allocation?.backing_allocations, allocatedBytes = record.allocation?.backing_allocation_bytes;
+  requireValue(Number.isSafeInteger(allocations) && allocations > 0 && Number.isSafeInteger(allocatedBytes) && allocatedBytes > 0, "native allocation replay counters are invalid");
+  return [allocations, allocatedBytes];
+}
+export function runOne(binary: string, mode: string, workload: string, jobs: number, lanes: number, allocationReplayMode = ""): RunnerRow {
   requireNoCompetingEvidenceProcess("before benchmark invocation");
   const command = ["env", "LC_ALL=C", "/usr/bin/time", "-l", binary, ...runnerArguments(mode, workload, jobs, lanes)]; console.error(`+ ${command.join(" ")}`);
   const completed = run(command); requireValue(completed.exitCode === 0, completed.stderr || `benchmark exited ${completed.exitCode}`);
@@ -126,22 +143,34 @@ export function runOne(binary: string, mode: string, workload: string, jobs: num
   const counters: any = parseDarwinCounters(completed.stdout, mode, workload, jobs), cpu = parseDarwinCpuTime(completed.stdout, mode, workload, jobs), thermal: any = parseDarwinThermalState(completed.stdout, mode, workload, jobs);
   requireValue(counters.instructions.status === "measured" && counters.cycles.status === "measured" && counters.process_energy_nj.status === "measured", "exact-parent Darwin counters are unavailable");
   requireValue(thermal.status === "measured", "exact-parent thermal state is unavailable");
-  const allocationCounters = parseFrontendAllocations(completed.stdout, mode, workload, jobs);
+  let allocationCounters = parseFrontendAllocations(completed.stdout, mode, workload, jobs), allocationSource = allocationCounters ? "untimed exact-work frontend parse/compile allocator replay" : null;
+  if (allocationReplayMode) {
+    requireValue(allocationCounters === null, "benchmark exposes both inline and native allocation replays");
+    requireValue((mode === "single" && allocationReplayMode === "attribution") || (mode === "single_no_jit" && allocationReplayMode === "attribution_no_jit"), "native allocation replay does not match the timed mode");
+    requireNoCompetingEvidenceProcess("before native allocation replay");
+    const replayCommand = [binary, allocationReplayMode, workload, String(jobs), String(lanes)]; console.error(`+ ${replayCommand.join(" ")}`);
+    const replay = run(replayCommand); requireValue(replay.exitCode === 0, replay.stderr || `native allocation replay exited ${replay.exitCode}`);
+    requireNoCompetingEvidenceProcess("after native allocation replay");
+    allocationCounters = parseNativeAllocationReplay(replay.stdout, allocationReplayMode, workload, jobs, lanes, checksum);
+    allocationSource = `untimed exact-work ${allocationReplayMode} invocation-phase Context backing allocation replay`;
+  }
   const lifecycle = mode === "context_lifecycle" ? parseLifecycleTelemetry(completed.stdout, workload, jobs) : undefined;
   const measuredBoundaryOccupancy = processCpuOccupancy(elapsed_ns, cpu.user_ns, cpu.system_ns);
   requireValue(measuredBoundaryOccupancy >= MINIMUM_PROCESS_CPU_OCCUPANCY, `benchmark measured-boundary CPU occupancy ${(measuredBoundaryOccupancy * 100).toFixed(1)}% is below ${(MINIMUM_PROCESS_CPU_OCCUPANCY * 100).toFixed(0)}%; transient competing work overlapped the scored invocation`);
   const processWallNs = Math.round(timeMetric(completed.stderr, "real") * 1e9), userNs = Math.round(timeMetric(completed.stderr, "user") * 1e9), systemNs = Math.round(timeMetric(completed.stderr, "sys") * 1e9), processOccupancy = processCpuOccupancy(processWallNs, userNs, systemNs);
-  return { engine, mode, workload, lanes, jobs, elapsed_ns, checksum, measured_boundary_cpu_user_ns: cpu.user_ns, measured_boundary_cpu_system_ns: cpu.system_ns, measured_boundary_cpu_occupancy: measuredBoundaryOccupancy, process_wall_time_ns: processWallNs, process_cpu_user_ns: userNs, process_cpu_system_ns: systemNs, process_cpu_occupancy: processOccupancy, peak_rss_bytes: parsePeakRss(completed.stderr), retained_rss_bytes: mode === "single_observed" ? parseRetainedRss(completed.stdout, mode, workload, jobs) : lifecycle?.post_destroy_rss_bytes ?? null, allocations: allocationCounters?.[0] ?? null, allocated_bytes: allocationCounters?.[1] ?? null, instructions: counters.instructions.value, cycles: counters.cycles.value, energy_joules: counters.process_energy_nj.value / 1e9, thermal_state: `${thermal.before}->${thermal.after}`, lifecycle };
+  return { engine, mode, workload, lanes, jobs, elapsed_ns, checksum, measured_boundary_cpu_user_ns: cpu.user_ns, measured_boundary_cpu_system_ns: cpu.system_ns, measured_boundary_cpu_occupancy: measuredBoundaryOccupancy, process_wall_time_ns: processWallNs, process_cpu_user_ns: userNs, process_cpu_system_ns: systemNs, process_cpu_occupancy: processOccupancy, peak_rss_bytes: parsePeakRss(completed.stderr), retained_rss_bytes: mode === "single_observed" ? parseRetainedRss(completed.stdout, mode, workload, jobs) : lifecycle?.post_destroy_rss_bytes ?? null, allocations: allocationCounters?.[0] ?? null, allocated_bytes: allocationCounters?.[1] ?? null, allocation_source: allocationSource, instructions: counters.instructions.value, cycles: counters.cycles.value, energy_joules: counters.process_energy_nj.value / 1e9, thermal_state: `${thermal.before}->${thermal.after}`, lifecycle };
 }
 export function sampleRecord(row: RunnerRow, variant: string, pairSample: number, order: number, schema: any): any {
   const metrics = unavailableMetrics(schema, "instrumentation is not yet connected for this metric; absence is explicit and is not a zero");
+  requireValue((row.allocations === null) === (row.allocated_bytes === null), "allocation count/byte availability drift");
+  if (row.allocations !== null) requireValue(typeof row.allocation_source === "string" && row.allocation_source.length > 0, "measured allocation replay lacks provenance");
   measured(metrics, "wall_time_ns", row.elapsed_ns, "benchmark_runner.elapsed_ns");
   measured(metrics, "process_cpu_user_ns", row.process_cpu_user_ns, "/usr/bin/time -l user");
   measured(metrics, "process_cpu_system_ns", row.process_cpu_system_ns, "/usr/bin/time -l sys");
   measured(metrics, "peak_rss_bytes", row.peak_rss_bytes, "/usr/bin/time -l maximum resident set size");
   if (row.retained_rss_bytes !== null) measured(metrics, "retained_rss_bytes", row.retained_rss_bytes, "task_vm_info.resident_size at the post-invocation live snapshot");
-  if (row.allocations !== null) measured(metrics, "allocations", row.allocations, "untimed exact-work frontend parse/compile allocator replay: alloc + resize/remap requests");
-  if (row.allocated_bytes !== null) measured(metrics, "allocated_bytes", row.allocated_bytes, "untimed exact-work frontend parse/compile allocator replay: cumulative bytes");
+  if (row.allocations !== null) measured(metrics, "allocations", row.allocations, `${row.allocation_source}: allocation requests`);
+  if (row.allocated_bytes !== null) measured(metrics, "allocated_bytes", row.allocated_bytes, `${row.allocation_source}: cumulative bytes`);
   measured(metrics, "instructions", row.instructions, "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta");
   measured(metrics, "cycles", row.cycles, "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta");
   measured(metrics, "energy_joules", row.energy_joules, "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9");
@@ -190,7 +219,19 @@ export function summarize(samples: any[], schema: any, hostClass: string, materi
   const status = blocks ? "blocked_regression" : efficiencyBlocks ? "blocked_efficiency_evidence" : !gatingHost ? "diagnostic_only" : !stable ? "inconclusive_noise" : regression ? "visible_non_gating_regression" : "pass";
   return { parent_wall_median_ns: parentMedian, candidate_wall_median_ns: candidateMedian, candidate_over_parent: ratio, parent_wall_rsd: parentRsd, candidate_wall_rsd: candidateRsd, stable, gating_host: gatingHost, regression, efficiency: { metrics: efficiency, thermal_states: thermalStates, required_categories: materialCategories, unmet_metrics: unmetMetrics, stable: efficiencyStable, blocks_publication: efficiencyBlocks }, blocks_publication: blocksPublication, status };
 }
-export function collect(parentBinary: string, candidateBinary: string, mode: string, workload: string, jobs: number, lanes: number, expectedChecksum: number, samples: number, schema: any): any[] { if (mode === "context_lifecycle") validateLifecycleCollectionRequest(workload, jobs, expectedChecksum); const binaries: any = { parent: parentBinary, candidate: candidateBinary }, result: any[] = []; for (let pairSample = 0; pairSample < samples; pairSample += 1) { const order = pairSample % 2 === 0 ? ["parent", "candidate"] : ["candidate", "parent"]; order.forEach((variant, position) => { const row = runOne(binaries[variant], mode, workload, jobs, lanes); requireValue(row.checksum === expectedChecksum, `${variant} pair ${pairSample} checksum ${row.checksum} != frozen ${expectedChecksum}`); result.push(sampleRecord(row, variant, pairSample, position, schema)); }); } return result; }
+export function collect(parentBinary: string, candidateBinary: string, mode: string, workload: string, jobs: number, lanes: number, expectedChecksum: number, samples: number, schema: any, allocationReplayMode = ""): any[] {
+  if (mode === "context_lifecycle") validateLifecycleCollectionRequest(workload, jobs, expectedChecksum);
+  const binaries: any = { parent: parentBinary, candidate: candidateBinary }, result: any[] = [];
+  for (let pairSample = 0; pairSample < samples; pairSample += 1) {
+    const order = pairSample % 2 === 0 ? ["parent", "candidate"] : ["candidate", "parent"];
+    order.forEach((variant, position) => {
+      const row = runOne(binaries[variant], mode, workload, jobs, lanes, allocationReplayMode);
+      requireValue(row.checksum === expectedChecksum, `${variant} pair ${pairSample} checksum ${row.checksum} != frozen ${expectedChecksum}`);
+      result.push(sampleRecord(row, variant, pairSample, position, schema));
+    });
+  }
+  return result;
+}
 export function render(artifact: any): string {
   const metadata = artifact.metadata, summary = artifact.summary, efficiency = summary.efficiency;
   const memoryRows = ["peak_rss_bytes", "retained_rss_bytes", "allocations", "allocated_bytes"].map((metric) => [metric, measuredMetricSummary(artifact.samples, metric)] as const).filter((entry) => entry[1] !== null).map(([metric, value]) => `| \`${metric}\` | ${value.parent_median} | ${value.candidate_median} | ${value.candidate_over_parent.toFixed(4)}x | ${(value.parent_rsd * 100).toFixed(2)}% | ${(value.candidate_rsd * 100).toFixed(2)}% |`);
@@ -212,14 +253,40 @@ export function render(artifact: any): string {
   ].join("\n");
 }
 
-function syntheticSamples(parent: number[], candidate: number[], schema: any): any[] { const result: any[] = []; parent.forEach((parentWall, pairSample) => { const walls: any = { parent: parentWall, candidate: candidate[pairSample] }, order = pairSample % 2 === 0 ? ["parent", "candidate"] : ["candidate", "parent"]; order.forEach((variant, position) => result.push(sampleRecord({ engine: "zig-js", mode: "single", workload: "representative_json", lanes: 1, jobs: 2200, elapsed_ns: walls[variant], checksum: 324952086, measured_boundary_cpu_user_ns: Math.max(0, walls[variant] - 100), measured_boundary_cpu_system_ns: 100, measured_boundary_cpu_occupancy: 1, process_wall_time_ns: walls[variant] * 10, process_cpu_user_ns: walls[variant], process_cpu_system_ns: 0, process_cpu_occupancy: 0.1, peak_rss_bytes: 10000000, retained_rss_bytes: null, allocations: null, allocated_bytes: null, instructions: 1000 + pairSample, cycles: 500 + pairSample, energy_joules: 0.2 + pairSample / 1000, thermal_state: "nominal->nominal" }, variant, pairSample, position, schema))); }); return result; }
+function syntheticSamples(parent: number[], candidate: number[], schema: any): any[] { const result: any[] = []; parent.forEach((parentWall, pairSample) => { const walls: any = { parent: parentWall, candidate: candidate[pairSample] }, order = pairSample % 2 === 0 ? ["parent", "candidate"] : ["candidate", "parent"]; order.forEach((variant, position) => result.push(sampleRecord({ engine: "zig-js", mode: "single", workload: "representative_json", lanes: 1, jobs: 2200, elapsed_ns: walls[variant], checksum: 324952086, measured_boundary_cpu_user_ns: Math.max(0, walls[variant] - 100), measured_boundary_cpu_system_ns: 100, measured_boundary_cpu_occupancy: 1, process_wall_time_ns: walls[variant] * 10, process_cpu_user_ns: walls[variant], process_cpu_system_ns: 0, process_cpu_occupancy: 0.1, peak_rss_bytes: 10000000, retained_rss_bytes: null, allocations: null, allocated_bytes: null, allocation_source: null, instructions: 1000 + pairSample, cycles: 500 + pairSample, energy_joules: 0.2 + pairSample / 1000, thermal_state: "nominal->nominal" }, variant, pairSample, position, schema))); }); return result; }
 function expectFailure(action: () => void, pattern: string): void { try { action(); } catch (error) { requireValue(String(error).includes(pattern), `expected ${pattern}, got ${String(error)}`); return; } throw new Error(`expected failure containing ${pattern}`); }
+export function validateBatchRows(value: any): BatchRow[] {
+  requireValue(Array.isArray(value) && value.length > 0, "exact-parent batch must contain at least one row");
+  const expectedFields = ["expected_checksum", "jobs", "markdown_out", "raw_out", "workload"];
+  for (const row of value) {
+    requireValue(row && typeof row === "object" && !Array.isArray(row) && JSON.stringify(Object.keys(row).sort()) === JSON.stringify(expectedFields), "exact-parent batch row fields drift");
+    requireValue(typeof row.workload === "string" && row.workload.length > 0 && Number.isSafeInteger(row.jobs) && row.jobs > 0 && Number.isSafeInteger(row.expected_checksum) && row.expected_checksum >= 0, "exact-parent batch row identity is invalid");
+    requireValue(typeof row.raw_out === "string" && row.raw_out.endsWith(".json") && typeof row.markdown_out === "string" && row.markdown_out.endsWith(".md"), "exact-parent batch output path is invalid");
+  }
+  requireValue(new Set(value.map((row) => row.workload)).size === value.length, "exact-parent batch repeats a workload");
+  const outputs = value.flatMap((row) => [row.raw_out, row.markdown_out]); requireValue(new Set(outputs).size === outputs.length, "exact-parent batch repeats an output path");
+  return value as BatchRow[];
+}
+export function loadBatchRows(path: string): BatchRow[] { return validateBatchRows(JSON.parse(readText(path))); }
 export function selfTest(): void {
   const schema = loadSchema(DEFAULT_SCHEMA);
   const stdout = "zig-js\tsingle\trepresentative_json\t1\t2200\t0\t60000000\t324952086\n"; requireValue(JSON.stringify(parseBenchmark(stdout, "single", "representative_json", 1, 2200)) === JSON.stringify(["zig-js", 60000000, 324952086]), "runner row parse drift"); expectFailure(() => parseBenchmark(stdout, "single", "representative_regexp", 1, 2200), "identity drift");
   const cpu = "zig-js-darwin-cpu-time\tsingle\trepresentative_json\t2200\t0\tmeasured\t57000000\t1000000\n"; requireValue(JSON.stringify(parseDarwinCpuTime(cpu, "single", "representative_json", 2200)) === '{"user_ns":57000000,"system_ns":1000000}', "measured-boundary CPU row parse drift"); expectFailure(() => parseDarwinCpuTime(cpu, "single", "representative_regexp", 2200), "identity drift"); expectFailure(() => parseDarwinCpuTime("", "single", "representative_json", 2200), "expected one Darwin CPU-time row");
   const native = "zig-js-native-observability\tsingle_observed\trepresentative_json\t2200\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t12000000\t11000000\n"; requireValue(parseRetainedRss(native, "single_observed", "representative_json", 2200) === 11000000, "retained RSS row parse drift"); expectFailure(() => parseRetainedRss(native, "single_observed", "representative_regexp", 2200), "identity drift");
   const frontend = "zig-js-frontend-allocations\tsingle\trepresentative_frontend_numeric_separators_1024\t10\t0\t123\t456\n"; requireValue(JSON.stringify(parseFrontendAllocations(frontend, "single", "representative_frontend_numeric_separators_1024", 10)) === "[123,456]", "frontend allocation parse drift"); expectFailure(() => parseFrontendAllocations(frontend, "single", "representative_frontend_numeric_separators_2048", 10), "identity drift");
+  const allocationReplay: any = { kind: "zig-js-tier-attribution", phase: "invocation", mode: "single_no_jit", workload: "representative_string_utf16_ascii_1024", lanes: 1, jobs: 10, checksum: 23880132, execution: { tree_walker_entries: 0, vm_entries: 30, vm_dispatches: 1956966, baseline_entries: 0, optimizer_entries: 0 }, admissions: { program_compiled: 16, template_plain_compiled: 5 }, baseline_publications: 0, optimizer_publications: 0, generated_code_bytes: 0, allocation: { backing_allocations: 176365, backing_allocation_bytes: 24257955 } };
+  const replayText = (value: any) => JSON.stringify(value) + "\n";
+  requireValue(JSON.stringify(parseNativeAllocationReplay(replayText(allocationReplay), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum)) === "[176365,24257955]", "native allocation replay parse drift");
+  expectFailure(() => parseNativeAllocationReplay("", "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "expected one native allocation invocation row");
+  expectFailure(() => parseNativeAllocationReplay(replayText(allocationReplay) + replayText(allocationReplay), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "got 2");
+  const wrongPhase = { ...allocationReplay, phase: "warmup" }; expectFailure(() => parseNativeAllocationReplay(replayText(wrongPhase), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "got 0");
+  const wrongIdentity = { ...allocationReplay, workload: "representative_string_utf16_ascii_2048" }; expectFailure(() => parseNativeAllocationReplay(replayText(wrongIdentity), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "identity drift");
+  const wrongChecksum = { ...allocationReplay, checksum: allocationReplay.checksum + 1 }; expectFailure(() => parseNativeAllocationReplay(replayText(wrongChecksum), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "checksum drift");
+  const wrongTier = JSON.parse(JSON.stringify(allocationReplay)); wrongTier.execution.tree_walker_entries = 1; expectFailure(() => parseNativeAllocationReplay(replayText(wrongTier), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "tier boundary drift");
+  const wrongAllocation = JSON.parse(JSON.stringify(allocationReplay)); wrongAllocation.allocation.backing_allocations = 0; expectFailure(() => parseNativeAllocationReplay(replayText(wrongAllocation), "attribution_no_jit", allocationReplay.workload, 10, 1, allocationReplay.checksum), "counters are invalid");
+  const batchRows = [{ workload: allocationReplay.workload, jobs: 10, expected_checksum: allocationReplay.checksum, raw_out: "docs/.data/fixture.json", markdown_out: "docs/.data/fixture.md" }]; requireValue(validateBatchRows(batchRows).length === 1, "exact-parent batch fixture drift");
+  expectFailure(() => validateBatchRows([...batchRows, { ...batchRows[0], raw_out: "docs/.data/fixture-2.json", markdown_out: "docs/.data/fixture-2.md" }]), "repeats a workload");
+  expectFailure(() => validateBatchRows([{ ...batchRows[0], extra: true }]), "row fields drift");
   const observedArguments = runnerArguments("single_observed", "representative_json", 2200, 1); requireValue(observedArguments[observedArguments.length - 1] === "--native-observability-telemetry", "single_observed telemetry option drift");
   requireValue(JSON.stringify(runnerArguments("single_no_jit", "representative_vm_arithmetic_number", 10000, 1)) === '["single_no_jit","representative_vm_arithmetic_number","10000","1","--darwin-rusage"]', "single_no_jit exact-parent argument drift");
   const lifecycleArguments = runnerArguments("context_lifecycle", "context_no_evaluation", 1, 1); requireValue(JSON.stringify(lifecycleArguments) === '["context_lifecycle","context_no_evaluation","1","1","--darwin-rusage"]', "context lifecycle runner arguments drift");
@@ -265,20 +332,53 @@ export function selfTest(): void {
   requireValue(JSON.stringify(competingEvidenceProcesses(processFixture, 120)) === JSON.stringify(expectedCompetitors), "competing evidence-process classification drift");
   expectFailure(() => requireNoCompetingEvidenceProcess("before fixture", processFixture, 120), "competing build/test process detected before fixture");
   requireNoCompetingEvidenceProcess("clean fixture", processFixture.split("\n").filter((line) => !/^(200|210|220|230|240|250|260|270|280) /.test(line)).join("\n"), 120);
-  console.log("OK exact-parent self-test: identity, pairing, regression, cleanliness, and competing-job gates verified");
+  console.log("OK exact-parent self-test: identity, pairing, native allocation replay, serial batch, regression, cleanliness, and competing-job gates verified");
+}
+
+function publishRow(parentBinary: string, candidateBinary: string, row: BatchRow, options: any, identities: any): void {
+  const samples = collect(parentBinary, candidateBinary, options.mode, row.workload, row.jobs, options.lanes, row.expected_checksum, options.samples, identities.schema, options.allocation_replay_mode || "");
+  validateSampleQuality(samples);
+  if (options.allocation_replay_mode) {
+    requireValue(samples.every((sample: any) => sample.metrics.allocations.status === "measured" && sample.metrics.allocated_bytes.status === "measured"), `native allocation replay evidence is incomplete at ${row.workload}`);
+    for (const variant of ["parent", "candidate"]) for (const metric of ["allocations", "allocated_bytes"]) requireValue(new Set(samples.filter((sample: any) => sample.identity.variant === variant).map((sample: any) => sample.metrics[metric].value)).size === 1, `${variant} ${metric} replay is not exact at ${row.workload}`);
+  }
+  const metadata = {
+    parent_revision: identities.parent_revision, candidate_revision: identities.candidate_revision, candidate_first_parent: identities.parent_revision,
+    parent_binary_revision: identities.parent_binary_revision, candidate_binary_revision: identities.candidate_binary_revision, shared_measurement_overlay_paths: SHARED_MEASUREMENT_OVERLAY_PATHS,
+    zig_gc_revision: identities.zig_gc_revision, zig_regex_revision: identities.zig_regex_revision, zig_version: identities.zig_version, os: identities.os, hardware: identities.hardware,
+    power: commandOutput(["pmset", "-g", "batt"], "unavailable").split(/\s+/).join(" "), host_class: options.host_class, material_change_categories: identities.material_categories,
+    workload_source_sha256: identities.workload_source_sha256, parent_binary_sha256: identities.parent_binary_sha256, candidate_binary_sha256: identities.candidate_binary_sha256,
+    samples: options.samples, minimum_measured_boundary_cpu_occupancy: MINIMUM_PROCESS_CPU_OCCUPANCY, timed_boundary: options.timed_boundary, mode: options.mode, workload: row.workload, lanes: options.lanes, jobs: row.jobs, expected_checksum: row.expected_checksum,
+    ...(options.allocation_replay_mode ? { allocation_replay_mode: options.allocation_replay_mode } : {}),
+  };
+  const artifact = { schema_version: identities.schema.schema_version, profile_id: identities.schema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarize(samples, identities.schema, options.host_class, identities.material_categories) };
+  validateArtifact(artifact, identities.schema);
+  checked(["mkdir", "-p", row.raw_out.slice(0, row.raw_out.lastIndexOf("/")) || ".", row.markdown_out.slice(0, row.markdown_out.lastIndexOf("/")) || "."], "create exact-parent output directories");
+  writeText(row.raw_out, JSON.stringify(artifact, null, 2) + "\n"); writeText(row.markdown_out, render(artifact));
+  console.log(`OK exact-parent row ${row.workload}: ${row.raw_out}`);
+  if (artifact.summary.blocks_publication) throw new Error(`reference-host publication blocked: ${artifact.summary.status}`);
 }
 
 function main(): void {
   const raw = process.argv.slice(2); if (raw.length === 1 && raw[0] === "--self-test") { selfTest(); return; }
   const positional: string[] = [], options: any = { candidate_revision: "HEAD", lanes: 1, samples: 7, host_class: "diagnostic", schema: DEFAULT_SCHEMA };
-  const names: any = { "--parent-revision": "parent_revision", "--candidate-revision": "candidate_revision", "--parent-binary-revision": "parent_binary_revision", "--candidate-binary-revision": "candidate_binary_revision", "--source": "source", "--mode": "mode", "--workload": "workload", "--jobs": "jobs", "--lanes": "lanes", "--expected-checksum": "expected_checksum", "--samples": "samples", "--host-class": "host_class", "--material-change": "material_change", "--timed-boundary": "timed_boundary", "--schema": "schema", "--raw-out": "raw_out", "--markdown-out": "markdown_out" };
+  const names: any = { "--parent-revision": "parent_revision", "--candidate-revision": "candidate_revision", "--parent-binary-revision": "parent_binary_revision", "--candidate-binary-revision": "candidate_binary_revision", "--source": "source", "--mode": "mode", "--workload": "workload", "--jobs": "jobs", "--lanes": "lanes", "--expected-checksum": "expected_checksum", "--samples": "samples", "--host-class": "host_class", "--material-change": "material_change", "--timed-boundary": "timed_boundary", "--allocation-replay-mode": "allocation_replay_mode", "--batch": "batch", "--schema": "schema", "--raw-out": "raw_out", "--markdown-out": "markdown_out" };
   for (let index = 0; index < raw.length; index += 1) { if (!raw[index].startsWith("--")) positional.push(raw[index]); else { requireValue(names[raw[index]] && index + 1 < raw.length, `unknown or incomplete argument: ${raw[index]}`); const key = names[raw[index]], value = raw[++index]; options[key] = ["jobs", "lanes", "expected_checksum", "samples"].includes(key) ? Number(value) : value; } }
-  requireValue(positional.length === 2, "usage: exact-parent-regression.ts PARENT_RUNNER CANDIDATE_RUNNER [options]"); for (const field of ["parent_revision", "parent_binary_revision", "candidate_binary_revision", "source", "mode", "workload", "jobs", "expected_checksum", "timed_boundary", "raw_out", "markdown_out"]) requireValue(options[field] !== undefined, `missing required option: ${field}`);
-  requireValue(options.samples >= 2 && options.jobs > 0 && options.lanes > 0 && options.expected_checksum >= 0, "samples must be >=2; jobs/lanes positive; checksum non-negative"); for (const path of [positional[0], positional[1], options.source]) requireValue(Home.fileExists(path), `input does not exist: ${path}`);
+  requireValue(positional.length === 2, "usage: exact-parent-regression.ts PARENT_RUNNER CANDIDATE_RUNNER [options]");
+  for (const field of ["parent_revision", "parent_binary_revision", "candidate_binary_revision", "source", "mode", "timed_boundary"]) requireValue(options[field] !== undefined, `missing required option: ${field}`);
+  const singleFields = ["workload", "jobs", "expected_checksum", "raw_out", "markdown_out"], batchMode = options.batch !== undefined;
+  if (batchMode) for (const field of singleFields) requireValue(options[field] === undefined, `--batch cannot be combined with --${field.replaceAll("_", "-")}`); else for (const field of singleFields) requireValue(options[field] !== undefined, `missing required option: ${field}`);
+  requireValue(Number.isSafeInteger(options.samples) && options.samples >= 2 && Number.isSafeInteger(options.lanes) && options.lanes > 0, "samples must be >=2 and lanes must be positive");
+  for (const path of [positional[0], positional[1], options.source, ...(batchMode ? [options.batch] : [])]) requireValue(Home.fileExists(path), `input does not exist: ${path}`);
+  if (options.allocation_replay_mode) requireValue((options.mode === "single" && options.allocation_replay_mode === "attribution") || (options.mode === "single_no_jit" && options.allocation_replay_mode === "attribution_no_jit"), "native allocation replay does not match the timed mode");
+  const rows = batchMode ? loadBatchRows(options.batch) : validateBatchRows([{ workload: options.workload, jobs: options.jobs, expected_checksum: options.expected_checksum, raw_out: options.raw_out, markdown_out: options.markdown_out }]);
+  for (const row of rows) for (const output of [row.raw_out, row.markdown_out]) requireValue(!Home.fileExists(output), `refusing to overwrite exact-parent artifact: ${output}`);
   const materialCategories = options.material_change ? String(options.material_change).split(",").filter(Boolean) : ["cpu_work", ...(["independent_steady", "independent_cold", "shared"].includes(options.mode) ? ["threads"] : [])];
   requireValue(materialCategories.length > 0 && materialCategories.every((value: string) => MATERIAL_CATEGORIES.includes(value)) && new Set(materialCategories).size === materialCategories.length, `material-change categories must be unique values from ${MATERIAL_CATEGORIES.join(",")}`);
-  const schema = loadSchema(options.schema), [parentRevision, candidateRevision] = validateExactParent(options.parent_revision, options.candidate_revision), [parentBinaryRevision, candidateBinaryRevision] = validateSharedMeasurementOverlay(parentRevision, candidateRevision, options.parent_binary_revision, options.candidate_binary_revision); for (const repository of [ROOT, `${ROOT}/../zig-gc`, `${ROOT}/../zig-regex`]) requireClean(repository);
-  const samples = collect(positional[0], positional[1], options.mode, options.workload, options.jobs, options.lanes, options.expected_checksum, options.samples, schema); validateSampleQuality(samples); const metadata = { parent_revision: parentRevision, candidate_revision: candidateRevision, candidate_first_parent: resolveRevision(`${candidateRevision}^1`), parent_binary_revision: parentBinaryRevision, candidate_binary_revision: candidateBinaryRevision, shared_measurement_overlay_paths: SHARED_MEASUREMENT_OVERLAY_PATHS, zig_gc_revision: repositoryRevision(`${ROOT}/../zig-gc`), zig_regex_revision: repositoryRevision(`${ROOT}/../zig-regex`), zig_version: commandOutput(["zig", "version"]), os: commandOutput(["uname", "-a"]), hardware: `${commandOutput(["uname", "-m"])}; ${commandOutput(["sysctl", "-n", "machdep.cpu.brand_string"])}`, power: commandOutput(["pmset", "-g", "batt"], "unavailable").split(/\s+/).join(" "), host_class: options.host_class, material_change_categories: materialCategories, workload_source_sha256: sha256File(options.source), parent_binary_sha256: sha256File(positional[0]), candidate_binary_sha256: sha256File(positional[1]), samples: options.samples, minimum_measured_boundary_cpu_occupancy: MINIMUM_PROCESS_CPU_OCCUPANCY, timed_boundary: options.timed_boundary, mode: options.mode, workload: options.workload, lanes: options.lanes, jobs: options.jobs, expected_checksum: options.expected_checksum };
-  const artifact = { schema_version: schema.schema_version, profile_id: schema.profile_id, kind: "exact_parent_ab", metadata, samples, summary: summarize(samples, schema, options.host_class, materialCategories) }; validateArtifact(artifact, schema); checked(["mkdir", "-p", options.raw_out.slice(0, options.raw_out.lastIndexOf("/")) || ".", options.markdown_out.slice(0, options.markdown_out.lastIndexOf("/")) || "."], "create exact-parent output directories"); writeText(options.raw_out, JSON.stringify(artifact, null, 2) + "\n"); writeText(options.markdown_out, render(artifact)); if (artifact.summary.blocks_publication) throw new Error(`reference-host publication blocked: ${artifact.summary.status}`);
+  const schema = loadSchema(options.schema), [parentRevision, candidateRevision] = validateExactParent(options.parent_revision, options.candidate_revision), [parentBinaryRevision, candidateBinaryRevision] = validateSharedMeasurementOverlay(parentRevision, candidateRevision, options.parent_binary_revision, options.candidate_binary_revision);
+  for (const repository of [ROOT, `${ROOT}/../zig-gc`, `${ROOT}/../zig-regex`]) requireClean(repository);
+  const identities = { schema, parent_revision: parentRevision, candidate_revision: candidateRevision, parent_binary_revision: parentBinaryRevision, candidate_binary_revision: candidateBinaryRevision, zig_gc_revision: repositoryRevision(`${ROOT}/../zig-gc`), zig_regex_revision: repositoryRevision(`${ROOT}/../zig-regex`), zig_version: commandOutput(["zig", "version"]), os: commandOutput(["uname", "-a"]), hardware: `${commandOutput(["uname", "-m"])}; ${commandOutput(["sysctl", "-n", "machdep.cpu.brand_string"])}`, material_categories: materialCategories, workload_source_sha256: sha256File(options.source), parent_binary_sha256: sha256File(positional[0]), candidate_binary_sha256: sha256File(positional[1]) };
+  for (const row of rows) publishRow(positional[0], positional[1], row, options, identities);
+  if (batchMode) console.log(`OK exact-parent batch: ${rows.length}/${rows.length} rows published serially`);
 }
 if (process.argv[1] === __filename) main();

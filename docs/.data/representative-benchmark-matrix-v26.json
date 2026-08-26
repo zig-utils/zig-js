@@ -1,0 +1,45 @@
+{
+  "schema_version": 26,
+  "matrix_id": "zig-js-representative-v26",
+  "status": "frozen",
+  "frozen_date": "2026-08-26",
+  "owner_issue": 769,
+  "history_policy": "This version hash-inherits every V25 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, timing boundary, measured-boundary occupancy rule, logical-versus-binary revision contract, and publication ruling. It adds only strict untimed native allocation replay attachment and strictly serial batch-row collection under one Home compilation. Historical artifacts remain byte-identical.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v25",
+    "path": "docs/.data/representative-benchmark-matrix-v25.json",
+    "sha256": "3aa94c54413d3388c58995e303e2206b1f7b79464e608b39eb909568084e21de",
+    "inherit": ["compatibility_panel", "engines", "lanes", "protocol", "modes", "acceptance", "required_families", "implemented_families", "deferred_families", "additional_panels", "tier_attribution", "pending_metric_panels", "completed_metric_panels"]
+  },
+  "change": "Adds an optional native attribution replay after each measured invocation and a serial batch-row interface. The replay must contain exactly one invocation-phase record with matching identity, checksum, required tier boundary, and positive Context backing allocation counters. Replays remain outside elapsed_ns. Batch rows share one Home compilation but launch benchmark children strictly serially and retain one independently validated artifact per row.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "bb464660074fac79c82360306318efd9cd88c9828bf1face21847becdeec8ead",
+    "native_allocation_replay": {
+      "modes": ["attribution", "attribution_no_jit"],
+      "phase": "invocation",
+      "timing": "outside_elapsed_ns",
+      "metrics": ["backing_allocations", "backing_allocation_bytes"],
+      "identity": ["kind", "mode", "workload", "lanes", "jobs", "checksum", "tier_boundary", "admissions"]
+    },
+    "serial_batch": {
+      "execution": "strictly_serial",
+      "home_compilations": 1,
+      "artifact_boundary": "one_validated_artifact_per_row",
+      "existing_outputs": "refuse"
+    },
+    "publication_boundary": "V26 preserves V25 measured-boundary CPU, hardware, thermal, order balancing, checksum, cleanliness, and shared-overlay gates. Native allocation replays are untimed, identity-bound, and exact; serial batches cannot overlap benchmark children or merge row artifacts."
+  },
+  "instrumentation_overhead_integration": {
+    "evidence_ruling": "Unchanged V25 parser and historical disabled-path evidence; V26 adds untimed allocation replay and serial batch collection only."
+  },
+  "context_lifecycle_integration": {
+    "publication_boundary": "Unchanged V25 lifecycle scenarios, telemetry, checksums, reconciliation, plateau, measured-boundary occupancy, and binary provenance."
+  },
+  "no_jit_integration": {
+    "publication_boundary": "Unchanged V25 required-bytecode modes, logical work, checksums, attribution, quickening, measured-boundary occupancy, and binary provenance."
+  },
+  "string_indexing_integration": {
+    "publication_boundary": "Unchanged V25 string representations, widths, jobs, checksums, attribution, timing, and non-throughput boundary. V26 permits the already-frozen attribution_no_jit replay to populate exact allocation metrics outside elapsed_ns and collects rows strictly serially."
+  }
+}

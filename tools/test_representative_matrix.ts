@@ -29,7 +29,7 @@ export function selfTest(): void {
   rejects("resident source drift", value => { value.tier_attribution.process_resident_source = "mixed APIs"; }, "process resident source drift");
   rejects("restored pending panel", value => value.pending_metric_panels.push({ issue: 503 }), "must be empty");
   rejects("missing completed panel", value => { delete value.completed_metric_panels.independent_suite; }, "completed panel inventory drift");
-  rejects("efficiency source drift", value => { value.completed_metric_panels.efficiency_thermal.scored_integration.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
+  rejects("efficiency source drift", value => { value.exact_parent_integration.sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
   rejects("independent adapter drift", value => value.completed_metric_panels.independent_suite.adapters.pop(), "adapter inventory drift");
   rejects("lifecycle scenario drift", value => value.context_lifecycle_integration.scenarios.pop(), "scenario inventory drift");
   rejects("lifecycle telemetry drift", value => value.context_lifecycle_integration.telemetry.pop(), "telemetry inventory drift");
@@ -61,7 +61,10 @@ export function selfTest(): void {
   rejects("string-indexing full attribution drift", value => { value.string_indexing_integration.full_attribution[0].backing_allocations += 1; }, "full attribution drift");
   rejects("string-indexing attribution drift", value => { value.string_indexing_integration.attribution.generated_code_bytes = 1; }, "attribution boundary drift");
   rejects("string-indexing timed boundary drift", value => { value.string_indexing_integration.timed_boundary = ""; }, "timed boundary is missing");
-  console.log("representative matrix structural tests: 52/52 passed");
+  rejects("exact-parent integration mirror drift", value => { value.exact_parent_integration.native_allocation_replay.phase = "warmup"; }, "exact-parent integration mirror drift");
+  rejects("native allocation replay phase drift", value => { value.exact_parent_integration.native_allocation_replay.phase = "warmup"; value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.phase = "warmup"; }, "native allocation replay policy drift");
+  rejects("exact-parent batch concurrency drift", value => { value.exact_parent_integration.serial_batch.execution = "parallel"; value.completed_metric_panels.efficiency_thermal.scored_integration.serial_batch.execution = "parallel"; }, "exact-parent batch policy drift");
+  console.log("representative matrix structural tests: 55/55 passed");
 }
 
 if (process.argv[1] === __filename) selfTest();
