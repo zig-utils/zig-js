@@ -20,6 +20,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const bc = @import("bytecode.zig");
+const agent = @import("agent.zig");
 
 const Node = ast.Node;
 const Chunk = bc.Chunk;
@@ -27,6 +28,92 @@ const value_mod = @import("value.zig");
 const Value = value_mod.Value;
 
 pub const CompileError = error{ Unsupported, OutOfMemory };
+
+const SecureStringHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), value: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, value);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+/// One lazy secret belongs to a complete compilation, including every nested
+/// function and admission prepass. Compiler maps never escape into a Chunk, so
+/// the state can remain stack-owned by the public compilation entry point.
+const CompileHashState = struct {
+    context: ?SecureStringHashContext = null,
+
+    fn candidate(state: *@This()) std.mem.Allocator.Error!SecureStringHashContext {
+        if (state.context) |context| return context;
+        var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+        agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+        return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+    }
+};
+
+fn SecureStringMapUnmanaged(comptime MapValue: type) type {
+    const Index = std.HashMapUnmanaged(
+        []const u8,
+        MapValue,
+        SecureStringHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        const Self = @This();
+
+        index: Index = .empty,
+        state: *CompileHashState,
+
+        fn publish(self: *Self, context: SecureStringHashContext) void {
+            if (self.state.context == null) self.state.context = context;
+        }
+
+        fn put(self: *Self, allocator: std.mem.Allocator, key: []const u8, value: MapValue) std.mem.Allocator.Error!void {
+            const context = try self.state.candidate();
+            try self.index.putContext(allocator, key, value, context);
+            self.publish(context);
+        }
+
+        fn getOrPut(self: *Self, allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!Index.GetOrPutResult {
+            const context = try self.state.candidate();
+            const result = try self.index.getOrPutContext(allocator, key, context);
+            self.publish(context);
+            return result;
+        }
+
+        fn get(self: *const Self, key: []const u8) ?MapValue {
+            const context = self.state.context orelse return null;
+            return self.index.getContext(key, context);
+        }
+
+        fn getPtr(self: *Self, key: []const u8) ?*MapValue {
+            const context = self.state.context orelse return null;
+            return self.index.getPtrContext(key, context);
+        }
+
+        fn contains(self: *const Self, key: []const u8) bool {
+            const context = self.state.context orelse return false;
+            return self.index.containsContext(key, context);
+        }
+
+        fn count(self: *const Self) usize {
+            return self.index.count();
+        }
+
+        fn iterator(self: *const Self) Index.Iterator {
+            return self.index.iterator();
+        }
+
+        fn keyIterator(self: *const Self) Index.KeyIterator {
+            return self.index.keyIterator();
+        }
+    };
+}
 
 /// Whether the result of a top-level expression statement becomes the program's
 /// completion value (`program`) or is discarded (`function`).
@@ -77,6 +164,7 @@ const SlotBinding = struct {
 /// performs InitializeBinding.
 const FnScope = struct {
     parent: ?*FnScope,
+    hash_state: *CompileHashState,
     /// Runtime Environment Records between this frame and its parent frame at
     /// closure creation. Frame slots are not present in `vm.env`, so dynamic
     /// name resolution must stop at this boundary before falling back to an
@@ -86,8 +174,8 @@ const FnScope = struct {
     /// closure creation. Kept separate from declarative environments so
     /// ordinary no-`with` slot accesses retain their direct bytecodes.
     parent_with_depth: u32 = 0,
-    names: std.StringHashMapUnmanaged(SlotBinding) = .{},
-    lexical_scopes: std.ArrayListUnmanaged(*std.StringHashMapUnmanaged(SlotBinding)) = .empty,
+    names: SecureStringMapUnmanaged(SlotBinding),
+    lexical_scopes: std.ArrayListUnmanaged(*SecureStringMapUnmanaged(SlotBinding)) = .empty,
     slot_names: std.ArrayListUnmanaged([]const u8) = .empty,
     count: u32 = 0,
     lexical_slots: std.ArrayListUnmanaged(u32) = .empty,
@@ -98,7 +186,7 @@ const FnScope = struct {
         return self.addBinding(arena, &self.names, name, lexical, immutable);
     }
 
-    fn addBinding(self: *FnScope, arena: std.mem.Allocator, bindings: *std.StringHashMapUnmanaged(SlotBinding), name: []const u8, lexical: bool, immutable: bool) CompileError!u32 {
+    fn addBinding(self: *FnScope, arena: std.mem.Allocator, bindings: *SecureStringMapUnmanaged(SlotBinding), name: []const u8, lexical: bool, immutable: bool) CompileError!u32 {
         const slot = self.count;
         const tdz_checked = lexical and self.tdz_checks;
         try bindings.put(arena, name, .{ .slot = slot, .lexical = lexical, .immutable = immutable, .tdz_checked = tdz_checked });
@@ -109,8 +197,8 @@ const FnScope = struct {
     }
 
     fn pushLexicalScope(self: *FnScope, arena: std.mem.Allocator) CompileError!void {
-        const bindings = try arena.create(std.StringHashMapUnmanaged(SlotBinding));
-        bindings.* = .empty;
+        const bindings = try arena.create(SecureStringMapUnmanaged(SlotBinding));
+        bindings.* = .{ .state = self.hash_state };
         try self.lexical_scopes.append(arena, bindings);
     }
 
@@ -118,7 +206,7 @@ const FnScope = struct {
         _ = self.lexical_scopes.pop();
     }
 
-    fn currentLexicalScope(self: *FnScope) *std.StringHashMapUnmanaged(SlotBinding) {
+    fn currentLexicalScope(self: *FnScope) *SecureStringMapUnmanaged(SlotBinding) {
         std.debug.assert(self.lexical_scopes.items.len != 0);
         return self.lexical_scopes.items[self.lexical_scopes.items.len - 1];
     }
@@ -369,7 +457,7 @@ fn configureMappedParameters(
     const unmapped = std.math.maxInt(u32);
     const indices = try arena.alloc(u32, scope.count);
     @memset(indices, unmapped);
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var seen: SecureStringMapUnmanaged(void) = .{ .state = scope.hash_state };
     var index = fnode.params.len;
     while (index > 0) {
         index -= 1;
@@ -534,20 +622,24 @@ fn patternSupportsEnvironmentNode(pattern: *const ast.Node) bool {
 }
 
 const CapturedBindingReferences = struct {
-    names: *const std.StringHashMapUnmanaged(void),
+    names: *const SecureStringMapUnmanaged(void),
 };
 
 /// Set-valued capture classification must visit the complete AST even after the
 /// first match. Returning false after recording prevents the generic exhaustive
 /// walk from short-circuiting while pre-reserved storage keeps matching infallible.
 const RecordingCapturedBindingReferences = struct {
-    names: *std.StringHashMapUnmanaged(bool),
+    names: *SecureStringMapUnmanaged(bool),
     captured_count: *usize,
 };
 
 const LoopBindingNames = struct {
     single: ?[]const u8 = null,
-    multiple: std.StringHashMapUnmanaged(void) = .{},
+    multiple: SecureStringMapUnmanaged(void),
+
+    fn init(hash_state: *CompileHashState) LoopBindingNames {
+        return .{ .multiple = .{ .state = hash_state } };
+    }
 
     fn add(self: *LoopBindingNames, arena: std.mem.Allocator, name: []const u8) CompileError!void {
         if (self.multiple.count() != 0) {
@@ -577,8 +669,12 @@ const LoopBindingNames = struct {
 const RepeatedBodyNameCaptures = struct {
     single: ?[]const u8 = null,
     single_captured: bool = false,
-    multiple: std.StringHashMapUnmanaged(bool) = .{},
+    multiple: SecureStringMapUnmanaged(bool),
     captured_count: usize = 0,
+
+    fn init(hash_state: *CompileHashState) RepeatedBodyNameCaptures {
+        return .{ .multiple = .{ .state = hash_state } };
+    }
 
     fn add(self: *RepeatedBodyNameCaptures, arena: std.mem.Allocator, name: []const u8) CompileError!void {
         if (self.multiple.count() != 0) {
@@ -617,11 +713,13 @@ const RepeatedBodyNameCaptures = struct {
 };
 
 const RepeatedBodyCaptures = struct {
-    bindings: RepeatedBodyNameCaptures = .{},
+    bindings: RepeatedBodyNameCaptures,
     captured_catch_patterns: std.AutoHashMapUnmanaged(*const ast.Node, void) = .{},
 
-    fn init(arena: std.mem.Allocator, root: *const ast.Node) CompileError!RepeatedBodyCaptures {
-        var captures: RepeatedBodyCaptures = .{};
+    fn init(arena: std.mem.Allocator, hash_state: *CompileHashState, root: *const ast.Node) CompileError!RepeatedBodyCaptures {
+        var captures: RepeatedBodyCaptures = .{
+            .bindings = RepeatedBodyNameCaptures.init(hash_state),
+        };
         try collectRepeatedBodyBindings(arena, root, &captures);
         captures.bindings.classify(root);
         return captures;
@@ -685,8 +783,8 @@ fn collectLoopBindingNames(arena: std.mem.Allocator, node: *const ast.Node, name
     }
 }
 
-fn forLoopCapturesLexical(arena: std.mem.Allocator, init_node: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) CompileError!bool {
-    var names: LoopBindingNames = .{};
+fn forLoopCapturesLexical(arena: std.mem.Allocator, hash_state: *CompileHashState, init_node: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) CompileError!bool {
+    var names = LoopBindingNames.init(hash_state);
     try collectLoopBindingNames(arena, init_node, &names);
     return names.referencedBy(init_node) or
         (if (cond) |condition| names.referencedBy(condition) else false) or
@@ -716,8 +814,8 @@ fn patternHasEvaluationExpressions(pattern: *const ast.Node) bool {
     };
 }
 
-fn forOfCapturesLexical(arena: std.mem.Allocator, target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) CompileError!bool {
-    var names: LoopBindingNames = .{};
+fn forOfCapturesLexical(arena: std.mem.Allocator, hash_state: *CompileHashState, target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) CompileError!bool {
+    var names = LoopBindingNames.init(hash_state);
     try collectPatternBindingNames(arena, target, &names);
     return names.referencedBy(target) or
         (if (var_init) |initializer| names.referencedBy(initializer) else false) or
@@ -747,7 +845,7 @@ fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, 
             try collectRepeatedBodyBindings(arena, statement.block, captures);
             if (statement.catch_block) |catch_block| {
                 if (statement.catch_param) |catch_param| {
-                    var catch_captures: RepeatedBodyNameCaptures = .{};
+                    var catch_captures = RepeatedBodyNameCaptures.init(captures.bindings.multiple.state);
                     try collectPatternBindingNames(arena, catch_param, &catch_captures);
                     catch_captures.classify(catch_block);
                     if (catch_captures.any()) try captures.captured_catch_patterns.put(arena, catch_param, {});
@@ -776,8 +874,8 @@ fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, 
 /// as closures: over-matching selects checked bytecode or the correct-but-slower
 /// tree-walker, never a wrong lowering.
 const PendingLexicalReferences = struct {
-    bindings: *const std.StringHashMapUnmanaged(Compiler.ShadowBind),
-    declared: *const std.StringHashMapUnmanaged(void),
+    bindings: *const SecureStringMapUnmanaged(Compiler.ShadowBind),
+    declared: *const SecureStringMapUnmanaged(void),
 };
 
 fn identifierReferenceMatches(query: anytype, identifier: []const u8) bool {
@@ -1046,7 +1144,7 @@ fn classDeferredBodiesCaptureNames(members: []const ast.ClassMember, names: *con
 /// Global-only methods therefore remain bytecode-eligible; a real frame capture
 /// still rejects the whole function before execution.
 fn classDeferredBodiesCaptureFrame(arena: std.mem.Allocator, scope: *const FnScope, members: []const ast.ClassMember, class_name: []const u8) CompileError!bool {
-    var frame_names: LoopBindingNames = .{};
+    var frame_names = LoopBindingNames.init(scope.hash_state);
     var current: ?*const FnScope = scope;
     while (current) |frame_scope| : (current = frame_scope.parent) {
         var names = frame_scope.names.keyIterator();
@@ -1169,6 +1267,7 @@ pub const Compiler = struct {
     arena: std.mem.Allocator,
     chunk: *Chunk,
     mode: Mode,
+    hash_state: *CompileHashState,
     scope: ?*FnScope = null,
     loops: std.ArrayListUnmanaged(*Loop) = .empty,
     /// True while lowering a generator body, so `yield` may emit `gen_yield`.
@@ -1267,11 +1366,12 @@ pub const Compiler = struct {
     fn compileProgramInner(arena: std.mem.Allocator, program: *Node, rejection: *?ProgramRejection) CompileError!*Chunk {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
+        var hash_state: CompileHashState = .{};
         // Keep latent source-node checkpoints in every chunk. With no debugger
         // hook the VM performs no checkpoint work; retaining the metadata lets a
         // later attachment inspect already-compiled functions without rebuilding
         // their frame/upvalue layout.
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program, .debug_checkpoints = true };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program, .hash_state = &hash_state, .debug_checkpoints = true };
         if (program.* != .program) {
             rejection.* = .invalid_root;
             return error.Unsupported;
@@ -1309,7 +1409,8 @@ pub const Compiler = struct {
 
     pub fn admitGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) error{OutOfMemory}!GeneratorAdmission {
         var rejection: ?GeneratorRejection = null;
-        const chunk = compileGeneratorInner(arena, fnode, debug_checkpoints, &rejection) catch |err| switch (err) {
+        var hash_state: CompileHashState = .{};
+        const chunk = compileGeneratorInner(arena, fnode, debug_checkpoints, &hash_state, &rejection) catch |err| switch (err) {
             error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -1323,7 +1424,7 @@ pub const Compiler = struct {
         };
     }
 
-    fn compileGeneratorInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, rejection: *?GeneratorRejection) CompileError!*Chunk {
+    fn compileGeneratorInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, hash_state: *CompileHashState, rejection: *?GeneratorRejection) CompileError!*Chunk {
         // Parameters (including default/rest/destructuring) are bound at runtime
         // by `makeGenerator` into the generator's environment — env-mode name
         // resolution means the body's references resolve there — so the param
@@ -1335,7 +1436,7 @@ pub const Compiler = struct {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         // An async generator body may also `await` (in_async enables await_op).
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_generator = true, .in_async = fnode.is_async, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .hash_state = hash_state, .scope = null, .in_generator = true, .in_async = fnode.is_async, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
         try c.compileStmt(fnode.body); // body is a block
         _ = try chunk.emit(.ret_undef, 0);
         try chunk.finalize();
@@ -1358,7 +1459,8 @@ pub const Compiler = struct {
 
     pub fn admitAsync(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) error{OutOfMemory}!AsyncAdmission {
         var rejection: ?AsyncRejection = null;
-        const chunk = compileAsyncInner(arena, fnode, debug_checkpoints, &rejection) catch |err| switch (err) {
+        var hash_state: CompileHashState = .{};
+        const chunk = compileAsyncInner(arena, fnode, debug_checkpoints, &hash_state, &rejection) catch |err| switch (err) {
             error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -1372,14 +1474,14 @@ pub const Compiler = struct {
         };
     }
 
-    fn compileAsyncInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, rejection: *?AsyncRejection) CompileError!*Chunk {
+    fn compileAsyncInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, hash_state: *CompileHashState, rejection: *?AsyncRejection) CompileError!*Chunk {
         if (fnode.is_generator) {
             rejection.* = .async_generator;
             return error.Unsupported; // async generators not lowered yet
         }
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
-        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_async = true, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
+        var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .hash_state = hash_state, .scope = null, .in_async = true, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
         if (fnode.is_expr_body) {
             try c.compileExpr(fnode.body);
             _ = try chunk.emit(.ret, 0);
@@ -1393,7 +1495,7 @@ pub const Compiler = struct {
 
     const ShadowBind = struct { count: u32 = 0, lexical: bool = false };
 
-    fn shadowAdd(arena: std.mem.Allocator, m: *std.StringHashMapUnmanaged(ShadowBind), name: []const u8, lexical: bool) CompileError!void {
+    fn shadowAdd(arena: std.mem.Allocator, m: *SecureStringMapUnmanaged(ShadowBind), name: []const u8, lexical: bool) CompileError!void {
         if (name.len == 0) return;
         const gop = try m.getOrPut(arena, name);
         if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -1401,7 +1503,7 @@ pub const Compiler = struct {
         if (lexical) gop.value_ptr.lexical = true;
     }
 
-    fn shadowScanPattern(arena: std.mem.Allocator, m: *std.StringHashMapUnmanaged(ShadowBind), pattern: *Node, lexical: bool) CompileError!void {
+    fn shadowScanPattern(arena: std.mem.Allocator, m: *SecureStringMapUnmanaged(ShadowBind), pattern: *Node, lexical: bool) CompileError!void {
         switch (pattern.*) {
             .identifier => |name| try shadowAdd(arena, m, name, lexical),
             .obj_pattern => |p| {
@@ -1416,7 +1518,7 @@ pub const Compiler = struct {
         }
     }
 
-    fn shadowScanStmt(arena: std.mem.Allocator, m: *std.StringHashMapUnmanaged(ShadowBind), node: *Node) CompileError!void {
+    fn shadowScanStmt(arena: std.mem.Allocator, m: *SecureStringMapUnmanaged(ShadowBind), node: *Node) CompileError!void {
         switch (node.*) {
             .var_decl => |d| try shadowAdd(arena, m, d.name, d.kind != .@"var"),
             .destructure_decl => |d| try shadowScanPattern(arena, m, d.pattern, d.kind != .@"var"),
@@ -1450,7 +1552,7 @@ pub const Compiler = struct {
     }
 
     const FunctionBindingInventory = struct {
-        bindings: std.StringHashMapUnmanaged(ShadowBind) = .empty,
+        bindings: SecureStringMapUnmanaged(ShadowBind),
         has_lexical: bool = false,
         has_shadowing: bool = false,
     };
@@ -1458,8 +1560,8 @@ pub const Compiler = struct {
     /// Build the spelling-based binding inventory once for both shadow and TDZ
     /// classification. Distinct lexical bindings still receive distinct slots;
     /// repeated spellings conservatively enable checks for every lexical slot.
-    fn functionBindingInventory(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!FunctionBindingInventory {
-        var inventory: FunctionBindingInventory = .{};
+    fn functionBindingInventory(arena: std.mem.Allocator, hash_state: *CompileHashState, fnode: *const ast.FunctionNode) CompileError!FunctionBindingInventory {
+        var inventory: FunctionBindingInventory = .{ .bindings = .{ .state = hash_state } };
         for (fnode.params) |param| try shadowAdd(arena, &inventory.bindings, param.name, false);
         if (!fnode.is_expr_body) try shadowScanStmt(arena, &inventory.bindings, fnode.body);
         var bindings = inventory.bindings.iterator();
@@ -1473,7 +1575,7 @@ pub const Compiler = struct {
         return inventory;
     }
 
-    fn tdzDeclarePattern(arena: std.mem.Allocator, declared: *std.StringHashMapUnmanaged(void), pattern: *Node) CompileError!void {
+    fn tdzDeclarePattern(arena: std.mem.Allocator, declared: *SecureStringMapUnmanaged(void), pattern: *Node) CompileError!void {
         switch (pattern.*) {
             .identifier => |name| try declared.put(arena, name, {}),
             .obj_pattern => |p| {
@@ -1493,7 +1595,7 @@ pub const Compiler = struct {
     /// only those evaluation regions so `let [x = x] = []` and a reference to a
     /// later lexical binding select TDZ-checked frame bytecodes without treating
     /// every declared name as a false-positive read.
-    fn tdzPatternRefsPending(pattern: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *const std.StringHashMapUnmanaged(void)) bool {
+    fn tdzPatternRefsPending(pattern: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void)) bool {
         return switch (pattern.*) {
             .identifier => false,
             .obj_pattern => |object| blk: {
@@ -1517,7 +1619,7 @@ pub const Compiler = struct {
         };
     }
 
-    fn tdzRefsPending(node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *const std.StringHashMapUnmanaged(void)) bool {
+    fn tdzRefsPending(node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *const SecureStringMapUnmanaged(void)) bool {
         // The query is the disjunction the old per-binding scans implemented:
         // visit each identifier once, then test exact pending-lexical membership.
         // Keeping the shared exhaustive walker means new AST node kinds still
@@ -1528,7 +1630,7 @@ pub const Compiler = struct {
         }, true);
     }
 
-    fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *std.StringHashMapUnmanaged(void)) CompileError!bool {
+    fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const SecureStringMapUnmanaged(ShadowBind), declared: *SecureStringMapUnmanaged(void)) CompileError!bool {
         switch (node.*) {
             .var_decl => |d| {
                 if (d.init) |init| if (tdzRefsPending(init, m, declared)) return true;
@@ -1599,15 +1701,15 @@ pub const Compiler = struct {
     fn functionHasTdzHazard(
         arena: std.mem.Allocator,
         fnode: *const ast.FunctionNode,
-        bindings: *const std.StringHashMapUnmanaged(ShadowBind),
+        bindings: *const SecureStringMapUnmanaged(ShadowBind),
     ) CompileError!bool {
         if (fnode.is_expr_body) return false;
-        var declared: std.StringHashMapUnmanaged(void) = .empty;
+        var declared: SecureStringMapUnmanaged(void) = .{ .state = bindings.state };
         return tdzScanStmt(arena, fnode.body, bindings, &declared);
     }
 
-    fn functionNeedsTdzChecks(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!bool {
-        const binding_inventory = try functionBindingInventory(arena, fnode);
+    fn functionNeedsTdzChecks(arena: std.mem.Allocator, hash_state: *CompileHashState, fnode: *const ast.FunctionNode) CompileError!bool {
+        const binding_inventory = try functionBindingInventory(arena, hash_state, fnode);
         if (binding_inventory.has_shadowing) return true;
         // With no lexical binding, no identifier can require a TDZ check. The
         // exhaustive inventory proves that negative without a second AST walk.
@@ -1643,7 +1745,8 @@ pub const Compiler = struct {
     /// error contract while tier inventories consume this stable result.
     pub fn admitPlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) error{OutOfMemory}!PlainFunctionAdmission {
         var rejection: ?PlainFunctionRejection = null;
-        const compiled = compilePlainFunctionInner(arena, fnode, &rejection) catch |err| switch (err) {
+        var hash_state: CompileHashState = .{};
+        const compiled = compilePlainFunctionInner(arena, fnode, &hash_state, &rejection) catch |err| switch (err) {
             error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -1707,7 +1810,7 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.exit_field_initializers, 0);
     }
 
-    fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
+    fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, hash_state: *CompileHashState, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
         if (fnode.uses_direct_eval)
@@ -1729,9 +1832,9 @@ pub const Compiler = struct {
         // Shadowed lexicals receive distinct slots below. Conservatively check
         // every lexical in such a function until the TDZ scan itself is keyed by
         // binding identity rather than spelling.
-        const tdz_checks = try functionNeedsTdzChecks(arena, fnode);
+        const tdz_checks = try functionNeedsTdzChecks(arena, hash_state, fnode);
         const scope = try arena.create(FnScope);
-        scope.* = .{ .parent = null, .tdz_checks = tdz_checks };
+        scope.* = .{ .parent = null, .hash_state = hash_state, .names = .{ .state = hash_state }, .tdz_checks = tdz_checks };
         const parameter_layout = configurePlainParameters(arena, scope, fnode) catch |err| switch (err) {
             error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
             error.OutOfMemory => return error.OutOfMemory,
@@ -1755,6 +1858,7 @@ pub const Compiler = struct {
             .arena = arena,
             .chunk = chunk,
             .mode = .function,
+            .hash_state = hash_state,
             .scope = scope,
             .is_strict = fnode.is_strict,
             .is_derived_constructor = fnode.is_derived_class_constructor,
@@ -2889,7 +2993,7 @@ pub const Compiler = struct {
     }
 
     fn compileRepeatedBody(self: *Compiler, body: *Node) CompileError!void {
-        var captures = try RepeatedBodyCaptures.init(self.arena, body);
+        var captures = try RepeatedBodyCaptures.init(self.arena, self.hash_state, body);
         if (!captures.any()) return self.compileStmt(body);
         if (!repeatedBodyCapturesSupported(body, &captures)) return error.Unsupported;
         const saved_captures = self.repeated_body_captures;
@@ -2933,7 +3037,7 @@ pub const Compiler = struct {
         // retain O(1) frame slots. Environment-backed patterns lower their
         // defaults and computed keys as bytecode in the active binding scope.
         if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
-        const captured_head = if (init_node) |ini| try forLoopCapturesLexical(self.arena, ini, cond, update, body) else false;
+        const captured_head = if (init_node) |ini| try forLoopCapturesLexical(self.arena, self.hash_state, ini, cond, update, body) else false;
         if (captured_head and !loopHeadSupportsEnvironment(init_node.?))
             return error.Unsupported;
         const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
@@ -3072,7 +3176,7 @@ pub const Compiler = struct {
         // frame slot. Environment-backed patterns lower defaults and computed
         // keys directly, so every iterator result initializes the fresh record.
         const captured_binding = if (decl_kind) |kind|
-            kind != .@"var" and try forOfCapturesLexical(self.arena, target, var_init, iterable, body)
+            kind != .@"var" and try forOfCapturesLexical(self.arena, self.hash_state, target, var_init, iterable, body)
         else
             false;
         const program_lexical_binding = keys_first and self.scope == null and if (decl_kind) |kind| kind != .@"var" else false;
@@ -5405,9 +5509,11 @@ pub const Compiler = struct {
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
         const scope = try self.arena.create(FnScope);
-        const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, fnode);
+        const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, self.hash_state, fnode);
         scope.* = .{
             .parent = self.scope,
+            .hash_state = self.hash_state,
+            .names = .{ .state = self.hash_state },
             .parent_environment_depth = self.environment_depth,
             .parent_with_depth = self.with_depth,
             .tdz_checks = tdz_checks,
@@ -5415,11 +5521,13 @@ pub const Compiler = struct {
 
         var template_admission: bc.FnTemplateAdmission = undefined;
         const sub: ?*Chunk = if (fnode.is_generator) blk: {
-            const compiled = try Compiler.compileGenerator(self.arena, fnode, self.debug_checkpoints);
+            var rejection: ?GeneratorRejection = null;
+            const compiled = try compileGeneratorInner(self.arena, fnode, self.debug_checkpoints, self.hash_state, &rejection);
             template_admission = .generator_compiled;
             break :blk compiled;
         } else if (fnode.is_async) blk: {
-            const compiled = try Compiler.compileAsync(self.arena, fnode, self.debug_checkpoints);
+            var rejection: ?AsyncRejection = null;
+            const compiled = try compileAsyncInner(self.arena, fnode, self.debug_checkpoints, self.hash_state, &rejection);
             template_admission = .async_compiled;
             break :blk compiled;
         } else blk: {
@@ -5459,6 +5567,7 @@ pub const Compiler = struct {
                 .arena = self.arena,
                 .chunk = compiled,
                 .mode = .function,
+                .hash_state = self.hash_state,
                 .scope = scope,
                 .is_strict = fnode.is_strict,
                 .is_derived_constructor = false,
@@ -5660,6 +5769,144 @@ const FunctionLocalBindingCollector = struct {
     }
 };
 
+fn expectChunkLayoutEqual(left: *const Chunk, right: *const Chunk) !void {
+    try std.testing.expectEqual(left.param_count, right.param_count);
+    try std.testing.expectEqual(left.local_count, right.local_count);
+    try std.testing.expectEqualSlices(u32, left.parameter_slots, right.parameter_slots);
+    try std.testing.expectEqualSlices(u32, left.destructuring_parameter_indices, right.destructuring_parameter_indices);
+    try std.testing.expectEqualSlices(u32, left.default_parameter_indices, right.default_parameter_indices);
+    try std.testing.expectEqual(left.rest_parameter_index, right.rest_parameter_index);
+    try std.testing.expectEqual(left.arguments_slot, right.arguments_slot);
+    try std.testing.expectEqualSlices(u32, left.mapped_parameter_indices, right.mapped_parameter_indices);
+    try std.testing.expectEqualSlices(u32, left.lexical_slots, right.lexical_slots);
+    try std.testing.expectEqual(left.code.items.len, right.code.items.len);
+    for (left.code.items, right.code.items) |left_instruction, right_instruction| {
+        try std.testing.expectEqual(left_instruction.op, right_instruction.op);
+        try std.testing.expectEqual(left_instruction.a, right_instruction.a);
+        try std.testing.expectEqual(left_instruction.b, right_instruction.b);
+    }
+    try std.testing.expectEqual(left.names.items.len, right.names.items.len);
+    for (left.names.items, right.names.items) |left_name, right_name|
+        try std.testing.expectEqualStrings(left_name, right_name);
+    try std.testing.expectEqual(left.fns.items.len, right.fns.items.len);
+    for (left.fns.items, right.fns.items) |left_template, right_template| {
+        try std.testing.expectEqualStrings(left_template.name, right_template.name);
+        try std.testing.expectEqual(left_template.admission, right_template.admission);
+        try std.testing.expectEqual(left_template.local_count, right_template.local_count);
+        try std.testing.expectEqual(left_template.chunk != null, right_template.chunk != null);
+        if (left_template.chunk) |left_nested|
+            try expectChunkLayoutEqual(left_nested, right_template.chunk.?);
+    }
+}
+
+test "compiler binding indexes share one lazy failure-atomic secure context" {
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed_state: CompileHashState = .{};
+    var failed = SecureStringMapUnmanaged(void){ .state = &failed_state };
+    try std.testing.expectError(error.OutOfMemory, failed.put(unavailable.allocator(), "first", {}));
+    try std.testing.expect(failed_state.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lazy_state: CompileHashState = .{};
+    var names = LoopBindingNames.init(&lazy_state);
+    try names.add(arena.allocator(), "only");
+    try names.add(arena.allocator(), "only");
+    try std.testing.expect(lazy_state.context == null);
+    try names.add(arena.allocator(), "second");
+    try std.testing.expect(lazy_state.context != null);
+    try std.testing.expectEqual(@as(usize, 2), names.multiple.count());
+
+    var sibling = SecureStringMapUnmanaged(void){ .state = &lazy_state };
+    try sibling.put(arena.allocator(), "third", {});
+    try std.testing.expectEqual(lazy_state.context.?.seed, sibling.state.context.?.seed);
+}
+
+test "compiler keyed placement disperses a deterministic default collision family" {
+    const target_mask: u64 = 1023;
+    const collision_count = 32;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var suffix: usize = 0;
+    while (names.items.len != collision_count) : (suffix += 1) {
+        const name = try std.fmt.allocPrint(allocator, "collision{d}", .{suffix});
+        if ((std.hash.Wyhash.hash(0, name) & target_mask) == 0)
+            try names.append(allocator, name);
+    }
+
+    var keyed_state = CompileHashState{ .context = .{ .seed = 0x434f_4d50_494c_4552 } };
+    var keyed = SecureStringMapUnmanaged(void){ .state = &keyed_state };
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (names.items) |name| {
+        try std.testing.expectEqual(@as(u64, 0), std.hash.Wyhash.hash(0, name) & target_mask);
+        const bucket = std.hash.Wyhash.hash(keyed_state.context.?.seed, name) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        try keyed.put(allocator, name, {});
+    }
+    try std.testing.expect(occupied_count > collision_count / 2);
+    for (names.items) |name| try std.testing.expect(keyed.contains(name));
+}
+
+test "compiler hash seeds preserve frame and nested chunk layout" {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        ast_arena.allocator(),
+        "function target(first, second, first) { var ordinary = first; let lexical = ordinary; function nested(value) { let inner = lexical; return inner + value; } for (let index = 0; index < 1; index++) { (() => index); } class Box { method() { return 1; } } return nested(second); }",
+    );
+    const program = try parser.parseProgram();
+    const function = program.program[0].func_decl;
+
+    var first_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer first_arena.deinit();
+    var first_state = CompileHashState{ .context = .{ .seed = 0x4649_5253_545f_4b45 } };
+    var first_rejection: ?Compiler.PlainFunctionRejection = null;
+    const first = try Compiler.compilePlainFunctionInner(first_arena.allocator(), function, &first_state, &first_rejection);
+
+    var second_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer second_arena.deinit();
+    var second_state = CompileHashState{ .context = .{ .seed = 0x5345_434f_4e44_4b45 } };
+    var second_rejection: ?Compiler.PlainFunctionRejection = null;
+    const second = try Compiler.compilePlainFunctionInner(second_arena.allocator(), function, &second_state, &second_rejection);
+
+    try std.testing.expectEqual(first.local_count, second.local_count);
+    try expectChunkLayoutEqual(first.chunk, second.chunk);
+}
+
+fn exerciseCompilerBindingAllocationFailures(allocator: std.mem.Allocator) !void {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        ast_arena.allocator(),
+        "function target(first, second) { let lexical = first; { let shadow = second; lexical += shadow; } return lexical; }",
+    );
+    const program = try parser.parseProgram();
+
+    var compile_arena = std.heap.ArenaAllocator.init(allocator);
+    defer compile_arena.deinit();
+    switch (try Compiler.admitPlainFunction(compile_arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler binding publication survives every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseCompilerBindingAllocationFailures,
+        .{},
+    );
+}
+
 test "compiler preserves a first-statement debugger checkpoint" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -5724,7 +5971,8 @@ test "compiler pending lexical query preserves TDZ classifications" {
         defer arena.deinit();
         var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
         const program = try parser.parseProgram();
-        const binding_inventory = try Compiler.functionBindingInventory(arena.allocator(), program.program[0].func_decl);
+        var hash_state = CompileHashState{ .context = .{ .seed = 0x5444_5a5f_5445_5354 } };
+        const binding_inventory = try Compiler.functionBindingInventory(arena.allocator(), &hash_state, program.program[0].func_decl);
         try std.testing.expectEqual(
             case.hazardous,
             try Compiler.functionHasTdzHazard(
@@ -5750,7 +5998,8 @@ test "compiler plain function binding inventory preserves lexical and shadow cla
         defer arena.deinit();
         var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
         const program = try parser.parseProgram();
-        const inventory = try Compiler.functionBindingInventory(arena.allocator(), program.program[0].func_decl);
+        var hash_state = CompileHashState{ .context = .{ .seed = 0x4249_4e44_5445_5354 } };
+        const inventory = try Compiler.functionBindingInventory(arena.allocator(), &hash_state, program.program[0].func_decl);
         try std.testing.expectEqual(case.has_lexical, inventory.has_lexical);
         try std.testing.expectEqual(case.has_shadowing, inventory.has_shadowing);
     }
@@ -5781,9 +6030,10 @@ test "compiler loop binding query preserves capture classifications" {
         var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
         const program = try parser.parseProgram();
         const body = program.program[0].func_decl.body.block[0];
+        var hash_state = CompileHashState{ .context = .{ .seed = 0x4c4f_4f50_5445_5354 } };
         const captured = switch (body.*) {
-            .for_stmt => |loop| try forLoopCapturesLexical(arena.allocator(), loop.init.?, loop.cond, loop.update, loop.body),
-            .for_in => |loop| try forOfCapturesLexical(arena.allocator(), loop.target, loop.var_init, loop.iterable, loop.body),
+            .for_stmt => |loop| try forLoopCapturesLexical(arena.allocator(), &hash_state, loop.init.?, loop.cond, loop.update, loop.body),
+            .for_in => |loop| try forOfCapturesLexical(arena.allocator(), &hash_state, loop.target, loop.var_init, loop.iterable, loop.body),
             else => return error.TestUnexpectedResult,
         };
         try std.testing.expectEqual(case.captured, captured);
@@ -5819,7 +6069,8 @@ test "compiler repeated body query preserves capture classifications" {
         const statement = program.program[0].func_decl.body.block[0];
         if (statement.* != .while_stmt) return error.TestUnexpectedResult;
         const body = statement.while_stmt.body;
-        const captures = try RepeatedBodyCaptures.init(arena.allocator(), body);
+        var hash_state = CompileHashState{ .context = .{ .seed = 0x424f_4459_5445_5354 } };
+        const captures = try RepeatedBodyCaptures.init(arena.allocator(), &hash_state, body);
         try std.testing.expectEqual(case.first, captures.nameCaptured("first"));
         try std.testing.expectEqual(case.last, captures.nameCaptured("last"));
         try std.testing.expectEqual(case.any, captures.any());
