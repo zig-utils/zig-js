@@ -14220,6 +14220,22 @@ test "Intl.DateTimeFormat resolved enums use exact unmanaged static cells" {
         ctx.collectGarbage();
         try std.testing.expectEqualStrings(case.expected, result.asStr());
     }
+
+    _ = try ctx.evaluate(
+        \\var hourCycleShapeFormatter = new Intl.DateTimeFormat("en", {timeZone:"UTC",hour:"numeric",hourCycle:"h23"});
+        \\globalThis.hourCycleShapeResults = [hourCycleShapeFormatter.resolvedOptions(), hourCycleShapeFormatter.resolvedOptions()];
+    );
+    var shape_results = ctx.global_object.getOwn("hourCycleShapeResults").?.asObj();
+    var first = shape_results.elementAt(0).?.asObj();
+    var second = shape_results.elementAt(1).?.asObj();
+    try std.testing.expect(first != second);
+    try std.testing.expectEqual(first.shape, second.shape);
+    ctx.collectGarbage();
+    shape_results = ctx.global_object.getOwn("hourCycleShapeResults").?.asObj();
+    first = shape_results.elementAt(0).?.asObj();
+    second = shape_results.elementAt(1).?.asObj();
+    try std.testing.expect(first != second);
+    try std.testing.expectEqual(first.shape, second.shape);
 }
 
 test "Intl.DateTimeFormat hour-cycle reflection agrees in tree-walker and required bytecode" {
