@@ -1,4 +1,4 @@
-# Exact-parent performance A/B — representative_string_utf16_ascii_1024 (single_no_jit, 1 lane(s))
+# Exact-parent performance A/B — representative_string_utf16_latin1_4096 (single_no_jit, 1 lane(s))
 
 - logical parent: `5bca24a359b2b571010547bdf096b3321f8d22d7`
 - logical candidate: `c65729e5db60041ef68bf0bc7ae5f3d880a368f7`
@@ -15,20 +15,20 @@
 
 | parent median | candidate median | candidate / parent | parent RSD | candidate RSD | assessment |
 | ---: | ---: | ---: | ---: | ---: | --- |
-| 12.593 ms | 12.669 ms | 1.006x | 2.20% | 0.21% | `diagnostic_only` |
+| 2771.433 ms | 68.592 ms | 0.025x | 0.36% | 0.12% | `diagnostic_only` |
 
 | memory/allocation metric | parent median | candidate median | candidate / parent | parent RSD | candidate RSD |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `peak_rss_bytes` | 28991488 | 29188096 | 1.0068x | 0.04% | 0.04% |
-| `allocations` | 176365 | 176365 | 1.0000x | 0.00% | 0.00% |
-| `allocated_bytes` | 24257955 | 24257955 | 1.0000x | 0.00% | 0.00% |
+| `peak_rss_bytes` | 30859264 | 31023104 | 1.0053x | 0.04% | 0.04% |
+| `allocations` | 667894 | 667898 | 1.0000x | 0.00% | 0.00% |
+| `allocated_bytes` | 77178556 | 77179660 | 1.0000x | 0.00% | 0.00% |
 
 | efficiency metric | parent median | candidate median | candidate / parent | parent RSD | candidate RSD |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `instructions` | 248489035 | 253535990 | 1.0203x | 0.02% | 0.00% |
-| `cycles` | 46735641.5 | 47705800.5 | 1.0208x | 0.23% | 0.28% |
-| `energy_joules` | 0.0521414645 | 0.050334288000000005 | 0.9653x | 4.18% | 0.07% |
+| `instructions` | 64084677734 | 1395887965.5 | 0.0218x | 0.00% | 0.00% |
+| `cycles` | 10397109100.5 | 257760113.5 | 0.0248x | 0.09% | 0.15% |
+| `energy_joules` | 11.4930401645 | 0.31690977249999996 | 0.0276x | 0.12% | 9.51% |
 
-Thermal states: `nominal->nominal`. Unmet category metrics: none. Efficiency evidence: `stable`.
+Thermal states: `nominal->nominal`. Unmet category metrics: none. Efficiency evidence: `blocked_or_diagnostic`.
 
 All input identities and checksums matched. Missing attribution values are encoded as unavailable with a reason, never as zero.

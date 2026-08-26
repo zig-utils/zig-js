@@ -1,4 +1,4 @@
-# Exact-parent performance A/B — representative_string_utf16_ascii_1024 (single_no_jit, 1 lane(s))
+# Exact-parent performance A/B — representative_string_utf16_astral_2048 (single_no_jit, 1 lane(s))
 
 - logical parent: `5bca24a359b2b571010547bdf096b3321f8d22d7`
 - logical candidate: `c65729e5db60041ef68bf0bc7ae5f3d880a368f7`
@@ -15,19 +15,19 @@
 
 | parent median | candidate median | candidate / parent | parent RSD | candidate RSD | assessment |
 | ---: | ---: | ---: | ---: | ---: | --- |
-| 12.593 ms | 12.669 ms | 1.006x | 2.20% | 0.21% | `diagnostic_only` |
+| 568.474 ms | 35.036 ms | 0.062x | 1.29% | 0.91% | `diagnostic_only` |
 
 | memory/allocation metric | parent median | candidate median | candidate / parent | parent RSD | candidate RSD |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `peak_rss_bytes` | 28991488 | 29188096 | 1.0068x | 0.04% | 0.04% |
-| `allocations` | 176365 | 176365 | 1.0000x | 0.00% | 0.00% |
-| `allocated_bytes` | 24257955 | 24257955 | 1.0000x | 0.00% | 0.00% |
+| `peak_rss_bytes` | 30408704 | 30507008 | 1.0032x | 0.08% | 0.08% |
+| `allocations` | 340214 | 340218 | 1.0000x | 0.00% | 0.00% |
+| `allocated_bytes` | 42682602 | 42683194 | 1.0000x | 0.00% | 0.00% |
 
 | efficiency metric | parent median | candidate median | candidate / parent | parent RSD | candidate RSD |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `instructions` | 248489035 | 253535990 | 1.0203x | 0.02% | 0.00% |
-| `cycles` | 46735641.5 | 47705800.5 | 1.0208x | 0.23% | 0.28% |
-| `energy_joules` | 0.0521414645 | 0.050334288000000005 | 0.9653x | 4.18% | 0.07% |
+| `instructions` | 11371366414.5 | 690699477 | 0.0607x | 0.00% | 0.00% |
+| `cycles` | 2125915905 | 131747877.5 | 0.0620x | 0.88% | 0.84% |
+| `energy_joules` | 2.3606915434999998 | 0.151921632 | 0.0644x | 0.67% | 0.32% |
 
 Thermal states: `nominal->nominal`. Unmet category metrics: none. Efficiency evidence: `stable`.
 

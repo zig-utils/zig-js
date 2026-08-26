@@ -23,10 +23,10 @@
     "minimum_measured_boundary_cpu_occupancy": 0.6,
     "timed_boundary": "One full-work invocation in one persistent production Context after ten one-job warmups. Fixture pattern expansion, exact-width slicing, String boxing, source/configuration, Context creation/destruction, attribution, and hardware snapshots are outside elapsed_ns. Each job performs the declared five operations once per UTF-16 code unit plus the three named boundary probes.",
     "mode": "single_no_jit",
-    "workload": "representative_string_utf16_ascii_1024",
+    "workload": "representative_string_utf16_latin1_4096",
     "lanes": 1,
     "jobs": 10,
-    "expected_checksum": 23880132,
+    "expected_checksum": 365792298,
     "allocation_replay_mode": "attribution_no_jit",
     "parent_binary_revision": "7d82c96e05ca32a64e8d885ae98e7a935795ab3c",
     "candidate_binary_revision": "a5975dbb504e0d3eb9fbce1df6bc99e632e05996",
@@ -53,29 +53,29 @@
         "order": 0,
         "engine": "zig-js",
         "mode": "single_no_jit",
-        "workload": "representative_string_utf16_ascii_1024",
+        "workload": "representative_string_utf16_latin1_4096",
         "lanes": 1,
         "jobs": 10,
-        "checksum": 23880132
+        "checksum": 365792298
       },
       "quality": {
-        "measured_boundary_cpu_user_ns": 12767000,
-        "measured_boundary_cpu_system_ns": 39000,
-        "measured_boundary_cpu_occupancy": 1,
+        "measured_boundary_cpu_user_ns": 2774553000,
+        "measured_boundary_cpu_system_ns": 2159000,
+        "measured_boundary_cpu_occupancy": 0.9993412912832259,
         "minimum_measured_boundary_cpu_occupancy": 0.6,
-        "process_wall_time_ns": 40000000,
-        "process_cpu_occupancy": 0.75
+        "process_wall_time_ns": 6150000000,
+        "process_cpu_occupancy": 0.9983739837398374
       },
       "metrics": {
         "wall_time_ns": {
           "status": "measured",
-          "value": 12788541,
+          "value": 2778542250,
           "source": "benchmark_runner.elapsed_ns",
           "reason": ""
         },
         "process_cpu_user_ns": {
           "status": "measured",
-          "value": 30000000,
+          "value": 6140000000,
           "source": "/usr/bin/time -l user",
           "reason": ""
         },
@@ -87,7 +87,7 @@
         },
         "peak_rss_bytes": {
           "status": "measured",
-          "value": 28983296,
+          "value": 30851072,
           "source": "/usr/bin/time -l maximum resident set size",
           "reason": ""
         },
@@ -99,13 +99,13 @@
         },
         "allocations": {
           "status": "measured",
-          "value": 176365,
+          "value": 667894,
           "source": "untimed exact-work attribution_no_jit invocation-phase Context backing allocation replay: allocation requests",
           "reason": ""
         },
         "allocated_bytes": {
           "status": "measured",
-          "value": 24257955,
+          "value": 77178556,
           "source": "untimed exact-work attribution_no_jit invocation-phase Context backing allocation replay: cumulative bytes",
           "reason": ""
         },
@@ -357,13 +357,13 @@
         },
         "cycles": {
           "status": "measured",
-          "value": 46660892,
+          "value": 10404049285,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
           "reason": ""
         },
         "instructions": {
           "status": "measured",
-          "value": 248517823,
+          "value": 64084674227,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
           "reason": ""
         },
@@ -375,7 +375,7 @@
         },
         "energy_joules": {
           "status": "measured",
-          "value": 0.053684299,
+          "value": 11.502832543,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
           "reason": ""
         },
@@ -406,29 +406,29 @@
         "order": 1,
         "engine": "zig-js",
         "mode": "single_no_jit",
-        "workload": "representative_string_utf16_ascii_1024",
+        "workload": "representative_string_utf16_latin1_4096",
         "lanes": 1,
         "jobs": 10,
-        "checksum": 23880132
+        "checksum": 365792298
       },
       "quality": {
-        "measured_boundary_cpu_user_ns": 12636000,
-        "measured_boundary_cpu_system_ns": 31000,
-        "measured_boundary_cpu_occupancy": 1,
+        "measured_boundary_cpu_user_ns": 68524000,
+        "measured_boundary_cpu_system_ns": 86000,
+        "measured_boundary_cpu_occupancy": 0.999404596081259,
         "minimum_measured_boundary_cpu_occupancy": 0.6,
-        "process_wall_time_ns": 40000000,
-        "process_cpu_occupancy": 0.5
+        "process_wall_time_ns": 140000000,
+        "process_cpu_occupancy": 1
       },
       "metrics": {
         "wall_time_ns": {
           "status": "measured",
-          "value": 12650291,
+          "value": 68650875,
           "source": "benchmark_runner.elapsed_ns",
           "reason": ""
         },
         "process_cpu_user_ns": {
           "status": "measured",
-          "value": 20000000,
+          "value": 140000000,
           "source": "/usr/bin/time -l user",
           "reason": ""
         },
@@ -440,7 +440,7 @@
         },
         "peak_rss_bytes": {
           "status": "measured",
-          "value": 29196288,
+          "value": 31014912,
           "source": "/usr/bin/time -l maximum resident set size",
           "reason": ""
         },
@@ -452,13 +452,13 @@
         },
         "allocations": {
           "status": "measured",
-          "value": 176365,
+          "value": 667898,
           "source": "untimed exact-work attribution_no_jit invocation-phase Context backing allocation replay: allocation requests",
           "reason": ""
         },
         "allocated_bytes": {
           "status": "measured",
-          "value": 24257955,
+          "value": 77179660,
           "source": "untimed exact-work attribution_no_jit invocation-phase Context backing allocation replay: cumulative bytes",
           "reason": ""
         },
@@ -710,13 +710,13 @@
         },
         "cycles": {
           "status": "measured",
-          "value": 47799683,
+          "value": 258031874,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
           "reason": ""
         },
         "instructions": {
           "status": "measured",
-          "value": 253541765,
+          "value": 1395891733,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
           "reason": ""
         },
@@ -728,7 +728,7 @@
         },
         "energy_joules": {
           "status": "measured",
-          "value": 0.050308402,
+          "value": 0.295590714,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
           "reason": ""
         },
@@ -759,29 +759,29 @@
         "order": 0,
         "engine": "zig-js",
         "mode": "single_no_jit",
-        "workload": "representative_string_utf16_ascii_1024",
+        "workload": "representative_string_utf16_latin1_4096",
         "lanes": 1,
         "jobs": 10,
-        "checksum": 23880132
+        "checksum": 365792298
       },
       "quality": {
-        "measured_boundary_cpu_user_ns": 12651000,
-        "measured_boundary_cpu_system_ns": 23000,
-        "measured_boundary_cpu_occupancy": 0.9988703008606173,
+        "measured_boundary_cpu_user_ns": 68391000,
+        "measured_boundary_cpu_system_ns": 104000,
+        "measured_boundary_cpu_occupancy": 0.999440666339692,
         "minimum_measured_boundary_cpu_occupancy": 0.6,
-        "process_wall_time_ns": 30000000,
-        "process_cpu_occupancy": 0.6666666666666666
+        "process_wall_time_ns": 140000000,
+        "process_cpu_occupancy": 1
       },
       "metrics": {
         "wall_time_ns": {
           "status": "measured",
-          "value": 12688334,
+          "value": 68533333,
           "source": "benchmark_runner.elapsed_ns",
           "reason": ""
         },
         "process_cpu_user_ns": {
           "status": "measured",
-          "value": 20000000,
+          "value": 140000000,
           "source": "/usr/bin/time -l user",
           "reason": ""
         },
@@ -793,7 +793,7 @@
         },
         "peak_rss_bytes": {
           "status": "measured",
-          "value": 29179904,
+          "value": 31031296,
           "source": "/usr/bin/time -l maximum resident set size",
           "reason": ""
         },
@@ -805,13 +805,13 @@
         },
         "allocations": {
           "status": "measured",
-          "value": 176365,
+          "value": 667898,
           "source": "untimed exact-work attribution_no_jit invocation-phase Context backing allocation replay: allocation requests",
           "reason": ""
         },
         "allocated_bytes": {
           "status": "measured",
-          "value": 24257955,
+          "value": 77179660,
           "source": "untimed exact-work attribution_no_jit invocation-phase Context backing allocation replay: cumulative bytes",
           "reason": ""
         },
@@ -1063,13 +1063,13 @@
         },
         "cycles": {
           "status": "measured",
-          "value": 47611918,
+          "value": 257488353,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
           "reason": ""
         },
         "instructions": {
           "status": "measured",
-          "value": 253530215,
+          "value": 1395884198,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
           "reason": ""
         },
@@ -1081,7 +1081,7 @@
         },
         "energy_joules": {
           "status": "measured",
-          "value": 0.050360174,
+          "value": 0.338228831,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
           "reason": ""
         },
@@ -1112,29 +1112,29 @@
         "order": 1,
         "engine": "zig-js",
         "mode": "single_no_jit",
-        "workload": "representative_string_utf16_ascii_1024",
+        "workload": "representative_string_utf16_latin1_4096",
         "lanes": 1,
         "jobs": 10,
-        "checksum": 23880132
+        "checksum": 365792298
       },
       "quality": {
-        "measured_boundary_cpu_user_ns": 12386000,
-        "measured_boundary_cpu_system_ns": 17000,
-        "measured_boundary_cpu_occupancy": 1,
+        "measured_boundary_cpu_user_ns": 2760675000,
+        "measured_boundary_cpu_system_ns": 2332000,
+        "measured_boundary_cpu_occupancy": 0.999523738093607,
         "minimum_measured_boundary_cpu_occupancy": 0.6,
-        "process_wall_time_ns": 30000000,
-        "process_cpu_occupancy": 0.6666666666666666
+        "process_wall_time_ns": 6140000000,
+        "process_cpu_occupancy": 0.998371335504886
       },
       "metrics": {
         "wall_time_ns": {
           "status": "measured",
-          "value": 12396833,
+          "value": 2764323542,
           "source": "benchmark_runner.elapsed_ns",
           "reason": ""
         },
         "process_cpu_user_ns": {
           "status": "measured",
-          "value": 20000000,
+          "value": 6130000000,
           "source": "/usr/bin/time -l user",
           "reason": ""
         },
@@ -1146,7 +1146,7 @@
         },
         "peak_rss_bytes": {
           "status": "measured",
-          "value": 28999680,
+          "value": 30867456,
           "source": "/usr/bin/time -l maximum resident set size",
           "reason": ""
         },
@@ -1158,13 +1158,13 @@
         },
         "allocations": {
           "status": "measured",
-          "value": 176365,
+          "value": 667894,
           "source": "untimed exact-work attribution_no_jit invocation-phase Context backing allocation replay: allocation requests",
           "reason": ""
         },
         "allocated_bytes": {
           "status": "measured",
-          "value": 24257955,
+          "value": 77178556,
           "source": "untimed exact-work attribution_no_jit invocation-phase Context backing allocation replay: cumulative bytes",
           "reason": ""
         },
@@ -1416,13 +1416,13 @@
         },
         "cycles": {
           "status": "measured",
-          "value": 46810391,
+          "value": 10390168916,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_cycles delta",
           "reason": ""
         },
         "instructions": {
           "status": "measured",
-          "value": 248460247,
+          "value": 64084681241,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_instructions delta",
           "reason": ""
         },
@@ -1434,7 +1434,7 @@
         },
         "energy_joules": {
           "status": "measured",
-          "value": 0.05059863,
+          "value": 11.483247786,
           "source": "proc_pid_rusage(RUSAGE_INFO_V6).ri_energy_nj delta / 1e9",
           "reason": ""
         },
@@ -1460,39 +1460,39 @@
     }
   ],
   "summary": {
-    "parent_wall_median_ns": 12592687,
-    "candidate_wall_median_ns": 12669312.5,
-    "candidate_over_parent": 1.0060849205574631,
-    "parent_wall_rsd": 0.02199525669501832,
-    "candidate_wall_rsd": 0.0021232772714920266,
+    "parent_wall_median_ns": 2771432896,
+    "candidate_wall_median_ns": 68592104,
+    "candidate_over_parent": 0.024749689627700803,
+    "parent_wall_rsd": 0.0036277785621374875,
+    "candidate_wall_rsd": 0.001211724680062725,
     "stable": true,
     "gating_host": false,
     "regression": false,
     "efficiency": {
       "metrics": {
         "instructions": {
-          "parent_median": 248489035,
-          "candidate_median": 253535990,
-          "candidate_over_parent": 1.0203105742673917,
-          "parent_rsd": 0.00016383974461326497,
-          "candidate_rsd": 0.00003221271789738658,
+          "parent_median": 64084677734,
+          "candidate_median": 1395887965.5,
+          "candidate_over_parent": 0.02178193001600154,
+          "parent_rsd": 7.739208713553558e-8,
+          "candidate_rsd": 0.000003816960764707328,
           "stable": true
         },
         "cycles": {
-          "parent_median": 46735641.5,
-          "candidate_median": 47705800.5,
-          "candidate_over_parent": 1.0207584397873302,
-          "parent_rsd": 0.0022619087550260256,
-          "candidate_rsd": 0.002783097723504128,
+          "parent_median": 10397109100.5,
+          "candidate_median": 257760113.5,
+          "candidate_over_parent": 0.024791517623644465,
+          "parent_rsd": 0.0009440030830107897,
+          "candidate_rsd": 0.0014910273726943153,
           "stable": true
         },
         "energy_joules": {
-          "parent_median": 0.0521414645,
-          "candidate_median": 0.050334288000000005,
-          "candidate_over_parent": 0.9653408948649689,
-          "parent_rsd": 0.04184572672286779,
-          "candidate_rsd": 0.0007273040650855914,
-          "stable": true
+          "parent_median": 11.4930401645,
+          "candidate_median": 0.31690977249999996,
+          "candidate_over_parent": 0.02757405942762465,
+          "parent_rsd": 0.0012049478888420415,
+          "candidate_rsd": 0.0951365476358904,
+          "stable": false
         }
       },
       "thermal_states": [
@@ -1502,7 +1502,7 @@
         "cpu_work"
       ],
       "unmet_metrics": [],
-      "stable": true,
+      "stable": false,
       "blocks_publication": false
     },
     "blocks_publication": false,
