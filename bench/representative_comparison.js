@@ -1891,10 +1891,95 @@ var representativeIntlDateTimeEnds = [
   1704112496789, 1718461800000, 1735603200000, 1718409600000
 ];
 
+// DateTimeFormat hour-cycle reflection keeps formatter construction outside
+// the scored boundary. The fixtures cover every closed cycle, locale-extension
+// resolution, hour12 precedence in both directions, and the required omission
+// when no hour field is present.
+var representativeIntlDateTimeHourCycleFormatters = [
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC", hour: "numeric", hourCycle: "h11" }),
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC", hour: "numeric", hourCycle: "h12" }),
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC", hour: "numeric", hourCycle: "h23" }),
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC", hour: "numeric", hourCycle: "h24" }),
+  new Intl.DateTimeFormat("en-US-u-hc-h11", { timeZone: "UTC", hour: "numeric" }),
+  new Intl.DateTimeFormat("en-US-u-hc-h11", { timeZone: "UTC", hour: "numeric", hour12: false }),
+  new Intl.DateTimeFormat("en-US", { timeZone: "UTC", hour: "numeric", hourCycle: "h23", hour12: true }),
+  new Intl.DateTimeFormat("en-US-u-hc-h24", { timeZone: "UTC", year: "numeric", month: "numeric", day: "numeric" })
+];
+var representativeIntlDateTimeExpectedHourCycles = [
+  "h11", "h12", "h23", "h24", "h11", "h23", "h12", undefined
+];
+var representativeIntlDateTimeExpectedHour12 = [
+  true, true, false, false, true, false, true, undefined
+];
+var representativeIntlDateTimeTwelveHourCycleKeys = [
+  "locale", "calendar", "numberingSystem", "timeZone", "hourCycle", "hour12", "dayPeriod", "hour"
+];
+// #773 tracks zig-js omitting the pattern-added dayPeriod field. Keep that
+// exact pre-fix shape visible as a distinct checksum instead of normalizing it
+// to the system-JSC result inside this #772 allocation boundary.
+var representativeIntlDateTimeTwelveHourCycleKeysWithoutDayPeriod = [
+  "locale", "calendar", "numberingSystem", "timeZone", "hourCycle", "hour12", "hour"
+];
+var representativeIntlDateTimeTwentyFourHourCycleKeys = [
+  "locale", "calendar", "numberingSystem", "timeZone", "hourCycle", "hour12", "hour"
+];
+var representativeIntlDateTimeNoHourCycleKeys = [
+  "locale", "calendar", "numberingSystem", "timeZone", "year", "month", "day"
+];
+
 function representativeIntlDateTimeChecksum(text) {
   var total = text.length;
   for (var index = 0; index < text.length; index = index + 1)
     total = (total * 131 + text.charCodeAt(index)) % 1000000007;
+  return total;
+}
+
+function representativeIntlDateTimeKeysEqual(actual, expected) {
+  if (actual.length !== expected.length) return false;
+  for (var index = 0; index < actual.length; index = index + 1) {
+    if (actual[index] !== expected[index]) return false;
+  }
+  return true;
+}
+
+function representativeIntlDateTimeFormatResolvedHourCycle(jobs, lane) {
+  var total = 0;
+  for (var job = 0; job < jobs; job = job + 1) {
+    for (var i = 0; i < 64; i = i + 1) {
+      var formatterIndex = (job + i + lane) & 7;
+      var formatter = representativeIntlDateTimeHourCycleFormatters[formatterIndex];
+      var first = formatter.resolvedOptions();
+      var second = formatter.resolvedOptions();
+      var expectedCycle = representativeIntlDateTimeExpectedHourCycles[formatterIndex];
+      var expectedHour12 = representativeIntlDateTimeExpectedHour12[formatterIndex];
+      if (first === second || first.hourCycle !== expectedCycle || second.hourCycle !== expectedCycle ||
+          first.hour12 !== expectedHour12 || second.hour12 !== expectedHour12)
+        throw new Error("DateTimeFormat hour-cycle reflection drift");
+      var firstKeys = Object.keys(first);
+      var secondKeys = Object.keys(second);
+      var exactKeys = expectedCycle === undefined
+        ? representativeIntlDateTimeKeysEqual(firstKeys, representativeIntlDateTimeNoHourCycleKeys)
+        : (expectedHour12
+          ? (representativeIntlDateTimeKeysEqual(firstKeys, representativeIntlDateTimeTwelveHourCycleKeys) ||
+            representativeIntlDateTimeKeysEqual(firstKeys, representativeIntlDateTimeTwelveHourCycleKeysWithoutDayPeriod))
+          : representativeIntlDateTimeKeysEqual(firstKeys, representativeIntlDateTimeTwentyFourHourCycleKeys));
+      if (!exactKeys || !representativeIntlDateTimeKeysEqual(secondKeys, firstKeys) ||
+          (expectedHour12 && first.dayPeriod !== undefined &&
+            (first.dayPeriod !== "short" || second.dayPeriod !== "short")))
+        throw new Error("DateTimeFormat resolved key/value drift");
+      total = (total + firstKeys.length + formatterIndex + i + lane) % 1000000007;
+      for (var keyIndex = 0; keyIndex < firstKeys.length; keyIndex = keyIndex + 1) {
+        var key = firstKeys[keyIndex];
+        if (first[key] !== second[key])
+          throw new Error("DateTimeFormat resolved field drift");
+        var reflected = first[key];
+        var reflectedChecksum = typeof reflected === "string"
+          ? representativeIntlDateTimeChecksum(reflected)
+          : (typeof reflected === "number" ? reflected : (reflected ? 97 : 31));
+        total = (total + representativeIntlDateTimeChecksum(key) + reflectedChecksum + keyIndex) % 1000000007;
+      }
+    }
+  }
   return total;
 }
 
@@ -2263,6 +2348,7 @@ function benchmarkFunction(name) {
   if (name === "representative_intl_date_time_format_consumer_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "parts"); };
   if (name === "representative_intl_date_time_format_consumer_range") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "range"); };
   if (name === "representative_intl_date_time_format_consumer_range_parts") return function (jobs, lane) { return representativeIntlDateTimeFormatConsumer(jobs, lane, "rangeParts"); };
+  if (name === "representative_intl_date_time_format_resolved_hour_cycle") return representativeIntlDateTimeFormatResolvedHourCycle;
   if (name === "representative_intl_date_time_format_construct_default") return function (jobs, lane) { return representativeIntlDateTimeFormatConstruct(jobs, lane, "default"); };
   if (name === "representative_intl_date_time_format_construct_components") return function (jobs, lane) { return representativeIntlDateTimeFormatConstruct(jobs, lane, "components"); };
   if (name === "representative_intl_date_time_format_construct_style") return function (jobs, lane) { return representativeIntlDateTimeFormatConstruct(jobs, lane, "style"); };
