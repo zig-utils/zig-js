@@ -10798,6 +10798,23 @@ fn binOp(op: bc.Op) ast.BinaryOp {
 /// closure's upvalue source. Templates with a compiled `chunk` take the VM path;
 /// env-mode templates may leave it null and use the tree-walker body fallback.
 fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
+    const saved_environment = vm.env;
+    const saved_environment_root = if (tmpl.capture_environment != null)
+        try vm.pushTempEnvRoot(saved_environment)
+    else
+        null;
+    defer if (saved_environment_root) |root| {
+        // A closure view includes slot-backed lexical records, which must not
+        // change the enclosing bytecode's runtime block/handler depth.
+        vm.env = vm.tempEnvRoot(root, saved_environment);
+        vm.restoreTempEnvRoots(root);
+    };
+    if (tmpl.capture_environment) |plan| {
+        const defining_frame = frame orelse
+            return vm.throwError("InternalError", "suspendable closure requires its defining activation");
+        const materialized = try materializeDirectEvalEnvironment(vm, defining_frame, plan);
+        materialized.environment.markCaptured();
+    }
     const func = try gc_mod.allocFunction(vm.arena);
     const admission_reason: interp.BytecodeAdmissionReason = switch (tmpl.admission) {
         .plain_compiled => .template_plain_compiled,
@@ -10879,6 +10896,67 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
     try interp.installFunctionProps(vm.arena, vm.root_shape, obj, tmpl.params, tmpl.name);
     if (tmpl.self_name.len > 0) try closure_env.putFnName(tmpl.self_name, Value.obj(obj));
     return Value.obj(obj);
+}
+
+test "nested suspendable closure allocation failure restores the defining environment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "function outer(value) { return function* named() { yield value; }; }");
+    const program = try parser.parseProgram();
+    const compiled = try Compiler.compilePlainFunction(allocator, program.program[0].func_decl);
+    const template = compiled.chunk.fns.items[0];
+    var root = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&root, root_shape);
+    const slots = try allocator.alloc(Value, compiled.local_count);
+    const plan = template.capture_environment.?;
+    var value_slot: ?u32 = null;
+    for (plan.scopes) |scope| for (scope.bindings) |binding| {
+        if (std.mem.eql(u8, binding.name, "value")) value_slot = binding.slot;
+    };
+    try std.testing.expect(value_slot != null);
+    var failures: usize = 0;
+    var succeeded = false;
+    for (0..128) |fail_index| {
+        @memset(slots, Value.undef());
+        slots[value_slot.?] = Value.num(7);
+        var frame = Frame{ .slots = slots, .parent = null, .closure_environment = &root };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape });
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        const attempt = makeClosure(&machine, template, &frame);
+        try std.testing.expectEqual(&root, machine.env);
+        try std.testing.expectEqual(@as(f64, 7), slots[value_slot.?].asNum());
+        if (attempt) |closure| {
+            const function = Interpreter.funcOf(closure) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(f64, 7), function.closure.get("value").?.asNum());
+            slots[value_slot.?] = Value.num(9);
+            try std.testing.expectEqual(@as(f64, 9), function.closure.get("value").?.asNum());
+            try std.testing.expect(frame.escaped.load(.acquire));
+            try std.testing.expect(function.closure.captured.load(.acquire) or function.closure.parent.?.captured.load(.acquire));
+            succeeded = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+    }
+    try std.testing.expect(succeeded and failures > 10);
+
+    // Root reservation is an additional allocation boundary in a GC realm.
+    const Context = @import("context.zig").Context;
+    const context = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer context.destroy();
+    var machine = context.interpreter();
+    var frame = Frame{ .slots = slots, .parent = null, .closure_environment = machine.env };
+    var unavailable = std.testing.FailingAllocator.init(machine.arena, .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    try std.testing.expectError(error.OutOfMemory, makeClosure(&machine, template, &frame));
+    try std.testing.expectEqual(&context.env, machine.env);
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+    try std.testing.expect(frame.direct_eval_environment.load(.acquire) == null);
+    try std.testing.expect(!frame.escaped.load(.acquire));
 }
 
 /// Invoke `callee` with `args` and an explicit `this`. A VM-compiled function

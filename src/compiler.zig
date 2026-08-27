@@ -6115,13 +6115,20 @@ pub const Compiler = struct {
         fnode: *const ast.FunctionNode,
         named_expr: bool,
     ) CompileError!u32 {
-        // Suspendable functions run env-mode and capture the enclosing scope BY
-        // NAME (load_var). If the enclosing function is frame-mode (tiered), its
-        // locals live in frame slots the suspendable function's Environment chain
-        // can't see, so the capture would read a stale/global value. Force that
-        // enclosing function to the tree-walker. A program/env-mode scope captures
-        // correctly and can retain the compiled generator/async template.
-        if ((fnode.is_generator or fnode.is_async) and self.scope != null) return error.Unsupported;
+        // InstantiateGeneratorFunctionObject / InstantiateAsyncFunctionObject
+        // capture the current lexical environment. Env-mode bodies need live
+        // views of defining frame slots, with the same binding identity and
+        // runtime-record ordering as direct eval (never copied local values).
+        const capture_environment = if ((fnode.is_generator or fnode.is_async) and self.scope != null) blk: {
+            const plan = try self.arena.create(bc.DirectEvalPlan);
+            plan.* = try buildDirectEvalPlan(
+                self.arena,
+                self.scope.?,
+                if (self.function_binding_phase == .parameters) .parameter else .variable,
+                self.environment_depth,
+            );
+            break :blk plan;
+        } else null;
         if (!fnode.is_generator and !fnode.is_async and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
@@ -6233,6 +6240,7 @@ pub const Compiler = struct {
         }
         const tmpl = try self.arena.create(bc.FnTemplate);
         tmpl.* = .{
+            .capture_environment = capture_environment,
             .name = fnode.name,
             .definition_node = definition_node,
             // A *named function expression* (not a declaration, not an inferred
@@ -6806,6 +6814,34 @@ fn exerciseEnvironmentDeclarationAllocationFailures(allocator: std.mem.Allocator
 
 test "environment declarations compiler planning propagates allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseEnvironmentDeclarationAllocationFailures, .{});
+}
+
+fn exerciseSuspendableCaptureAllocationFailures(allocator: std.mem.Allocator) !void {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(ast_arena.allocator(),
+        \\function outer(value = 1, read = function* () { yield value; }) {
+        \\  let cell = value;
+        \\  return function middle(extra) {
+        \\    with ({ runtime: 2 }) {
+        \\      let local = 3;
+        \\      return [read, function* () { yield cell + extra + runtime + local; },
+        \\        async function () { return await cell; }, async function* () { yield cell; }];
+        \\    }
+        \\  };
+        \\}
+    );
+    const program = try parser.parseProgram();
+    var replay = CompilerAllocationReplay{ .backing = allocator };
+    var compile_arena = std.heap.ArenaAllocator.init(replay.allocator());
+    defer compile_arena.deinit();
+    const compiled = try Compiler.compilePlainFunction(compile_arena.allocator(), program.program[0].func_decl);
+    try std.testing.expect(compiled.chunk.fns.items[0].capture_environment != null);
+    try std.testing.expect(compiled.chunk.parameter_direct_eval_plan == null);
+}
+
+test "nested suspendable compiler capture planning propagates allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseSuspendableCaptureAllocationFailures, .{});
 }
 
 test "compiler preserves a first-statement debugger checkpoint" {

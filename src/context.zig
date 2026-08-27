@@ -29267,6 +29267,113 @@ test "realm global identity is independent of mutable globalThis" {
     };
 }
 
+test "nested suspendable closures capture live ordinary activation environments" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{
+            .source = "function outer(value) { let cell = value; function* read() { yield cell; cell += 2; return cell; } return [read, function(next) { cell = next; }]; } var pair = outer(3), it = pair[0](); var first = it.next().value; pair[1](10); var result = [first, it.next().value].join(':');",
+            .expected = "3:12",
+        },
+        .{
+            .source = "function outer(value) { return function middle(extra) { let local = 4; return function* named() { yield value + extra + local; return named; }; }; } var read = outer(2)(3), it = read(); var result = [it.next().value, it.next().value === read].join(':');",
+            .expected = "9:true",
+        },
+        .{
+            .source = "function outer() { let read = function* () { yield later; }; var before; try { read().next(); } catch (e) { before = e.name; } let later = 8; return before + ':' + read().next().value; } var result = outer();",
+            .expected = "ReferenceError:8",
+        },
+        .{
+            .source = "function outer() { const cell = 5; return function* () { try { cell = 9; } catch (e) { yield e.name; } return cell; }; } var it = outer()(); var result = [it.next().value, it.next().value].join(':');",
+            .expected = "TypeError:5",
+        },
+        .{
+            .source = "function outer(value = 2, read = function* () { yield value; yield typeof body; }) { var body = 8; value = 7; return read; } var it = outer()(); var result = [it.next().value, it.next().value].join(':');",
+            .expected = "7:undefined",
+        },
+        .{
+            .source = "function outer(value) { var args = arguments; var read = function* () { yield value; value = 8; yield args[0]; }; args[0] = 4; return read; } var it = outer(1)(); var result = [it.next().value, it.next().value].join(':');",
+            .expected = "4:8",
+        },
+        .{
+            .source = "function outer() { var reads = []; for (let i = 0; i < 3; i++) { let local = i + 10; reads.push(function* () { yield i + ':' + local; }); } return reads; } var result = outer().map(function(read) { return read().next().value; }).join('|');",
+            .expected = "0:10|1:11|2:12",
+        },
+        .{
+            .source = "function outer() { let value = 1, read; with ({value: 2}) { { let inner = 3; read = function* () { yield value + inner; }; } } return [read, value]; } var pair = outer(); var result = pair[0]().next().value + ':' + pair[1];",
+            .expected = "5:1",
+        },
+        .{
+            .source = "function outer() { let value = 1; var read = function* () { yield eval('value'); yield late; }; eval('value = 4; var late = 9'); return read; } var it = outer()(); var result = [it.next().value, it.next().value].join(':');",
+            .expected = "4:9",
+        },
+        .{
+            .source = "function outer() { let value = 6; try { throw 3; } catch (error) { return function* () { yield error + value; }; } } var result = String(outer()().next().value);",
+            .expected = "9",
+        },
+        .{
+            .source = "var result = ''; function outer(value) { return async function () { await 0; value += 3; return value; }; } outer(4)().then(function(value) { result = String(value); });",
+            .expected = "7",
+        },
+        .{
+            .source = "var result = ''; function outer(value) { return async function* () { yield value; await 0; return value + 2; }; } var it = outer(4)(); it.next().then(function(first) { return it.next().then(function(last) { result = first.value + ':' + last.value; }); });",
+            .expected = "4:6",
+        },
+    };
+    for (cases) |case| for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        errdefer std.debug.print("nested suspendable ({s}): {s}\n", .{ @tagName(mode), case.source });
+        _ = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, (try ctx.evaluate("result")).asStr());
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) > 0);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    };
+}
+
+test "nested suspendable closures share synchronized defining slots without the GIL" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function makeSharedCapture() {
+        \\  let count = 0;
+        \\  const lock = new Lock();
+        \\  function* increment() {
+        \\    for (var i = 0; i < 32; i++) {
+        \\      yield lock.hold(function () { count += 1; return count; });
+        \\    }
+        \\  }
+        \\  return { increment: increment, read: function () { return count; } };
+        \\}
+        \\var shared = makeSharedCapture();
+        \\function captureLane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+        \\  var iterator = shared.increment(), seen = 0;
+        \\  while (!iterator.next().done) seen++;
+        \\  return seen;
+        \\}
+        \\var lanes = [], yielded = 0;
+        \\for (var i = 0; i < 4; i++) lanes.push(new Thread(captureLane));
+        \\for (var i = 0; i < 4; i++) yielded += lanes[i].join();
+        \\yielded + ':' + shared.read()
+    );
+    try std.testing.expectEqualStrings("128:128", result.asStr());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 test "environment declarations preserve block switch and suspended binding identity" {
     const cases = [_]struct { source: []const u8, expected: []const u8 }{
         .{
@@ -29578,6 +29685,29 @@ test "block functions survive actual moving GC across a native safepoint" {
     try std.testing.expect(environment_holder_before != ctx.global_object.getOwn("environmentMovingHolder").?.asObj());
     ctx.collectGarbage();
     try std.testing.expectEqual(@as(f64, 13), (try ctx.evaluate("environmentMovingRead()")).asNum());
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\function makeMovingSuspendable(holder) {
+        \\  let cell = { value: 1 };
+        \\  return function* () {
+        \\    yield cell.value + holder.value;
+        \\    requestBlockFunctionMove(); blockMovingLoop(20000);
+        \\    cell.value += 2;
+        \\    return cell.value + holder.value;
+        \\  };
+        \\}
+        \\globalThis.captureMovingHolder = { value: 10 };
+        \\globalThis.captureMovingRead = makeMovingSuspendable(captureMovingHolder);
+        \\globalThis.captureMovingIterator = captureMovingRead();
+    );
+    try std.testing.expectEqual(@as(f64, 11), (try ctx.evaluate("captureMovingIterator.next().value")).asNum());
+    const capture_holder_before = ctx.global_object.getOwn("captureMovingHolder").?.asObj();
+    const capture_moving_before = heap.accounting().moving_minor_collections;
+    try std.testing.expectEqual(@as(f64, 13), (try ctx.evaluate("captureMovingIterator.next().value")).asNum());
+    try std.testing.expect(heap.accounting().moving_minor_collections > capture_moving_before);
+    try std.testing.expect(capture_holder_before != ctx.global_object.getOwn("captureMovingHolder").?.asObj());
+    ctx.collectGarbage();
+    try std.testing.expectEqual(@as(f64, 13), (try ctx.evaluate("captureMovingRead().next().value")).asNum());
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 

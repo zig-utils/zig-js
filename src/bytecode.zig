@@ -765,6 +765,9 @@ pub const FnTemplateAdmission = enum {
 };
 
 pub const FnTemplate = struct {
+    /// Suspendable bodies resolve names through Environment Records rather than
+    /// upvalue opcodes. Retain the exact defining activation/lexical projection.
+    capture_environment: ?*const DirectEvalPlan = null,
     name: []const u8,
     /// Function declaration/expression node used to recover its exact registered
     /// source coordinates even when declaration instantiation is hoisted ahead
