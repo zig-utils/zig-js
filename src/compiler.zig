@@ -168,6 +168,10 @@ const SlotBinding = struct {
 /// performs InitializeBinding.
 const FnScope = struct {
     parent: ?*FnScope,
+    /// Which record of `parent` was visible when this function was created.
+    /// A closure created by a parameter initializer must never resolve or
+    /// materialize the parent's not-yet-created body VariableEnvironment.
+    parent_binding_phase: FunctionBindingPhase = .body,
     hash_state: *CompileHashState,
     /// Runtime Environment Records between this frame and its parent frame at
     /// closure creation. Frame slots are not present in `vm.env`, so dynamic
@@ -202,7 +206,14 @@ const FnScope = struct {
         const parameters = self.parameter_names orelse return self.addLocal(arena, name, false, false);
         if (parameters.get(name)) |binding| return binding.slot;
         const slot = try self.addBinding(arena, parameters, name, false, false, false);
-        parameters.getPtr(name).?.parameter_with_eval_boundary = self.body_direct_eval_boundary;
+        const binding = parameters.getPtr(name).?;
+        binding.parameter_with_eval_boundary = self.body_direct_eval_boundary;
+        // FunctionDeclarationInstantiation creates every formal binding before
+        // evaluating the first initializer, but initializes them left-to-right.
+        // Reuse the checked-slot machinery so a default that reaches a later
+        // formal observes its exact TDZ rather than its raw call argument.
+        binding.tdz_checked = true;
+        try self.lexical_slots.append(arena, slot);
         return slot;
     }
 
@@ -343,6 +354,7 @@ fn buildDirectEvalPlan(
     var frame_count: usize = 0;
     var scope_count: usize = 0;
     var cursor: ?*const FnScope = scope;
+    var cursor_phase: FunctionBindingPhase = if (current_target == .parameter) .parameters else .body;
     while (cursor) |frame_scope| : (cursor = frame_scope.parent) {
         // A runtime Environment Record between two defining frames must appear
         // at its exact lexical position. Do not flatten or reorder it into the
@@ -350,23 +362,33 @@ fn buildDirectEvalPlan(
         if (frame_scope.parent != null and frame_scope.parent_environment_depth != 0)
             return error.Unsupported;
         frame_count += 1;
-        scope_count += @intFromBool(!(frame_scope == scope and current_target == .parameter));
-        scope_count += @intFromBool(frame_scope.parameter_names != null);
-        for (frame_scope.lexical_scopes.items) |lexical|
-            scope_count += @intFromBool(lexical.count() != 0);
+        if (cursor_phase == .parameters) {
+            if (frame_scope.parameter_names == null) return error.Unsupported;
+            scope_count += 1;
+        } else {
+            scope_count += 1;
+            scope_count += @intFromBool(frame_scope.parameter_names != null);
+            for (frame_scope.lexical_scopes.items) |lexical|
+                scope_count += @intFromBool(lexical.count() != 0);
+        }
+        cursor_phase = frame_scope.parent_binding_phase;
     }
 
     const scopes = try arena.alloc(bc.DirectEvalScope, scope_count);
-    const frames = try arena.alloc(*const FnScope, frame_count);
+    const FrameScope = struct { scope: *const FnScope, phase: FunctionBindingPhase };
+    const frames = try arena.alloc(FrameScope, frame_count);
     cursor = scope;
+    cursor_phase = if (current_target == .parameter) .parameters else .body;
     var current_depth: usize = 0;
     while (cursor) |frame_scope| : (cursor = frame_scope.parent) {
-        frames[frame_count - current_depth - 1] = frame_scope;
+        frames[frame_count - current_depth - 1] = .{ .scope = frame_scope, .phase = cursor_phase };
         current_depth += 1;
+        cursor_phase = frame_scope.parent_binding_phase;
     }
 
     var scope_index: usize = 0;
-    for (frames, 0..) |frame_scope, outer_index| {
+    for (frames, 0..) |frame, outer_index| {
+        const frame_scope = frame.scope;
         const frame_depth: u32 = @intCast(frame_count - outer_index - 1);
         if (frame_scope.parameter_names) |parameters| {
             scopes[scope_index] = .{
@@ -377,7 +399,7 @@ fn buildDirectEvalPlan(
             };
             scope_index += 1;
         }
-        if (frame_depth != 0 or current_target != .parameter) {
+        if (frame.phase == .body) {
             scopes[scope_index] = .{
                 .bindings = try directEvalBindings(arena, &frame_scope.names),
                 .kind = .variable,
@@ -385,16 +407,16 @@ fn buildDirectEvalPlan(
                 .frame_depth = frame_depth,
             };
             scope_index += 1;
-        }
-        for (frame_scope.lexical_scopes.items, frame_scope.lexical_scope_is_catch_param.items) |lexical, is_catch_param| {
-            if (lexical.count() == 0) continue;
-            scopes[scope_index] = .{
-                .bindings = try directEvalBindings(arena, lexical),
-                .kind = .lexical,
-                .is_catch_param = is_catch_param,
-                .frame_depth = frame_depth,
-            };
-            scope_index += 1;
+            for (frame_scope.lexical_scopes.items, frame_scope.lexical_scope_is_catch_param.items) |lexical, is_catch_param| {
+                if (lexical.count() == 0) continue;
+                scopes[scope_index] = .{
+                    .bindings = try directEvalBindings(arena, lexical),
+                    .kind = .lexical,
+                    .is_catch_param = is_catch_param,
+                    .frame_depth = frame_depth,
+                };
+                scope_index += 1;
+            }
         }
     }
     return .{ .scopes = scopes };
@@ -455,19 +477,11 @@ const PlainParameterLayout = struct {
     slots: []const u32,
     destructuring_indices: []const u32,
     default_indices: []const u32,
-    destructuring_input_names: []const ?[]const u8,
+    input_names: []const ?[]const u8,
     rest_index: ?u32,
 
     fn hasNonSimple(self: *const PlainParameterLayout) bool {
         return self.rest_index != null or self.destructuring_indices.len != 0 or self.default_indices.len != 0;
-    }
-
-    fn hasParameterExpressions(self: *const PlainParameterLayout) bool {
-        // Supported destructuring patterns are already required to contain no
-        // computed keys or nested defaults. A top-level default is therefore
-        // the only admitted form that creates the separate parameter/body
-        // Environment Record pair.
-        return self.default_indices.len != 0;
     }
 };
 
@@ -494,14 +508,23 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
             supportedPlainParameterDefault(conditional.alternate, fnode, parameter_index),
         .sequence => |sequence| supportedPlainParameterDefault(sequence.first, fnode, parameter_index) and
             supportedPlainParameterDefault(sequence.second, fnode, parameter_index),
+        // Identifier assignment preserves Reference resolution and leaves the
+        // assigned value on the parameter initializer's expression stack. The
+        // target may be a formal (including one still in TDZ) or an outer name;
+        // the ordinary checked/global store opcodes retain that distinction.
+        .assign => |assignment| assignment.target.* == .identifier and
+            supportedPlainParameterDefault(assignment.value, fnode, parameter_index),
+        // Function/arrow creation itself has no user-code side effect. Its
+        // nested compiler performs the exact capture/admission checks, while
+        // eager parameter-environment materialization preserves closure identity.
+        .function => true,
         .member => |member| !member.optional and
             (member.computed != null or !value_mod.isRawPrivateName(member.property)) and
             supportedPlainParameterDefault(member.object, fnode, parameter_index) and
             (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode, parameter_index)),
         .call => |call| blk: {
-            if (call.optional or
-                (call.callee.* == .identifier and std.mem.eql(u8, call.callee.identifier, "eval")) or
-                !supportedPlainParameterDefault(call.callee, fnode, parameter_index))
+            const direct_eval = call.callee.* == .identifier and std.mem.eql(u8, call.callee.identifier, "eval");
+            if (call.optional or (!direct_eval and !supportedPlainParameterDefault(call.callee, fnode, parameter_index)))
                 break :blk false;
             for (call.args) |argument|
                 if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode, parameter_index))
@@ -554,10 +577,7 @@ fn configurePlainParameters(
         const parameters = try arena.create(SecureStringMapUnmanaged(SlotBinding));
         parameters.* = .{ .state = scope.hash_state };
         scope.parameter_names = parameters;
-        // Parameter-phase direct eval remains fail-closed below. For the body-
-        // only admitted slice, this marks parameter references that a later
-        // dynamic body var can shadow.
-        scope.body_direct_eval_boundary = fnode.uses_direct_eval and !fnode.uses_direct_eval_in_parameters;
+        scope.body_direct_eval_boundary = fnode.uses_direct_eval_in_body;
     }
 
     const parameter_slots = try arena.alloc(u32, fnode.params.len);
@@ -579,23 +599,35 @@ fn configurePlainParameters(
             if (parameter.is_rest or patternHasEvaluationExpressions(pattern)) return error.Unsupported;
             var collector = BindingCollector{ .scope = scope };
             try collectPatternBindingNames(arena, pattern, &collector);
-            const input_name = try std.fmt.allocPrint(arena, "\x00param{d}", .{index});
-            input_names[index] = input_name;
-            parameter_slots[index] = try scope.addParameter(arena, input_name);
             try pattern_indices.append(arena, @intCast(index));
-            continue;
+        } else {
+            _ = try scope.addParameter(arena, parameter.name);
         }
         if (parameter.is_rest) {
             if (index + 1 != fnode.params.len) return error.Unsupported;
             rest_index = @intCast(index);
         }
-        parameter_slots[index] = try scope.addParameter(arena, parameter.name);
+    }
+    // Keep visible formal cells contiguous. Hidden raw inputs follow them and
+    // are excluded from direct-eval plans, preserving both cache locality for
+    // ordinary body reads and exact ParameterEnvironment observability.
+    for (fnode.params, 0..) |parameter, index| {
+        if (has_default or parameter.pattern != null) {
+            const input_name = try std.fmt.allocPrint(arena, "\x00param{d}", .{index});
+            input_names[index] = input_name;
+            parameter_slots[index] = if (scope.parameter_names) |parameters|
+                try scope.addBinding(arena, parameters, input_name, false, false, false)
+            else
+                try scope.addLocal(arena, input_name, false, false);
+        } else {
+            parameter_slots[index] = (scope.parameter_names orelse &scope.names).get(parameter.name).?.slot;
+        }
     }
     return .{
         .slots = parameter_slots,
         .destructuring_indices = pattern_indices.items,
         .default_indices = default_indices.items,
-        .destructuring_input_names = input_names,
+        .input_names = input_names,
         .rest_index = rest_index,
     };
 }
@@ -1958,7 +1990,7 @@ pub const Compiler = struct {
         self.function_binding_phase = .parameters;
         defer self.function_binding_phase = saved_phase;
         for (fnode.params, 0..) |parameter, index| {
-            const input_name = layout.destructuring_input_names[index] orelse parameter.name;
+            const input_name = layout.input_names[index] orelse parameter.name;
             if (parameter.default) |default| {
                 // IteratorBindingInitialization selects an Initializer only for
                 // exact undefined, never for null or another falsy primitive.
@@ -1967,6 +1999,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.eq_strict, 0);
                 const provided = try self.chunk.emit(.jump_if_false, 0);
                 try self.compileExpr(default);
+                if (parameter.pattern == null) try self.emitNamedEval(default, parameter.name);
                 try self.emitStore(input_name);
                 _ = try self.chunk.emit(.pop, 0);
                 self.chunk.patchToHere(provided);
@@ -1974,9 +2007,18 @@ pub const Compiler = struct {
             if (parameter.pattern) |pattern| {
                 try self.compilePattern(
                     pattern,
-                    .{ .named = layout.destructuring_input_names[index].? },
+                    .{ .named = layout.input_names[index].? },
                     .var_declaration,
                 );
+            } else if (layout.input_names[index] != null) {
+                // The raw call input is distinct from every visible binding in
+                // a parameter-expression list. Initialize the formal only after
+                // its own default completes, preserving later-formal TDZs.
+                try self.emitLoad(input_name);
+                const parameters = self.scope.?.parameter_names orelse return error.Unsupported;
+                const binding = parameters.get(parameter.name) orelse return error.Unsupported;
+                _ = try self.chunk.emit(.store_local, binding.slot);
+                _ = try self.chunk.emit(.pop, 0);
             }
         }
     }
@@ -2049,14 +2091,6 @@ pub const Compiler = struct {
             error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
             error.OutOfMemory => return error.OutOfMemory,
         };
-        // Parameter-phase eval runs before the body VariableEnvironment exists
-        // and carries distinct declaration/arguments restrictions. Body-only
-        // eval is represented by the separate slot maps and activation records
-        // below; keep the earlier phase fail-closed until its entry state is
-        // lowered explicitly. Rest-only and expression-free patterns share one
-        // function environment and need no synthetic boundary.
-        if (fnode.uses_direct_eval_in_parameters and parameter_layout.hasParameterExpressions())
-            return rejectPlainFunction(rejection, .unsupported_lowering);
         const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
         if (!fnode.is_expr_body) try collectFunctionLocals(arena, scope, fnode.body);
         const mapped_parameter_indices = try configureMappedParameters(arena, scope, fnode, arguments_slot);
@@ -2107,8 +2141,9 @@ pub const Compiler = struct {
         var depth: u32 = 0;
         var environment_depth: u32 = 0;
         var scope = self.scope;
+        var phase = self.function_binding_phase;
         while (scope) |sc| {
-            const binding = if (depth == 0 and self.function_binding_phase == .parameters)
+            const binding = if (phase == .parameters)
                 sc.getParameter(name)
             else
                 sc.get(name);
@@ -2122,6 +2157,7 @@ pub const Compiler = struct {
             }
             environment_depth += sc.parent_environment_depth;
             depth += 1;
+            phase = sc.parent_binding_phase;
             scope = sc.parent;
         }
         return .global;
@@ -2134,15 +2170,15 @@ pub const Compiler = struct {
     fn withDepthToResolution(self: *Compiler, name: []const u8) u32 {
         var depth = self.with_depth;
         var scope = self.scope;
-        var frame_depth: u32 = 0;
+        var phase = self.function_binding_phase;
         while (scope) |sc| {
-            const binding = if (frame_depth == 0 and self.function_binding_phase == .parameters)
+            const binding = if (phase == .parameters)
                 sc.getParameter(name)
             else
                 sc.get(name);
             if (binding != null) return depth;
             depth += sc.parent_with_depth;
-            frame_depth += 1;
+            phase = sc.parent_binding_phase;
             scope = sc.parent;
         }
         return depth;
@@ -5784,11 +5820,16 @@ pub const Compiler = struct {
         // its exact lexical position. Static frame scopes alone cannot describe
         // that chain, so keep this call site causally fail-closed.
         if (self.environment_depth != 0) return error.Unsupported;
-        return self.chunk.addDirectEvalPlan(try buildDirectEvalPlan(
+        if (self.function_binding_phase == .parameters)
+            if (self.chunk.parameter_direct_eval_plan) |plan_index| return plan_index;
+        const plan_index = try self.chunk.addDirectEvalPlan(try buildDirectEvalPlan(
             self.arena,
             scope,
             if (self.function_binding_phase == .parameters) .parameter else .variable,
         ));
+        if (self.function_binding_phase == .parameters)
+            self.chunk.parameter_direct_eval_plan = plan_index;
+        return plan_index;
     }
 
     fn compileFunction(
@@ -5813,6 +5854,7 @@ pub const Compiler = struct {
         const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, self.hash_state, fnode);
         scope.* = .{
             .parent = self.scope,
+            .parent_binding_phase = self.function_binding_phase,
             .hash_state = self.hash_state,
             .names = .{ .state = self.hash_state },
             .parent_environment_depth = self.environment_depth,
@@ -5844,13 +5886,6 @@ pub const Compiler = struct {
                 },
                 error.OutOfMemory => return error.OutOfMemory,
             };
-            if (fnode.uses_direct_eval_in_parameters and parameter_layout.hasParameterExpressions()) {
-                if (self.scope == null) {
-                    template_admission = .plain_unsupported_lowering;
-                    break :blk null;
-                }
-                return error.Unsupported;
-            }
             const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode);
             if (!fnode.is_expr_body) try collectFunctionLocals(self.arena, scope, fnode.body);
             const mapped_parameter_indices = try configureMappedParameters(self.arena, scope, fnode, arguments_slot);
@@ -6549,7 +6584,6 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(first, value = first(outer)){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = first?.()){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, args, value = first(...args)){}", .expected = .parameter_prologue },
-        .{ .source = "function f(eval, value = eval('1')){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = new first(outer)){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, args, value = new first(...args)){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = value + 1){}", .expected = .parameter_prologue },
@@ -6559,13 +6593,11 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = /x/){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = []){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = () => 1){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = class {}){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = side()){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = (1, outer)){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = false || outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = false ? 1 : outer){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = (outer = 1)){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = ++outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = delete holder.value){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = 1, ...tail){}", .expected = .parameter_prologue },
@@ -6741,7 +6773,7 @@ test "compiler reports stable plain-function admission reasons" {
     switch (default_admission) {
         .compiled => |compiled| {
             try std.testing.expectEqual(@as(u32, 6), compiled.chunk.param_count);
-            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 6 }, compiled.chunk.parameter_slots);
+            try std.testing.expectEqualSlices(u32, &.{ 6, 7, 8, 9, 10, 11 }, compiled.chunk.parameter_slots);
             try std.testing.expectEqualSlices(u32, &.{5}, compiled.chunk.destructuring_parameter_indices);
             try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5 }, compiled.chunk.default_parameter_indices);
             try std.testing.expectEqual(@as(?u32, null), compiled.chunk.rest_parameter_index);
@@ -6753,7 +6785,8 @@ test "compiler reports stable plain-function admission reasons" {
             try std.testing.expectEqualStrings("flag", compiled.chunk.debug_local_names[3]);
             try std.testing.expectEqualStrings("nil", compiled.chunk.debug_local_names[4]);
             try std.testing.expectEqualStrings("letter", compiled.chunk.debug_local_names[5]);
-            try std.testing.expectEqualStrings("\x00param5", compiled.chunk.debug_local_names[6]);
+            for (compiled.chunk.debug_local_names[6..12], 0..) |name, index|
+                try std.testing.expectEqualStrings(try std.fmt.allocPrint(default_arena.allocator(), "\x00param{d}", .{index}), name);
             for (compiled.chunk.code.items) |instruction| if (instruction.op == .bind_pattern)
                 return error.TestUnexpectedResult;
         },
@@ -6771,7 +6804,7 @@ test "compiler reports stable plain-function admission reasons" {
     switch (expression_admission) {
         .compiled => |compiled| {
             try std.testing.expectEqual(@as(u32, 10), compiled.chunk.param_count);
-            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, compiled.chunk.parameter_slots);
+            try std.testing.expectEqualSlices(u32, &.{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 }, compiled.chunk.parameter_slots);
             try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, compiled.chunk.default_parameter_indices);
             try std.testing.expectEqual(@as(usize, 0), compiled.chunk.destructuring_parameter_indices.len);
             try std.testing.expectEqual(@as(?u32, null), compiled.chunk.rest_parameter_index);
@@ -6794,7 +6827,7 @@ test "compiler reports stable plain-function admission reasons" {
     switch (invocation_admission) {
         .compiled => |compiled| {
             try std.testing.expectEqual(@as(u32, 3), compiled.chunk.param_count);
-            try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, compiled.chunk.parameter_slots);
+            try std.testing.expectEqualSlices(u32, &.{ 3, 4, 5 }, compiled.chunk.parameter_slots);
             try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, compiled.chunk.default_parameter_indices);
             try std.testing.expect(compiled.chunk.has_non_simple_parameters);
             try std.testing.expect(compiled.chunk.arguments_slot != null);
@@ -6931,15 +6964,15 @@ test "compiler reports stable plain-function admission reasons" {
     switch (pattern_admission) {
         .compiled => |compiled| {
             try std.testing.expectEqual(@as(u32, 2), compiled.chunk.param_count);
-            try std.testing.expectEqualSlices(u32, &.{ 3, 6 }, compiled.chunk.parameter_slots);
+            try std.testing.expectEqualSlices(u32, &.{ 5, 6 }, compiled.chunk.parameter_slots);
             try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, compiled.chunk.destructuring_parameter_indices);
             try std.testing.expectEqual(@as(usize, 0), compiled.chunk.default_parameter_indices.len);
             try std.testing.expectEqualStrings("first", compiled.chunk.debug_local_names[0]);
             try std.testing.expectEqualStrings("value", compiled.chunk.debug_local_names[1]);
             try std.testing.expectEqualStrings("tail", compiled.chunk.debug_local_names[2]);
-            try std.testing.expectEqualStrings("\x00param0", compiled.chunk.debug_local_names[3]);
-            try std.testing.expectEqualStrings("keep", compiled.chunk.debug_local_names[4]);
-            try std.testing.expectEqualStrings("rest", compiled.chunk.debug_local_names[5]);
+            try std.testing.expectEqualStrings("keep", compiled.chunk.debug_local_names[3]);
+            try std.testing.expectEqualStrings("rest", compiled.chunk.debug_local_names[4]);
+            try std.testing.expectEqualStrings("\x00param0", compiled.chunk.debug_local_names[5]);
             try std.testing.expectEqualStrings("\x00param1", compiled.chunk.debug_local_names[6]);
             try std.testing.expectEqual(@as(?u32, null), compiled.chunk.rest_parameter_index);
             try std.testing.expect(compiled.chunk.has_non_simple_parameters);
@@ -7114,10 +7147,62 @@ test "compiler admits direct eval for expression-free non-simple parameter lists
         "function f(value = eval('1')){ return value; }",
     );
     const parameter_program = try parameter_parser.parseProgram();
-    switch (try Compiler.admitPlainFunction(parameter_arena.allocator(), parameter_program.program[0].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.parameter_prologue, reason),
-    }
+    const parameter_compiled = switch (try Compiler.admitPlainFunction(parameter_arena.allocator(), parameter_program.program[0].func_decl)) {
+        .compiled => |compiled| compiled,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?u32, 0), parameter_compiled.chunk.parameter_direct_eval_plan);
+    try std.testing.expectEqual(@as(usize, 1), parameter_compiled.chunk.direct_eval_plans.items.len);
+    const parameter_plan = parameter_compiled.chunk.direct_eval_plans.items[0];
+    try std.testing.expectEqual(@as(usize, 1), parameter_plan.scopes.len);
+    try std.testing.expectEqual(bc.DirectEvalScopeKind.parameter, parameter_plan.scopes[0].kind);
+    try std.testing.expect(parameter_plan.scopes[0].declaration_target);
+
+    var both_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer both_arena.deinit();
+    var both_parser = try @import("parser.zig").Parser.init(
+        both_arena.allocator(),
+        "function f(value = eval('1')){ return eval('value'); }",
+    );
+    const both_program = try both_parser.parseProgram();
+    const both_compiled = switch (try Compiler.admitPlainFunction(both_arena.allocator(), both_program.program[0].func_decl)) {
+        .compiled => |compiled| compiled,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?u32, 0), both_compiled.chunk.parameter_direct_eval_plan);
+    try std.testing.expectEqual(@as(usize, 2), both_compiled.chunk.direct_eval_plans.items.len);
+    try std.testing.expectEqual(bc.DirectEvalScopeKind.parameter, both_compiled.chunk.direct_eval_plans.items[0].scopes[0].kind);
+    const both_body_plan = both_compiled.chunk.direct_eval_plans.items[1];
+    try std.testing.expectEqual(@as(usize, 2), both_body_plan.scopes.len);
+    try std.testing.expectEqual(bc.DirectEvalScopeKind.parameter, both_body_plan.scopes[0].kind);
+    try std.testing.expectEqual(bc.DirectEvalScopeKind.variable, both_body_plan.scopes[1].kind);
+    try std.testing.expect(both_body_plan.scopes[1].declaration_target);
+
+    var nested_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer nested_arena.deinit();
+    var nested_parser = try @import("parser.zig").Parser.init(
+        nested_arena.allocator(),
+        "function f(value = (() => eval(\"'ok'\"))()){ var bodyOnly = 1; return value; }",
+    );
+    const nested_program = try nested_parser.parseProgram();
+    const nested_compiled = switch (try Compiler.admitPlainFunction(nested_arena.allocator(), nested_program.program[0].func_decl)) {
+        .compiled => |compiled| compiled,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?u32, null), nested_compiled.chunk.parameter_direct_eval_plan);
+    try std.testing.expectEqual(@as(usize, 1), nested_compiled.chunk.fns.items.len);
+    const arrow_chunk = nested_compiled.chunk.fns.items[0].chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), arrow_chunk.direct_eval_plans.items.len);
+    const arrow_plan = arrow_chunk.direct_eval_plans.items[0];
+    try std.testing.expectEqual(@as(usize, 2), arrow_plan.scopes.len);
+    try std.testing.expectEqual(bc.DirectEvalScopeKind.parameter, arrow_plan.scopes[0].kind);
+    try std.testing.expectEqual(@as(u32, 1), arrow_plan.scopes[0].frame_depth);
+    try std.testing.expectEqual(bc.DirectEvalScopeKind.variable, arrow_plan.scopes[1].kind);
+    try std.testing.expectEqual(@as(u32, 0), arrow_plan.scopes[1].frame_depth);
+    try std.testing.expect(arrow_plan.scopes[1].declaration_target);
+    for (arrow_plan.scopes) |plan_scope|
+        for (plan_scope.bindings) |binding|
+            try std.testing.expect(!std.mem.eql(u8, binding.name, "bodyOnly"));
 }
 
 test "compiler admits direct eval methods and derived constructors" {

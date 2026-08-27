@@ -88,6 +88,10 @@ pub const FunctionNode = struct {
     /// a distinct ParameterEnvironment and body VariableEnvironment, so VM
     /// admission must retain this phase boundary rather than infer it from text.
     uses_direct_eval_in_parameters: bool = false,
+    /// Whether the direct-eval use occurs in the function body, including
+    /// inside a nested arrow. A function with parameter expressions can use
+    /// direct eval in both phases; each phase has a distinct declaration target.
+    uses_direct_eval_in_body: bool = false,
     /// Arrow functions don't get their own `arguments` (or `this`).
     is_arrow: bool = false,
     /// Explicit named function expressions have an internal immutable self-name

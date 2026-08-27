@@ -4471,6 +4471,17 @@ fn materializeDirectEvalEnvironmentHook(raw_context: *anyopaque, vm: *Interprete
     return materialized.environment;
 }
 
+fn directEvalDeclarationScope(plan: *const bc.DirectEvalPlan) ?*const bc.DirectEvalScope {
+    for (plan.scopes) |*scope| if (scope.declaration_target) return scope;
+    return null;
+}
+
+fn directEvalScopeBinds(scope: *const bc.DirectEvalScope, name: []const u8) bool {
+    for (scope.bindings) |binding|
+        if (std.mem.eql(u8, binding.name, name)) return true;
+    return false;
+}
+
 fn callActivationEvalValue(
     vm: *Interpreter,
     chunk: *Chunk,
@@ -4497,12 +4508,27 @@ fn callActivationEvalValue(
         else
             callEvalValue(vm, callee, args);
 
+    const plan = &chunk.direct_eval_plans.items[plan_index];
+    const declaration_scope = directEvalDeclarationScope(plan) orelse
+        return vm.throwError("InternalError", "direct-eval activation plan has no declaration target");
+    const parameter_phase = declaration_scope.kind == .parameter;
+    const saved_parameter_expression = vm.in_param_expr;
+    const saved_parameter_default = vm.in_param_default;
+    if (parameter_phase) {
+        vm.in_param_default = true;
+        vm.in_param_expr = directEvalScopeBinds(declaration_scope, "arguments");
+    }
+    defer {
+        vm.in_param_expr = saved_parameter_expression;
+        vm.in_param_default = saved_parameter_default;
+    }
+
     const saved_environment = vm.env;
     const saved_hook = vm.direct_eval_environment_hook;
     const saved_hook_context = vm.direct_eval_environment_hook_ctx;
     var hook_context = DirectEvalActivationHookContext{
         .frame = frame,
-        .plan = &chunk.direct_eval_plans.items[plan_index],
+        .plan = plan,
     };
     vm.direct_eval_environment_hook = materializeDirectEvalEnvironmentHook;
     vm.direct_eval_environment_hook_ctx = @ptrCast(&hook_context);
@@ -4846,6 +4872,66 @@ test "vm body direct eval shadows an outer default parameter binding" {
 
     const result = try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
     try std.testing.expectEqual(@as(f64, 110), result.asNum());
+    try std.testing.expectEqual(&env, machine.env);
+}
+
+test "vm parameter direct-eval entry allocation failure restores the caller activation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(
+        allocator,
+        "var phase = (value = eval(\"'ok'\")) => value; phase",
+    );
+    const program = try parser.parseProgram();
+    const root_chunk = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+    };
+    const function_value = try run(&machine, root_chunk, null);
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expect(function_chunk.parameter_direct_eval_plan != null);
+
+    const warm = try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
+    try std.testing.expectEqualStrings("ok", warm.asStr());
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    const saved_this = Value.num(91);
+    const saved_new_target = Value.num(92);
+    machine.this_value = saved_this;
+    machine.new_target = saved_new_target;
+    machine.strict = true;
+    machine.in_param_expr = true;
+    machine.in_param_default = true;
+    var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    machine.arena = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef()),
+    );
+    machine.arena = allocator;
+
+    try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+    try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+    try std.testing.expect(machine.strict);
+    try std.testing.expect(machine.in_param_expr);
+    try std.testing.expect(machine.in_param_default);
+    try std.testing.expectEqual(&env, machine.env);
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    machine.in_param_expr = false;
+    machine.in_param_default = false;
+    const recovered = try runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
+    try std.testing.expectEqualStrings("ok", recovered.asStr());
     try std.testing.expectEqual(&env, machine.env);
 }
 
@@ -10159,6 +10245,10 @@ const Activation = struct {
     saved_active_function: ?*value.Object,
     saved_pending_field_inits: []const *ast.Node,
     saved_pending_brand_names: []const []const u8,
+    saved_in_param_expr: bool,
+    saved_in_param_default: bool,
+    saved_cur_func_params: []const ast.Param,
+    saved_cur_func_args_needed: bool,
     debug_environment: ?*Environment = null,
     debug_call_frame: interp.DebugCallFrame = undefined,
     stack_trace_call_frame: interp.StackTraceCallFrame = undefined,
@@ -10243,6 +10333,10 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_active_function = undefined,
         .saved_pending_field_inits = undefined,
         .saved_pending_brand_names = undefined,
+        .saved_in_param_expr = undefined,
+        .saved_in_param_default = undefined,
+        .saved_cur_func_params = undefined,
+        .saved_cur_func_args_needed = undefined,
     };
     vm.vm_activation_allocations += 1;
     return act;
@@ -10368,6 +10462,10 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_active_function = vm.active_function,
         .saved_pending_field_inits = vm.pending_field_inits,
         .saved_pending_brand_names = vm.pending_brand_names,
+        .saved_in_param_expr = vm.in_param_expr,
+        .saved_in_param_default = vm.in_param_default,
+        .saved_cur_func_params = vm.cur_func_params,
+        .saved_cur_func_args_needed = vm.cur_func_args_needed,
     };
     act.exec.saved_home_object = vm.home_object;
     act.exec.saved_super_ctor = vm.super_ctor;
@@ -10395,6 +10493,10 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.import_meta_obj = if (func.import_meta_slot) |slot| slot.load() else null;
     vm.cur_module = func.module_referrer;
     vm.in_field_initializer = func.is_arrow and func.field_init_ctx;
+    vm.in_param_expr = false;
+    vm.in_param_default = false;
+    vm.cur_func_params = func.params;
+    vm.cur_func_args_needed = func.uses_arguments or func.uses_direct_eval;
     vm.in_derived_ctor = if (func.is_arrow) func.arrow_in_derived_ctor else func.is_derived_constructor;
     vm.in_default_ctor = !func.is_arrow and func.is_default_ctor;
     vm.active_function = func.obj;
@@ -10511,6 +10613,29 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         }
         slots[layout.slot] = vm.tempRoot(rest_root, rest);
     }
+    if (fchunk.parameter_direct_eval_plan) |plan_index| {
+        if (plan_index >= fchunk.direct_eval_plans.items.len) {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return vm.throwError("InternalError", "invalid parameter direct-eval plan");
+        }
+        const plan = &fchunk.direct_eval_plans.items[plan_index];
+        const declaration_scope = directEvalDeclarationScope(plan) orelse {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return vm.throwError("InternalError", "parameter direct-eval plan has no declaration target");
+        };
+        if (declaration_scope.kind != .parameter or declaration_scope.frame_depth != 0) {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return vm.throwError("InternalError", "invalid parameter direct-eval declaration target");
+        }
+        _ = materializeDirectEvalEnvironment(vm, frame, plan) catch |err| {
+            popActivation(vm, act);
+            releaseActivation(vm, act);
+            return err;
+        };
+    }
     if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
         const debug_environment = try gc_mod.allocEnv(vm.arena);
         vm.initEnvironment(debug_environment, func.closure, true);
@@ -10566,6 +10691,10 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.active_function = act.saved_active_function;
     vm.pending_field_inits = act.saved_pending_field_inits;
     vm.pending_brand_names = act.saved_pending_brand_names;
+    vm.in_param_expr = act.saved_in_param_expr;
+    vm.in_param_default = act.saved_in_param_default;
+    vm.cur_func_params = act.saved_cur_func_params;
+    vm.cur_func_args_needed = act.saved_cur_func_args_needed;
     if (vm.this_cell) |cell| if (cell.isInitialized()) {
         vm.this_value = cell.value();
         vm.this_initialized = true;
@@ -10596,6 +10725,10 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_active_function = src.saved_active_function;
     dst.saved_pending_field_inits = src.saved_pending_field_inits;
     dst.saved_pending_brand_names = src.saved_pending_brand_names;
+    dst.saved_in_param_expr = src.saved_in_param_expr;
+    dst.saved_in_param_default = src.saved_in_param_default;
+    dst.saved_cur_func_params = src.saved_cur_func_params;
+    dst.saved_cur_func_args_needed = src.saved_cur_func_args_needed;
     if (dst.debug_environment != null) dst.debug_call_frame.caller = src.debug_call_frame.caller;
     dst.stack_trace_call_frame.caller = src.stack_trace_call_frame.caller;
 }

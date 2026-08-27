@@ -3145,7 +3145,7 @@ pub const Interpreter = struct {
         // parameter scope); `arguments` has its own separate restriction.
         if (self.in_param_default) {
             for (vars.items) |n|
-                if (!eq(n, "arguments") and var_env.hasOwnBinding(n))
+                if (!eq(n, "arguments") and paramsBindName(self.cur_func_params, n))
                     return self.throwError("SyntaxError", "eval cannot var-declare a parameter name in a parameter default");
         }
         var env: *Environment = self.env;
@@ -8439,6 +8439,10 @@ pub const Interpreter = struct {
         const saved_pe = self.in_param_expr;
         const saved_pd = self.in_param_default;
         self.in_param_default = false; // a function body is not a parameter default
+        const saved_params = self.cur_func_params;
+        const saved_args_needed = self.cur_func_args_needed;
+        self.cur_func_params = func.params;
+        self.cur_func_args_needed = func.uses_arguments or func.uses_direct_eval;
         const saved_edd = self.eval_decl_deletable;
         self.eval_decl_deletable = false; // a function's own vars aren't eval-deletable, even if called from eval
         const saved_idc = self.in_derived_ctor;
@@ -8595,6 +8599,8 @@ pub const Interpreter = struct {
             self.in_field_initializer = saved_fi;
             self.in_param_expr = saved_pe;
             self.in_param_default = saved_pd;
+            self.cur_func_params = saved_params;
+            self.cur_func_args_needed = saved_args_needed;
             self.eval_decl_deletable = saved_edd;
             self.in_derived_ctor = saved_idc;
             self.in_default_ctor = saved_dfc;
@@ -8681,16 +8687,9 @@ pub const Interpreter = struct {
                 try self.hoistVarNames(func.body.block);
             }
         }
-        // Expose this activation's parameter names + tag the body block as the
-        // function-body scope, for Annex B B.3.3 block-function analysis.
-        const saved_params = self.cur_func_params;
-        const saved_args_needed = self.cur_func_args_needed;
-        self.cur_func_params = func.params;
-        self.cur_func_args_needed = func.uses_arguments or func.uses_direct_eval;
-        defer {
-            self.cur_func_params = saved_params;
-            self.cur_func_args_needed = saved_args_needed;
-        }
+        // Tag the body block as the function-body scope for Annex B B.3.3.
+        // This activation's parameter names have been installed since before
+        // BindingInitialization so parameter-phase eval sees the same identity.
         const saved_skip_annex_b_scan = self.skip_next_annex_b_scan;
         defer self.skip_next_annex_b_scan = saved_skip_annex_b_scan;
         self.skip_next_annex_b_scan = !func.annex_b_possible;
@@ -8739,6 +8738,15 @@ pub const Interpreter = struct {
             if (p.pattern) |pat| {
                 if (patternBindsName(pat, "arguments")) return true;
             } else if (std.mem.eql(u8, p.name, "arguments")) return true;
+        }
+        return false;
+    }
+
+    fn paramsBindName(params: []const ast.Param, name: []const u8) bool {
+        for (params) |parameter| {
+            if (parameter.pattern) |pattern| {
+                if (patternBindsName(pattern, name)) return true;
+            } else if (std.mem.eql(u8, parameter.name, name)) return true;
         }
         return false;
     }

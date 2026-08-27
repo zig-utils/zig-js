@@ -868,6 +868,10 @@ pub const Chunk = struct {
     /// frame so reads, writes, mapped arguments, TDZ, and escaping closures share
     /// one live cell rather than a snapshot.
     direct_eval_plans: std.ArrayListUnmanaged(DirectEvalPlan) = .empty,
+    /// Plan whose declaration target is this activation's ParameterEnvironment.
+    /// The VM materializes it before initializer bytecode so closures created by
+    /// an earlier default share the record with vars introduced by a later eval.
+    parameter_direct_eval_plan: ?u32 = null,
     /// Class-expression AST nodes referenced by `eval_class`; the compiler
     /// evaluates and prepares heritage plus any suspendable computed names first,
     /// then the VM delegates construction back to the interpreter while the

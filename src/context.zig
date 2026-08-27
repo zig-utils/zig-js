@@ -24152,6 +24152,117 @@ test "forced tree-walker and required bytecode preserve default parameter body e
     try std.testing.expectEqualStrings("277:37:6:77", results[1]);
 }
 
+test "forced tree-walker and required bytecode preserve parameter-phase direct eval records" {
+    const source =
+        \\function phase(
+        \\  before = () => dynamic,
+        \\  first = eval("var dynamic = 'inside'"),
+        \\  second = eval("var dynamic; dynamic += '!'"),
+        \\  after = () => dynamic
+        \\) {
+        \\  var bodyResult = eval("var bodyOnly = dynamic + '?'; dynamic + ':' + bodyOnly");
+        \\  return before() + "|" + after() + "|" + bodyResult;
+        \\}
+        \\function recursive(depth, before = () => dynamic, init = eval("var dynamic = depth")) {
+        \\  return depth ? before() + ":" + recursive(0) : before();
+        \\}
+        \\function escaping(before = () => dynamic, init = eval("var dynamic = 8")) { return before; }
+        \\function laterTdz(first = eval("later"), later) { return "body-ran"; }
+        \\function parameterConflict(value = eval("var value")) { return "body-ran"; }
+        \\function argumentsConflict(value = eval("var arguments")) { return "body-ran"; }
+        \\var arrowArgumentsConflict = (arguments, value = eval("var arguments")) => "body-ran";
+        \\function shadowed(eval, value = eval("ok")) { return value; }
+        \\var phaseShadowProbe;
+        \\function phaseShadow(_ = (eval("var x = 'parameter'"), phaseShadowProbe = () => x)) {
+        \\  var x = "body";
+        \\  return phaseShadowProbe() + ":" + x;
+        \\}
+        \\var errors = [];
+        \\for (var invoke of [laterTdz, parameterConflict, argumentsConflict, arrowArgumentsConflict]) {
+        \\  try { invoke(); } catch (error) { errors.push(error.name); }
+        \\}
+        \\globalThis.parameterPhaseEscaped = escaping();
+        \\globalThis.parameterPhaseRetained = [];
+        \\globalThis.parameterPhaseDiscarded = [];
+        \\for (var index = 0; index < 4096; index++) {
+        \\  parameterPhaseRetained.push({ index: index, nested: { value: index } });
+        \\  parameterPhaseDiscarded.push({ index: index, nested: { value: index } });
+        \\}
+        \\parameterPhaseDiscarded = null;
+        \\phase() + "|" + recursive(1) + "|" + phaseShadow() + "|" + errors.join(":") + "|" + shadowed(function (text) { return text + "!"; }, "ok");
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len][]const u8 = undefined;
+    var result_count: usize = 0;
+    defer for (results[0..result_count]) |result| std.testing.allocator.free(result);
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(source);
+        try std.testing.expect(result.isString());
+        results[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        result_count += 1;
+        try std.testing.expectEqual(@as(f64, 8), (try ctx.evaluate("parameterPhaseEscaped()")).asNum());
+        const compacted = ctx.compactGarbage();
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+        try std.testing.expect(compacted.moved_cells > 0);
+        try std.testing.expectEqual(@as(f64, 8), (try ctx.evaluate("parameterPhaseEscaped()")).asNum());
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 8);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_parameter_prologue));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+        }
+    }
+    try std.testing.expectEqualStrings(results[0], results[1]);
+    try std.testing.expectEqualStrings("inside!|inside!|inside!:inside!?|1:0|parameter:body|ReferenceError:SyntaxError:SyntaxError:SyntaxError|ok", results[1]);
+}
+
+test "parallel_js required bytecode isolates parameter direct eval records across shared workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\if ($vm.useThreadGIL() !== false) throw new Error("parallel_js did not drop the thread GIL");
+        \\function parameterEval(value, before = () => dynamic, init = eval("var dynamic = value")) {
+        \\  return before();
+        \\}
+        \\function runLane(lane) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error("worker still holds the thread GIL");
+        \\  var total = 0;
+        \\  for (var index = 0; index < 24; index++) total += parameterEval(lane * 100 + index);
+        \\  return total;
+        \\}
+        \\var expected = [];
+        \\var workers = [];
+        \\for (var lane = 0; lane < 4; lane++) expected.push(runLane(lane));
+        \\for (var lane = 0; lane < 4; lane++) workers.push(new Thread(runLane, lane));
+        \\var exact = true;
+        \\for (var lane = 0; lane < 4; lane++) if (workers[lane].join() !== expected[lane]) exact = false;
+        \\exact;
+    );
+    try std.testing.expect(result.asBool());
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 2);
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+}
+
 test "parameter initialization exposes every later non-simple binding in TDZ" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,
