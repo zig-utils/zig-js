@@ -29267,6 +29267,42 @@ test "realm global identity is independent of mutable globalThis" {
     };
 }
 
+test "callee parameter initialization isolates eval metadata across execution modes" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "function* gen(a = eval('var a = 42')) {} var result; try { gen(); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "async function* gen(a = eval('var a = 42')) {} var result; try { gen(); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "async function gen(a = eval('var a = 42')) {} var result = 'pending'; gen().then(function () { result = 'miss'; }, function (e) { result = e.name; });", .expected = "SyntaxError" },
+        .{ .source = "function* gen([a = eval('var a = 42')] = []) {} var result; try { gen(); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "function* gen({a = eval('var a = 42')} = {}) {} var result; try { gen(); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "function* gen({[eval('var a = 42')]: a} = {}) {} var result; try { gen(); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "function* gen(...[a = eval('var a = 42')]) {} var result; try { gen(); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "function* gen({a = eval('var arguments')} = {}) {} var result; try { gen(); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "var gen = (function () { 'use strict'; return function* (a = eval('var a = 42; a')) { yield a; }; })(); var result = String(gen().next().value);", .expected = "42" },
+        .{ .source = "function* gen(a = eval('var a = 42')) {} var result = (function () { 'use strict'; try { gen(); return 'miss'; } catch (e) { return e.name; } })();", .expected = "SyntaxError" },
+        .{ .source = "function* gen(a = eval('var caller = 42; caller')) { yield a; } function outer(read, caller = read().next().value) { return caller; } var result = String(outer(gen));", .expected = "42" },
+        .{ .source = "function plain() { return eval('var arguments = 42; arguments'); } function* gen(a = plain()) { yield a; } var result = String(gen().next().value);", .expected = "42" },
+        .{ .source = "function* gen() { yield eval('var arguments = 42; arguments'); } function outer(read, a = read().next().value) { return a; } var result = String(outer(gen));", .expected = "42" },
+        .{ .source = "async function gen() { return eval('var arguments = 42; arguments'); } function outer(read, a = read()) { return a; } var result = 'pending'; outer(gen).then(function (v) { result = String(v); }, function (e) { result = e.name; });", .expected = "42" },
+        .{ .source = "const [unused = (function* ({x}) { yield ++x; })({x: 1}).next().value] = []; var result = String(unused);", .expected = "2" },
+        .{ .source = "function* gen(inner = eval('var inner')) {} function catchInner() { try { gen(); } catch (e) { return e.name; } } function outer(read, caller = read(), other = eval('var caller')) {} var result; try { outer(catchInner); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "var arrow = ({a = eval('var arguments = 42; arguments')}) => a; var result = String(arrow({}));", .expected = "42" },
+        .{ .source = "var arrow = (arguments, {a = eval('var arguments')}) => a; var result; try { arrow(undefined, {}); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },
+    };
+    for (cases) |case| for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        errdefer std.debug.print("parameter context ({s}): {s}\n", .{ @tagName(mode), case.source });
+        _ = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, (try ctx.evaluate("result")).asStr());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    };
+}
+
 test "nested suspendable closures capture live ordinary activation environments" {
     const cases = [_]struct { source: []const u8, expected: []const u8 }{
         .{

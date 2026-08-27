@@ -3098,12 +3098,12 @@ pub const Interpreter = struct {
     /// direct eval inside it inherits the field-initializer early errors:
     /// `super()` and `arguments` are forbidden (`super.prop` stays legal).
     in_field_initializer: bool = false,
-    /// True while a non-arrow function's parameter default expressions are being
-    /// evaluated (the parameter scope, which has an `arguments` binding). A direct
+    /// True during parameter initialization when the parameter scope has its
+    /// own `arguments` binding (including arrows with that parameter). A direct
     /// eval there may not declare `arguments` — an early error.
     in_param_expr: bool = false,
-    /// True while *any* function's parameter default Initializer is being
-    /// evaluated (including arrows, unlike `in_param_expr`). A function with
+    /// True during *any* function's parameter BindingInitialization, including
+    /// destructuring defaults and computed keys. A function with
     /// parameter expressions keeps its parameters in an environment distinct from
     /// the body's var environment, so a direct eval in a default that declares a
     /// `var` shadowing a parameter name is a SyntaxError. Reset to false when
@@ -8591,6 +8591,7 @@ pub const Interpreter = struct {
         const saved_fi = self.in_field_initializer;
         const saved_pe = self.in_param_expr;
         const saved_pd = self.in_param_default;
+        self.in_param_expr = false;
         self.in_param_default = false; // a function body is not a parameter default
         const saved_params = self.cur_func_params;
         const saved_args_needed = self.cur_func_args_needed;
@@ -8801,7 +8802,7 @@ pub const Interpreter = struct {
         // Bind parameters in `call_env` (so a default can reference earlier
         // params). A non-arrow parameter scope owns `arguments`, so a direct eval
         // in a default expression may not redeclare it (checked in evalFn).
-        try self.bindParams2(func.params, args, func.is_arrow);
+        try self.bindFunctionParams(func, args);
 
         // Async generator: params have now bound (propagating any side-effect
         // throws). We can't run the body yet, so hand back an inert object
@@ -9047,11 +9048,42 @@ pub const Interpreter = struct {
         return args_obj;
     }
 
+    pub fn bindFunctionParams(self: *Interpreter, func: *Function, args: []const Value) EvalError!void {
+        // FunctionDeclarationInstantiation uses the callee's [[Strict]], even
+        // when a suspendable function binds its parameters before body entry.
+        const saved_strict = self.strict;
+        self.strict = func.is_strict;
+        defer self.strict = saved_strict;
+        try self.bindParams2(func.params, args, func.is_arrow);
+    }
+
     pub fn bindParams2(self: *Interpreter, params: []const ast.Param, args: []const Value, is_arrow: bool) EvalError!void {
         // The parameter scope binds `arguments` when this is a non-arrow function
         // (the arguments object) or when a parameter is named `arguments`; in
         // either case a direct eval in a default may not declare `arguments`.
         const param_scope_has_arguments = !is_arrow or paramsBindArguments(params);
+        // ECMA-262 10.2.11: the complete formals BindingInitialization runs in
+        // the callee's parameter context, including computed keys, nested
+        // defaults, and rest patterns. EvalDeclarationInstantiation must test
+        // these bound names, not those of the caller. Parameter bindings are
+        // mutable even when the call occurs in a const destructuring default.
+        const saved_params = self.cur_func_params;
+        const saved_pe = self.in_param_expr;
+        const saved_pd = self.in_param_default;
+        const saved_const = self.binding_const;
+        const saved_hoisted = self.binding_hoisted;
+        self.cur_func_params = params;
+        self.in_param_expr = param_scope_has_arguments;
+        self.in_param_default = true;
+        self.binding_const = false;
+        self.binding_hoisted = false;
+        defer {
+            self.cur_func_params = saved_params;
+            self.in_param_expr = saved_pe;
+            self.in_param_default = saved_pd;
+            self.binding_const = saved_const;
+            self.binding_hoisted = saved_hoisted;
+        }
         // FunctionDeclarationInstantiation creates every binding in a
         // non-simple parameter list before IteratorBindingInitialization begins.
         // The bindings are initialized strictly left-to-right, so a default,
@@ -9085,21 +9117,7 @@ pub const Interpreter = struct {
             var v: Value = if (i < args.len) args[i] else Value.undef();
             if (v.isUndefined()) {
                 if (p.default) |d| {
-                    // The default runs in the parameter scope; a non-arrow's owns
-                    // `arguments`, so a direct eval there can't declare it. The
-                    // `in_param_default` flag (all functions) marks that a direct
-                    // eval here may not `var`-declare a parameter name.
-                    const saved_pe = self.in_param_expr;
-                    const saved_pd = self.in_param_default;
-                    self.in_param_expr = param_scope_has_arguments;
-                    self.in_param_default = true;
-                    v = self.eval(d) catch |e| {
-                        self.in_param_expr = saved_pe;
-                        self.in_param_default = saved_pd;
-                        return e;
-                    };
-                    self.in_param_expr = saved_pe;
-                    self.in_param_default = saved_pd;
+                    v = try self.eval(d);
                     if (p.pattern == null) try self.maybeNameAnon(v, d, p.name); // `function f(x = () => {})` ⇒ name "x"
                 }
             }

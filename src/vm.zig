@@ -5487,6 +5487,62 @@ test "vm body direct eval shadows an outer default parameter binding" {
     try std.testing.expectEqual(&env, machine.env);
 }
 
+test "callee parameter initialization restores metadata after allocation failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "function gen(a = {value: 1}, ...[b = 2]) {}");
+    const program = try parser.parseProgram();
+    const parsed = program.program[0].func_decl;
+    const root_shape = try Shape.createRoot(allocator);
+    var root = Environment{ .arena = allocator, .fn_scope = true };
+    try interp.installGlobals(&root, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    const caller_params = [_]ast.Param{.{ .name = "caller" }};
+    var failures: usize = 0;
+    var succeeded = false;
+    for (0..128) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var env = Environment{ .arena = failing.allocator(), .parent = &root, .fn_scope = true };
+        var machine = Interpreter{
+            .arena = failing.allocator(),
+            .env = &env,
+            .root_shape = root_shape,
+            .tdz_marker = tdz_marker,
+            .strict = true,
+            .in_param_expr = false,
+            .in_param_default = true,
+            .cur_func_params = &caller_params,
+            .binding_const = true,
+            .binding_hoisted = true,
+        };
+        var function = Function{
+            .params = parsed.params,
+            .body = parsed.body,
+            .is_expr_body = false,
+            .closure = &env,
+        };
+        const attempt = machine.bindFunctionParams(&function, &.{});
+        try std.testing.expect(machine.strict);
+        try std.testing.expect(!machine.in_param_expr);
+        try std.testing.expect(machine.in_param_default);
+        try std.testing.expectEqual(caller_params[0..].ptr, machine.cur_func_params.ptr);
+        try std.testing.expectEqual(@as(usize, 1), machine.cur_func_params.len);
+        try std.testing.expect(machine.binding_const);
+        try std.testing.expect(machine.binding_hoisted);
+        if (attempt) |_| {
+            try std.testing.expectEqual(@as(f64, 2), env.get("b").?.asNum());
+            succeeded = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+    }
+    try std.testing.expect(succeeded and failures > 0);
+}
+
 test "vm parameter direct-eval entry allocation failure restores the caller activation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -7461,6 +7517,19 @@ fn ensureBindingReferenceStorage(vm: *Interpreter, exec: *Exec, chunk: *const Ch
 }
 
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    const saved_param_expr = vm.in_param_expr;
+    const saved_param_default = vm.in_param_default;
+    if (gen != null) {
+        // A generator/async body can start inside another call's parameter
+        // initializer. Its eval declarations belong to the body, not that
+        // caller's parameter context (ECMA-262 10.2.11).
+        vm.in_param_expr = false;
+        vm.in_param_default = false;
+    }
+    defer {
+        vm.in_param_expr = saved_param_expr;
+        vm.in_param_default = saved_param_default;
+    }
     const saved_execution_strict = vm.strict;
     defer vm.strict = saved_execution_strict;
     activateExecStrict(vm, exec, gen);
@@ -9514,7 +9583,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
         vm.import_meta_obj = saved_import_meta_obj;
         vm.cur_module = saved_cur_module;
     }
-    try vm.bindParams2(func.params, args, func.is_arrow);
+    try vm.bindFunctionParams(func, args);
 
     // A generator whose parameter list contains an expression (a default value)
     // gets a body variable environment distinct from the parameter environment, so
@@ -9958,7 +10027,7 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     const result = try promise.newPromise(vm);
     const rp: *promise.Promise = @ptrCast(@alignCast(result.promiseData().?));
     if (!func.is_arrow) try genv.put("arguments", try vm.createArgumentsObject(func, args, genv));
-    vm.bindParams2(func.params, args, func.is_arrow) catch |err| {
+    vm.bindFunctionParams(func, args) catch |err| {
         if (err != error.Throw) return err;
         const reason = vm.exception;
         vm.exception = Value.undef();
@@ -10285,7 +10354,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
         vm.import_meta_obj = saved_import_meta_obj;
         vm.cur_module = saved_cur_module;
     }
-    try vm.bindParams2(func.params, args, func.is_arrow);
+    try vm.bindFunctionParams(func, args);
     // Separate body var-env when the params contain a default (see makeGenerator).
     const body_env = try paramsBodyVarEnv(vm, func, genv);
     const lexical_env = try bodyLexicalEnv(vm, body_env);
