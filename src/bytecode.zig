@@ -574,12 +574,23 @@ pub const DirectEvalScope = struct {
     frame_depth: u32,
 };
 
+/// Runtime Environment Records captured between one ordinary activation and
+/// its defining parent frame. `child_frame_depth == 0` is the direct-eval
+/// caller. The immutable count is validated against each Frame's exact
+/// `closure_environment` edge before an interleaved chain can be published.
+pub const DirectEvalFrameBoundary = struct {
+    child_frame_depth: u32,
+    environment_depth: u32,
+};
+
 /// Exact static scope stack for one direct-eval call site. Runtime Environment
 /// Records (captured loop heads, `with`, disposal scopes) are not flattened into
-/// this structure: admission must remain fail-closed until their interleaving is
-/// represented explicitly.
+/// binding snapshots. Frame boundaries retain only their exact record counts;
+/// admission remains fail-closed until materialization consumes them without
+/// mutating the captured records' published parent links.
 pub const DirectEvalPlan = struct {
     scopes: []const DirectEvalScope,
+    frame_boundaries: []const DirectEvalFrameBoundary = &.{},
 };
 
 /// `load_binding_ref` keeps the Reference for a later PutValue when `retain` is

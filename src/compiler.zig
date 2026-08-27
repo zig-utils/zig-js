@@ -178,6 +178,11 @@ const FnScope = struct {
     /// name resolution must stop at this boundary before falling back to an
     /// enclosing non-deletable slot.
     parent_environment_depth: u32 = 0,
+    /// Complete runtime Environment segment captured between this frame and
+    /// its defining parent frame for direct eval. Unlike name-resolution's
+    /// `parent_environment_depth`, this includes a named function expression's
+    /// immutable self-name record, which also sits outside the frame slots.
+    parent_direct_eval_environment_depth: u32 = 0,
     /// Object Environment Records between this frame and its parent frame at
     /// closure creation. Kept separate from declarative environments so
     /// ordinary no-`with` slot accesses retain their direct bytecodes.
@@ -343,12 +348,13 @@ fn directEvalBindings(
 /// The current declaration target is retained even when empty; functions with
 /// parameter expressions additionally retain their outer parameter record.
 /// Empty lexical scopes are semantically inert and omitted. Runtime Environment
-/// Records must be interleaved by a later admission-aware layer rather than
-/// guessed here.
+/// Records are retained only as exact frame-boundary counts; their live binding
+/// identity must be recovered from Frame closure edges during materialization.
 fn buildDirectEvalPlan(
     arena: std.mem.Allocator,
     scope: *const FnScope,
     current_target: bc.DirectEvalScopeKind,
+    current_environment_depth: u32,
 ) CompileError!bc.DirectEvalPlan {
     if (current_target == .parameter and scope.parameter_names == null) return error.Unsupported;
     var frame_count: usize = 0;
@@ -356,11 +362,6 @@ fn buildDirectEvalPlan(
     var cursor: ?*const FnScope = scope;
     var cursor_phase: FunctionBindingPhase = if (current_target == .parameter) .parameters else .body;
     while (cursor) |frame_scope| : (cursor = frame_scope.parent) {
-        // A runtime Environment Record between two defining frames must appear
-        // at its exact lexical position. Do not flatten or reorder it into the
-        // static plan; admission stays causal until interleaving is represented.
-        if (frame_scope.parent != null and frame_scope.parent_environment_depth != 0)
-            return error.Unsupported;
         frame_count += 1;
         if (cursor_phase == .parameters) {
             if (frame_scope.parameter_names == null) return error.Unsupported;
@@ -375,6 +376,7 @@ fn buildDirectEvalPlan(
     }
 
     const scopes = try arena.alloc(bc.DirectEvalScope, scope_count);
+    const frame_boundaries = try arena.alloc(bc.DirectEvalFrameBoundary, frame_count - 1);
     const FrameScope = struct { scope: *const FnScope, phase: FunctionBindingPhase };
     const frames = try arena.alloc(FrameScope, frame_count);
     cursor = scope;
@@ -382,6 +384,17 @@ fn buildDirectEvalPlan(
     var current_depth: usize = 0;
     while (cursor) |frame_scope| : (cursor = frame_scope.parent) {
         frames[frame_count - current_depth - 1] = .{ .scope = frame_scope, .phase = cursor_phase };
+        if (frame_scope.parent != null) {
+            const active_depth = if (current_depth == 0) current_environment_depth else 0;
+            frame_boundaries[current_depth] = .{
+                .child_frame_depth = @intCast(current_depth),
+                .environment_depth = std.math.add(
+                    u32,
+                    frame_scope.parent_direct_eval_environment_depth,
+                    active_depth,
+                ) catch return error.Unsupported,
+            };
+        }
         current_depth += 1;
         cursor_phase = frame_scope.parent_binding_phase;
     }
@@ -419,7 +432,7 @@ fn buildDirectEvalPlan(
             }
         }
     }
-    return .{ .scopes = scopes };
+    return .{ .scopes = scopes, .frame_boundaries = frame_boundaries };
 }
 
 /// Every ordinary function that can observe its own arguments object receives
@@ -5853,11 +5866,19 @@ pub const Compiler = struct {
         if (self.environment_depth != 0) return error.Unsupported;
         if (self.function_binding_phase == .parameters)
             if (self.chunk.parameter_direct_eval_plan) |plan_index| return plan_index;
-        const plan_index = try self.chunk.addDirectEvalPlan(try buildDirectEvalPlan(
+        const plan = try buildDirectEvalPlan(
             self.arena,
             scope,
             if (self.function_binding_phase == .parameters) .parameter else .variable,
-        ));
+            self.environment_depth,
+        );
+        // Boundary metadata is frozen now, but materialization must not admit a
+        // captured gap until it can interleave the exact live records. Retain
+        // the causal barrier rather than silently flattening them around frame
+        // activation views.
+        for (plan.frame_boundaries) |boundary|
+            if (boundary.environment_depth != 0) return error.Unsupported;
+        const plan_index = try self.chunk.addDirectEvalPlan(plan);
         if (self.function_binding_phase == .parameters)
             self.chunk.parameter_direct_eval_plan = plan_index;
         return plan_index;
@@ -5882,6 +5903,12 @@ pub const Compiler = struct {
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
         const scope = try self.arena.create(FnScope);
+        const self_environment_depth: u32 = @intFromBool(named_expr and fnode.has_name_binding and !fnode.is_arrow);
+        const parent_direct_eval_environment_depth = std.math.add(
+            u32,
+            self.environment_depth,
+            self_environment_depth,
+        ) catch return error.Unsupported;
         const tdz_checks = !fnode.is_generator and try functionNeedsTdzChecks(self.arena, self.hash_state, fnode);
         scope.* = .{
             .parent = self.scope,
@@ -5889,6 +5916,7 @@ pub const Compiler = struct {
             .hash_state = self.hash_state,
             .names = .{ .state = self.hash_state },
             .parent_environment_depth = self.environment_depth,
+            .parent_direct_eval_environment_depth = parent_direct_eval_environment_depth,
             .parent_with_depth = self.with_depth,
             .tdz_checks = tdz_checks,
         };
@@ -6214,7 +6242,7 @@ test "compiler direct eval plan retains ordered live binding identity" {
     try scope.pushLexicalScope(allocator);
     const inner_slot = try scope.addLexicalChecked(allocator, "value", true);
 
-    const plan = try buildDirectEvalPlan(allocator, &scope, .variable);
+    const plan = try buildDirectEvalPlan(allocator, &scope, .variable, 0);
     try std.testing.expectEqual(@as(usize, 3), plan.scopes.len);
 
     const function_scope = plan.scopes[0];
@@ -6249,7 +6277,7 @@ test "compiler direct eval plan retains ordered live binding identity" {
     try std.testing.expect(inner.bindings[0].immutable);
 }
 
-test "compiler direct eval plan preserves defining-frame depth and rejects environment gaps" {
+test "compiler direct eval plan preserves defining-frame and runtime-environment depths" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -6273,7 +6301,7 @@ test "compiler direct eval plan preserves defining-frame depth and rejects envir
     };
     _ = try inner.addLocal(allocator, "innerVariable", false, false);
 
-    const plan = try buildDirectEvalPlan(allocator, &inner, .variable);
+    const plan = try buildDirectEvalPlan(allocator, &inner, .variable, 0);
     try std.testing.expectEqual(@as(usize, 3), plan.scopes.len);
     try std.testing.expectEqualStrings("outerVariable", plan.scopes[0].bindings[0].name);
     try std.testing.expectEqual(bc.DirectEvalScopeKind.variable, plan.scopes[0].kind);
@@ -6285,9 +6313,16 @@ test "compiler direct eval plan preserves defining-frame depth and rejects envir
     try std.testing.expectEqual(bc.DirectEvalScopeKind.variable, plan.scopes[2].kind);
     try std.testing.expect(plan.scopes[2].declaration_target);
     try std.testing.expectEqual(@as(u32, 0), plan.scopes[2].frame_depth);
+    try std.testing.expectEqual(@as(usize, 1), plan.frame_boundaries.len);
+    try std.testing.expectEqual(@as(u32, 0), plan.frame_boundaries[0].child_frame_depth);
+    try std.testing.expectEqual(@as(u32, 0), plan.frame_boundaries[0].environment_depth);
 
     inner.parent_environment_depth = 1;
-    try std.testing.expectError(error.Unsupported, buildDirectEvalPlan(allocator, &inner, .variable));
+    inner.parent_direct_eval_environment_depth = 1;
+    const interleaved = try buildDirectEvalPlan(allocator, &inner, .variable, 2);
+    try std.testing.expectEqual(@as(usize, 1), interleaved.frame_boundaries.len);
+    try std.testing.expectEqual(@as(u32, 0), interleaved.frame_boundaries[0].child_frame_depth);
+    try std.testing.expectEqual(@as(u32, 3), interleaved.frame_boundaries[0].environment_depth);
 }
 
 test "compiler threads activation plans through fixed spread and tail eval calls" {
