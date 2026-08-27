@@ -4067,7 +4067,14 @@ pub const Compiler = struct {
     /// `{ k0: t0 = d0, ... } = src` (assignment form).
     fn compileObjectPattern(self: *Compiler, props: []const ast.ObjPatProp, rest: ?*ast.Node, src: ActivationTemp, mode: PatternMode) CompileError!void {
         try self.emitLoadActivationTemp(src);
-        _ = try self.chunk.emit(.require_object_coercible, 0);
+        // Name the first statically-known key so the null/undefined failure can
+        // report it, exactly as the tree-walker does. A computed first key, an
+        // empty pattern, and a rest-only pattern all report without a name.
+        const coercible_name: u32 = if (props.len != 0 and props[0].key_expr == null)
+            1 + try self.chunk.addName(props[0].key)
+        else
+            0;
+        _ = try self.chunk.emitAB(.require_object_coercible, 0, coercible_name);
         var excluded: std.ArrayListUnmanaged(ActivationTemp) = .empty;
         for (props) |prop| {
             // PropertyName (may be computed and yield), then the target reference.

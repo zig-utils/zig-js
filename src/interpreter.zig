@@ -148,6 +148,15 @@ fn jsTrimFlat(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
     return s[lo..hi];
 }
 
+/// JavaScriptCore's wording for a null/undefined base. JSC appends the source
+/// text of the offending expression — `null is not an object (evaluating
+/// 'x.p')` — which needs spans the AST does not carry, so only the leading
+/// clause is reproduced. Distinguishing null from undefined is the part callers
+/// actually branch on, and it is what zig-js previously collapsed.
+pub fn notAnObjectMessage(base: Value) []const u8 {
+    return if (base.isNull()) "null is not an object" else "undefined is not an object";
+}
+
 fn jsTrim(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
     var lo: usize = 0;
     var hi: usize = s.len;
@@ -4706,7 +4715,7 @@ pub const Interpreter = struct {
                         const kv = try self.eval(ce);
                         const v = try self.eval(a.value);
                         if (recv.isNull() or recv.isUndefined())
-                            return self.throwError("TypeError", "cannot set property of null or undefined");
+                            return self.throwError("TypeError", notAnObjectMessage(recv));
                         if (fastNumericIndex(kv)) |idx| {
                             if (try self.setFastArrayNumericIndex(recv, idx, v)) break :blk v;
                             var fast_key_buf: [24]u8 = undefined;
@@ -4810,7 +4819,7 @@ pub const Interpreter = struct {
                             const kv = try self.eval(ce);
                             if (m.optional and (obj.isNull() or obj.isUndefined())) break :blk Value.undef();
                             if (obj.isNull() or obj.isUndefined())
-                                return self.throwError("TypeError", "cannot read property of null or undefined");
+                                return self.throwError("TypeError", notAnObjectMessage(obj));
                             if (fastNumericIndex(kv)) |idx|
                                 break :blk2 std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
                             break :blk2 try self.keyOf(kv);
@@ -4889,7 +4898,7 @@ pub const Interpreter = struct {
                         const key: []const u8 = if (m.computed) |ce| blk2: {
                             const kv = try self.eval(ce);
                             if (obj.isNull() or obj.isUndefined())
-                                return self.throwError("TypeError", "cannot read property of null or undefined");
+                                return self.throwError("TypeError", notAnObjectMessage(obj));
                             if (fastNumericIndex(kv)) |idx|
                                 break :blk2 std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
                             break :blk2 try self.keyOf(kv);
@@ -5058,7 +5067,7 @@ pub const Interpreter = struct {
                     // the key's `toString` is ever called.
                     const kv = try self.eval(ce);
                     if (obj.isNull() or obj.isUndefined())
-                        return self.throwError("TypeError", "cannot read property of null or undefined");
+                        return self.throwError("TypeError", notAnObjectMessage(obj));
                     var fast_key_buf: [24]u8 = undefined;
                     const key = if (fastNumericIndex(kv)) |idx|
                         std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable
@@ -8047,7 +8056,7 @@ pub const Interpreter = struct {
             // evaluated — `o.bar.gar(foo())` must not run `foo()` when `o.bar` is
             // undefined.
             if (recv.isNull() or recv.isUndefined())
-                return self.throwError("TypeError", "cannot read property of null or undefined");
+                return self.throwError("TypeError", notAnObjectMessage(recv));
             const key = if (kv) |k| try self.keyOf(k) else m.property;
             // `recv.m?.(...)`: short-circuit if the method itself is nullish.
             if (optional) {
@@ -8160,7 +8169,7 @@ pub const Interpreter = struct {
                 const key_value: ?Value = if (m.computed) |key| try self.eval(key) else null;
                 if (recv.isNull() or recv.isUndefined()) {
                     if (m.optional) return error.OptShortCircuit;
-                    return self.throwError("TypeError", "cannot read property of null or undefined");
+                    return self.throwError("TypeError", notAnObjectMessage(recv));
                 }
                 const key = if (key_value) |key_primitive| try self.keyOf(key_primitive) else m.property;
                 callee = try self.getProperty(recv, key);
@@ -14222,7 +14231,7 @@ pub const Interpreter = struct {
                 return Value.undef();
             },
             .string, .number, .boolean => return self.getPrimitiveMember(recv, key),
-            .undefined, .null => return self.throwError("TypeError", "cannot read property of null or undefined"),
+            .undefined, .null => return self.throwError("TypeError", notAnObjectMessage(recv)),
         }
     }
 
@@ -14355,9 +14364,22 @@ pub const Interpreter = struct {
         }
     }
 
+    /// JavaScriptCore reports the first statically-known key of an object
+    /// binding pattern and omits it when there is none (a computed first key, an
+    /// empty pattern, or rest-only). Both execution tiers share this wording.
+    pub fn throwDestructureError(self: *Interpreter, key: ?[]const u8) EvalError {
+        const name = key orelse
+            return self.throwError("TypeError", "Cannot destructure null or undefined value");
+        return self.throwError("TypeError", try std.fmt.allocPrint(
+            self.arena,
+            "Cannot destructure property '{s}' from null or undefined value",
+            .{name},
+        ));
+    }
+
     fn destructureObject(self: *Interpreter, props: []ast.ObjPatProp, rest: ?*Node, val: Value, declare: bool) EvalError!void {
         if (val.isUndefined() or val.isNull())
-            return self.throwError("TypeError", "cannot destructure null or undefined");
+            return self.throwDestructureError(if (props.len != 0 and props[0].key_expr == null) props[0].key else null);
         var consumed: std.ArrayListUnmanaged([]const u8) = .empty;
         for (props) |prop| {
             const key = if (prop.key_expr) |ke| try self.keyOf(try self.eval(ke)) else try value.encodeStringKey(self.arena, prop.key);
@@ -14462,7 +14484,7 @@ pub const Interpreter = struct {
                 // computed key. A nullish base therefore throws without running
                 // a user-defined toString after CopyDataProperties completes.
                 if (rest_recv.isNull() or rest_recv.isUndefined())
-                    return self.throwError("TypeError", "cannot set property of null or undefined");
+                    return self.throwError("TypeError", notAnObjectMessage(rest_recv));
                 const key = if (member.computed) try self.keyOf(member.keyval) else member.property;
                 try self.setMember(rest_recv, key, rest_obj);
             } else if (rest_super) |super_ref| {
@@ -14486,7 +14508,7 @@ pub const Interpreter = struct {
     /// undergone ToPropertyKey, so this helper performs no user-visible coercion.
     fn copyObjectRest(self: *Interpreter, val: Value, excluded: []const []const u8) EvalError!Value {
         if (val.isUndefined() or val.isNull())
-            return self.throwError("TypeError", "cannot destructure null or undefined");
+            return self.throwDestructureError(null);
         const rest_obj = try self.newObject();
         if (val.isObject()) {
             // Object rest copies only enumerable own properties, in
@@ -14532,7 +14554,7 @@ pub const Interpreter = struct {
 
     fn destructureArray(self: *Interpreter, elems: []ast.ArrPatElem, rest: ?*Node, val: Value, declare: bool) EvalError!void {
         if (val.isUndefined() or val.isNull())
-            return self.throwError("TypeError", "cannot destructure null or undefined");
+            return self.throwError("TypeError", notAnObjectMessage(val));
 
         // ArrayBindingPattern/AssignmentPattern always uses GetIterator, even for
         // packed arrays: both @@iterator and the returned iterator's `next` are
@@ -14973,7 +14995,7 @@ pub const Interpreter = struct {
                     // the null/undefined base check, then ToPropertyKey.
                     const kv = try self.eval(ce);
                     if (recv.isNull() or recv.isUndefined())
-                        return self.throwError("TypeError", "cannot set property of null or undefined");
+                        return self.throwError("TypeError", notAnObjectMessage(recv));
                     var fast_key_buf: [24]u8 = undefined;
                     const key = if (fastNumericIndex(kv)) |idx| blk: {
                         if (try self.setFastArrayNumericIndex(recv, idx, v)) return;
@@ -15035,7 +15057,7 @@ pub const Interpreter = struct {
             return self.setPrimitiveMemberResult(recv, key, v);
         if (!recv.isObject()) {
             if (recv.isNull() or recv.isUndefined())
-                return self.throwError("TypeError", "Cannot set property of null or undefined");
+                return self.throwError("TypeError", notAnObjectMessage(recv));
             return self.setPrimitiveMemberResult(recv, key, v);
         }
         const o = recv.asObj();

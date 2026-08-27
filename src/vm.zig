@@ -4023,7 +4023,7 @@ fn nativeGetIndex(vm: *Interpreter, object: Value, key: Value) EvalError!Value {
     // Match bytecode ordering: RequireObjectCoercible fails before an object key
     // can run observable ToPropertyKey hooks.
     if (object.isNull() or object.isUndefined())
-        return vm.throwError("TypeError", "cannot read property of null or undefined");
+        return vm.throwError("TypeError", interp.notAnObjectMessage(object));
     return vm.getProperty(object, try propKey(vm, key));
 }
 
@@ -4135,7 +4135,7 @@ fn nativeSetIndex(vm: *Interpreter, object: Value, key: Value, value_word: Value
     // The right-hand side is already staged, but a nullish base still fails
     // before an object key can run observable ToPropertyKey hooks.
     if (object.isNull() or object.isUndefined())
-        return vm.throwError("TypeError", "Cannot set property of null or undefined");
+        return vm.throwError("TypeError", interp.notAnObjectMessage(object));
     try vm.setMember(object, try propKey(vm, key), value_word);
     return value_word;
 }
@@ -7480,11 +7480,14 @@ fn runChunk(
             },
             .require_object_coercible => {
                 const input = stack.pop().?;
-                if (input.isNull() or input.isUndefined())
-                    return vm.throwError(
-                        "TypeError",
-                        if (inst.a == 1) "cannot read property of null or undefined" else "cannot destructure null or undefined",
+                if (input.isNull() or input.isUndefined()) {
+                    if (inst.a == 1) return vm.throwError("TypeError", interp.notAnObjectMessage(input));
+                    // `b` carries 1 + the name index of the pattern's first
+                    // static key, so both tiers name the same property.
+                    return vm.throwDestructureError(
+                        if (inst.b != 0) chunk.names.items[inst.b - 1] else null,
                     );
+                }
             },
             .to_property_key => {
                 // ToPropertyKey: coerce once (runs the key's toString/valueOf)
@@ -7812,7 +7815,7 @@ fn runChunk(
                 // RequireObjectCoercible before ToPropertyKey: `null[k]` is a
                 // TypeError before the key's `toString` runs (matches the tree-walker).
                 if (obj.isNull() or obj.isUndefined())
-                    return vm.throwError("TypeError", "cannot read property of null or undefined");
+                    return vm.throwError("TypeError", interp.notAnObjectMessage(obj));
                 fast: {
                     // A present dense element has no observable coercion,
                     // accessor, hole, or prototype work. Shared arrays take a
@@ -7991,7 +7994,7 @@ fn runChunk(
                 // RequireObjectCoercible before ToPropertyKey (the RHS is already
                 // evaluated); `null[k] = v` throws before the key's `toString` runs.
                 if (obj.isNull() or obj.isUndefined())
-                    return vm.throwError("TypeError", "Cannot set property of null or undefined");
+                    return vm.throwError("TypeError", interp.notAnObjectMessage(obj));
                 if (try quickDenseArrayStore(vm, obj, key, v)) {
                     if (builtin.is_test) _ = quick_dense_array_store_hits.fetchAdd(1, .monotonic);
                     try stack.append(stack_alloc, v);
@@ -12165,7 +12168,7 @@ test "vm: computed logical assignment preserves abrupt order and suspended refer
         \\function key() { log = log + "e"; return { toString() { log = log + "k"; if (mode === "key") throw 7050; return "value"; } }; }
         \\function rhs() { log = log + "r"; if (mode === "rhs") throw 7052; return 12; }
         \\var observed = "";
-        \\try { base(true)[key()] ??= rhs(); } catch (error) { observed = observed + (error instanceof TypeError && error.message === "cannot read property of null or undefined") + ":" + log; }
+        \\try { base(true)[key()] ??= rhs(); } catch (error) { observed = observed + (error instanceof TypeError && error.message === "null is not an object") + ":" + log; }
         \\log = ""; mode = "key";
         \\try { base(false)[key()] ??= rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
         \\log = ""; mode = "get";

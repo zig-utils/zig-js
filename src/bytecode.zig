@@ -340,7 +340,7 @@ pub const Op = enum(u8) {
     to_numeric, // ToNumeric(pop) -> Number or BigInt (the postfix `x++` old value)
     inc, // ToNumeric(pop) then +1 of the matching numeric type
     dec, // ToNumeric(pop) then -1 of the matching numeric type
-    require_object_coercible, // pop; throw for null/undefined; a: 0 binding-pattern message, 1 property-reference message
+    require_object_coercible, // pop; throw for null/undefined; a: 0 binding-pattern message, 1 property-reference message; b: for a==0, 1+name index of the pattern's first static key (0 = none)
     to_property_key, // ToPropertyKey(pop) -> the property-key string (runs toString once)
     name_anon, // NamedEvaluation: name the top-of-stack anonymous function (operand a: name)
 
