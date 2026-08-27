@@ -87,6 +87,14 @@ fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError
 pub const Frame = struct {
     slots: []Value,
     parent: ?*Frame,
+    /// Exact lexical Environment captured by the function whose activation
+    /// owns this frame. Frame slots are deliberately absent from that chain;
+    /// direct eval uses this immutable edge to recover the runtime Environment
+    /// Records that must be interleaved before the defining parent frame.
+    /// Null is permitted only for synthetic/test frames and inactive recycled
+    /// activations. A running ordinary activation always publishes it before
+    /// the frame becomes a GC root or can escape through a closure.
+    closure_environment: ?*Environment = null,
     /// Sloppy simple parameters share atomic cells owned by this arguments
     /// object. The frame retains only an object edge plus immutable slot layout,
     /// never a raw pointer from an escaped object back into recyclable storage.
@@ -10322,6 +10330,7 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     @memset(act.exec.binding_references, .empty);
     act.frame.mapped_arguments = null;
     act.frame.mapped_parameter_indices = &.{};
+    act.frame.closure_environment = null;
     act.frame.direct_eval_environment.store(null, .release);
     act.frame.direct_eval_parameter_environment.store(null, .release);
     act.next_free = if (vm.vm_activation_free) |raw| @ptrCast(@alignCast(raw)) else null;
@@ -10338,6 +10347,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
             act.frame.parent = null;
             act.frame.mapped_arguments = null;
             act.frame.mapped_parameter_indices = &.{};
+            act.frame.closure_environment = null;
             act.frame.direct_eval_environment.store(null, .release);
             act.frame.direct_eval_parameter_environment.store(null, .release);
             act.frame.escaped.store(false, .monotonic);
@@ -10515,6 +10525,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     frame.* = .{
         .slots = slots,
         .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
+        .closure_environment = func.closure,
     };
     if (!func.is_arrow) vm.current_private_map = func.private_map; // a direct eval here resolves the class's private names
     vm.strict = func.is_strict;

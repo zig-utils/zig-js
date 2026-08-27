@@ -1564,6 +1564,7 @@ fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
     var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
     const lock_slots = if (comptime @hasDecl(@TypeOf(v.*), "concurrent")) v.concurrent() else false;
     while (frame) |current| : (frame = current.parent) {
+        if (current.closure_environment) |environment| markManaged(v, environment);
         if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
         if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
         traceFrameMappedParameters(current, v);
@@ -1578,6 +1579,7 @@ fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
 fn relocateCapturedFrame(raw: ?*anyopaque, v: anytype) void {
     var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
     while (frame) |current| : (frame = current.parent) {
+        gc_relocation.rewriteOptionalSlot(v, Environment, &current.closure_environment);
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
         relocateFrameMappedParameters(current, v);
@@ -1684,7 +1686,11 @@ test "Function marking and relocation cover every managed field" {
     var parent_frame_slots = [_]Value{Value.obj(&old_objects[13])};
     var parent_frame = vm.Frame{ .slots = &parent_frame_slots, .parent = null };
     var captured_frame_slots = [_]Value{Value.obj(&old_objects[14])};
-    var captured_frame = vm.Frame{ .slots = &captured_frame_slots, .parent = &parent_frame };
+    var captured_frame = vm.Frame{
+        .slots = &captured_frame_slots,
+        .parent = &parent_frame,
+        .closure_environment = &old_environment,
+    };
     var function = interp.Function{
         .params = &.{},
         .body = &body,
@@ -1766,6 +1772,7 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expectEqual(&new_objects[12], async_constants[0].asObj());
     try std.testing.expectEqual(&new_objects[13], parent_frame_slots[0].asObj());
     try std.testing.expectEqual(&new_objects[14], captured_frame_slots[0].asObj());
+    try std.testing.expectEqual(&new_environment, captured_frame.closure_environment.?);
     try std.testing.expect(Binding.traceOldOnMinor(.function));
 }
 
@@ -2001,6 +2008,7 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
         if (handler.environment) |environment| markManaged(v, environment);
     var frame = g.exec.frame;
     while (frame) |current| : (frame = current.parent) {
+        if (current.closure_environment) |environment| markManaged(v, environment);
         if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
         if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
         for (current.slots) |slot| markValue(v, slot);
@@ -2033,6 +2041,7 @@ pub fn relocateGenerator(g: *vm.Generator, v: anytype) void {
         gc_relocation.rewriteOptionalSlot(v, interp.Environment, &handler.environment);
     var frame = g.exec.frame;
     while (frame) |current| : (frame = current.parent) {
+        gc_relocation.rewriteOptionalSlot(v, Environment, &current.closure_environment);
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
         for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
@@ -2113,7 +2122,11 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
     var parent_frame_slots = [_]Value{Value.obj(&old_objects[3])};
     var child_frame_slots = [_]Value{Value.obj(&old_objects[4])};
     var parent_frame = vm.Frame{ .slots = &parent_frame_slots, .parent = null };
-    var child_frame = vm.Frame{ .slots = &child_frame_slots, .parent = &parent_frame };
+    var child_frame = vm.Frame{
+        .slots = &child_frame_slots,
+        .parent = &parent_frame,
+        .closure_environment = &old_environment,
+    };
     var handlers = [_]vm.Handler{.{
         .catch_pc = 1,
         .stack_depth = 0,
@@ -2209,6 +2222,7 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
     try std.testing.expectEqual(&new_objects[2], generator.exec.acc.asObj());
     try std.testing.expectEqual(&new_objects[3], parent_frame_slots[0].asObj());
     try std.testing.expectEqual(&new_objects[4], child_frame_slots[0].asObj());
+    try std.testing.expectEqual(&new_environment, child_frame.closure_environment.?);
     try std.testing.expectEqual(&new_objects[5], generator.this_value.asObj());
     try std.testing.expectEqual(&new_objects[6], generator.home_object.?);
     try std.testing.expectEqual(&new_objects[7], generator.super_ctor.?);
@@ -2553,6 +2567,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         const lock_slots = v.concurrent();
         var fr: ?*vm.Frame = exec.frame;
         while (fr) |f| : (fr = f.parent) {
+            if (f.closure_environment) |environment| markManaged(v, environment);
             if (f.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
             if (f.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
             traceFrameMappedParameters(f, v);
@@ -2674,6 +2689,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_super_ctor);
         var frame = exec.frame;
         while (frame) |current| : (frame = current.parent) {
+            gc_relocation.rewriteOptionalSlot(v, Environment, &current.closure_environment);
             gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
             gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
             relocateFrameMappedParameters(current, v);
@@ -2790,7 +2806,11 @@ test "realm root relocation rewrites active interpreter containers" {
     var operand_stack = [_]Value{ Value.obj(&old_objects[16]), Value.obj(&old_objects[17]) };
     var pending_rest_arguments = [_]Value{Value.obj(&old_objects[27])};
     var frame_slots = [_]Value{Value.obj(&old_objects[19])};
-    var frame = vm.Frame{ .slots = &frame_slots, .parent = null };
+    var frame = vm.Frame{
+        .slots = &frame_slots,
+        .parent = null,
+        .closure_environment = &old_environment,
+    };
     frame.direct_eval_environment.store(&old_environment, .release);
     frame.direct_eval_parameter_environment.store(&old_environment, .release);
     var execution = vm.Exec{
@@ -2899,6 +2919,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[18], execution.acc.asObj());
     try std.testing.expectEqual(&new_objects[27], pending_rest_arguments[0].asObj());
     try std.testing.expectEqual(&new_objects[19], frame_slots[0].asObj());
+    try std.testing.expectEqual(&new_environment, frame.closure_environment.?);
     try std.testing.expectEqual(&new_environment, frame.direct_eval_environment.load(.acquire).?);
     try std.testing.expectEqual(&new_environment, frame.direct_eval_parameter_environment.load(.acquire).?);
     try std.testing.expectEqual(&new_objects[25], execution.saved_home_object.?);
