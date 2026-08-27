@@ -439,8 +439,14 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     if (chunk.arguments_slot != null) return error.UnsupportedChunk;
     // Environment-unwinding jumps mutate interpreter-owned lexical state. They
     // remain exact bytecode exits until native frame states carry that depth.
-    for (code) |instruction| if (instruction.op == .jump_env or instruction.op == .push_handler_catch or instruction.op == .push_handler_outer)
-        return error.UnsupportedChunk;
+    for (code) |instruction| {
+        if (instruction.op == .jump_env or instruction.op == .push_handler_catch or instruction.op == .push_handler_outer)
+            return error.UnsupportedChunk;
+        // The deferred call tail is activation-owned state outside the native
+        // frame. Keep the whole mixed-rest prologue on exact bytecode until a
+        // native entry descriptor can carry and relocate that slice.
+        if (instruction.op == .collect_rest_parameter) return error.UnsupportedChunk;
+    }
 
     const starts = try allocator.alloc(bool, code.len);
     defer allocator.free(starts);
@@ -566,6 +572,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .pop, .jump_if_false, .ret, .throw_op, .abrupt_return => .{ .required = 1, .removed = 1, .added = 0 },
         .end_finally => .{ .required = 2, .removed = 2, .added = 0 },
         .store_var, .store_local, .store_local_lexical, .store_upval, .store_upval_lexical, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
+        .collect_rest_parameter => .{ .required = 0, .removed = 0, .added = 0 },
         .store_binding_ref => .{ .required = 1, .removed = 1, .added = 0 },
         .dup => .{ .required = 1, .removed = 0, .added = 1 },
         .swap => .{ .required = 2, .removed = 0, .added = 0 },

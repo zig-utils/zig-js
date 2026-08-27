@@ -385,6 +385,7 @@ pub const Op = enum(u8) {
     load_import_meta, // push the active declaring module's lazily created import.meta object
     new_object, // push a fresh {}
     new_array, // push a fresh []
+    collect_rest_parameter, // operand a: frame slot; create the pending call-tail Array at this exact parameter-entry point
     init_prop, // operand a: name index; pop value, define own data prop on object at top, leave object
     init_proto, // pop value; if object/null set it as the [[Prototype]] of object at top (the `__proto__: v` colon form), leave object
     init_prop_computed, // pop key, pop value, set on object at top, leave object
@@ -816,10 +817,11 @@ pub const Chunk = struct {
     /// when it is exactly undefined. The compiler admits recursively safe value,
     /// public-read, call, and construction trees rooted in prior invocation state.
     default_parameter_indices: []const u32 = &.{},
-    /// Syntactic index of the final named rest formal. Its activation slot is
-    /// `parameter_slots[index]`; null means every formal is positional.
-    /// Rest mixed with defaults/patterns retains its separate ordered-entry
-    /// barrier and never impersonates this allocation-only prologue.
+    /// Syntactic index of the final rest formal. Its activation slot is
+    /// `parameter_slots[index]`; for a destructuring rest formal this is the
+    /// hidden raw-array slot consumed by its bytecode entry prologue. Null means
+    /// every formal is positional. Rest mixed with defaults/patterns is created
+    /// by `collect_rest_parameter` at the exact left-to-right entry point.
     rest_parameter_index: ?u32 = null,
     /// FunctionDeclarationInstantiation must create an unmapped arguments
     /// exotic for a non-simple formal list. Frozen here so calls never rescan

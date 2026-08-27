@@ -303,6 +303,11 @@ pub const Exec = struct {
     /// suspended or recursively nested activation cannot lose or overwrite the
     /// exact Environment/Object selected by ResolveBinding.
     binding_references: []interp.BindingReference = &.{},
+    /// Extra call arguments retained until a mixed/default/destructuring rest
+    /// formal reaches its exact left-to-right ArrayCreate point. The optional
+    /// distinguishes a pending empty tail from an activation with no deferred
+    /// rest work; `gc.zig` traces and relocates every retained Value.
+    parameter_rest_arguments: ?[]Value = null,
 };
 
 /// A live try handler: where to resume on a throw and the operand-stack depth
@@ -7051,6 +7056,7 @@ fn runChunk(
     gen: ?*Generator,
     optimizer_delta: *jit.OptimizerProfile.Delta,
 ) EvalError!Value {
+    @setEvalBranchQuota(10_000);
     const stack = &exec.stack;
     const stack_alloc = generatorStackAllocator(vm, gen);
     const handlers_alloc = generatorHandlersAllocator(vm, gen);
@@ -7605,6 +7611,38 @@ fn runChunk(
             },
             .new_object => try stack.append(stack_alloc, try vm.newObject()),
             .new_array => try stack.append(stack_alloc, try vm.newArray()),
+            .collect_rest_parameter => {
+                const activation_frame = frame orelse
+                    return vm.throwError("InternalError", "rest parameter requires an ordinary activation");
+                const rest_index_u32 = chunk.rest_parameter_index orelse
+                    return vm.throwError("InternalError", "missing bytecode rest parameter layout");
+                const rest_index: usize = rest_index_u32;
+                if (rest_index >= chunk.parameter_slots.len or
+                    chunk.parameter_slots[rest_index] != inst.a or inst.a >= activation_frame.slots.len or
+                    (chunk.destructuring_parameter_indices.len == 0 and chunk.default_parameter_indices.len == 0))
+                    return vm.throwError("InternalError", "invalid deferred rest parameter entry");
+                const arguments = exec.parameter_rest_arguments orelse
+                    return vm.throwError("InternalError", "missing deferred rest arguments");
+
+                // RestParameter : ... BindingRestElement performs ArrayCreate
+                // only after every preceding BindingElement has completed. The
+                // call tail is an Exec root, while the new Array has its own
+                // temporary root across element-storage growth and recovery GC.
+                const rest_root = try vm.pushTempRoot(Value.undef());
+                defer vm.restoreTempRoots(rest_root);
+                const rest = try vm.newArray();
+                vm.setTempRoot(rest_root, rest);
+                if (arguments.len != 0) {
+                    const rooted_rest = vm.tempRoot(rest_root, rest).asObj();
+                    const elements = try rooted_rest.ensureElementsList(vm.arena);
+                    try elements.ensureTotalCapacity(rooted_rest.elementsAllocator(vm.arena), arguments.len);
+                }
+                for (arguments) |argument|
+                    try vm.tempRoot(rest_root, rest).asObj().appendElement(vm.arena, argument);
+                activation_frame.writeSlot(inst.a, vm.tempRoot(rest_root, rest), parallel_sync);
+                @memset(arguments, Value.undef());
+                exec.parameter_rest_arguments = null;
+            },
             .init_prop => {
                 const v = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
@@ -10218,6 +10256,9 @@ const Activation = struct {
     /// Keeping capacity here lets a later activation with no more locals reuse
     /// the same allocation.
     slot_storage: []Value,
+    /// Reusable backing for `exec.parameter_rest_arguments`. It is separate
+    /// from frame slots because the call-tail length is invocation-dependent.
+    rest_argument_storage: []Value = &.{},
     next_free: ?*Activation = null,
     // The operand-stack index in the *caller* where this call's result lands
     // (callee + args were popped off before the call ran). Unused for the
@@ -10265,6 +10306,8 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
         act.optimizer_delta = .{};
         act.optimizer_profile_active = false;
     }
+    if (act.exec.parameter_rest_arguments) |arguments| @memset(arguments, Value.undef());
+    act.exec.parameter_rest_arguments = null;
     if (act.frame.escaped.load(.monotonic)) return;
     act.exec.stack.clearRetainingCapacity();
     act.exec.handlers.clearRetainingCapacity();
@@ -10355,6 +10398,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     };
     const frame = act.frame;
     const slot_storage = act.slot_storage;
+    const rest_argument_storage = act.rest_argument_storage;
     const slots = frame.slots;
     const pattern_indices = fchunk.destructuring_parameter_indices;
     const default_indices = fchunk.default_parameter_indices;
@@ -10362,7 +10406,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     var default_cursor: usize = 0;
     for (func.params, 0..) |parameter, index| {
         if (parameter.pattern != null) {
-            if (parameter.is_rest or pattern_cursor >= pattern_indices.len or pattern_indices[pattern_cursor] != index) {
+            if (pattern_cursor >= pattern_indices.len or pattern_indices[pattern_cursor] != index) {
                 releaseActivation(vm, act);
                 return vm.throwError("InternalError", "invalid bytecode destructuring parameter layout");
             }
@@ -10385,8 +10429,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         const rest_index: usize = rest_index_u32;
         if (fchunk.param_count != func.params.len or fchunk.parameter_slots.len != func.params.len or
             rest_index + 1 != func.params.len or
-            !func.params[rest_index].is_rest or func.params[rest_index].default != null or
-            func.params[rest_index].pattern != null)
+            !func.params[rest_index].is_rest or func.params[rest_index].default != null)
         {
             releaseActivation(vm, act);
             return vm.throwError("InternalError", "invalid bytecode rest parameter layout");
@@ -10399,8 +10442,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         break :layout .{ .index = rest_index, .slot = rest_slot };
     } else null;
     const has_non_simple_layout = rest_layout != null or pattern_indices.len != 0 or default_indices.len != 0;
-    if ((rest_layout != null and (pattern_indices.len != 0 or default_indices.len != 0)) or
-        fchunk.has_non_simple_parameters != has_non_simple_layout or
+    if (fchunk.has_non_simple_parameters != has_non_simple_layout or
         (has_non_simple_layout and
             (fchunk.param_count != func.params.len or fchunk.parameter_slots.len != func.params.len)) or
         (fchunk.has_non_simple_parameters and fchunk.mapped_parameter_indices.len != 0))
@@ -10438,6 +10480,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .chunk = fchunk,
         .frame = frame,
         .slot_storage = slot_storage,
+        .rest_argument_storage = rest_argument_storage,
         .next_free = null,
         .optimizer_delta = .{},
         .optimizer_profile_active = false,
@@ -10587,7 +10630,8 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             frame.mapped_parameter_indices = fchunk.mapped_parameter_indices;
         }
     }
-    if (rest_layout) |layout| {
+    const deferred_rest = rest_layout != null and (pattern_indices.len != 0 or default_indices.len != 0);
+    if (rest_layout) |layout| if (!deferred_rest) {
         // Allocate the root slot before the Array itself. Element growth may
         // invoke allocation-recovery collection, so every subsequent access
         // reloads the possibly relocated Value from the registered root.
@@ -10603,6 +10647,20 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             return e;
         };
         vm.setTempRoot(rest_root, rest);
+        const argument_count = args.len - @min(layout.index, args.len);
+        if (argument_count != 0) {
+            const rooted_rest = vm.tempRoot(rest_root, rest).asObj();
+            const elements = rooted_rest.ensureElementsList(vm.arena) catch |e| {
+                popActivation(vm, act);
+                releaseActivation(vm, act);
+                return e;
+            };
+            elements.ensureTotalCapacity(rooted_rest.elementsAllocator(vm.arena), argument_count) catch |e| {
+                popActivation(vm, act);
+                releaseActivation(vm, act);
+                return e;
+            };
+        }
         var argument_index = layout.index;
         while (argument_index < args.len) : (argument_index += 1) {
             vm.tempRoot(rest_root, rest).asObj().appendElement(vm.arena, args[argument_index]) catch |e| {
@@ -10612,7 +10670,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             };
         }
         slots[layout.slot] = vm.tempRoot(rest_root, rest);
-    }
+    };
     if (fchunk.parameter_direct_eval_plan) |plan_index| {
         if (plan_index >= fchunk.direct_eval_plans.items.len) {
             popActivation(vm, act);
@@ -10662,6 +10720,20 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .code_type = if (!new_target.isUndefined() or func.is_class_constructor) .constructor else .function,
         .is_async = func.is_async,
         .caller = vm.stack_trace_call_frame,
+    };
+    if (rest_layout) |layout| if (deferred_rest) {
+        const argument_start = @min(layout.index, args.len);
+        const argument_count = args.len - argument_start;
+        if (act.rest_argument_storage.len < argument_count) {
+            act.rest_argument_storage = vm.arena.alloc(Value, argument_count) catch |err| {
+                popActivation(vm, act);
+                releaseActivation(vm, act);
+                return err;
+            };
+        }
+        const retained = act.rest_argument_storage[0..argument_count];
+        @memcpy(retained, args[argument_start..]);
+        act.exec.parameter_rest_arguments = retained;
     };
     return act;
 }
@@ -10986,6 +11058,37 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     return run(&machine, chunk, null);
 }
 
+test "vm: mixed destructuring rest executes deferred empty-tail defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function f(first = 1, ...[tail = 2]) { return first * 10 + tail; }
+        \\f;
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .tdz_marker = tdz_marker };
+    const function_value = try run(&machine, root, null);
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    var saw_ordered_rest = false;
+    for (function_chunk.code.items) |instruction|
+        saw_ordered_rest = saw_ordered_rest or instruction.op == .collect_rest_parameter;
+    try std.testing.expect(saw_ordered_rest);
+    const arguments = [_]Value{Value.undef()};
+    try std.testing.expectEqual(
+        @as(f64, 12),
+        (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+    );
+}
+
 test "vm: named rest allocation failure restores the caller activation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -11023,6 +11126,72 @@ test "vm: named rest allocation failure restores the caller activation" {
 
     const saved_this = Value.num(71);
     const saved_new_target = Value.num(72);
+    machine.this_value = saved_this;
+    machine.new_target = saved_new_target;
+    machine.strict = true;
+    var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    machine.arena = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef()),
+    );
+    machine.arena = allocator;
+
+    try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+    try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+    try std.testing.expect(machine.strict);
+    try std.testing.expectEqual(&env, machine.env);
+    try std.testing.expect(machine.vm_activation_free != null);
+    try std.testing.expectEqual(
+        @as(f64, 6),
+        (try runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())).asNum(),
+    );
+}
+
+test "vm: deferred rest tail allocation failure restores the caller activation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(
+        allocator,
+        "function collect(head = 1, ...values) { return head + values.length; } collect",
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    const tdz_marker = try gc_mod.allocObj(allocator);
+    tdz_marker.* = .{};
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .tdz_marker = tdz_marker,
+    };
+
+    const function_value = try run(&machine, root, null);
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u32, 1), function_chunk.rest_parameter_index);
+    var saw_deferred_rest = false;
+    for (function_chunk.code.items) |instruction|
+        saw_deferred_rest = saw_deferred_rest or instruction.op == .collect_rest_parameter;
+    try std.testing.expect(saw_deferred_rest);
+
+    // Reuse a fully built activation whose empty tail needed no backing. The
+    // failing allocator therefore lands on retaining the first non-empty tail,
+    // before bytecode entry, and must restore every caller field exactly.
+    const head_only = [_]Value{Value.num(4)};
+    try std.testing.expectEqual(
+        @as(f64, 4),
+        (try runFunction(&machine, function, function_chunk, &head_only, Value.undef(), Value.undef())).asNum(),
+    );
+    try std.testing.expect(machine.vm_activation_free != null);
+
+    const arguments = [_]Value{ Value.num(4), Value.num(5), Value.num(6) };
+    const saved_this = Value.num(81);
+    const saved_new_target = Value.num(82);
     machine.this_value = saved_this;
     machine.new_target = saved_new_target;
     machine.strict = true;

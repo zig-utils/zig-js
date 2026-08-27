@@ -2524,6 +2524,8 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         // #706 activation-local program scratch: same arena-backed precise-root
         // story as the operand stack above.
         for (exec.scratch) |s| markValueInternal(v, "interpreter VM activation scratch", s);
+        if (exec.parameter_rest_arguments) |arguments|
+            for (arguments) |argument| markValueInternal(v, "interpreter VM pending rest arguments", argument);
         for (exec.binding_references) |reference| switch (reference) {
             .environment => |environment| markManaged(v, environment),
             .with_object, .global_object => |object| v.mark(object),
@@ -2659,6 +2661,8 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
         gc_relocation.rewriteValueSlot(v, &exec.acc);
         for (exec.scratch) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+        if (exec.parameter_rest_arguments) |arguments|
+            for (arguments) |*argument| gc_relocation.rewriteValueSlot(v, argument);
         for (exec.binding_references) |*reference| switch (reference.*) {
             .environment => |*environment| gc_relocation.rewriteRequiredSlot(v, Environment, environment),
             .with_object, .global_object => |*object| gc_relocation.rewriteRequiredSlot(v, Object, object),
@@ -2752,8 +2756,8 @@ test "realm root relocation rewrites active interpreter containers" {
     const context = try ContextMod.Context.create(std.testing.allocator);
     defer context.destroy();
     var machine = context.interpreter();
-    var old_objects: [27]Object = undefined;
-    var new_objects: [27]Object = undefined;
+    var old_objects: [28]Object = undefined;
+    var new_objects: [28]Object = undefined;
     var old_promise = promise.Promise{ .gc_owned = true };
     var new_promise = promise.Promise{ .gc_owned = true };
     var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
@@ -2784,6 +2788,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try machine.symbols.put(machine.arena, "root-symbol", &old_objects[15]);
 
     var operand_stack = [_]Value{ Value.obj(&old_objects[16]), Value.obj(&old_objects[17]) };
+    var pending_rest_arguments = [_]Value{Value.obj(&old_objects[27])};
     var frame_slots = [_]Value{Value.obj(&old_objects[19])};
     var frame = vm.Frame{ .slots = &frame_slots, .parent = null };
     frame.direct_eval_environment.store(&old_environment, .release);
@@ -2794,6 +2799,7 @@ test "realm root relocation rewrites active interpreter containers" {
         .frame = &frame,
         .saved_home_object = &old_objects[25],
         .saved_super_ctor = &old_objects[26],
+        .parameter_rest_arguments = &pending_rest_arguments,
     };
     try machine.gc_execs.append(machine.arena, &execution);
     try machine.gc_env_roots.append(machine.arena, &old_environment);
@@ -2831,8 +2837,8 @@ test "realm root relocation rewrites active interpreter containers" {
     };
 
     const Plan = struct {
-        old_objects: *[27]Object,
-        new_objects: *[27]Object,
+        old_objects: *[28]Object,
+        new_objects: *[28]Object,
         old_environment: *Environment,
         new_environment: *Environment,
         old_cached_environment: *Environment,
@@ -2891,6 +2897,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[16], operand_stack[0].asObj());
     try std.testing.expectEqual(&new_objects[17], operand_stack[1].asObj());
     try std.testing.expectEqual(&new_objects[18], execution.acc.asObj());
+    try std.testing.expectEqual(&new_objects[27], pending_rest_arguments[0].asObj());
     try std.testing.expectEqual(&new_objects[19], frame_slots[0].asObj());
     try std.testing.expectEqual(&new_environment, frame.direct_eval_environment.load(.acquire).?);
     try std.testing.expectEqual(&new_environment, frame.direct_eval_parameter_environment.load(.acquire).?);

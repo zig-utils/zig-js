@@ -483,6 +483,11 @@ const PlainParameterLayout = struct {
     fn hasNonSimple(self: *const PlainParameterLayout) bool {
         return self.rest_index != null or self.destructuring_indices.len != 0 or self.default_indices.len != 0;
     }
+
+    fn hasDeferredRest(self: *const PlainParameterLayout) bool {
+        return self.rest_index != null and
+            (self.destructuring_indices.len != 0 or self.default_indices.len != 0);
+    }
 };
 
 fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode, parameter_index: usize) bool {
@@ -552,28 +557,53 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
     };
 }
 
+fn supportedPlainParameterPattern(pattern: *const ast.Node, fnode: *const ast.FunctionNode, parameter_index: usize) bool {
+    return switch (pattern.*) {
+        .identifier => true,
+        .obj_pattern => |object| blk: {
+            for (object.props) |property| {
+                if (property.key_expr) |key|
+                    if (!supportedPlainParameterDefault(key, fnode, parameter_index)) break :blk false;
+                if (property.default) |default|
+                    if (!supportedPlainParameterDefault(default, fnode, parameter_index)) break :blk false;
+                if (!supportedPlainParameterPattern(property.target, fnode, parameter_index)) break :blk false;
+            }
+            if (object.rest) |rest|
+                if (!supportedPlainParameterPattern(rest, fnode, parameter_index)) break :blk false;
+            break :blk true;
+        },
+        .arr_pattern => |array| blk: {
+            for (array.elems) |element| {
+                if (element.default) |default|
+                    if (!supportedPlainParameterDefault(default, fnode, parameter_index)) break :blk false;
+                if (element.target) |target|
+                    if (!supportedPlainParameterPattern(target, fnode, parameter_index)) break :blk false;
+            }
+            if (array.rest) |rest|
+                if (!supportedPlainParameterPattern(rest, fnode, parameter_index)) break :blk false;
+            break :blk true;
+        },
+        else => false,
+    };
+}
+
 fn configurePlainParameters(
     arena: std.mem.Allocator,
     scope: *FnScope,
     fnode: *const ast.FunctionNode,
 ) CompileError!PlainParameterLayout {
-    var has_pattern = false;
-    var has_rest = false;
-    var has_default = false;
+    var has_parameter_expressions = false;
     for (fnode.params, 0..) |parameter, index| {
         if (parameter.default) |default| {
             if (!supportedPlainParameterDefault(default, fnode, index)) return error.Unsupported;
-            has_default = true;
+            has_parameter_expressions = true;
         }
-        has_pattern = has_pattern or parameter.pattern != null;
-        has_rest = has_rest or parameter.is_rest;
+        if (parameter.pattern) |pattern| {
+            if (!supportedPlainParameterPattern(pattern, fnode, index)) return error.Unsupported;
+            has_parameter_expressions = has_parameter_expressions or patternHasEvaluationExpressions(pattern);
+        }
     }
-    // A pattern/default followed by a rest formal has observable left-to-right
-    // entry ordering: iterator/default work must precede rest ArrayCreate. Keep
-    // that mixed prologue explicit until every operation shares one ordered
-    // bytecode entry stream.
-    if ((has_pattern or has_default) and has_rest) return error.Unsupported;
-    if (has_default) {
+    if (has_parameter_expressions) {
         const parameters = try arena.create(SecureStringMapUnmanaged(SlotBinding));
         parameters.* = .{ .state = scope.hash_state };
         scope.parameter_names = parameters;
@@ -596,7 +626,6 @@ fn configurePlainParameters(
     for (fnode.params, 0..) |parameter, index| {
         if (parameter.default != null) try default_indices.append(arena, @intCast(index));
         if (parameter.pattern) |pattern| {
-            if (parameter.is_rest or patternHasEvaluationExpressions(pattern)) return error.Unsupported;
             var collector = BindingCollector{ .scope = scope };
             try collectPatternBindingNames(arena, pattern, &collector);
             try pattern_indices.append(arena, @intCast(index));
@@ -612,7 +641,7 @@ fn configurePlainParameters(
     // are excluded from direct-eval plans, preserving both cache locality for
     // ordinary body reads and exact ParameterEnvironment observability.
     for (fnode.params, 0..) |parameter, index| {
-        if (has_default or parameter.pattern != null) {
+        if (has_parameter_expressions or parameter.pattern != null) {
             const input_name = try std.fmt.allocPrint(arena, "\x00param{d}", .{index});
             input_names[index] = input_name;
             parameter_slots[index] = if (scope.parameter_names) |parameters|
@@ -1991,6 +2020,8 @@ pub const Compiler = struct {
         defer self.function_binding_phase = saved_phase;
         for (fnode.params, 0..) |parameter, index| {
             const input_name = layout.input_names[index] orelse parameter.name;
+            if (parameter.is_rest and layout.hasDeferredRest())
+                _ = try self.chunk.emit(.collect_rest_parameter, layout.slots[index]);
             if (parameter.default) |default| {
                 // IteratorBindingInitialization selects an Initializer only for
                 // exact undefined, never for null or another falsy primitive.
@@ -6600,11 +6631,8 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = false ? 1 : outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = ++outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = delete holder.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = 1, ...tail){}", .expected = .parameter_prologue },
-        .{ .source = "function f([value = 1]){}", .expected = .parameter_prologue },
         .{ .source = "function f([value] = []){}", .expected = .parameter_prologue },
         .{ .source = "function f({ [key]: value }){}", .expected = .parameter_prologue },
-        .{ .source = "function f([value], ...tail){}", .expected = .parameter_prologue },
     };
 
     for (cases) |case| {
@@ -6616,6 +6644,24 @@ test "compiler reports stable plain-function admission reasons" {
         switch (admission) {
             .compiled => return error.TestUnexpectedResult,
             .rejected => |reason| try std.testing.expectEqual(case.expected, reason),
+        }
+    }
+
+    const admitted_parameter_prologues = [_][]const u8{
+        "function f(value = 1, ...tail){}",
+        "function f([value = 1]){}",
+        "function f([value], ...tail){}",
+        "function f(...[value = 1]){}",
+        "function f(key, { [key]: value = 1 }, ...tail){}",
+    };
+    for (admitted_parameter_prologues) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
+        const program = try parser.parseProgram();
+        switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+            .compiled => {},
+            .rejected => return error.TestUnexpectedResult,
         }
     }
 
@@ -7203,6 +7249,48 @@ test "compiler admits direct eval for expression-free non-simple parameter lists
     for (arrow_plan.scopes) |plan_scope|
         for (plan_scope.bindings) |binding|
             try std.testing.expect(!std.mem.eql(u8, binding.name, "bodyOnly"));
+}
+
+test "compiler emits mixed destructuring rest at its ordered parameter entry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function f(first = 1, ...[tail = (eval('var x = 2'), function(){ return x; })]) { return tail; }",
+    );
+    const program = try parser.parseProgram();
+    const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |code| code,
+        .rejected => return error.TestUnexpectedResult,
+    };
+
+    try std.testing.expectEqual(@as(?u32, 1), compiled.chunk.rest_parameter_index);
+    try std.testing.expectEqualSlices(u32, &.{0}, compiled.chunk.default_parameter_indices);
+    try std.testing.expectEqualSlices(u32, &.{1}, compiled.chunk.destructuring_parameter_indices);
+    try std.testing.expect(compiled.chunk.parameter_direct_eval_plan != null);
+    var collect_index: ?usize = null;
+    var iterator_index: ?usize = null;
+    for (compiled.chunk.code.items, 0..) |instruction, index| switch (instruction.op) {
+        .collect_rest_parameter => {
+            try std.testing.expectEqual(compiled.chunk.parameter_slots[1], instruction.a);
+            collect_index = index;
+        },
+        .iter_of => if (iterator_index == null) {
+            iterator_index = index;
+        },
+        else => {},
+    };
+    try std.testing.expect(collect_index != null and iterator_index != null);
+    try std.testing.expect(collect_index.? < iterator_index.?);
+
+    const root = try Compiler.compileProgram(arena.allocator(), program);
+    var template: ?*bc.FnTemplate = null;
+    for (root.fns.items) |candidate| {
+        if (std.mem.eql(u8, candidate.name, "f")) template = candidate;
+    }
+    const function_template = template orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(bc.FnTemplateAdmission.plain_compiled, function_template.admission);
+    try std.testing.expect(function_template.chunk != null);
 }
 
 test "compiler admits direct eval methods and derived constructors" {

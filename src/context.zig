@@ -24177,6 +24177,17 @@ test "forced tree-walker and required bytecode preserve parameter-phase direct e
         \\  var x = "body";
         \\  return phaseShadowProbe() + ":" + x;
         \\}
+        \\var restCloseProbe;
+        \\function restClose(...[_ = (eval("var restDynamic = 'close'"), restCloseProbe = () => restDynamic)]) {
+        \\  return restCloseProbe();
+        \\}
+        \\var restOpenBefore, restOpenAfter;
+        \\function restOpen(
+        \\  _ = restOpenBefore = () => restDynamic,
+        \\  ...[__ = (eval("var restDynamic = 'open'"), restOpenAfter = () => restDynamic)]
+        \\) {
+        \\  return restOpenBefore() + ":" + restOpenAfter();
+        \\}
         \\var errors = [];
         \\for (var invoke of [laterTdz, parameterConflict, argumentsConflict, arrowArgumentsConflict]) {
         \\  try { invoke(); } catch (error) { errors.push(error.name); }
@@ -24189,7 +24200,7 @@ test "forced tree-walker and required bytecode preserve parameter-phase direct e
         \\  parameterPhaseDiscarded.push({ index: index, nested: { value: index } });
         \\}
         \\parameterPhaseDiscarded = null;
-        \\phase() + "|" + recursive(1) + "|" + phaseShadow() + "|" + errors.join(":") + "|" + shadowed(function (text) { return text + "!"; }, "ok");
+        \\phase() + "|" + recursive(1) + "|" + phaseShadow() + "|" + restClose() + "|" + restOpen() + "|" + errors.join(":") + "|" + shadowed(function (text) { return text + "!"; }, "ok");
     ;
     const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
     var results: [modes.len][]const u8 = undefined;
@@ -24214,14 +24225,14 @@ test "forced tree-walker and required bytecode preserve parameter-phase direct e
         try std.testing.expectEqual(@as(f64, 8), (try ctx.evaluate("parameterPhaseEscaped()")).asNum());
         if (mode == .required) {
             const inventory = ctx.bytecodeAdmissionSnapshot();
-            try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 8);
+            try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 10);
             try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
             try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_parameter_prologue));
             try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
         }
     }
     try std.testing.expectEqualStrings(results[0], results[1]);
-    try std.testing.expectEqualStrings("inside!|inside!|inside!:inside!?|1:0|parameter:body|ReferenceError:SyntaxError:SyntaxError:SyntaxError|ok", results[1]);
+    try std.testing.expectEqualStrings("inside!|inside!|inside!:inside!?|1:0|parameter:body|close|open:open|ReferenceError:SyntaxError:SyntaxError:SyntaxError|ok", results[1]);
 }
 
 test "parallel_js required bytecode isolates parameter direct eval records across shared workers" {
@@ -24241,10 +24252,19 @@ test "parallel_js required bytecode isolates parameter direct eval records acros
         \\function parameterEval(value, before = () => dynamic, init = eval("var dynamic = value")) {
         \\  return before();
         \\}
+        \\function parameterRestEval(
+        \\  value,
+        \\  ...[before = () => dynamic, init = eval("var dynamic = value")]
+        \\) {
+        \\  return before();
+        \\}
         \\function runLane(lane) {
         \\  if ($vm.useThreadGIL() !== false) throw new Error("worker still holds the thread GIL");
         \\  var total = 0;
-        \\  for (var index = 0; index < 24; index++) total += parameterEval(lane * 100 + index);
+        \\  for (var index = 0; index < 24; index++) {
+        \\    total += parameterEval(lane * 100 + index);
+        \\    total += parameterRestEval(lane * 100 + index);
+        \\  }
         \\  return total;
         \\}
         \\var expected = [];
@@ -24257,7 +24277,7 @@ test "parallel_js required bytecode isolates parameter direct eval records acros
     );
     try std.testing.expect(result.asBool());
     const inventory = ctx.bytecodeAdmissionSnapshot();
-    try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 2);
+    try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 3);
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_parameter_prologue));
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
