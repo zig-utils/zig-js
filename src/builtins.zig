@@ -1167,8 +1167,11 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         return result;
     }
 
-    // Not iterable: ToObject(items) (throws for null/undefined), then copy
-    // indices 0..LengthOfArrayLike-1 via [[Get]].
+    // Not iterable: ToObject(items), then copy indices 0..LengthOfArrayLike-1
+    // via [[Get]]. ToObject would reject a nullish `items` with its generic
+    // message; name the method instead, as JSC does.
+    if (items.isUndefined() or items.isNull())
+        return self.throwError("TypeError", "Array.from requires an array-like object - not null or undefined");
     const array_like = try self.toObject(items);
     // LengthOfArrayLike = ToLength(Get(arrayLike,"length")), clamped to
     // 2^53-1. `interpreter.toLen` intentionally caps at array-index range, which

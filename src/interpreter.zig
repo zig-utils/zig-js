@@ -7929,6 +7929,10 @@ pub const Interpreter = struct {
     /// observable mutable property, so a direct element-copy shortcut would skip
     /// both its lookup and calls.
     pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
+        // A nullish spread argument reports the spread-specific message rather
+        // than the generic nullish-base one; both tiers route through here.
+        if (v.isUndefined() or v.isNull())
+            return self.throwError("TypeError", "Spread syntax requires ...iterable not be null or undefined");
         const record = try self.getIteratorRecord(v); // throws TypeError if not iterable
         const iter_obj = record.iterator;
         const iter_root = try self.pushTempRoot(iter_obj);
@@ -15574,8 +15578,11 @@ pub const Interpreter = struct {
     /// bytecode uses this boundary because compiled sites capture `next` in their
     /// own activation immediately afterward.
     pub fn getIterator(self: *Interpreter, v: Value) EvalError!Value {
+        // GetIterator(v) begins with GetMethod(v, @@iterator), i.e. a property
+        // read on `v` — so a nullish `v` fails RequireObjectCoercible, not an
+        // iterability check. Report it as the nullish-base error, as JSC does.
         if (v.isUndefined() or v.isNull())
-            return self.throwError("TypeError", "value is not iterable");
+            return self.throwError("TypeError", notAnObjectMessage(v));
         const key = self.symbolIteratorKey() orelse
             return self.throwError("TypeError", "value is not iterable");
         const method = try self.getProperty(v, key);
