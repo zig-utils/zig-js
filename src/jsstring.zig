@@ -13,13 +13,24 @@ pub const JsString = struct {
     refcount: std.atomic.Value(usize),
     gpa: std.mem.Allocator,
 
-    pub fn create(gpa: std.mem.Allocator, utf8: []const u8) !*JsString {
-        if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
+    /// Create from engine bytes, which are **WTF-8**: a lone surrogate is a legal
+    /// three-byte `ED xx xx` sequence there, and strict UTF-8 validation rejects
+    /// it. Well-formed UTF-8 (the overwhelmingly common case) keeps the direct
+    /// path; anything else is decoded to code units and handed to `createUtf16`,
+    /// which already defines the lone-surrogate contract — keep the unit exactly,
+    /// and substitute U+FFFD in the UTF-8 view a C caller reads. Genuinely
+    /// malformed input still fails with `error.InvalidUtf8`.
+    pub fn create(gpa: std.mem.Allocator, wtf8: []const u8) !*JsString {
+        if (!std.unicode.utf8ValidateSlice(wtf8)) {
+            const units = try wtf8ToUtf16Alloc(gpa, wtf8);
+            defer gpa.free(units);
+            return createUtf16(gpa, units);
+        }
         const self = try gpa.create(JsString);
         errdefer gpa.destroy(self);
-        const buf = try gpa.dupe(u8, utf8);
+        const buf = try gpa.dupe(u8, wtf8);
         errdefer gpa.free(buf);
-        const utf16 = try std.unicode.utf8ToUtf16LeAlloc(gpa, utf8);
+        const utf16 = try std.unicode.utf8ToUtf16LeAlloc(gpa, wtf8);
         self.* = .{ .bytes = buf, .utf16 = utf16, .refcount = .init(1), .gpa = gpa };
         return self;
     }
@@ -70,6 +81,53 @@ pub const JsString = struct {
         return self.utf16.len;
     }
 };
+
+/// Decode WTF-8 to UTF-16 code units. Identical to UTF-8 decoding except that a
+/// three-byte sequence encoding U+D800..U+DFFF yields that lone surrogate as one
+/// unit instead of being rejected. Astral code points still become a pair.
+fn wtf8ToUtf16Alloc(gpa: std.mem.Allocator, wtf8: []const u8) ![]u16 {
+    var units: std.ArrayListUnmanaged(u16) = .empty;
+    errdefer units.deinit(gpa);
+    try units.ensureTotalCapacity(gpa, wtf8.len);
+
+    var i: usize = 0;
+    while (i < wtf8.len) {
+        const lead = wtf8[i];
+        const seq_len: usize = if (lead < 0x80) 1 else if (lead >= 0xC2 and lead <= 0xDF)
+            2
+        else if (lead >= 0xE0 and lead <= 0xEF)
+            3
+        else if (lead >= 0xF0 and lead <= 0xF4)
+            4
+        else
+            return error.InvalidUtf8;
+        if (i + seq_len > wtf8.len) return error.InvalidUtf8;
+        for (wtf8[i + 1 .. i + seq_len]) |continuation| {
+            if (continuation & 0xC0 != 0x80) return error.InvalidUtf8;
+        }
+
+        const codepoint: u21 = switch (seq_len) {
+            1 => lead,
+            2 => (@as(u21, lead & 0x1F) << 6) | (wtf8[i + 1] & 0x3F),
+            3 => (@as(u21, lead & 0x0F) << 12) | (@as(u21, wtf8[i + 1] & 0x3F) << 6) |
+                (wtf8[i + 2] & 0x3F),
+            else => (@as(u21, lead & 0x07) << 18) | (@as(u21, wtf8[i + 1] & 0x3F) << 12) |
+                (@as(u21, wtf8[i + 2] & 0x3F) << 6) | (wtf8[i + 3] & 0x3F),
+        };
+        if (seq_len == 3 and codepoint < 0x800) return error.InvalidUtf8; // overlong
+        if (seq_len == 4 and (codepoint < 0x10000 or codepoint > 0x10FFFF)) return error.InvalidUtf8;
+
+        if (codepoint <= 0xFFFF) {
+            try units.append(gpa, @intCast(codepoint));
+        } else {
+            const offset = codepoint - 0x10000;
+            try units.append(gpa, @intCast(0xD800 + (offset >> 10)));
+            try units.append(gpa, @intCast(0xDC00 + (offset & 0x3FF)));
+        }
+        i += seq_len;
+    }
+    return units.toOwnedSlice(gpa);
+}
 
 fn utf16ToUtf8ReplacingUnpaired(gpa: std.mem.Allocator, units: []const u16) ![]u8 {
     const max_len = try std.math.mul(usize, units.len, 3);
@@ -147,4 +205,27 @@ test "JSString retain refuses refcount overflow" {
     try std.testing.expect(s.tryRetain() == null);
     try std.testing.expectEqual(std.math.maxInt(usize), s.refcount.load(.acquire));
     s.refcount.store(1, .release);
+}
+
+test "JSString accepts WTF-8 lone surrogates from the engine" {
+    // The engine stores '\ud800' as the three-byte WTF-8 sequence ED A0 80.
+    const s = try JsString.create(std.testing.allocator, "A\xed\xa0\x80Z");
+    defer s.release();
+    try std.testing.expectEqualSlices(u16, &[_]u16{ 'A', 0xD800, 'Z' }, s.utf16);
+    try std.testing.expectEqualStrings("A\u{FFFD}Z", s.bytes);
+    try std.testing.expectEqual(@as(usize, 3), s.utf16Len());
+}
+
+test "JSString WTF-8 ingress keeps astral pairs and rejects malformed bytes" {
+    const astral = try JsString.create(std.testing.allocator, "\xf0\x9f\x98\x80");
+    defer astral.release();
+    try std.testing.expectEqualSlices(u16, &[_]u16{ 0xD83D, 0xDE00 }, astral.utf16);
+
+    // A surrogate PAIR spelled as two WTF-8 sequences stays two units.
+    const paired = try JsString.create(std.testing.allocator, "\xed\xa0\xbd\xed\xb8\x80");
+    defer paired.release();
+    try std.testing.expectEqualSlices(u16, &[_]u16{ 0xD83D, 0xDE00 }, paired.utf16);
+
+    try std.testing.expectError(error.InvalidUtf8, JsString.create(std.testing.allocator, "\xed\xa0"));
+    try std.testing.expectError(error.InvalidUtf8, JsString.create(std.testing.allocator, "\xed\xa0\x41"));
 }
