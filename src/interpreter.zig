@@ -859,6 +859,13 @@ pub const Environment = struct {
         return record.aliases.contains(name) or record.vars.contains(name);
     }
 
+    pub fn hasOwnLexical(self: *const Environment, name: []const u8) bool {
+        const record = @constCast(self.bindingRecord());
+        const locked = record.lockBindingsForRead();
+        defer record.unlockBindingsForRead(locked);
+        return record.lexicals.contains(name) or record.consts.contains(name);
+    }
+
     pub fn lockBindings(self: *Environment) void {
         if (!self.binding_lock_required or !binding_locks_enabled.load(.acquire)) return;
         var spins: usize = 0;
@@ -3304,9 +3311,8 @@ pub const Interpreter = struct {
     /// Global Environment Record's object binding continues to read/write the
     /// property; in this interpreter, leaving `vars` empty for an existing
     /// global property lets identifier resolution fall through to that property.
-    fn createVarBinding(self: *Interpreter, name: []const u8) EvalError!void {
+    pub fn createVarBinding(self: *Interpreter, name: []const u8) EvalError!void {
         const vs = self.env.varScope();
-        if (vs.hasOwnBinding(name)) return; // param / hoisted function / earlier var
         if (vs.parent == null) {
             if (self.global_object) |g| {
                 if (objectHasOwn(g, name)) return;
@@ -3318,6 +3324,7 @@ pub const Interpreter = struct {
                 return;
             }
         }
+        if (vs.hasOwnBinding(name)) return; // param / hoisted function / earlier var
         try vs.put(name, Value.undef());
         if (vs.parent != null and self.eval_decl_deletable)
             try vs.markDeletable(name);
@@ -3341,6 +3348,63 @@ pub const Interpreter = struct {
             return true;
         }
         return g.isExtensible();
+    }
+
+    /// GlobalDeclarationInstantiation steps 3–15 / FunctionDeclarationInstantiation:
+    /// validate the complete declaration set before creating any binding. The
+    /// compiler owns the immutable names; each invocation owns its Annex B mask.
+    pub fn instantiateEnvironmentDeclarations(self: *Interpreter, plan: bc.EnvironmentDeclarations, enabled: []bool) EvalError!void {
+        std.debug.assert(enabled.len == plan.annex_b.len);
+        const variable = self.env.varScope();
+        const global = if (plan.is_script and variable.parent == null) self.global_object else null;
+        if (global) |object| {
+            for (plan.lexical) |binding| {
+                if (variable.hasOwnLexical(binding.name))
+                    return self.throwError("SyntaxError", "redeclaration of global lexical binding");
+                if (objectHasOwn(object, binding.name) and !object.getAttr(binding.name).configurable)
+                    return self.throwError("SyntaxError", "cannot declare restricted global property");
+            }
+            for ([_][]const []const u8{ plan.variables, plan.functions }) |names| for (names) |name| {
+                if (variable.hasOwnLexical(name))
+                    return self.throwError("SyntaxError", "var declaration conflicts with global lexical binding");
+            };
+            var index = plan.functions.len;
+            while (index > 0) {
+                index -= 1;
+                if (!canDeclareGlobalFunction(object, plan.functions[index]))
+                    return self.throwError("TypeError", "cannot declare global function");
+            }
+            for (plan.variables) |name| {
+                if (!objectHasOwn(object, name) and !object.isExtensible())
+                    return self.throwError("TypeError", "cannot declare global variable (global object is not extensible)");
+            }
+        }
+        for (plan.annex_b, enabled) |candidate, *eligible| {
+            const name = candidate.name;
+            eligible.* = if (global) |object|
+                !variable.hasOwnLexical(name) and
+                    (objectHasOwn(object, name) or object.isExtensible())
+            else
+                true;
+            if (eligible.* and candidate.create_binding) try self.createVarBinding(name);
+        }
+        for (plan.lexical) |binding|
+            try self.defineLexicalVM(binding.name, self.tdzVal(), binding.immutable);
+    }
+
+    /// B.3.2 copies a live block binding to VariableEnvironment, bypassing with
+    /// resolution. The global object still uses ordinary Set semantics (including
+    /// setters and non-writable properties), not CreateGlobalFunctionBinding.
+    pub fn copyAnnexBEnvironmentBinding(self: *Interpreter, name: []const u8) EvalError!void {
+        const current = self.env.getOwnResolved(name) orelse
+            return self.throwError("InternalError", "missing Annex B block binding");
+        const variable = self.env.varScope();
+        const saved_strict = self.strict;
+        self.strict = false;
+        defer self.strict = saved_strict;
+        if (variable.parent == null) if (self.global_object) |object|
+            return self.storeCapturedBindingReference(.{ .global_object = object }, name, current);
+        try self.storeCapturedBindingReference(.{ .environment = variable }, name, current);
     }
 
     /// EvalDeclarationInstantiation does all the CanDeclareGlobalFunction /
@@ -3637,16 +3701,19 @@ pub const Interpreter = struct {
     }
 
     /// Pre-bind every identifier in a destructuring pattern to the TDZ sentinel.
-    fn tdzBindPattern(self: *Interpreter, target: *Node, tdz: Value) void {
+    fn tdzBindPattern(self: *Interpreter, target: *Node, tdz: Value) EvalError!void {
         switch (target.*) {
-            .identifier => |name| self.env.put(name, tdz) catch {},
+            .identifier => |name| {
+                try self.env.put(name, tdz);
+                if (self.env.parent == null) try self.env.markLexical(name);
+            },
             .obj_pattern => |p| {
-                for (p.props) |pr| self.tdzBindPattern(pr.target, tdz);
-                if (p.rest) |r| if (r.* == .identifier) self.env.put(r.identifier, tdz) catch {}; // a binding object rest is a name
+                for (p.props) |pr| try self.tdzBindPattern(pr.target, tdz);
+                if (p.rest) |r| try self.tdzBindPattern(r, tdz);
             },
             .arr_pattern => |p| {
-                for (p.elems) |e| if (e.target) |t| self.tdzBindPattern(t, tdz);
-                if (p.rest) |r| self.tdzBindPattern(r, tdz);
+                for (p.elems) |e| if (e.target) |t| try self.tdzBindPattern(t, tdz);
+                if (p.rest) |r| try self.tdzBindPattern(r, tdz);
             },
             else => {},
         }
@@ -5569,12 +5636,9 @@ pub const Interpreter = struct {
             const head_env = try gc_mod.allocEnv(self.arena);
             self.initEnvironment(head_env, outer_env, false);
             self.env = head_env;
-            self.tdzBindPattern(target, self.tdzVal());
-            iter = self.eval(iterable) catch |e| {
-                self.env = outer_env;
-                return e;
-            };
-            self.env = outer_env;
+            defer self.env = outer_env;
+            try self.tdzBindPattern(target, self.tdzVal());
+            iter = try self.eval(iterable);
         } else {
             iter = try self.eval(iterable);
         }
@@ -5873,7 +5937,7 @@ pub const Interpreter = struct {
                         .var_decl => |d| if (d.kind != .@"var") try self.env.put(d.name, tdz),
                         else => {},
                     },
-                    .destructure_decl => |d| if (d.kind != .@"var") self.tdzBindPattern(d.pattern, tdz),
+                    .destructure_decl => |d| if (d.kind != .@"var") try self.tdzBindPattern(d.pattern, tdz),
                     .class_expr => |c2| if (c2.name.len > 0) try self.env.put(c2.name, tdz),
                     else => {},
                 };
@@ -6533,7 +6597,7 @@ pub const Interpreter = struct {
                     },
                     else => {},
                 },
-                .destructure_decl => |d| if (d.kind != .@"var") self.tdzBindPattern(d.pattern, tdz),
+                .destructure_decl => |d| if (d.kind != .@"var") try self.tdzBindPattern(d.pattern, tdz),
                 .class_expr => |c| if (c.name.len > 0) {
                     try self.env.put(c.name, tdz);
                     if (mark_global) try self.env.markLexical(c.name);
@@ -14865,6 +14929,7 @@ pub const Interpreter = struct {
             try self.env.putConst(name, v)
         else
             try self.env.put(name, v);
+        if (self.env.parent == null) try self.env.markLexical(name);
     }
 
     fn assignTo(self: *Interpreter, target: *Node, v: Value) EvalError!void {
@@ -56906,6 +56971,31 @@ test "RegExp constructor treats escaped class hyphen as literal" {
     try std.testing.expect((try evalSource(a,
         \\new RegExp("[A-Za-z.\\-_]+").test("Porto-Novo")
     )).asBool());
+}
+
+test "environment declarations restore a for-of TDZ after allocation failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    var parser = try Parser.init(allocator, "for (let [item] of []) {}");
+    const program = try parser.parseProgram();
+    const loop = program.program[0].for_in;
+    var environment = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    const marker = try gc_mod.allocObj(allocator);
+    // The head record allocation succeeds; its first binding allocation fails.
+    var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 1 });
+    var machine = Interpreter{
+        .arena = failing.allocator(),
+        .env = &environment,
+        .root_shape = root_shape,
+        .tdz_marker = marker,
+    };
+    try std.testing.expectError(error.OutOfMemory, machine.evalForInOf(loop.decl_kind, loop.target, loop.var_init, loop.iterable, loop.body, loop.is_of, loop.is_await, loop.dispose));
+    try std.testing.expectEqual(&environment, machine.env);
+    try std.testing.expect(!environment.hasOwnBinding("item"));
 }
 
 test "RegExp exec reuses interpreter-local Thompson matcher scratch" {

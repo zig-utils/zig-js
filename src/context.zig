@@ -29267,6 +29267,174 @@ test "realm global identity is independent of mutable globalThis" {
     };
 }
 
+test "environment declarations preserve block switch and suspended binding identity" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{
+            .source = "var before = f, saved, inside; { saved = f; function f() { return f; } f = 9; inside = saved(); } [before, inside, f === saved, saved()].join(':')",
+            .expected = ":9:true:9",
+        },
+        .{
+            .source = "'use strict'; var saved; { saved = f; function f() { return f; } f = 7; } [typeof f, saved()].join(':')",
+            .expected = "undefined:7",
+        },
+        .{
+            .source = "var trace = [], saved; switch (typeof f) { case (trace.push(f()), 'undefined'): saved = f; function f() { return 1; } f = function () { return 8; }; case 'later': trace.push(f()); } trace.push(saved === globalThis.f, f()); trace.join(':')",
+            .expected = "1:8:true:1",
+        },
+        .{
+            .source = "var reads = []; for (let i = 0; i < 3; i++) { let cell = i; function f() { return cell + (f === reads[cell] ? 10 : 0); } reads.push(f); if (i === 1) continue; } reads.map(function (read) { return read(); }).join(':')",
+            .expected = "10:11:12",
+        },
+        .{
+            .source = "var object = { f: 99 }, saved; with (object) { { saved = f; function f() { return f; } f = 6; } } [object.f, f === saved, saved()].join(':')",
+            .expected = "99:true:6",
+        },
+        .{
+            .source = "var seen = []; { try { seen.push(typeof later); } catch (e) { seen.push(e.name); } let later = 4; seen.push(later); } seen.push(typeof later); seen.join(':')",
+            .expected = "ReferenceError:4:undefined",
+        },
+        .{
+            .source = "function* g() { yield typeof f; { yield f(); function f() { return 3; } yield f; f = 7; yield f; } return f(); } var it = g(), a = it.next(), b = it.next(), c = it.next(), d = it.next(), e = it.next(); [a.value, b.value, typeof c.value, d.value, e.value, e.done].join(':')",
+            .expected = "undefined:3:function:7:3:true",
+        },
+        .{
+            .source = "function* g() { var read; try { switch (yield 'disc') { case (yield f()): read = f; function f() { return f; } f = 5; yield read(); } } finally { yield typeof f; } return read(); } var it = g(), a = it.next(), b = it.next(2), c = it.next(2), d = it.next(), e = it.next(); [a.value, typeof b.value, c.value, d.value, e.value, e.done].join(':')",
+            .expected = "disc:function:5:function:5:true",
+        },
+        .{
+            .source = "function* g(f) { { yield f(); function f() { return 8; } } return f; } var it = g(41); [it.next().value, it.next().value].join(':')",
+            .expected = "8:41",
+        },
+        .{
+            .source = "function* g() { var reads = []; for (let i = 0; i < 3; i++) { function f() { return i + (f === reads[i] ? 10 : 0); } reads.push(f); yield f; } return reads.map(function (read) { return read(); }).join(':'); } var it = g(); it.next(); $vm.gc(); it.next(); it.next(); it.next().value",
+            .expected = "10:11:12",
+        },
+        .{
+            .source = "var trace = []; async function g() { trace.push(typeof f); { trace.push(f()); function f() { return 3; } await 0; f = 8; trace.push(f); } trace.push(f()); } g(); 'started'",
+            .expected = "started",
+        },
+        .{
+            .source = "for (let f; ; ) { switch (1) { case 1: function f() {} } break; } for (let f of [1]) { if (true) function f() {} } typeof f + ':' + Object.prototype.hasOwnProperty.call(globalThis, 'f')",
+            .expected = "undefined:false",
+        },
+        .{
+            .source = "{ let local = 2; var { a, nested: [b] } = { a: local, nested: [3] }; } function* g() { { let local = 4; var [x = yield 1] = []; } return x; } var it = g(); [a, b, typeof local, it.next().value, it.next(9).value].join(':')",
+            .expected = "2:3:undefined:1:9",
+        },
+    };
+    for (cases) |case| for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = ctx.evaluate(case.source) catch |err| {
+            std.debug.print("environment declarations ({s}): {s}\n", .{ @tagName(mode), case.source });
+            return err;
+        };
+        std.testing.expectEqualStrings(case.expected, result.asStr()) catch |err| {
+            std.debug.print("environment declarations ({s}): {s}\n", .{ @tagName(mode), case.source });
+            return err;
+        };
+        if (std.mem.startsWith(u8, case.source, "var trace = []; async"))
+            try std.testing.expectEqualStrings("undefined:3:8:3", (try ctx.evaluate("trace.join(':')")).asStr());
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.program_compiled) > 0);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    };
+}
+
+test "environment declarations validate globals before publishing any binding" {
+    const cases = [_]struct { setup: []const u8, source: []const u8, error_name: []const u8 }{
+        .{ .setup = "let occupied = 1", .source = "var untouched; function occupied() {}", .error_name = "SyntaxError" },
+        .{ .setup = "let occupied = 1; globalThis.occupied = 2", .source = "var untouched; var occupied;", .error_name = "SyntaxError" },
+        .{ .setup = "let { occupied } = { occupied: 1 }; globalThis.occupied = 2", .source = "var untouched; var occupied;", .error_name = "SyntaxError" },
+        .{ .setup = "Object.defineProperty(globalThis, 'occupied', { value: 1, configurable: false })", .source = "function untouched() {} function occupied() {}", .error_name = "TypeError" },
+        .{ .setup = "Object.defineProperty(globalThis, 'occupied', { value: 1, configurable: false })", .source = "var untouched; let occupied;", .error_name = "SyntaxError" },
+        .{ .setup = "Object.preventExtensions(globalThis)", .source = "var untouched;", .error_name = "TypeError" },
+    };
+    for (cases) |case| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(case.setup);
+        try std.testing.expectError(error.Throw, ctx.evaluate(case.source));
+        try std.testing.expectEqualStrings(case.error_name, ctx.exception.?.asObj().errorName());
+        try std.testing.expectEqualStrings("undefined:false", (try ctx.evaluate("typeof untouched + ':' + Object.prototype.hasOwnProperty.call(globalThis, 'untouched')")).asStr());
+    }
+}
+
+test "environment declarations retain global eligibility and property descriptors" {
+    const cases = [_]struct { setup: []const u8, source: []const u8, expected: []const u8 }{
+        .{ .setup = "let f = 41; globalThis.f = 42", .source = "{ function f() { return 8; } } [f, globalThis.f].join(':')", .expected = "41:42" },
+        .{ .setup = "Object.defineProperty(globalThis, 'f', { value: 41, writable: false, configurable: false })", .source = "var inside; { function f() { return 8; } inside = f(); } [inside, f].join(':')", .expected = "8:41" },
+        .{ .setup = "globalThis.seen = 0; Object.defineProperty(globalThis, 'f', { configurable: false, get: function () { return 41; }, set: function (v) { seen = v(); } })", .source = "{ function f() { return 8; } } [seen, f].join(':')", .expected = "8:41" },
+        .{ .setup = "Object.defineProperty(globalThis, 'f', { value: 41, configurable: true, enumerable: false, writable: false })", .source = "function f() { return 8; } var descriptor = Object.getOwnPropertyDescriptor(globalThis, 'f'); [f(), descriptor.writable, descriptor.enumerable, descriptor.configurable].join(':')", .expected = "8:true:true:false" },
+        .{ .setup = "Object.preventExtensions(globalThis)", .source = "{ function f() { return 8; } if (f() !== 8) throw 0; } typeof f", .expected = "undefined" },
+        .{ .setup = "", .source = "Object.preventExtensions(globalThis); { function f() { return 8; } } typeof f + ':' + f()", .expected = "function:8" },
+        .{ .setup = "", .source = "function order_a() {} function order_b() {} function order_a() {} var order_c; { function order_c() {} } Object.keys(globalThis).filter(function (key) { return key.indexOf('order_') === 0; }).join(':')", .expected = "order_b:order_a:order_c" },
+        .{ .setup = "eval('var f = 1'); delete globalThis.f", .source = "var f = 2; f + ':' + Object.getOwnPropertyDescriptor(globalThis, 'f').configurable", .expected = "2:false" },
+    };
+    for (cases) |case| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = .required,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(case.setup);
+        const result = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, result.asStr());
+        try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "environment declarations are invocation owned across no GIL suspension" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function* environmentGenerator(seed) {
+        \\  if (typeof f !== 'undefined') throw new Error('legacy initialized early');
+        \\  for (let i = 0; i < 8; i++) {
+        \\    let cell = seed + i;
+        \\    function f() { return cell; }
+        \\    yield f;
+        \\    cell += 10;
+        \\  }
+        \\  return f();
+        \\}
+        \\function environmentLane(seed) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+        \\  var iterator = environmentGenerator(seed), reads = [];
+        \\  for (var i = 0; i < 8; i++) reads.push(iterator.next().value);
+        \\  if (iterator.next().value !== seed + 17) return 0;
+        \\  for (var i = 0; i < 8; i++) if (reads[i]() !== seed + i + 10) return 0;
+        \\  return 1;
+        \\}
+        \\var workers = [];
+        \\for (var i = 0; i < 4; i++) workers.push(new Thread(environmentLane, i * 100));
+        \\var result = 0;
+        \\for (var i = 0; i < 4; i++) result += workers[i].join();
+        \\result
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 test "block functions retain the runaway guard and restore execution after interruption" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
@@ -29385,6 +29553,31 @@ test "block functions survive actual moving GC across a native safepoint" {
     try std.testing.expectEqualStrings("9:10:11:12", (try ctx.evaluate(
         "movedBlockReads.map(function (read) { return read(); }).join(':')",
     )).asStr());
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\function* movingEnvironmentGenerator(holder) {
+        \\  { function f() { return f.cell.value + holder.value; }
+        \\    f.cell = { value: 2 };
+        \\    yield f;
+        \\    requestBlockFunctionMove(); blockMovingLoop(20000);
+        \\    f.cell.value = 3;
+        \\    yield f;
+        \\  }
+        \\  return f();
+        \\}
+        \\globalThis.environmentMovingHolder = { value: 10 };
+        \\globalThis.environmentMovingIterator = movingEnvironmentGenerator(environmentMovingHolder);
+        \\globalThis.environmentMovingRead = environmentMovingIterator.next().value;
+    );
+    const environment_holder_before = ctx.global_object.getOwn("environmentMovingHolder").?.asObj();
+    const environment_moving_before = heap.accounting().moving_minor_collections;
+    try std.testing.expectEqualStrings("true:13:13", (try ctx.evaluate(
+        "[environmentMovingIterator.next().value === environmentMovingRead, environmentMovingRead(), environmentMovingIterator.next().value].join(':')",
+    )).asStr());
+    try std.testing.expect(heap.accounting().moving_minor_collections > environment_moving_before);
+    try std.testing.expect(environment_holder_before != ctx.global_object.getOwn("environmentMovingHolder").?.asObj());
+    ctx.collectGarbage();
+    try std.testing.expectEqual(@as(f64, 13), (try ctx.evaluate("environmentMovingRead()")).asNum());
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 

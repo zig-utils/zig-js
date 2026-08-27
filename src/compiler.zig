@@ -1585,6 +1585,8 @@ pub const Compiler = struct {
     mode: Mode,
     hash_state: *CompileHashState,
     scope: ?*FnScope = null,
+    environment_function_body: ?*const Node = null,
+    environment_annex_b: std.AutoHashMapUnmanaged(*const Node, u32) = .empty,
     /// Parameter initializers resolve only through the outer parameter record;
     /// ordinary body code resolves body vars first and then parameters.
     function_binding_phase: FunctionBindingPhase = .body,
@@ -1700,7 +1702,8 @@ pub const Compiler = struct {
         // strict DeletePropertyOrThrow behavior does not depend on the caller's
         // mutable interpreter mode.
         c.is_strict = programIsStrict(program.program);
-        try c.compileStmtList(program.program);
+        try c.planEnvironmentDeclarations(program.program, &.{}, false);
+        try c.compileEnvironmentBody(program.program);
         _ = try chunk.emit(.halt, 0);
         chunk.scratch_count = c.scratch_count;
         try chunk.finalize();
@@ -1756,6 +1759,8 @@ pub const Compiler = struct {
         chunk.* = Chunk.init(arena);
         // An async generator body may also `await` (in_async enables await_op).
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .hash_state = hash_state, .scope = null, .in_generator = true, .in_async = fnode.is_async, .is_strict = fnode.is_strict, .debug_checkpoints = debug_checkpoints };
+        c.environment_function_body = fnode.body;
+        try c.planEnvironmentDeclarations(fnode.body.block, fnode.params, !fnode.is_arrow);
         try c.compileStmt(fnode.body); // body is a block
         _ = try chunk.emit(.ret_undef, 0);
         try chunk.finalize();
@@ -1805,6 +1810,8 @@ pub const Compiler = struct {
             try c.compileExpr(fnode.body);
             _ = try chunk.emit(.ret, 0);
         } else {
+            c.environment_function_body = fnode.body;
+            try c.planEnvironmentDeclarations(fnode.body.block, fnode.params, !fnode.is_arrow);
             try c.compileStmt(fnode.body);
             _ = try chunk.emit(.ret_undef, 0);
         }
@@ -2912,19 +2919,121 @@ pub const Compiler = struct {
 
     // ---- statements -------------------------------------------------------
 
+    fn planEnvironmentDeclarations(self: *Compiler, stmts: []*Node, params: []const ast.Param, arguments_needed: bool) CompileError!void {
+        std.debug.assert(self.scope == null);
+        var variables = FnScope{ .parent = null, .hash_state = self.hash_state, .names = .{ .state = self.hash_state } };
+        for (stmts) |statement| try collectFunctionLocals(self.arena, &variables, statement);
+        var functions: std.ArrayListUnmanaged([]const u8) = .empty;
+        var function_names = SecureStringMapUnmanaged(void){ .state = self.hash_state };
+        var lexical: std.ArrayListUnmanaged(bc.EnvironmentDeclarations.Lexical) = .empty;
+        for (stmts) |statement| {
+            if (annex_b.functionDeclaration(statement)) |declaration| {
+                const name = declaration.func_decl.name;
+                if (!function_names.contains(name)) try functions.append(self.arena, name);
+                try function_names.put(self.arena, name, {});
+            } else try self.collectEnvironmentLexical(statement, &lexical);
+        }
+        const Collector = struct {
+            compiler: *Compiler,
+            variables: *const FnScope,
+            functions: *const SecureStringMapUnmanaged(void),
+            names: std.ArrayListUnmanaged(bc.EnvironmentDeclarations.AnnexB) = .empty,
+
+            pub fn add(collector: *@This(), declaration: *Node, name: []const u8) CompileError!void {
+                const index = std.math.cast(u32, collector.names.items.len) orelse return error.Unsupported;
+                try collector.names.append(collector.compiler.arena, .{
+                    .name = name,
+                    .create_binding = !collector.variables.names.contains(name) and !collector.functions.contains(name),
+                });
+                try collector.compiler.environment_annex_b.put(collector.compiler.arena, declaration, index);
+            }
+        };
+        var collector = Collector{ .compiler = self, .variables = &variables, .functions = &function_names };
+        if (!self.is_strict)
+            try annex_b.collect(CompileError, self.arena, stmts, 0, params, arguments_needed, &collector);
+        self.chunk.environment_declarations = .{
+            .lexical = lexical.items,
+            .functions = functions.items,
+            .variables = variables.slot_names.items,
+            .annex_b = collector.names.items,
+            .is_script = self.mode == .program,
+        };
+        if (lexical.items.len != 0 or functions.items.len != 0 or variables.count != 0 or collector.names.items.len != 0)
+            _ = try self.chunk.emit(.init_declarations, 0);
+    }
+
+    fn collectEnvironmentLexical(self: *Compiler, node: *Node, out: *std.ArrayListUnmanaged(bc.EnvironmentDeclarations.Lexical)) CompileError!void {
+        switch (node.*) {
+            .var_decl => |declaration| if (declaration.kind != .@"var")
+                try out.append(self.arena, .{ .name = declaration.name, .immutable = declaration.kind == .@"const" }),
+            .destructure_decl => |declaration| if (declaration.kind != .@"var") {
+                const Collector = struct {
+                    out: *std.ArrayListUnmanaged(bc.EnvironmentDeclarations.Lexical),
+                    immutable: bool,
+                    fn add(collector: *@This(), arena: std.mem.Allocator, name: []const u8) CompileError!void {
+                        try collector.out.append(arena, .{ .name = name, .immutable = collector.immutable });
+                    }
+                };
+                var collector = Collector{ .out = out, .immutable = declaration.kind == .@"const" };
+                try collectPatternBindingNames(self.arena, declaration.pattern, &collector);
+            },
+            .decl_group => |group| for (group) |declaration| try self.collectEnvironmentLexical(declaration, out),
+            .class_expr => |class| if (class.name.len != 0)
+                try out.append(self.arena, .{ .name = class.name, .immutable = false }),
+            else => {},
+        }
+    }
+
+    fn emitEnvironmentLexicals(self: *Compiler, stmts: []*Node) CompileError!void {
+        var lexical: std.ArrayListUnmanaged(bc.EnvironmentDeclarations.Lexical) = .empty;
+        for (stmts) |statement| try self.collectEnvironmentLexical(statement, &lexical);
+        for (lexical.items) |binding| try self.emitDeclareEnvironmentLexicalName(binding.name, binding.immutable);
+    }
+
+    fn environmentBlockNeedsRecord(stmts: []*Node) bool {
+        for (stmts) |statement| {
+            if (annex_b.functionDeclaration(statement) != null or nodeDeclaresLexical(statement) or statement.* == .class_expr) return true;
+        }
+        return false;
+    }
+
+    fn compileEnvironmentBody(self: *Compiler, stmts: []*Node) CompileError!void {
+        try self.emitHoistedFunctions(stmts, true);
+        for (self.chunk.environment_declarations.variables) |name| {
+            _ = try self.chunk.emit(.load_undefined, 0);
+            _ = try self.chunk.emitAB(.def_var, try self.chunk.addName(name), 0);
+        }
+        try self.compileHoistedStmtList(stmts);
+    }
+
     /// BlockDeclarationInstantiation runs before source-order evaluation. A
     /// switch uses this for the entire CaseBlock before testing any clause.
-    fn emitHoistedFunctions(self: *Compiler, stmts: []*Node) CompileError!void {
-        for (stmts) |statement| if (annex_b.functionDeclaration(statement)) |declaration| {
+    fn emitHoistedFunctions(self: *Compiler, stmts: []*Node, variable_scope: bool) CompileError!void {
+        var last_declarations = SecureStringMapUnmanaged(usize){ .state = self.hash_state };
+        if (variable_scope) for (stmts, 0..) |statement, index| {
+            if (annex_b.functionDeclaration(statement)) |declaration|
+                try last_declarations.put(self.arena, declaration.func_decl.name, index);
+        };
+        for (stmts, 0..) |statement, index| if (annex_b.functionDeclaration(statement)) |declaration| {
             const function = declaration.func_decl;
+            // Variable-scope instantiation selects only the last declaration
+            // per name, preserving its source position (observable key order).
+            if (variable_scope and last_declarations.get(function.name).? != index) continue;
             const fi = try self.compileFunction(declaration, function, false);
             _ = try self.chunk.emit(.make_closure, fi);
-            try self.emitDefineForce(function.name);
+            if (self.scope == null)
+                _ = try self.chunk.emitAB(if (variable_scope) .def_var else .def_lex, try self.chunk.addName(function.name), if (variable_scope) 3 else 1)
+            else
+                try self.emitDefineForce(function.name);
         };
     }
 
     fn emitAnnexBUpdate(self: *Compiler, declaration: *Node) CompileError!void {
-        const scope = self.scope orelse return;
+        const scope = self.scope orelse {
+            if (self.environment_annex_b.get(declaration)) |index|
+                _ = try self.chunk.emit(.copy_annex_b, index);
+            return;
+        };
         const variable_slot = scope.annex_b_variables.get(declaration) orelse return;
         // B.3.2: GetBindingValue from this block's lexical record, then
         // SetMutableBinding on the function's VariableEnvironment directly.
@@ -2950,7 +3059,7 @@ pub const Compiler = struct {
     }
 
     fn compileStmtList(self: *Compiler, stmts: []*Node) CompileError!void {
-        try self.emitHoistedFunctions(stmts);
+        try self.emitHoistedFunctions(stmts, false);
         try self.compileHoistedStmtList(stmts);
     }
 
@@ -2977,12 +3086,12 @@ pub const Compiler = struct {
                 // function-scoped `var` as undefined (or as the existing
                 // parameter value). A declaration without an initializer has
                 // no runtime assignment and must not erase that parameter.
-                if (self.scope != null and d.kind == .@"var" and d.init == null) return;
+                if (d.kind == .@"var" and d.init == null) return;
                 // BindingIdentifier evaluation creates the Reference before the
                 // initializer. Only an activation-local Environment Record can
                 // shadow this function's hoisted `var`, so ordinary declarations
                 // retain their direct frame/global path.
-                const binding_reference = if (d.kind == .@"var" and d.init != null and self.environment_depth != 0)
+                const binding_reference = if (d.kind == .@"var" and d.init != null and (self.scope == null or self.environment_depth != 0))
                     try self.bindingReferencePlan(d.name)
                 else
                     null;
@@ -3002,42 +3111,28 @@ pub const Compiler = struct {
                 if (d.dispose != 0) _ = try self.chunk.emit(.register_disposable, if (d.dispose == 2) 1 else 0);
             },
             .destructure_decl => |d| {
-                const environment_pattern = self.scope != null and self.patternUsesEnvironment(d.pattern);
-                if (self.scope != null) {
-                    try self.compileExpr(d.init);
-                    const src = try self.freshActivationTemp();
-                    try self.emitDefineActivationTemp(src);
-                    const mode: PatternMode = if (environment_pattern)
-                        .{ .environment_lexical = d.kind == .@"const" }
-                    else if (d.kind == .@"var")
-                        .var_declaration
-                    else
-                        .lexical;
-                    try self.compilePattern(d.pattern, src, mode);
-                    return;
-                }
-                if (nodeHasYield(d.pattern)) {
-                    if (d.kind != .@"var" or environment_pattern) return error.Unsupported;
-                    try self.emitPatternVarDecls(d.pattern);
-                    try self.compileDestructuringAssign(d.pattern, d.init);
-                    _ = try self.chunk.emit(.pop, 0);
-                    return;
-                }
+                const environment_pattern = d.kind != .@"var" and
+                    (self.scope == null or self.patternUsesEnvironment(d.pattern));
                 try self.compileExpr(d.init);
-                const pi = try self.chunk.addPattern(d.pattern);
-                const mode: u32 = switch (d.kind) {
-                    .@"var" => 0,
-                    .let => 1,
-                    .@"const" => 2,
-                };
-                _ = try self.chunk.emitAB(.bind_pattern, pi, mode);
+                const src = try self.freshActivationTemp();
+                try self.emitDefineActivationTemp(src);
+                const mode: PatternMode = if (environment_pattern)
+                    .{ .environment_lexical = d.kind == .@"const" }
+                else if (d.kind == .@"var")
+                    .var_declaration
+                else
+                    .lexical;
+                // A var pattern inside a lexical block still targets the
+                // variable record. Native Reference plans preserve that target
+                // across getters/defaults and suspension in either storage mode.
+                try self.compilePattern(d.pattern, src, mode);
             },
             .func_decl => |fnode| {
                 // A bare Annex B IfStatement declaration has an implicit block.
                 // Only the entered branch initializes its lexical/legacy pair.
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
-                const captured_environment = if (self.repeated_body_captures) |captures|
+                const captured_environment = self.scope == null or if (self.repeated_body_captures) |captures|
                     repeatedBodyNodeNeedsEnvironment(node, captures)
                 else
                     false;
@@ -3047,11 +3142,14 @@ pub const Compiler = struct {
                     try self.predeclareLexicalNode(node);
                 if (captured_environment) {
                     try self.emitEnterEnvironment();
-                    try self.emitDeclareRepeatedBodyNode(node, self.repeated_body_captures.?);
+                    if (self.scope != null) try self.emitDeclareRepeatedBodyNode(node, self.repeated_body_captures.?);
                 }
                 const fi = try self.compileFunction(node, fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
-                try self.emitDefineForce(fnode.name);
+                if (self.scope == null)
+                    _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(fnode.name), 1)
+                else
+                    try self.emitDefineForce(fnode.name);
                 try self.emitAnnexBUpdate(node);
                 if (captured_environment) try self.emitExitEnvironment();
             },
@@ -3110,10 +3208,16 @@ pub const Compiler = struct {
             },
             .debugger_stmt => _ = try self.chunk.emit(.nop, 0),
             .block => |stmts| {
+                if (node == self.environment_function_body) {
+                    try self.compileEnvironmentBody(stmts);
+                    return;
+                }
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
                 const repeated_captures = self.repeated_body_captures;
-                const captured_environment = if (repeated_captures) |captures|
+                const captured_environment = if (self.scope == null)
+                    environmentBlockNeedsRecord(stmts)
+                else if (repeated_captures) |captures|
                     repeatedBodyListNeedsEnvironment(stmts, captures)
                 else
                     false;
@@ -3136,7 +3240,9 @@ pub const Compiler = struct {
                 if (captured_environment and !disposable_scope) {
                     try self.emitEnterEnvironment();
                 }
-                if (captured_environment) try self.emitDeclareRepeatedBodyList(stmts, repeated_captures.?);
+                if (self.scope == null) {
+                    try self.emitEnvironmentLexicals(stmts);
+                } else if (captured_environment) try self.emitDeclareRepeatedBodyList(stmts, repeated_captures.?);
                 try self.emitLexicalInitializersForList(stmts);
                 try self.compileStmtList(stmts);
                 if (captured_environment and !disposable_scope) try self.emitExitEnvironment();
@@ -3210,7 +3316,6 @@ pub const Compiler = struct {
                 // every completion. Jumps carry their target environment depth,
                 // handlers retain the exact unwind prefix, and function exit
                 // restores the caller's activation.
-                if (self.scope == null and stmtContainsFuncDecl(w.body)) return error.Unsupported;
                 try self.compileExpr(w.obj);
                 _ = try self.chunk.emit(.enter_with, 0);
                 self.environment_depth += 1;
@@ -3371,14 +3476,18 @@ pub const Compiler = struct {
     /// `default` is taken only after every case test fails.
     fn compileSwitch(self: *Compiler, disc: *Node, cases: []const ast.SwitchCase) CompileError!void {
         try self.compileExpr(disc);
-        const d = try self.freshTemp();
-        try self.emitDefine(d); // d = the discriminant value
+        const d = try self.freshActivationTemp();
+        try self.emitDefineActivationTemp(d);
 
         try self.pushLexicalScope();
         defer self.popLexicalScope();
         const repeated_captures = self.repeated_body_captures;
         var captured_environment = false;
         for (cases) |case| {
+            if (self.scope == null) {
+                captured_environment = captured_environment or environmentBlockNeedsRecord(case.body);
+                continue;
+            }
             if (repeated_captures) |captures| {
                 try self.predeclareRepeatedBodyList(case.body, captures);
                 captured_environment = captured_environment or repeatedBodyListNeedsEnvironment(case.body, captures);
@@ -3389,13 +3498,16 @@ pub const Compiler = struct {
         // after discriminant evaluation but before any case-test evaluation.
         if (captured_environment) {
             try self.emitEnterEnvironment();
-            for (cases) |case| try self.emitDeclareRepeatedBodyList(case.body, repeated_captures.?);
+            for (cases) |case| {
+                if (self.scope == null)
+                    try self.emitEnvironmentLexicals(case.body)
+                else
+                    try self.emitDeclareRepeatedBodyList(case.body, repeated_captures.?);
+            }
         }
         if (self.scope != null) for (cases) |case| try self.emitLexicalInitializersForList(case.body);
-        // The frame-mode plan owns a distinct CaseBlock binding. Instantiate it
-        // before case tests, including clauses that never execute. Environment
-        // mode still needs its separate global/suspendable declaration plan.
-        if (self.scope != null) for (cases) |case| try self.emitHoistedFunctions(case.body);
+        // Instantiate the whole CaseBlock, including clauses that never execute.
+        for (cases) |case| try self.emitHoistedFunctions(case.body, false);
 
         const sw = try self.pushLoop();
         sw.is_switch = true;
@@ -3403,7 +3515,7 @@ pub const Compiler = struct {
         const default_marker = std.math.maxInt(usize);
         for (cases, 0..) |c, i| {
             if (c.@"test") |t| {
-                try self.emitLoad(d);
+                try self.emitLoadActivationTemp(d);
                 try self.compileExpr(t);
                 _ = try self.chunk.emit(.eq_strict, 0);
                 _ = try self.chunk.emit(.not, 0); // jump_if_false jumps when equal
@@ -3421,10 +3533,7 @@ pub const Compiler = struct {
             } else {
                 self.chunk.patchToHere(body_jumps[i]);
             }
-            if (self.scope != null)
-                try self.compileHoistedStmtList(c.body)
-            else
-                try self.compileStmtList(c.body);
+            try self.compileHoistedStmtList(c.body);
         }
         const end = self.chunk.here();
         self.chunk.patchTo(to_default, default_target orelse end);
@@ -3448,6 +3557,7 @@ pub const Compiler = struct {
     }
 
     fn compileRepeatedBody(self: *Compiler, body: *Node) CompileError!void {
+        if (self.scope == null) return self.compileStmt(body);
         var captures = try RepeatedBodyCaptures.init(self.arena, self.hash_state, body);
         if (!captures.any()) return self.compileStmt(body);
         if (!repeatedBodyCapturesSupported(body, &captures)) return error.Unsupported;
@@ -3492,7 +3602,10 @@ pub const Compiler = struct {
         // retain O(1) frame slots. Environment-backed patterns lower their
         // defaults and computed keys as bytecode in the active binding scope.
         if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
-        const captured_head = if (init_node) |ini| try forLoopCapturesLexical(self.arena, self.hash_state, ini, cond, update, body) else false;
+        const captured_head = if (init_node) |ini|
+            if (self.scope == null) nodeDeclaresLexical(ini) else try forLoopCapturesLexical(self.arena, self.hash_state, ini, cond, update, body)
+        else
+            false;
         if (captured_head and !loopHeadSupportsEnvironment(init_node.?))
             return error.Unsupported;
         const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
@@ -3634,7 +3747,7 @@ pub const Compiler = struct {
             kind != .@"var" and try forOfCapturesLexical(self.arena, self.hash_state, target, var_init, iterable, body)
         else
             false;
-        const program_lexical_binding = keys_first and self.scope == null and if (decl_kind) |kind| kind != .@"var" else false;
+        const program_lexical_binding = self.scope == null and if (decl_kind) |kind| kind != .@"var" else false;
         const environment_binding = captured_binding or program_lexical_binding;
         if (environment_binding and !patternSupportsEnvironment(target)) return error.Unsupported;
         const lexical_scope = self.scope != null and if (decl_kind) |kind|
@@ -3734,7 +3847,7 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.load_false, 0);
         try self.emitStore(done_name);
         _ = try self.chunk.emit(.pop, 0);
-        if (captured_binding) {
+        if (environment_binding) {
             if (target.* == .identifier)
                 try self.emitFreshEnvironmentLexicalName(target.identifier, decl_kind.? == .@"const")
             else
@@ -3742,8 +3855,8 @@ pub const Compiler = struct {
         }
         // Bind the already-read value to the loop target. Abrupt target
         // resolution/destructuring is inside the close-protected region.
-        const native_pattern = self.scope != null and (target.* == .arr_pattern or target.* == .obj_pattern);
-        try self.compileLoopBind(decl_kind, target, captured_binding, native_pattern);
+        const native_pattern = target.* == .arr_pattern or target.* == .obj_pattern;
+        try self.compileLoopBind(decl_kind, target, environment_binding, native_pattern);
         try self.compileRepeatedBody(body);
         const continue_target = self.chunk.here();
         _ = try self.chunk.emit(.load_true, 0);
@@ -3790,7 +3903,7 @@ pub const Compiler = struct {
         self.chunk.patchToHere(skip_close);
         _ = try self.chunk.emit(.end_finally, 0);
         self.chunk.patchToHere(after_finally);
-        if (captured_binding) try self.emitExitEnvironment();
+        if (environment_binding) try self.emitExitEnvironment();
     }
 
     /// Drive `for-in` without routing the engine-owned key snapshot through
@@ -3872,24 +3985,6 @@ pub const Compiler = struct {
         try self.emitDefineActivationTemp(src); // [v]   (define consumes one copy)
         try self.compileAssignPattern(pattern, src);
         // `src` (the rhs value) remains on the stack as the expression result.
-    }
-
-    fn emitPatternVarDecls(self: *Compiler, pattern: *Node) CompileError!void {
-        switch (pattern.*) {
-            .identifier => |name| {
-                _ = try self.chunk.emit(.load_undefined, 0);
-                try self.emitDefineKind(name, .@"var", false);
-            },
-            .arr_pattern => |p| {
-                for (p.elems) |elem| if (elem.target) |target| try self.emitPatternVarDecls(target);
-                if (p.rest) |rest| try self.emitPatternVarDecls(rest);
-            },
-            .obj_pattern => |p| {
-                for (p.props) |prop| try self.emitPatternVarDecls(prop.target);
-                if (p.rest) |rest| try self.emitPatternVarDecls(rest);
-            },
-            else => {},
-        }
     }
 
     const PatternMode = union(enum) {
@@ -6028,9 +6123,6 @@ pub const Compiler = struct {
         // correctly and can retain the compiled generator/async template.
         if ((fnode.is_generator or fnode.is_async) and self.scope != null) return error.Unsupported;
         if (!fnode.is_generator and !fnode.is_async and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
-        // Async environment-mode declaration planning remains separate from
-        // the ordinary frame-mode lexical/legacy plan below.
-        if (fnode.is_async and !fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
@@ -6688,6 +6780,32 @@ fn exerciseBlockFunctionAllocationFailures(allocator: std.mem.Allocator) !void {
 
 test "block functions compiler planning propagates allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseBlockFunctionAllocationFailures, .{});
+}
+
+fn exerciseEnvironmentDeclarationAllocationFailures(allocator: std.mem.Allocator) !void {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(ast_arena.allocator(),
+        \\var top; let { lexical } = {};
+        \\{ function top() { return top; } }
+        \\function* generator(parameter) {
+        \\  yield typeof legacy;
+        \\  switch (yield 1) { case 1: function legacy() { return legacy; } yield legacy; }
+        \\  { function parameter() {} }
+        \\}
+        \\async function asynchronous() { { function local() { return local; } await 0; return local; } }
+    );
+    const program = try parser.parseProgram();
+    var replay = CompilerAllocationReplay{ .backing = allocator };
+    var compile_arena = std.heap.ArenaAllocator.init(replay.allocator());
+    defer compile_arena.deinit();
+    const chunk = try Compiler.compileProgram(compile_arena.allocator(), program);
+    try std.testing.expect(chunk.environment_declarations.is_script);
+    try std.testing.expectEqual(@as(usize, 1), chunk.environment_declarations.annex_b.len);
+}
+
+test "environment declarations compiler planning propagates allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseEnvironmentDeclarationAllocationFailures, .{});
 }
 
 test "compiler preserves a first-statement debugger checkpoint" {

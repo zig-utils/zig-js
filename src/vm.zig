@@ -320,6 +320,9 @@ pub const Exec = struct {
     /// suspended or recursively nested activation cannot lose or overwrite the
     /// exact Environment/Object selected by ResolveBinding.
     binding_references: []interp.BindingReference = &.{},
+    /// Invocation-owned declaration eligibility. Immutable after the entry
+    /// opcode; suspended generators retain it in their existing Exec.
+    annex_b_enabled: []bool = &.{},
     /// Extra call arguments retained until a mixed/default/destructuring rest
     /// formal reaches its exact left-to-right ArrayCreate point. The optional
     /// distinguishes a pending empty tail from an activation with no deferred
@@ -4884,7 +4887,7 @@ test "vm materializes direct eval environments over exact defining frames failur
     const allocator = arena.allocator();
     var root = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &root, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape });
 
     var outer_slots = [_]Value{Value.num(10)};
     var outer = Frame{ .slots = &outer_slots, .parent = null, .closure_environment = &root };
@@ -5049,7 +5052,7 @@ test "vm interleaves captured direct eval runtime environments without reparenti
     };
     try runtime_inner.put("innerRuntime", Value.num(20));
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &runtime_inner, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &runtime_inner, .root_shape = root_shape });
 
     var outer_slots = [_]Value{ Value.num(30), Value.num(35) };
     var outer = Frame{ .slots = &outer_slots, .parent = null, .closure_environment = &root };
@@ -5213,7 +5216,7 @@ test "vm current runtime direct eval views publish failure atomically without fo
     try runtime_outer.put("outerRuntime", Value.num(3));
     try runtime_inner.put("innerRuntime", Value.num(4));
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &runtime_inner, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &runtime_inner, .root_shape = root_shape });
     var slots = [_]Value{ Value.num(1), Value.num(2) };
     var frame = Frame{ .slots = &slots, .parent = null, .closure_environment = &root };
     const variable_bindings = [_]bc.DirectEvalBinding{.{
@@ -5294,7 +5297,7 @@ test "vm materializes distinct parameter and body direct-eval records failure at
     const allocator = arena.allocator();
     var root = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &root, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape });
 
     var slots = [_]Value{Value.num(11)};
     var frame = Frame{ .slots = &slots, .parent = null };
@@ -5353,7 +5356,7 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
     var root = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
     try interp.installGlobals(&root, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &root, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape });
 
     var slots = [_]Value{Value.num(41)};
     var frame = Frame{ .slots = &slots, .parent = null };
@@ -6243,12 +6246,12 @@ test "vm: native finally dispatch resumes every completion exactly once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
     var inventory: interp.ExecutionTierInventory = .{};
-    var machine = Interpreter{
+    var machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
         .root_shape = root_shape,
         .execution_tier_inventory = &inventory,
-    };
+    });
     const cases = [_]struct { kind: Completion, value: f64 }{
         .{ .kind = .normal, .value = 40 },
         .{ .kind = .throw, .value = 41 },
@@ -6327,7 +6330,7 @@ test "vm: native finally abrupt completions continue through an outer finally" {
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     for ([_]Completion{ .ret, .break_, .continue_ }) |kind| {
         var chunk = bc.Chunk.init(allocator);
         const completion_value = Value.num(47 + @as(f64, @floatFromInt(@backingInt(kind))));
@@ -6438,12 +6441,12 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
     var env = Environment{ .arena = arena.allocator(), .fn_scope = true };
     const root_shape = try Shape.createRoot(arena.allocator());
     var inventory = interp.ExecutionTierInventory{};
-    var machine = Interpreter{
+    var machine = try initTestInterpreter(.{
         .arena = arena.allocator(),
         .env = &env,
         .root_shape = root_shape,
         .execution_tier_inventory = &inventory,
-    };
+    });
     const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{.{
         .bytecode_op = @backingInt(bc.Op.to_numeric),
         .first_input = 0,
@@ -6579,7 +6582,7 @@ test "vm: native operation dispatcher preserves explicit this and arguments" {
     defer arena.deinit();
     var env = Environment{ .arena = arena.allocator(), .fn_scope = true };
     const root_shape = try Shape.createRoot(arena.allocator());
-    var machine = Interpreter{ .arena = arena.allocator(), .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = arena.allocator(), .env = &env, .root_shape = root_shape });
     var callable = value.Object{ .native = Native.call };
     var receiver = value.Object{};
     const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{.{
@@ -6667,7 +6670,7 @@ test "vm: native operation dispatcher executes invocation forms including tail c
     var root = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
     try interp.installGlobals(&root, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &root, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape });
     var callable = value.Object{ .native = Native.call };
     var receiver = value.Object{};
     try machine.setProp(&receiver, "method", Value.obj(&callable));
@@ -6809,7 +6812,7 @@ test "vm: native operation dispatcher executes object and array construction eff
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
 
     const object = try Dispatch.run(&machine, .new_object, &.{}, null);
     try std.testing.expect(object.isObject());
@@ -7756,9 +7759,27 @@ fn runChunk(
                 const name = chunk.names.items[inst.a];
                 try vm.assignVarVM(name, stack.items[stack.items.len - 1]); // assignment leaves its value
             },
+            .init_declarations => {
+                const plan = chunk.environment_declarations;
+                exec.annex_b_enabled = try vm.arena.alloc(bool, plan.annex_b.len);
+                @memset(exec.annex_b_enabled, false);
+                try vm.instantiateEnvironmentDeclarations(plan, exec.annex_b_enabled);
+            },
+            .copy_annex_b => {
+                if (exec.annex_b_enabled[inst.a])
+                    try vm.copyAnnexBEnvironmentBinding(chunk.environment_declarations.annex_b[inst.a].name);
+            },
             .def_var => {
                 const name = chunk.names.items[inst.a];
                 const val = stack.pop().?;
+                if (inst.b == 0) {
+                    try vm.createVarBinding(name);
+                    continue;
+                }
+                if (inst.b == 3) {
+                    try vm.globalDefineFunc(name, val);
+                    continue;
+                }
                 // A `var x = init` (b == 1) whose name a `with` object provides
                 // writes to that object: ResolveBinding runs before PutValue, and
                 // the object Environment Record (honoring `@@unscopables`) shadows
@@ -7769,8 +7790,6 @@ fn runChunk(
                 const wo: ?*value.Object = if (inst.b == 1) try vm.assignWithObject(name) else null;
                 if (wo) |o| {
                     try vm.setMember(Value.obj(o), name, val);
-                } else if (inst.b == 0 and vm.env.varScope().vars.contains(name)) {
-                    // `var f; function f(){}` preserves the hoisted function value.
                 } else {
                     try vm.globalDefine(name, val);
                 }
@@ -11704,6 +11723,17 @@ pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
 const Parser = @import("parser.zig").Parser;
 const Compiler = @import("compiler.zig").Compiler;
 
+/// Standalone VM fixtures need the same TDZ sentinel supplied by Context.
+/// Keeping initialization here prevents a test from silently omitting lexical
+/// semantics just because it does not construct a complete embedding realm.
+fn initTestInterpreter(options: Interpreter) !Interpreter {
+    var machine = options;
+    const marker = try gc_mod.allocObj(machine.arena);
+    marker.* = .{};
+    machine.tdz_marker = marker;
+    return machine;
+}
+
 /// Compile + run on the VM, asserting the program was within the compiler's
 /// supported subset (i.e. it really exercised the bytecode path).
 fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
@@ -12656,12 +12686,12 @@ test "vm: identifier deletion caches native rejection and preserves exact fallba
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{
+    var machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
         .root_shape = root_shape,
         .jit_owner = &owner,
-    };
+    });
     const native_hits_before = optimizer_native_hits.load(.monotonic);
     const slots = try allocator.alloc(Value, compiled.local_count);
     var frame = Frame{ .slots = slots, .parent = null };
@@ -13244,7 +13274,7 @@ test "vm: hot primitive constant function tiers through native entry" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     var previous_steps: u64 = 0;
     var expected_delta: u64 = 0;
@@ -13298,7 +13328,7 @@ test "vm: optimizer profiles aggregate function behavior without claiming execut
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     _ = try run(&machine, root, null);
 
     const function_chunk = root.fns.items[0].chunk.?;
@@ -13330,7 +13360,7 @@ test "vm: constant SSA return converges across bytecode baseline and optimizer" 
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
     const hits_before = optimizer_native_hits.load(.monotonic);
 
@@ -13369,7 +13399,7 @@ test "vm: guarded parameter SSA executes and side exits before accounting" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
     const hits_before = optimizer_native_hits.load(.monotonic);
 
@@ -13456,7 +13486,7 @@ test "vm: optimizer exact branch converges across both paths" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 21), (try run(&machine, root, null)).asNum());
@@ -13500,7 +13530,7 @@ test "vm: optimizer asymmetric branch resumes without restarting" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 29), (try run(&machine, root, null)).asNum());
@@ -13545,7 +13575,7 @@ test "vm: optimizer side exit restores an active catch handler" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 29), (try run(&machine, root, null)).asNum());
@@ -13586,7 +13616,7 @@ test "vm: optimizer executes a deterministic catch path natively" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
@@ -13628,7 +13658,7 @@ test "vm: optimizer throw side exit propagates to a caller handler" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
@@ -13667,7 +13697,7 @@ test "vm: optimizer native finally body preserves nested unwinding" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 11), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -13715,7 +13745,7 @@ test "vm: optimizer abrupt return side exit preserves finally completion" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 10), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -13755,7 +13785,7 @@ test "vm: optimizer abrupt break side exit preserves finally completion" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 11), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -13796,7 +13826,7 @@ test "vm: optimizer native call resumes a function-valued parameter" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
     const call_link_hits_before = optimizer_native_call_link_hits.load(.monotonic);
     const call_link_publications_before = optimizer_native_call_link_publications.load(.monotonic);
@@ -13861,7 +13891,7 @@ test "vm: optimizer native tail call replaces the current activation" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
@@ -13907,7 +13937,7 @@ test "vm: optimizer executes native object and array construction effects" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());
@@ -13966,7 +13996,7 @@ test "vm: optimizer object and array construction resumes a spread throw once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 93), (try run(&machine, root, null)).asNum());
     var collect_chunk: ?*bc.Chunk = null;
@@ -14010,7 +14040,7 @@ test "vm: optimizer native call resumes an exact caught exception" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -14062,7 +14092,7 @@ test "vm: optimizer native call resumes finally and rethrows once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 133), (try run(&machine, root, null)).asNum());
     const invoke_chunk = root.fns.items[2].chunk.?;
@@ -14097,7 +14127,7 @@ test "vm: optimizer native construction resumes a constructor parameter" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());
@@ -14141,7 +14171,7 @@ test "vm: optimizer native construction resumes an exact caught exception" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
     const make_chunk = root.fns.items[2].chunk.?;
@@ -14183,7 +14213,7 @@ test "vm: optimizer native named read composes with a caught downstream call" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
     const property_callbacks_before = optimizer_native_property_read_callbacks.load(.monotonic);
 
@@ -14252,7 +14282,7 @@ test "vm: native call deopts before tree-walk callee catches VM runtime throw" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
 
     try std.testing.expectEqualStrings("ok", (try run(&machine, root, null)).asStr());
@@ -14283,7 +14313,7 @@ test "vm: optimizer executes a global environment load natively" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const loads_before = optimizer_native_environment_load_callbacks.load(.monotonic);
     const attempts_before = optimizer_native_attempts.load(.monotonic);
 
@@ -14343,7 +14373,7 @@ test "vm: optimizer environment load observes a rebound global" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const loads_before = optimizer_native_environment_load_callbacks.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
@@ -14380,7 +14410,7 @@ test "vm: optimizer environment load resumes an exact ReferenceError" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     const result = try run(&machine, root, null);
     try std.testing.expectEqualStrings("caught:12", result.asStr());
@@ -14395,7 +14425,7 @@ test "vm: optimizer native property cache guards polymorphic shapes and malforme
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     var chunk = bc.Chunk.init(allocator);
     chunk.param_count = 1;
     chunk.local_count = 1;
@@ -14547,7 +14577,7 @@ test "vm: optimizer inherited property cache serves a one-hop prototype read" {
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
 
     var chunk = bc.Chunk.init(allocator);
     chunk.param_count = 1;
@@ -14595,7 +14625,7 @@ test "vm: optimizer inherited property cache yields to shadowing, chain edits, a
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
 
     var chunk = bc.Chunk.init(allocator);
     chunk.param_count = 1;
@@ -14723,12 +14753,12 @@ test "vm: optimizer property modes match bytecode results effects and steps" {
             var env = Environment{ .arena = allocator, .fn_scope = true };
             const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
             try interp.installGlobals(&env, root_shape);
-            var machine = Interpreter{
+            var machine = try initTestInterpreter(.{
                 .arena = allocator,
                 .env = &env,
                 .root_shape = root_shape,
                 .jit_owner = if (optimized) &owner else null,
-            };
+            });
             _ = try run(&machine, root, null);
             const function_names = [_][]const u8{
                 "readOwn", "readInherited", "readAccessor", "readProxy", "readMega",
@@ -14820,7 +14850,7 @@ test "vm: optimizer packed index guards direct existing-index reads and writes" 
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     const array_ctor = env.get("Array") orelse return error.TestUnexpectedResult;
     const array_proto = try machine.getProperty(array_ctor, "prototype");
     const intrinsic_push = try machine.getProperty(array_proto, "push");
@@ -15200,7 +15230,7 @@ test "vm: optimizer native named getter resumes an exact catch once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
     const read_chunk = root.fns.items[0].chunk.?;
@@ -15238,7 +15268,7 @@ test "vm: optimizer executes a complete named method call chain" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 19), (try run(&machine, root, null)).asNum());
@@ -15275,7 +15305,7 @@ test "vm: optimizer native computed read resumes caught lookup exceptions" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 0), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -15327,7 +15357,7 @@ test "vm: optimizer native computed key resumes an exact catch once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
     const read_chunk = root.fns.items[0].chunk.?;
@@ -15360,7 +15390,7 @@ test "vm: optimizer executes a complete computed method call chain" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 19), (try run(&machine, root, null)).asNum());
@@ -15395,7 +15425,7 @@ test "vm: optimizer native named write returns and stores its value" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 18), (try run(&machine, root, null)).asNum());
@@ -15427,7 +15457,7 @@ test "vm: optimizer native property cache uses the shared write protocol" {
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     const target = try machine.newObject();
     try machine.setProp(target.asObj(), "value", Value.num(1));
 
@@ -15512,7 +15542,7 @@ test "vm: native property cache serializes concurrent existing-slot reads and wr
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     const target = try machine.newObject();
     try machine.setProp(target.asObj(), "value", Value.num(0));
     const shape = target.asObj().shape orelse return error.TestUnexpectedResult;
@@ -15582,7 +15612,7 @@ test "vm: optimizer native named setter resumes an exact catch once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
     const write_chunk = root.fns.items[0].chunk.?;
@@ -15618,7 +15648,7 @@ test "vm: optimizer native named write invokes a proxy trap once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 19), (try run(&machine, root, null)).asNum());
     const write_chunk = root.fns.items[1].chunk.?;
@@ -15647,7 +15677,7 @@ test "vm: optimizer native computed write preserves mutation inputs" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());
@@ -15697,7 +15727,7 @@ test "vm: optimizer native computed write resumes key failure once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
     const write_chunk = root.fns.items[0].chunk.?;
@@ -15733,7 +15763,7 @@ test "vm: optimizer native computed write evaluates rhs before nullish key rejec
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 10), (try run(&machine, root, null)).asNum());
     const write_chunk = root.fns.items[2].chunk.?;
@@ -15766,7 +15796,7 @@ test "vm: optimizer native in operator invokes a proxy trap once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
@@ -15803,7 +15833,7 @@ test "vm: optimizer native instanceof invokes Symbol.hasInstance once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
@@ -15837,7 +15867,7 @@ test "vm: optimizer native private-in preserves the class brand" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     var branded = value.Object{};
     try branded.setOwn(allocator, root_shape, "#value", Value.undef());
     var plain = value.Object{};
@@ -15875,7 +15905,7 @@ test "vm: optimizer native unary coercions preserve primitive results" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     const Case = struct { op: bc.Op, input: Value };
     const cases = [_]Case{
         .{ .op = .neg, .input = Value.num(5) },
@@ -15953,7 +15983,7 @@ test "vm: optimizer native unary coercion resumes an exact catch once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
@@ -15976,7 +16006,7 @@ test "vm: optimizer native binary coercions preserve Number and BigInt semantics
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     const Case = struct { op: bc.Op, lhs: f64, rhs: f64, expected: f64 };
     const cases = [_]Case{
         .{ .op = .pow, .lhs = 2, .rhs = 3, .expected = 8 },
@@ -16055,7 +16085,7 @@ test "vm: optimizer native binary coercion preserves left-to-right one-shot exce
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
@@ -16079,7 +16109,7 @@ test "vm: optimizer native dynamic arithmetic preserves canonical results" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     const Expected = union(enum) { number: f64, boolean: bool, string: []const u8 };
     const Case = struct { op: bc.Op, lhs: Value, rhs: Value, expected: Expected };
     const cases = [_]Case{
@@ -16179,7 +16209,7 @@ test "vm: optimizer profiles dynamic arithmetic and resumes its exact catch once
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
@@ -16223,7 +16253,7 @@ test "vm: optimizer native dynamic arithmetic comparison feeds Boolean control" 
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     var slots = [_]Value{ Value.str("10"), Value.str("2") };
     const truthy = try tryRunManagedNative(&machine, &compiled, &slots, null);
     const truthy_result = switch (truthy) {
@@ -16267,7 +16297,7 @@ test "vm: optimizer native logical not feeds Boolean control" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     var slots = [_]Value{Value.boolVal(true)};
     const truthy = try tryRunManagedNative(&machine, &compiled, &slots, null);
     const truthy_result = switch (truthy) {
@@ -16308,7 +16338,7 @@ test "vm: optimizer coercion-effect side exit preserves caught user exceptions" 
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -16351,7 +16381,7 @@ test "vm: optimizer native to_numeric returns and propagates uncaught object thr
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
     const post_chunk = root.fns.items[0].chunk.?;
 
@@ -16397,7 +16427,7 @@ test "vm: optimizer native to_numeric resumes an active catch without replay" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const attempts_before = optimizer_native_attempts.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
@@ -16439,7 +16469,7 @@ test "vm: optimizer native to_numeric resumes finally and rethrows once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 133), (try run(&machine, root, null)).asNum());
     const post_chunk = root.fns.items[0].chunk.?;
@@ -16474,7 +16504,7 @@ test "vm: optimizer interpreter-owned environment exit preserves binding excepti
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -16513,7 +16543,7 @@ test "vm: optimizer native allocation effect constructs exactly once" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -16557,7 +16587,7 @@ test "vm: optimizer interpreter-owned iterator exit preserves protocol exception
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -16602,7 +16632,7 @@ test "vm: optimizer executes multiple iterations after a hot backedge" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const osr_before = optimizer_osr_entries.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 6), (try run(&machine, root, null)).asNum());
@@ -16717,7 +16747,7 @@ test "vm: optimizer packed index loop executes existing-index reads and writes d
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 46), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -16810,7 +16840,7 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 92022), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -16885,14 +16915,14 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
     }
 
     var stop_requested: std.atomic.Value(bool) = .init(true);
-    var stop_machine = Interpreter{
+    var stop_machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
         .root_shape = root_shape,
         .jit_owner = &owner,
         .stop_flag = &stop_requested,
         .steps = 800,
-    };
+    });
     var stop_storage: [64]Value = @splat(Value.undef());
     if (build_chunk.local_count > stop_storage.len) return error.TestUnexpectedResult;
     stop_storage[0] = Value.num(1000);
@@ -16940,7 +16970,7 @@ test "vm: optimizer unequal nested branch paths converge" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 44), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -16984,7 +17014,7 @@ test "vm: optimizer independent loop latches converge" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 22), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17025,7 +17055,7 @@ test "vm: optimizer conditional continue chain converges across three latches" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 112), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17070,7 +17100,7 @@ test "vm: optimizer fused region enters an exact outer nested loop" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 624), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17175,7 +17205,7 @@ test "vm: optimizer fused region converges across three loop headers" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 12), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17227,7 +17257,7 @@ test "vm: optimizer general loop region converges nested diamonds" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 116), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17272,7 +17302,7 @@ test "vm: optimizer general loop region converges four nested latches" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 116), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17317,7 +17347,7 @@ test "vm: optimizer general loop region exits from a nested arm exactly" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 20), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17358,7 +17388,7 @@ test "vm: optimizer conditional loop exit converges" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 2), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17377,14 +17407,14 @@ test "vm: optimizer conditional loop exit converges" {
     // reconstructs the current header, then bytecode consumes the request at
     // precisely step 1,024.
     var stop_requested: std.atomic.Value(bool) = .init(true);
-    var stop_machine = Interpreter{
+    var stop_machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
         .root_shape = root_shape,
         .jit_owner = &owner,
         .stop_flag = &stop_requested,
         .steps = 970,
-    };
+    });
     var stop_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
     var stop_frame = Frame{ .slots = &stop_slots, .parent = null };
     var trap_osr_before = optimizer_osr_entries.load(.monotonic);
@@ -17396,7 +17426,7 @@ test "vm: optimizer conditional loop exit converges" {
     var watchdog_check: std.atomic.Value(bool) = .init(true);
     var watchdog_deadline: std.atomic.Value(u64) = .init(1);
     var watchdog_termination: std.atomic.Value(bool) = .init(false);
-    var watchdog_machine = Interpreter{
+    var watchdog_machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
         .root_shape = root_shape,
@@ -17405,7 +17435,7 @@ test "vm: optimizer conditional loop exit converges" {
         .watchdog_deadline_ns = &watchdog_deadline,
         .termination_request_flag = &watchdog_termination,
         .steps = 970,
-    };
+    });
     var watchdog_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
     var watchdog_frame = Frame{ .slots = &watchdog_slots, .parent = null };
     trap_osr_before = optimizer_osr_entries.load(.monotonic);
@@ -17417,7 +17447,7 @@ test "vm: optimizer conditional loop exit converges" {
 
     var shell_timeout: std.atomic.Value(bool) = .init(true);
     var shell_termination: std.atomic.Value(bool) = .init(false);
-    var shell_machine = Interpreter{
+    var shell_machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
         .root_shape = root_shape,
@@ -17425,7 +17455,7 @@ test "vm: optimizer conditional loop exit converges" {
         .shell_timeout_check_flag = &shell_timeout,
         .termination_request_flag = &shell_termination,
         .steps = 970,
-    };
+    });
     var shell_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
     var shell_frame = Frame{ .slots = &shell_slots, .parent = null };
     trap_osr_before = optimizer_osr_entries.load(.monotonic);
@@ -17464,7 +17494,7 @@ test "vm: optimizer multiple conditional loop exits converge" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17508,7 +17538,7 @@ test "vm: optimizer conditional exit prefix and sequential diamond tail converge
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
 
     try std.testing.expectEqual(@as(f64, 123), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -17535,7 +17565,7 @@ test "vm: unsupported optimizer input caches rejection and preserves fallback" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
     const hits_before = optimizer_native_hits.load(.monotonic);
 
     for (0..10) |_| try std.testing.expectEqual(@as(f64, 1), (try run(&machine, root, null)).asNum());
@@ -17596,13 +17626,13 @@ test "vm: numeric baseline tier preserves steps and non-number fallback" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{
+    var machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
         .root_shape = root_shape,
         .jit_owner = &owner,
         .prefer_managed_baseline = true,
-    };
+    });
 
     const sum_chunk = root.fns.items[0].chunk.?;
     var sum_slots = [_]Value{ Value.num(10), Value.undef(), Value.undef() };
@@ -17884,14 +17914,14 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
     fast_global.* = .{};
     try fast_env.put("globalThis", Value.obj(fast_global));
     try interp.mirrorGlobalsOnto(&fast_env, fast_global, fast_root_shape);
-    var fast = Interpreter{
+    var fast = try initTestInterpreter(.{
         .arena = allocator,
         .env = &fast_env,
         .root_shape = fast_root_shape,
         .global_object = fast_global,
         .this_value = Value.obj(fast_global),
         .jit_owner = &owner,
-    };
+    });
     const hits_before = quick_native_direct_call_hits.load(.monotonic);
     const loop_hits_before = quick_numeric_call_loop_hits.load(.monotonic);
     const arguments_loop_hits_before = quick_numeric_arguments_call_loop_hits.load(.monotonic);
@@ -17918,13 +17948,13 @@ test "vm: numeric call-loop quickening preserves guards and exact steps" {
     slow_global.* = .{};
     try slow_env.put("globalThis", Value.obj(slow_global));
     try interp.mirrorGlobalsOnto(&slow_env, slow_global, slow_root_shape);
-    var slow = Interpreter{
+    var slow = try initTestInterpreter(.{
         .arena = allocator,
         .env = &slow_env,
         .root_shape = slow_root_shape,
         .global_object = slow_global,
         .this_value = Value.obj(slow_global),
-    };
+    });
     quick_numeric_call_loop_test_enabled.store(false, .monotonic);
     const slow_result = try run(&slow, chunk, null);
     try std.testing.expectEqual(fast_result.rawBits(), slow_result.rawBits());
@@ -17946,7 +17976,7 @@ test "vm: completed non-escaping recursive activations reuse bounded storage" {
     var env = Environment{ .arena = a, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(a);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = a, .env = &env, .root_shape = root_shape });
 
     try std.testing.expectEqual(@as(f64, 2750), (try run(&machine, chunk, null)).asNum());
     // fib(10) needs only its live recursion depth. Repeating it 50 times must
@@ -17971,7 +18001,7 @@ test "vm: sloppy mapped arguments keep activation reuse ownership-safe" {
     var env = Environment{ .arena = a, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(a);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = a, .env = &env, .root_shape = root_shape });
 
     try std.testing.expectEqual(@as(f64, 2_001_007), (try run(&machine, chunk, null)).asNum());
     // The arguments objects are per-call observable identities; the backing VM
@@ -17993,7 +18023,7 @@ test "vm: recursive calls throw a catchable RangeError before native stack overf
     var env = Environment{ .arena = a, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(a);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = a, .env = &env, .root_shape = root_shape });
 
     try std.testing.expectError(error.Throw, run(&machine, chunk, null));
     const exception = machine.exception;
@@ -18148,7 +18178,7 @@ test "vm: fixed-name object literals cache shape transitions across realms" {
         var env = Environment{ .arena = allocator, .fn_scope = true };
         const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
         try interp.installGlobals(&env, root_shape);
-        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
         try std.testing.expectEqual(@as(f64, 1940), (try run(&machine, chunk, null)).asNum());
         steps[run_index] = machine.steps;
         const next_hits = quick_literal_transition_hits.load(.monotonic);
@@ -18191,13 +18221,13 @@ test "vm: sloppy recursive calls retain their function realm global" {
     const global = try gc_mod.allocObj(allocator);
     global.* = .{};
     try env.put("globalThis", Value.obj(global));
-    var machine = Interpreter{
+    var machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &env,
         .root_shape = root_shape,
         .global_object = global,
         .this_value = Value.obj(global),
-    };
+    });
 
     try std.testing.expect((try run(&machine, chunk, null)).asBool());
     try std.testing.expectEqual(global, machine.global_object.?);
@@ -18232,13 +18262,13 @@ test "vm: caches live global function bindings" {
         global.* = .{};
         try env.put("globalThis", Value.obj(global));
         try interp.mirrorGlobalsOnto(&env, global, root_shape);
-        var machine = Interpreter{
+        var machine = try initTestInterpreter(.{
             .arena = allocator,
             .env = &env,
             .root_shape = root_shape,
             .global_object = global,
             .this_value = Value.obj(global),
-        };
+        });
         try std.testing.expectEqual(@as(f64, 12), (try run(&machine, chunk, null)).asNum());
         if (!parallel) {
             try std.testing.expect(quick_global_binding_hits.load(.monotonic) > hits_before);
@@ -18282,13 +18312,13 @@ test "vm: quickens guarded pure numeric recurrence" {
         global.* = .{};
         try env.put("globalThis", Value.obj(global));
         try interp.mirrorGlobalsOnto(&env, global, root_shape);
-        var machine = Interpreter{
+        var machine = try initTestInterpreter(.{
             .arena = allocator,
             .env = &env,
             .root_shape = root_shape,
             .global_object = global,
             .this_value = Value.obj(global),
-        };
+        });
         try std.testing.expectEqual(@as(f64, 221), (try run(&machine, chunk, null)).asNum());
         run_steps[run_index] = machine.steps;
         if (!parallel) {
@@ -18340,13 +18370,13 @@ test "vm: compiles observable numeric recurrence without eliding calls" {
         global.* = .{};
         try env.put("globalThis", Value.obj(global));
         try interp.mirrorGlobalsOnto(&env, global, root_shape);
-        var machine = Interpreter{
+        var machine = try initTestInterpreter(.{
             .arena = allocator,
             .env = &env,
             .root_shape = root_shape,
             .global_object = global,
             .this_value = Value.obj(global),
-        };
+        });
         // fib(8) performs all 67 observable calls. The accessor-backed state
         // takes the generic path and observes all five fib(3) mutations. After
         // replacement, saved(3) executes once and its two live calls add 1000.
@@ -18384,13 +18414,13 @@ test "vm: compiles observable numeric recurrence without eliding calls" {
     named_global.* = .{};
     try named_env.put("globalThis", Value.obj(named_global));
     try interp.mirrorGlobalsOnto(&named_env, named_global, named_root_shape);
-    var named_machine = Interpreter{
+    var named_machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &named_env,
         .root_shape = named_root_shape,
         .global_object = named_global,
         .this_value = Value.obj(named_global),
-    };
+    });
     try std.testing.expectEqual(@as(f64, 88), (try run(&named_machine, named_chunk, null)).asNum());
     try std.testing.expect(quick_observable_recurrence_hits.load(.monotonic) > shared_hits_before);
 }
@@ -18580,7 +18610,7 @@ test "vm: quickens isolated polymorphic own-data property loops with exact steps
             var env = Environment{ .arena = allocator, .fn_scope = true };
             const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
             try interp.installGlobals(&env, root_shape);
-            var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
             results[run_index] = try run(&machine, chunk, null);
             steps[run_index] = machine.steps;
             const next_hits = quick_polymorphic_property_loop_hits.load(.monotonic);
@@ -18653,7 +18683,7 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         var env = Environment{ .arena = allocator, .fn_scope = true };
         const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
         try interp.installGlobals(&env, root_shape);
-        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
         var serviced_checkpoints: u64 = 0;
         machine.gc_safepoint_ctx = &serviced_checkpoints;
         machine.gc_safepoint_fn = SafepointCounter.service;
@@ -18705,7 +18735,7 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
         var env = Environment{ .arena = allocator, .fn_scope = true };
         const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
         try interp.installGlobals(&env, root_shape);
-        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .steps = initial_steps };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .steps = initial_steps });
         var serviced_checkpoints: u64 = 0;
         machine.gc_safepoint_ctx = &serviced_checkpoints;
         machine.gc_safepoint_fn = SafepointCounter.service;
@@ -18726,12 +18756,12 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     var budget_env = Environment{ .arena = allocator, .fn_scope = true };
     const budget_root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&budget_env, budget_root_shape);
-    var budget_machine = Interpreter{
+    var budget_machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &budget_env,
         .root_shape = budget_root_shape,
         .steps = budget_initial_steps,
-    };
+    });
     try std.testing.expectError(error.Throw, run(&budget_machine, budget_chunk, null));
     try std.testing.expectEqual(interp.max_steps - 60, quick_object_allocation_first_entry_steps.load(.monotonic));
     try std.testing.expectEqual(interp.max_steps + 1, budget_machine.steps);
@@ -18739,13 +18769,13 @@ test "vm: quickens fixed-shape object allocation loops with exact steps and guar
     // The observable-step helper used after a crossing must still stop on the
     // exact checkpoint before it advances any later logical steps.
     var stop_requested: std.atomic.Value(bool) = .init(true);
-    var stop_machine = Interpreter{
+    var stop_machine = try initTestInterpreter(.{
         .arena = allocator,
         .env = &budget_env,
         .root_shape = budget_root_shape,
         .steps = 1023,
         .stop_flag = &stop_requested,
-    };
+    });
     try std.testing.expectError(error.Throw, advanceQuickObservableSteps(&stop_machine, 2));
     try std.testing.expectEqual(@as(u64, 1024), stop_machine.steps);
 
@@ -18885,7 +18915,7 @@ test "vm: packed array sum quickening preserves bytecode steps" {
         var env = Environment{ .arena = allocator, .fn_scope = true };
         const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
         try interp.installGlobals(&env, root_shape);
-        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
         try std.testing.expectEqual(@as(f64, 36), (try run(&machine, chunk, null)).asNum());
         steps[run_index] = machine.steps;
         const next_sum_hits = quick_packed_array_sum_loop_hits.load(.monotonic);
@@ -18922,7 +18952,7 @@ test "vm: quickens warmed numeric property update traces" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
     _ = try run(&machine, root, null);
 
     const function_value = env.get("update").?;
@@ -19023,7 +19053,7 @@ test "vm: fuses warmed four-property loops with exact bytecode steps" {
         var env = Environment{ .arena = allocator, .fn_scope = true };
         const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
         try interp.installGlobals(&env, root_shape);
-        var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
         results[run_index] = (try run(&machine, chunk, null)).asNum();
         steps[run_index] = machine.steps;
         const next_hits = quick_property_kernel_hits.load(.monotonic);

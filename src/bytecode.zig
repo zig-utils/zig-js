@@ -306,8 +306,10 @@ pub const Op = enum(u8) {
     load_var, // operand a: name index; push value (ReferenceError if unbound)
     load_var_or_undef, // operand a: name index; push value, or undefined if unbound (for `typeof`)
     store_var, // operand a: name index; assign global, leave value on stack
-    def_var, // operand a: name index, b: 0 bare `var x;`, 1 `var x = init`, 2 force define/function/internal temp; pop value, define global
+    def_var, // a: name index; b: 0 create var if absent, 1 var initializer, 2 internal define, 3 variable-scope function
     def_lex, // operand a: name index, b: 1 let / 2 const / 3 let-TDZ / 4 const-TDZ; pop value, define lexical binding
+    init_declarations, // instantiate this chunk's environment declaration plan before evaluation
+    copy_annex_b, // a: candidate index; copy the current block binding to the exact variable record if enabled
     bind_pattern, // operand a: pattern index, b: mode (0 var, 1 let, 2 const, 3 assign); pop value, destructure into the pattern
     resolve_binding_ref, // operand a: binding-reference plan; capture ResolveBinding before later observable work
     load_binding_ref, // operand a: plan, b: binding_ref_load_* flags; GetValue through the captured Reference
@@ -809,6 +811,16 @@ pub const FnTemplate = struct {
 
 /// A unit of compiled code: the instruction stream plus its constant, name,
 /// and function-template pools. All slices live in the owning arena.
+pub const EnvironmentDeclarations = struct {
+    pub const Lexical = struct { name: []const u8, immutable: bool };
+    pub const AnnexB = struct { name: []const u8, create_binding: bool };
+    lexical: []const Lexical = &.{},
+    functions: []const []const u8 = &.{},
+    variables: []const []const u8 = &.{},
+    annex_b: []const AnnexB = &.{},
+    is_script: bool = false,
+};
+
 pub const Chunk = struct {
     const DebugSite = struct { instruction: usize, node: *const ast.Node };
 
@@ -862,6 +874,9 @@ pub const Chunk = struct {
     /// references above all — live in an Exec-owned, GC-rooted `Value` array
     /// sized by this count. Function and env-mode chunks leave it at zero.
     scratch_count: u32 = 0,
+    /// Immutable names/kinds only. Runtime global eligibility belongs to each
+    /// Exec, never the shared chunk; frame-mode functions need no such plan.
+    environment_declarations: EnvironmentDeclarations = .{},
     /// Frame slots in chunks whose control flow can observe a lexical TDZ.
     /// Activations initialize these before the first debugger checkpoint;
     /// block-entry opcodes reset them when a lexical scope is re-entered.
