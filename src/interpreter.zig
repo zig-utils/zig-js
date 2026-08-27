@@ -11154,6 +11154,17 @@ pub const Interpreter = struct {
         }
     }
 
+    /// `stringSliceUtf16` for a receiver that may be a flat latin1 image, where a
+    /// code-unit range IS a byte range. Only the extracted range is re-encoded to
+    /// WTF-8, so slicing does not cost a pass over the whole receiver.
+    fn stringSliceUtf16A(self: *Interpreter, s: []const u8, start: usize, end: usize, flat: bool) EvalError![]const u8 {
+        if (!flat) return self.stringSliceUtf16(s, start, end);
+        const lo = @min(start, s.len);
+        const hi = @min(end, s.len);
+        if (lo >= hi) return "";
+        return strcell.latin1FlatToWtf8(self.arena, s[lo..hi]);
+    }
+
     fn stringSliceUtf16(self: *Interpreter, s: []const u8, start: usize, end: usize) EvalError![]const u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         var units: usize = 0;
@@ -17745,6 +17756,14 @@ pub const Interpreter = struct {
         return eq(name, "charAt") or eq(name, "charCodeAt") or eq(name, "at") or eq(name, "codePointAt");
     }
 
+    /// Methods whose implementation is exact on a flat latin1 image: they do
+    /// UTF-16 index arithmetic (where a byte offset IS the index) and copy out a
+    /// byte range, never decoding the bytes as WTF-8. `stringSliceUtf16` re-encodes
+    /// just the extracted range, so the cost is O(result) rather than O(receiver).
+    fn stringMethodReadsFlatImage(name: []const u8) bool {
+        return eq(name, "slice") or eq(name, "substring") or eq(name, "substr");
+    }
+
     fn stringMethodValue(
         self: *Interpreter,
         string: Value,
@@ -17756,11 +17775,17 @@ pub const Interpreter = struct {
         std.debug.assert(string.isString());
         if (eq(name, "repeat")) return try self.stringRepeatValue(string, args);
         if (eq(name, "concat")) return try self.stringConcatValue(string, args);
-        const bytes = if (stringMethodUsesCodeUnitCell(name))
+        // A flat latin1 cell stores one byte per code unit, so `asWtf8` has to
+        // re-encode the WHOLE receiver — O(n) per call, which turns a loop of
+        // short slices into O(n^2). Methods that only need fixed-width index
+        // math read the stored image directly instead; everything else keeps the
+        // WTF-8 view, so no other reader can meet a flat byte.
+        const flat = string.strIsFlatLatin1() and stringMethodReadsFlatImage(name);
+        const bytes = if (flat or stringMethodUsesCodeUnitCell(name))
             string.asStr()
         else
             try string.asWtf8(self.arena);
-        return self.stringMethod(bytes, name, args, check_protocol, string.asStringCell(), protocol_receiver);
+        return self.stringMethod(bytes, name, args, check_protocol, string.asStringCell(), protocol_receiver, flat);
     }
 
     fn canonicalStringByteLength(string: Value) EvalError!usize {
@@ -18012,8 +18037,14 @@ pub const Interpreter = struct {
         check_protocol: bool,
         s_cell: ?*const StringCell,
         protocol_receiver: ?Value,
+        /// `s` is the receiver's flat latin1 image rather than its WTF-8 view —
+        /// set only for `stringMethodReadsFlatImage` names. It describes the
+        /// BYTES, not the cell: a flat cell reached through `asWtf8` is false.
+        s_flat: bool,
     ) EvalError!?Value {
-        const s_ascii = if (s_cell) |cell| cell.isAscii() else false;
+        // Both representations are one byte per UTF-16 code unit, so a byte
+        // offset into `s` is a code-unit index.
+        const s_ascii = s_flat or if (s_cell) |cell| cell.isAscii() else false;
         if (check_protocol and eq(name, "replaceAll"))
             if (try self.replaceAllProtocolDispatch(protocol_receiver orelse try self.stringReceiverValue(s, s_cell), args)) |r| return r;
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
@@ -18082,7 +18113,7 @@ pub const Interpreter = struct {
             const len = stringLengthForAccess(s, s_ascii, s_cell);
             const start = try relIndex(self, arg0(args), len, 0);
             const end = try relIndex(self, arg(args, 1), len, @floatFromInt(len));
-            if (start < end) return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, start, end));
+            if (start < end) return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, start, end, s_flat));
             return Value.str("");
         }
         if (eq(name, "substring")) {
@@ -18094,7 +18125,7 @@ pub const Interpreter = struct {
                 a0 = b0;
                 b0 = t;
             }
-            return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, a0, b0));
+            return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, a0, b0, s_flat));
         }
         if (eq(name, "toUpperCase") or eq(name, "toLocaleUpperCase")) {
             if (eq(name, "toLocaleUpperCase")) {
@@ -18413,7 +18444,7 @@ pub const Interpreter = struct {
                 const lu: usize = @intFromFloat(@trunc(l));
                 break :blk @min(lu, remaining);
             } else remaining;
-            return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, start, start + len));
+            return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, start, start + len, s_flat));
         }
         if (eq(name, "trimLeft")) return try Value.strAlloc(self.arena, jsTrim(s, true, false));
         if (eq(name, "trimRight")) return try Value.strAlloc(self.arena, jsTrim(s, false, true));
@@ -36997,7 +37028,7 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, op, "matchAll")) {
                 return try self.regexpMatchAll(this, str);
             }
-            return (try self.stringMethod(str, op, &.{this}, false, string.asStringCell(), null)) orelse Value.undef();
+            return (try self.stringMethod(str, op, &.{this}, false, string.asStringCell(), null, false)) orelse Value.undef();
         }
     }.call;
 }
@@ -54203,7 +54234,7 @@ test "String indexed access publishes one bounded immutable cell index" {
     const string = try Value.strAlloc(a, source.items);
     try std.testing.expect(!string.asStringCell().hasUtf16Index());
     const bytes = try string.asWtf8(a);
-    const char_code = (try machine.stringMethod(bytes, "charCodeAt", &.{Value.num(100)}, false, string.asStringCell(), null)).?;
+    const char_code = (try machine.stringMethod(bytes, "charCodeAt", &.{Value.num(100)}, false, string.asStringCell(), null, false)).?;
     try std.testing.expect(char_code.isNumber());
     try std.testing.expect(string.asStringCell().hasUtf16Index());
     const primitive = try machine.getPrimitiveMember(string, "100");
@@ -54219,7 +54250,7 @@ test "String indexed access publishes one bounded immutable cell index" {
     machine.arena = unavailable.allocator();
     try std.testing.expectError(
         error.OutOfMemory,
-        machine.stringMethod(failing_bytes, "charCodeAt", &.{Value.num(100)}, false, failing_string.asStringCell(), null),
+        machine.stringMethod(failing_bytes, "charCodeAt", &.{Value.num(100)}, false, failing_string.asStringCell(), null, false),
     );
     try std.testing.expect(!failing_string.asStringCell().hasUtf16Index());
     machine.arena = a;
