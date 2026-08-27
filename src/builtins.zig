@@ -64,17 +64,19 @@ pub fn isFiniteFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 pub fn stringFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const ip = interp(ctx);
-    const s: []const u8 = blk: {
-        if (args.len == 0) break :blk "";
+    const string: Value = blk: {
+        if (args.len == 0) break :blk Value.str("");
         // String(symbol) (called, not constructed) → SymbolDescriptiveString; in
         // any other case ToString (toStringV, running @@toPrimitive/toString/
         // valueOf and throwing for a Symbol under `new String(sym)`).
-        if (ip.new_target.isUndefined() and args[0].isObject() and args[0].asObj().is_symbol)
-            break :blk try std.fmt.allocPrint(ip.arena, "Symbol({s})", .{args[0].asObj().symbolDescription() orelse ""});
-        break :blk try ip.toStringWtf8(args[0]);
+        if (ip.new_target.isUndefined() and args[0].isObject() and args[0].asObj().is_symbol) {
+            const description = try std.fmt.allocPrint(ip.arena, "Symbol({s})", .{args[0].asObj().symbolDescription() orelse ""});
+            break :blk try Value.strAlloc(ip.arena, description);
+        }
+        break :blk try ip.toStringValue(args[0]);
     };
-    if (!ip.new_target.isUndefined()) return ip.makeWrapper(try Value.strAlloc(ip.arena, s));
-    return try Value.strAlloc(ip.arena, s);
+    if (!ip.new_target.isUndefined()) return ip.makeWrapper(string);
+    return string;
 }
 
 pub fn numberFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
@@ -3660,6 +3662,48 @@ test "JSON parser borrows validated unescaped strings without scratch allocation
 
     var control = JsonParser{ .s = "\"a\x01b\"", .i = 0, .interp = &machine };
     try std.testing.expectError(error.Invalid, control.parseString());
+}
+
+test "String construction retains existing flat Latin-1 StringData" {
+    var owner_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer owner_arena.deinit();
+    const owner = owner_arena.allocator();
+    const root_shape = try @import("shape.zig").Shape.createRoot(owner);
+    var env: interpreter.Environment = .{ .arena = owner, .fn_scope = true };
+    var machine: Interpreter = .{ .arena = owner, .env = &env, .root_shape = root_shape };
+
+    const string = try Value.strAlloc(owner, "caf\xc3\xa9\xc3\xbf");
+    try std.testing.expect(string.strIsFlatLatin1());
+
+    // A called String receives the already-complete ToString result. Failing
+    // the first allocator request proves neither the flat bytes nor the cell
+    // are rebuilt; the no-argument result is the static empty string as well.
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    const called = try stringFn(@ptrCast(&machine), Value.undef(), &.{string});
+    try std.testing.expectEqual(string.rawBits(), called.rawBits());
+    const empty = try stringFn(@ptrCast(&machine), Value.undef(), &.{});
+    try std.testing.expectEqual(Value.str("").rawBits(), empty.rawBits());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+
+    // Construction needs exactly the Object, storage-state, and cold-sidecar
+    // allocations used by makeWrapper. The fourth-request tripwire would have
+    // caught any StringCell/transcode allocation before that wrapper completed.
+    var wrapper_alloc: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 3 });
+    const wrapper_allocator = wrapper_alloc.allocator();
+    machine.arena = wrapper_allocator;
+    machine.new_target = Value.boolVal(true);
+    const boxed = try stringFn(@ptrCast(&machine), Value.undef(), &.{string});
+    const object = boxed.asObj();
+    try std.testing.expectEqual(string.rawBits(), object.boxedPrimitive().?.rawBits());
+    try std.testing.expectEqual(@as(usize, 3), wrapper_alloc.allocations);
+
+    const storage = object.storageState().?;
+    const cold = object.coldState().?;
+    wrapper_allocator.destroy(cold);
+    wrapper_allocator.destroy(storage);
+    wrapper_allocator.destroy(object);
+    try std.testing.expectEqual(wrapper_alloc.allocated_bytes, wrapper_alloc.freed_bytes);
 }
 
 test "JSON stringifier emits flat Latin-1 into prepared output without allocation" {
