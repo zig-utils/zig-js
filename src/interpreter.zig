@@ -4285,9 +4285,7 @@ pub const Interpreter = struct {
     }
 
     fn labeledFunctionDeclNode(node: *Node) ?*Node {
-        var n = node;
-        while (n.* == .labeled_stmt) n = n.labeled_stmt.body;
-        return if (n.* == .func_decl) n else null;
+        return @import("annex_b.zig").functionDeclaration(node);
     }
 
     fn labeledStatementTargetsIteration(node: *const Node) bool {
@@ -6296,13 +6294,6 @@ pub const Interpreter = struct {
 
     // ---- Annex B B.3.3 block-level function legacy-binding analysis -----------
 
-    const NameStack = std.ArrayListUnmanaged([]const u8);
-
-    fn annexbStackHas(stack: NameStack, name: []const u8) bool {
-        for (stack.items) |n| if (eq(n, name)) return true;
-        return false;
-    }
-
     fn annexbListMayNeedScan(stmts: []const *Node, depth: u32) bool {
         if (depth >= 1) for (stmts) |s| switch (s.*) {
             .func_decl => |f| if (!f.is_generator and !f.is_async) return true,
@@ -6352,178 +6343,29 @@ pub const Interpreter = struct {
         };
     }
 
-    fn appendPatternNames(arena: std.mem.Allocator, pat: *Node, list: *NameStack) EvalError!void {
-        switch (pat.*) {
-            .identifier => |nm| try list.append(arena, nm),
-            .obj_pattern => |p| {
-                for (p.props) |pr| try appendPatternNames(arena, pr.target, list);
-                if (p.rest) |r| if (r.* == .identifier) try list.append(arena, r.identifier);
-            },
-            .arr_pattern => |p| {
-                for (p.elems) |e| if (e.target) |t| try appendPatternNames(arena, t, list);
-                if (p.rest) |r| try appendPatternNames(arena, r, list);
-            },
-            else => {},
-        }
-    }
-
-    /// FunctionDeclarationInstantiation's parameterNames list for Annex B.3.3:
-    /// formal BoundNames plus "arguments" when an arguments object is created.
-    /// Names in this list block the legacy var binding for block functions.
-    /// Append the parameter bound-names (plus a legacy `arguments` entry when
-    /// the activation needs one) directly onto `list`. Used to seed the Annex B
-    /// B.3.3 name stack from the raw `ast.Param` slice, avoiding a per-call
-    /// intermediate allocation on the hot function-call path.
-    fn appendParameterNames(arena: std.mem.Allocator, params: []const ast.Param, arguments_object_needed: bool, list: *NameStack) EvalError!void {
-        for (params) |p| {
-            if (p.pattern) |pat| {
-                try appendPatternNames(arena, pat, list);
-            } else if (p.name.len > 0) try list.append(arena, p.name);
-        }
-        if (arguments_object_needed and !annexbStackHas(list.*, "arguments"))
-            try list.append(arena, "arguments");
-    }
-
-    /// Push the lexically-declared (let/const/class) names of one statement.
-    fn annexbPushLexical(self: *Interpreter, s: *Node, stack: *NameStack) EvalError!void {
-        const scratch = self.scratch_allocator orelse self.arena;
-        switch (s.*) {
-            .var_decl => |d| if (d.kind != .@"var") try stack.append(scratch, d.name),
-            .decl_group => |g| for (g) |gs| {
-                if (gs.* == .var_decl and gs.var_decl.kind != .@"var") try stack.append(scratch, gs.var_decl.name);
-            },
-            .destructure_decl => |d| if (d.kind != .@"var") try appendPatternNames(scratch, d.pattern, stack),
-            .class_expr => |c| if (c.name.len > 0) try stack.append(scratch, c.name),
-            // An async/generator/async-generator function declaration is an
-            // ordinary lexical (block-scoped) binding, never an Annex B B.3.3
-            // legacy candidate — so it shadows like let/const/class. (A *plain*
-            // function declaration is handled by the candidate loops below.)
-            .func_decl => |f| if (f.is_generator or f.is_async) try stack.append(scratch, f.name),
-            else => {},
-        }
-    }
-
-    /// Entry point: collect the eligible legacy-binding function names of a
-    /// variable scope's statement list. `stack` is seeded with parameter names,
-    /// which block the legacy binding.
-    fn annexbAddCandidate(self: *Interpreter, node: *const Node, name: []const u8, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
-        const scratch = self.scratch_allocator orelse self.arena;
-        _ = try out.getOrPutSecure(self, scratch, name);
-        try nodes.put(scratch, node, {});
-    }
-
     fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
-        const scratch = self.scratch_allocator orelse self.arena;
-        var stack: NameStack = .empty;
-        defer stack.deinit(scratch);
-        if (!self.eval_decl_deletable)
-            try appendParameterNames(scratch, self.cur_func_params, self.cur_func_args_needed, &stack);
-        try self.annexbScanList(stmts, &stack, depth, out, nodes);
-    }
+        const Collector = struct {
+            interpreter: *Interpreter,
+            names: *SecureStringMembership,
+            nodes: *std.AutoHashMapUnmanaged(*const Node, void),
 
-    fn annexbScanList(self: *Interpreter, stmts: []*Node, stack: *NameStack, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
-        const base = stack.items.len;
-        // This block's own let/const/class names shadow the legacy binding.
-        for (stmts) |s| try self.annexbPushLexical(s, stack);
-        // A function declaration directly in a nested block (depth >= 1) is a
-        // legacy-binding candidate unless its name is already lexically bound.
-        // A *block*-level function declaration is itself block-lexical, so it
-        // blocks a deeper same-named declaration's legacy binding (replacing it
-        // with `var F` would early-error) — but a *top-level* (var-scoped)
-        // function declaration does not block, hence the depth >= 1 gate.
-        if (depth >= 1) {
-            for (stmts) |s| switch (s.*) {
-                .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try self.annexbAddCandidate(s, f.name, out, nodes),
-                .labeled_stmt => if (labeledFunctionDeclNode(s)) |fn_node| {
-                    const f = fn_node.func_decl;
-                    if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try self.annexbAddCandidate(fn_node, f.name, out, nodes);
-                },
-                else => {},
-            };
-            for (stmts) |s| switch (s.*) {
-                .func_decl => |f| if (!f.is_generator and !f.is_async) try stack.append(self.scratch_allocator orelse self.arena, f.name),
-                .labeled_stmt => if (labeledFunctionDeclNode(s)) |fn_node| {
-                    const f = fn_node.func_decl;
-                    if (!f.is_generator and !f.is_async) try stack.append(self.scratch_allocator orelse self.arena, f.name);
-                },
-                else => {},
-            };
-        }
-        for (stmts) |s| try self.annexbScanStmt(s, stack, depth, out, nodes);
-        stack.shrinkRetainingCapacity(base);
-    }
-
-    /// Scan a single statement that is the *body* of an if/loop/label — a block,
-    /// a bare function declaration (treated as a one-statement block), or other.
-    fn annexbScanBranch(self: *Interpreter, node: *Node, stack: *NameStack, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
-        switch (node.*) {
-            .block => |b| try self.annexbScanList(b, stack, depth + 1, out, nodes),
-            .func_decl => |f| if (!f.is_generator and !f.is_async and !annexbStackHas(stack.*, f.name)) try self.annexbAddCandidate(node, f.name, out, nodes),
-            else => try self.annexbScanStmt(node, stack, depth, out, nodes),
-        }
-    }
-
-    fn annexbScanStmt(self: *Interpreter, s: *Node, stack: *NameStack, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
-        switch (s.*) {
-            .block => |b| try self.annexbScanList(b, stack, depth + 1, out, nodes),
-            .if_stmt => |i| {
-                try self.annexbScanBranch(i.consequent, stack, depth, out, nodes);
-                if (i.alternate) |a| try self.annexbScanBranch(a, stack, depth, out, nodes);
-            },
-            .while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out, nodes),
-            .do_while_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out, nodes),
-            .with_stmt => |w| try self.annexbScanBranch(w.body, stack, depth, out, nodes),
-            .for_stmt => |f| {
-                const base = stack.items.len;
-                if (f.init) |ini| try self.annexbPushLexical(ini, stack);
-                try self.annexbScanBranch(f.body, stack, depth, out, nodes);
-                stack.shrinkRetainingCapacity(base);
-            },
-            .for_in => |f| {
-                const base = stack.items.len;
-                if (f.decl_kind) |k| if (k != .@"var") try appendPatternNames(self.scratch_allocator orelse self.arena, f.target, stack);
-                try self.annexbScanBranch(f.body, stack, depth, out, nodes);
-                stack.shrinkRetainingCapacity(base);
-            },
-            .labeled_stmt => |l| try self.annexbScanBranch(l.body, stack, depth, out, nodes),
-            .switch_stmt => |sw| {
-                const base = stack.items.len;
-                // The whole switch is one lexical (CaseBlock) scope across all cases.
-                for (sw.cases) |c| for (c.body) |cs| try self.annexbPushLexical(cs, stack);
-                for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
-                    .func_decl => |fd| if (!fd.is_generator and !fd.is_async and !annexbStackHas(stack.*, fd.name)) try self.annexbAddCandidate(cs, fd.name, out, nodes),
-                    .labeled_stmt => if (labeledFunctionDeclNode(cs)) |fn_node| {
-                        const fd = fn_node.func_decl;
-                        if (!fd.is_generator and !fd.is_async and !annexbStackHas(stack.*, fd.name)) try self.annexbAddCandidate(fn_node, fd.name, out, nodes);
-                    },
-                    else => {},
-                };
-                for (sw.cases) |c| for (c.body) |cs| switch (cs.*) {
-                    .func_decl => |fd| if (!fd.is_generator and !fd.is_async) try stack.append(self.scratch_allocator orelse self.arena, fd.name),
-                    .labeled_stmt => if (labeledFunctionDeclNode(cs)) |fn_node| {
-                        const fd = fn_node.func_decl;
-                        if (!fd.is_generator and !fd.is_async) try stack.append(self.scratch_allocator orelse self.arena, fd.name);
-                    },
-                    else => {},
-                };
-                for (sw.cases) |c| for (c.body) |cs| try self.annexbScanStmt(cs, stack, depth + 1, out, nodes);
-                stack.shrinkRetainingCapacity(base);
-            },
-            .try_stmt => |t| {
-                try self.annexbScanBranch(t.block, stack, depth, out, nodes);
-                if (t.catch_block) |cb| {
-                    const cbase = stack.items.len;
-                    // A *simple* (identifier) catch parameter does not block the
-                    // legacy binding (Annex B B.3.5 allows `catch(e){var e}`); a
-                    // destructuring catch parameter does.
-                    if (t.catch_param) |cp| if (cp.* != .identifier) try appendPatternNames(self.scratch_allocator orelse self.arena, cp, stack);
-                    try self.annexbScanBranch(cb, stack, depth, out, nodes);
-                    stack.shrinkRetainingCapacity(cbase);
-                }
-                if (t.finally_block) |fb| try self.annexbScanBranch(fb, stack, depth, out, nodes);
-            },
-            else => {},
-        }
+            pub fn add(collector: *@This(), node: *const Node, name: []const u8) EvalError!void {
+                const machine = collector.interpreter;
+                const scratch = machine.scratch_allocator orelse machine.arena;
+                _ = try collector.names.getOrPutSecure(machine, scratch, name);
+                try collector.nodes.put(scratch, node, {});
+            }
+        };
+        var collector = Collector{ .interpreter = self, .names = out, .nodes = nodes };
+        try @import("annex_b.zig").collect(
+            EvalError,
+            self.scratch_allocator orelse self.arena,
+            stmts,
+            depth,
+            if (self.eval_decl_deletable) &.{} else self.cur_func_params,
+            !self.eval_decl_deletable and self.cur_func_args_needed,
+            &collector,
+        );
     }
 
     pub fn evalStatements(self: *Interpreter, stmts: []*Node) EvalError!Value {
@@ -58287,6 +58129,26 @@ test "Annex B secure legacy name membership preserves exact eligibility" {
         \\duplicateResult === 2 && labeledResult === 3 && switchResult === 4 &&
         \\  parameterExact === 6 && typeof lexicalName === "undefined" &&
         \\  typeof catchName === "undefined"
+    )).asBool());
+}
+
+test "Annex B grouped destructuring lexicals block eval legacy bindings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Every BoundName in a LexicalDeclaration excludes the corresponding
+    // Annex B legacy var, including patterns after another declarator. A
+    // sloppy eval's lexical record disappears afterward; a wrongly created
+    // variable binding would remain observable in the surrounding scope.
+    try std.testing.expect((try evalSource(allocator,
+        \\var retained = 3;
+        \\eval('let unused, { leakedObject } = {}; { function leakedObject() {} }');
+        \\eval('const unused = 0, [leakedArray] = []; { function leakedArray() {} }');
+        \\eval('let unused, { retained } = {}; { function retained() {} }');
+        \\eval('{ function admitted() {} }');
+        \\typeof leakedObject === 'undefined' && typeof leakedArray === 'undefined' &&
+        \\retained === 3 && typeof admitted === 'function'
     )).asBool());
 }
 
