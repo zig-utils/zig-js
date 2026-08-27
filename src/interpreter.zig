@@ -19192,6 +19192,26 @@ pub const Interpreter = struct {
 
     pub fn applyBinary(self: *Interpreter, op_in: ast.BinaryOp, l_in: Value, r_in: Value) EvalError!Value {
         const op = op_in;
+        const l_object = l_in.isObject() and !l_in.asObj().is_bigint and !l_in.asObj().is_symbol;
+        const r_object = r_in.isObject() and !r_in.asObj().is_bigint and !r_in.asObj().is_symbol;
+        const has_observable_coercion = switch (op) {
+            .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => l_object or r_object,
+            .eq, .neq => (l_object and !r_object and !r_in.isUndefined() and !r_in.isNull()) or
+                (r_object and !l_object and !l_in.isUndefined() and !l_in.isNull()),
+            else => false,
+        };
+        // Primitive-only arithmetic stays on the existing root-free fast path.
+        // Once either side can run user code, publish both originals before the
+        // first ToPrimitive so a moving checkpoint cannot stale the other side.
+        const roots_mark: ?usize = if (self.gc != null and has_observable_coercion) roots: {
+            const mark = try self.pushTempRoot(l_in);
+            errdefer self.restoreTempRoots(mark);
+            const right_root = try self.pushTempRoot(r_in);
+            std.debug.assert(right_root == mark + 1);
+            break :roots mark;
+        } else null;
+        defer if (roots_mark) |mark| self.restoreTempRoots(mark);
+
         var l = l_in;
         var r = r_in;
         // Coerce object operands to primitives first (ToPrimitive). `+` uses the
@@ -19199,8 +19219,13 @@ pub const Interpreter = struct {
         // "number". Equality and instanceof/in handle objects themselves.
         switch (op) {
             .add => {
-                l = try self.toPrimitive(l, .default);
-                r = try self.toPrimitive(r, .default);
+                l = try self.toPrimitive(if (roots_mark) |mark| self.tempRoot(mark, l) else l, .default);
+                if (roots_mark) |mark| self.setTempRoot(mark, l);
+                r = try self.toPrimitive(if (roots_mark) |mark| self.tempRoot(mark + 1, r) else r, .default);
+                if (roots_mark) |mark| {
+                    self.setTempRoot(mark + 1, r);
+                    l = self.tempRoot(mark, l);
+                }
             },
             .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 // ApplyStringOrNumericBinaryOperator evaluates ToNumeric(lhs)
@@ -19209,10 +19234,15 @@ pub const Interpreter = struct {
                 // each operand in order: a throwing lhs conversion must abort
                 // before the rhs operand is coerced at all (its `valueOf` must not
                 // run). (BigInt mixing is diagnosed later, after both ToNumerics.)
-                l = try self.toPrimitive(l, .number);
+                l = try self.toPrimitive(if (roots_mark) |mark| self.tempRoot(mark, l) else l, .number);
+                if (roots_mark) |mark| self.setTempRoot(mark, l);
                 if (l.isObject() and l.asObj().is_symbol)
                     return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
-                r = try self.toPrimitive(r, .number);
+                r = try self.toPrimitive(if (roots_mark) |mark| self.tempRoot(mark + 1, r) else r, .number);
+                if (roots_mark) |mark| {
+                    self.setTempRoot(mark + 1, r);
+                    l = self.tempRoot(mark, l);
+                }
                 if (r.isObject() and r.asObj().is_symbol)
                     return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
             },
@@ -19224,12 +19254,20 @@ pub const Interpreter = struct {
                 // objects compare by identity, and an object vs null/undefined is
                 // always unequal, so neither is coerced. A BigInt/Symbol value is
                 // boxed as an object here but counts as a primitive operand.
-                const l_obj = l.isObject() and !l.asObj().is_bigint and !l.asObj().is_symbol;
-                const r_obj = r.isObject() and !r.asObj().is_bigint and !r.asObj().is_symbol;
-                if (l_obj and !r_obj and !r.isUndefined() and !r.isNull()) l = try self.toPrimitive(l, .default);
-                if (r_obj and !l_obj and !l.isUndefined() and !l.isNull()) r = try self.toPrimitive(r, .default);
+                if (l_object and !r_object and !r.isUndefined() and !r.isNull()) {
+                    l = try self.toPrimitive(if (roots_mark) |mark| self.tempRoot(mark, l) else l, .default);
+                    if (roots_mark) |mark| self.setTempRoot(mark, l);
+                }
+                if (r_object and !l_object and !l.isUndefined() and !l.isNull()) {
+                    r = try self.toPrimitive(if (roots_mark) |mark| self.tempRoot(mark + 1, r) else r, .default);
+                    if (roots_mark) |mark| self.setTempRoot(mark + 1, r);
+                }
             },
             else => {},
+        }
+        if (roots_mark) |mark| {
+            l = self.tempRoot(mark, l);
+            r = self.tempRoot(mark + 1, r);
         }
         // (Symbol operands for the number-hint ops above were already rejected
         // in-order during their ToNumeric coercion.)
@@ -53485,6 +53523,29 @@ test "variadic string concat uses one exact canonical construction" {
         \\result + '|' + log
     );
     try std.testing.expectEqualStrings("RAB|rab", try receiver_order.asWtf8(a));
+}
+
+test "binary observable coercions remain once-only and left-to-right" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalSource(arena.allocator(),
+        \\let log = '';
+        \\function operand(mark, value, fail) {
+        \\  return { valueOf() { log += mark; if (fail) throw 1; return value; } };
+        \\}
+        \\const results = [];
+        \\results.push(operand('a', 'A', false) + operand('b', 'B', false));
+        \\results.push(operand('c', 7, false) - operand('d', 2, false));
+        \\results.push(operand('e', 2, false) < operand('f', 3, false));
+        \\results.push(operand('g', 6, false) & operand('h', 3, false));
+        \\results.push(operand('i', 5, false) == 5);
+        \\results.push(5 == operand('j', 5, false));
+        \\try { operand('k', 0, true) + operand('x', 1, false); } catch {}
+        \\function* vmBinary(left, right) { return left + right; }
+        \\results.push(vmBinary(operand('l', 'L', false), operand('m', 'M', false)).next().value);
+        \\results.join(',') + '|' + log
+    );
+    try std.testing.expectEqualStrings("AB,5,true,2,true,true,LM|abcdefghijklm", try result.asWtf8(arena.allocator()));
 }
 
 test "ToString canonicalizes object-produced StringData" {

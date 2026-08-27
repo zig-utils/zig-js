@@ -21561,6 +21561,122 @@ test "variadic String concat roots pending arguments across moving nursery" {
     try std.testing.expect(last_argument_before != last_argument_after);
 }
 
+test "binary coercion roots pending and completed operands across moving nursery" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const Harness = struct {
+        fn create() !*Context {
+            const ctx = try Context.createWith(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = true,
+            });
+            errdefer ctx.destroy();
+            _ = try ctx.evaluate(
+                \\function binaryMovingLoop(n) {
+                \\  var total = 0;
+                \\  var i = 0;
+                \\  while (i < n) { total = total + i; i = i + 1; }
+                \\  return total;
+                \\}
+                \\for (var warm = 0; warm < 10; warm = warm + 1) binaryMovingLoop(4096);
+            );
+            const loop_object = ctx.global_object.getOwn("binaryMovingLoop").?.asObj();
+            const loop: *interp.Function = @ptrCast(@alignCast(loop_object.jsFunction().?));
+            const chunk = loop.chunk.?;
+            try std.testing.expectEqual(jit.TierState.ready, chunk.tier.loadState());
+            try std.testing.expect(chunk.tier.loadCode().?.manages_steps);
+            ctx.collectGarbage();
+            ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+            return ctx;
+        }
+    };
+
+    // The left conversion evacuates the nursery while the original right
+    // object has not yet been converted. Its precise operand root must be
+    // rewritten before the right-side ToPrimitive begins.
+    {
+        const ctx = try Harness.create();
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\globalThis.binaryMovingLeft = {
+            \\  valueOf() { binaryMovingLoop(20000); return 7; }
+            \\};
+            \\globalThis.binaryMovingRight = { valueOf() { return 9; } };
+        );
+        const right_before = ctx.global_object.getOwn("binaryMovingRight").?.asObj();
+
+        const gc_saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(gc_saved);
+        const sa_saved = strcell.setActiveArena(ctx.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
+        const ss_saved = stack_scan.enter(@frameAddress());
+        defer stack_scan.leave(ss_saved);
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const ai_saved = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+
+        const heap = ctx.gc.?;
+        heap.nursery_threshold_bytes = 1;
+        ctx.movingCheckpointRequest().store(true, .release);
+        const moving_before = heap.accounting().moving_minor_collections;
+        const result = try machine.applyBinary(
+            .add,
+            ctx.global_object.getOwn("binaryMovingLeft").?,
+            ctx.global_object.getOwn("binaryMovingRight").?,
+        );
+        try std.testing.expectEqual(@as(f64, 16), result.asNum());
+        try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+        try std.testing.expect(right_before != ctx.global_object.getOwn("binaryMovingRight").?.asObj());
+        try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+    }
+
+    // The left conversion completes first. The right conversion then evacuates
+    // the returned young StringData, proving that the completed primitive
+    // replaced the original left-object root before observable right-side code.
+    {
+        const ctx = try Harness.create();
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\globalThis.binaryMovingLeftText = "left".repeat(2);
+            \\globalThis.binaryMovingLeft = {
+            \\  valueOf() { return binaryMovingLeftText; }
+            \\};
+            \\globalThis.binaryMovingRight = {
+            \\  valueOf() { binaryMovingLoop(20000); return "right".repeat(2); }
+            \\};
+        );
+        const left_text_before = ctx.global_object.getOwn("binaryMovingLeftText").?.asStringCell();
+
+        const gc_saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(gc_saved);
+        const sa_saved = strcell.setActiveArena(ctx.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
+        const ss_saved = stack_scan.enter(@frameAddress());
+        defer stack_scan.leave(ss_saved);
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const ai_saved = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+
+        const heap = ctx.gc.?;
+        heap.nursery_threshold_bytes = 1;
+        ctx.movingCheckpointRequest().store(true, .release);
+        const moving_before = heap.accounting().moving_minor_collections;
+        const result = try machine.applyBinary(
+            .add,
+            ctx.global_object.getOwn("binaryMovingLeft").?,
+            ctx.global_object.getOwn("binaryMovingRight").?,
+        );
+        try std.testing.expectEqualStrings("leftleftrightright", try result.asWtf8(ctx.gpa));
+        try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+        try std.testing.expect(left_text_before != ctx.global_object.getOwn("binaryMovingLeftText").?.asStringCell());
+        try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+    }
+}
+
 test "GC requested compaction rewrites active Promise job native roots" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
