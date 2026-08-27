@@ -262,11 +262,9 @@ pub const Parser = struct {
     /// Inside a class body (so a private name `#x` is in scope) — gates the
     /// `#field in obj` brand check, which is a syntax error outside any class.
     in_class: bool = false,
-    /// Set when parsing a direct eval whose caller is inside a class element: the
-    /// eval'd code may reference the enclosing class's private names, so the
-    /// "every used private name must be declared here" check is skipped (the host
-    /// resolves them against the class's private map and the runtime brand-checks).
-    eval_private_allowed: bool = false,
+    /// Direct eval's exact enclosing PrivateEnvironment. Locally declared class
+    /// names are checked normally; other private uses must occur in this map.
+    eval_private_names: ?*const std.StringHashMapUnmanaged([]const u8) = null,
     /// True while parsing strict-mode code: the program (or an enclosing
     /// function) had a `"use strict"` directive prologue, a function body has
     /// its own such directive, or we're inside a class (always strict). Inherited
@@ -772,7 +770,7 @@ pub const Parser = struct {
         }
         // Early error: no duplicate lexically-declared names in a scope.
         try self.checkLexicalDupes(stmts.items, false);
-        if (!self.eval_private_allowed) try self.checkPrivateUsesInProgram(stmts.items);
+        try self.checkPrivateUsesInProgram(stmts.items);
         // A CoverInitializedName (`{ a = 1 }`) never refined to a pattern is an
         // early error.
         if (self.pending_cover_inits.count() > 0 or self.pending_proto_dup.count() > 0) return self.fail(ParseError.UnexpectedToken);
@@ -3487,7 +3485,7 @@ pub const Parser = struct {
                 sub.in_class = self.in_class;
                 sub.strict = self.strict;
                 sub.module = self.module;
-                sub.eval_private_allowed = self.eval_private_allowed;
+                sub.eval_private_names = self.eval_private_names;
                 sub.regex_validation_arena = self.regex_validation_arena;
                 node = try self.concatExpr(node, try sub.parseExpression());
                 i = if (expr_end < raw.len) expr_end + 1 else expr_end; // skip `}`
@@ -3543,7 +3541,7 @@ pub const Parser = struct {
                 sub.in_class = self.in_class;
                 sub.strict = self.strict;
                 sub.module = self.module;
-                sub.eval_private_allowed = self.eval_private_allowed;
+                sub.eval_private_names = self.eval_private_names;
                 sub.regex_validation_arena = self.regex_validation_arena;
                 exprs[substitution_index] = try sub.parseExpression();
                 substitution_index += 1;
@@ -4352,8 +4350,10 @@ pub const Parser = struct {
         declared: *SecureStringMapUnmanaged(void),
         name: []const u8,
     ) ParseError!void {
-        _ = self;
-        if (isPrivateNameText(name) and !declared.contains(name)) return ParseError.UnexpectedToken;
+        if (isPrivateNameText(name) and !declared.contains(name)) {
+            if (self.eval_private_names) |outer| if (outer.contains(name)) return;
+            return ParseError.UnexpectedToken;
+        }
     }
 
     fn checkPrivateUsesInPattern(
@@ -5864,6 +5864,33 @@ test "parser validates class private name uses" {
     );
     const nested_prog = try nested.parseModule();
     try std.testing.expectEqual(@as(usize, 1), nested_prog.program.len);
+}
+
+test "private eval contexts validate exact enclosing names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try names.put(allocator, "#outer", "#outer\x001");
+    const cases = [_]struct { source: []const u8, valid: bool }{
+        .{ .source = "this.#outer", .valid = true },
+        .{ .source = "() => this.#outer", .valid = true },
+        .{ .source = "class C { #inner; read(obj) { return obj.#outer + this.#inner; } }", .valid = true },
+        .{ .source = "`value: ${this.#outer}`", .valid = true },
+        .{ .source = "this.#missing", .valid = false },
+        .{ .source = "() => this.#missing", .valid = false },
+        .{ .source = "class C { #inner; read(obj) { return obj.#missing; } }", .valid = false },
+        .{ .source = "`value: ${this.#missing}`", .valid = false },
+    };
+    for (cases) |case| {
+        var parser = try Parser.init(allocator, case.source);
+        parser.in_class = true;
+        parser.eval_private_names = &names;
+        if (case.valid)
+            _ = try parser.parseProgram()
+        else
+            try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
 }
 
 test "parser enforces private name declaration collisions" {

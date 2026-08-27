@@ -128,6 +128,10 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     // any SyntaxError it creates, not the caller's current realm.
     const nt = self.new_target;
     const saved_env = self.env;
+    // CreateDynamicFunction never captures the caller's PrivateEnvironment.
+    const saved_private_map = self.current_private_map;
+    self.current_private_map = null;
+    defer self.current_private_map = saved_private_map;
     var swapped = false;
     if (self.active_native) |callee| {
         if (callee.private_data) |pd| {

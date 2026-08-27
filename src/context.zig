@@ -29267,6 +29267,106 @@ test "realm global identity is independent of mutable globalThis" {
     };
 }
 
+test "private eval contexts survive function escape and suspension" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "class C { #x = 7; *read(a = eval('this.#x')) { yield a; } } var result = String(new C().read().next().value);", .expected = "7" },
+        .{ .source = "class C { #x = 7; *read() { yield eval('this.#x'); yield eval('this.#x') + 1; } } var it = new C().read(); var result = it.next().value + ':' + it.next().value;", .expected = "7:8" },
+        .{ .source = "var result = 'pending'; class C { #x = 7; async read(a = eval('this.#x')) { await 0; return a + eval('this.#x'); } } new C().read().then(function(v) { result = String(v); }, function(e) { result = e.name; });", .expected = "14" },
+        .{ .source = "var result = 'pending'; class C { #x = 7; async *read(a = eval('this.#x')) { yield a; await 0; yield eval('this.#x') + 1; } } var it = new C().read(); it.next().then(function(a) { return it.next().then(function(b) { result = a.value + ':' + b.value; }); }).catch(function(e) { result = e.name; });", .expected = "7:8" },
+        .{ .source = "function* gen(a = eval('arguments.length')) { yield a; } class C { field = gen().next().value; } var result = String(new C().field);", .expected = "0" },
+        .{ .source = "function* gen() { yield eval('arguments.length'); } class C { field = gen().next().value; } var result = String(new C().field);", .expected = "0" },
+        .{ .source = "var result = 'pending'; async function read() { return eval('arguments.length'); } class C { field = read(1); } new C().field.then(function(v) { result = String(v); }, function(e) { result = e.name; });", .expected = "1" },
+        .{ .source = "var result = 'pending'; class C { read = async () => { await 0; return eval('arguments'); }; } new C().read().then(function() { result = 'miss'; }, function(e) { result = e.name; });", .expected = "SyntaxError" },
+        .{ .source = "class C { #x = 7; read() { return () => eval('this.#x'); } } var fn = new C().read(); var result = String(fn());", .expected = "7" },
+        .{ .source = "var result = 'pending'; class C { #x = 7; read() { return async () => { await 0; return eval('this.#x'); }; } } new C().read()().then(function(v) { result = String(v); }, function(e) { result = e.name; });", .expected = "7" },
+        .{ .source = "class C { #x = 7; read() { return function(obj) { return eval('obj.#x'); }; } } var obj = new C(); var result = String(obj.read()(obj));", .expected = "7" },
+        .{ .source = "class C { #x = 7; read() { return function*(obj) { yield eval('obj.#x'); }; } } var obj = new C(); var result = String(obj.read()(obj).next().value);", .expected = "7" },
+        .{ .source = "class C { #x = 7; read() { return class D { #y = 5; *read(obj) { yield eval('obj.#x + this.#y'); } }; } } var obj = new C(), D = obj.read(); var result = String(new D().read(obj).next().value);", .expected = "12" },
+        .{ .source = "class C { #x = 7; read() { return class D { *read(obj) { yield eval('obj.#x'); } }; } } var obj = new C(), D = obj.read(); var result = String(new D().read(obj).next().value);", .expected = "7" },
+        .{ .source = "class C { #x = 7; read() { return class D { #x = 5; *read() { yield eval('this.#x'); } }; } } var D = new C().read(); var result = String(new D().read().next().value);", .expected = "5" },
+        .{ .source = "class C { #x = 7; *read() { yield eval('this.#x'); } } class D { #x = 9; read(it) { return it.next().value + ':' + eval('this.#x'); } } var result = new D().read(new C().read());", .expected = "7:9" },
+        .{ .source = "var touched = 0; class C { #x; read() { try { eval('touched = 1; this.#missing'); return 'miss'; } catch(e) { return e.name; } } } var result = new C().read() + ':' + touched;", .expected = "SyntaxError:0" },
+        .{ .source = "class C { #x = 7; read() { return (0,eval)('(obj) => eval(\"obj.#x\")'); } } var obj = new C(), fn = obj.read(), result; try { fn(obj); result = 'miss'; } catch(e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "class C { #x = 7; read() { return Function('obj', 'return eval(\"obj.#x\")'); } } var obj = new C(), fn = obj.read(), result; try { fn(obj); result = 'miss'; } catch(e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "class C { #x = 7; read() { return Object.getPrototypeOf(function*(){}).constructor('obj', 'yield eval(\"obj.#x\")'); } } var obj = new C(), fn = obj.read(), result; try { fn(obj).next(); result = 'miss'; } catch(e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "class C { #x = 7; *read() { throw 1; } } class D { #x = 9; read(it) { try { it.next(); } catch(e) {} return eval('this.#x'); } } var result = String(new D().read(new C().read()));", .expected = "9" },
+        .{ .source = "function* gen() { yield 1; } class C { field = (gen().next(), eval('arguments')); } var result; try { new C(); result = 'miss'; } catch(e) { result = e.name; }", .expected = "SyntaxError" },
+        .{ .source = "class C { #x = 7; read() { return eval('(class { *read(obj) { yield eval(\"obj.#x\"); } })'); } } var obj = new C(), D = obj.read(); var result = String(new D().read(obj).next().value);", .expected = "7" },
+        .{ .source = "class C { read = (0, eval)('() => eval(\"typeof arguments\")'); } var result = new C().read();", .expected = "undefined" },
+    };
+    for (cases) |case| for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        errdefer std.debug.print("private eval context ({s}): {s}\n", .{ @tagName(mode), case.source });
+        _ = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, (try ctx.evaluate("result")).asStr());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    };
+}
+
+test "private eval contexts remain lexical across shared no-GIL calls" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\class C { #x = 7; read() { return () => eval('this.#x'); } *gen() { yield eval('this.#x'); } }
+        \\class D { #x = 9; read() { return () => eval('this.#x'); } *gen() { yield eval('this.#x'); } }
+        \\var left = new C(), right = new D(), first = left.read(), second = right.read();
+        \\function lane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+        \\  var sum = 0;
+        \\  for (var i = 0; i < 32; i++)
+        \\    sum += first() + second() + left.gen().next().value + right.gen().next().value;
+        \\  return sum;
+        \\}
+        \\var lanes = [], sum = 0;
+        \\for (var i = 0; i < 4; i++) lanes.push(new Thread(lane));
+        \\for (var i = 0; i < 4; i++) sum += lanes[i].join();
+        \\sum
+    );
+    try std.testing.expectEqual(@as(f64, 4096), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
+test "private eval contexts retain suspended receivers across moving collection" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        ctx.collectGarbage();
+        _ = try ctx.evaluate(
+            \\class C {
+            \\  #x = { value: 7 };
+            \\  *read() { yield eval('this.#x.value'); yield eval('this.#x.value') + 1; }
+            \\  arrow() { return () => eval('this.#x.value'); }
+            \\}
+            \\var obj = new C(), retained = obj.read(), arrow = obj.arrow();
+            \\retained.next().value;
+        );
+        const before = ctx.global_object.getOwn("obj").?.asObj();
+        const compacted = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+        try std.testing.expect(compacted.moved_cells > 0);
+        try std.testing.expect(before != ctx.global_object.getOwn("obj").?.asObj());
+        try std.testing.expectEqualStrings("8:7", (try ctx.evaluate("retained.next().value + ':' + arrow()")).asStr());
+    }
+}
+
 test "callee parameter initialization isolates eval metadata across execution modes" {
     const cases = [_]struct { source: []const u8, expected: []const u8 }{
         .{ .source = "function* gen(a = eval('var a = 42')) {} var result; try { gen(); result = 'miss'; } catch (e) { result = e.name; }", .expected = "SyntaxError" },

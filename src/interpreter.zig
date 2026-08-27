@@ -2409,7 +2409,8 @@ pub const Function = struct {
     /// The declaring class evaluation's private-name map (`#x` → its unique storage
     /// key). A direct eval inside this function's body resolves the private names it
     /// references through this map (`getWithEval(){ return eval("this.#x") }`).
-    /// Null for non-class functions; arrows inherit the enclosing one at call time.
+    /// Captured lexically by every function, including arrows and nested functions.
+    /// The map and its storage-key strings are immutable Context-arena metadata.
     private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
     /// Arrow functions capture `this` lexically at creation (like `home_object`
     /// and `super_ctor`); every call uses this captured value and ignores any
@@ -6704,6 +6705,7 @@ pub const Interpreter = struct {
             .is_method = fnode.is_method,
             .import_meta_slot = self.import_meta_slot,
             .module_referrer = self.cur_module,
+            .private_map = self.current_private_map,
         };
         // A `with` block's object Environment Record is part of the lexical chain
         // (`Environment.with_object`), so a function defined inside a `with`
@@ -7393,7 +7395,8 @@ pub const Interpreter = struct {
     /// Rewrite this class's private names (`#x` → a unique storage key) in member
     /// keys and bodies, and return the raw→storage map (persisted in the arena) so
     /// the class's functions can resolve private names a direct eval references.
-    /// Returns null when the class declares no private names.
+    /// Includes enclosing private names, with this class's declarations shadowing
+    /// them (ClassDefinitionEvaluation's NewPrivateEnvironment).
     fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!?*const std.StringHashMapUnmanaged([]const u8) {
         const map = try self.arena.create(std.StringHashMapUnmanaged([]const u8));
         map.* = .empty;
@@ -7401,7 +7404,7 @@ pub const Interpreter = struct {
             if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.contains(m.key)) continue;
             try map.put(self.arena, m.key, try self.nextPrivateStorageKey(m.key));
         }
-        if (map.count() == 0) return null;
+        if (map.count() == 0) return self.current_private_map;
         for (members) |*m| {
             m.key = remapPrivateName(map, m.key);
             // A computed key (`[expr]`) may itself reference a private name —
@@ -7411,6 +7414,15 @@ pub const Interpreter = struct {
             if (m.field_init) |init| try self.rewritePrivateNamesInNode(init, map);
             if (m.func) |func| try self.rewritePrivateNamesInNode(func, map);
             if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, map);
+        }
+        // Keep the published map immutable. Its flattened lookup preserves the
+        // complete lexical private environment without mutating an outer class.
+        if (self.current_private_map) |outer| {
+            var names = outer.iterator();
+            while (names.next()) |entry| {
+                if (!map.contains(entry.key_ptr.*))
+                    try map.put(self.arena, entry.key_ptr.*, entry.value_ptr.*);
+            }
         }
         return map;
     }
@@ -8624,7 +8636,7 @@ pub const Interpreter = struct {
         };
         self.stack_trace_call_frame = &stack_trace_call_frame;
         if (self.debug_statement_hook != null or self.host_statement_hook != null) self.debug_call_frame = &debug_call_frame;
-        if (!func.is_arrow) self.current_private_map = func.private_map; // arrows inherit the enclosing class's map
+        self.current_private_map = func.private_map; // PrepareForOrdinaryCall uses the lexical [[PrivateEnvironment]]
         if (!func.is_arrow) {
             self.active_function = func.obj;
             if (func.obj) |fo| {
@@ -9052,8 +9064,16 @@ pub const Interpreter = struct {
         // FunctionDeclarationInstantiation uses the callee's [[Strict]], even
         // when a suspendable function binds its parameters before body entry.
         const saved_strict = self.strict;
+        const saved_private_map = self.current_private_map;
+        const saved_field_initializer = self.in_field_initializer;
         self.strict = func.is_strict;
-        defer self.strict = saved_strict;
+        self.current_private_map = func.private_map;
+        self.in_field_initializer = func.is_arrow and func.field_init_ctx;
+        defer {
+            self.strict = saved_strict;
+            self.current_private_map = saved_private_map;
+            self.in_field_initializer = saved_field_initializer;
+        }
         try self.bindParams2(func.params, args, func.is_arrow);
     }
 
@@ -20044,11 +20064,11 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     if (self.direct_eval_call and self.strict) parser.strict = true;
     if (self.direct_eval_call and self.direct_eval_new_target_allowed) parser.new_target_depth = 1;
     // A direct eval inside a class element may reference the class's private names
-    // (`eval("this.#x")`): allow them in the parse (and skip the undeclared-private
-    // check), then rewrite them below to the class's storage keys.
+    // (`eval("this.#x")`): validate against that exact private environment before
+    // executing any code, then rewrite them below to the class's storage keys.
     if (self.direct_eval_call and self.current_private_map != null) {
         parser.in_class = true;
-        parser.eval_private_allowed = true;
+        parser.eval_private_names = self.current_private_map;
     }
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("eval", src, &parser, err);
     try self.registerParsedDynamicDebugScript(
@@ -20106,7 +20126,17 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     const saved_env = self.env;
     const saved_this = self.this_value;
     const saved_glob = self.global_object;
+    const saved_private_map = self.current_private_map;
+    const saved_field_initializer = self.in_field_initializer;
+    defer {
+        self.current_private_map = saved_private_map;
+        self.in_field_initializer = saved_field_initializer;
+    }
     if (!self.direct_eval_call) {
+        // PerformEval gives indirect eval a null PrivateEnvironment, including
+        // functions created by that eval while its caller is inside a class.
+        self.current_private_map = null;
+        self.in_field_initializer = false;
         const fnobj = self.active_native orelse return Value.undef();
         const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return Value.undef()));
         self.env = genv;
@@ -24796,6 +24826,10 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
             // SyntaxError instances are from that realm too.
             const nt = self.new_target;
             const saved_env = self.env;
+            // CreateDynamicFunction does not close over the caller's private names.
+            const saved_private_map = self.current_private_map;
+            self.current_private_map = null;
+            defer self.current_private_map = saved_private_map;
             var swapped = false;
             if (self.active_native) |callee| {
                 if (callee.private_data) |pd| {

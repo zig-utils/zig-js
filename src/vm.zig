@@ -442,6 +442,10 @@ pub const Generator = struct {
     function_identity: usize = 0,
     definition_location: ?interp.DebugStatementLocation = null,
     strict: bool = false,
+    // Immutable lexical metadata published with the activation. The map and
+    // its strings are Context-arena-owned, not moving GC cells.
+    private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    field_init_ctx: bool = false,
     exec: Exec = .{},
     env: *Environment,
     this_value: Value = Value.undef(),
@@ -5500,6 +5504,7 @@ test "callee parameter initialization restores metadata after allocation failure
     const tdz_marker = try gc_mod.allocObj(allocator);
     tdz_marker.* = .{};
     const caller_params = [_]ast.Param{.{ .name = "caller" }};
+    const caller_private_map: std.StringHashMapUnmanaged([]const u8) = .empty;
     var failures: usize = 0;
     var succeeded = false;
     for (0..128) |fail_index| {
@@ -5514,6 +5519,8 @@ test "callee parameter initialization restores metadata after allocation failure
             .in_param_expr = false,
             .in_param_default = true,
             .cur_func_params = &caller_params,
+            .current_private_map = &caller_private_map,
+            .in_field_initializer = true,
             .binding_const = true,
             .binding_hoisted = true,
         };
@@ -5527,6 +5534,8 @@ test "callee parameter initialization restores metadata after allocation failure
         try std.testing.expect(machine.strict);
         try std.testing.expect(!machine.in_param_expr);
         try std.testing.expect(machine.in_param_default);
+        try std.testing.expectEqual(&caller_private_map, machine.current_private_map.?);
+        try std.testing.expect(machine.in_field_initializer);
         try std.testing.expectEqual(caller_params[0..].ptr, machine.cur_func_params.ptr);
         try std.testing.expectEqual(@as(usize, 1), machine.cur_func_params.len);
         try std.testing.expect(machine.binding_const);
@@ -7517,6 +7526,18 @@ fn ensureBindingReferenceStorage(vm: *Interpreter, exec: *Exec, chunk: *const Ch
 }
 
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    const saved_private_map = vm.current_private_map;
+    const saved_field_initializer = vm.in_field_initializer;
+    if (gen) |activation| {
+        // The suspended execution context owns its PrivateEnvironment and
+        // lexical field-initializer restriction (ECMA-262 PerformEval).
+        vm.current_private_map = activation.private_map;
+        vm.in_field_initializer = activation.field_init_ctx;
+    }
+    defer {
+        vm.current_private_map = saved_private_map;
+        vm.in_field_initializer = saved_field_initializer;
+    }
     const saved_param_expr = vm.in_param_expr;
     const saved_param_default = vm.in_param_default;
     if (gen != null) {
@@ -9601,6 +9622,8 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
         .function_identity = @intFromPtr(func),
         .definition_location = func.definition_location,
         .strict = func.is_strict,
+        .private_map = func.private_map,
+        .field_init_ctx = func.is_arrow and func.field_init_ctx,
         .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
@@ -10046,6 +10069,8 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
         .function_identity = @intFromPtr(func),
         .definition_location = func.definition_location,
         .strict = func.is_strict,
+        .private_map = func.private_map,
+        .field_init_ctx = func.is_arrow and func.field_init_ctx,
         .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
@@ -10366,6 +10391,8 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
         .function_identity = @intFromPtr(func),
         .definition_location = func.definition_location,
         .strict = func.is_strict,
+        .private_map = func.private_map,
+        .field_init_ctx = func.is_arrow and func.field_init_ctx,
         .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
@@ -10919,6 +10946,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .is_strict = tmpl.is_strict,
         .import_meta_slot = vm.import_meta_slot,
         .module_referrer = vm.cur_module,
+        .private_map = vm.current_private_map,
         .chunk = if (tmpl.is_generator or tmpl.is_async) null else tmpl.chunk,
         .vm_inline_calls_safe = if (tmpl.chunk) |compiled| interp.vmChunkAllowsInlineCalls(compiled) else false,
         .gen_chunk = if (tmpl.is_generator) tmpl.chunk else null,
@@ -11420,7 +11448,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
         .closure_environment = func.closure,
     };
-    if (!func.is_arrow) vm.current_private_map = func.private_map; // a direct eval here resolves the class's private names
+    vm.current_private_map = func.private_map; // PrepareForOrdinaryCall's lexical [[PrivateEnvironment]]
     vm.strict = func.is_strict;
     vm.home_object = func.home_object;
     // GetSuperConstructor observes a class constructor's current [[Prototype]];
