@@ -17751,11 +17751,99 @@ pub const Interpreter = struct {
     ) EvalError!?Value {
         std.debug.assert(string.isString());
         if (eq(name, "repeat")) return try self.stringRepeatValue(string, args);
+        if (eq(name, "concat")) {
+            if (args.len == 0) return string;
+            if (args.len == 1) return try self.concatStringValues(string, try self.toStringValue(args[0]));
+        }
         const bytes = if (stringMethodUsesCodeUnitCell(name))
             string.asStr()
         else
             try string.asWtf8(self.arena);
         return self.stringMethod(bytes, name, args, check_protocol, string.asStringCell(), protocol_receiver);
+    }
+
+    fn canonicalStringByteLength(string: Value) EvalError!usize {
+        std.debug.assert(string.isString());
+        const source = string.asStr();
+        var len = source.len;
+        if (string.strIsFlatLatin1()) for (source) |byte| {
+            if (byte >= 0x80)
+                len = std.math.add(usize, len, 1) catch return error.OutOfMemory;
+        };
+        return len;
+    }
+
+    fn copyCanonicalString(string: Value, output: []u8) usize {
+        std.debug.assert(string.isString());
+        const source = string.asStr();
+        if (!string.strIsFlatLatin1()) {
+            @memcpy(output[0..source.len], source);
+            return source.len;
+        }
+        var written: usize = 0;
+        for (source) |byte| {
+            if (byte < 0x80) {
+                output[written] = byte;
+                written += 1;
+            } else {
+                output[written] = @intCast(0xC0 | (byte >> 6));
+                output[written + 1] = @intCast(0x80 | (byte & 0x3F));
+                written += 2;
+            }
+        }
+        return written;
+    }
+
+    fn stringStartsWithLowSurrogate(string: Value) bool {
+        if (string.strIsFlatLatin1()) return false;
+        const unit = wtf8SurrogateAt(string.asStr(), 0) orelse return false;
+        return isLowSurrogate(unit);
+    }
+
+    fn stringEndsWithHighSurrogate(string: Value) bool {
+        if (string.strIsFlatLatin1()) return false;
+        const source = string.asStr();
+        if (source.len < 3) return false;
+        const unit = wtf8SurrogateAt(source, source.len - 3) orelse return false;
+        return isHighSurrogate(unit);
+    }
+
+    fn concatStringValues(self: *Interpreter, left: Value, right: Value) EvalError!Value {
+        std.debug.assert(left.isString() and right.isString());
+        if (left.asStringCell().utf16Len() == 0) return right;
+        if (right.asStringCell().utf16Len() == 0) return left;
+
+        const left_len = try canonicalStringByteLength(left);
+        const right_len = try canonicalStringByteLength(right);
+        const joins_surrogate_pair = stringEndsWithHighSurrogate(left) and stringStartsWithLowSurrogate(right);
+        var output_len = std.math.add(usize, left_len, right_len) catch return error.OutOfMemory;
+        if (joins_surrogate_pair) output_len -= 2;
+        if (output_len > max_string_bytes) return self.throwError("RangeError", "Invalid string length");
+        const output = try self.arena.alloc(u8, output_len);
+
+        if (joins_surrogate_pair) {
+            const left_source = left.asStr();
+            const right_source = right.asStr();
+            const left_prefix_len = left_source.len - 3;
+            @memcpy(output[0..left_prefix_len], left_source[0..left_prefix_len]);
+            var written = left_prefix_len;
+            const high = wtf8SurrogateAt(left_source, left_prefix_len).?;
+            const low = wtf8SurrogateAt(right_source, 0).?;
+            const code_point: u21 = 0x10000 + ((@as(u21, high) - 0xD800) << 10) + (@as(u21, low) - 0xDC00);
+            var encoded: [4]u8 = undefined;
+            const encoded_len = std.unicode.utf8Encode(code_point, &encoded) catch unreachable;
+            std.debug.assert(encoded_len == encoded.len);
+            @memcpy(output[written..][0..encoded.len], &encoded);
+            written += encoded.len;
+            @memcpy(output[written..], right_source[3..]);
+            written += right_source.len - 3;
+            std.debug.assert(written == output.len);
+        } else {
+            const left_written = copyCanonicalString(left, output);
+            const right_written = copyCanonicalString(right, output[left_written..]);
+            std.debug.assert(left_written + right_written == output.len);
+        }
+        return Value.strOwned(self.arena, output);
     }
 
     fn stringRepeatValue(self: *Interpreter, string: Value, args: []const Value) EvalError!Value {
@@ -17769,11 +17857,7 @@ pub const Interpreter = struct {
 
         const source = string.asStr();
         const source_flat = string.strIsFlatLatin1();
-        var canonical_source_len = source.len;
-        if (source_flat) for (source) |byte| {
-            if (byte >= 0x80)
-                canonical_source_len = std.math.add(usize, canonical_source_len, 1) catch return error.OutOfMemory;
-        };
+        const canonical_source_len = try canonicalStringByteLength(string);
 
         const first_surrogate = if (!source_flat) wtf8SurrogateAt(source, 0) else null;
         const last_surrogate = if (!source_flat and source.len >= 3) wtf8SurrogateAt(source, source.len - 3) else null;
@@ -17790,17 +17874,7 @@ pub const Interpreter = struct {
         const output = try self.arena.alloc(u8, output_len);
 
         if (source_flat) {
-            var initialized: usize = 0;
-            for (source) |byte| {
-                if (byte < 0x80) {
-                    output[initialized] = byte;
-                    initialized += 1;
-                } else {
-                    output[initialized] = @intCast(0xC0 | (byte >> 6));
-                    output[initialized + 1] = @intCast(0x80 | (byte & 0x3F));
-                    initialized += 2;
-                }
-            }
+            var initialized = copyCanonicalString(string, output);
             std.debug.assert(initialized == canonical_source_len);
             while (initialized < output.len) {
                 const copy_len = @min(initialized, output.len - initialized);
@@ -19113,9 +19187,9 @@ pub const Interpreter = struct {
             .add => blk: {
                 // String concatenation if either operand is a string.
                 if (l.isString() or r.isString()) {
-                    const ls = try self.toStringWtf8(l);
-                    const rs = try self.toStringWtf8(r);
-                    break :blk try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ ls, rs }));
+                    const left_string = try self.toStringValue(l);
+                    const right_string = try self.toStringValue(r);
+                    break :blk try self.concatStringValues(left_string, right_string);
                 }
                 // Numeric `+`: both operands were already ToPrimitive'd (default
                 // hint) above; ToNumeric(lhs) then ToNumeric(rhs) follow in order,
@@ -53224,6 +53298,51 @@ test "String repeat bounds empty work and fills exact canonical output" {
     const boundary = try Value.strAlloc(a, "\xed\xb0\x80\xed\xa0\x80");
     const repeated_boundary = try machine.stringRepeatValue(boundary, &.{Value.num(2)});
     try std.testing.expectEqualStrings("\xed\xb0\x80\xf0\x90\x80\x80\xed\xa0\x80", try repeated_boundary.asWtf8(a));
+}
+
+test "two-value string concatenation retains empties and canonicalizes boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    const empty = try Value.strAlloc(a, "");
+    const flat = try Value.strAlloc(a, "caf\xc3\xa9\xc3\xbf");
+    try std.testing.expect(flat.strIsFlatLatin1());
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    const right_empty = try machine.applyBinary(.add, flat, empty);
+    try std.testing.expectEqual(flat.rawBits(), right_empty.rawBits());
+    const left_empty = try machine.applyBinary(.add, empty, flat);
+    try std.testing.expectEqual(flat.rawBits(), left_empty.rawBits());
+    const no_args = (try machine.stringMethodValue(flat, "concat", &.{}, false, null)).?;
+    try std.testing.expectEqual(flat.rawBits(), no_args.rawBits());
+    const one_empty = (try machine.stringMethodValue(flat, "concat", &.{empty}, false, null)).?;
+    try std.testing.expectEqual(flat.rawBits(), one_empty.rawBits());
+    try std.testing.expectError(error.OutOfMemory, machine.concatStringValues(Value.str("a"), Value.str("b")));
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+
+    machine.arena = a;
+    const canonical_flat = try machine.concatStringValues(flat, Value.str("!"));
+    try std.testing.expectEqualStrings("caf\xc3\xa9\xc3\xbf!", try canonical_flat.asWtf8(a));
+
+    // Concatenation can join separately well-formed WTF-8 surrogate strings.
+    // The result must use the canonical four-byte scalar representation.
+    const high = try Value.strAlloc(a, "\xed\xa0\x80");
+    const low = try Value.strAlloc(a, "\xed\xb0\x80");
+    const joined = try machine.concatStringValues(high, low);
+    try std.testing.expectEqualStrings("\xf0\x90\x80\x80", try joined.asWtf8(a));
+
+    const order = try evalSource(a,
+        \\let log = '';
+        \\const left = { valueOf() { log += 'l'; return 'a'; } };
+        \\const right = { valueOf() { log += 'r'; return 'b'; } };
+        \\left + right + '|' + log
+    );
+    try std.testing.expectEqualStrings("ab|lr", try order.asWtf8(a));
 }
 
 test "ToString canonicalizes object-produced StringData" {
