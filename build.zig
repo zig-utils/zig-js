@@ -639,6 +639,19 @@ pub fn build(b: *std.Build) void {
     const run_c_api_cpp_smoke = b.addRunArtifact(c_api_cpp_smoke);
     run_c_api_cpp_smoke.step.dependOn(&c_api_audit_cmd.step);
 
+    // Latin-1 crosses the ABI only after `flat_storage_active` changed the stored
+    // byte image, so the boundary must re-encode rather than borrow; the other C
+    // hosts move ASCII only, where the two forms coincide.
+    const c_api_latin1 = b.addExecutable(.{
+        .name = "c-api-latin1",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    c_api_latin1.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_latin1.c") });
+    c_api_latin1.root_module.addIncludePath(b.path("include"));
+    c_api_latin1.root_module.linkLibrary(lib);
+    const run_c_api_latin1 = b.addRunArtifact(c_api_latin1);
+    run_c_api_latin1.step.dependOn(&c_api_audit_cmd.step);
+
     const c_api_inspector_smoke = b.addExecutable(.{
         .name = "c-api-inspector-smoke",
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
@@ -651,6 +664,7 @@ pub fn build(b: *std.Build) void {
 
     const c_api_test_step = b.step("test-c-api", "Compile, link, and run C and C++ public-ABI hosts");
     c_api_test_step.dependOn(&run_c_api_c_smoke.step);
+    c_api_test_step.dependOn(&run_c_api_latin1.step);
     c_api_test_step.dependOn(&run_c_api_cpp_smoke.step);
     c_api_test_step.dependOn(&run_c_api_inspector_smoke.step);
 
