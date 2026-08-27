@@ -17795,7 +17795,8 @@ pub const Interpreter = struct {
     fn stringMethodReadsFlatImage(name: []const u8) bool {
         return eq(name, "slice") or eq(name, "substring") or eq(name, "substr") or
             eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes") or
-            eq(name, "startsWith") or eq(name, "endsWith");
+            eq(name, "startsWith") or eq(name, "endsWith") or
+            eq(name, "padStart") or eq(name, "padEnd");
     }
 
     fn stringMethodValue(
@@ -18342,18 +18343,46 @@ pub const Interpreter = struct {
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "padStart") or eq(name, "padEnd")) {
+            const start = eq(name, "padStart");
             const target = toLen(try self.toNumberV(arg0(args)));
             const len = stringLengthForAccess(s, s_ascii, s_cell);
-            if (len >= target) return try Value.strOwned(self.arena, try self.arena.dupe(u8, s));
+            // The result is the receiver itself; returning its cell keeps an
+            // immutable string from being copied (and never re-encodes a flat one).
+            if (len >= target) return try self.stringReceiverValue(s, s_cell);
             const pad = if (args.len > 1 and !args[1].isUndefined()) try self.toStringWtf8(args[1]) else " ";
             const pad_units = utf16LenOfString(pad);
-            if (pad_units == 0) return try Value.strOwned(self.arena, try self.arena.dupe(u8, s));
+            if (pad_units == 0) return try self.stringReceiverValue(s, s_cell);
+            const fill_units = target - len;
+
+            // A flat receiver with an ASCII pad — including the default " " — is a
+            // flat middle between ASCII affixes, so the result can be assembled
+            // straight into the cell's final physical representation instead of
+            // re-encoding the receiver just to copy it back. Other receivers keep
+            // the buffer path, whose cell hashes lazily.
+            if (s_flat and stringBytesAreAscii(pad)) {
+                const fill = try self.arena.alloc(u8, fill_units);
+                var written: usize = 0;
+                while (written < fill_units) {
+                    const chunk = @min(pad.len, fill_units - written);
+                    @memcpy(fill[written..][0..chunk], pad[0..chunk]);
+                    written += chunk;
+                }
+                const receiver = try self.stringReceiverValue(s, s_cell);
+                return if (start)
+                    try self.stringValueWithAsciiAffixes(fill, receiver, "")
+                else
+                    try self.stringValueWithAsciiAffixes("", receiver, fill);
+            }
+
+            // Non-ASCII pad: build the canonical WTF-8 result, so a flat receiver
+            // needs its WTF-8 view here.
+            const body = if (s_flat) try strcell.latin1FlatToWtf8(self.arena, s) else s;
             var buf: std.ArrayListUnmanaged(u8) = .empty;
-            var fill_len = target - len;
-            if (eq(name, "padEnd")) try buf.appendSlice(self.arena, s);
+            var fill_len = fill_units;
+            if (!start) try buf.appendSlice(self.arena, body);
             while (fill_len >= pad_units) : (fill_len -= pad_units) try buf.appendSlice(self.arena, pad);
             if (fill_len > 0) try self.appendStringUtf16Prefix(&buf, pad, fill_len);
-            if (eq(name, "padStart")) try buf.appendSlice(self.arena, s);
+            if (start) try buf.appendSlice(self.arena, body);
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "replace") or eq(name, "replaceAll")) {
