@@ -17750,11 +17750,93 @@ pub const Interpreter = struct {
         protocol_receiver: ?Value,
     ) EvalError!?Value {
         std.debug.assert(string.isString());
+        if (eq(name, "repeat")) return try self.stringRepeatValue(string, args);
         const bytes = if (stringMethodUsesCodeUnitCell(name))
             string.asStr()
         else
             try string.asWtf8(self.arena);
         return self.stringMethod(bytes, name, args, check_protocol, string.asStringCell(), protocol_receiver);
+    }
+
+    fn stringRepeatValue(self: *Interpreter, string: Value, args: []const Value) EvalError!Value {
+        const count_number = try self.toNumberV(arg0(args));
+        const count_integer = if (std.math.isNan(count_number)) @as(f64, 0) else @trunc(count_number);
+        if (count_integer < 0 or std.math.isInf(count_integer))
+            return self.throwError("RangeError", "Invalid count value");
+        if (count_integer == 0) return Value.str("");
+        if (string.asStringCell().utf16Len() == 0) return string;
+        if (count_integer == 1) return string;
+
+        const source = string.asStr();
+        const source_flat = string.strIsFlatLatin1();
+        var canonical_source_len = source.len;
+        if (source_flat) for (source) |byte| {
+            if (byte >= 0x80)
+                canonical_source_len = std.math.add(usize, canonical_source_len, 1) catch return error.OutOfMemory;
+        };
+
+        const first_surrogate = if (!source_flat) wtf8SurrogateAt(source, 0) else null;
+        const last_surrogate = if (!source_flat and source.len >= 3) wtf8SurrogateAt(source, source.len - 3) else null;
+        const joins_surrogate_pair = first_surrogate != null and last_surrogate != null and
+            isLowSurrogate(first_surrogate.?) and isHighSurrogate(last_surrogate.?);
+        const per_additional_copy = canonical_source_len - @as(usize, if (joins_surrogate_pair) 2 else 0);
+        if (canonical_source_len > max_string_bytes) return self.throwError("RangeError", "Invalid string length");
+        const max_count = 1 + (max_string_bytes - canonical_source_len) / per_additional_copy;
+        if (count_integer > @as(f64, @floatFromInt(max_count)))
+            return self.throwError("RangeError", "Invalid string length");
+        const count: usize = @intFromFloat(count_integer);
+        const tail_len = std.math.mul(usize, count - 1, per_additional_copy) catch return error.OutOfMemory;
+        const output_len = std.math.add(usize, canonical_source_len, tail_len) catch return error.OutOfMemory;
+        const output = try self.arena.alloc(u8, output_len);
+
+        if (source_flat) {
+            var initialized: usize = 0;
+            for (source) |byte| {
+                if (byte < 0x80) {
+                    output[initialized] = byte;
+                    initialized += 1;
+                } else {
+                    output[initialized] = @intCast(0xC0 | (byte >> 6));
+                    output[initialized + 1] = @intCast(0x80 | (byte & 0x3F));
+                    initialized += 2;
+                }
+            }
+            std.debug.assert(initialized == canonical_source_len);
+            while (initialized < output.len) {
+                const copy_len = @min(initialized, output.len - initialized);
+                @memcpy(output[initialized .. initialized + copy_len], output[0..copy_len]);
+                initialized += copy_len;
+            }
+        } else if (joins_surrogate_pair) {
+            const prefix_len = source.len - 3;
+            @memcpy(output[0..prefix_len], source[0..prefix_len]);
+            var initialized = prefix_len;
+            const high = last_surrogate.?;
+            const low = first_surrogate.?;
+            const code_point: u21 = 0x10000 + ((@as(u21, high) - 0xD800) << 10) + (@as(u21, low) - 0xDC00);
+            var encoded: [4]u8 = undefined;
+            const encoded_len = std.unicode.utf8Encode(code_point, &encoded) catch unreachable;
+            std.debug.assert(encoded_len == encoded.len);
+            const middle = source[3 .. source.len - 3];
+            for (1..count) |_| {
+                @memcpy(output[initialized..][0..encoded.len], &encoded);
+                initialized += encoded.len;
+                @memcpy(output[initialized..][0..middle.len], middle);
+                initialized += middle.len;
+            }
+            @memcpy(output[initialized..][0..3], source[source.len - 3 ..]);
+            initialized += 3;
+            std.debug.assert(initialized == output.len);
+        } else {
+            @memcpy(output[0..source.len], source);
+            var initialized = source.len;
+            while (initialized < output.len) {
+                const copy_len = @min(initialized, output.len - initialized);
+                @memcpy(output[initialized .. initialized + copy_len], output[0..copy_len]);
+                initialized += copy_len;
+            }
+        }
+        return Value.strOwned(self.arena, output);
     }
 
     /// ToIntegerOrInfinity(v) clamped into `[0, len]` — the position argument of
@@ -17881,15 +17963,6 @@ pub const Interpreter = struct {
             return try Value.strAlloc(self.arena, try unicode_case.toLower(self.arena, s));
         }
         if (eq(name, "trim")) return try Value.strAlloc(self.arena, jsTrim(s, true, true));
-        if (eq(name, "repeat")) {
-            const rn = try self.toNumberV(arg0(args));
-            if (rn < 0 or std.math.isInf(rn)) return self.throwError("RangeError", "Invalid count value");
-            const n = toLen(rn);
-            var buf: std.ArrayListUnmanaged(u8) = .empty;
-            var i: usize = 0;
-            while (i < n) : (i += 1) try buf.appendSlice(self.arena, s);
-            return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
-        }
         if (eq(name, "concat")) {
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             try buf.appendSlice(self.arena, s);
@@ -53117,6 +53190,40 @@ test "String methods preserve original protocol receivers and post-coercion cell
         \\protocol && codeUnit && coercions === 1
     );
     try std.testing.expect(result.asBool());
+}
+
+test "String repeat bounds empty work and fills exact canonical output" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    const empty = try Value.strAlloc(a, "");
+    const flat = try Value.strAlloc(a, "\xc3\xa9\xc3\xbf");
+    try std.testing.expect(flat.strIsFlatLatin1());
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    const empty_huge = try machine.stringRepeatValue(empty, &.{Value.num(9007199254740991.0)});
+    try std.testing.expectEqual(empty.rawBits(), empty_huge.rawBits());
+    const one = try machine.stringRepeatValue(flat, &.{Value.num(1)});
+    try std.testing.expectEqual(flat.rawBits(), one.rawBits());
+    const negative_fraction = try machine.stringRepeatValue(flat, &.{Value.num(-0.5)});
+    try std.testing.expectEqualStrings("", negative_fraction.asStr());
+    try std.testing.expectError(error.OutOfMemory, machine.stringRepeatValue(Value.str("ab"), &.{Value.num(2)}));
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+
+    machine.arena = a;
+    const repeated_flat = try machine.stringRepeatValue(flat, &.{Value.num(3)});
+    try std.testing.expectEqualStrings("\xc3\xa9\xc3\xbf\xc3\xa9\xc3\xbf\xc3\xa9\xc3\xbf", try repeated_flat.asWtf8(a));
+
+    // Repetition can join a trailing high surrogate to the next copy's leading
+    // low surrogate. The exact-size path canonicalizes every such boundary.
+    const boundary = try Value.strAlloc(a, "\xed\xb0\x80\xed\xa0\x80");
+    const repeated_boundary = try machine.stringRepeatValue(boundary, &.{Value.num(2)});
+    try std.testing.expectEqualStrings("\xed\xb0\x80\xf0\x90\x80\x80\xed\xa0\x80", try repeated_boundary.asWtf8(a));
 }
 
 test "ToString canonicalizes object-produced StringData" {
