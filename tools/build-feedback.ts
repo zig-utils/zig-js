@@ -560,6 +560,8 @@ export function selfTest(): void {
     "230 1 /tmp/home-ts-checker/o/test --listen=-",
     "240 1 /repo/zig-out/bin/test262 --diag test/language",
     "250 1 /tmp/unrelated-test",
+    "260 1 /toolchain/zig version",
+    "270 1 /toolchain/zig --version",
   ].join("\n");
   requireValue(
     JSON.stringify(competingEvidenceProcesses(processFixture, 120)) === JSON.stringify([

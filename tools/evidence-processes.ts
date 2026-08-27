@@ -16,6 +16,14 @@ function processBasename(command: string): [string, string] {
   return [executable, executable.slice(slash + 1)];
 }
 
+function isCompetingZigCommand(command: string): boolean {
+  const words = command.split(/\s+/), subcommand = words[1] || "";
+  // Identity probes are bounded metadata reads, not compiler work. Treat every
+  // other Zig invocation conservatively as competing so new build subcommands
+  // remain fail-closed without maintaining an incomplete work allowlist.
+  return subcommand !== "version" && subcommand !== "--version";
+}
+
 function relatedProcesses(rows: ProcessRow[], selfPid: number): Set<number> {
   const parents = new Map(rows.map((row) => [row.pid, row.parent])),
     related = new Set<number>(),
@@ -38,7 +46,8 @@ export function competingEvidenceProcesses(source: string, selfPid: number): str
   return rows.filter((row) => {
     if (related.has(row.pid)) return false;
     const [executable, basename] = processBasename(row.command);
-    if (basename === "zig" || basename === "maker") return true;
+    if (basename === "zig") return isCompetingZigCommand(row.command);
+    if (basename === "maker") return true;
     if (["home-url-final", "unit-test-parallel", "threads-test", "test262", "frontend-parse-benchmark"].includes(basename)) return true;
     return basename === "test" &&
       (executable.includes("/.zig-cache/") || executable.startsWith("/tmp/home-") || executable.startsWith("/private/tmp/home-"));
