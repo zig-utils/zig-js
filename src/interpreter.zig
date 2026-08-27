@@ -16335,6 +16335,7 @@ pub const Interpreter = struct {
                 if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString() and o.getOwn(name) == null) {
                     const bp = o.boxedPrimitive().?;
                     if (eq(name, "valueOf") or eq(name, "toString")) return bp;
+                    if (eq(name, "concat")) return try self.stringConcatReceiverValue(recv, args, false);
                     const string = try self.toStringValue(recv);
                     if (try self.stringMethodValue(string, name, args, true, recv)) |r| return r;
                 }
@@ -16347,6 +16348,7 @@ pub const Interpreter = struct {
                 // Generic String.prototype methods coerce `this` to string
                 // (`String.prototype.split.call(obj)`).
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
+                    if (eq(name, "concat")) return try self.stringConcatReceiverValue(recv, args, false);
                     return try self.stringMethodValue(try self.toStringValue(recv), name, args, true, recv);
                 }
                 // `Object.prototype.valueOf` for an ordinary object returns the
@@ -16369,10 +16371,12 @@ pub const Interpreter = struct {
             },
             .number => {
                 if (try self.numberMethod(recv.asNum(), name, args)) |r| return r;
+                if (eq(name, "concat")) return try self.stringConcatReceiverValue(recv, args, false);
                 if (isStringGeneric(name)) return try self.stringMethodValue(try self.toStringValue(recv), name, args, true, recv);
             },
             .boolean => {
                 if (try self.booleanMethod(recv.asBool(), name, args)) |r| return r;
+                if (eq(name, "concat")) return try self.stringConcatReceiverValue(recv, args, false);
                 if (isStringGeneric(name)) return try self.stringMethodValue(try self.toStringValue(recv), name, args, true, recv);
             },
             else => {},
@@ -17751,10 +17755,7 @@ pub const Interpreter = struct {
     ) EvalError!?Value {
         std.debug.assert(string.isString());
         if (eq(name, "repeat")) return try self.stringRepeatValue(string, args);
-        if (eq(name, "concat")) {
-            if (args.len == 0) return string;
-            if (args.len == 1) return try self.concatStringValues(string, try self.toStringValue(args[0]));
-        }
+        if (eq(name, "concat")) return try self.stringConcatValue(string, args);
         const bytes = if (stringMethodUsesCodeUnitCell(name))
             string.asStr()
         else
@@ -17808,42 +17809,119 @@ pub const Interpreter = struct {
         return isHighSurrogate(unit);
     }
 
-    fn concatStringValues(self: *Interpreter, left: Value, right: Value) EvalError!Value {
-        std.debug.assert(left.isString() and right.isString());
-        if (left.asStringCell().utf16Len() == 0) return right;
-        if (right.asStringCell().utf16Len() == 0) return left;
-
-        const left_len = try canonicalStringByteLength(left);
-        const right_len = try canonicalStringByteLength(right);
-        const joins_surrogate_pair = stringEndsWithHighSurrogate(left) and stringStartsWithLowSurrogate(right);
-        var output_len = std.math.add(usize, left_len, right_len) catch return error.OutOfMemory;
-        if (joins_surrogate_pair) output_len -= 2;
-        if (output_len > max_string_bytes) return self.throwError("RangeError", "Invalid string length");
-        const output = try self.arena.alloc(u8, output_len);
-
-        if (joins_surrogate_pair) {
-            const left_source = left.asStr();
-            const right_source = right.asStr();
-            const left_prefix_len = left_source.len - 3;
-            @memcpy(output[0..left_prefix_len], left_source[0..left_prefix_len]);
-            var written = left_prefix_len;
-            const high = wtf8SurrogateAt(left_source, left_prefix_len).?;
-            const low = wtf8SurrogateAt(right_source, 0).?;
-            const code_point: u21 = 0x10000 + ((@as(u21, high) - 0xD800) << 10) + (@as(u21, low) - 0xDC00);
-            var encoded: [4]u8 = undefined;
-            const encoded_len = std.unicode.utf8Encode(code_point, &encoded) catch unreachable;
-            std.debug.assert(encoded_len == encoded.len);
-            @memcpy(output[written..][0..encoded.len], &encoded);
-            written += encoded.len;
-            @memcpy(output[written..], right_source[3..]);
-            written += right_source.len - 3;
-            std.debug.assert(written == output.len);
-        } else {
-            const left_written = copyCanonicalString(left, output);
-            const right_written = copyCanonicalString(right, output[left_written..]);
-            std.debug.assert(left_written + right_written == output.len);
+    fn concatStringSequence(self: *Interpreter, strings: []const Value) EvalError!Value {
+        std.debug.assert(strings.len != 0);
+        // Coercion is already complete. Size the canonical WTF-8 result before
+        // allocating it, while accounting for surrogate pairs formed across
+        // empty pieces, then stream every physical representation exactly once.
+        var output_len: usize = 0;
+        var nonempty_count: usize = 0;
+        var sole_nonempty = strings[0];
+        var previous: ?Value = null;
+        for (strings) |string| {
+            std.debug.assert(string.isString());
+            if (string.asStringCell().utf16Len() == 0) continue;
+            const piece_len = try canonicalStringByteLength(string);
+            output_len = std.math.add(usize, output_len, piece_len) catch return error.OutOfMemory;
+            if (previous) |left| {
+                if (stringEndsWithHighSurrogate(left) and stringStartsWithLowSurrogate(string)) output_len -= 2;
+            }
+            if (output_len > max_string_bytes) return self.throwError("RangeError", "Invalid string length");
+            nonempty_count += 1;
+            sole_nonempty = string;
+            previous = string;
         }
+
+        if (nonempty_count == 0) return strings[0];
+        if (nonempty_count == 1) return sole_nonempty;
+
+        const output = try self.arena.alloc(u8, output_len);
+        var written: usize = 0;
+        previous = null;
+        for (strings) |string| {
+            if (string.asStringCell().utf16Len() == 0) continue;
+            const joins_surrogate_pair = if (previous) |left|
+                stringEndsWithHighSurrogate(left) and stringStartsWithLowSurrogate(string)
+            else
+                false;
+            if (joins_surrogate_pair) {
+                std.debug.assert(written >= 3);
+                written -= 3;
+                const left_source = previous.?.asStr();
+                const right_source = string.asStr();
+                const high = wtf8SurrogateAt(left_source, left_source.len - 3).?;
+                const low = wtf8SurrogateAt(right_source, 0).?;
+                const code_point: u21 = 0x10000 + ((@as(u21, high) - 0xD800) << 10) + (@as(u21, low) - 0xDC00);
+                var encoded: [4]u8 = undefined;
+                const encoded_len = std.unicode.utf8Encode(code_point, &encoded) catch unreachable;
+                std.debug.assert(encoded_len == encoded.len);
+                @memcpy(output[written..][0..encoded.len], &encoded);
+                written += encoded.len;
+                @memcpy(output[written..][0 .. right_source.len - 3], right_source[3..]);
+                written += right_source.len - 3;
+            } else {
+                written += copyCanonicalString(string, output[written..]);
+            }
+            previous = string;
+        }
+        std.debug.assert(written == output.len);
         return Value.strOwned(self.arena, output);
+    }
+
+    fn concatStringValues(self: *Interpreter, left: Value, right: Value) EvalError!Value {
+        return self.concatStringSequence(&.{ left, right });
+    }
+
+    fn stringConcatReceiverValue(
+        self: *Interpreter,
+        receiver: Value,
+        args: []const Value,
+        receiver_is_string: bool,
+    ) EvalError!Value {
+        std.debug.assert(!receiver_is_string or receiver.isString());
+        if (args.len == 0 and receiver_is_string) return receiver;
+        const piece_count = std.math.add(usize, args.len, 1) catch return error.OutOfMemory;
+
+        // Receiver/argument coercion can execute arbitrary JavaScript and
+        // trigger a moving collection. Publish every *original* value before
+        // the first ToString, then replace each slot with its completed string.
+        // Rooting only completed results would leave later object arguments as
+        // stale raw Values after an earlier coercion crossed a moving safepoint.
+        const roots_mark = try self.pushTempRoot(receiver);
+        defer self.restoreTempRoots(roots_mark);
+        if (self.gc != null) {
+            for (args, 1..) |argument, index| {
+                const argument_root = try self.pushTempRoot(argument);
+                std.debug.assert(argument_root == roots_mark + index);
+            }
+            if (!receiver_is_string)
+                self.setTempRoot(roots_mark, try self.toStringValue(self.tempRoot(roots_mark, receiver)));
+            for (args, 1..) |argument, index| {
+                const root = roots_mark + index;
+                self.setTempRoot(root, try self.toStringValue(self.tempRoot(root, argument)));
+            }
+            return self.concatStringSequence(
+                self.gc_temp_roots.items[roots_mark .. roots_mark + piece_count],
+            );
+        }
+
+        const string = if (receiver_is_string) receiver else try self.toStringValue(receiver);
+        // Keep ordinary short calls metadata-allocation-free. Larger calls use
+        // one exact compile-time-independent slice so each observable ToString
+        // runs once and its immutable result survives until final construction.
+        var inline_pieces: [8]Value = undefined;
+        const pieces = if (piece_count <= inline_pieces.len)
+            inline_pieces[0..piece_count]
+        else
+            try self.arena.alloc(Value, piece_count);
+        pieces[0] = string;
+        for (args, 1..) |argument, index|
+            pieces[index] = try self.toStringValue(argument);
+        return self.concatStringSequence(pieces);
+    }
+
+    fn stringConcatValue(self: *Interpreter, string: Value, args: []const Value) EvalError!Value {
+        return self.stringConcatReceiverValue(string, args, true);
     }
 
     fn stringRepeatValue(self: *Interpreter, string: Value, args: []const Value) EvalError!Value {
@@ -18037,12 +18115,6 @@ pub const Interpreter = struct {
             return try Value.strAlloc(self.arena, try unicode_case.toLower(self.arena, s));
         }
         if (eq(name, "trim")) return try Value.strAlloc(self.arena, jsTrim(s, true, true));
-        if (eq(name, "concat")) {
-            var buf: std.ArrayListUnmanaged(u8) = .empty;
-            try buf.appendSlice(self.arena, s);
-            for (args) |a| try buf.appendSlice(self.arena, try self.toStringWtf8(a));
-            return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
-        }
         if (eq(name, "split")) {
             const result = try self.newArray();
             const out = try result.asObj().ensureElementsList(self.arena);
@@ -36403,6 +36475,8 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, name, "replaceAll"))
                 if (try self.replaceAllProtocolDispatch(this, args)) |r| return r;
             if (try self.stringProtocolDispatch(name, this, args)) |r| return r;
+            if (comptime std.mem.eql(u8, name, "concat"))
+                return self.stringConcatReceiverValue(this, args, this.isString());
             const string = try self.toStringValue(this);
             return (try self.stringMethodValue(string, name, args, false, null)) orelse Value.undef();
         }
@@ -53343,6 +53417,74 @@ test "two-value string concatenation retains empties and canonicalizes boundarie
         \\left + right + '|' + log
     );
     try std.testing.expectEqualStrings("ab|lr", try order.asWtf8(a));
+}
+
+test "variadic string concat uses one exact canonical construction" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    const empty = try Value.strAlloc(a, "");
+    const flat = try Value.strAlloc(a, "caf\xc3\xa9\xc3\xbf");
+    try std.testing.expect(flat.strIsFlatLatin1());
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    const retained_receiver = try machine.stringConcatValue(flat, &.{ empty, empty });
+    try std.testing.expectEqual(flat.rawBits(), retained_receiver.rawBits());
+    const retained = try machine.stringConcatValue(empty, &.{ empty, flat, empty });
+    try std.testing.expectEqual(flat.rawBits(), retained.rawBits());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        machine.stringConcatValue(Value.str("a"), &.{ Value.str("b"), Value.str("c") }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+
+    machine.arena = a;
+    const combined = try machine.stringConcatValue(flat, &.{ Value.str("-"), flat, Value.str("!") });
+    try std.testing.expectEqualStrings("caf\xc3\xa9\xc3\xbf-caf\xc3\xa9\xc3\xbf!", try combined.asWtf8(a));
+
+    const many_args = [_]Value{
+        Value.str("b"), Value.str("c"), Value.str("d"), Value.str("e"),
+        Value.str("f"), Value.str("g"), Value.str("h"), Value.str("i"),
+    };
+    const many = try machine.stringConcatValue(Value.str("a"), &many_args);
+    try std.testing.expectEqualStrings("abcdefghi", try many.asWtf8(a));
+
+    // Empty pieces do not interrupt adjacent code units. A high surrogate at
+    // the end of one non-empty piece and a low surrogate at the start of the
+    // next must therefore become one canonical scalar even across empties.
+    const high = try Value.strAlloc(a, "\xed\xa0\x80");
+    const low = try Value.strAlloc(a, "\xed\xb0\x80");
+    const joined = try machine.stringConcatValue(high, &.{ empty, low, empty });
+    try std.testing.expectEqualStrings("\xf0\x90\x80\x80", try joined.asWtf8(a));
+    const low_high = try Value.strAlloc(a, "\xed\xb0\x80\xed\xa0\x80");
+    const twice_joined = try machine.stringConcatValue(high, &.{ low_high, low });
+    try std.testing.expectEqualStrings("\xf0\x90\x80\x80\xf0\x90\x80\x80", try twice_joined.asWtf8(a));
+
+    const order = try evalSource(a,
+        \\let log = '';
+        \\const first = { toString() { log += 'a'; return 'A'; } };
+        \\const stop = { toString() { log += 'b'; throw 1; } };
+        \\const never = { toString() { log += 'c'; return 'C'; } };
+        \\try { ''.concat(first, stop, never); } catch {}
+        \\const result = ''.concat(first, 'B', never);
+        \\result + '|' + log
+    );
+    try std.testing.expectEqualStrings("ABC|abac", try order.asWtf8(a));
+
+    const receiver_order = try evalSource(a,
+        \\let log = '';
+        \\const receiver = { toString() { log += 'r'; return 'R'; } };
+        \\const first = { toString() { log += 'a'; return 'A'; } };
+        \\const second = { toString() { log += 'b'; return 'B'; } };
+        \\const result = String.prototype.concat.call(receiver, first, second);
+        \\result + '|' + log
+    );
+    try std.testing.expectEqualStrings("RAB|rab", try receiver_order.asWtf8(a));
 }
 
 test "ToString canonicalizes object-produced StringData" {

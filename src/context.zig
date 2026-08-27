@@ -21463,6 +21463,104 @@ test "GC requested compaction resumes the same baseline tier from a precise nati
     try std.testing.expectEqual(Context.GcHeap.CompactionStatus.no_candidates, ctx.compactGarbage().status);
 }
 
+test "variadic String concat roots pending arguments across moving nursery" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\function concatMovingLoop(n) {
+        \\  var total = 0;
+        \\  var i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\for (var warm = 0; warm < 10; warm = warm + 1) concatMovingLoop(4096);
+    );
+
+    const loop_object = ctx.global_object.getOwn("concatMovingLoop").?.asObj();
+    const loop: *interp.Function = @ptrCast(@alignCast(loop_object.jsFunction().?));
+    const chunk = loop.chunk.?;
+    try std.testing.expectEqual(jit.TierState.ready, chunk.tier.loadState());
+    try std.testing.expect(chunk.tier.loadCode().?.manages_steps);
+
+    // Start a fresh nursery generation so every value that concat must retain
+    // is eligible for the exact moving checkpoint in the trigger below.
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\globalThis.concatMovingNative = String.prototype.concat;
+        \\globalThis.concatMovingReceiverText = "recv".repeat(2);
+        \\globalThis.concatMovingFirstText = "first".repeat(2);
+        \\globalThis.concatMovingMiddleText = "middle".repeat(2);
+        \\globalThis.concatMovingLastText = "last".repeat(2);
+        \\globalThis.concatMovingReceiver = {
+        \\  toString() { return concatMovingReceiverText; }
+        \\};
+        \\globalThis.concatMovingFirst = {
+        \\  toString() { return concatMovingFirstText; }
+        \\};
+        \\globalThis.concatMovingTrigger = {
+        \\  toString() { concatMovingLoop(20000); return concatMovingMiddleText; }
+        \\};
+        \\globalThis.concatMovingLast = {
+        \\  toString() { return concatMovingLastText; }
+        \\};
+    );
+
+    const receiver_before = ctx.global_object.getOwn("concatMovingReceiverText").?.asStringCell();
+    const first_text_before = ctx.global_object.getOwn("concatMovingFirstText").?.asStringCell();
+    const last_argument_before = ctx.global_object.getOwn("concatMovingLast").?.asObj();
+
+    const gc_saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(gc_saved);
+    const sa_saved = strcell.setActiveArena(ctx.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    const ss_saved = stack_scan.enter(@frameAddress());
+    defer stack_scan.leave(ss_saved);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const ai_saved = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(ai_saved);
+
+    const concat = ctx.global_object.getOwn("concatMovingNative").?;
+    const receiver = ctx.global_object.getOwn("concatMovingReceiver").?;
+    const args = [_]Value{
+        ctx.global_object.getOwn("concatMovingFirst").?,
+        ctx.global_object.getOwn("concatMovingTrigger").?,
+        ctx.global_object.getOwn("concatMovingLast").?,
+    };
+    heap.nursery_threshold_bytes = 1;
+    ctx.movingCheckpointRequest().store(true, .release);
+    const moving_before = heap.accounting().moving_minor_collections;
+    const result = try machine.callValueWithThis(concat, &args, receiver);
+
+    try std.testing.expectEqualStrings(
+        "recvrecvfirstfirstmiddlemiddlelastlast",
+        try result.asWtf8(ctx.gpa),
+    );
+    try std.testing.expectEqual(
+        moving_before + 1,
+        heap.accounting().moving_minor_collections,
+    );
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+
+    // Global roots provide stable after-pointers for the same cells; concat's
+    // temporary roots must rewrite its receiver, completed piece, and pending
+    // argument while the nested JIT frame evacuates their nursery generation.
+    const receiver_after = ctx.global_object.getOwn("concatMovingReceiverText").?.asStringCell();
+    const first_text_after = ctx.global_object.getOwn("concatMovingFirstText").?.asStringCell();
+    const last_argument_after = ctx.global_object.getOwn("concatMovingLast").?.asObj();
+    try std.testing.expect(receiver_before != receiver_after);
+    try std.testing.expect(first_text_before != first_text_after);
+    try std.testing.expect(last_argument_before != last_argument_after);
+}
+
 test "GC requested compaction rewrites active Promise job native roots" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
