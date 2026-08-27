@@ -3518,8 +3518,9 @@ pub const Binding = struct {
     /// unrewritable native/JIT/conservative boundary. The backing then selects
     /// only tail cells that can move into a smaller dense chunk prefix; pinned
     /// prefix cells still use the exact rewrite dispatch below for their edges.
-    pub fn canRelocate(self: *Binding, cell: *anyopaque, _: Kind) bool {
+    pub fn canRelocate(self: *Binding, cell: *anyopaque, kind: Kind) bool {
         if (!self.context.gc_relocation_active.load(.acquire)) return false;
+        if (!cellAddressIsRelocatable(cell, kind)) return false;
         const backing = self.context.gc_cell_backing orelse return false;
         return backing.shouldRelocateCell(cell);
     }
@@ -3528,9 +3529,17 @@ pub const Binding = struct {
     /// than the old-generation tail plan. The Context token still proves that
     /// every live execution root can be rewritten; all managed cells use the
     /// owned backing, whose reservation hook supplies failure atomicity.
-    pub fn canRelocateYoung(self: *Binding, _: *anyopaque, _: Kind) bool {
+    pub fn canRelocateYoung(self: *Binding, cell: *anyopaque, kind: Kind) bool {
         return self.context.gc_relocation_active.load(.acquire) and
-            self.context.gc_cell_backing != null;
+            self.context.gc_cell_backing != null and cellAddressIsRelocatable(cell, kind);
+    }
+
+    fn cellAddressIsRelocatable(cell: *anyopaque, kind: Kind) bool {
+        if (kind == .generator) {
+            const generator: *vm.Generator = @ptrCast(@alignCast(cell));
+            return !generator.native_resume_active.load(.acquire) and !generator.running.load(.acquire);
+        }
+        return true;
     }
 
     pub fn relocateRoots(self: *Binding, v: anytype) void {

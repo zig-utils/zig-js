@@ -450,6 +450,10 @@ pub const Generator = struct {
     done: bool = false,
     suspended: bool = false,
     resume_mutex: std.Io.Mutex = .init,
+    /// A synchronous native resume borrows this payload and its inline Exec.
+    /// The GC may rewrite its edges but must retain its address until unlock.
+    /// Published only while holding resume_mutex, including pre/post-body work.
+    native_resume_active: std.atomic.Value(bool) = .init(false),
     /// Resume ownership. Ordinary generators also hold `resume_mutex` to
     /// preserve the re-entrant TypeError; async functions use this atomic as a
     /// release/acquire handoff between promise jobs drained by different
@@ -9558,10 +9562,36 @@ fn resumeKindNum(kind: ResumeKind) Value {
 /// context, applies the resume action at the suspend point, runs the VM to the
 /// next `yield` (or completion), then restores the caller's context.
 fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Value) EvalError!Value {
-    const g: *Generator = @ptrCast(@alignCast(gen_obj.generator().?));
+    const generator_root = try vm.pushTempRoot(Value.obj(gen_obj));
+    defer vm.restoreTempRoots(generator_root);
+    const g: *Generator = @ptrCast(@alignCast(vm.tempRoot(generator_root, Value.obj(gen_obj)).asObj().generator().?));
     if (!g.resume_mutex.tryLock()) return vm.throwError("TypeError", "generator is already running");
-    defer g.resume_mutex.unlock(agent.engineIo());
+    g.native_resume_active.store(true, .release);
+    defer {
+        // No JavaScript/safepoint runs between releasing the address borrow and
+        // unlocking. Clear under the mutex so a later owner cannot lose its pin.
+        g.native_resume_active.store(false, .release);
+        g.resume_mutex.unlock(agent.engineIo());
+    }
     if (g.running.load(.monotonic)) return vm.throwError("TypeError", "generator is already running");
+
+    // Reserve the saved caller roots before changing any suspended state. A
+    // root-allocation failure must leave the generator resumable and unlocked.
+    const s_env = vm.env;
+    const s_this = vm.this_value;
+    const s_home = vm.home_object;
+    const s_super = vm.super_ctor;
+    const s_import_meta_slot = vm.import_meta_slot;
+    const s_import_meta_obj = vm.import_meta_obj;
+    const s_nt = vm.new_target;
+    const s_eval_nt = vm.direct_eval_new_target_allowed;
+    const caller_environment_root = try vm.pushTempEnvRoot(s_env);
+    defer vm.restoreTempEnvRoots(caller_environment_root);
+    const caller_this_root = try vm.pushTempRoot(s_this);
+    const caller_home_root = try vm.pushTempRoot(if (s_home) |object| Value.obj(object) else Value.undef());
+    const caller_super_root = try vm.pushTempRoot(if (s_super) |object| Value.obj(object) else Value.undef());
+    const caller_import_root = try vm.pushTempRoot(if (s_import_meta_obj) |object| Value.obj(object) else Value.undef());
+    const caller_target_root = try vm.pushTempRoot(s_nt);
 
     // A completed (or not-yet-started) generator handles each kind without
     // re-entering the body.
@@ -9638,14 +9668,6 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     g.started = true;
     g.suspended = false;
 
-    const s_env = vm.env;
-    const s_this = vm.this_value;
-    const s_home = vm.home_object;
-    const s_super = vm.super_ctor;
-    const s_import_meta_slot = vm.import_meta_slot;
-    const s_import_meta_obj = vm.import_meta_obj;
-    const s_nt = vm.new_target;
-    const s_eval_nt = vm.direct_eval_new_target_allowed;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
@@ -9655,13 +9677,13 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
     defer {
-        vm.env = s_env;
-        vm.this_value = s_this;
-        vm.home_object = s_home;
-        vm.super_ctor = s_super;
+        vm.env = vm.tempEnvRoot(caller_environment_root, s_env);
+        vm.this_value = vm.tempRoot(caller_this_root, s_this);
+        vm.home_object = if (s_home) |object| vm.tempRoot(caller_home_root, Value.obj(object)).asObj() else null;
+        vm.super_ctor = if (s_super) |object| vm.tempRoot(caller_super_root, Value.obj(object)).asObj() else null;
         vm.import_meta_slot = s_import_meta_slot;
-        vm.import_meta_obj = s_import_meta_obj;
-        vm.new_target = s_nt;
+        vm.import_meta_obj = if (s_import_meta_obj) |object| vm.tempRoot(caller_import_root, Value.obj(object)).asObj() else null;
+        vm.new_target = vm.tempRoot(caller_target_root, s_nt);
         vm.direct_eval_new_target_allowed = s_eval_nt;
     }
 
@@ -9721,6 +9743,44 @@ pub fn genReturn(vm: *Interpreter, gen_obj: *value.Object, v: Value) EvalError!V
 pub fn genThrow(vm: *Interpreter, gen_obj: *value.Object, e: Value) EvalError!Value {
     if (asyncGenObj(gen_obj)) return asyncGenRequest(vm, gen_obj, .throw_, e);
     return genResume(vm, gen_obj, .throw_, e);
+}
+
+test "generator native resume root allocation failure preserves suspended ownership" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |started| for ([_]ResumeKind{ .send, .return_, .throw_ }) |kind| for (0..3) |reservation| {
+        const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = .required,
+        });
+        defer context.destroy();
+        const object = (try context.evaluate("function* rootFailureGenerator() { yield 1; return 2; } var rootFailureIterator = rootFailureGenerator(); rootFailureIterator")).asObj();
+        if (started) _ = try context.evaluate("rootFailureIterator.next()");
+        const generator: *Generator = @ptrCast(@alignCast(object.generator().?));
+        const ip = generator.exec.ip;
+        const stack_length = generator.exec.stack.items.len;
+        var machine = context.interpreter();
+        const allocator = machine.arena;
+        if (reservation > 0) try machine.gc_temp_roots.ensureTotalCapacityPrecise(allocator, 1);
+        if (reservation > 1) try machine.gc_env_roots.ensureTotalCapacityPrecise(allocator, 1);
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+        machine.arena = failing.allocator();
+        try std.testing.expectError(error.OutOfMemory, genResume(&machine, object, kind, Value.num(42)));
+        machine.arena = allocator;
+        try std.testing.expectEqual(started, generator.started);
+        try std.testing.expectEqual(started, generator.suspended);
+        try std.testing.expect(!generator.done);
+        try std.testing.expectEqual(ip, generator.exec.ip);
+        try std.testing.expectEqual(stack_length, generator.exec.stack.items.len);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+        try std.testing.expectEqual(&context.env, machine.env);
+        try std.testing.expect(!generator.native_resume_active.load(.acquire));
+        try std.testing.expect(!generator.running.load(.acquire));
+        try std.testing.expect(generator.resume_mutex.tryLock());
+        generator.resume_mutex.unlock(agent.engineIo());
+        try std.testing.expectEqual(@as(f64, if (started) 2 else 1), (try context.evaluate("rootFailureIterator.next().value")).asNum());
+    };
 }
 
 /// Route a thrown value `e` to the suspended activation's nearest handler:
