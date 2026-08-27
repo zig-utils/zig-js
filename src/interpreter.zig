@@ -11515,8 +11515,15 @@ pub const Interpreter = struct {
     /// Compare `needle` with the UTF-16 substring beginning at `start` without
     /// materializing that substring. This differs from converting `start` to a
     /// byte offset: the index may designate the low half of an astral scalar.
-    fn stringCodeUnitsEqualAt(haystack: []const u8, needle: []const u8, start: usize, haystack_ascii: bool) bool {
+    /// `needle_flat` says `needle` has already been converted to the haystack's
+    /// flat latin1 representation by the caller (which owns the allocator), so
+    /// both sides are one byte per code unit and `start` is a byte offset.
+    fn stringCodeUnitsEqualAt(haystack: []const u8, needle: []const u8, start: usize, haystack_ascii: bool, needle_flat: bool) bool {
         if (needle.len == 0) return true;
+        if (needle_flat) {
+            if (start > haystack.len) return false;
+            return std.mem.startsWith(u8, haystack[start..], needle);
+        }
         const needle_ascii = stringBytesAreAscii(needle);
         if (haystack_ascii) {
             if (!needle_ascii or start > haystack.len) return false;
@@ -17787,7 +17794,8 @@ pub const Interpreter = struct {
     /// just the extracted range, so the cost is O(result) rather than O(receiver).
     fn stringMethodReadsFlatImage(name: []const u8) bool {
         return eq(name, "slice") or eq(name, "substring") or eq(name, "substr") or
-            eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes");
+            eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes") or
+            eq(name, "startsWith") or eq(name, "endsWith");
     }
 
     fn stringMethodValue(
@@ -18122,7 +18130,10 @@ pub const Interpreter = struct {
             const pos = try self.clampPos(arg(args, 1), len);
             const sub_len = utf16LenOfStringA(sub, stringBytesAreAscii(sub));
             if (sub_len > len - pos) return Value.boolVal(false);
-            return Value.boolVal(stringCodeUnitsEqualAt(s, sub, pos, s_ascii));
+            // On a flat receiver put the needle in the same representation and
+            // compare bytes; a needle holding a unit above 0xFF cannot match.
+            const sub_flat = if (s_flat) (try self.flatLatin1Needle(sub)) orelse return Value.boolVal(false) else sub;
+            return Value.boolVal(stringCodeUnitsEqualAt(s, sub_flat, pos, s_ascii, s_flat));
         }
         if (eq(name, "endsWith")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.endsWith must not be a regular expression");
@@ -18133,7 +18144,8 @@ pub const Interpreter = struct {
             const end_pos = if (args.len > 1 and !args[1].isUndefined()) try self.clampPos(args[1], len) else len;
             const sub_len = utf16LenOfStringA(sub, stringBytesAreAscii(sub));
             if (sub_len > end_pos) return Value.boolVal(false);
-            return Value.boolVal(stringCodeUnitsEqualAt(s, sub, end_pos - sub_len, s_ascii));
+            const sub_flat = if (s_flat) (try self.flatLatin1Needle(sub)) orelse return Value.boolVal(false) else sub;
+            return Value.boolVal(stringCodeUnitsEqualAt(s, sub_flat, end_pos - sub_len, s_ascii, s_flat));
         }
         if (eq(name, "slice")) {
             const len = stringLengthForAccess(s, s_ascii, s_cell);
