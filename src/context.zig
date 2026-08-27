@@ -24146,6 +24146,206 @@ test "forced tree-walker and required bytecode retain escaping direct eval conte
     try std.testing.expectEqual(results[0], results[1]);
 }
 
+test "forced tree-walker and required bytecode interleave captured direct eval records" {
+    const source =
+        \\function directEvalWithOuter(seed, holder) {
+        \\  var outer = seed;
+        \\  var closure;
+        \\  with (holder) {
+        \\    closure = function inner(step) {
+        \\      var inner = step;
+        \\      return eval("outer += inner; value += outer; inner += value; outer + ':' + value + ':' + inner");
+        \\    };
+        \\  }
+        \\  return closure;
+        \\}
+        \\function directEvalLoopOuter(seed) {
+        \\  var outer = seed;
+        \\  for (let captured = 1; captured < 2; captured++) {
+        \\    return function inner(step) {
+        \\      return eval("outer += step; captured += outer; outer + ':' + captured");
+        \\    };
+        \\  }
+        \\}
+        \\function directEvalNamedOuter(seed, holder) {
+        \\  var outer = seed;
+        \\  var closure;
+        \\  with (holder) {
+        \\    closure = function self(step) {
+        \\      return eval("self === closure ? outer + value + step : -1");
+        \\    };
+        \\  }
+        \\  return closure;
+        \\}
+        \\function directEvalShadowedOuter(holder) {
+        \\  var closure;
+        \\  with (holder) {
+        \\    let value = 2;
+        \\    closure = function inner() { eval("value += 1"); return eval("value"); };
+        \\  }
+        \\  return closure;
+        \\}
+        \\function directEvalNestedOuter(first, second) {
+        \\  var closure;
+        \\  with (first) {
+        \\    let one = 11;
+        \\    with (second) {
+        \\      let two = 22;
+        \\      closure = function inner() { return eval("one + ':' + two + ':' + value"); };
+        \\    }
+        \\  }
+        \\  return closure;
+        \\}
+        \\function directEvalThrowValue() { throw 7; }
+        \\function directEvalCatchOuter(holder) {
+        \\  var closure;
+        \\  with (holder) {
+        \\    try { directEvalThrowValue(); } catch (value) {
+        \\      closure = function inner() { return eval("value"); };
+        \\    }
+        \\  }
+        \\  return closure;
+        \\}
+        \\function directEvalDeepOuter(first) {
+        \\  var outer = 1;
+        \\  var make;
+        \\  with (first) {
+        \\    let lexical = 7;
+        \\    make = function middle(second) {
+        \\      var middle = 2;
+        \\      var closure;
+        \\      with (second) {
+        \\        let local = 5;
+        \\        closure = function inner() { return eval("outer + middle + left + right + lexical + local"); };
+        \\      }
+        \\      return closure;
+        \\    };
+        \\  }
+        \\  return make;
+        \\}
+        \\function directEvalEscapeOuter(holder) {
+        \\  var outer = 31;
+        \\  var make;
+        \\  with (holder) {
+        \\    make = function inner() { return eval("(function escaped() { return outer + value; })"); };
+        \\  }
+        \\  return make();
+        \\}
+        \\globalThis.directEvalWithHolder = { value: 5 };
+        \\globalThis.directEvalWithClosure = directEvalWithOuter(2, directEvalWithHolder);
+        \\globalThis.directEvalLoopClosure = directEvalLoopOuter(3);
+        \\globalThis.directEvalNamedHolder = { value: 7 };
+        \\globalThis.directEvalNamedClosure = directEvalNamedOuter(11, directEvalNamedHolder);
+        \\globalThis.directEvalShadowedClosure = directEvalShadowedOuter({ value: 3 });
+        \\globalThis.directEvalNestedClosure = directEvalNestedOuter({ one: 101, two: 102, value: 103 }, { one: 201, two: 202, value: 203 });
+        \\globalThis.directEvalCatchClosure = directEvalCatchOuter({ value: 99 });
+        \\globalThis.directEvalDeepClosure = directEvalDeepOuter({ left: 3, middle: 20 })({ right: 4, lexical: 70 });
+        \\globalThis.directEvalRuntimeEscaped = directEvalEscapeOuter({ value: 5 });
+        \\globalThis.directEvalInterleaveRetained = [];
+        \\globalThis.directEvalInterleaveDiscarded = [];
+        \\for (var index = 0; index < 4096; index++) {
+        \\  directEvalInterleaveRetained.push({ index: index, nested: { value: index } });
+        \\  directEvalInterleaveDiscarded.push({ index: index, nested: { value: index } });
+        \\}
+        \\directEvalInterleaveDiscarded = null;
+    ;
+    const probes = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "directEvalWithClosure(3)", .expected = "5:10:13" },
+        .{ .source = "directEvalLoopClosure(2)", .expected = "5:6" },
+        .{ .source = "String(directEvalNamedClosure(4))", .expected = "22" },
+        .{ .source = "directEvalWithClosure(1)", .expected = "6:16:17" },
+        .{ .source = "directEvalLoopClosure(1)", .expected = "6:12" },
+        .{ .source = "String(directEvalShadowedClosure())", .expected = "3" },
+        .{ .source = "String(directEvalShadowedClosure())", .expected = "4" },
+        .{ .source = "directEvalNestedClosure()", .expected = "201:22:203" },
+        .{ .source = "String(directEvalCatchClosure())", .expected = "7" },
+        .{ .source = "String(directEvalDeepClosure())", .expected = "85" },
+        .{ .source = "String(directEvalRuntimeEscaped())", .expected = "36" },
+    };
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len][probes.len][]const u8 = undefined;
+    var result_counts: [modes.len]usize = @splat(0);
+    defer for (&results, 0..) |*mode_results, mode_index|
+        for (mode_results[0..result_counts[mode_index]]) |result| std.testing.allocator.free(result);
+
+    for (modes, 0..) |mode, mode_index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        for (probes[0..3], 0..) |probe, probe_index| {
+            const result = try ctx.evaluate(probe.source);
+            try std.testing.expect(result.isString());
+            try std.testing.expectEqualStrings(probe.expected, result.asStr());
+            results[mode_index][probe_index] = try std.testing.allocator.dupe(u8, result.asStr());
+            result_counts[mode_index] += 1;
+        }
+        const compacted = ctx.compactGarbage();
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+        try std.testing.expect(compacted.moved_cells > 0);
+        for (probes[3..], 3..) |probe, probe_index| {
+            const result = try ctx.evaluate(probe.source);
+            try std.testing.expect(result.isString());
+            try std.testing.expectEqualStrings(probe.expected, result.asStr());
+            results[mode_index][probe_index] = try std.testing.allocator.dupe(u8, result.asStr());
+            result_counts[mode_index] += 1;
+        }
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 18);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+        }
+    }
+    for (results[0], results[1]) |tree_result, bytecode_result|
+        try std.testing.expectEqualStrings(tree_result, bytecode_result);
+}
+
+test "parallel_js required bytecode interleaves shared captured direct eval records" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\function makeSharedDirectEval(holder) {
+        \\  var outer = 17;
+        \\  var closure;
+        \\  with (holder) {
+        \\    let lexical = 23;
+        \\    closure = function lane(seed) {
+        \\      if ($vm.useThreadGIL() !== false) throw new Error("worker still holds the thread GIL");
+        \\      var total = 0;
+        \\      for (var index = 0; index < 16; index++) total += eval("outer + lexical + value + seed");
+        \\      return total;
+        \\    };
+        \\  }
+        \\  return closure;
+        \\}
+        \\var sharedDirectEval = makeSharedDirectEval({ value: 5, lexical: 99 });
+        \\var directEvalWorkers = [];
+        \\for (var lane = 0; lane < 4; lane++) directEvalWorkers.push(new Thread(sharedDirectEval, lane));
+        \\var exactDirectEval = true;
+        \\for (var lane = 0; lane < 4; lane++)
+        \\  if (directEvalWorkers[lane].join() !== (45 + lane) * 16) exactDirectEval = false;
+        \\exactDirectEval;
+    );
+    try std.testing.expect(result.asBool());
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(inventory.count(.template_plain_compiled) >= 2);
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+}
+
 test "forced tree-walker and required bytecode preserve direct eval method and constructor context" {
     const source =
         \\class DirectEvalBase {

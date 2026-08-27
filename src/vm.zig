@@ -4236,6 +4236,28 @@ fn directEvalEnvironmentCache(
     };
 }
 
+fn directEvalEnvironmentOwnsFrame(environment: *const Environment, frame: *const Frame) bool {
+    const activation = environment.activation orelse return false;
+    return activation.frame.slots.ptr == frame.slots.ptr and
+        activation.frame.slots.len == frame.slots.len;
+}
+
+/// A previous eval may have installed views for either side of this boundary.
+/// They already occur in the static plan and must not consume runtime records.
+fn skipDirectEvalBoundaryActivations(
+    cursor: ?*Environment,
+    child_frame: *const Frame,
+    parent_frame: *const Frame,
+) ?*Environment {
+    var current = cursor;
+    while (current) |environment| {
+        if (!directEvalEnvironmentOwnsFrame(environment, child_frame) and
+            !directEvalEnvironmentOwnsFrame(environment, parent_frame)) break;
+        current = environment.parent;
+    }
+    return current;
+}
+
 fn reparentUnpublishedDirectEvalEnvironment(environment: *Environment, parent: *Environment) void {
     environment.parent = parent;
     if (environment.gc_managed and parent.gc_managed)
@@ -4283,6 +4305,7 @@ fn materializeDirectEvalEnvironment(
     // variable record, which precedes the optional outer parameter record.
     var selected_frame = current_frame;
     var selected_depth: u32 = 0;
+    var selected_environment_depth: ?u32 = null;
     var saw_variable_scope = false;
     var saw_parameter_scope = false;
     var saw_nonlexical_scope = false;
@@ -4299,10 +4322,17 @@ fn materializeDirectEvalEnvironment(
             selected_frame = selected_frame.parent orelse
                 return vm.throwError("InternalError", "direct-eval defining frame is unavailable");
             selected_depth = scope.frame_depth;
+            selected_environment_depth = null;
             saw_variable_scope = false;
             saw_parameter_scope = false;
             saw_nonlexical_scope = false;
         }
+        if (selected_environment_depth) |inner_depth|
+            if (scope.environment_depth > inner_depth)
+                return vm.throwError("InternalError", "unordered direct-eval lexical boundary");
+        selected_environment_depth = scope.environment_depth;
+        if (scope.environment_depth != 0 and (scope.kind != .lexical or scope.frame_depth == 0))
+            return vm.throwError("InternalError", "unsupported direct-eval lexical boundary");
         if (scope.kind != .lexical) {
             if (scope.is_catch_param)
                 return vm.throwError("InternalError", "function scope marked as direct-eval catch scope");
@@ -4350,6 +4380,43 @@ fn materializeDirectEvalEnvironment(
     if (!saw_nonlexical_scope or declaration_target_index == null)
         return vm.throwError("InternalError", "missing direct-eval declaration target");
 
+    if (plan.frame_boundaries.len != @as(usize, @intCast(selected_depth)))
+        return vm.throwError("InternalError", "incomplete direct-eval frame boundaries");
+    for (plan.scopes) |scope| {
+        if (scope.frame_depth == 0) continue;
+        const boundary = plan.frame_boundaries[@intCast(scope.frame_depth - 1)];
+        if (scope.environment_depth > boundary.environment_depth)
+            return vm.throwError("InternalError", "out-of-bounds direct-eval lexical boundary");
+    }
+    var total_boundary_environments: usize = 0;
+    var boundary_frame = current_frame;
+    for (plan.frame_boundaries, 0..) |boundary, child_depth| {
+        if (boundary.child_frame_depth != @as(u32, @intCast(child_depth)))
+            return vm.throwError("InternalError", "unordered direct-eval frame boundary");
+        const parent_frame = boundary_frame.parent orelse
+            return vm.throwError("InternalError", "direct-eval boundary parent frame is unavailable");
+        var cursor: ?*Environment = if (child_depth == 0)
+            vm.env
+        else
+            boundary_frame.closure_environment;
+        var consumed: u32 = 0;
+        while (consumed < boundary.environment_depth) : (consumed += 1) {
+            cursor = skipDirectEvalBoundaryActivations(cursor, boundary_frame, parent_frame);
+            const environment = cursor orelse
+                return vm.throwError("InternalError", "truncated direct-eval runtime boundary");
+            cursor = environment.parent;
+        }
+        cursor = skipDirectEvalBoundaryActivations(cursor, boundary_frame, parent_frame);
+        if (cursor != parent_frame.closure_environment)
+            return vm.throwError("InternalError", "mismatched direct-eval runtime boundary");
+        total_boundary_environments = std.math.add(
+            usize,
+            total_boundary_environments,
+            @intCast(boundary.environment_depth),
+        ) catch return vm.throwError("InternalError", "direct-eval runtime boundary overflow");
+        boundary_frame = parent_frame;
+    }
+
     const target_scope = plan.scopes[declaration_target_index.?];
     const target_cache = directEvalEnvironmentCache(current_frame, target_scope.kind);
     if (target_cache.load(.acquire)) |cached| {
@@ -4387,11 +4454,47 @@ fn materializeDirectEvalEnvironment(
     for (1..frames.len) |depth|
         frames[depth] = frames[depth - 1].parent.?;
 
+    const boundary_offsets = try vm.arena.alloc(usize, plan.frame_boundaries.len + 1);
+    const boundary_target_fallbacks = try vm.arena.alloc(*Environment, total_boundary_environments);
+    const boundary_target_roots = try vm.arena.alloc(usize, total_boundary_environments);
+    var boundary_roots_mark: ?usize = null;
+    defer if (boundary_roots_mark) |mark| vm.restoreTempEnvRoots(mark);
+    var boundary_target_index: usize = 0;
+    for (plan.frame_boundaries, 0..) |boundary, child_depth| {
+        boundary_offsets[child_depth] = boundary_target_index;
+        const child_frame = frames[child_depth];
+        var cursor: ?*Environment = if (child_depth == 0)
+            vm.env
+        else
+            child_frame.closure_environment;
+        var consumed: u32 = 0;
+        while (consumed < boundary.environment_depth) : (consumed += 1) {
+            cursor = skipDirectEvalBoundaryActivations(cursor, child_frame, frames[child_depth + 1]);
+            const target = cursor orelse
+                return vm.throwError("InternalError", "truncated rooted direct-eval runtime boundary");
+            const target_root = try vm.pushTempEnvRoot(target);
+            if (boundary_roots_mark == null) boundary_roots_mark = target_root;
+            boundary_target_fallbacks[boundary_target_index] = target;
+            boundary_target_roots[boundary_target_index] = target_root;
+            boundary_target_index += 1;
+            cursor = vm.tempEnvRoot(target_root, target).parent;
+        }
+        cursor = skipDirectEvalBoundaryActivations(cursor, child_frame, frames[child_depth + 1]);
+        if (cursor != frames[child_depth + 1].closure_environment)
+            return vm.throwError("InternalError", "mismatched rooted direct-eval runtime boundary");
+    }
+    boundary_offsets[plan.frame_boundaries.len] = boundary_target_index;
+    std.debug.assert(boundary_target_index == total_boundary_environments);
+
     // Anchor at the nearest already-published persistent record. This may be an
     // outer frame's variable record or this frame's parameter record; choosing
     // the innermost available scope preserves dynamic declarations and lets a
     // later body record link to the exact parameter identity.
-    var base_environment = vm.env;
+    var base_environment = if (selected_depth == 0)
+        vm.env
+    else
+        selected_frame.closure_environment orelse
+            return vm.throwError("InternalError", "direct-eval defining closure is unavailable");
     var start_index: usize = 0;
     var anchor_index = declaration_target_index.?;
     while (anchor_index > 0) {
@@ -4415,11 +4518,64 @@ fn materializeDirectEvalEnvironment(
     defer vm.restoreTempEnvRoots(scope_roots_mark);
     const scope_environments = try vm.arena.alloc(?*Environment, plan.scopes.len);
     const scope_root_indices = try vm.arena.alloc(usize, plan.scopes.len);
+    const scope_child_fallbacks = try vm.arena.alloc(?*Environment, plan.scopes.len);
+    const scope_child_root_indices = try vm.arena.alloc(?usize, plan.scopes.len);
     @memset(scope_environments, null);
+    @memset(scope_child_fallbacks, null);
+    @memset(scope_child_root_indices, null);
 
     var outward = vm.tempEnvRoot(chain_root, base_environment);
     var unrooted_function_environment: ?*Environment = null;
+    var materialized_frame_depth: u32 = if (start_index == 0)
+        selected_depth
+    else
+        plan.scopes[start_index - 1].frame_depth;
+    var materialized_environment_depth: u32 = 0;
+    var previous_scope_index: ?usize = null;
     for (plan.scopes[start_index..], start_index..) |scope, index| {
+        const crossing_frame = scope.frame_depth != materialized_frame_depth;
+        var boundary_child_depth: ?usize = null;
+        var target_environment_depth = scope.environment_depth;
+        if (crossing_frame) {
+            if (scope.frame_depth + 1 != materialized_frame_depth)
+                return vm.throwError("InternalError", "skipped materialized direct-eval frame boundary");
+            boundary_child_depth = @intCast(scope.frame_depth);
+            target_environment_depth = plan.frame_boundaries[boundary_child_depth.?].environment_depth;
+        } else if (target_environment_depth > materialized_environment_depth) {
+            boundary_child_depth = @intCast(scope.frame_depth - 1);
+        }
+        // ECMA-262 GetIdentifierReference follows [[OuterEnv]] in lexical
+        // order. A frame-backed block inside `with` must therefore sit inward
+        // of that object record, not outward with the frame's variable record.
+        if (boundary_child_depth) |child_depth| {
+            var target_index = boundary_offsets[child_depth + 1] - materialized_environment_depth;
+            const target_end = boundary_offsets[child_depth + 1] - target_environment_depth;
+            while (target_index > target_end) {
+                target_index -= 1;
+                const environment = try gc_mod.allocEnv(vm.arena);
+                vm.initEnvironment(environment, vm.tempEnvRoot(chain_root, outward), false);
+                environment.direct_eval_forward_target = vm.tempEnvRoot(
+                    boundary_target_roots[target_index],
+                    boundary_target_fallbacks[target_index],
+                );
+                environment.private_activation = false;
+                outward = environment;
+                vm.setTempEnvRoot(chain_root, environment);
+                if (previous_scope_index) |previous| {
+                    scope_child_fallbacks[previous] = environment;
+                    scope_child_root_indices[previous] = try vm.pushTempEnvRoot(
+                        vm.tempEnvRoot(chain_root, environment),
+                    );
+                    previous_scope_index = null;
+                }
+            }
+        }
+        if (crossing_frame) {
+            materialized_frame_depth = scope.frame_depth;
+            materialized_environment_depth = 0;
+        } else {
+            materialized_environment_depth = scope.environment_depth;
+        }
         const environment = try gc_mod.allocEnv(vm.arena);
         vm.initEnvironment(environment, vm.tempEnvRoot(chain_root, outward), scope.kind != .lexical);
         environment.is_catch_param = scope.is_catch_param;
@@ -4433,6 +4589,13 @@ fn materializeDirectEvalEnvironment(
         outward = environment;
         vm.setTempEnvRoot(chain_root, environment);
         scope_root_indices[index] = try vm.pushTempEnvRoot(vm.tempEnvRoot(chain_root, environment));
+        if (previous_scope_index) |previous| {
+            scope_child_fallbacks[previous] = environment;
+            scope_child_root_indices[previous] = try vm.pushTempEnvRoot(
+                vm.tempEnvRoot(chain_root, environment),
+            );
+        }
+        previous_scope_index = index;
         if (index == declaration_target_index.?) {
             unrooted_function_environment = environment;
             vm.setTempEnvRoot(function_root, environment);
@@ -4452,11 +4615,8 @@ fn materializeDirectEvalEnvironment(
         const frame = frames[@intCast(scope.frame_depth)];
         const published = try publishDirectEvalFunctionEnvironment(vm, frame, scope, candidate);
         if (published == candidate) continue;
-        if (index + 1 < plan.scopes.len) {
-            const child = vm.tempEnvRoot(
-                scope_root_indices[index + 1],
-                scope_environments[index + 1] orelse unreachable,
-            );
+        if (scope_child_root_indices[index]) |child_root| {
+            const child = vm.tempEnvRoot(child_root, scope_child_fallbacks[index] orelse unreachable);
             reparentUnpublishedDirectEvalEnvironment(child, published);
         } else {
             installed = published;
@@ -4567,9 +4727,9 @@ test "vm materializes direct eval environments over exact defining frames failur
     var machine = Interpreter{ .arena = allocator, .env = &root, .root_shape = root_shape };
 
     var outer_slots = [_]Value{Value.num(10)};
-    var outer = Frame{ .slots = &outer_slots, .parent = null };
+    var outer = Frame{ .slots = &outer_slots, .parent = null, .closure_environment = &root };
     var inner_slots = [_]Value{ Value.num(20), Value.num(30) };
-    var inner = Frame{ .slots = &inner_slots, .parent = &outer };
+    var inner = Frame{ .slots = &inner_slots, .parent = &outer, .closure_environment = &root };
     const outer_bindings = [_]bc.DirectEvalBinding{.{
         .name = "outer",
         .slot = 0,
@@ -4599,7 +4759,11 @@ test "vm materializes direct eval environments over exact defining frames failur
         .{ .bindings = &inner_bindings, .kind = .variable, .declaration_target = true, .frame_depth = 0 },
         .{ .bindings = &lexical_bindings, .kind = .lexical, .frame_depth = 0 },
     };
-    const plan = bc.DirectEvalPlan{ .scopes = &scopes };
+    const boundaries = [_]bc.DirectEvalFrameBoundary{.{
+        .child_frame_depth = 0,
+        .environment_depth = 0,
+    }};
+    const plan = bc.DirectEvalPlan{ .scopes = &scopes, .frame_boundaries = &boundaries };
 
     const PublishBarrier = struct {
         calls: usize = 0,
@@ -4658,7 +4822,7 @@ test "vm materializes direct eval environments over exact defining frames failur
     );
     try outer_materialized.function_environment.put("lateOuter", Value.num(9));
     machine.env = &root;
-    var anchored_inner = Frame{ .slots = &inner_slots, .parent = &outer };
+    var anchored_inner = Frame{ .slots = &inner_slots, .parent = &outer, .closure_environment = &root };
     const anchored = try materializeDirectEvalEnvironment(&machine, &anchored_inner, &plan);
     try std.testing.expectEqual(@as(f64, 9), anchored.environment.get("lateOuter").?.asNum());
 
@@ -4669,7 +4833,7 @@ test "vm materializes direct eval environments over exact defining frames failur
     try std.testing.expectEqual(&root, machine.env);
     try std.testing.expectEqual(materialized.function_environment, inner.direct_eval_environment.load(.acquire).?);
 
-    var cold_inner = Frame{ .slots = &inner_slots, .parent = &outer };
+    var cold_inner = Frame{ .slots = &inner_slots, .parent = &outer, .closure_environment = &root };
     var cold_unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     machine.arena = cold_unavailable.allocator();
     try std.testing.expectError(error.OutOfMemory, materializeDirectEvalEnvironment(&machine, &cold_inner, &plan));
@@ -4678,8 +4842,12 @@ test "vm materializes direct eval environments over exact defining frames failur
 
     var saw_transactional_success = false;
     for (0..16) |fail_index| {
-        var transactional_outer = Frame{ .slots = &outer_slots, .parent = null };
-        var transactional_inner = Frame{ .slots = &inner_slots, .parent = &transactional_outer };
+        var transactional_outer = Frame{ .slots = &outer_slots, .parent = null, .closure_environment = &root };
+        var transactional_inner = Frame{
+            .slots = &inner_slots,
+            .parent = &transactional_outer,
+            .closure_environment = &root,
+        };
         var unavailable_at = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         machine.arena = unavailable_at.allocator();
         machine.env = &root;
@@ -4692,6 +4860,182 @@ test "vm materializes direct eval environments over exact defining frames failur
         };
         try std.testing.expect(transactional_outer.direct_eval_environment.load(.acquire) != null);
         try std.testing.expectEqual(attempt.function_environment, transactional_inner.direct_eval_environment.load(.acquire).?);
+        saw_transactional_success = true;
+        break;
+    }
+    machine.arena = allocator;
+    try std.testing.expect(saw_transactional_success);
+}
+
+test "vm interleaves captured direct eval runtime environments without reparenting them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var root = Environment{
+        .arena = allocator,
+        .fn_scope = true,
+        .binding_lock_required = false,
+    };
+    var runtime_outer = Environment{
+        .arena = allocator,
+        .parent = &root,
+        .binding_lock_required = false,
+    };
+    try runtime_outer.put("outerRuntime", Value.num(10));
+    var runtime_inner = Environment{
+        .arena = allocator,
+        .parent = &runtime_outer,
+        .binding_lock_required = false,
+    };
+    try runtime_inner.put("innerRuntime", Value.num(20));
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &runtime_inner, .root_shape = root_shape };
+
+    var outer_slots = [_]Value{ Value.num(30), Value.num(35) };
+    var outer = Frame{ .slots = &outer_slots, .parent = null, .closure_environment = &root };
+    var inner_slots = [_]Value{Value.num(40)};
+    var inner = Frame{
+        .slots = &inner_slots,
+        .parent = &outer,
+        .closure_environment = &runtime_inner,
+    };
+    const outer_bindings = [_]bc.DirectEvalBinding{.{
+        .name = "outerFrame",
+        .slot = 0,
+        .lexical = false,
+        .immutable = false,
+        .tdz_checked = false,
+        .mapped_parameter = false,
+    }};
+    const inner_bindings = [_]bc.DirectEvalBinding{.{
+        .name = "innerFrame",
+        .slot = 0,
+        .lexical = false,
+        .immutable = false,
+        .tdz_checked = false,
+        .mapped_parameter = false,
+    }};
+    const middle_bindings = [_]bc.DirectEvalBinding{.{
+        .name = "middleFrame",
+        .slot = 1,
+        .lexical = true,
+        .immutable = false,
+        .tdz_checked = true,
+        .mapped_parameter = false,
+    }};
+    const scopes = [_]bc.DirectEvalScope{
+        .{ .bindings = &outer_bindings, .kind = .variable, .frame_depth = 1 },
+        .{ .bindings = &middle_bindings, .kind = .lexical, .frame_depth = 1, .environment_depth = 1 },
+        .{ .bindings = &inner_bindings, .kind = .variable, .declaration_target = true, .frame_depth = 0 },
+    };
+    const boundaries = [_]bc.DirectEvalFrameBoundary{.{
+        .child_frame_depth = 0,
+        .environment_depth = 2,
+    }};
+    const plan = bc.DirectEvalPlan{ .scopes = &scopes, .frame_boundaries = &boundaries };
+
+    const materialized = try materializeDirectEvalEnvironment(&machine, &inner, &plan);
+    const inner_function = materialized.function_environment;
+    const forwarded_inner = inner_function.parent.?;
+    const middle_environment = forwarded_inner.parent.?;
+    const forwarded_outer = middle_environment.parent.?;
+    const outer_function = forwarded_outer.parent.?;
+    try std.testing.expectEqual(&runtime_inner, forwarded_inner.direct_eval_forward_target.?);
+    try std.testing.expectEqual(&runtime_outer, forwarded_outer.direct_eval_forward_target.?);
+    try std.testing.expectEqual(outer.direct_eval_environment.load(.acquire).?, outer_function);
+    try std.testing.expectEqual(&root, outer_function.parent.?);
+    try std.testing.expectEqual(&runtime_outer, runtime_inner.parent.?);
+    try std.testing.expectEqual(&root, runtime_outer.parent.?);
+
+    try std.testing.expectEqual(@as(f64, 40), materialized.environment.get("innerFrame").?.asNum());
+    try std.testing.expectEqual(@as(f64, 20), materialized.environment.get("innerRuntime").?.asNum());
+    try std.testing.expectEqual(@as(f64, 10), materialized.environment.get("outerRuntime").?.asNum());
+    try std.testing.expectEqual(@as(f64, 30), materialized.environment.get("outerFrame").?.asNum());
+    try std.testing.expectEqual(@as(f64, 35), materialized.environment.get("middleFrame").?.asNum());
+    try materialized.environment.assign("innerRuntime", Value.num(21));
+    try std.testing.expectEqual(@as(f64, 21), runtime_inner.getLocal("innerRuntime").?.asNum());
+    try runtime_outer.put("lateRuntime", Value.num(11));
+    try std.testing.expectEqual(@as(f64, 11), materialized.environment.get("lateRuntime").?.asNum());
+
+    machine.env = &runtime_inner;
+    const cached = try materializeDirectEvalEnvironment(&machine, &inner, &plan);
+    try std.testing.expectEqual(inner_function, cached.function_environment);
+    try std.testing.expectEqual(forwarded_inner, cached.function_environment.parent.?);
+
+    machine.env = &runtime_inner;
+    var anchored_slots = [_]Value{Value.num(50)};
+    var anchored_inner = Frame{
+        .slots = &anchored_slots,
+        .parent = &outer,
+        .closure_environment = &runtime_inner,
+    };
+    const anchored = try materializeDirectEvalEnvironment(&machine, &anchored_inner, &plan);
+    try std.testing.expectEqual(@as(f64, 50), anchored.environment.get("innerFrame").?.asNum());
+    const anchored_forwarded_inner = anchored.function_environment.parent.?;
+    const anchored_middle = anchored_forwarded_inner.parent.?;
+    const anchored_forwarded_outer = anchored_middle.parent.?;
+    try std.testing.expectEqual(&runtime_inner, anchored_forwarded_inner.direct_eval_forward_target.?);
+    try std.testing.expectEqual(&runtime_outer, anchored_forwarded_outer.direct_eval_forward_target.?);
+    try std.testing.expectEqual(outer_function, anchored_forwarded_outer.parent.?);
+
+    machine.env = &runtime_inner;
+    machine.exception = Value.undef();
+    var malformed_outer = Frame{ .slots = &outer_slots, .parent = null, .closure_environment = &root };
+    var malformed_inner = Frame{
+        .slots = &inner_slots,
+        .parent = &malformed_outer,
+        .closure_environment = &runtime_inner,
+    };
+    const malformed_boundaries = [_]bc.DirectEvalFrameBoundary{.{
+        .child_frame_depth = 0,
+        .environment_depth = 1,
+    }};
+    try std.testing.expectError(error.Throw, materializeDirectEvalEnvironment(
+        &machine,
+        &malformed_inner,
+        &.{ .scopes = &scopes, .frame_boundaries = &malformed_boundaries },
+    ));
+    try std.testing.expectEqual(@as(?*Environment, null), malformed_outer.direct_eval_environment.load(.acquire));
+    try std.testing.expectEqual(@as(?*Environment, null), malformed_inner.direct_eval_environment.load(.acquire));
+    try std.testing.expectEqual(&runtime_inner, machine.env);
+    try std.testing.expectEqual(&runtime_outer, runtime_inner.parent.?);
+    try std.testing.expectEqual(&root, runtime_outer.parent.?);
+
+    var malformed_scopes = scopes;
+    malformed_scopes[1].environment_depth = 3;
+    machine.exception = Value.undef();
+    try std.testing.expectError(error.Throw, materializeDirectEvalEnvironment(
+        &machine,
+        &malformed_inner,
+        &.{ .scopes = &malformed_scopes, .frame_boundaries = &boundaries },
+    ));
+    try std.testing.expectEqual(@as(?*Environment, null), malformed_outer.direct_eval_environment.load(.acquire));
+    try std.testing.expectEqual(@as(?*Environment, null), malformed_inner.direct_eval_environment.load(.acquire));
+    try std.testing.expectEqual(&runtime_inner, machine.env);
+
+    var saw_transactional_success = false;
+    for (0..32) |fail_index| {
+        var candidate_outer = Frame{ .slots = &outer_slots, .parent = null, .closure_environment = &root };
+        var candidate_inner = Frame{
+            .slots = &inner_slots,
+            .parent = &candidate_outer,
+            .closure_environment = &runtime_inner,
+        };
+        var unavailable = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        machine.arena = unavailable.allocator();
+        machine.env = &runtime_inner;
+        machine.exception = Value.undef();
+        _ = materializeDirectEvalEnvironment(&machine, &candidate_inner, &plan) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(?*Environment, null), candidate_outer.direct_eval_environment.load(.acquire));
+            try std.testing.expectEqual(@as(?*Environment, null), candidate_inner.direct_eval_environment.load(.acquire));
+            try std.testing.expectEqual(&runtime_inner, machine.env);
+            try std.testing.expectEqual(&runtime_outer, runtime_inner.parent.?);
+            try std.testing.expectEqual(&root, runtime_outer.parent.?);
+            continue;
+        };
+        try std.testing.expect(candidate_outer.direct_eval_environment.load(.acquire) != null);
+        try std.testing.expect(candidate_inner.direct_eval_environment.load(.acquire) != null);
         saw_transactional_success = true;
         break;
     }

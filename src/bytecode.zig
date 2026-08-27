@@ -572,6 +572,10 @@ pub const DirectEvalScope = struct {
     /// Zero addresses the direct-eval caller; one addresses its captured outer
     /// frame, and so on.
     frame_depth: u32,
+    /// Runtime records outside this lexical scope but inside its defining
+    /// frame. This places frame-backed block/catch cells on the correct side
+    /// of captured `with`, loop, and class records instead of flattening them.
+    environment_depth: u32 = 0,
 };
 
 /// Runtime Environment Records captured between one ordinary activation and
@@ -585,9 +589,9 @@ pub const DirectEvalFrameBoundary = struct {
 
 /// Exact static scope stack for one direct-eval call site. Runtime Environment
 /// Records (captured loop heads, `with`, disposal scopes) are not flattened into
-/// binding snapshots. Frame boundaries retain only their exact record counts;
-/// admission remains fail-closed until materialization consumes them without
-/// mutating the captured records' published parent links.
+/// binding snapshots. Boundary counts and lexical-scope depths place captured
+/// records without mutating their published parent links. Current-frame runtime
+/// boundaries remain fail-closed until their own segment is represented.
 pub const DirectEvalPlan = struct {
     scopes: []const DirectEvalScope,
     frame_boundaries: []const DirectEvalFrameBoundary = &.{},

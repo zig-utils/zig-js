@@ -197,6 +197,7 @@ const FnScope = struct {
     /// lone catch BindingIdentifier. Direct eval needs the Environment Record
     /// identity to apply Annex B.3.5 without weakening destructuring catches.
     lexical_scope_is_catch_param: std.ArrayListUnmanaged(bool) = .empty,
+    lexical_scope_environment_depth: std.ArrayListUnmanaged(u32) = .empty,
     slot_names: std.ArrayListUnmanaged([]const u8) = .empty,
     count: u32 = 0,
     lexical_slots: std.ArrayListUnmanaged(u32) = .empty,
@@ -233,15 +234,21 @@ const FnScope = struct {
     }
 
     fn pushLexicalScope(self: *FnScope, arena: std.mem.Allocator) CompileError!void {
+        return self.pushLexicalScopeAtDepth(arena, 0);
+    }
+
+    fn pushLexicalScopeAtDepth(self: *FnScope, arena: std.mem.Allocator, environment_depth: u32) CompileError!void {
         const bindings = try arena.create(SecureStringMapUnmanaged(SlotBinding));
         bindings.* = .{ .state = self.hash_state };
         try self.lexical_scopes.append(arena, bindings);
         try self.lexical_scope_is_catch_param.append(arena, false);
+        try self.lexical_scope_environment_depth.append(arena, environment_depth);
     }
 
     fn popLexicalScope(self: *FnScope) void {
         _ = self.lexical_scopes.pop();
         _ = self.lexical_scope_is_catch_param.pop();
+        _ = self.lexical_scope_environment_depth.pop();
     }
 
     fn markCurrentLexicalScopeCatchParameter(self: *FnScope) void {
@@ -316,15 +323,19 @@ fn directEvalBindings(
     var visible_count: usize = 0;
     var count_it = bindings.iterator();
     while (count_it.next()) |entry|
-        visible_count += @intFromBool(isUserVisibleBindingName(entry.key_ptr.*));
+        visible_count += @intFromBool(
+            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment,
+        );
 
     const retained = try arena.alloc(bc.DirectEvalBinding, visible_count);
     var retained_index: usize = 0;
     var it = bindings.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
-        if (!isUserVisibleBindingName(name)) continue;
         const binding = entry.value_ptr.*;
+        // Captured runtime cells are supplied by their original Environment,
+        // not by the placeholder slot used for static name classification.
+        if (!isUserVisibleBindingName(name) or binding.environment) continue;
         retained[retained_index] = .{
             .name = name,
             .slot = binding.slot,
@@ -342,6 +353,16 @@ fn directEvalBindings(
         }
     }.lessThan);
     return retained;
+}
+
+fn directEvalFrameBindingCount(bindings: *const SecureStringMapUnmanaged(SlotBinding)) usize {
+    var count: usize = 0;
+    var it = bindings.iterator();
+    while (it.next()) |entry|
+        count += @intFromBool(
+            isUserVisibleBindingName(entry.key_ptr.*) and !entry.value_ptr.environment,
+        );
+    return count;
 }
 
 /// Freeze the active slot-backed scope stack without copying activation values.
@@ -370,7 +391,7 @@ fn buildDirectEvalPlan(
             scope_count += 1;
             scope_count += @intFromBool(frame_scope.parameter_names != null);
             for (frame_scope.lexical_scopes.items) |lexical|
-                scope_count += @intFromBool(lexical.count() != 0);
+                scope_count += @intFromBool(directEvalFrameBindingCount(lexical) != 0);
         }
         cursor_phase = frame_scope.parent_binding_phase;
     }
@@ -420,13 +441,18 @@ fn buildDirectEvalPlan(
                 .frame_depth = frame_depth,
             };
             scope_index += 1;
-            for (frame_scope.lexical_scopes.items, frame_scope.lexical_scope_is_catch_param.items) |lexical, is_catch_param| {
-                if (lexical.count() == 0) continue;
+            for (
+                frame_scope.lexical_scopes.items,
+                frame_scope.lexical_scope_is_catch_param.items,
+                frame_scope.lexical_scope_environment_depth.items,
+            ) |lexical, is_catch_param, environment_depth| {
+                if (directEvalFrameBindingCount(lexical) == 0) continue;
                 scopes[scope_index] = .{
                     .bindings = try directEvalBindings(arena, lexical),
                     .kind = .lexical,
                     .is_catch_param = is_catch_param,
                     .frame_depth = frame_depth,
+                    .environment_depth = environment_depth,
                 };
                 scope_index += 1;
             }
@@ -2801,7 +2827,7 @@ pub const Compiler = struct {
     }
 
     fn pushLexicalScope(self: *Compiler) CompileError!void {
-        if (self.scope) |scope| try scope.pushLexicalScope(self.arena);
+        if (self.scope) |scope| try scope.pushLexicalScopeAtDepth(self.arena, self.environment_depth);
     }
 
     fn popLexicalScope(self: *Compiler) void {
@@ -5879,12 +5905,6 @@ pub const Compiler = struct {
             if (self.function_binding_phase == .parameters) .parameter else .variable,
             self.environment_depth,
         );
-        // Boundary metadata is frozen now, but materialization must not admit a
-        // captured gap until it can interleave the exact live records. Retain
-        // the causal barrier rather than silently flattening them around frame
-        // activation views.
-        for (plan.frame_boundaries) |boundary|
-            if (boundary.environment_depth != 0) return error.Unsupported;
         const plan_index = try self.chunk.addDirectEvalPlan(plan);
         if (self.function_binding_phase == .parameters)
             self.chunk.parameter_direct_eval_plan = plan_index;
@@ -6246,6 +6266,8 @@ test "compiler direct eval plan retains ordered live binding identity" {
 
     try scope.pushLexicalScope(allocator);
     const outer_slot = try scope.addLexicalChecked(allocator, "value", false);
+    _ = try scope.addLexicalChecked(allocator, "capturedRuntime", false);
+    scope.lexical_scopes.items[scope.lexical_scopes.items.len - 1].getPtr("capturedRuntime").?.environment = true;
     try scope.pushLexicalScope(allocator);
     const inner_slot = try scope.addLexicalChecked(allocator, "value", true);
 
@@ -6316,6 +6338,7 @@ test "compiler direct eval plan preserves defining-frame and runtime-environment
     try std.testing.expectEqualStrings("outerLexical", plan.scopes[1].bindings[0].name);
     try std.testing.expectEqual(bc.DirectEvalScopeKind.lexical, plan.scopes[1].kind);
     try std.testing.expectEqual(@as(u32, 1), plan.scopes[1].frame_depth);
+    try std.testing.expectEqual(@as(u32, 0), plan.scopes[1].environment_depth);
     try std.testing.expectEqualStrings("innerVariable", plan.scopes[2].bindings[0].name);
     try std.testing.expectEqual(bc.DirectEvalScopeKind.variable, plan.scopes[2].kind);
     try std.testing.expect(plan.scopes[2].declaration_target);
@@ -6326,7 +6349,9 @@ test "compiler direct eval plan preserves defining-frame and runtime-environment
 
     inner.parent_environment_depth = 1;
     inner.parent_direct_eval_environment_depth = 1;
+    outer.lexical_scope_environment_depth.items[0] = 1;
     const interleaved = try buildDirectEvalPlan(allocator, &inner, .variable, 2);
+    try std.testing.expectEqual(@as(u32, 1), interleaved.scopes[1].environment_depth);
     try std.testing.expectEqual(@as(usize, 1), interleaved.frame_boundaries.len);
     try std.testing.expectEqual(@as(u32, 0), interleaved.frame_boundaries[0].child_frame_depth);
     try std.testing.expectEqual(@as(u32, 3), interleaved.frame_boundaries[0].environment_depth);
