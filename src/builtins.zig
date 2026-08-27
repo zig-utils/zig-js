@@ -2825,7 +2825,7 @@ const Stringifier = struct {
                 const n = v.asNum();
                 try buf.appendSlice(output_allocator, if (std.math.isNan(n) or std.math.isInf(n)) "null" else try value.numberToString(a, n));
             },
-            .string => try writeJsonString(output_allocator, buf, try v.asWtf8(a)),
+            .string => try writeJsonValueString(output_allocator, buf, v),
             .object => {
                 const o = v.asObj();
                 if (o.isCallableObject() or o.is_symbol) return false; // functions/symbols omitted
@@ -3066,6 +3066,21 @@ fn appendUtf8Codepoint(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), c
     }
 }
 
+fn appendJsonEscapedAscii(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), c: u8) HostError!void {
+    switch (c) {
+        '"' => try buf.appendSlice(a, "\\\""),
+        '\\' => try buf.appendSlice(a, "\\\\"),
+        '\n' => try buf.appendSlice(a, "\\n"),
+        '\t' => try buf.appendSlice(a, "\\t"),
+        '\r' => try buf.appendSlice(a, "\\r"),
+        8 => try buf.appendSlice(a, "\\b"),
+        12 => try buf.appendSlice(a, "\\f"),
+        // Other control characters are emitted as \u00XX escapes.
+        0...7, 11, 14...31 => try buf.print(a, "\\u{x:0>4}", .{c}),
+        else => unreachable,
+    }
+}
+
 fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) HostError!void {
     try buf.append(a, '"');
     var i: usize = 0;
@@ -3090,21 +3105,44 @@ fn writeJsonString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []
             continue;
         }
         const c = s[i];
-        switch (c) {
-            '"' => try buf.appendSlice(a, "\\\""),
-            '\\' => try buf.appendSlice(a, "\\\\"),
-            '\n' => try buf.appendSlice(a, "\\n"),
-            '\t' => try buf.appendSlice(a, "\\t"),
-            '\r' => try buf.appendSlice(a, "\\r"),
-            8 => try buf.appendSlice(a, "\\b"),
-            12 => try buf.appendSlice(a, "\\f"),
-            // Other control characters are emitted as \u00XX escapes.
-            0...7, 11, 14...31 => try buf.print(a, "\\u{x:0>4}", .{c}),
-            else => try buf.append(a, c),
+        try appendJsonEscapedAscii(a, buf, c);
+        i += 1;
+    }
+    try buf.append(a, '"');
+}
+
+/// QuoteJSONString directly from a physical flat Latin-1 image. Ordinary ASCII
+/// runs borrow the cell backing, special ASCII units take the shared JSON escape
+/// path, and non-ASCII units expand once into the authoritative output buffer.
+/// No canonical shadow allocation is needed.
+fn writeJsonFlatLatin1String(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), flat: []const u8) HostError!void {
+    try buf.append(a, '"');
+    var i: usize = 0;
+    while (i < flat.len) {
+        const run_start = i;
+        while (i < flat.len) : (i += 1) {
+            const c = flat[i];
+            if (c <= 31 or c == '"' or c == '\\' or c >= 0x80) break;
+        }
+        if (i != run_start) try buf.appendSlice(a, flat[run_start..i]);
+        if (i == flat.len) break;
+
+        const c = flat[i];
+        if (c >= 0x80) {
+            const encoded = [2]u8{ 0xC0 | (c >> 6), 0x80 | (c & 0x3F) };
+            try buf.appendSlice(a, &encoded);
+        } else {
+            try appendJsonEscapedAscii(a, buf, c);
         }
         i += 1;
     }
     try buf.append(a, '"');
+}
+
+fn writeJsonValueString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), string: Value) HostError!void {
+    std.debug.assert(string.isString());
+    if (string.strIsFlatLatin1()) return writeJsonFlatLatin1String(a, buf, string.asStr());
+    return writeJsonString(a, buf, string.asStr());
 }
 
 /// `JSON.rawJSON(text)`: validate `text` as a single JSON primitive and wrap it
@@ -3624,6 +3662,25 @@ test "JSON parser borrows validated unescaped strings without scratch allocation
 
     var control = JsonParser{ .s = "\"a\x01b\"", .i = 0, .interp = &machine };
     try std.testing.expectError(error.Invalid, control.parseString());
+}
+
+test "JSON stringifier emits flat Latin-1 into prepared output without allocation" {
+    const canonical = "A\"\\\n\t\r\x08\x0c\x00\x01\x0b\x1f\xc3\xa9\xc3\xbf";
+    const expected = "\"A\\\"\\\\\\n\\t\\r\\b\\f\\u0000\\u0001\\u000b\\u001f\xc3\xa9\xc3\xbf\"";
+    const cell = try strcell.createCell(std.testing.allocator, canonical);
+    defer {
+        std.testing.allocator.free(@constCast(cell.bytes));
+        std.testing.allocator.destroy(cell);
+    }
+    const string = Value.strCell(cell);
+    try std.testing.expect(string.strIsFlatLatin1());
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+    try output.ensureTotalCapacityPrecise(std.testing.allocator, expected.len);
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try writeJsonValueString(unavailable.allocator(), &output, string);
+    try std.testing.expectEqualStrings(expected, output.items);
 }
 
 test "JSON parse record indexes install exact seeded contexts failure atomically" {

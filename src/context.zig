@@ -12130,6 +12130,7 @@ test "JSON StringData readers canonicalize physical storage" {
     try std.testing.expect((try evalIn(
         \\const key = "caf\u00e9\u00ff";
         \\const source = { [key]: 17, ignored: 23 };
+        \\const direct = JSON.stringify(key) === '"caf\u00e9\u00ff"';
         \\const primitive = JSON.stringify(source, [key]) === '{"caf\u00e9\u00ff":17}';
         \\const boxed = JSON.stringify(source, [new String(key)]) === '{"caf\u00e9\u00ff":17}';
         \\const numberBox = new Number(0);
@@ -12138,7 +12139,7 @@ test "JSON StringData readers canonicalize physical storage" {
         \\const gap = JSON.stringify({ a: 1 }, null, new String("\u00e9")) === '{\n\u00e9"a": 1\n}';
         \\const rawText = '"caf\u00e9\u00ff"';
         \\const raw = JSON.stringify(JSON.rawJSON(rawText)) === rawText;
-        \\primitive && boxed && overridden && gap && raw
+        \\direct && primitive && boxed && overridden && gap && raw
     )).asBool());
 }
 
