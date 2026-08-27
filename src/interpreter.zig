@@ -678,6 +678,12 @@ pub const Environment = struct {
     /// immutable name table resolves into the activation's real frame slots;
     /// `vars` remains available for genuinely new sloppy-eval declarations.
     activation: ?ActivationBindingsView = null,
+    /// Original runtime Environment Record represented at this position in a
+    /// direct-eval activation chain. The forwarding record owns only its new
+    /// `parent` edge; every own-binding query/read/write/delete is performed on
+    /// this exact target, preserving live binding and object-record identity
+    /// without mutating the target's already-published parent link.
+    direct_eval_forward_target: ?*Environment = null,
     /// Immutable identity of an activation-backed direct-eval record. Separate
     /// parameter and body records may expose identical names and slots, so cache
     /// validation must not infer record identity from their binding layout.
@@ -791,16 +797,29 @@ pub const Environment = struct {
     /// this flag remains the fail-safe policy for every actual lock pair.
     pub var binding_locks_enabled: std.atomic.Value(bool) = .init(true);
 
+    fn bindingRecord(self: *const Environment) *const Environment {
+        const target = self.direct_eval_forward_target orelse return self;
+        std.debug.assert(self.activation == null);
+        std.debug.assert(target.direct_eval_forward_target == null);
+        return target;
+    }
+
+    fn mutableBindingRecord(self: *Environment) *Environment {
+        return @constCast(self.bindingRecord());
+    }
+
     fn activationBinding(self: *const Environment, name: []const u8) ?bc.DirectEvalBinding {
-        const view = self.activation orelse return null;
-        return view.binding(name);
+        if (self.activation) |*view| if (view.binding(name)) |binding| return binding;
+        const target = self.direct_eval_forward_target orelse return null;
+        return target.activationBinding(name);
     }
 
     pub fn hasOwnBinding(self: *const Environment, name: []const u8) bool {
         if (self.activationBinding(name) != null) return true;
-        const locked = @constCast(self).lockBindingsForRead();
-        defer @constCast(self).unlockBindingsForRead(locked);
-        return self.aliases.contains(name) or self.vars.contains(name);
+        const record = @constCast(self.bindingRecord());
+        const locked = record.lockBindingsForRead();
+        defer record.unlockBindingsForRead(locked);
+        return record.aliases.contains(name) or record.vars.contains(name);
     }
 
     pub fn lockBindings(self: *Environment) void {
@@ -917,11 +936,13 @@ pub const Environment = struct {
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
     pub fn put(self: *Environment, name: []const u8, v: Value) EvalError!void {
-        self.barrierStoredValue(v);
         if (self.activation) |*view| if (view.binding(name)) |binding| {
+            self.barrierStoredValue(v);
             view.frame.write(binding.slot, v);
             return;
         };
+        if (self.direct_eval_forward_target) |target| return target.put(name, v);
+        self.barrierStoredValue(v);
         if (self.bindingsHaveSingleWriter()) {
             // The owning mutator is the only structural writer. Snapshot before
             // allocating so a private activation retains one collector handshake
@@ -1030,6 +1051,7 @@ pub const Environment = struct {
 
     /// Define a `const` binding in this scope (marks it immutable for `assign`).
     pub fn putConst(self: *Environment, name: []const u8, v: Value) EvalError!void {
+        if (self.direct_eval_forward_target) |target| return target.putConst(name, v);
         self.barrierStoredValue(v);
         try self.putTaggedBinding(&self.consts, name, v);
     }
@@ -1062,17 +1084,20 @@ pub const Environment = struct {
     /// an identifier read resolves the declarative binding, not a shadowed
     /// global-object property.
     pub fn markLexical(self: *Environment, name: []const u8) EvalError!void {
+        if (self.direct_eval_forward_target) |target| return target.markLexical(name);
         try self.markOwnedName(&self.lexicals, name);
     }
 
     /// Bind a named function expression's own name (immutable, non-strict).
     pub fn putFnName(self: *Environment, name: []const u8, v: Value) EvalError!void {
+        if (self.direct_eval_forward_target) |target| return target.putFnName(name, v);
         self.barrierStoredValue(v);
         try self.putTaggedBinding(&self.fn_names, name, v);
     }
 
     /// Mark a binding in *this* scope as deletable (a sloppy eval-created var/fn).
     pub fn markDeletable(self: *Environment, name: []const u8) EvalError!void {
+        if (self.direct_eval_forward_target) |target| return target.markDeletable(name);
         try self.markOwnedName(&self.deletable, name);
     }
 
@@ -1080,6 +1105,7 @@ pub const Environment = struct {
     /// eval var). Drops it from `vars` and every side table so it no longer
     /// resolves. Returns whether a binding was present.
     pub fn removeVar(self: *Environment, name: []const u8) bool {
+        if (self.direct_eval_forward_target) |target| return target.removeVar(name);
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
         const removed = if (self.vars.fetchRemove(name)) |entry| blk: {
@@ -1098,13 +1124,14 @@ pub const Environment = struct {
         var env: ?*Environment = self;
         while (env) |e| {
             if (e.activationBinding(name) != null) return false;
-            const locked = e.lockBindingsForRead();
-            if (e.vars.contains(name)) {
-                const r = e.fn_names.contains(name);
-                e.unlockBindingsForRead(locked);
+            const record = e.mutableBindingRecord();
+            const locked = record.lockBindingsForRead();
+            if (record.vars.contains(name)) {
+                const r = record.fn_names.contains(name);
+                record.unlockBindingsForRead(locked);
                 return r;
             }
-            e.unlockBindingsForRead(locked);
+            record.unlockBindingsForRead(locked);
             env = e.parent;
         }
         return false;
@@ -1116,13 +1143,14 @@ pub const Environment = struct {
         var env: ?*Environment = self;
         while (env) |e| {
             if (e.activationBinding(name)) |binding| return binding.immutable;
-            const locked = e.lockBindingsForRead();
-            if (e.vars.contains(name)) {
-                const r = e.consts.contains(name);
-                e.unlockBindingsForRead(locked);
+            const record = e.mutableBindingRecord();
+            const locked = record.lockBindingsForRead();
+            if (record.vars.contains(name)) {
+                const r = record.consts.contains(name);
+                record.unlockBindingsForRead(locked);
                 return r;
             }
-            e.unlockBindingsForRead(locked);
+            record.unlockBindingsForRead(locked);
             env = e.parent;
         }
         return null;
@@ -1137,6 +1165,7 @@ pub const Environment = struct {
     pub fn markCaptured(self: *Environment) void {
         var e: ?*Environment = self;
         while (e) |env| : (e = env.parent) {
+            if (env.direct_eval_forward_target) |target| target.markCaptured();
             if (env.captured) break;
             // This executes in the defining mutator before the new closure can
             // be published. Once cleared, every future read uses the same lock
@@ -1151,7 +1180,7 @@ pub const Environment = struct {
     /// `var`/function declarations live.
     pub fn varScope(self: *Environment) *Environment {
         var e = self;
-        while (!e.fn_scope) {
+        while (!e.bindingRecord().fn_scope) {
             e = e.parent orelse return e;
         }
         return e;
@@ -1167,6 +1196,7 @@ pub const Environment = struct {
                 view.frame.write(binding.slot, v);
                 return;
             };
+            const record = e.mutableBindingRecord();
             // Hold `binding_lock` across BOTH the `getPtr` lookup and the value
             // write. Under no-GIL a peer thread's `put`/`getOrPut` on this scope
             // (e.g. globalDefine) can rehash `vars` concurrently, so an unlocked
@@ -1175,14 +1205,14 @@ pub const Environment = struct {
             // stays valid for the write because no rehash can occur under the
             // lock. A private activation instead owns the table exclusively and
             // uses the marker handshake until capture revokes that proof.
-            const locked = e.lockBindingsForWrite();
-            if (e.vars.getPtr(name)) |ptr| {
-                e.barrierStoredValue(v);
+            const locked = record.lockBindingsForWrite();
+            if (record.vars.getPtr(name)) |ptr| {
+                record.barrierStoredValue(v);
                 ptr.* = v;
-                e.unlockBindingsForWrite(locked);
+                record.unlockBindingsForWrite(locked);
                 return;
             }
-            e.unlockBindingsForWrite(locked);
+            record.unlockBindingsForWrite(locked);
             env = e.parent;
         }
         var root = self;
@@ -1209,14 +1239,15 @@ pub const Environment = struct {
                 if (current.isObject() and current.asObj() == marker) return .tdz;
             return if (binding.immutable) .immutable else .mutable;
         };
-        const locked = self.lockBindingsForRead();
-        defer self.unlockBindingsForRead(locked);
-        if (self.aliases.contains(name)) return .immutable;
-        const current = self.vars.get(name) orelse return .missing;
+        const record = self.mutableBindingRecord();
+        const locked = record.lockBindingsForRead();
+        defer record.unlockBindingsForRead(locked);
+        if (record.aliases.contains(name)) return .immutable;
+        const current = record.vars.get(name) orelse return .missing;
         if (tdz_marker) |marker|
             if (current.isObject() and current.asObj() == marker) return .tdz;
-        if (self.consts.contains(name)) return .immutable;
-        if (self.fn_names.contains(name)) return .function_name;
+        if (record.consts.contains(name)) return .immutable;
+        if (record.fn_names.contains(name)) return .function_name;
         return .mutable;
     }
 
@@ -1224,14 +1255,16 @@ pub const Environment = struct {
     /// TDZ/immutability checks and deliberately does not fall through to a
     /// different record if the binding disappeared after Reference creation.
     pub fn assignOwnResolved(self: *Environment, name: []const u8, v: Value) bool {
-        self.barrierStoredValue(v);
         if (self.activation) |*view| if (view.binding(name)) |binding| {
+            self.barrierStoredValue(v);
             view.frame.write(binding.slot, v);
             return true;
         };
-        const locked = self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite(locked);
-        const slot = self.vars.getPtr(name) orelse return false;
+        const record = self.mutableBindingRecord();
+        record.barrierStoredValue(v);
+        const locked = record.lockBindingsForWrite();
+        defer record.unlockBindingsForWrite(locked);
+        const slot = record.vars.getPtr(name) orelse return false;
         slot.* = v;
         return true;
     }
@@ -1241,6 +1274,7 @@ pub const Environment = struct {
 
     /// Install an indirect binding `local` → `target.name` (a module import).
     pub fn putAlias(self: *Environment, local: []const u8, target: *Environment, name: []const u8) EvalError!void {
+        if (self.direct_eval_forward_target) |forwarded| return forwarded.putAlias(local, target, name);
         self.barrierStoredEnvironment(target);
         // Both caller-provided names are owned before the Environment lock is
         // taken. Allocation recovery is prohibited inside that trace-sensitive
@@ -1280,16 +1314,17 @@ pub const Environment = struct {
         var env: ?*Environment = self;
         while (env) |e| {
             if (e.activationBinding(name) != null) return false;
-            const locked = e.lockBindingsForRead();
-            if (e.aliases.contains(name)) {
-                e.unlockBindingsForRead(locked);
+            const record = e.mutableBindingRecord();
+            const locked = record.lockBindingsForRead();
+            if (record.aliases.contains(name)) {
+                record.unlockBindingsForRead(locked);
                 return true;
             }
-            if (e.vars.contains(name)) {
-                e.unlockBindingsForRead(locked);
+            if (record.vars.contains(name)) {
+                record.unlockBindingsForRead(locked);
                 return false;
             }
-            e.unlockBindingsForRead(locked);
+            record.unlockBindingsForRead(locked);
             env = e.parent;
         }
         return false;
@@ -1302,22 +1337,23 @@ pub const Environment = struct {
         while (env) |e| {
             if (e.activation) |*view| if (view.binding(name)) |binding|
                 return view.frame.read(binding.slot);
+            const record = e.mutableBindingRecord();
             // Shared/captured scopes read under `binding_lock` so a concurrent
             // `put`/`putAlias` rehash cannot tear the read or free the table.
             // Uncaptured private activations have one mutator and may read
             // lock-free; their writes use the marker handshake above.
-            const locked = e.lockBindingsForRead();
-            if (e.aliases.count() != 0) {
-                if (e.aliases.get(name)) |a| {
-                    e.unlockBindingsForRead(locked);
+            const locked = record.lockBindingsForRead();
+            if (record.aliases.count() != 0) {
+                if (record.aliases.get(name)) |a| {
+                    record.unlockBindingsForRead(locked);
                     return a.env.get(a.name);
                 }
             }
-            if (e.vars.get(name)) |v| {
-                e.unlockBindingsForRead(locked);
+            if (record.vars.get(name)) |v| {
+                record.unlockBindingsForRead(locked);
                 return v;
             }
-            e.unlockBindingsForRead(locked);
+            record.unlockBindingsForRead(locked);
             env = e.parent;
         }
         return null;
@@ -1330,9 +1366,10 @@ pub const Environment = struct {
     pub fn getLocal(self: *Environment, name: []const u8) ?Value {
         if (self.activation) |*view| if (view.binding(name)) |binding|
             return view.frame.read(binding.slot);
-        const locked = self.lockBindingsForRead();
-        defer self.unlockBindingsForRead(locked);
-        return self.vars.get(name);
+        const record = self.mutableBindingRecord();
+        const locked = record.lockBindingsForRead();
+        defer record.unlockBindingsForRead(locked);
+        return record.vars.get(name);
     }
 
     /// GetBindingValue from this exact Declarative Environment Record without
@@ -1341,10 +1378,11 @@ pub const Environment = struct {
     pub fn getOwnResolved(self: *Environment, name: []const u8) ?Value {
         if (self.activation) |*view| if (view.binding(name)) |binding|
             return view.frame.read(binding.slot);
-        const locked = self.lockBindingsForRead();
-        const alias = if (self.aliases.count() != 0) self.aliases.get(name) else null;
-        const local = if (alias == null) self.vars.get(name) else null;
-        self.unlockBindingsForRead(locked);
+        const record = self.mutableBindingRecord();
+        const locked = record.lockBindingsForRead();
+        const alias = if (record.aliases.count() != 0) record.aliases.get(name) else null;
+        const local = if (alias == null) record.vars.get(name) else null;
+        record.unlockBindingsForRead(locked);
         if (alias) |target| return target.env.get(target.name);
         return local;
     }
@@ -1358,10 +1396,11 @@ pub const Environment = struct {
             view.frame.write(binding.slot, v);
             return true;
         };
-        const locked = self.lockBindingsForWrite();
-        defer self.unlockBindingsForWrite(locked);
-        if (self.vars.getPtr(name)) |ptr| {
-            self.barrierStoredValue(v);
+        const record = self.mutableBindingRecord();
+        const locked = record.lockBindingsForWrite();
+        defer record.unlockBindingsForWrite(locked);
+        if (record.vars.getPtr(name)) |ptr| {
+            record.barrierStoredValue(v);
             ptr.* = v;
             return true;
         }
@@ -1441,6 +1480,7 @@ pub const Environment = struct {
         self.fn_body = false;
         self.is_catch_param = false;
         self.with_object = null;
+        self.direct_eval_forward_target = null;
     }
 
     /// Clear a completed private activation while retaining its static binding
@@ -1469,6 +1509,7 @@ pub const Environment = struct {
         self.fn_body = false;
         self.is_catch_param = false;
         self.with_object = null;
+        self.direct_eval_forward_target = null;
     }
 
     pub fn finalizeOwnedBindingStorage(self: *Environment) void {
@@ -1511,6 +1552,100 @@ test "Environment barriers distinguish embedded roots from managed owners" {
     managed.barrierStoredValue(Value.obj(&child));
     try std.testing.expectEqual(@as(usize, 2), provider.calls);
     try std.testing.expectEqual(@intFromPtr(&managed), @intFromPtr(provider.last_owner.?));
+}
+
+test "Environment direct eval forwarding preserves one live binding record" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var original_parent = Environment{
+        .arena = allocator,
+        .binding_lock_required = false,
+    };
+    try original_parent.put("originalOnly", Value.num(1));
+    var interleaved_parent = Environment{
+        .arena = allocator,
+        .binding_lock_required = false,
+    };
+    try interleaved_parent.put("interleavedOnly", Value.num(2));
+    var target = Environment{
+        .arena = allocator,
+        .parent = &original_parent,
+        .fn_scope = true,
+        .binding_lock_required = false,
+    };
+    try target.put("mutable", Value.num(3));
+    try target.putConst("immutable", Value.num(4));
+    try target.putFnName("selfName", Value.num(5));
+    try target.put("deletable", Value.num(6));
+    try target.markDeletable("deletable");
+
+    var forwarded = Environment{
+        .arena = allocator,
+        .parent = &interleaved_parent,
+        .direct_eval_forward_target = &target,
+        .binding_lock_required = false,
+    };
+
+    try std.testing.expectEqual(@as(?Value, Value.num(3)), forwarded.get("mutable"));
+    try std.testing.expectEqual(@as(?Value, Value.num(2)), forwarded.get("interleavedOnly"));
+    try std.testing.expectEqual(@as(?Value, null), forwarded.get("originalOnly"));
+    try std.testing.expect(forwarded.hasOwnBinding("immutable"));
+    try std.testing.expectEqual(@as(?bool, true), forwarded.isConst("immutable"));
+    try std.testing.expect(forwarded.isFnName("selfName"));
+    try std.testing.expectEqual(&forwarded, forwarded.varScope());
+
+    try forwarded.assign("mutable", Value.num(7));
+    try std.testing.expectEqual(@as(?Value, Value.num(7)), target.getLocal("mutable"));
+    try target.put("late", Value.num(8));
+    try std.testing.expectEqual(@as(?Value, Value.num(8)), forwarded.getLocal("late"));
+    try forwarded.put("createdThroughForwarder", Value.num(9));
+    try std.testing.expectEqual(@as(?Value, Value.num(9)), target.getLocal("createdThroughForwarder"));
+    try std.testing.expect(forwarded.removeVar("deletable"));
+    try std.testing.expectEqual(@as(?Value, null), target.getLocal("deletable"));
+}
+
+test "Environment direct eval forwarding preserves with binding references" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+    var root = Environment{
+        .arena = allocator,
+        .fn_scope = true,
+        .binding_lock_required = false,
+    };
+    var object = value.Object{};
+    try object.setOwn(allocator, root_shape, "visible", Value.num(11));
+    var target = Environment{
+        .arena = allocator,
+        .parent = &root,
+        .with_object = &object,
+        .binding_lock_required = false,
+    };
+    var forwarded = Environment{
+        .arena = allocator,
+        .parent = &root,
+        .direct_eval_forward_target = &target,
+        .binding_lock_required = false,
+    };
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &forwarded,
+        .root_shape = root_shape,
+    };
+
+    const loaded = try machine.resolveBindingValue("visible", false);
+    try std.testing.expectEqual(@as(f64, 11), loaded.value.asNum());
+    try std.testing.expectEqual(&object, loaded.with_base.asObj());
+    const reference = try machine.captureBindingReference("visible", null);
+    try std.testing.expect(reference == .with_object);
+    try std.testing.expectEqual(&object, reference.with_object);
+    try machine.storeCapturedBindingReference(reference, "visible", Value.num(12));
+    try std.testing.expectEqual(@as(f64, 12), object.getOwn("visible").?.asNum());
+    try std.testing.expect(try machine.deleteIdentifier("visible", false, null));
+    try std.testing.expectEqual(@as(?Value, null), object.getOwn("visible"));
 }
 
 test "Environment immutable lock ruling keeps only shared roots synchronized" {
@@ -3152,7 +3287,8 @@ pub const Interpreter = struct {
         while (env != var_env) {
             // A simple catch parameter is exempt (Annex B.3.5: a direct eval's
             // `var` may match it); other declarative records are checked.
-            if (env.with_object == null and !env.is_catch_param) {
+            const record = env.bindingRecord();
+            if (record.with_object == null and !record.is_catch_param) {
                 for (vars.items) |n|
                     if (env.hasOwnBinding(n))
                         return self.throwError("SyntaxError", "var declaration in eval conflicts with a lexical binding");
@@ -3476,13 +3612,14 @@ pub const Interpreter = struct {
         var env: ?*Environment = self.env;
         while (env) |e| {
             if (e.activationBinding(name) != null) return null;
+            const record = e.mutableBindingRecord();
             // Read `vars` under the binding lock: a peer thread's put/getOrPut on
             // this scope can rehash it concurrently (no-GIL Environment race,
             // Linux tsan-threadfuzz: globalDefine put vs this contains). Only a
             // proven-private activation may elide this read lock.
-            const locked = e.lockBindingsForRead();
-            const has = e.vars.contains(name);
-            e.unlockBindingsForRead(locked);
+            const locked = record.lockBindingsForRead();
+            const has = record.vars.contains(name);
+            record.unlockBindingsForRead(locked);
             if (has)
                 return if (e.parent == null and objectHasOwn(g, name)) g else null;
             env = e.parent;
@@ -3543,13 +3680,14 @@ pub const Interpreter = struct {
         while (env) |e| {
             if (e.activation) |*activation| if (activation.binding(name)) |binding|
                 return .{ .value = activation.frame.read(binding.slot) };
-            const locked = e.lockBindingsForRead();
+            const record = e.mutableBindingRecord();
+            const locked = record.lockBindingsForRead();
             // Skip the `aliases` hash (which would still hash `name`) when the map
             // is empty — the common case for ordinary scopes (aliases exist only for
             // `arguments`/`with`/eval-mapped bindings). Halves the per-identifier
             // hashing on the hot resolution path.
-            const alias = if (e.aliases.count() != 0) e.aliases.get(name) else null;
-            const found_var: ?Value = if (alias == null) e.vars.get(name) else null;
+            const alias = if (record.aliases.count() != 0) record.aliases.get(name) else null;
+            const found_var: ?Value = if (alias == null) record.vars.get(name) else null;
             // `consts` membership must be read under the SAME `binding_lock` as
             // `vars`/`aliases`: a peer thread's `putConst` writes `consts` while
             // holding that lock, so reading it after `unlockBindings` is the same
@@ -3561,8 +3699,8 @@ pub const Interpreter = struct {
             // binding and shadows any like-named global property. `consts`/`lexicals`
             // are read under the SAME `binding_lock` as `vars` (no-GIL race).
             const global_shadowable = found_var != null and e.parent == null and
-                !e.consts.contains(name) and !e.lexicals.contains(name);
-            e.unlockBindingsForRead(locked);
+                !record.consts.contains(name) and !record.lexicals.contains(name);
+            record.unlockBindingsForRead(locked);
             if (alias) |a| return .{ .value = a.env.get(a.name) orelse return null };
             if (found_var) |v| {
                 if (global_shadowable) {
@@ -3571,17 +3709,18 @@ pub const Interpreter = struct {
                 }
                 return .{ .value = v };
             }
-            if (e.with_object != null) {
+            if (record.with_object != null) {
                 // HasBinding and GetBindingValue can execute Proxy traps and
                 // @@unscopables accessors that move the heap. Root the owning
                 // Environment so the object, selected receiver, and next link
                 // are always refreshed from relocated storage.
                 const environment_root = try self.pushTempEnvRoot(e);
                 defer self.restoreTempEnvRoots(environment_root);
-                const with_object = self.tempEnvRoot(environment_root, e).with_object.?;
+                const rooted_environment = self.tempEnvRoot(environment_root, e);
+                const with_object = rooted_environment.mutableBindingRecord().with_object.?;
                 if (try self.withHasBinding(with_object, name)) {
-                    const rooted_environment = self.tempEnvRoot(environment_root, e);
-                    const object_fallback = Value.obj(rooted_environment.with_object.?);
+                    const refreshed_environment = self.tempEnvRoot(environment_root, e);
+                    const object_fallback = Value.obj(refreshed_environment.mutableBindingRecord().with_object.?);
                     const object_root = try self.pushTempRoot(object_fallback);
                     defer self.restoreTempRoots(object_root);
                     // Object Environment Record GetBindingValue does its OWN
@@ -3629,12 +3768,13 @@ pub const Interpreter = struct {
         var env: ?*Environment = start;
         while (env) |e| {
             if (e.activationBinding(name) != null) return e;
+            const record = e.mutableBindingRecord();
             // Existence check under the binding lock (same no-GIL race class as
             // lookupIdent); the `getPtr` result is not escaped, only its
             // presence, so nothing dangles after unlock.
-            const locked = e.lockBindingsForRead();
-            const owns = e.vars.getPtr(name) != null or e.aliases.get(name) != null;
-            e.unlockBindingsForRead(locked);
+            const locked = record.lockBindingsForRead();
+            const owns = record.vars.getPtr(name) != null or record.aliases.get(name) != null;
+            record.unlockBindingsForRead(locked);
             if (owns) return e;
             env = e.parent;
         }
@@ -3645,11 +3785,12 @@ pub const Interpreter = struct {
         var env: ?*Environment = self.env;
         while (env) |e| {
             if (e.activationBinding(name) != null) return null;
-            const locked = e.lockBindingsForRead();
-            const owned = e.aliases.get(name) != null or e.vars.get(name) != null;
-            e.unlockBindingsForRead(locked);
+            const record = e.mutableBindingRecord();
+            const locked = record.lockBindingsForRead();
+            const owned = record.aliases.get(name) != null or record.vars.get(name) != null;
+            record.unlockBindingsForRead(locked);
             if (owned) return null; // a real binding owns it
-            if (e.with_object) |wo| {
+            if (record.with_object) |wo| {
                 if (try self.withHasBinding(wo, name)) return wo;
             }
             env = e.parent;
@@ -3672,19 +3813,20 @@ pub const Interpreter = struct {
                 remaining = count - 1;
             }
             if (e.activationBinding(name) != null) return .{ .environment = e };
-            const locked = e.lockBindingsForRead();
-            const owns_alias = e.aliases.contains(name);
-            const owns_var = e.vars.contains(name);
+            const record = e.mutableBindingRecord();
+            const locked = record.lockBindingsForRead();
+            const owns_alias = record.aliases.contains(name);
+            const owns_var = record.vars.contains(name);
             const owns = owns_alias or owns_var;
             const root_object_candidate = owns_var and !owns_alias and e.parent == null and
-                !e.lexicals.contains(name) and !e.consts.contains(name);
-            e.unlockBindingsForRead(locked);
+                !record.lexicals.contains(name) and !record.consts.contains(name);
+            record.unlockBindingsForRead(locked);
             if (owns) {
                 if (root_object_candidate) if (self.currentGlobalObject()) |global|
                     if (objectHasOwn(global, name)) return .{ .global_object = global };
                 return .{ .environment = e };
             }
-            if (e.with_object) |object| {
+            if (record.with_object) |object| {
                 // HasBinding can execute Proxy traps and @@unscopables getters,
                 // either of which may force a moving collection. Root the
                 // Environment Record that owns the object so both the selected
@@ -3693,7 +3835,7 @@ pub const Interpreter = struct {
                 defer self.restoreTempEnvRoots(environment_root);
                 if (try self.withHasBinding(object, name)) {
                     const rooted_environment = self.tempEnvRoot(environment_root, e);
-                    return .{ .with_object = rooted_environment.with_object.? };
+                    return .{ .with_object = rooted_environment.mutableBindingRecord().with_object.? };
                 }
                 env = self.tempEnvRoot(environment_root, e).parent;
                 continue;
@@ -3725,11 +3867,12 @@ pub const Interpreter = struct {
                 return false;
             }
 
-            const locked = e.lockBindingsForRead();
-            const owns = e.vars.contains(name) or e.aliases.get(name) != null;
-            const deletable = owns and e.deletable.contains(name);
+            const record = e.mutableBindingRecord();
+            const locked = record.lockBindingsForRead();
+            const owns = record.vars.contains(name) or record.aliases.get(name) != null;
+            const deletable = owns and record.deletable.contains(name);
             const is_global = e.parent == null;
-            e.unlockBindingsForRead(locked);
+            record.unlockBindingsForRead(locked);
             if (owns) {
                 // A sloppy eval-created binding is removed from the declaring
                 // Environment. Global variable bindings instead mirror their
@@ -3751,7 +3894,7 @@ pub const Interpreter = struct {
                 if (strict) return self.throwError("TypeError", "Cannot delete binding");
                 return false;
             }
-            if (e.with_object) |object| {
+            if (record.with_object) |object| {
                 if (try self.withHasBinding(object, name)) {
                     const deleted = try self.deleteOwn(object, name);
                     if (!deleted and strict) return self.throwError("TypeError", "Cannot delete property");

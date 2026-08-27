@@ -1146,6 +1146,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
         for (activation.bindings) |binding|
             markValueInternal(v, "direct-eval VM activation binding", activation.frame.read(binding.slot));
     }
+    if (e.direct_eval_forward_target) |target| markManaged(v, target);
     var vit = e.vars.iterator();
     while (vit.next()) |entry| markValueVariable(v, entry.key_ptr.*, entry.value_ptr.*);
     for (e.disposables.items) |d| {
@@ -1172,6 +1173,7 @@ pub fn relocateEnv(e: *Environment, v: anytype) void {
                 gc_relocation.rewriteValueSlot(v, &activation.frame.slots[binding.slot]);
         }
     }
+    gc_relocation.rewriteOptionalSlot(v, Environment, &e.direct_eval_forward_target);
     var values = e.vars.valueIterator();
     while (values.next()) |slot| gc_relocation.rewriteValueSlot(v, slot);
     for (e.disposables.items) |*disposable| {
@@ -1201,6 +1203,7 @@ test "Environment relocation rewrites every managed binding slot" {
     var environment = Environment{
         .arena = std.testing.allocator,
         .gc_managed = true,
+        .direct_eval_forward_target = &old_environments[1],
         .dispose_pending = Value.obj(&old_objects[3]),
         .object_proto_intrinsic = &old_objects[4],
         .parent = &old_environments[0],
@@ -1250,6 +1253,7 @@ test "Environment relocation rewrites every managed binding slot" {
     try std.testing.expect(environment.disposables.items[0].is_async);
     try std.testing.expectEqual(&new_objects[3], environment.dispose_pending.?.asObj());
     try std.testing.expectEqual(&new_objects[4], environment.object_proto_intrinsic.?);
+    try std.testing.expectEqual(&new_environments[1], environment.direct_eval_forward_target.?);
     try std.testing.expectEqual(&new_environments[0], environment.parent.?);
     const alias = environment.aliases.get("imported").?;
     try std.testing.expectEqual(&new_environments[1], alias.env);

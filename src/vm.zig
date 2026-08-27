@@ -1750,6 +1750,7 @@ fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8) ?QuickGlobalBin
     // another environment.
     var cursor: ?*Environment = start;
     while (cursor) |env| : (cursor = env.parent) {
+        if (env.direct_eval_forward_target != null) return null;
         if (env.with_object != null) return null;
         const locked = env.lockBindingsForRead();
         const alias = env.aliases.contains(name);
@@ -2236,6 +2237,7 @@ fn quickLeafPlan(chunk: *Chunk, parallel_sync: bool) ?*QuickLeafPlan {
 fn quickImmutableLocalBinding(vm: *Interpreter, name: []const u8) ?Value {
     var cursor: ?*Environment = vm.env;
     while (cursor) |env| : (cursor = env.parent) {
+        if (env.direct_eval_forward_target != null) return null;
         if (env.with_object != null) return null;
         const locked = env.lockBindingsForRead();
         const alias = env.aliases.contains(name);
