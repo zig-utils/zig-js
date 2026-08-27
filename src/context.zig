@@ -24084,6 +24084,34 @@ test "forced tree-walker and required bytecode preserve direct eval expression-f
     try std.testing.expectEqualStrings("3:2:4:7:8:40|5:3:9:10:10|9", results[1]);
 }
 
+test "parameter initialization exposes every later non-simple binding in TDZ" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\var later = 99;
+        \\var bodyCalls = 0;
+        \\function plain(first = later, later) { bodyCalls += 1; }
+        \\var arrow = (first = later, later) => { bodyCalls += 1; };
+        \\function throughEval(first = eval("later"), later) { bodyCalls += 1; }
+        \\function pattern({ value = later }, later) { bodyCalls += 1; }
+        \\var failures = 0;
+        \\for (var invoke of [
+        \\  function () { plain(); },
+        \\  function () { arrow(); },
+        \\  function () { throughEval(); },
+        \\  function () { pattern({}); }
+        \\]) {
+        \\  try { invoke(); } catch (error) { if (error instanceof ReferenceError) failures += 1; }
+        \\}
+        \\failures + ":" + bodyCalls + ":" + later;
+    );
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("4:0:99", result.asStr());
+}
+
 test "required bytecode uses strict captured iterator records" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,

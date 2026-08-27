@@ -8887,6 +8887,28 @@ pub const Interpreter = struct {
         // (the arguments object) or when a parameter is named `arguments`; in
         // either case a direct eval in a default may not declare `arguments`.
         const param_scope_has_arguments = !is_arrow or paramsBindArguments(params);
+        // FunctionDeclarationInstantiation creates every binding in a
+        // non-simple parameter list before IteratorBindingInitialization begins.
+        // The bindings are initialized strictly left-to-right, so a default,
+        // computed key, iterator hook, or direct eval that reaches a later
+        // parameter observes its live TDZ rather than an outer/global name.
+        // Non-simple lists cannot contain duplicate bound names (an early error),
+        // so each predeclaration owns one exact parameter binding.
+        var non_simple = false;
+        for (params) |parameter| {
+            if (parameter.default != null or parameter.is_rest or parameter.pattern != null) {
+                non_simple = true;
+                break;
+            }
+        }
+        if (non_simple and self.tdz_marker != null) {
+            for (params) |parameter| {
+                if (parameter.pattern) |pattern|
+                    try self.predeclareForLexicalPattern(pattern, false)
+                else
+                    try self.env.put(parameter.name, self.tdzVal());
+            }
+        }
         for (params, 0..) |p, i| {
             if (p.is_rest) {
                 const rest = try self.newArray();
@@ -8898,12 +8920,6 @@ pub const Interpreter = struct {
             var v: Value = if (i < args.len) args[i] else Value.undef();
             if (v.isUndefined()) {
                 if (p.default) |d| {
-                    // A parameter is in scope (in its TDZ) across its own
-                    // Initializer, so a self-reference `function f(x = x)` reads
-                    // the still-uninitialized parameter — a ReferenceError — not
-                    // an outer binding of the same name. Pre-bind it to the TDZ
-                    // sentinel; the real value overwrites it below.
-                    if (p.pattern == null and self.tdz_marker != null) try self.env.put(p.name, self.tdzVal());
                     // The default runs in the parameter scope; a non-arrow's owns
                     // `arguments`, so a direct eval there can't declare it. The
                     // `in_param_default` flag (all functions) marks that a direct
