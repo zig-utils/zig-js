@@ -369,8 +369,9 @@ fn directEvalFrameBindingCount(bindings: *const SecureStringMapUnmanaged(SlotBin
 /// The current declaration target is retained even when empty; functions with
 /// parameter expressions additionally retain their outer parameter record.
 /// Empty lexical scopes are semantically inert and omitted. Runtime Environment
-/// Records are retained only as exact frame-boundary counts; their live binding
-/// identity must be recovered from Frame closure edges during materialization.
+/// Records are retained only as exact segment counts; materialization recovers
+/// captured identities from Frame closure edges and the current segment from
+/// the activation's live runtime chain.
 fn buildDirectEvalPlan(
     arena: std.mem.Allocator,
     scope: *const FnScope,
@@ -406,14 +407,9 @@ fn buildDirectEvalPlan(
     while (cursor) |frame_scope| : (cursor = frame_scope.parent) {
         frames[frame_count - current_depth - 1] = .{ .scope = frame_scope, .phase = cursor_phase };
         if (frame_scope.parent != null) {
-            const active_depth = if (current_depth == 0) current_environment_depth else 0;
             frame_boundaries[current_depth] = .{
                 .child_frame_depth = @intCast(current_depth),
-                .environment_depth = std.math.add(
-                    u32,
-                    frame_scope.parent_direct_eval_environment_depth,
-                    active_depth,
-                ) catch return error.Unsupported,
+                .environment_depth = frame_scope.parent_direct_eval_environment_depth,
             };
         }
         current_depth += 1;
@@ -458,7 +454,11 @@ fn buildDirectEvalPlan(
             }
         }
     }
-    return .{ .scopes = scopes, .frame_boundaries = frame_boundaries };
+    return .{
+        .scopes = scopes,
+        .frame_boundaries = frame_boundaries,
+        .current_environment_depth = current_environment_depth,
+    };
 }
 
 /// Every ordinary function that can observe its own arguments object receives
@@ -1156,6 +1156,23 @@ fn identifierReferenceMatches(query: anytype, identifier: []const u8) bool {
     } else std.mem.eql(u8, identifier, query);
 }
 
+fn directEvalReferenceMatches(query: anytype) bool {
+    if (comptime @TypeOf(query) == RecordingCapturedBindingReferences) {
+        if (query.captured_count.* == query.names.count()) return false;
+        var bindings = query.names.iterator();
+        while (bindings.next()) |entry| entry.value_ptr.* = true;
+        query.captured_count.* = query.names.count();
+        return false;
+    } else if (comptime @TypeOf(query) == CapturedBindingReferences) {
+        return query.names.count() != 0;
+    } else if (comptime @TypeOf(query) == PendingLexicalReferences) {
+        var bindings = query.bindings.iterator();
+        while (bindings.next()) |entry|
+            if (entry.value_ptr.lexical and !query.declared.contains(entry.key_ptr.*)) return true;
+        return false;
+    } else return true;
+}
+
 fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
     return switch (node.*) {
         .identifier => |id| in_fn and identifierReferenceMatches(name, id),
@@ -1197,6 +1214,12 @@ fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
         },
         .super_member => |m| m.computed != null and nameRefInClosure(m.computed.?, name, in_fn),
         .call => |c| blk: {
+            // PerformEval can create a closure over any visible binding. A
+            // repeated scope must retain fresh cells even when the source text
+            // contains no statically visible function or identifier reference.
+            if (!c.optional and c.callee.* == .identifier and
+                std.mem.eql(u8, c.callee.identifier, "eval") and directEvalReferenceMatches(name))
+                break :blk true;
             if (nameRefInClosure(c.callee, name, in_fn)) break :blk true;
             for (c.args) |a| if (nameRefInClosure(a, name, in_fn)) break :blk true;
             break :blk false;
@@ -1313,12 +1336,10 @@ fn fnCaptures(fnode: *const ast.FunctionNode, name: anytype) bool {
     return nameRefInClosure(fnode.body, name, true);
 }
 
-/// Conservatively, does a statement subtree contain a construct that could leave a
-/// `with` block ABRUPTLY (skipping the matching `exit_with`, which would leave the
-/// VM's environment pointing at the popped with-record)? `with` bodies that might
-/// `yield`/`return`/`throw`/`break`/`continue` are kept on the tree-walker. Stops at
-/// nested function boundaries (their control flow is self-contained). Overly strict
-/// (a `break` for an inner loop inside the `with` also bails), but always safe.
+/// Disposal scopes still need resource cleanup on every abrupt completion;
+/// environment-depth unwind alone is insufficient. Conservatively reject any
+/// possible escape until that cleanup is represented in bytecode. Nested
+/// functions have independent control flow and do not escape the current scope.
 fn stmtCanEscapeAbruptly(node: *const ast.Node) bool {
     return switch (node.*) {
         .yield_expr, .return_stmt, .throw_stmt, .break_stmt, .continue_stmt => true,
@@ -2835,7 +2856,11 @@ pub const Compiler = struct {
     }
 
     fn emitEnterEnvironment(self: *Compiler) CompileError!void {
-        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitEnterEnvironmentFlags(0);
+    }
+
+    fn emitEnterEnvironmentFlags(self: *Compiler, flags: u32) CompileError!void {
+        _ = try self.chunk.emit(.enter_block, flags);
         self.environment_depth += 1;
     }
 
@@ -2846,13 +2871,12 @@ pub const Compiler = struct {
     }
 
     fn emitEnterClassEnvironment(self: *Compiler) CompileError!void {
-        _ = try self.chunk.emit(.enter_block, 1);
-        self.environment_depth += 1;
+        try self.emitEnterEnvironmentFlags(bc.block_environment_class);
     }
 
     fn emitExitClassEnvironment(self: *Compiler) CompileError!void {
         std.debug.assert(self.environment_depth > 0);
-        _ = try self.chunk.emit(.exit_block, 1);
+        _ = try self.chunk.emit(.exit_block, bc.block_environment_class);
         self.environment_depth -= 1;
     }
 
@@ -3107,13 +3131,12 @@ pub const Compiler = struct {
                 self.popLoop();
             },
             .with_stmt => |w| {
-                // `with (obj) body`: push an object Environment Record, run the body,
-                // pop it. Only safe when the body can't leave abruptly (which would
-                // skip exit_with) — otherwise keep the whole generator on the
-                // tree-walker. Annex B block function declarations inside `with`
-                // also need tree-walker source-order legacy binding updates.
-                // The object expression itself may `yield` (evaluated before the push).
-                if (stmtCanEscapeAbruptly(w.body) or stmtContainsFuncDecl(w.body)) return error.Unsupported;
+                // ECMA-262 WithStatement restores the outer environment for
+                // every completion. Jumps carry their target environment depth,
+                // handlers retain the exact unwind prefix, and function exit
+                // restores the caller's activation. Annex B block function
+                // declarations still need source-order legacy binding updates.
+                if (stmtContainsFuncDecl(w.body)) return error.Unsupported;
                 try self.compileExpr(w.obj);
                 _ = try self.chunk.emit(.enter_with, 0);
                 self.environment_depth += 1;
@@ -3141,7 +3164,9 @@ pub const Compiler = struct {
         const environment = self.catchPatternUsesEnvironment(pattern, catch_block);
         if (environment) {
             try self.markEnvironmentLexicalPattern(pattern, false);
-            try self.emitEnterEnvironment();
+            // Annex B.3.5 exempts only a simple catch BindingIdentifier from
+            // sloppy eval declaration conflicts, including captured catches.
+            try self.emitEnterEnvironmentFlags(if (pattern.* == .identifier) bc.block_environment_simple_catch else 0);
             // A lone identifier is initialized immediately from the incoming
             // exception and cannot observe its own pre-initialization state.
             // Destructuring defaults/computed keys can observe sibling TDZs, so
@@ -5893,10 +5918,6 @@ pub const Compiler = struct {
 
     fn addCurrentDirectEvalPlan(self: *Compiler) CompileError!u32 {
         const scope = self.scope orelse return error.Unsupported;
-        // A runtime Environment Record at the call site must be interleaved at
-        // its exact lexical position. Static frame scopes alone cannot describe
-        // that chain, so keep this call site causally fail-closed.
-        if (self.environment_depth != 0) return error.Unsupported;
         if (self.function_binding_phase == .parameters)
             if (self.chunk.parameter_direct_eval_plan) |plan_index| return plan_index;
         const plan = try buildDirectEvalPlan(
@@ -6354,7 +6375,8 @@ test "compiler direct eval plan preserves defining-frame and runtime-environment
     try std.testing.expectEqual(@as(u32, 1), interleaved.scopes[1].environment_depth);
     try std.testing.expectEqual(@as(usize, 1), interleaved.frame_boundaries.len);
     try std.testing.expectEqual(@as(u32, 0), interleaved.frame_boundaries[0].child_frame_depth);
-    try std.testing.expectEqual(@as(u32, 3), interleaved.frame_boundaries[0].environment_depth);
+    try std.testing.expectEqual(@as(u32, 1), interleaved.frame_boundaries[0].environment_depth);
+    try std.testing.expectEqual(@as(u32, 2), interleaved.current_environment_depth);
 }
 
 test "compiler threads activation plans through fixed spread and tail eval calls" {
@@ -6633,6 +6655,9 @@ test "compiler repeated body query preserves capture classifications" {
         any: bool,
     }{
         .{ .source = "function f(){ while(false){ let first=0; let last=1; } }", .any = false },
+        .{ .source = "function f(){ while(false){ let first=0; let last=1; eval(source); } }", .first = true, .last = true, .any = true },
+        .{ .source = "function f(){ while(false){ let first=0; let last=1; eval?.(source); } }", .any = false },
+        .{ .source = "function f(){ while(false){ let first=0; let last=1; (0, eval)(source); } }", .any = false },
         .{ .source = "function f(){ while(false){ let first=0; let last=1; (function(){ return unrelated; }); } }", .any = false },
         .{ .source = "function f(){ while(false){ let first=0; let last=1; (function(){ return first; }); } }", .first = true, .any = true },
         .{ .source = "function f(){ while(false){ let first=0; let last=1; (function(){ return last; }); } }", .last = true, .any = true },

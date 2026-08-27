@@ -2553,6 +2553,17 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
             if (handler.environment) |environment| markManaged(v, environment);
         v.mark(exec.saved_home_object);
         v.mark(exec.saved_super_ctor);
+        markValue(v, exec.saved_this);
+        markValue(v, exec.saved_nt);
+        v.mark(exec.saved_global);
+        v.mark(exec.saved_imo);
+        v.mark(exec.saved_active_function);
+        if (exec.saved_ims) |slot| v.mark(slot.load());
+        if (exec.saved_this_cell) |cell| markValue(v, cell.value());
+        for ([_]?*Environment{ exec.saved_env, exec.debug_environment }) |maybe_env| if (maybe_env) |env| {
+            markManaged(v, env);
+            traceEnv(env, v);
+        };
         // The activation's frame slots (and its captured-frame parent chain for
         // upvalues) are arena-backed locals — invisible to both the precise
         // object graph and the native-stack scan, exactly like the operand stack
@@ -2691,6 +2702,15 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
             gc_relocation.rewriteOptionalSlot(v, interp.Environment, &handler.environment);
         gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_home_object);
         gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_super_ctor);
+        gc_relocation.rewriteValueSlot(v, &exec.saved_this);
+        gc_relocation.rewriteValueSlot(v, &exec.saved_nt);
+        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_global);
+        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_imo);
+        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_active_function);
+        gc_relocation.rewriteOptionalSlot(v, Environment, &exec.saved_env);
+        gc_relocation.rewriteOptionalSlot(v, Environment, &exec.debug_environment);
+        if (exec.saved_ims) |slot| gc_relocation.rewriteAtomicOptionalSlot(v, Object, &slot.obj);
+        if (exec.saved_this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
         var frame = exec.frame;
         while (frame) |current| : (frame = current.parent) {
             gc_relocation.rewriteOptionalSlot(v, Environment, &current.closure_environment);
@@ -2817,12 +2837,23 @@ test "realm root relocation rewrites active interpreter containers" {
     };
     frame.direct_eval_environment.store(&old_environment, .release);
     frame.direct_eval_parameter_environment.store(&old_environment, .release);
+    var saved_import_meta = interp.ImportMetaSlot.init(&old_objects[10]);
+    var saved_this_cell = interp.ThisCell.init(Value.obj(&old_objects[1]), true);
     var execution = vm.Exec{
         .stack = .{ .items = &operand_stack, .capacity = operand_stack.len },
         .acc = Value.obj(&old_objects[18]),
         .frame = &frame,
         .saved_home_object = &old_objects[25],
         .saved_super_ctor = &old_objects[26],
+        .saved_this = Value.obj(&old_objects[1]),
+        .saved_nt = Value.obj(&old_objects[3]),
+        .saved_env = &old_environment,
+        .saved_global = &old_objects[5],
+        .saved_ims = &saved_import_meta,
+        .saved_imo = &old_objects[10],
+        .saved_this_cell = &saved_this_cell,
+        .saved_active_function = &old_objects[7],
+        .debug_environment = &old_environment,
         .parameter_rest_arguments = &pending_rest_arguments,
     };
     try machine.gc_execs.append(machine.arena, &execution);
@@ -2928,6 +2959,15 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_environment, frame.direct_eval_parameter_environment.load(.acquire).?);
     try std.testing.expectEqual(&new_objects[25], execution.saved_home_object.?);
     try std.testing.expectEqual(&new_objects[26], execution.saved_super_ctor.?);
+    try std.testing.expectEqual(&new_objects[1], execution.saved_this.asObj());
+    try std.testing.expectEqual(&new_objects[3], execution.saved_nt.asObj());
+    try std.testing.expectEqual(&new_environment, execution.saved_env.?);
+    try std.testing.expectEqual(&new_objects[5], execution.saved_global.?);
+    try std.testing.expectEqual(&new_objects[10], saved_import_meta.load().?);
+    try std.testing.expectEqual(&new_objects[10], execution.saved_imo.?);
+    try std.testing.expectEqual(&new_objects[1], saved_this_cell.value().asObj());
+    try std.testing.expectEqual(&new_objects[7], execution.saved_active_function.?);
+    try std.testing.expectEqual(&new_environment, execution.debug_environment.?);
     try std.testing.expectEqual(&new_environment, machine.gc_env_roots.items[0]);
     try std.testing.expectEqual(&new_cached_environment, machine.reusable_block_env.?);
     try std.testing.expectEqual(&new_cached_call_environment, machine.reusable_call_env.?);

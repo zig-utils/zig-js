@@ -24304,6 +24304,318 @@ test "forced tree-walker and required bytecode interleave captured direct eval r
         try std.testing.expectEqualStrings(tree_result, bytecode_result);
 }
 
+test "forced tree-walker and required bytecode preserve current runtime direct eval records" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source =
+        \\function currentWith(holder) {
+        \\  var local = 1, answer;
+        \\  with (holder) {
+        \\    let local = 2;
+        \\    eval("local += 3; var dynamic = 7; value += local");
+        \\    answer = eval("local + ':' + value + ':' + dynamic");
+        \\  }
+        \\  return answer + '|' + local + '|' + dynamic + '|' + typeof value;
+        \\}
+        \\currentWith({ value: 10, local: 99 });
+        , .expected = "5:15:7|1|7|undefined" },
+        .{ .source =
+        \\function currentLoop() {
+        \\  var readers = [];
+        \\  for (let index = 0; index < 3; index++) {
+        \\    let body = index + 10;
+        \\    readers.push(eval("(function() { return index + ':' + body; })"));
+        \\    eval("var count = (typeof count === 'undefined' ? 0 : count) + 1");
+        \\    if (index === 1) continue;
+        \\  }
+        \\  globalThis.currentEvalReaders = readers;
+        \\  return readers[0]() + '|' + readers[1]() + '|' + readers[2]() + '|' + count + '|' + typeof index + ':' + typeof body;
+        \\}
+        \\currentLoop();
+        , .expected = "0:10|1:11|2:12|3|undefined:undefined" },
+        .{ .source =
+        \\function currentCatch() {
+        \\  var readers = [];
+        \\  for (var index = 0; index < 2; index++) {
+        \\    try { throw index; } catch (caught) {
+        \\      eval("var caught; caught += 10; var latest = caught");
+        \\      readers.push(eval("(function() { return caught; })"));
+        \\    }
+        \\  }
+        \\  return readers[0]() + ',' + readers[1]() + '|' + latest + '|' + typeof caught;
+        \\}
+        \\currentCatch();
+        , .expected = "10,11|11|undefined" },
+        .{ .source =
+        \\function currentAbrupt(holder) {
+        \\  var result;
+        \\  try { with (holder) { eval("var created = 9; value += 1; throw 'boom'"); } }
+        \\  catch (error) { result = error; }
+        \\  return result + ':' + created + ':' + typeof value;
+        \\}
+        \\currentAbrupt({ value: 1 });
+        , .expected = "boom:9:undefined" },
+        .{ .source =
+        \\function currentClass() {
+        \\  var caught;
+        \\  try { class Local { [eval("var created = 7; Local")]() {} } }
+        \\  catch (error) { caught = error.name; }
+        \\  eval("var after = 8");
+        \\  return caught + ':' + typeof created + ':' + after;
+        \\}
+        \\currentClass();
+        , .expected = "ReferenceError:undefined:8" },
+        .{ .source =
+        \\function currentUnscopables(holder) {
+        \\  var value = 3, result;
+        \\  with (holder) {
+        \\    eval("value += 2; var dynamic = 6");
+        \\    result = eval("value") + ':' + eval("delete removable");
+        \\  }
+        \\  return value + ':' + result + ':' + dynamic + ':' + ('removable' in holder);
+        \\}
+        \\currentUnscopables({ value: 99, removable: 1, [Symbol.unscopables]: { value: true } });
+        , .expected = "5:5:true:6:false" },
+        .{ .source =
+        \\function currentNested(holder) {
+        \\  var closure;
+        \\  with (holder) {
+        \\    eval("var dynamic = 7");
+        \\    closure = function inner() {
+        \\      with ({ step: 2 }) { return eval("dynamic += step; value + ':' + dynamic"); }
+        \\    };
+        \\  }
+        \\  return closure;
+        \\}
+        \\var currentNestedClosure = currentNested({ value: 4 });
+        \\currentNestedClosure() + '|' + currentNestedClosure();
+        , .expected = "4:9|4:11" },
+        .{ .source =
+        \\function currentHandlers() {
+        \\  var trace = '';
+        \\  with ({ value: 3 }) {
+        \\    try { eval("var dynamic = 5; throw 7"); }
+        \\    catch (error) { trace += value + dynamic + error; }
+        \\    finally { trace += 'f' + eval("dynamic"); }
+        \\  }
+        \\  return trace + ':' + dynamic + ':' + typeof value;
+        \\}
+        \\currentHandlers();
+        , .expected = "15f5:5:undefined" },
+        .{ .source =
+        \\function currentRejected() {
+        \\  var trace = '';
+        \\  with ({ value: 3 }) {
+        \\    try { eval("let ="); } catch (error) { trace = error.name; }
+        \\    trace += ':' + eval(23) + ':' + value;
+        \\  }
+        \\  var shadow = { eval: function () { return this === shadow ? 7 : 0; } };
+        \\  with (shadow) { trace += ':' + eval('ignored'); }
+        \\  return trace + ':' + typeof value;
+        \\}
+        \\currentRejected();
+        , .expected = "SyntaxError:23:3:7:undefined" },
+        .{ .source =
+        \\function currentDestructuredCatch() {
+        \\  var trace = '', reader;
+        \\  try { throw [3]; } catch ([caught]) {
+        \\    try { eval("var caught = 5"); } catch (error) { trace = error.name; }
+        \\    reader = eval("(function () { return caught; })");
+        \\  }
+        \\  return trace + ':' + reader() + ':' + typeof caught;
+        \\}
+        \\currentDestructuredCatch();
+        , .expected = "SyntaxError:3:undefined" },
+        .{ .source =
+        \\function currentIterationForms() {
+        \\  var readers = [];
+        \\  for (let key in { a: 1, b: 2 }) readers.push(eval("(function () { return key; })"));
+        \\  for (let value of [3, 4]) readers.push(eval("(function () { return value; })"));
+        \\  var index = 0;
+        \\  while (index < 2) {
+        \\    let body = 5 + index++;
+        \\    readers.push(eval("(function () { return body; })"));
+        \\  }
+        \\  return readers[0]() + readers[1]() + readers[2]() + readers[3]() + readers[4]() + readers[5]();
+        \\}
+        \\currentIterationForms();
+        , .expected = "ab3456" },
+        .{ .source =
+        \\function currentWithJumps() {
+        \\  var trace = '';
+        \\  outer: for (let index = 0; index < 3; index++) {
+        \\    with ({ value: index + 10 }) {
+        \\      try {
+        \\        eval("var dynamic = value");
+        \\        if (index === 0) continue outer;
+        \\        break outer;
+        \\      } finally { trace += eval("value"); }
+        \\    }
+        \\  }
+        \\  return trace + ':' + dynamic + ':' + typeof value;
+        \\}
+        \\currentWithJumps();
+        , .expected = "1011:11:undefined" },
+        .{ .source =
+        \\function* currentWithSuspension() {
+        \\  var local = 2;
+        \\  with ({ value: 3 }) {
+        \\    yield eval("local + value");
+        \\    eval("local += value");
+        \\    return local;
+        \\  }
+        \\}
+        \\var currentWithIterator = currentWithSuspension();
+        \\var currentWithFirst = currentWithIterator.next(), currentWithSecond = currentWithIterator.next();
+        \\currentWithFirst.value + ':' + currentWithFirst.done + ':' + currentWithSecond.value + ':' + currentWithSecond.done;
+        , .expected = "5:false:5:true" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        ctx.collectGarbage();
+        ctx.gc.?.threshold_bytes = std.math.maxInt(usize);
+        ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+        for (cases, 0..) |case, index| {
+            const result = ctx.evaluate(case.source) catch |err| {
+                std.debug.print("current runtime direct eval case {d} failed in {s}\n", .{ index, @tagName(mode) });
+                if (ctx.exception) |exception| if (exception.isObject()) {
+                    const message = exception.asObj().getOwn("message") orelse Value.undef();
+                    if (message.isString()) std.debug.print("{s}: {s}\n", .{ exception.asObj().errorName(), message.asStr() });
+                };
+                return err;
+            };
+            try std.testing.expect(result.isString());
+            try std.testing.expectEqualStrings(case.expected, result.asStr());
+        }
+        const compacted = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+        try std.testing.expect(compacted.moved_cells > 0);
+        try std.testing.expectEqualStrings("0:10|1:11|2:12|4:13", (try ctx.evaluate(
+            \\currentEvalReaders[0]() + '|' + currentEvalReaders[1]() + '|' + currentEvalReaders[2]() + '|' + currentNestedClosure();
+        )).asStr());
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+        }
+    }
+}
+
+test "current runtime direct eval resumes its exact environment after a moving safepoint" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const Trigger = struct {
+        fn request(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const owner: *Context = @ptrCast(@alignCast(machine.gc_safepoint_ctx.?));
+            owner.gc.?.nursery_threshold_bytes = 1;
+            owner.movingCheckpointRequest().store(true, .release);
+            return Value.undef();
+        }
+    };
+    {
+        const saved_gc = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved_gc);
+        const saved_strings = strcell.setActiveArena(ctx.arena());
+        defer _ = strcell.setActiveArena(saved_strings);
+        try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "requestCurrentEvalMove", 0, Trigger.request);
+    }
+    _ = try ctx.evaluate(
+        \\function currentEvalMovingLoop(n) {
+        \\  var total = 0, index = 0;
+        \\  while (index < n) { total = total + index; index = index + 1; }
+        \\  return total;
+        \\}
+        \\for (var warm = 0; warm < 10; warm++) currentEvalMovingLoop(4096);
+        \\function currentEvalMoving(holder) {
+        \\  var result, plain = 2;
+        \\  with (holder) {
+        \\    let lexical = 3;
+        \\    result = eval("var dynamic = value; requestCurrentEvalMove(); currentEvalMovingLoop(20000); lexical++; value += lexical; dynamic += plain; lexical");
+        \\    result += ':' + eval("value + ':' + dynamic");
+        \\  }
+        \\  return result + ':' + dynamic + ':' + typeof value;
+        \\}
+    );
+    const loop_object = ctx.global_object.getOwn("currentEvalMovingLoop").?.asObj();
+    const loop: *interp.Function = @ptrCast(@alignCast(loop_object.jsFunction().?));
+    try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+    try std.testing.expect(loop.chunk.?.tier.loadCode().?.manages_steps);
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate("globalThis.currentEvalMovingHolder = { value: 5 }");
+    const holder_before = ctx.global_object.getOwn("currentEvalMovingHolder").?.asObj();
+    const moving_before = heap.accounting().moving_minor_collections;
+    try std.testing.expectEqualStrings("4:9:7:7:undefined", (try ctx.evaluate(
+        "currentEvalMoving(currentEvalMovingHolder)",
+    )).asStr());
+    try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+    try std.testing.expect(holder_before != ctx.global_object.getOwn("currentEvalMovingHolder").?.asObj());
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+}
+
+test "parallel_js required bytecode preserves current runtime direct eval records" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = ctx.evaluate(
+        \\function currentEvalLane(seed) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('worker still holds the thread GIL');
+        \\  var readers = [], trace = '';
+        \\  with ({ value: seed }) {
+        \\    for (let index = 0; index < 8; index++) {
+        \\      let body = index + 10;
+        \\      readers.push(eval("(function () { return value + index + body; })"));
+        \\      try { eval("var dynamic = index; throw index"); }
+        \\      catch (error) { if (error !== index) return 0; }
+        \\      finally { trace += eval("dynamic"); }
+        \\    }
+        \\  }
+        \\  for (var index = 0; index < 8; index++) if (readers[index]() !== seed + index * 2 + 10) return 0;
+        \\  return dynamic === 7 && trace === '01234567' && typeof value === 'undefined' ? 1 : 0;
+        \\}
+        \\var currentEvalWorkers = [];
+        \\for (var lane = 0; lane < 4; lane++) currentEvalWorkers.push(new Thread(currentEvalLane, lane));
+        \\var currentEvalTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) currentEvalTotal += currentEvalWorkers[lane].join();
+        \\currentEvalTotal;
+    ) catch |err| {
+        if (ctx.exception) |exception| {
+            std.debug.print("current runtime direct eval worker failed: {}\n", .{exception});
+            if (exception.isObject()) {
+                const message = exception.asObj().getOwn("message") orelse Value.undef();
+                if (message.isString()) std.debug.print("{s}: {s}\n", .{
+                    exception.asObj().errorName(), message.asStr(),
+                });
+            }
+        }
+        return err;
+    };
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+}
+
 test "parallel_js required bytecode interleaves shared captured direct eval records" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{

@@ -402,8 +402,8 @@ pub const Op = enum(u8) {
     super_base, // operand a: require non-null; push the current home-object prototype (or null)
     super_get_from, // operand a: name index; pop captured base -> push base[name] with receiver = this
     super_get_index_from, // pop key, captured base -> push base[key] with receiver = this
-    enter_block, // push a declarative block Environment; a != 0 also enters resumable strict class code
-    exit_block, // pop that Environment; a != 0 also exits resumable strict class code
+    enter_block, // push a declarative Environment; a: block_environment_* flags
+    exit_block, // pop that Environment; a: block_environment_class restores class strictness
     dispose_scope, // DisposeResources for the current Environment Record
     enter_with, // pop object; push an object Environment Record (with_object = ToObject(it)) onto vm.env
     exit_with, // pop the innermost with/block environment off vm.env (restore its parent)
@@ -549,6 +549,9 @@ pub const DirectEvalBinding = struct {
     mapped_parameter: bool,
 };
 
+pub const block_environment_class: u32 = 1;
+pub const block_environment_simple_catch: u32 = 2;
+
 pub const DirectEvalScopeKind = enum {
     parameter,
     variable,
@@ -590,11 +593,12 @@ pub const DirectEvalFrameBoundary = struct {
 /// Exact static scope stack for one direct-eval call site. Runtime Environment
 /// Records (captured loop heads, `with`, disposal scopes) are not flattened into
 /// binding snapshots. Boundary counts and lexical-scope depths place captured
-/// records without mutating their published parent links. Current-frame runtime
-/// boundaries remain fail-closed until their own segment is represented.
+/// records without mutating their published parent links. The current frame's
+/// active segment is separate from the immutable captured frame boundaries.
 pub const DirectEvalPlan = struct {
     scopes: []const DirectEvalScope,
     frame_boundaries: []const DirectEvalFrameBoundary = &.{},
+    current_environment_depth: u32 = 0,
 };
 
 /// `load_binding_ref` keeps the Reference for a later PutValue when `retain` is

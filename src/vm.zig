@@ -280,11 +280,20 @@ pub const Exec = struct {
     /// both the precise object graph and the conservative native-stack scan, so
     /// an object live only through a VM local would otherwise be swept.
     frame: ?*Frame = null,
-    /// Caller method scope saved by a heap activation. These live on `Exec`
-    /// rather than only on the arena-backed Activation so the registered exec
-    /// root keeps them marked and relocates them during a moving collection.
+    /// Managed caller state saved by a heap activation. The registered Exec
+    /// owns the only restoration copies, so a nested moving safepoint rewrites
+    /// the exact values later consumed by popActivation and tail-call transfer.
+    saved_this: Value = Value.undef(),
+    saved_env: ?*Environment = null,
+    saved_global: ?*value.Object = null,
+    saved_nt: Value = Value.undef(),
+    saved_ims: ?*interp.ImportMetaSlot = null,
+    saved_imo: ?*value.Object = null,
+    saved_this_cell: ?*interp.ThisCell = null,
+    saved_active_function: ?*value.Object = null,
     saved_home_object: ?*value.Object = null,
     saved_super_ctor: ?*value.Object = null,
+    debug_environment: ?*Environment = null,
     /// Active try/catch handlers, innermost last. Lives in `Exec` so it persists
     /// across a generator's `yield`/resume (a `yield` can sit inside a `try`).
     handlers: std.ArrayListUnmanaged(Handler) = .empty,
@@ -4197,6 +4206,7 @@ fn callEvalValueWithThis(vm: *Interpreter, callee: Value, args: []const Value, t
 const MaterializedDirectEvalEnvironment = struct {
     environment: *Environment,
     function_environment: *Environment,
+    runtime_environment: *Environment,
 };
 
 fn sameDirectEvalBindings(left: []const bc.DirectEvalBinding, right: []const bc.DirectEvalBinding) bool {
@@ -4256,6 +4266,35 @@ fn skipDirectEvalBoundaryActivations(
         current = environment.parent;
     }
     return current;
+}
+
+fn directEvalCurrentBaseMatches(environment: ?*Environment, frame: *Frame) bool {
+    const candidate = environment orelse return false;
+    return candidate == frame.closure_environment or
+        candidate == frame.direct_eval_environment.load(.acquire) or
+        candidate == frame.direct_eval_parameter_environment.load(.acquire);
+}
+
+fn directEvalForwardTarget(environment: *Environment) *Environment {
+    const target = environment.direct_eval_forward_target orelse environment;
+    // Repeated eval must not build chains of forwarding records. The runtime
+    // projection and the eval view both refer directly to the original cell.
+    std.debug.assert(target.direct_eval_forward_target == null);
+    return target;
+}
+
+fn allocDirectEvalForwardingEnvironment(
+    vm: *Interpreter,
+    parent_root: usize,
+    parent_fallback: *Environment,
+    target_root: usize,
+    target_fallback: *Environment,
+) EvalError!*Environment {
+    const environment = try gc_mod.allocEnv(vm.arena);
+    vm.initEnvironment(environment, vm.tempEnvRoot(parent_root, parent_fallback), false);
+    environment.direct_eval_forward_target = directEvalForwardTarget(vm.tempEnvRoot(target_root, target_fallback));
+    environment.private_activation = false;
+    return environment;
 }
 
 fn reparentUnpublishedDirectEvalEnvironment(environment: *Environment, parent: *Environment) void {
@@ -4331,7 +4370,7 @@ fn materializeDirectEvalEnvironment(
             if (scope.environment_depth > inner_depth)
                 return vm.throwError("InternalError", "unordered direct-eval lexical boundary");
         selected_environment_depth = scope.environment_depth;
-        if (scope.environment_depth != 0 and (scope.kind != .lexical or scope.frame_depth == 0))
+        if (scope.environment_depth != 0 and scope.kind != .lexical)
             return vm.throwError("InternalError", "unsupported direct-eval lexical boundary");
         if (scope.kind != .lexical) {
             if (scope.is_catch_param)
@@ -4383,22 +4422,32 @@ fn materializeDirectEvalEnvironment(
     if (plan.frame_boundaries.len != @as(usize, @intCast(selected_depth)))
         return vm.throwError("InternalError", "incomplete direct-eval frame boundaries");
     for (plan.scopes) |scope| {
-        if (scope.frame_depth == 0) continue;
-        const boundary = plan.frame_boundaries[@intCast(scope.frame_depth - 1)];
-        if (scope.environment_depth > boundary.environment_depth)
+        const environment_depth = if (scope.frame_depth == 0)
+            plan.current_environment_depth
+        else
+            plan.frame_boundaries[@intCast(scope.frame_depth - 1)].environment_depth;
+        if (scope.environment_depth > environment_depth)
             return vm.throwError("InternalError", "out-of-bounds direct-eval lexical boundary");
     }
-    var total_boundary_environments: usize = 0;
+    var current_base: ?*Environment = vm.env;
+    for (0..plan.current_environment_depth) |_| {
+        const environment = current_base orelse
+            return vm.throwError("InternalError", "truncated current direct-eval runtime segment");
+        if (directEvalEnvironmentOwnsFrame(environment, current_frame))
+            return vm.throwError("InternalError", "activation inside current direct-eval runtime segment");
+        current_base = environment.parent;
+    }
+    if (plan.current_environment_depth != 0 and !directEvalCurrentBaseMatches(current_base, current_frame))
+        return vm.throwError("InternalError", "mismatched current direct-eval runtime segment");
+
+    var total_boundary_environments: usize = plan.current_environment_depth;
     var boundary_frame = current_frame;
     for (plan.frame_boundaries, 0..) |boundary, child_depth| {
         if (boundary.child_frame_depth != @as(u32, @intCast(child_depth)))
             return vm.throwError("InternalError", "unordered direct-eval frame boundary");
         const parent_frame = boundary_frame.parent orelse
             return vm.throwError("InternalError", "direct-eval boundary parent frame is unavailable");
-        var cursor: ?*Environment = if (child_depth == 0)
-            vm.env
-        else
-            boundary_frame.closure_environment;
+        var cursor = boundary_frame.closure_environment;
         var consumed: u32 = 0;
         while (consumed < boundary.environment_depth) : (consumed += 1) {
             cursor = skipDirectEvalBoundaryActivations(cursor, boundary_frame, parent_frame);
@@ -4419,7 +4468,7 @@ fn materializeDirectEvalEnvironment(
 
     const target_scope = plan.scopes[declaration_target_index.?];
     const target_cache = directEvalEnvironmentCache(current_frame, target_scope.kind);
-    if (target_cache.load(.acquire)) |cached| {
+    if (plan.current_environment_depth == 0) if (target_cache.load(.acquire)) |cached| {
         const function_scope = target_scope;
         if (!directEvalFunctionEnvironmentMatches(cached, current_frame, function_scope))
             return vm.throwError("InternalError", "mismatched cached direct-eval environment");
@@ -4444,8 +4493,12 @@ fn materializeDirectEvalEnvironment(
         const installed = vm.tempEnvRoot(chain_root, outward);
         const function_environment = vm.tempEnvRoot(function_root, cached);
         vm.env = installed;
-        return .{ .environment = installed, .function_environment = function_environment };
-    }
+        return .{
+            .environment = installed,
+            .function_environment = function_environment,
+            .runtime_environment = function_environment,
+        };
+    };
 
     const frame_count = std.math.add(usize, @intCast(selected_depth), 1) catch
         return vm.throwError("InternalError", "direct-eval frame depth overflow");
@@ -4454,7 +4507,8 @@ fn materializeDirectEvalEnvironment(
     for (1..frames.len) |depth|
         frames[depth] = frames[depth - 1].parent.?;
 
-    const boundary_offsets = try vm.arena.alloc(usize, plan.frame_boundaries.len + 1);
+    const current_segment_index = plan.frame_boundaries.len;
+    const boundary_offsets = try vm.arena.alloc(usize, plan.frame_boundaries.len + 2);
     const boundary_target_fallbacks = try vm.arena.alloc(*Environment, total_boundary_environments);
     const boundary_target_roots = try vm.arena.alloc(usize, total_boundary_environments);
     var boundary_roots_mark: ?usize = null;
@@ -4463,10 +4517,7 @@ fn materializeDirectEvalEnvironment(
     for (plan.frame_boundaries, 0..) |boundary, child_depth| {
         boundary_offsets[child_depth] = boundary_target_index;
         const child_frame = frames[child_depth];
-        var cursor: ?*Environment = if (child_depth == 0)
-            vm.env
-        else
-            child_frame.closure_environment;
+        var cursor = child_frame.closure_environment;
         var consumed: u32 = 0;
         while (consumed < boundary.environment_depth) : (consumed += 1) {
             cursor = skipDirectEvalBoundaryActivations(cursor, child_frame, frames[child_depth + 1]);
@@ -4484,6 +4535,20 @@ fn materializeDirectEvalEnvironment(
             return vm.throwError("InternalError", "mismatched rooted direct-eval runtime boundary");
     }
     boundary_offsets[plan.frame_boundaries.len] = boundary_target_index;
+    var current_cursor: ?*Environment = vm.env;
+    for (0..plan.current_environment_depth) |_| {
+        const target = current_cursor orelse
+            return vm.throwError("InternalError", "truncated rooted current direct-eval segment");
+        const target_root = try vm.pushTempEnvRoot(target);
+        if (boundary_roots_mark == null) boundary_roots_mark = target_root;
+        boundary_target_fallbacks[boundary_target_index] = target;
+        boundary_target_roots[boundary_target_index] = target_root;
+        boundary_target_index += 1;
+        current_cursor = vm.tempEnvRoot(target_root, target).parent;
+    }
+    if (plan.current_environment_depth != 0 and !directEvalCurrentBaseMatches(current_cursor, current_frame))
+        return vm.throwError("InternalError", "mismatched rooted current direct-eval segment");
+    boundary_offsets[current_segment_index + 1] = boundary_target_index;
     std.debug.assert(boundary_target_index == total_boundary_environments);
 
     // Anchor at the nearest already-published persistent record. This may be an
@@ -4491,12 +4556,12 @@ fn materializeDirectEvalEnvironment(
     // the innermost available scope preserves dynamic declarations and lets a
     // later body record link to the exact parameter identity.
     var base_environment = if (selected_depth == 0)
-        vm.env
+        current_cursor orelse return vm.throwError("InternalError", "missing current direct-eval base")
     else
         selected_frame.closure_environment orelse
             return vm.throwError("InternalError", "direct-eval defining closure is unavailable");
     var start_index: usize = 0;
-    var anchor_index = declaration_target_index.?;
+    var anchor_index = declaration_target_index.? + 1;
     while (anchor_index > 0) {
         anchor_index -= 1;
         const scope = plan.scopes[anchor_index];
@@ -4525,7 +4590,7 @@ fn materializeDirectEvalEnvironment(
     @memset(scope_child_root_indices, null);
 
     var outward = vm.tempEnvRoot(chain_root, base_environment);
-    var unrooted_function_environment: ?*Environment = null;
+    var unrooted_function_environment: ?*Environment = if (start_index > declaration_target_index.?) base_environment else null;
     var materialized_frame_depth: u32 = if (start_index == 0)
         selected_depth
     else
@@ -4542,7 +4607,10 @@ fn materializeDirectEvalEnvironment(
             boundary_child_depth = @intCast(scope.frame_depth);
             target_environment_depth = plan.frame_boundaries[boundary_child_depth.?].environment_depth;
         } else if (target_environment_depth > materialized_environment_depth) {
-            boundary_child_depth = @intCast(scope.frame_depth - 1);
+            boundary_child_depth = if (scope.frame_depth == 0)
+                current_segment_index
+            else
+                @intCast(scope.frame_depth - 1);
         }
         // ECMA-262 GetIdentifierReference follows [[OuterEnv]] in lexical
         // order. A frame-backed block inside `with` must therefore sit inward
@@ -4552,13 +4620,13 @@ fn materializeDirectEvalEnvironment(
             const target_end = boundary_offsets[child_depth + 1] - target_environment_depth;
             while (target_index > target_end) {
                 target_index -= 1;
-                const environment = try gc_mod.allocEnv(vm.arena);
-                vm.initEnvironment(environment, vm.tempEnvRoot(chain_root, outward), false);
-                environment.direct_eval_forward_target = vm.tempEnvRoot(
+                const environment = try allocDirectEvalForwardingEnvironment(
+                    vm,
+                    chain_root,
+                    outward,
                     boundary_target_roots[target_index],
                     boundary_target_fallbacks[target_index],
                 );
-                environment.private_activation = false;
                 outward = environment;
                 vm.setTempEnvRoot(chain_root, environment);
                 if (previous_scope_index) |previous| {
@@ -4602,6 +4670,52 @@ fn materializeDirectEvalEnvironment(
         }
     }
 
+    var current_target_index = boundary_offsets[current_segment_index + 1] - materialized_environment_depth;
+    while (current_target_index > boundary_offsets[current_segment_index]) {
+        current_target_index -= 1;
+        const environment = try allocDirectEvalForwardingEnvironment(
+            vm,
+            chain_root,
+            outward,
+            boundary_target_roots[current_target_index],
+            boundary_target_fallbacks[current_target_index],
+        );
+        outward = environment;
+        vm.setTempEnvRoot(chain_root, environment);
+        if (previous_scope_index) |previous| {
+            scope_child_fallbacks[previous] = environment;
+            scope_child_root_indices[previous] = try vm.pushTempEnvRoot(environment);
+            previous_scope_index = null;
+        }
+    }
+
+    // The eval view includes slot-backed lexical records. Bytecode's runtime
+    // environment depth does not: exit_block/exit_with and handler unwind must
+    // still pop exactly one record per entered runtime scope. Prepare a second
+    // identity-preserving view over the persistent variable record before any
+    // cache publication, so OOM cannot strand either view half-installed.
+    var runtime_outward = vm.tempEnvRoot(function_root, unrooted_function_environment orelse unreachable);
+    const runtime_root = try vm.pushTempEnvRoot(runtime_outward);
+    var runtime_child_fallback: ?*Environment = null;
+    var runtime_child_root: ?usize = null;
+    current_target_index = boundary_offsets[current_segment_index + 1];
+    while (current_target_index > boundary_offsets[current_segment_index]) {
+        current_target_index -= 1;
+        const environment = try allocDirectEvalForwardingEnvironment(
+            vm,
+            runtime_root,
+            runtime_outward,
+            boundary_target_roots[current_target_index],
+            boundary_target_fallbacks[current_target_index],
+        );
+        runtime_outward = environment;
+        vm.setTempEnvRoot(runtime_root, environment);
+        if (runtime_child_root == null) {
+            runtime_child_fallback = environment;
+            runtime_child_root = try vm.pushTempEnvRoot(environment);
+        }
+    }
+
     // Publish every defining function record, outer-to-inner, only after the
     // whole candidate chain has allocated. A nested eval that materializes
     // first therefore establishes the outer frame's stable declaration target;
@@ -4625,24 +4739,53 @@ fn materializeDirectEvalEnvironment(
         if (index == declaration_target_index.?) {
             unrooted_function_environment = published;
             vm.setTempEnvRoot(function_root, published);
+            if (runtime_child_root) |child_root| {
+                reparentUnpublishedDirectEvalEnvironment(
+                    vm.tempEnvRoot(child_root, runtime_child_fallback.?),
+                    published,
+                );
+            } else {
+                runtime_outward = published;
+                vm.setTempEnvRoot(runtime_root, published);
+            }
         }
     }
 
     const function_environment = vm.tempEnvRoot(function_root, unrooted_function_environment orelse unreachable);
     vm.env = installed;
-    return .{ .environment = installed, .function_environment = function_environment };
+    return .{
+        .environment = installed,
+        .function_environment = function_environment,
+        .runtime_environment = vm.tempEnvRoot(runtime_root, runtime_outward),
+    };
 }
 
 const DirectEvalActivationHookContext = struct {
     frame: *Frame,
+    exec: ?*Exec,
     plan: *const bc.DirectEvalPlan,
-    function_environment: ?*Environment = null,
+    runtime_environment: *Environment,
+    runtime_environment_root: usize,
 };
 
 fn materializeDirectEvalEnvironmentHook(raw_context: *anyopaque, vm: *Interpreter) EvalError!*Environment {
     const context: *DirectEvalActivationHookContext = @ptrCast(@alignCast(raw_context));
     const materialized = try materializeDirectEvalEnvironment(vm, context.frame, context.plan);
-    context.function_environment = materialized.function_environment;
+    context.runtime_environment = materialized.runtime_environment;
+    vm.setTempEnvRoot(context.runtime_environment_root, materialized.runtime_environment);
+    if (context.exec) |exec| {
+        // Handler depths describe prefixes of the active runtime chain. Keep
+        // their binding identities while installing the same persistent var
+        // base, so a later catch/finally cannot hide declarations made by eval.
+        for (exec.handlers.items) |*handler| if (handler.environment != null) {
+            var environment = materialized.runtime_environment;
+            var depth = context.plan.current_environment_depth;
+            while (depth > handler.environment_depth) : (depth -= 1)
+                environment = environment.parent.?;
+            gc_mod.barrierCell(@ptrCast(environment));
+            handler.environment = environment;
+        };
+    }
     return materialized.environment;
 }
 
@@ -4661,6 +4804,7 @@ fn callActivationEvalValue(
     vm: *Interpreter,
     chunk: *Chunk,
     current_frame: ?*Frame,
+    exec: ?*Exec,
     plan_index: u32,
     callee: Value,
     args: []const Value,
@@ -4684,6 +4828,13 @@ fn callActivationEvalValue(
             callEvalValue(vm, callee, args);
 
     const plan = &chunk.direct_eval_plans.items[plan_index];
+    if (exec) |activation| {
+        if (activation.environment_depth != plan.current_environment_depth)
+            return vm.throwError("InternalError", "direct-eval runtime depth disagrees with activation");
+        for (activation.handlers.items) |handler|
+            if (handler.environment_depth > plan.current_environment_depth)
+                return vm.throwError("InternalError", "direct-eval handler exceeds runtime depth");
+    }
     const declaration_scope = directEvalDeclarationScope(plan) orelse
         return vm.throwError("InternalError", "direct-eval activation plan has no declaration target");
     const parameter_phase = declaration_scope.kind == .parameter;
@@ -4699,18 +4850,23 @@ fn callActivationEvalValue(
     }
 
     const saved_environment = vm.env;
+    const runtime_environment_root = try vm.pushTempEnvRoot(saved_environment);
+    defer vm.restoreTempEnvRoots(runtime_environment_root);
     const saved_hook = vm.direct_eval_environment_hook;
     const saved_hook_context = vm.direct_eval_environment_hook_ctx;
     var hook_context = DirectEvalActivationHookContext{
         .frame = frame,
+        .exec = exec,
         .plan = plan,
+        .runtime_environment = saved_environment,
+        .runtime_environment_root = runtime_environment_root,
     };
     vm.direct_eval_environment_hook = materializeDirectEvalEnvironmentHook;
     vm.direct_eval_environment_hook_ctx = @ptrCast(&hook_context);
     defer {
         vm.direct_eval_environment_hook = saved_hook;
         vm.direct_eval_environment_hook_ctx = saved_hook_context;
-        vm.env = hook_context.function_environment orelse saved_environment;
+        vm.env = vm.tempEnvRoot(runtime_environment_root, hook_context.runtime_environment);
     }
     return if (this_value) |receiver|
         callEvalValueWithThis(vm, callee, args, receiver)
@@ -5043,6 +5199,91 @@ test "vm interleaves captured direct eval runtime environments without reparenti
     try std.testing.expect(saw_transactional_success);
 }
 
+test "vm current runtime direct eval views publish failure atomically without forwarding chains" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var root = Environment{ .arena = allocator, .fn_scope = true, .binding_lock_required = false };
+    var runtime_outer = Environment{ .arena = allocator, .parent = &root, .binding_lock_required = false };
+    var runtime_inner = Environment{ .arena = allocator, .parent = &runtime_outer, .binding_lock_required = false };
+    try runtime_outer.put("outerRuntime", Value.num(3));
+    try runtime_inner.put("innerRuntime", Value.num(4));
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &runtime_inner, .root_shape = root_shape };
+    var slots = [_]Value{ Value.num(1), Value.num(2) };
+    var frame = Frame{ .slots = &slots, .parent = null, .closure_environment = &root };
+    const variable_bindings = [_]bc.DirectEvalBinding{.{
+        .name = "variable",
+        .slot = 0,
+        .lexical = false,
+        .immutable = false,
+        .tdz_checked = false,
+        .mapped_parameter = false,
+    }};
+    const lexical_bindings = [_]bc.DirectEvalBinding{.{
+        .name = "lexical",
+        .slot = 1,
+        .lexical = true,
+        .immutable = false,
+        .tdz_checked = true,
+        .mapped_parameter = false,
+    }};
+    const scopes = [_]bc.DirectEvalScope{
+        .{ .bindings = &variable_bindings, .kind = .variable, .declaration_target = true, .frame_depth = 0 },
+        .{ .bindings = &lexical_bindings, .kind = .lexical, .frame_depth = 0, .environment_depth = 1 },
+    };
+    const plan = bc.DirectEvalPlan{ .scopes = &scopes, .current_environment_depth = 2 };
+    const first = try materializeDirectEvalEnvironment(&machine, &frame, &plan);
+    try std.testing.expectEqual(@as(f64, 2), first.environment.get("lexical").?.asNum());
+    try std.testing.expectEqual(&runtime_inner, first.environment.direct_eval_forward_target.?);
+    const lexical = first.environment.parent.?;
+    try std.testing.expect(lexical.activation != null);
+    try std.testing.expectEqual(&runtime_outer, lexical.parent.?.direct_eval_forward_target.?);
+    try std.testing.expectEqual(first.function_environment, lexical.parent.?.parent.?);
+    try std.testing.expectEqual(&runtime_inner, first.runtime_environment.direct_eval_forward_target.?);
+    try std.testing.expectEqual(&runtime_outer, first.runtime_environment.parent.?.direct_eval_forward_target.?);
+    try std.testing.expectEqual(first.function_environment, first.runtime_environment.parent.?.parent.?);
+    try std.testing.expectEqual(&root, first.function_environment.parent.?);
+
+    machine.env = first.runtime_environment;
+    const second = try materializeDirectEvalEnvironment(&machine, &frame, &plan);
+    try std.testing.expectEqual(first.function_environment, second.function_environment);
+    try std.testing.expectEqual(&runtime_inner, second.runtime_environment.direct_eval_forward_target.?);
+    try std.testing.expectEqual(&runtime_outer, second.runtime_environment.parent.?.direct_eval_forward_target.?);
+    try std.testing.expectEqual(&runtime_inner, second.environment.direct_eval_forward_target.?);
+    try second.environment.assign("innerRuntime", Value.num(8));
+    try std.testing.expectEqual(@as(f64, 8), runtime_inner.getLocal("innerRuntime").?.asNum());
+
+    var saw_success = false;
+    for (0..64) |fail_index| {
+        var candidate = Frame{ .slots = &slots, .parent = null, .closure_environment = &root };
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        machine.env = &runtime_inner;
+        _ = materializeDirectEvalEnvironment(&machine, &candidate, &plan) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(?*Environment, null), candidate.direct_eval_environment.load(.acquire));
+            try std.testing.expectEqual(&runtime_inner, machine.env);
+            try std.testing.expectEqual(&runtime_outer, runtime_inner.parent.?);
+            try std.testing.expectEqual(&root, runtime_outer.parent.?);
+            continue;
+        };
+        saw_success = true;
+        break;
+    }
+    machine.arena = allocator;
+    try std.testing.expect(saw_success);
+    var malformed = Frame{ .slots = &slots, .parent = null, .closure_environment = &root };
+    machine.env = &runtime_inner;
+    try std.testing.expectError(error.Throw, materializeDirectEvalEnvironment(
+        &machine,
+        &malformed,
+        &.{ .scopes = &scopes, .current_environment_depth = 1 },
+    ));
+    try std.testing.expectEqual(@as(?*Environment, null), malformed.direct_eval_environment.load(.acquire));
+    try std.testing.expectEqual(&runtime_inner, machine.env);
+}
+
 test "vm materializes distinct parameter and body direct-eval records failure atomically" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -5157,6 +5398,7 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
         &machine,
         &chunk,
         &syntax_frame,
+        null,
         plan_index,
         root.get("eval") orelse return error.TestUnexpectedResult,
         &.{Value.str("let =")},
@@ -5175,6 +5417,7 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
         &machine,
         &chunk,
         &identity_frame,
+        null,
         plan_index,
         root.get("eval") orelse return error.TestUnexpectedResult,
         &.{Value.num(7)},
@@ -5192,6 +5435,7 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
         &machine,
         &chunk,
         &identity_frame,
+        null,
         plan_index,
         root.get("eval") orelse return error.TestUnexpectedResult,
         &.{Value.str("{}")},
@@ -8230,10 +8474,11 @@ fn runChunk(
             .enter_block => {
                 const benv = try gc_mod.allocEnv(vm.arena);
                 vm.initEnvironment(benv, vm.env, false);
+                benv.is_catch_param = inst.a & bc.block_environment_simple_catch != 0;
                 vm.env = benv;
                 if (gen) |g| g.env = benv;
                 exec.environment_depth += 1;
-                if (inst.a != 0) {
+                if (inst.a & bc.block_environment_class != 0) {
                     exec.class_strict_depth += 1;
                     vm.strict = true;
                 }
@@ -8243,7 +8488,7 @@ fn runChunk(
                 if (gen) |g| g.env = vm.env;
                 std.debug.assert(exec.environment_depth > 0);
                 exec.environment_depth -= 1;
-                if (inst.a != 0) {
+                if (inst.a & bc.block_environment_class != 0) {
                     std.debug.assert(exec.class_strict_depth > 0);
                     exec.class_strict_depth -= 1;
                     vm.strict = if (exec.class_strict_depth > 0) true else exec.class_strict_base;
@@ -8545,7 +8790,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callActivationEvalValue(vm, chunk, frame, inst.b, callee, stack.items[base..], null);
+                return try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], null);
             },
             .tail_call_eval_activation_with_this => {
                 const argc = inst.a;
@@ -8563,7 +8808,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callActivationEvalValue(vm, chunk, frame, inst.b, callee, stack.items[base..], this_val);
+                return try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], this_val);
             },
             .call_eval => {
                 // A bare `eval(args)` call: mark it a DIRECT eval so, if the callee
@@ -8580,7 +8825,7 @@ fn runChunk(
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
-                const result = try callActivationEvalValue(vm, chunk, frame, inst.b, callee, stack.items[base..], null);
+                const result = try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], null);
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
@@ -8598,7 +8843,7 @@ fn runChunk(
                 const base = stack.items.len - argc;
                 const this_val = stack.items[base - 1];
                 const callee = stack.items[base - 2];
-                const result = try callActivationEvalValue(vm, chunk, frame, inst.b, callee, stack.items[base..], this_val);
+                const result = try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], this_val);
                 stack.shrinkRetainingCapacity(base - 2);
                 try stack.append(stack_alloc, result);
             },
@@ -8698,6 +8943,7 @@ fn runChunk(
                     vm,
                     chunk,
                     frame,
+                    exec,
                     inst.a,
                     callee,
                     try spreadArguments(vm, args_arr),
@@ -8712,6 +8958,7 @@ fn runChunk(
                     vm,
                     chunk,
                     frame,
+                    exec,
                     inst.a,
                     callee,
                     try spreadArguments(vm, args_arr),
@@ -8774,7 +9021,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callActivationEvalValue(vm, chunk, frame, inst.a, callee, args, null);
+                return try callActivationEvalValue(vm, chunk, frame, exec, inst.a, callee, args, null);
             },
             .tail_call_eval_activation_with_this_spread => {
                 const args_arr = stack.items[stack.items.len - 1];
@@ -8792,7 +9039,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callActivationEvalValue(vm, chunk, frame, inst.a, callee, args, this_val);
+                return try callActivationEvalValue(vm, chunk, frame, exec, inst.a, callee, args, this_val);
             },
             .new_spread => {
                 const args_arr = stack.pop().?;
@@ -10622,13 +10869,7 @@ const Activation = struct {
     // driver's initial activation.
     result_base: usize = 0,
     // Caller VM state, restored by `popActivation`.
-    saved_this: Value,
     saved_strict: bool,
-    saved_env: *Environment,
-    saved_global: ?*value.Object,
-    saved_nt: Value,
-    saved_ims: ?*interp.ImportMetaSlot,
-    saved_imo: ?*value.Object,
     saved_cur_module: []const u8,
     saved_eval_nt: bool,
     saved_bytecode_execution_mode: interp.BytecodeExecutionMode,
@@ -10637,17 +10878,14 @@ const Activation = struct {
     saved_stack_trace_call_frame: ?*interp.StackTraceCallFrame,
     saved_field_initializer: bool,
     saved_this_initialized: bool,
-    saved_this_cell: ?*interp.ThisCell,
     saved_in_derived_ctor: bool,
     saved_in_default_ctor: bool,
-    saved_active_function: ?*value.Object,
     saved_pending_field_inits: []const *ast.Node,
     saved_pending_brand_names: []const []const u8,
     saved_in_param_expr: bool,
     saved_in_param_default: bool,
     saved_cur_func_params: []const ast.Param,
     saved_cur_func_args_needed: bool,
-    debug_environment: ?*Environment = null,
     debug_call_frame: interp.DebugCallFrame = undefined,
     stack_trace_call_frame: interp.StackTraceCallFrame = undefined,
 };
@@ -10671,6 +10909,17 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     act.exec.acc = Value.undef();
     act.exec.ip = 0;
     act.exec.frame = null;
+    act.exec.saved_this = Value.undef();
+    act.exec.saved_env = null;
+    act.exec.saved_global = null;
+    act.exec.saved_nt = Value.undef();
+    act.exec.saved_ims = null;
+    act.exec.saved_imo = null;
+    act.exec.saved_this_cell = null;
+    act.exec.saved_active_function = null;
+    act.exec.saved_home_object = null;
+    act.exec.saved_super_ctor = null;
+    act.exec.debug_environment = null;
     act.exec.environment_depth = 0;
     act.exec.abrupt_environment_depth = 0;
     act.exec.class_strict_depth = 0;
@@ -10714,13 +10963,7 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .chunk = undefined,
         .frame = frame,
         .slot_storage = slots,
-        .saved_this = undefined,
         .saved_strict = undefined,
-        .saved_env = undefined,
-        .saved_global = undefined,
-        .saved_nt = undefined,
-        .saved_ims = undefined,
-        .saved_imo = undefined,
         .saved_cur_module = undefined,
         .saved_eval_nt = undefined,
         .saved_bytecode_execution_mode = undefined,
@@ -10729,10 +10972,8 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .saved_stack_trace_call_frame = undefined,
         .saved_field_initializer = undefined,
         .saved_this_initialized = undefined,
-        .saved_this_cell = undefined,
         .saved_in_derived_ctor = undefined,
         .saved_in_default_ctor = undefined,
-        .saved_active_function = undefined,
         .saved_pending_field_inits = undefined,
         .saved_pending_brand_names = undefined,
         .saved_in_param_expr = undefined,
@@ -10843,13 +11084,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .next_free = null,
         .optimizer_delta = .{},
         .optimizer_profile_active = false,
-        .saved_this = vm.this_value,
         .saved_strict = vm.strict,
-        .saved_env = vm.env,
-        .saved_global = vm.global_object,
-        .saved_nt = vm.new_target,
-        .saved_ims = vm.import_meta_slot,
-        .saved_imo = vm.import_meta_obj,
         .saved_cur_module = vm.cur_module,
         .saved_eval_nt = vm.direct_eval_new_target_allowed,
         .saved_bytecode_execution_mode = vm.bytecode_execution_mode,
@@ -10858,10 +11093,8 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_stack_trace_call_frame = vm.stack_trace_call_frame,
         .saved_field_initializer = vm.in_field_initializer,
         .saved_this_initialized = vm.this_initialized,
-        .saved_this_cell = vm.this_cell,
         .saved_in_derived_ctor = vm.in_derived_ctor,
         .saved_in_default_ctor = vm.in_default_ctor,
-        .saved_active_function = vm.active_function,
         .saved_pending_field_inits = vm.pending_field_inits,
         .saved_pending_brand_names = vm.pending_brand_names,
         .saved_in_param_expr = vm.in_param_expr,
@@ -10869,6 +11102,14 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_cur_func_params = vm.cur_func_params,
         .saved_cur_func_args_needed = vm.cur_func_args_needed,
     };
+    act.exec.saved_this = vm.this_value;
+    act.exec.saved_env = vm.env;
+    act.exec.saved_global = vm.global_object;
+    act.exec.saved_nt = vm.new_target;
+    act.exec.saved_ims = vm.import_meta_slot;
+    act.exec.saved_imo = vm.import_meta_obj;
+    act.exec.saved_this_cell = vm.this_cell;
+    act.exec.saved_active_function = vm.active_function;
     act.exec.saved_home_object = vm.home_object;
     act.exec.saved_super_ctor = vm.super_ctor;
     frame.* = .{
@@ -11061,7 +11302,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         for (fchunk.debug_local_names, 0..) |name, slot| {
             if (name.len != 0) try debug_environment.put(name, frame.readSlot(slot, parallel_sync));
         }
-        act.debug_environment = debug_environment;
+        act.exec.debug_environment = debug_environment;
         act.debug_call_frame = .{
             .function_name = func.name,
             .environment = debug_environment,
@@ -11071,7 +11312,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             .environment_is_vm_activation = true,
         };
     } else {
-        act.debug_environment = null;
+        act.exec.debug_environment = null;
     }
     act.stack_trace_call_frame = .{
         .function_name = func.name,
@@ -11100,15 +11341,15 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
 
 /// Restore the caller VM state captured by `buildActivation`.
 fn popActivation(vm: *Interpreter, act: *Activation) void {
-    vm.this_value = act.saved_this;
+    vm.this_value = act.exec.saved_this;
     vm.strict = act.saved_strict;
     vm.home_object = act.exec.saved_home_object;
     vm.super_ctor = act.exec.saved_super_ctor;
-    vm.env = act.saved_env;
-    vm.global_object = act.saved_global;
-    vm.new_target = act.saved_nt;
-    vm.import_meta_slot = act.saved_ims;
-    vm.import_meta_obj = act.saved_imo;
+    vm.env = act.exec.saved_env.?;
+    vm.global_object = act.exec.saved_global;
+    vm.new_target = act.exec.saved_nt;
+    vm.import_meta_slot = act.exec.saved_ims;
+    vm.import_meta_obj = act.exec.saved_imo;
     vm.cur_module = act.saved_cur_module;
     vm.direct_eval_new_target_allowed = act.saved_eval_nt;
     vm.bytecode_execution_mode = act.saved_bytecode_execution_mode;
@@ -11117,10 +11358,10 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.stack_trace_call_frame = act.saved_stack_trace_call_frame;
     vm.in_field_initializer = act.saved_field_initializer;
     vm.this_initialized = act.saved_this_initialized;
-    vm.this_cell = act.saved_this_cell;
+    vm.this_cell = act.exec.saved_this_cell;
     vm.in_derived_ctor = act.saved_in_derived_ctor;
     vm.in_default_ctor = act.saved_in_default_ctor;
-    vm.active_function = act.saved_active_function;
+    vm.active_function = act.exec.saved_active_function;
     vm.pending_field_inits = act.saved_pending_field_inits;
     vm.pending_brand_names = act.saved_pending_brand_names;
     vm.in_param_expr = act.saved_in_param_expr;
@@ -11134,15 +11375,15 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
 }
 
 fn inheritCallerState(dst: *Activation, src: *const Activation) void {
-    dst.saved_this = src.saved_this;
+    dst.exec.saved_this = src.exec.saved_this;
     dst.saved_strict = src.saved_strict;
     dst.exec.saved_home_object = src.exec.saved_home_object;
     dst.exec.saved_super_ctor = src.exec.saved_super_ctor;
-    dst.saved_env = src.saved_env;
-    dst.saved_global = src.saved_global;
-    dst.saved_nt = src.saved_nt;
-    dst.saved_ims = src.saved_ims;
-    dst.saved_imo = src.saved_imo;
+    dst.exec.saved_env = src.exec.saved_env;
+    dst.exec.saved_global = src.exec.saved_global;
+    dst.exec.saved_nt = src.exec.saved_nt;
+    dst.exec.saved_ims = src.exec.saved_ims;
+    dst.exec.saved_imo = src.exec.saved_imo;
     dst.saved_cur_module = src.saved_cur_module;
     dst.saved_eval_nt = src.saved_eval_nt;
     dst.saved_bytecode_execution_mode = src.saved_bytecode_execution_mode;
@@ -11151,22 +11392,22 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_stack_trace_call_frame = src.saved_stack_trace_call_frame;
     dst.saved_field_initializer = src.saved_field_initializer;
     dst.saved_this_initialized = src.saved_this_initialized;
-    dst.saved_this_cell = src.saved_this_cell;
+    dst.exec.saved_this_cell = src.exec.saved_this_cell;
     dst.saved_in_derived_ctor = src.saved_in_derived_ctor;
     dst.saved_in_default_ctor = src.saved_in_default_ctor;
-    dst.saved_active_function = src.saved_active_function;
+    dst.exec.saved_active_function = src.exec.saved_active_function;
     dst.saved_pending_field_inits = src.saved_pending_field_inits;
     dst.saved_pending_brand_names = src.saved_pending_brand_names;
     dst.saved_in_param_expr = src.saved_in_param_expr;
     dst.saved_in_param_default = src.saved_in_param_default;
     dst.saved_cur_func_params = src.saved_cur_func_params;
     dst.saved_cur_func_args_needed = src.saved_cur_func_args_needed;
-    if (dst.debug_environment != null) dst.debug_call_frame.caller = src.debug_call_frame.caller;
+    if (dst.exec.debug_environment != null) dst.debug_call_frame.caller = src.debug_call_frame.caller;
     dst.stack_trace_call_frame.caller = src.stack_trace_call_frame.caller;
 }
 
 fn syncDebugEnvironmentFromFrame(act: *Activation) EvalError!void {
-    const environment = act.debug_environment orelse return;
+    const environment = act.exec.debug_environment orelse return;
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
     for (act.chunk.debug_local_names, 0..) |name, slot| {
         if (name.len != 0) try environment.put(name, act.frame.readSlot(slot, parallel_sync));
@@ -11174,7 +11415,7 @@ fn syncDebugEnvironmentFromFrame(act: *Activation) EvalError!void {
 }
 
 fn syncFrameFromDebugEnvironment(act: *Activation) void {
-    const environment = act.debug_environment orelse return;
+    const environment = act.exec.debug_environment orelse return;
     const parallel_sync = bc.ic_seqlock_enabled.load(.monotonic);
     for (act.chunk.debug_local_names, 0..) |name, slot| {
         if (name.len != 0) {
@@ -11195,7 +11436,7 @@ fn runInlineFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []
     defer vm.depth -= 1;
     const act = try buildActivation(vm, func, fchunk, args, this_val, new_target);
     vm.stack_trace_call_frame = &act.stack_trace_call_frame;
-    if (act.debug_environment != null) vm.debug_call_frame = &act.debug_call_frame;
+    if (act.exec.debug_environment != null) vm.debug_call_frame = &act.debug_call_frame;
     defer {
         popActivation(vm, act);
         releaseActivation(vm, act);
@@ -11302,7 +11543,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
             cur.optimizer_profile_active = true;
         }
         vm.stack_trace_call_frame = &cur.stack_trace_call_frame;
-        if (cur.debug_environment != null) {
+        if (cur.exec.debug_environment != null) {
             vm.debug_call_frame = &cur.debug_call_frame;
             try syncDebugEnvironmentFromFrame(cur);
         }
@@ -11313,7 +11554,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
             activateExecStrict(vm, &cur.exec, null);
             break :run runChunk(vm, &cur.exec, cur.chunk, cur.frame, null, &cur.optimizer_delta);
         };
-        if (cur.debug_environment != null) syncFrameFromDebugEnvironment(cur);
+        if (cur.exec.debug_environment != null) syncFrameFromDebugEnvironment(cur);
         const rv = outcome catch |e| {
             const abrupt = if (activationStackHasHandler(&acts)) vm.catchableOutOfMemory(e) else e;
             if (abrupt != error.Throw) {
