@@ -455,10 +455,12 @@ pub const Generator = struct {
     resume_mutex: std.Io.Mutex = .init,
     /// A synchronous native resume borrows this payload and its inline Exec.
     /// The GC may rewrite its edges but must retain its address until unlock.
-    /// Published only while holding resume_mutex, including pre/post-body work.
+    /// Claimed before waiting for the collector's trace lock, then released
+    /// under resume_mutex after all pre/post-body work. This is the JS reentry
+    /// guard; collector ownership of resume_mutex alone is not execution.
     native_resume_active: std.atomic.Value(bool) = .init(false),
-    /// Resume ownership. Ordinary generators also hold `resume_mutex` to
-    /// preserve the re-entrant TypeError; async functions use this atomic as a
+    /// Execution/trace ownership. Ordinary generators use native_resume_active
+    /// to preserve the re-entrant TypeError; async functions use this atomic as a
     /// release/acquire handoff between promise jobs drained by different
     /// shared-realm threads.
     running: std.atomic.Value(bool) = .init(false),
@@ -9584,8 +9586,12 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     const generator_root = try vm.pushTempRoot(Value.obj(gen_obj));
     defer vm.restoreTempRoots(generator_root);
     const g: *Generator = @ptrCast(@alignCast(vm.tempRoot(generator_root, Value.obj(gen_obj)).asObj().generator().?));
-    if (!g.resume_mutex.tryLock()) return vm.throwError("TypeError", "generator is already running");
-    g.native_resume_active.store(true, .release);
+    // GeneratorValidate rejects actual reentry, not a concurrent marker's
+    // temporary trace ownership. Claim the native borrow first, so another
+    // resume still throws while this caller waits for the collector to finish.
+    if (g.native_resume_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
+        return vm.throwError("TypeError", "generator is already running");
+    g.resume_mutex.lockUncancelable(agent.engineIo());
     defer {
         // No JavaScript/safepoint runs between releasing the address borrow and
         // unlocking. Clear under the mutex so a later owner cannot lose its pin.
@@ -9762,6 +9768,77 @@ pub fn genReturn(vm: *Interpreter, gen_obj: *value.Object, v: Value) EvalError!V
 pub fn genThrow(vm: *Interpreter, gen_obj: *value.Object, e: Value) EvalError!Value {
     if (asyncGenObj(gen_obj)) return asyncGenRequest(vm, gen_obj, .throw_, e);
     return genResume(vm, gen_obj, .throw_, e);
+}
+
+test "generator collector trace ownership is not JavaScript reentry" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const Marker = struct {
+        generator: *Generator,
+        ready: std.atomic.Value(bool) = .init(false),
+        returned: std.atomic.Value(bool) = .init(false),
+        acquired: bool = false,
+        saw_resume_claim: bool = false,
+
+        fn run(self: *@This()) void {
+            self.acquired = self.generator.tryLockTrace();
+            self.ready.store(true, .release);
+            if (!self.acquired) return;
+            defer self.generator.unlockTrace();
+            while (!self.generator.native_resume_active.load(.acquire) and !self.returned.load(.acquire))
+                std.Thread.yield() catch {};
+            self.saw_resume_claim = self.generator.native_resume_active.load(.acquire);
+        }
+    };
+    for ([_]ResumeKind{ .send, .return_, .throw_ }) |kind| {
+        const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = .required,
+        });
+        defer context.destroy();
+        const object = (try context.evaluate("function* traced() { yield 1; } var tracedIterator = traced(); tracedIterator")).asObj();
+        const generator: *Generator = @ptrCast(@alignCast(object.generator().?));
+        var marker = Marker{ .generator = generator };
+        const thread = try std.Thread.spawn(.{}, Marker.run, .{&marker});
+        while (!marker.ready.load(.acquire)) std.Thread.yield() catch {};
+        var machine = context.interpreter();
+        const saved_context = gc_mod.setActiveContext(context);
+        defer gc_mod.restoreActiveContext(saved_context);
+        const attempt = genResume(&machine, object, kind, Value.num(42));
+        marker.returned.store(true, .release);
+        thread.join();
+        try std.testing.expect(marker.acquired);
+        try std.testing.expect(marker.saw_resume_claim);
+        if (kind == .throw_) {
+            try std.testing.expectError(error.Throw, attempt);
+            try std.testing.expectEqual(@as(f64, 42), machine.exception.asNum());
+        } else {
+            const result = try attempt;
+            try std.testing.expectEqual(@as(f64, if (kind == .send) 1 else 42), result.asObj().getOwn("value").?.asNum());
+        }
+        try std.testing.expect(!generator.native_resume_active.load(.acquire));
+        try std.testing.expect(!generator.running.load(.acquire));
+    }
+    const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer context.destroy();
+    const result = try context.evaluate(
+        \\function* reentrant() {
+        \\  var errors = [];
+        \\  for (var method of ['next', 'return', 'throw']) {
+        \\    try { reentrantIterator[method](42); }
+        \\    catch (error) { errors.push(error.name); }
+        \\  }
+        \\  yield errors.join(':');
+        \\}
+        \\var reentrantIterator = reentrant();
+        \\reentrantIterator.next().value
+    );
+    try std.testing.expectEqualStrings("TypeError:TypeError:TypeError", result.asStr());
 }
 
 test "generator native resume root allocation failure preserves suspended ownership" {
