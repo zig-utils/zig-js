@@ -678,6 +678,10 @@ pub const Environment = struct {
     /// immutable name table resolves into the activation's real frame slots;
     /// `vars` remains available for genuinely new sloppy-eval declarations.
     activation: ?ActivationBindingsView = null,
+    /// Immutable identity of an activation-backed direct-eval record. Separate
+    /// parameter and body records may expose identical names and slots, so cache
+    /// validation must not infer record identity from their binding layout.
+    direct_eval_scope_kind: ?bc.DirectEvalScopeKind = null,
     /// `using` resources declared in this scope, in declaration order (disposed
     /// in reverse when the scope exits).
     disposables: std.ArrayListUnmanaged(Disposable) = .empty,

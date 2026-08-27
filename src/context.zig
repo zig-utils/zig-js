@@ -24084,6 +24084,74 @@ test "forced tree-walker and required bytecode preserve direct eval expression-f
     try std.testing.expectEqualStrings("3:2:4:7:8:40|5:3:9:10:10|9", results[1]);
 }
 
+test "forced tree-walker and required bytecode preserve default parameter body eval records" {
+    const source =
+        \\function dynamicBoundary(value = 2) {
+        \\  var read = function () { return value; };
+        \\  var before = read();
+        \\  eval("var value = 7");
+        \\  return before * 100 + read() * 10 + value;
+        \\}
+        \\function staticBoundary(value = 3) {
+        \\  var value;
+        \\  var before = value;
+        \\  eval("value = 7");
+        \\  return before * 10 + value;
+        \\}
+        \\function parameterAssignment(value = 4) {
+        \\  eval("value += 2");
+        \\  return value;
+        \\}
+        \\function recursiveBoundary(value = 1, depth) {
+        \\  eval("var value = 7");
+        \\  return depth ? value * 10 + recursiveBoundary(undefined, 0) : value;
+        \\}
+        \\function escapingBoundary(value = 5) {
+        \\  eval("var value = 8");
+        \\  return function () { return value; };
+        \\}
+        \\globalThis.boundaryEscaped = escapingBoundary();
+        \\globalThis.boundaryRetained = [];
+        \\globalThis.boundaryDiscard = [];
+        \\for (var i = 0; i < 4096; i++) {
+        \\  boundaryRetained.push({ index: i, nested: { value: i } });
+        \\  boundaryDiscard.push({ index: i, nested: { value: i } });
+        \\}
+        \\boundaryDiscard = null;
+        \\dynamicBoundary() + ":" + staticBoundary() + ":" + parameterAssignment() + ":" + recursiveBoundary(undefined, 1);
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len][]const u8 = undefined;
+    var result_count: usize = 0;
+    defer for (results[0..result_count]) |result| std.testing.allocator.free(result);
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(source);
+        try std.testing.expect(result.isString());
+        results[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        result_count += 1;
+        try std.testing.expectEqual(@as(f64, 8), (try ctx.evaluate("boundaryEscaped()")).asNum());
+        const compacted = ctx.compactGarbage();
+        try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+        try std.testing.expect(compacted.moved_cells > 0);
+        try std.testing.expectEqual(@as(f64, 8), (try ctx.evaluate("boundaryEscaped()")).asNum());
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) + inventory.count(.plain_compiled) >= 4);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_rejected_unsupported_lowering));
+        }
+    }
+    try std.testing.expectEqualStrings(results[0], results[1]);
+    try std.testing.expectEqualStrings("277:37:6:77", results[1]);
+}
+
 test "parameter initialization exposes every later non-simple binding in TDZ" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,

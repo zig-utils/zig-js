@@ -1565,6 +1565,7 @@ fn traceCapturedFrame(raw: ?*anyopaque, v: anytype) void {
     const lock_slots = if (comptime @hasDecl(@TypeOf(v.*), "concurrent")) v.concurrent() else false;
     while (frame) |current| : (frame = current.parent) {
         if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
+        if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
         traceFrameMappedParameters(current, v);
         const held = current.lockSlots(lock_slots);
         for (current.slots) |slot| markValueInternal(v, "captured VM frame slot", slot);
@@ -1578,6 +1579,7 @@ fn relocateCapturedFrame(raw: ?*anyopaque, v: anytype) void {
     var frame: ?*vm.Frame = if (raw) |pointer| @ptrCast(@alignCast(pointer)) else null;
     while (frame) |current| : (frame = current.parent) {
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
+        gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
         relocateFrameMappedParameters(current, v);
         for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
     }
@@ -2000,6 +2002,7 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     var frame = g.exec.frame;
     while (frame) |current| : (frame = current.parent) {
         if (current.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
+        if (current.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
         for (current.slots) |slot| markValue(v, slot);
     }
     markValue(v, g.this_value);
@@ -2031,6 +2034,7 @@ pub fn relocateGenerator(g: *vm.Generator, v: anytype) void {
     var frame = g.exec.frame;
     while (frame) |current| : (frame = current.parent) {
         gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
+        gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
         for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
     }
     gc_relocation.rewriteValueSlot(v, &g.this_value);
@@ -2548,6 +2552,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         var fr: ?*vm.Frame = exec.frame;
         while (fr) |f| : (fr = f.parent) {
             if (f.direct_eval_environment.load(.acquire)) |environment| markManaged(v, environment);
+            if (f.direct_eval_parameter_environment.load(.acquire)) |environment| markManaged(v, environment);
             traceFrameMappedParameters(f, v);
             const held = f.lockSlots(lock_slots);
             for (f.slots) |slot| markValueInternal(v, "interpreter VM frame slot", slot);
@@ -2666,6 +2671,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         var frame = exec.frame;
         while (frame) |current| : (frame = current.parent) {
             gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_environment);
+            gc_relocation.rewriteAtomicOptionalSlot(v, Environment, &current.direct_eval_parameter_environment);
             relocateFrameMappedParameters(current, v);
             for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
         }
@@ -2781,6 +2787,7 @@ test "realm root relocation rewrites active interpreter containers" {
     var frame_slots = [_]Value{Value.obj(&old_objects[19])};
     var frame = vm.Frame{ .slots = &frame_slots, .parent = null };
     frame.direct_eval_environment.store(&old_environment, .release);
+    frame.direct_eval_parameter_environment.store(&old_environment, .release);
     var execution = vm.Exec{
         .stack = .{ .items = &operand_stack, .capacity = operand_stack.len },
         .acc = Value.obj(&old_objects[18]),
@@ -2886,6 +2893,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[18], execution.acc.asObj());
     try std.testing.expectEqual(&new_objects[19], frame_slots[0].asObj());
     try std.testing.expectEqual(&new_environment, frame.direct_eval_environment.load(.acquire).?);
+    try std.testing.expectEqual(&new_environment, frame.direct_eval_parameter_environment.load(.acquire).?);
     try std.testing.expectEqual(&new_objects[25], execution.saved_home_object.?);
     try std.testing.expectEqual(&new_objects[26], execution.saved_super_ctor.?);
     try std.testing.expectEqual(&new_environment, machine.gc_env_roots.items[0]);

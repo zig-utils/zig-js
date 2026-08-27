@@ -527,6 +527,11 @@ pub const BindingReferencePlan = struct {
     /// unresolvable Reference. Smaller values stop before a statically known
     /// frame/upvalue binding and select `fallback`.
     environment_depth: u32,
+    /// A parameter binding can acquire a nearer body VariableEnvironment
+    /// binding after sloppy direct eval. When present, ResolveBinding probes
+    /// this exact defining frame's lazily materialized variable record after
+    /// the ordinary bounded lexical walk, before selecting `fallback`.
+    direct_eval_frame_depth: ?u32 = null,
     fallback: BindingReferenceFallback,
 };
 
@@ -543,13 +548,20 @@ pub const DirectEvalBinding = struct {
     mapped_parameter: bool,
 };
 
-/// One declarative scope visible at a direct-eval call site. `function_scope`
-/// identifies the VariableEnvironment that receives sloppy eval `var` and
-/// function declarations; every later entry is an enclosing-to-enclosed
-/// lexical scope layered above it.
+pub const DirectEvalScopeKind = enum {
+    parameter,
+    variable,
+    lexical,
+};
+
+/// One declarative scope visible at a direct-eval call site. Parameter and body
+/// variable records are distinct persistent views over one activation; lexical
+/// records are transient call-site wrappers. Exactly one non-lexical record is
+/// the declaration target for the direct eval represented by the plan.
 pub const DirectEvalScope = struct {
     bindings: []const DirectEvalBinding,
-    function_scope: bool,
+    kind: DirectEvalScopeKind,
+    declaration_target: bool = false,
     /// Annex B.3.5 exempts the declarative record for a lone catch
     /// BindingIdentifier from sloppy eval `var`/function conflicts. This is a
     /// property of the scope record, not of the binding, because destructuring
