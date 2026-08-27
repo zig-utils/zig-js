@@ -108,6 +108,7 @@ const ToolContract = struct {
     outputs: []const []const u8,
     subprocesses: []const []const u8,
     callers: []const []const u8,
+    caller_prefixes: []const []const u8 = &.{},
     migration_target: MigrationTarget,
 };
 
@@ -172,9 +173,20 @@ fn toolIndex(inventory: ToolMigrationInventory, path: []const u8) ?usize {
     return null;
 }
 
-fn callerListed(tool: ToolContract, path: []const u8) bool {
+fn exactCallerListed(tool: ToolContract, path: []const u8) bool {
     for (tool.callers) |caller| if (std.mem.eql(u8, caller, path)) return true;
     return false;
+}
+
+fn callerPrefixIndex(tool: ToolContract, path: []const u8) ?usize {
+    for (tool.caller_prefixes, 0..) |prefix, i| {
+        if (std.mem.startsWith(u8, path, prefix)) return i;
+    }
+    return null;
+}
+
+fn callerListed(tool: ToolContract, path: []const u8) bool {
+    return exactCallerListed(tool, path) or callerPrefixIndex(tool, path) != null;
 }
 
 fn isFilenameByte(byte: u8) bool {
@@ -500,6 +512,19 @@ fn auditToolMigrationInventory(gpa: std.mem.Allocator, io: std.Io, inventory: To
                 if (std.mem.eql(u8, prior, caller)) return fail("tool '{s}' repeats caller '{s}'", .{ tool.path, caller });
             }
         }
+        if (tool.caller_prefixes.len > 64)
+            return fail("tool '{s}' has more than 64 generated caller prefixes", .{tool.path});
+        for (tool.caller_prefixes, 0..) |prefix, prefix_index| {
+            // Prefix classification is reserved for narrow, versioned evidence
+            // families. Requiring a non-directory suffix prevents a broad
+            // `docs/.data/` prefix from silently admitting unrelated callers.
+            const data_root = "docs/.data/";
+            if (!std.mem.startsWith(u8, prefix, data_root) or prefix.len == data_root.len or prefix[prefix.len - 1] != '-')
+                return fail("tool '{s}' has unsafe generated caller prefix '{s}'", .{ tool.path, prefix });
+            for (tool.caller_prefixes[0..prefix_index]) |prior| {
+                if (std.mem.eql(u8, prior, prefix)) return fail("tool '{s}' repeats generated caller prefix '{s}'", .{ tool.path, prefix });
+            }
+        }
     }
 
     const index_source = try gitIndexSource(gpa, io);
@@ -511,6 +536,9 @@ fn auditToolMigrationInventory(gpa: std.mem.Allocator, io: std.Io, inventory: To
     const actual_callers = try gpa.alloc(usize, inventory.tools.len);
     defer gpa.free(actual_callers);
     @memset(actual_callers, 0);
+    const matched_prefixes = try gpa.alloc(u64, inventory.tools.len);
+    defer gpa.free(matched_prefixes);
+    @memset(matched_prefixes, 0);
     const found_tools = try gpa.alloc(bool, inventory.tools.len);
     defer gpa.free(found_tools);
     @memset(found_tools, false);
@@ -559,7 +587,11 @@ fn auditToolMigrationInventory(gpa: std.mem.Allocator, io: std.Io, inventory: To
                     if (std.mem.eql(u8, path, tool.path)) continue;
                     if (!callerListed(tool, path))
                         return fail("tool '{s}' has unclassified caller/reference '{s}'", .{ tool.path, path });
-                    actual_callers[i] += 1;
+                    if (exactCallerListed(tool, path)) {
+                        actual_callers[i] += 1;
+                    } else if (callerPrefixIndex(tool, path)) |prefix_index| {
+                        matched_prefixes[i] |= @as(u64, 1) << @intCast(prefix_index);
+                    }
                     matched_in_file[i] = true;
                 }
             }
@@ -572,6 +604,12 @@ fn auditToolMigrationInventory(gpa: std.mem.Allocator, io: std.Io, inventory: To
         if (!found_tools[i]) return fail("tool inventory contains untracked or stale path '{s}'", .{tool.path});
         if (actual_callers[i] != tool.callers.len)
             return fail("tool '{s}' has {d} caller/reference files, expected {d}", .{ tool.path, actual_callers[i], tool.callers.len });
+        const expected_prefixes = if (tool.caller_prefixes.len == 64)
+            std.math.maxInt(u64)
+        else
+            (@as(u64, 1) << @intCast(tool.caller_prefixes.len)) - 1;
+        if (matched_prefixes[i] != expected_prefixes)
+            return fail("tool '{s}' has a stale generated caller prefix", .{tool.path});
     }
 }
 
