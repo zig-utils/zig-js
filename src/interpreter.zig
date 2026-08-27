@@ -128,6 +128,25 @@ pub fn isJsTrimCp(cp: u21) bool {
 /// Trim leading and/or trailing ECMAScript WhiteSpace+LineTerminator code points
 /// from `s`. UTF-8 aware: a non-ASCII byte at a boundary is decoded so e.g. NBSP
 /// (U+00A0) and the ideographic space (U+3000) are stripped, not just ASCII.
+/// `jsTrim` for a flat latin1 image. Every trimmed code point above 0xFF is
+/// unrepresentable in such a string, so the set reduces to seven bytes and no
+/// decoding is needed — which also lets the trailing scan walk backwards from
+/// the end instead of forward over the whole string.
+fn isJsTrimFlatByte(b: u8) bool {
+    return switch (b) {
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0 => true,
+        else => false,
+    };
+}
+
+fn jsTrimFlat(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
+    var lo: usize = 0;
+    var hi: usize = s.len;
+    if (trim_start_) while (lo < hi and isJsTrimFlatByte(s[lo])) : (lo += 1) {};
+    if (trim_end_) while (hi > lo and isJsTrimFlatByte(s[hi - 1])) : (hi -= 1) {};
+    return s[lo..hi];
+}
+
 fn jsTrim(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
     var lo: usize = 0;
     var hi: usize = s.len;
@@ -11241,6 +11260,24 @@ pub const Interpreter = struct {
     /// Build `prefix + middle + suffix` with ASCII affixes directly in the
     /// StringCell's final physical representation. This avoids a flat-latin1
     /// conversion scratch allocation before the already-required result cell.
+    /// Trim a flat latin1 image and build the result cell directly from the
+    /// retained range. `createCellWithAsciiAffixes` accepts a flat middle, so
+    /// this neither re-encodes the receiver on the way in nor re-flattens the
+    /// result on the way out. Returns the receiver's own cell when nothing is
+    /// trimmed, since the string is immutable.
+    fn trimmedFlatValue(
+        self: *Interpreter,
+        s: []const u8,
+        s_cell: ?*const StringCell,
+        trim_start_: bool,
+        trim_end_: bool,
+    ) EvalError!Value {
+        const trimmed = jsTrimFlat(s, trim_start_, trim_end_);
+        if (trimmed.len == 0) return Value.str("");
+        if (trimmed.len == s.len) return try self.stringReceiverValue(s, s_cell);
+        return Value.strCell(try strcell.createCellWithAsciiAffixes(self.arena, "", trimmed, true, ""));
+    }
+
     fn stringValueWithAsciiAffixes(self: *Interpreter, prefix: []const u8, middle: Value, suffix: []const u8) EvalError!Value {
         std.debug.assert(middle.isString());
         const canonical_len = try strcell.asciiAffixedCanonicalLength(prefix, middle.asStr(), middle.strIsFlatLatin1(), suffix);
@@ -17939,7 +17976,9 @@ pub const Interpreter = struct {
         return eq(name, "slice") or eq(name, "substring") or eq(name, "substr") or
             eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes") or
             eq(name, "startsWith") or eq(name, "endsWith") or
-            eq(name, "padStart") or eq(name, "padEnd");
+            eq(name, "padStart") or eq(name, "padEnd") or
+            eq(name, "trim") or eq(name, "trimStart") or eq(name, "trimEnd") or
+            eq(name, "trimLeft") or eq(name, "trimRight");
     }
 
     fn stringMethodValue(
@@ -18327,7 +18366,7 @@ pub const Interpreter = struct {
             }
             return try Value.strAlloc(self.arena, try unicode_case.toLower(self.arena, s));
         }
-        if (eq(name, "trim")) return try Value.strAlloc(self.arena, jsTrim(s, true, true));
+        if (eq(name, "trim")) return if (s_flat) try self.trimmedFlatValue(s, s_cell, true, true) else try Value.strAlloc(self.arena, jsTrim(s, true, true));
         if (eq(name, "split")) {
             const result = try self.newArray();
             const out = try result.asObj().ensureElementsList(self.arena);
@@ -18441,8 +18480,8 @@ pub const Interpreter = struct {
             const cu = try self.stringCodeUnitAtAccess(s, @intCast(idx), s_ascii, s_cell) orelse return Value.undef();
             return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
-        if (eq(name, "trimStart")) return try Value.strAlloc(self.arena, jsTrim(s, true, false));
-        if (eq(name, "trimEnd")) return try Value.strAlloc(self.arena, jsTrim(s, false, true));
+        if (eq(name, "trimStart")) return if (s_flat) try self.trimmedFlatValue(s, s_cell, true, false) else try Value.strAlloc(self.arena, jsTrim(s, true, false));
+        if (eq(name, "trimEnd")) return if (s_flat) try self.trimmedFlatValue(s, s_cell, false, true) else try Value.strAlloc(self.arena, jsTrim(s, false, true));
         if (eq(name, "isWellFormed")) {
             // Well-formed UTF-16 has no LONE surrogate. An astral code point is a
             // 4-byte UTF-8 sequence here; a high+low surrogate pair (e.g. from
@@ -18656,8 +18695,8 @@ pub const Interpreter = struct {
             } else remaining;
             return try Value.strAlloc(self.arena, try self.stringSliceUtf16A(s, start, start + len, s_flat));
         }
-        if (eq(name, "trimLeft")) return try Value.strAlloc(self.arena, jsTrim(s, true, false));
-        if (eq(name, "trimRight")) return try Value.strAlloc(self.arena, jsTrim(s, false, true));
+        if (eq(name, "trimLeft")) return if (s_flat) try self.trimmedFlatValue(s, s_cell, true, false) else try Value.strAlloc(self.arena, jsTrim(s, true, false));
+        if (eq(name, "trimRight")) return if (s_flat) try self.trimmedFlatValue(s, s_cell, false, true) else try Value.strAlloc(self.arena, jsTrim(s, false, true));
         // Annex B B.2.3 HTML wrapper methods (CreateHTML).
         {
             const HtmlSpec = struct { m: []const u8, tag: []const u8, attr: []const u8 };
