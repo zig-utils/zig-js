@@ -11353,9 +11353,27 @@ pub const Interpreter = struct {
     /// ASCII representation is already one byte per UTF-16 code unit. Other
     /// strings stream their abstract code units through KMP so astral halves
     /// and lone surrogates remain observable without repeated rescans.
-    fn stringIndexOfUtf16(self: *Interpreter, haystack: []const u8, needle: []const u8, start: usize, haystack_len: usize, haystack_ascii: bool) EvalError!?usize {
+    /// `needle`'s flat latin1 image, for searching a flat latin1 haystack with
+    /// plain byte operations. Null when the needle carries a code unit above
+    /// 0xFF, which therefore cannot occur in such a haystack at all. An ASCII
+    /// needle is already its own flat image, so the common case copies nothing.
+    fn flatLatin1Needle(self: *Interpreter, needle: []const u8) EvalError!?[]const u8 {
+        if (stringBytesAreAscii(needle)) return needle;
+        if (!jsStringIs8Bit(needle)) return null;
+        return try strcell.wtf8ToLatin1Flat(self.arena, needle);
+    }
+
+    fn stringIndexOfUtf16(self: *Interpreter, haystack: []const u8, needle: []const u8, start: usize, haystack_len: usize, haystack_ascii: bool, haystack_flat: bool) EvalError!?usize {
         if (start > haystack_len) return null;
         if (needle.len == 0) return start;
+        // A flat latin1 haystack is one byte per code unit, so — once the needle
+        // is in the same representation — this is the same byte search the ASCII
+        // path runs, and the match offset is already the code-unit index.
+        if (haystack_flat) {
+            const flat_needle = (try self.flatLatin1Needle(needle)) orelse return null;
+            if (flat_needle.len == 0) return start;
+            return std.mem.indexOfPos(u8, haystack, @min(start, haystack.len), flat_needle);
+        }
         const needle_ascii = stringBytesAreAscii(needle);
         if (haystack_ascii) {
             if (!needle_ascii) return null;
@@ -11383,9 +11401,16 @@ pub const Interpreter = struct {
     /// Greatest UTF-16 match start at or before `limit`. Scanning only through
     /// `max_start + needle_len` observes every admissible candidate exactly
     /// once, including overlaps, without a reverse/random-access decode.
-    fn stringLastIndexOfUtf16(self: *Interpreter, haystack: []const u8, needle: []const u8, limit: usize, haystack_len: usize, haystack_ascii: bool) EvalError!?usize {
+    fn stringLastIndexOfUtf16(self: *Interpreter, haystack: []const u8, needle: []const u8, limit: usize, haystack_len: usize, haystack_ascii: bool, haystack_flat: bool) EvalError!?usize {
         if (limit > haystack_len) return null;
         if (needle.len == 0) return limit;
+        if (haystack_flat) {
+            const flat_needle = (try self.flatLatin1Needle(needle)) orelse return null;
+            if (flat_needle.len == 0) return limit;
+            if (flat_needle.len > haystack.len) return null;
+            const max_start = @min(limit, haystack.len - flat_needle.len);
+            return std.mem.lastIndexOf(u8, haystack[0 .. max_start + flat_needle.len], flat_needle);
+        }
         const needle_ascii = stringBytesAreAscii(needle);
         if (haystack_ascii) {
             if (!needle_ascii or needle.len > haystack.len) return null;
@@ -11484,7 +11509,7 @@ pub const Interpreter = struct {
     pub fn stringIncludesUtf16(self: *Interpreter, haystack: []const u8, needle: []const u8) EvalError!bool {
         const haystack_ascii = stringBytesAreAscii(haystack);
         const haystack_len = utf16LenOfStringA(haystack, haystack_ascii);
-        return (try self.stringIndexOfUtf16(haystack, needle, 0, haystack_len, haystack_ascii)) != null;
+        return (try self.stringIndexOfUtf16(haystack, needle, 0, haystack_len, haystack_ascii, false)) != null;
     }
 
     /// Compare `needle` with the UTF-16 substring beginning at `start` without
@@ -17761,7 +17786,8 @@ pub const Interpreter = struct {
     /// byte range, never decoding the bytes as WTF-8. `stringSliceUtf16` re-encodes
     /// just the extracted range, so the cost is O(result) rather than O(receiver).
     fn stringMethodReadsFlatImage(name: []const u8) bool {
-        return eq(name, "slice") or eq(name, "substring") or eq(name, "substr");
+        return eq(name, "slice") or eq(name, "substring") or eq(name, "substr") or
+            eq(name, "indexOf") or eq(name, "lastIndexOf") or eq(name, "includes");
     }
 
     fn stringMethodValue(
@@ -18076,7 +18102,7 @@ pub const Interpreter = struct {
             // StringIndexOf are defined over UTF-16 code units.
             const len = stringLengthForAccess(s, s_ascii, s_cell);
             const start = try self.clampPos(arg(args, 1), len);
-            return Value.num(if (try self.stringIndexOfUtf16(s, sub, start, len, s_ascii)) |index| @floatFromInt(index) else -1);
+            return Value.num(if (try self.stringIndexOfUtf16(s, sub, start, len, s_ascii, s_flat)) |index| @floatFromInt(index) else -1);
         }
         if (eq(name, "includes")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.includes must not be a regular expression");
@@ -18085,7 +18111,7 @@ pub const Interpreter = struct {
             // StringIndexOf operate on UTF-16 code units, not backing bytes.
             const len = stringLengthForAccess(s, s_ascii, s_cell);
             const pos = try self.clampPos(arg(args, 1), len);
-            return Value.boolVal((try self.stringIndexOfUtf16(s, sub, pos, len, s_ascii)) != null);
+            return Value.boolVal((try self.stringIndexOfUtf16(s, sub, pos, len, s_ascii, s_flat)) != null);
         }
         if (eq(name, "startsWith")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.startsWith must not be a regular expression");
@@ -18377,7 +18403,7 @@ pub const Interpreter = struct {
                 positions = try self.stringMatchPositionsUtf16(s, pat, s_len, s_ascii, null);
                 break :blk positions.items;
             } else blk: {
-                if (try self.stringIndexOfUtf16(s, pat, 0, s_len, s_ascii)) |position| {
+                if (try self.stringIndexOfUtf16(s, pat, 0, s_len, s_ascii, s_flat)) |position| {
                     if (position > std.math.maxInt(u32)) return error.OutOfMemory;
                     first_position[0] = @intCast(position);
                     break :blk first_position[0..];
@@ -18430,7 +18456,7 @@ pub const Interpreter = struct {
             else if (np >= @as(f64, @floatFromInt(cu_len))) cu_len else @intFromFloat(@trunc(np));
             // StringLastIndexOf compares the abstract code-unit sequence and
             // constrains the match's start (not its end) to `limit_cu`.
-            return Value.num(if (try self.stringLastIndexOfUtf16(s, sub, limit_cu, cu_len, s_ascii)) |index| @floatFromInt(index) else -1);
+            return Value.num(if (try self.stringLastIndexOfUtf16(s, sub, limit_cu, cu_len, s_ascii, s_flat)) |index| @floatFromInt(index) else -1);
         }
         if (eq(name, "substr")) {
             // `substr(start, length)`: start may count from the end.
