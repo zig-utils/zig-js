@@ -6649,16 +6649,16 @@ pub const Value = struct {
         return self.asStringCell().isAscii();
     }
     /// O(1) latin1 / is8Bit classification (every code unit ≤ 0xFF), cached on
-    /// the cell. Superset of `strIsAscii()`; this is the representation the
-    /// flat-string storage flip and the JSC `is8Bit` ABI predicate key on.
+    /// the cell. Superset of `strIsAscii()`; this is the representation flat
+    /// storage and the JSC `is8Bit` ABI predicate key on.
     /// Caller has checked `isString()`.
     pub inline fn strIsLatin1(self: Value) bool {
         return self.asStringCell().isLatin1();
     }
     /// The string's bytes as canonical **WTF-8**, regardless of how the cell
-    /// physically stores them. Today (WTF-8 storage) this always borrows
-    /// `.bytes` with no allocation; once flat-latin1 storage is active it
-    /// re-encodes a flat cell's 1-byte-per-unit image into `arena`. Every reader
+    /// physically stores them. ASCII and canonical cells borrow `.bytes` with
+    /// no allocation; flat Latin-1 cells re-encode their 1-byte-per-unit image
+    /// into `arena`. Every reader
     /// that interprets the bytes as WTF-8 — decoders, code-unit iteration, UTF-8
     /// egress, or copying into a WTF-8-expecting string constructor (incl.
     /// slice/substring re-wrap) — must obtain its bytes through this rather than

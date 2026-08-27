@@ -4767,7 +4767,7 @@ fn privateZigStringValue(context: *Context, string: *const PrivateZigString) Pri
 }
 
 /// Semantic byte consumers use canonical WTF-8, never a StringCell's physical
-/// backing image. ASCII and canonical cells borrow; a future flat Latin-1 cell
+/// backing image. ASCII and canonical cells borrow; a flat Latin-1 cell
 /// performs one bounded conversion in the owning context arena.
 fn privateCanonicalStringBytes(context: *Context, string: Value) error{OutOfMemory}![]const u8 {
     std.debug.assert(string.isString());
@@ -26691,7 +26691,11 @@ test "private external ZigString callbacks are exact-once and post-sweep" {
     const latin1_input = PrivateZigString{ .tagged_ptr = @intFromPtr(&latin1), .len = latin1.len };
     const latin1_encoded = ZigString__external(&latin1_input, global, &latin1_state, State.release);
     const latin1_value = privateValueFrom(global, latin1_encoded) orelse return error.ValueInitFailed;
-    try std.testing.expectEqualStrings("café", latin1_value.asStr());
+    try std.testing.expect(latin1_value.strIsFlatLatin1());
+    try std.testing.expectEqualStrings(
+        "café",
+        try latin1_value.asWtf8(context.arena()),
+    );
 
     var utf16 = [_]u16{ 'A', 0xd83d, 0xde00, 0xd800, 'Z' };
     var utf16_state = NullContextState{

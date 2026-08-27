@@ -34,8 +34,8 @@ pub fn hashBytes(bytes: []const u8) u64 {
 /// bit 61 marks it ready. Interning and `eql` stay exact
 /// because ASCII-ness is a deterministic function of content — two equal strings
 /// classify identically and so carry an identical `hash` word. Intern placement
-/// uses an independent keyed hash. This is the first brick of the flat-string
-/// model (Phase 1); later phases widen to true latin1/UTF-16 flat storage.
+/// uses an independent keyed hash. ASCII is the allocation-free subset of the
+/// production flat Latin-1 representation.
 pub const ascii_flag: u64 = @as(u64, 1) << 63;
 
 /// Bit 62 of a StringCell's hash-state word flags a **latin1 / is8Bit**
@@ -44,8 +44,8 @@ pub const ascii_flag: u64 = @as(u64, 1) << 63;
 /// byte ≥ 0xC4 (2-byte C4–DF for U+0100–U+07FF, 3/4-byte E0–F4, or the
 /// lone-surrogate lead ED), while latin1 uses only ASCII bytes plus the leads
 /// C2/C3 and their 0x80–0xBF continuations. ASCII ⊂ latin1, so an ASCII cell
-/// carries BOTH flags. This is the representation discriminator the flat-string
-/// storage flip keys on (a flat-latin1 cell is exactly an is8Bit, non-ASCII
+/// carries BOTH flags. This is the representation discriminator flat storage
+/// keys on (a flat-latin1 cell is exactly an is8Bit, non-ASCII
 /// cell) and it makes the ABI `is8Bit` predicate an O(1) cell read. Same
 /// safety argument as `ascii_flag`: latin1-ness is a deterministic function of
 /// content, so equal strings classify identically and share one hash state.
@@ -83,18 +83,13 @@ pub const content_hash_mask: u64 = ~(classification_mask | hash_ready_flag | gc_
 
 const persistent_state_mask = classification_mask | gc_managed_flag | utf16_length_mask;
 
-/// Master switch for the flat-latin1 storage representation (the flat-string
-/// model). While **false** every cell stores canonical WTF-8, `isFlatLatin1` is
-/// never observed as "stored flat", and `Value.asWtf8` borrows `.bytes` — so the
-/// reader-migration (routing every WTF-8-interpreting reader through `asWtf8`)
-/// is a pure no-op that can land and be verified byte-identical first. Flipping
-/// it to **true** (a later, single change) makes the constructors store a
-/// latin1-but-not-ASCII string as its flat 1-byte-per-unit image, makes
-/// `asWtf8` re-encode those cells on demand, and switches the debug WTF-8
-/// tripwire to a representation-aware check — all at once, so storage and
-/// readers never disagree. Keeping it a comptime const means the disabled path
-/// compiles to exactly today's behavior.
-pub const flat_storage_active: bool = false;
+/// The flat-latin1 storage representation is part of the production string
+/// model: Latin-1-but-not-ASCII cells store one raw byte per UTF-16 code unit.
+/// Representation-aware readers consume the physical image directly; byte-
+/// canonical boundaries use `Value.asWtf8` to re-encode on demand. Keeping the
+/// discriminator centralized prevents constructors and readers from choosing
+/// different layouts.
+pub const flat_storage_active: bool = true;
 
 /// True when the cell whose content hash is `h` is *stored* as flat latin1
 /// (1 raw byte per code unit) rather than WTF-8. Latin1-but-not-ASCII content is
@@ -1393,7 +1388,7 @@ test "strcell: staticCell needs no allocator and comptime-interns literals" {
     try std.testing.expectEqual(contentHash("null"), c.hashState());
 }
 
-test "strcell: classification is eager and content hash is first-use cached" {
+test "strcell: classification is eager and flat content hash preserves canonical identity" {
     const a = std.testing.allocator;
     const ascii = try createCell(a, "hello world");
     defer {
@@ -1411,8 +1406,14 @@ test "strcell: classification is eager and content hash is first-use cached" {
     // ASCII ⊂ latin1: an ASCII cell is also is8Bit; "café" is latin1 but not ASCII.
     try std.testing.expect(ascii.isLatin1());
     try std.testing.expect(latin1.isLatin1());
+    // Canonical "café" occupies five WTF-8 bytes; its production cell owns
+    // four physical bytes, exactly one per UTF-16 code unit.
+    try std.testing.expectEqual(@as(usize, 5), "caf\xc3\xa9".len);
+    try std.testing.expectEqualStrings("caf\xe9", latin1.bytes);
     try std.testing.expect(!ascii.hasCachedContentHash());
-    try std.testing.expect(!latin1.hasCachedContentHash());
+    // Flat storage cannot derive the canonical content hash from its physical
+    // byte image, so constructors publish the hash before discarding that form.
+    try std.testing.expect(latin1.hasCachedContentHash());
     try std.testing.expect(ascii.eql(staticCell("hello world")));
     try std.testing.expect(latin1.eql(staticCell("caf\xc3\xa9")));
     try std.testing.expectEqual(hashBytes("hello world") & content_hash_mask, ascii.hashState() & content_hash_mask);
@@ -1486,7 +1487,7 @@ test "strcell: static and runtime states converge and hash collisions stay exact
             a.destroy(runtime);
         }
         try std.testing.expect(case.static.hasCachedContentHash());
-        try std.testing.expect(!runtime.hasCachedContentHash());
+        try std.testing.expectEqual(isFlatLatin1(runtime.hashState()), runtime.hasCachedContentHash());
         try std.testing.expectEqual(case.static.isAscii(), runtime.isAscii());
         try std.testing.expectEqual(case.static.isLatin1(), runtime.isLatin1());
         try std.testing.expect(case.static.eql(runtime));
