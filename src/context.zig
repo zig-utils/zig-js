@@ -28402,7 +28402,7 @@ test "moving GC relocates live severed and recycled mapped arguments cells" {
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
 }
 
-test "required bytecode rejects an expression-default function instead of counting fallback coverage" {
+test "required bytecode rejects an unsupported object default instead of counting fallback coverage" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,
         .bytecode_execution_mode = .required,
@@ -28410,7 +28410,7 @@ test "required bytecode rejects an expression-default function instead of counti
     defer ctx.destroy();
 
     try std.testing.expectError(error.Throw, ctx.evaluate(
-        \\function needsParameterPrologue(value = missingDefault) { return value; }
+        \\function needsParameterPrologue(value = {}) { return value; }
         \\needsParameterPrologue();
     ));
     const exception = ctx.exception orelse return error.TestUnexpectedResult;
@@ -29265,6 +29265,77 @@ test "realm global identity is independent of mutable globalThis" {
         if (mode == .required)
             try std.testing.expectEqual(@as(u64, 0), context.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
     };
+}
+
+test "parameter references preserve exact lexical initialization" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "var outer=7; function f(value=outer){var outer=99; return value;} var result=String(f());", .expected = "7" },
+        .{ .source = "function owner(){let outer=7; return function(value=outer){var outer=99; return value;};} var result=String(owner()());", .expected = "7" },
+        .{ .source = "var value=9; function f(value=value){return 'miss';} var result; try{f();result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .source = "function f(value=later,later){return 'miss';} var result; try{f(undefined,7);result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .source = "function f(value=typeof value){return value;} var result; try{f();result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .source = "function f(value=missingParameterReference){return value;} var result; try{f();result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .source = "function f(value=typeof missingParameterReference){return value;} var result=f();", .expected = "undefined" },
+        .{ .source = "function f({a=b,b}){return a;} var result;try{f({b:7});result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .source = "function f({a,b=a}){return b;} var result=String(f({a:7}));", .expected = "7" },
+        .{ .source = "var key='x',outer=7;function f({[key]:value=outer}){return value;}var result=String(f({}));", .expected = "7" },
+        .{ .source = "var outer=7;function f([value=outer]){return value;}var result=String(f([]));", .expected = "7" },
+        .{ .source = "function owner(value){return ((arg=arguments[0])=>arg)();}var result=String(owner(7));", .expected = "7" },
+        .{ .source = "function f(arguments=arguments){return arguments;}var result;try{f();result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .source = "var fn,outer=7,box={outer:9};with(box){fn=function(value=outer){return value;};}var result=String(fn());", .expected = "9" },
+        .{ .source = "var fn,outer=7,box={outer:9};box[Symbol.unscopables]={outer:true};with(box){fn=function(value=outer){return value;};}var result=String(fn());", .expected = "7" },
+        .{ .source = "var holder={value:7,read(){return this.value;}};function f(value=holder.read()){return value;}var result=String(f());", .expected = "7" },
+        .{ .source = "function Box(value){this.value=value;}var outer=7;function f(value=new Box(outer)){return value.value;}var result=String(f());", .expected = "7" },
+        .{ .source = "var log='';function first(){log+='a';throw 1;}function second(){log+='b';return 2;}function f(a=first(),b=second()){log+='body';}try{f();}catch(e){}var result=log;", .expected = "a" },
+        .{ .source = "var calls=0;function side(){calls++;return 7;}function f(value=side()){return value;}var result=f(9)+':'+calls;", .expected = "9:0" },
+        .{ .source = "var outer=7;class C{read(value=outer){return value;}}var result=String(new C().read());", .expected = "7" },
+        .{ .source = "var outer=7;function f(value=outer){function outer(){return 99;}return value;}var result=String(f());", .expected = "7" },
+        .{ .source = "var outer=7;function f(value=eval('outer'),next=value){var outer=99;return next;}var result=String(f());", .expected = "7" },
+        .{ .source = "function f(read=()=>later,later=7){return read;}var result=String(f()());", .expected = "7" },
+        .{ .source = "var log='',holder={get value(){log+='get';return 7;}};function side(v){log+='call';return v;}function f(value=side(holder.value)){return value;}var result=f()+':'+log;", .expected = "7:getcall" },
+    };
+    for (cases) |case| for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        errdefer std.debug.print("parameter reference ({s}): {s}\n", .{ @tagName(mode), case.source });
+        _ = try ctx.evaluate(case.source);
+        try std.testing.expectEqualStrings(case.expected, (try ctx.evaluate("result")).asStr());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    };
+}
+
+test "parameter references stay lexical across shared no-GIL calls" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function owner(seed) { let held = seed; return function(value = held) { var held = 99; return value; }; }
+        \\var left = owner(7), right = owner(9);
+        \\function lane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+        \\  var sum = 0;
+        \\  for (var i = 0; i < 32; i++) sum += left() + right();
+        \\  return sum;
+        \\}
+        \\var lanes = [], sum = 0;
+        \\for (var i = 0; i < 4; i++) lanes.push(new Thread(lane));
+        \\for (var i = 0; i < 4; i++) sum += lanes[i].join();
+        \\sum
+    );
+    try std.testing.expectEqual(@as(f64, 2048), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 
 test "private eval contexts survive function escape and suspension" {

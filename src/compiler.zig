@@ -521,15 +521,6 @@ fn parametersBindName(fnode: *const ast.FunctionNode, name: []const u8) bool {
     return false;
 }
 
-fn earlierParameterBindsName(fnode: *const ast.FunctionNode, parameter_index: usize, name: []const u8) bool {
-    for (fnode.params[0..parameter_index]) |parameter| {
-        if (parameter.pattern) |pattern| {
-            if (patternBindsName(pattern, name)) return true;
-        } else if (std.mem.eql(u8, parameter.name, name)) return true;
-    }
-    return false;
-}
-
 const PlainParameterLayout = struct {
     slots: []const u32,
     destructuring_indices: []const u32,
@@ -547,7 +538,7 @@ const PlainParameterLayout = struct {
     }
 };
 
-fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode, parameter_index: usize) bool {
+fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode) bool {
     // FunctionDeclarationInstantiation installs invocation context first, and
     // each prior formal completes BindingInitialization before the next one.
     // The recursive cases below use only these exact leaves and canonical VM
@@ -555,58 +546,59 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
     return switch (node.*) {
         .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit => true,
         .this_expr, .new_target_expr => !fnode.requires_tree_walk_class_constructor,
-        .identifier => |name| earlierParameterBindsName(fnode, parameter_index, name) or
-            (!fnode.is_arrow and
-                fnode.uses_arguments and
-                std.mem.eql(u8, name, "arguments") and
-                !parametersBindName(fnode, "arguments")),
-        .unary => |unary| supportedPlainParameterDefault(unary.operand, fnode, parameter_index),
-        .binary => |binary| supportedPlainParameterDefault(binary.left, fnode, parameter_index) and
-            supportedPlainParameterDefault(binary.right, fnode, parameter_index),
-        .logical => |logical| supportedPlainParameterDefault(logical.left, fnode, parameter_index) and
-            supportedPlainParameterDefault(logical.right, fnode, parameter_index),
-        .conditional => |conditional| supportedPlainParameterDefault(conditional.cond, fnode, parameter_index) and
-            supportedPlainParameterDefault(conditional.consequent, fnode, parameter_index) and
-            supportedPlainParameterDefault(conditional.alternate, fnode, parameter_index),
-        .sequence => |sequence| supportedPlainParameterDefault(sequence.first, fnode, parameter_index) and
-            supportedPlainParameterDefault(sequence.second, fnode, parameter_index),
+        // FunctionDeclarationInstantiation creates all formal cells before
+        // initializing them left-to-right. Exceptions from self/later reads
+        // belong to execution, not admission. The parameter binding phase
+        // resolves checked formals and exact outer records without exposing
+        // the body's not-yet-created VariableEnvironment.
+        .identifier => true,
+        .unary => |unary| supportedPlainParameterDefault(unary.operand, fnode),
+        .binary => |binary| supportedPlainParameterDefault(binary.left, fnode) and
+            supportedPlainParameterDefault(binary.right, fnode),
+        .logical => |logical| supportedPlainParameterDefault(logical.left, fnode) and
+            supportedPlainParameterDefault(logical.right, fnode),
+        .conditional => |conditional| supportedPlainParameterDefault(conditional.cond, fnode) and
+            supportedPlainParameterDefault(conditional.consequent, fnode) and
+            supportedPlainParameterDefault(conditional.alternate, fnode),
+        .sequence => |sequence| supportedPlainParameterDefault(sequence.first, fnode) and
+            supportedPlainParameterDefault(sequence.second, fnode),
         // Identifier assignment preserves Reference resolution and leaves the
         // assigned value on the parameter initializer's expression stack. The
         // target may be a formal (including one still in TDZ) or an outer name;
         // the ordinary checked/global store opcodes retain that distinction.
         .assign => |assignment| assignment.target.* == .identifier and
-            supportedPlainParameterDefault(assignment.value, fnode, parameter_index),
+            supportedPlainParameterDefault(assignment.value, fnode),
         // Function/arrow creation itself has no user-code side effect. Its
         // nested compiler performs the exact capture/admission checks, while
         // eager parameter-environment materialization preserves closure identity.
         .function => true,
         .member => |member| !member.optional and
             (member.computed != null or !value_mod.isRawPrivateName(member.property)) and
-            supportedPlainParameterDefault(member.object, fnode, parameter_index) and
-            (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode, parameter_index)),
+            supportedPlainParameterDefault(member.object, fnode) and
+            (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode)),
         .call => |call| blk: {
             const direct_eval = call.callee.* == .identifier and std.mem.eql(u8, call.callee.identifier, "eval");
-            if (call.optional or (!direct_eval and !supportedPlainParameterDefault(call.callee, fnode, parameter_index)))
+            if (call.optional or (!direct_eval and !supportedPlainParameterDefault(call.callee, fnode)))
                 break :blk false;
             for (call.args) |argument|
-                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode, parameter_index))
+                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode))
                     break :blk false;
             break :blk true;
         },
         .new_expr => |construction| blk: {
-            if (!supportedPlainParameterDefault(construction.callee, fnode, parameter_index))
+            if (!supportedPlainParameterDefault(construction.callee, fnode))
                 break :blk false;
             for (construction.args) |argument|
-                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode, parameter_index))
+                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode))
                     break :blk false;
             break :blk true;
         },
         .super_member => |member| fnode.is_derived_class_constructor and
-            (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode, parameter_index)),
+            (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode)),
         .super_call => |arguments| blk: {
             if (!fnode.is_derived_class_constructor) break :blk false;
             for (arguments) |argument|
-                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode, parameter_index))
+                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode))
                     break :blk false;
             break :blk true;
         },
@@ -614,30 +606,30 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
     };
 }
 
-fn supportedPlainParameterPattern(pattern: *const ast.Node, fnode: *const ast.FunctionNode, parameter_index: usize) bool {
+fn supportedPlainParameterPattern(pattern: *const ast.Node, fnode: *const ast.FunctionNode) bool {
     return switch (pattern.*) {
         .identifier => true,
         .obj_pattern => |object| blk: {
             for (object.props) |property| {
                 if (property.key_expr) |key|
-                    if (!supportedPlainParameterDefault(key, fnode, parameter_index)) break :blk false;
+                    if (!supportedPlainParameterDefault(key, fnode)) break :blk false;
                 if (property.default) |default|
-                    if (!supportedPlainParameterDefault(default, fnode, parameter_index)) break :blk false;
-                if (!supportedPlainParameterPattern(property.target, fnode, parameter_index)) break :blk false;
+                    if (!supportedPlainParameterDefault(default, fnode)) break :blk false;
+                if (!supportedPlainParameterPattern(property.target, fnode)) break :blk false;
             }
             if (object.rest) |rest|
-                if (!supportedPlainParameterPattern(rest, fnode, parameter_index)) break :blk false;
+                if (!supportedPlainParameterPattern(rest, fnode)) break :blk false;
             break :blk true;
         },
         .arr_pattern => |array| blk: {
             for (array.elems) |element| {
                 if (element.default) |default|
-                    if (!supportedPlainParameterDefault(default, fnode, parameter_index)) break :blk false;
+                    if (!supportedPlainParameterDefault(default, fnode)) break :blk false;
                 if (element.target) |target|
-                    if (!supportedPlainParameterPattern(target, fnode, parameter_index)) break :blk false;
+                    if (!supportedPlainParameterPattern(target, fnode)) break :blk false;
             }
             if (array.rest) |rest|
-                if (!supportedPlainParameterPattern(rest, fnode, parameter_index)) break :blk false;
+                if (!supportedPlainParameterPattern(rest, fnode)) break :blk false;
             break :blk true;
         },
         else => false,
@@ -650,13 +642,13 @@ fn configurePlainParameters(
     fnode: *const ast.FunctionNode,
 ) CompileError!PlainParameterLayout {
     var has_parameter_expressions = false;
-    for (fnode.params, 0..) |parameter, index| {
+    for (fnode.params) |parameter| {
         if (parameter.default) |default| {
-            if (!supportedPlainParameterDefault(default, fnode, index)) return error.Unsupported;
+            if (!supportedPlainParameterDefault(default, fnode)) return error.Unsupported;
             has_parameter_expressions = true;
         }
         if (parameter.pattern) |pattern| {
-            if (!supportedPlainParameterPattern(pattern, fnode, index)) return error.Unsupported;
+            if (!supportedPlainParameterPattern(pattern, fnode)) return error.Unsupported;
             has_parameter_expressions = has_parameter_expressions or patternHasEvaluationExpressions(pattern);
         }
     }
@@ -6844,6 +6836,25 @@ test "nested suspendable compiler capture planning propagates allocation failure
     try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseSuspendableCaptureAllocationFailures, .{});
 }
 
+fn exerciseParameterReferenceAllocationFailures(allocator: std.mem.Allocator) !void {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        ast_arena.allocator(),
+        "function outer(seed) { let held = seed; return function(value = held, { [key]: next = value }, read = () => next) { return read; }; }",
+    );
+    const program = try parser.parseProgram();
+    var replay = CompilerAllocationReplay{ .backing = allocator };
+    var compile_arena = std.heap.ArenaAllocator.init(replay.allocator());
+    defer compile_arena.deinit();
+    const compiled = try Compiler.compilePlainFunction(compile_arena.allocator(), program.program[0].func_decl);
+    try std.testing.expect(compiled.chunk.fns.items[0].chunk != null);
+}
+
+test "parameter references compiler planning propagates allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseParameterReferenceAllocationFailures, .{});
+}
+
 test "compiler preserves a first-statement debugger checkpoint" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -7029,32 +7040,17 @@ test "compiler reports stable plain-function admission reasons" {
     }{
         .{ .source = "function* f(){}", .expected = .generator_or_async },
         .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
-        .{ .source = "function f(value = outer){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = undefined){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = holder.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, value = first[outer]){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = first?.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, value = first(outer)){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, value = first?.()){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, args, value = first(...args)){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, value = new first(outer)){}", .expected = .parameter_prologue },
         .{ .source = "function f(first, args, value = new first(...args)){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = value + 1){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = later + 1, later){}", .expected = .parameter_prologue },
-        .{ .source = "function f(arguments = arguments){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, value = first + outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = /x/){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = []){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = class {}){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = side()){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = (1, outer)){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = false || outer){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = false ? 1 : outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = ++outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = delete holder.value){}", .expected = .parameter_prologue },
         .{ .source = "function f([value] = []){}", .expected = .parameter_prologue },
-        .{ .source = "function f({ [key]: value }){}", .expected = .parameter_prologue },
     };
 
     for (cases) |case| {
@@ -7070,6 +7066,21 @@ test "compiler reports stable plain-function admission reasons" {
     }
 
     const admitted_parameter_prologues = [_][]const u8{
+        "function f(value = outer){}",
+        "function f(value = undefined){}",
+        "function f(value = holder.value){}",
+        "function f(first, value = first[outer]){}",
+        "function f(first, value = first(outer)){}",
+        "function f(first, value = new first(outer)){}",
+        "function f(value = value + 1){}",
+        "function f(value = later + 1, later){}",
+        "function f(arguments = arguments){}",
+        "function f(first, value = first + outer){}",
+        "function f(value = side()){}",
+        "function f(value = (1, outer)){}",
+        "function f(value = false || outer){}",
+        "function f(value = false ? 1 : outer){}",
+        "function f({ [key]: value }){}",
         "function f(value = 1, ...tail){}",
         "function f([value = 1]){}",
         "function f([value], ...tail){}",
@@ -7119,8 +7130,8 @@ test "compiler reports stable plain-function admission reasons" {
         return error.TestUnexpectedResult;
     const inherited_arguments_admission = try Compiler.admitPlainFunction(inherited_arguments_arena.allocator(), arrow_expression.function);
     switch (inherited_arguments_admission) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
+        .compiled => {},
+        .rejected => return error.TestUnexpectedResult,
     }
 
     var private_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
