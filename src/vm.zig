@@ -4293,7 +4293,7 @@ fn allocDirectEvalForwardingEnvironment(
     const environment = try gc_mod.allocEnv(vm.arena);
     vm.initEnvironment(environment, vm.tempEnvRoot(parent_root, parent_fallback), false);
     environment.direct_eval_forward_target = directEvalForwardTarget(vm.tempEnvRoot(target_root, target_fallback));
-    environment.private_activation = false;
+    environment.private_activation.store(false, .monotonic);
     return environment;
 }
 
@@ -4647,7 +4647,7 @@ fn materializeDirectEvalEnvironment(
         const environment = try gc_mod.allocEnv(vm.arena);
         vm.initEnvironment(environment, vm.tempEnvRoot(chain_root, outward), scope.kind != .lexical);
         environment.is_catch_param = scope.is_catch_param;
-        environment.private_activation = !frames[@intCast(scope.frame_depth)].escaped.load(.acquire);
+        environment.private_activation.store(!frames[@intCast(scope.frame_depth)].escaped.load(.acquire), .monotonic);
         environment.activation = .{
             .frame = frames[@intCast(scope.frame_depth)].activationView(),
             .bindings = scope.bindings,

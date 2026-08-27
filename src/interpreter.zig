@@ -772,7 +772,9 @@ pub const Environment = struct {
     /// observable through a closure that captured that iteration's binding, so an
     /// uncaptured loop env is reused across iterations instead of reallocated —
     /// removing the per-iteration GC-cell allocation from the common tight loop.
-    captured: bool = false,
+    /// Shared ancestors and direct-eval targets can be captured concurrently;
+    /// acquire readers observe release publication of the escaped-frame state.
+    captured: std.atomic.Value(bool) = .init(false),
     /// True for a function or the global scope (a *variable* environment); false
     /// for a block `{…}` scope. `var`/function declarations hoist to the nearest
     /// variable environment, while `let`/`const`/`class` bind in the block.
@@ -784,8 +786,10 @@ pub const Environment = struct {
     /// fall back to the lock while concurrent tracing is active. Closure
     /// capture clears this flag before the Environment can be published to
     /// another mutator. Root and module environments never opt into this proof;
-    /// nested scopes inherit it only from a still-private activation.
-    private_activation: bool = false,
+    /// nested scopes inherit it only from a still-private activation. Capture
+    /// clears it with release ordering even for already-shared ancestors, whose
+    /// binding lookups must never race with that same-value update.
+    private_activation: std.atomic.Value(bool) = .init(false),
     /// True for the *function body* block — a real block env (so it can hold the
     /// body's top-level `let`/`const`) but treated like the variable scope for
     /// function-declaration hoisting and Annex B B.3.3 analysis: a function
@@ -870,11 +874,11 @@ pub const Environment = struct {
     /// mutator-private activation. Returns whether the caller must unlock.
     pub fn lockBindingsForRead(self: *Environment) bool {
         if (!self.binding_lock_required) return false;
-        if (self.private_activation and !self.captured) return false;
+        if (self.private_activation.load(.acquire) and !self.captured.load(.acquire)) return false;
         self.lockBindings();
         jsthread.recordEnvReadLockAcquire(if (self.parent == null)
             .root
-        else if (self.captured)
+        else if (self.captured.load(.acquire))
             .captured
         else
             .other);
@@ -895,7 +899,7 @@ pub const Environment = struct {
         // takes the ordinary unlock branch, whose immutable policy check is a
         // no-op for this single-owner Environment.
         if (!self.binding_lock_required) return true;
-        if (self.private_activation and !self.captured and
+        if (self.private_activation.load(.acquire) and !self.captured.load(.acquire) and
             gc_mod.tryEnterPrivateEnvironmentWrite())
         {
             gc_runtime.enterTraceSensitiveLock();
@@ -903,11 +907,11 @@ pub const Environment = struct {
             return false;
         }
         self.lockBindings();
-        jsthread.recordEnvWriteLockAcquire(if (self.private_activation and !self.captured)
+        jsthread.recordEnvWriteLockAcquire(if (self.private_activation.load(.acquire) and !self.captured.load(.acquire))
             .private
         else if (self.parent == null)
             .root
-        else if (self.captured)
+        else if (self.captured.load(.acquire))
             .captured
         else
             .other);
@@ -960,7 +964,7 @@ pub const Environment = struct {
     }
 
     inline fn bindingsHaveSingleWriter(self: *const Environment) bool {
-        return !self.binding_lock_required or (self.private_activation and !self.captured);
+        return !self.binding_lock_required or (self.private_activation.load(.acquire) and !self.captured.load(.acquire));
     }
 
     /// Define (or overwrite) a binding in *this* scope (used by let/const).
@@ -1195,13 +1199,13 @@ pub const Environment = struct {
         var e: ?*Environment = self;
         while (e) |env| : (e = env.parent) {
             if (env.direct_eval_forward_target) |target| target.markCaptured();
-            if (env.captured) break;
-            // This executes in the defining mutator before the new closure can
-            // be published. Once cleared, every future read uses the same lock
-            // as a concurrent mutator's structural writes.
-            env.private_activation = false;
-            env.captured = true;
+            if (env.captured.load(.acquire)) break;
+            // Clear the single-mutator proof before publishing a closure. A
+            // forwarding view may also reach an already-shared ancestor, so
+            // even a same-value clear races with peer lookups unless atomic.
+            env.private_activation.store(false, .release);
             if (env.activation) |*view| view.frame.markEscaped();
+            env.captured.store(true, .release);
         }
     }
 
@@ -1503,9 +1507,9 @@ pub const Environment = struct {
         // publishing it in the interpreter cache.
         self.parent = null;
         self.object_proto_intrinsic = null;
-        self.captured = false;
+        self.captured.store(false, .monotonic);
         self.fn_scope = false;
-        self.private_activation = false;
+        self.private_activation.store(false, .monotonic);
         self.fn_body = false;
         self.is_catch_param = false;
         self.with_object = null;
@@ -1532,9 +1536,9 @@ pub const Environment = struct {
         self.dispose_pending = null;
         self.parent = null;
         self.object_proto_intrinsic = null;
-        self.captured = false;
+        self.captured.store(false, .monotonic);
         self.fn_scope = false;
-        self.private_activation = false;
+        self.private_activation.store(false, .monotonic);
         self.fn_body = false;
         self.is_catch_param = false;
         self.with_object = null;
@@ -1703,6 +1707,71 @@ test "Environment immutable lock ruling keeps only shared roots synchronized" {
     try std.testing.expectEqual(@as(u64, 2), jsthread.contentionStats().env_write_lock_acquires);
 }
 
+test "Environment capture publication synchronizes forwarding targets and peer reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const lane_count = 4;
+    const record_count = 256;
+    var root = Environment{ .arena = allocator };
+    const records = try allocator.alloc(Environment, record_count);
+    for (records) |*record| {
+        record.* = .{ .arena = allocator, .parent = &root };
+        try record.put("value", Value.num(17));
+    }
+    var arrivals: std.atomic.Value(usize) = .init(0);
+    var stop: std.atomic.Value(bool) = .init(false);
+    var threads: [lane_count]std.Thread = undefined;
+    var spawned: usize = 0;
+    var results: [lane_count]bool = undefined;
+    @memset(&results, true);
+    defer {
+        stop.store(true, .release);
+        for (threads[0..spawned]) |thread| thread.join();
+    }
+    const Lane = struct {
+        fn run(shared: []Environment, ready: *std.atomic.Value(usize), abort: *std.atomic.Value(bool), lane: usize, result: *bool) void {
+            for (shared, 0..) |*record, index| {
+                _ = ready.fetchAdd(1, .acq_rel);
+                while (ready.load(.acquire) < (index + 1) * lane_count) {
+                    if (abort.load(.acquire)) return;
+                    std.atomic.spinLoopHint();
+                }
+                if (lane < 2) {
+                    var forwarding = Environment{
+                        .arena = record.arena,
+                        .parent = record.parent,
+                        .direct_eval_forward_target = record,
+                    };
+                    forwarding.markCaptured();
+                    if (!forwarding.captured.load(.acquire) or !record.captured.load(.acquire)) result.* = false;
+                } else {
+                    for (0..8) |_| {
+                        const got = record.get("value") orelse {
+                            result.* = false;
+                            abort.store(true, .release);
+                            return;
+                        };
+                        if (!got.isNumber() or got.asNum() != 17) result.* = false;
+                    }
+                }
+            }
+        }
+    };
+    for (&threads, &results, 0..) |*thread, *result, lane| {
+        thread.* = try std.Thread.spawn(.{}, Lane.run, .{ records, &arrivals, &stop, lane, result });
+        spawned += 1;
+    }
+    for (threads) |thread| thread.join();
+    spawned = 0;
+    for (results) |result| try std.testing.expect(result);
+    for (records) |*record| {
+        try std.testing.expect(record.captured.load(.acquire));
+        try std.testing.expect(!record.private_activation.load(.acquire));
+    }
+    try std.testing.expect(root.captured.load(.acquire));
+}
+
 test "Environment private activation reads elide locks until capture" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1711,14 +1780,14 @@ test "Environment private activation reads elide locks until capture" {
         .arena = arena.allocator(),
         .gc_managed = true,
         .fn_scope = true,
-        .private_activation = true,
+        .private_activation = .init(true),
     };
     try parent.put("outer", Value.num(11));
     var child = Environment{
         .arena = arena.allocator(),
         .parent = &parent,
         .gc_managed = true,
-        .private_activation = true,
+        .private_activation = .init(true),
     };
     try child.put("local", Value.num(7));
 
@@ -1729,8 +1798,8 @@ test "Environment private activation reads elide locks until capture" {
     try std.testing.expectEqual(@as(u64, 0), jsthread.contentionStats().env_lock_acquires);
 
     child.markCaptured();
-    try std.testing.expect(!child.private_activation);
-    try std.testing.expect(!parent.private_activation);
+    try std.testing.expect(!child.private_activation.load(.acquire));
+    try std.testing.expect(!parent.private_activation.load(.acquire));
     try std.testing.expectEqual(@as(?Value, Value.num(7)), child.get("local"));
     try std.testing.expectEqual(@as(?Value, Value.num(11)), child.get("outer"));
     const stats = jsthread.contentionStats();
@@ -1751,7 +1820,7 @@ test "Environment private activation writes use the collector handshake until ca
         .parent = &root,
         .gc_managed = true,
         .fn_scope = true,
-        .private_activation = true,
+        .private_activation = .init(true),
     };
     var trace_active: std.atomic.Value(bool) = .init(false);
     var machine = Interpreter{
@@ -4099,7 +4168,7 @@ pub const Interpreter = struct {
             .parent = parent,
             .gc_managed = gc_mod.allocationsAreManaged(),
             .fn_scope = fn_scope,
-            .private_activation = if (parent) |p| p.private_activation and !p.captured else false,
+            .private_activation = .init(if (parent) |p| p.private_activation.load(.acquire) and !p.captured.load(.acquire) else false),
         };
     }
 
@@ -4122,7 +4191,7 @@ pub const Interpreter = struct {
             // so even a same-value rewrite here would be an engine-state race.
             std.debug.assert(env.gc_managed == (self.gc_side_storage != null));
             env.fn_scope = false;
-            env.private_activation = parent.private_activation and !parent.captured;
+            env.private_activation.store(parent.private_activation.load(.acquire) and !parent.captured.load(.acquire), .monotonic);
             // The cached cell can have survived long enough to tenure. Reusing
             // it under a young lexical parent creates a new managed edge, unlike
             // initialization of a freshly allocated nursery environment.
@@ -4160,7 +4229,7 @@ pub const Interpreter = struct {
             // for concurrent parent-edge tracing.
             std.debug.assert(env.gc_managed == (self.gc_side_storage != null));
             env.fn_scope = true;
-            env.private_activation = true;
+            env.private_activation.store(true, .monotonic);
             // A cached activation can be tenured while its new closure parent
             // is young. Publish that managed edge exactly before execution.
             if (env.gc_managed and func.closure.gc_managed)
@@ -4170,7 +4239,7 @@ pub const Interpreter = struct {
         }
         const env = try gc_mod.allocEnv(self.arena);
         self.initEnvironment(env, func.closure, true);
-        env.private_activation = true;
+        env.private_activation.store(true, .monotonic);
         return env;
     }
 
@@ -4179,7 +4248,7 @@ pub const Interpreter = struct {
         // environments retain special declaration-instantiation state, and a
         // captured environment has observable identity. All three keep their
         // existing one-shot lifetime.
-        if (env.bindings_allocator == null or env.fn_body or env.captured or
+        if (env.bindings_allocator == null or env.fn_body or env.captured.load(.acquire) or
             env.disposables.items.len != 0 or env.dispose_pending != null)
             return;
         env.resetForBlockReuse();
@@ -4193,7 +4262,7 @@ pub const Interpreter = struct {
         // A closure or mapped arguments object makes activation identity and
         // bindings observable. Allocation failures can leave a partial table;
         // callPlain deliberately invokes this helper only for normal completion.
-        if (env.bindings_allocator == null or env.captured or env.aliases.count() != 0 or
+        if (env.bindings_allocator == null or env.captured.load(.acquire) or env.aliases.count() != 0 or
             env.deletable.count() != 0 or
             env.disposables.items.len != 0 or env.dispose_pending != null)
             return;
@@ -5917,7 +5986,7 @@ pub const Interpreter = struct {
         // evaluation captured the head environment. Reuse an uncaptured head in
         // place instead of allocating a redundant second environment before its
         // condition.
-        if (lexical and self.env.captured) self.env = try self.perIterEnv(outer, names.items, self.env);
+        if (lexical and self.env.captured.load(.acquire)) self.env = try self.perIterEnv(outer, names.items, self.env);
         if (loop_env) |le| {
             if (le.disposables.items.len == 0) {
                 loop_env = null;
@@ -5962,7 +6031,7 @@ pub const Interpreter = struct {
             // it, skipping a GC-cell allocation per iteration (the tight-loop
             // fast path). If it was captured, allocate the fresh copy so the
             // captured binding keeps its value.
-            if (lexical and self.env.captured) self.env = try self.perIterEnv(outer, names, self.env);
+            if (lexical and self.env.captured.load(.acquire)) self.env = try self.perIterEnv(outer, names, self.env);
             if (update) |u| _ = try self.eval(u);
         }
         return last;
@@ -6008,7 +6077,7 @@ pub const Interpreter = struct {
     /// a per-iteration `using` resource must get its own env to dispose).
     fn iterBindingEnv(self: *Interpreter, state: *IterEnvState, outer: *Environment, allow_reuse: bool) EvalError!*Environment {
         if (state.reuse) |r| {
-            if (!r.captured) return r; // reuse in place — no allocation
+            if (!r.captured.load(.acquire)) return r; // reuse in place — no allocation
             state.reuse = null; // captured: abandon it (kept alive by its closure) and stop reusing
             state.disabled = true;
         }
