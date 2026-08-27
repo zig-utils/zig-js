@@ -2713,8 +2713,7 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
                 space = Value.num(n);
             },
             .string => {
-                const s = try self.toStringWtf8(space);
-                space = try Value.strAlloc(self.arena, s);
+                space = try self.toStringValue(space);
             },
             else => space = p,
         }
@@ -2808,8 +2807,7 @@ const Stringifier = struct {
                     v = Value.num(n);
                 },
                 .string => {
-                    const s = try self.toStringWtf8(v);
-                    v = try Value.strAlloc(self.arena, s);
+                    v = try self.toStringValue(v);
                 },
                 else => v = p,
             }
