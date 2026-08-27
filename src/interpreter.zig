@@ -16335,7 +16335,8 @@ pub const Interpreter = struct {
                 if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString() and o.getOwn(name) == null) {
                     const bp = o.boxedPrimitive().?;
                     if (eq(name, "valueOf") or eq(name, "toString")) return bp;
-                    if (try self.stringMethod(try bp.asWtf8(self.arena), name, args, true, bp.asStringCell())) |r| return r;
+                    const string = try self.toStringValue(recv);
+                    if (try self.stringMethodValue(string, name, args, true, recv)) |r| return r;
                 }
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
                 // Generic Array.prototype methods on an array-like `this`
@@ -16346,7 +16347,7 @@ pub const Interpreter = struct {
                 // Generic String.prototype methods coerce `this` to string
                 // (`String.prototype.split.call(obj)`).
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
-                    return try self.stringMethod(try self.toStringWtf8(recv), name, args, true, null);
+                    return try self.stringMethodValue(try self.toStringValue(recv), name, args, true, recv);
                 }
                 // `Object.prototype.valueOf` for an ordinary object returns the
                 // object itself (ToObject(this)). Reached only after the kind
@@ -16364,15 +16365,15 @@ pub const Interpreter = struct {
             },
             .string => {
                 if (eq(name, "valueOf") or eq(name, "toString")) return recv;
-                return try self.stringMethod(try recv.asWtf8(self.arena), name, args, true, recv.asStringCell());
+                return try self.stringMethodValue(recv, name, args, true, recv);
             },
             .number => {
                 if (try self.numberMethod(recv.asNum(), name, args)) |r| return r;
-                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, null);
+                if (isStringGeneric(name)) return try self.stringMethodValue(try self.toStringValue(recv), name, args, true, recv);
             },
             .boolean => {
                 if (try self.booleanMethod(recv.asBool(), name, args)) |r| return r;
-                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, null);
+                if (isStringGeneric(name)) return try self.stringMethodValue(try self.toStringValue(recv), name, args, true, recv);
             },
             else => {},
         }
@@ -17736,6 +17737,26 @@ pub const Interpreter = struct {
         return Value.strAlloc(self.arena, s);
     }
 
+    fn stringMethodUsesCodeUnitCell(name: []const u8) bool {
+        return eq(name, "charAt") or eq(name, "charCodeAt") or eq(name, "at") or eq(name, "codePointAt");
+    }
+
+    fn stringMethodValue(
+        self: *Interpreter,
+        string: Value,
+        name: []const u8,
+        args: []const Value,
+        check_protocol: bool,
+        protocol_receiver: ?Value,
+    ) EvalError!?Value {
+        std.debug.assert(string.isString());
+        const bytes = if (stringMethodUsesCodeUnitCell(name))
+            string.asStr()
+        else
+            try string.asWtf8(self.arena);
+        return self.stringMethod(bytes, name, args, check_protocol, string.asStringCell(), protocol_receiver);
+    }
+
     /// ToIntegerOrInfinity(v) clamped into `[0, len]` — the position argument of
     /// `includes`/`startsWith`/`endsWith` (a Symbol/BigInt throws via toNumberV).
     fn clampPos(self: *Interpreter, v: Value, len: usize) EvalError!usize {
@@ -17749,10 +17770,18 @@ pub const Interpreter = struct {
     // `s_cell` retains immutable receiver metadata when ToString returned an
     // existing StringData cell. Raw coerced bytes pass null. ASCII byte-offset
     // fast paths and the bounded non-ASCII index are selected from the cell.
-    fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool, s_cell: ?*const StringCell) EvalError!?Value {
+    fn stringMethod(
+        self: *Interpreter,
+        s: []const u8,
+        name: []const u8,
+        args: []const Value,
+        check_protocol: bool,
+        s_cell: ?*const StringCell,
+        protocol_receiver: ?Value,
+    ) EvalError!?Value {
         const s_ascii = if (s_cell) |cell| cell.isAscii() else false;
         if (check_protocol and eq(name, "replaceAll"))
-            if (try self.replaceAllProtocolDispatch(try self.stringReceiverValue(s, s_cell), args)) |r| return r;
+            if (try self.replaceAllProtocolDispatch(protocol_receiver orelse try self.stringReceiverValue(s, s_cell), args)) |r| return r;
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
         // `replace`/`replaceAll` first check their first argument for the matching
         // `Symbol.*` method and, if it is callable, delegate to it (with `this` =
@@ -17762,7 +17791,7 @@ pub const Interpreter = struct {
         // receiver Value at all. Protocol methods retain an existing immutable
         // StringData cell instead of copying its canonical bytes into a new one.
         if (check_protocol and self.stringProtocolSymbol(name) != null)
-            if (try self.stringProtocolDispatch(name, try self.stringReceiverValue(s, s_cell), args)) |r| return r;
+            if (try self.stringProtocolDispatch(name, protocol_receiver orelse try self.stringReceiverValue(s, s_cell), args)) |r| return r;
         if (eq(name, "charAt")) {
             const pos = try self.stringPosition(s, arg0(args), s_ascii, s_cell) orelse return Value.str("");
             const cu = try self.stringCodeUnitAtAccess(s, pos, s_ascii, s_cell) orelse return Value.str("");
@@ -36227,14 +36256,8 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, name, "replaceAll"))
                 if (try self.replaceAllProtocolDispatch(this, args)) |r| return r;
             if (try self.stringProtocolDispatch(name, this, args)) |r| return r;
-            const s = try self.toStringWtf8(this);
-            const cell: ?*const StringCell = if (this.isString())
-                this.asStringCell()
-            else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isString())
-                this.asObj().boxedPrimitive().?.asStringCell()
-            else
-                null;
-            return (try self.stringMethod(s, name, args, false, cell)) orelse Value.undef();
+            const string = try self.toStringValue(this);
+            return (try self.stringMethodValue(string, name, args, false, null)) orelse Value.undef();
         }
     }.call;
 }
@@ -36696,7 +36719,8 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype[Symbol." ++ op ++ "] called on a non-object");
             const str_src = if (args.len > 0) args[0] else Value.undef();
-            const str = try self.toStringWtf8(str_src);
+            const string = try self.toStringValue(str_src);
+            const str = try string.asWtf8(self.arena);
             if (comptime std.mem.eql(u8, op, "match")) {
                 return try self.regexpMatch(this, str);
             }
@@ -36714,8 +36738,7 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, op, "matchAll")) {
                 return try self.regexpMatchAll(this, str);
             }
-            const cell: ?*const StringCell = if (str_src.isString()) str_src.asStringCell() else null;
-            return (try self.stringMethod(str, op, &.{this}, false, cell)) orelse Value.undef();
+            return (try self.stringMethod(str, op, &.{this}, false, string.asStringCell(), null)) orelse Value.undef();
         }
     }.call;
 }
@@ -53070,7 +53093,30 @@ test "String method dispatch materializes protocol receivers only when required"
     // physical flat-latin1 cell rather than wrapping its canonical byte view.
     const receiver = try machine.stringReceiverValue(canonical_latin1, latin1.asStringCell());
     try std.testing.expectEqual(latin1.rawBits(), receiver.rawBits());
+
+    // Code-unit-only methods consume the physical cell directly. In
+    // particular, charCodeAt must not allocate a canonical WTF-8 snapshot of
+    // the whole flat-latin1 receiver merely to read one indexed code unit.
+    const latin1_code = (try machine.stringMethodValue(latin1, "charCodeAt", &.{Value.num(3)}, false, null)).?;
+    try std.testing.expectEqual(@as(f64, 0xE9), latin1_code.asNum());
     try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+}
+
+test "String methods preserve original protocol receivers and post-coercion cells" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const result = try evalSource(arena.allocator(),
+        \\const boxed = new String("wrong");
+        \\let coercions = 0;
+        \\boxed.toString = function () { coercions += 1; return "\u00e9x"; };
+        \\let seen;
+        \\const matcher = { [Symbol.search](receiver) { seen = receiver; return 7; } };
+        \\const protocol = boxed.search(matcher) === 7 && seen === boxed && coercions === 0;
+        \\const codeUnit = String.prototype.charCodeAt.call(boxed, 0) === 0xE9;
+        \\protocol && codeUnit && coercions === 1
+    );
+    try std.testing.expect(result.asBool());
 }
 
 test "ToString canonicalizes object-produced StringData" {
@@ -53728,7 +53774,7 @@ test "String indexed access publishes one bounded immutable cell index" {
     const string = try Value.strAlloc(a, source.items);
     try std.testing.expect(!string.asStringCell().hasUtf16Index());
     const bytes = try string.asWtf8(a);
-    const char_code = (try machine.stringMethod(bytes, "charCodeAt", &.{Value.num(100)}, false, string.asStringCell())).?;
+    const char_code = (try machine.stringMethod(bytes, "charCodeAt", &.{Value.num(100)}, false, string.asStringCell(), null)).?;
     try std.testing.expect(char_code.isNumber());
     try std.testing.expect(string.asStringCell().hasUtf16Index());
     const primitive = try machine.getPrimitiveMember(string, "100");
@@ -53744,7 +53790,7 @@ test "String indexed access publishes one bounded immutable cell index" {
     machine.arena = unavailable.allocator();
     try std.testing.expectError(
         error.OutOfMemory,
-        machine.stringMethod(failing_bytes, "charCodeAt", &.{Value.num(100)}, false, failing_string.asStringCell()),
+        machine.stringMethod(failing_bytes, "charCodeAt", &.{Value.num(100)}, false, failing_string.asStringCell(), null),
     );
     try std.testing.expect(!failing_string.asStringCell().hasUtf16Index());
     machine.arena = a;
