@@ -29060,6 +29060,313 @@ test "forced tree-walker and required bytecode preserve lexical TDZ and const se
     , "lexicalTrace.join(',')");
 }
 
+test "block functions preserve lexical and Annex B identity in required bytecode" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{
+            .source =
+            \\(function () {
+            \\  "use strict";
+            \\  var read, initial;
+            \\  { initial = f(); function f() { return 3; } read = function () { return f; }; f = 9; }
+            \\  return initial + ":" + read() + ":" + typeof f;
+            \\})();
+            ,
+            .expected = "3:9:undefined",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var read;
+            \\  { f = 6; function f() {} read = function () { return f; }; f = 7; }
+            \\  return f + ":" + read();
+            \\})();
+            ,
+            .expected = "6:7",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var read, inside;
+            \\  { read = f; function f() { return 1; } f = 9; function f() { return 2; } inside = f; }
+            \\  return read() + ":" + inside + ":" + f;
+            \\})();
+            ,
+            .expected = "2:9:9",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var first, second;
+            \\  { function f() { return f.value; } f.value = 1; first = f; }
+            \\  { function f() { return f.value; } f.value = 2; second = f; }
+            \\  return first() + ":" + second() + ":" + (first !== second);
+            \\})();
+            ,
+            .expected = "1:2:true",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var f = 17, seen;
+            \\  switch (f) {
+            \\    case (seen = f(), 17): function f() { return 1; } f = 4;
+            \\    default: function f() { return 2; }
+            \\  }
+            \\  return seen + ":" + f;
+            \\})();
+            ,
+            .expected = "2:4",
+        },
+        .{
+            .source = "(function () { switch (8) { case 0: function hidden() {} } return typeof hidden; })();",
+            .expected = "undefined",
+        },
+        .{
+            .source =
+            \\(function (f) {
+            \\  var before = f;
+            \\  { function f() { return 3; } if (f() !== 3) throw 1; }
+            \\  return before + ":" + f;
+            \\})(12);
+            ,
+            .expected = "12:12",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  let unused, { f } = { f: 11 };
+            \\  { function f() { return 3; } if (f() !== 3) throw 1; }
+            \\  return "" + f;
+            \\})();
+            ,
+            .expected = "11",
+        },
+        .{
+            .source = "(function () { var before = arguments; { function arguments() {} } return '' + (before === arguments); })(1);",
+            .expected = "true",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var before = outer();
+            \\  label: function outer() { return 2; }
+            \\  { innerLabel: function inner() { return 3; } }
+            \\  if (false) function absent() {}
+            \\  if (true) function present() { return 4; }
+            \\  return before + ":" + inner() + ":" + present() + ":" + typeof absent;
+            \\})();
+            ,
+            .expected = "2:3:4:undefined",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var object = { f: 23 }, seen, read;
+            \\  with (object) {
+            \\    { function f() { return 3; } seen = f(); read = function () { return f; }; f = 8; }
+            \\  }
+            \\  return seen + ":" + f() + ":" + read() + ":" + object.f;
+            \\})();
+            ,
+            .expected = "3:3:8:23",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var outer = { value: 20 }, inner = { value: 30 }, result;
+            \\  with (outer) { let value = 2; var read = function () { return value; };
+            \\    with (inner) { value += 1; }
+            \\    value += 3; result = value + ":" + read() + ":" + (delete value);
+            \\  }
+            \\  return result + ":" + outer.value + ":" + inner.value;
+            \\})();
+            ,
+            .expected = "5:5:false:20:31",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var reads = [];
+            \\  for (var i = 0; i < 4; i++) {
+            \\    function f() { return f.value; }
+            \\    f.value = i;
+            \\    reads.push(f);
+            \\    if (i === 1) continue;
+            \\  }
+            \\  return reads.map(function (read) { return read(); }).join(":");
+            \\})();
+            ,
+            .expected = "0:1:2:3",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var reads = [];
+            \\  for (var i = 0; i < 3; i++) {
+            \\    try { throw i; } catch (caught) {
+            \\      { function f() { return caught; } reads.push(f); }
+            \\    } finally { function finished() { return 7; } }
+            \\  }
+            \\  return reads.map(function (read) { return read(); }).join(":") + ":" + finished();
+            \\})();
+            ,
+            .expected = "0:1:2:7",
+        },
+        .{
+            .source =
+            \\(function () {
+            \\  var read;
+            \\  { function f() { return 1; } read = eval("(function () { return f; })"); eval("f = 8"); }
+            \\  return f() + ":" + read();
+            \\})();
+            ,
+            .expected = "1:8",
+        },
+    };
+    for (cases) |case| for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = ctx.evaluate(case.source) catch |err| {
+            std.debug.print("block-function case ({s}): {s}\n", .{ @tagName(mode), case.source });
+            return err;
+        };
+        try std.testing.expect(result.isString());
+        std.testing.expectEqualStrings(case.expected, result.asStr()) catch |err| {
+            std.debug.print("block-function case ({s}): {s}\n", .{ @tagName(mode), case.source });
+            return err;
+        };
+        if (mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    };
+}
+
+test "block functions retain the runaway guard and restore execution after interruption" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+        .step_budget = 2000,
+    });
+    defer ctx.destroy();
+    try std.testing.expectError(error.Throw, ctx.evaluate(
+        "(function () { while (true) { function local() { return local; } globalThis.lastBlockFunction = local; } })()",
+    ));
+    const exception = ctx.exception orelse return error.TestUnexpectedResult;
+    try std.testing.expect(exception.isObject());
+    try std.testing.expectEqualStrings("RangeError", exception.asObj().errorName());
+    try std.testing.expect((try ctx.evaluate("lastBlockFunction() === lastBlockFunction")).toBoolean());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
+test "block functions preserve shared and repeated closures without the GIL" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function makeBlockLane() {
+        \\  with ({ offset: 10 }) {
+        \\    { function lane(seed) {
+        \\        if ($vm.useThreadGIL() !== false) throw new Error("GIL held");
+        \\        var reads = [];
+        \\        for (let i = 0; i < 8; i++) {
+        \\          let cell = { value: i };
+        \\          function read() { return cell.value + seed + offset; }
+        \\          reads.push(read);
+        \\          if (i === 3) continue;
+        \\        }
+        \\        for (var i = 0; i < 8; i++) if (reads[i]() !== i + seed + 10) return 0;
+        \\        return 1;
+        \\      }
+        \\      return lane;
+        \\    }
+        \\  }
+        \\}
+        \\var blockLane = makeBlockLane(), blockWorkers = [];
+        \\for (var i = 0; i < 4; i++) blockWorkers.push(new Thread(blockLane, i));
+        \\var blockTotal = 0;
+        \\for (var i = 0; i < 4; i++) blockTotal += blockWorkers[i].join();
+        \\blockTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
+test "block functions survive actual moving GC across a native safepoint" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const Trigger = struct {
+        fn request(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const owner: *Context = @ptrCast(@alignCast(machine.gc_safepoint_ctx.?));
+            owner.gc.?.nursery_threshold_bytes = 1;
+            owner.movingCheckpointRequest().store(true, .release);
+            return Value.undef();
+        }
+    };
+    {
+        const saved_gc = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(saved_gc);
+        const saved_strings = strcell.setActiveArena(ctx.arena());
+        defer _ = strcell.setActiveArena(saved_strings);
+        try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "requestBlockFunctionMove", 0, Trigger.request);
+    }
+    _ = try ctx.evaluate(
+        \\function blockMovingLoop(n) {
+        \\  var total = 0, i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\for (var warm = 0; warm < 10; warm++) blockMovingLoop(4096);
+        \\function makeMovingBlockFunctions(holder) {
+        \\  var reads = [];
+        \\  for (let i = 0; i < 4; i++) {
+        \\    function read() { return read.cell.value + holder.value; }
+        \\    read.cell = { value: i };
+        \\    reads.push(read);
+        \\    if (i === 0) { requestBlockFunctionMove(); blockMovingLoop(20000); }
+        \\  }
+        \\  return reads;
+        \\}
+    );
+    const loop: *interp.Function = @ptrCast(@alignCast(ctx.global_object.getOwn("blockMovingLoop").?.asObj().jsFunction().?));
+    try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+    try std.testing.expect(loop.chunk.?.tier.loadCode().?.manages_steps);
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate("globalThis.blockMovingHolder = { value: 9 }");
+    const holder_before = ctx.global_object.getOwn("blockMovingHolder").?.asObj();
+    const moving_before = heap.accounting().moving_minor_collections;
+    try std.testing.expectEqualStrings("9:10:11:12", (try ctx.evaluate(
+        "globalThis.movedBlockReads = makeMovingBlockFunctions(blockMovingHolder); movedBlockReads.map(function (read) { return read(); }).join(':')",
+    )).asStr());
+    try std.testing.expect(heap.accounting().moving_minor_collections > moving_before);
+    try std.testing.expect(holder_before != ctx.global_object.getOwn("blockMovingHolder").?.asObj());
+    ctx.collectGarbage();
+    try std.testing.expectEqualStrings("9:10:11:12", (try ctx.evaluate(
+        "movedBlockReads.map(function (read) { return read(); }).join(':')",
+    )).asStr());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 test "forced tree-walker and required bytecode preserve lexical binding identity" {
     try verifyForcedPlainDifferential(
         \\globalThis.shadowTrace = [];

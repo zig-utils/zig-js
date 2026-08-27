@@ -140,7 +140,11 @@ fn Analysis(comptime Error: type, comptime Visitor: type) type {
                     if (statement.decl_kind) |kind| if (kind != .@"var") try self.appendPattern(statement.target);
                     try self.scanBranch(statement.body, depth);
                 },
-                .labeled_stmt => |statement| try self.scanBranch(statement.body, depth),
+                // A labelled function in this statement list was classified at
+                // the list's own depth. Treating it as a branch invents a
+                // legacy binding for a function-body-level declaration.
+                .labeled_stmt => |statement| if (functionDeclaration(node) == null)
+                    try self.scanBranch(statement.body, depth),
                 .switch_stmt => |statement| {
                     const base = self.names.items.len;
                     defer self.names.shrinkRetainingCapacity(base);
@@ -241,6 +245,7 @@ test "Annex B shared analysis keeps eval exclusions and function-top depth expli
     var parser = try @import("parser.zig").Parser.init(allocator,
         \\function owner(parameter) {
         \\  function top() {}
+        \\  label: function labeledTop() {}
         \\  { function parameter() {} function arguments() {} function available() {} }
         \\}
     );

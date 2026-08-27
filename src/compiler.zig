@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const annex_b = @import("annex_b.zig");
 const bc = @import("bytecode.zig");
 const agent = @import("agent.zig");
 
@@ -160,6 +161,9 @@ const SlotBinding = struct {
     /// parameter expressions. A later body direct eval may create a nearer
     /// same-named binding, so body references retain an exact dynamic probe.
     parameter_with_eval_boundary: bool = false,
+    /// Runtime records outside this lexical slot must not shadow it. This is
+    /// the owning scope's boundary, not the depth at a later reference site.
+    lexical_environment_depth: u32 = 0,
 };
 
 /// A function's local namespace: name → frame slot. Lexical bindings retain
@@ -168,6 +172,10 @@ const SlotBinding = struct {
 /// performs InitializeBinding.
 const FnScope = struct {
     parent: ?*FnScope,
+    function_body: ?*const Node = null,
+    /// Exact declaration identity -> the distinct Annex B variable slot.
+    /// This plan is compiler-owned and immutable before bytecode publication.
+    annex_b_variables: std.AutoHashMapUnmanaged(*const Node, u32) = .empty,
     /// Which record of `parent` was visible when this function was created.
     /// A closure created by a parameter initializer must never resolve or
     /// materialize the parent's not-yet-created body VariableEnvironment.
@@ -226,7 +234,17 @@ const FnScope = struct {
     fn addBinding(self: *FnScope, arena: std.mem.Allocator, bindings: *SecureStringMapUnmanaged(SlotBinding), name: []const u8, lexical: bool, immutable: bool, parameter_with_eval_boundary: bool) CompileError!u32 {
         const slot = self.count;
         const tdz_checked = lexical and self.tdz_checks;
-        try bindings.put(arena, name, .{ .slot = slot, .lexical = lexical, .immutable = immutable, .tdz_checked = tdz_checked, .parameter_with_eval_boundary = parameter_with_eval_boundary });
+        try bindings.put(arena, name, .{
+            .slot = slot,
+            .lexical = lexical,
+            .immutable = immutable,
+            .tdz_checked = tdz_checked,
+            .parameter_with_eval_boundary = parameter_with_eval_boundary,
+            .lexical_environment_depth = if (lexical and self.lexical_scope_environment_depth.items.len != 0)
+                self.lexical_scope_environment_depth.items[self.lexical_scope_environment_depth.items.len - 1]
+            else
+                0,
+        });
         if (tdz_checked) try self.lexical_slots.append(arena, slot);
         try self.slot_names.append(arena, name);
         self.count += 1;
@@ -1091,6 +1109,7 @@ fn forOfCapturesLexical(arena: std.mem.Allocator, hash_state: *CompileHashState,
 /// classified once against only its catch block and cached by pattern identity.
 fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, captures: *RepeatedBodyCaptures) CompileError!void {
     switch (node.*) {
+        .func_decl => |function| try captures.bindings.add(arena, function.name),
         .var_decl => |declaration| if (declaration.kind != .@"var")
             try captures.bindings.add(arena, declaration.name),
         .destructure_decl => |declaration| if (declaration.kind != .@"var")
@@ -1104,6 +1123,7 @@ fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, 
             if (statement.alternate) |alternate| try collectRepeatedBodyBindings(arena, alternate, captures);
         },
         .labeled_stmt => |statement| try collectRepeatedBodyBindings(arena, statement.body, captures),
+        .with_stmt => |statement| try collectRepeatedBodyBindings(arena, statement.body, captures),
         .try_stmt => |statement| {
             try collectRepeatedBodyBindings(arena, statement.block, captures);
             if (statement.catch_block) |catch_block| {
@@ -1122,7 +1142,7 @@ fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, 
             try collectRepeatedBodyBindings(arena, case_statement, captures),
         // Nested iteration statements own their declarations. Their references
         // still participate when the exhaustive root traversal runs below.
-        .while_stmt, .do_while_stmt, .for_stmt, .for_in, .function, .func_decl => {},
+        .while_stmt, .do_while_stmt, .for_stmt, .for_in, .function => {},
         else => {},
     }
 }
@@ -2163,15 +2183,6 @@ pub const Compiler = struct {
         // these bodies on the tree-walker until function-exit disposal is lowered.
         if (!fnode.is_expr_body and stmtContainsDisposableDeclDeep(fnode.body))
             return rejectPlainFunction(rejection, .function_scope_disposal);
-        // A function declaration nested in a block needs the tree-walker in BOTH
-        // modes: strict scopes it to the block (a binding the flat slot model
-        // can't isolate), and sloppy gives it Annex B.3.3 dual bindings — a block
-        // lexical AND a function-scope var that is assigned the block binding's
-        // value at the point the declaration is evaluated. The flat model has one
-        // slot for the name, so it reports the block's final value instead of the
-        // decl-time snapshot (e.g. a reassignment after the declaration leaks).
-        if (functionHasBlockNestedFuncDecl(fnode))
-            return rejectPlainFunction(rejection, .block_nested_function_declaration);
         // Shadowed lexicals receive distinct slots below. Conservatively check
         // every lexical in such a function until the TDZ scan itself is keyed by
         // binding identity rather than spelling.
@@ -2183,7 +2194,7 @@ pub const Compiler = struct {
             error.OutOfMemory => return error.OutOfMemory,
         };
         const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
-        if (!fnode.is_expr_body) try collectFunctionLocals(arena, scope, fnode.body);
+        try planFunctionDeclarations(arena, scope, fnode, arguments_slot != null);
         const mapped_parameter_indices = try configureMappedParameters(arena, scope, fnode, arguments_slot);
 
         const chunk = try arena.create(Chunk);
@@ -2242,7 +2253,7 @@ pub const Compiler = struct {
                 if (resolved_binding.environment) return .{ .environment = resolved_binding };
                 return if (depth == 0) .{ .local = resolved_binding } else .{ .upval = .{
                     .depth = depth,
-                    .environment_depth = environment_depth,
+                    .environment_depth = environment_depth - resolved_binding.lexical_environment_depth,
                     .binding = resolved_binding,
                 } };
             }
@@ -2336,7 +2347,7 @@ pub const Compiler = struct {
             .environment, .global => .{ .op = .store_var },
         };
         const environment_depth: u32 = switch (resolved) {
-            .local => self.environment_depth,
+            .local => |binding| self.environment_depth - binding.lexical_environment_depth,
             .upval => |upvalue| self.environment_depth + upvalue.environment_depth,
             .environment, .global => bc.delete_name_full_environment_depth,
         };
@@ -2494,6 +2505,10 @@ pub const Compiler = struct {
 
     fn predeclareLexicalNode(self: *Compiler, node: *Node) CompileError!void {
         const scope = self.scope orelse return;
+        if (annex_b.functionDeclaration(node)) |declaration| {
+            _ = try scope.addLexical(self.arena, declaration.func_decl.name, false);
+            return;
+        }
         switch (node.*) {
             .var_decl => |decl| {
                 if (decl.kind != .@"var")
@@ -2513,6 +2528,14 @@ pub const Compiler = struct {
 
     fn predeclareRepeatedBodyNode(self: *Compiler, node: *Node, captures: *const RepeatedBodyCaptures) CompileError!void {
         const scope = self.scope orelse return;
+        if (annex_b.functionDeclaration(node)) |declaration| {
+            const name = declaration.func_decl.name;
+            if (captures.nameCaptured(name))
+                try scope.addEnvironmentLexical(self.arena, name, false)
+            else
+                _ = try scope.addLexical(self.arena, name, false);
+            return;
+        }
         switch (node.*) {
             .var_decl => |declaration| {
                 if (declaration.kind == .@"var") return;
@@ -2540,6 +2563,10 @@ pub const Compiler = struct {
 
     fn emitDeclareRepeatedBodyNode(self: *Compiler, node: *const Node, captures: *const RepeatedBodyCaptures) CompileError!void {
         switch (node.*) {
+            .func_decl => |function| if (captures.nameCaptured(function.name))
+                try self.emitDeclareEnvironmentLexicalName(function.name, false),
+            .labeled_stmt => |statement| if (annex_b.functionDeclaration(statement.body) != null)
+                try self.emitDeclareRepeatedBodyNode(statement.body, captures),
             .var_decl => |declaration| if (declaration.kind != .@"var" and captures.nameCaptured(declaration.name))
                 try self.emitDeclareEnvironmentLexicalName(declaration.name, declaration.kind == .@"const"),
             .destructure_decl => |declaration| if (declaration.kind != .@"var" and captures.patternCaptured(declaration.pattern))
@@ -2556,6 +2583,9 @@ pub const Compiler = struct {
 
     fn repeatedBodyNodeNeedsEnvironment(node: *const Node, captures: *const RepeatedBodyCaptures) bool {
         return switch (node.*) {
+            .func_decl => |function| captures.nameCaptured(function.name),
+            .labeled_stmt => |statement| annex_b.functionDeclaration(statement.body) != null and
+                repeatedBodyNodeNeedsEnvironment(statement.body, captures),
             .var_decl => |declaration| declaration.kind != .@"var" and captures.nameCaptured(declaration.name),
             .destructure_decl => |declaration| declaration.kind != .@"var" and captures.patternCaptured(declaration.pattern),
             .decl_group => |declarations| blk: {
@@ -2882,23 +2912,46 @@ pub const Compiler = struct {
 
     // ---- statements -------------------------------------------------------
 
-    /// Compile a statement list with function-declaration hoisting: every
-    /// `func_decl` is emitted (closure + define) first, so forward references
-    /// like `bar(); function bar() {}` resolve, then the remaining statements
-    /// run in order (func_decls skipped, so each binds exactly once).
-    fn compileStmtList(self: *Compiler, stmts: []*Node) CompileError!void {
-        for (stmts) |s| switch (s.*) {
-            .func_decl => |fnode| {
-                const fi = try self.compileFunction(s, fnode, false);
-                _ = try self.chunk.emit(.make_closure, fi);
-                try self.emitDefineForce(fnode.name);
-            },
-            else => {},
+    /// BlockDeclarationInstantiation runs before source-order evaluation. A
+    /// switch uses this for the entire CaseBlock before testing any clause.
+    fn emitHoistedFunctions(self: *Compiler, stmts: []*Node) CompileError!void {
+        for (stmts) |statement| if (annex_b.functionDeclaration(statement)) |declaration| {
+            const function = declaration.func_decl;
+            const fi = try self.compileFunction(declaration, function, false);
+            _ = try self.chunk.emit(.make_closure, fi);
+            try self.emitDefineForce(function.name);
         };
+    }
+
+    fn emitAnnexBUpdate(self: *Compiler, declaration: *Node) CompileError!void {
+        const scope = self.scope orelse return;
+        const variable_slot = scope.annex_b_variables.get(declaration) orelse return;
+        // B.3.2: GetBindingValue from this block's lexical record, then
+        // SetMutableBinding on the function's VariableEnvironment directly.
+        // Neither operation is ResolveBinding through an outer with object.
+        const name = declaration.func_decl.name;
+        const binding = scope.currentLexicalScope().get(name) orelse return error.Unsupported;
+        if (binding.environment)
+            _ = try self.chunk.emit(.load_var, try self.chunk.addName(name))
+        else
+            _ = try self.chunk.emit(.load_local, binding.slot);
+        _ = try self.chunk.emit(.store_local, variable_slot);
+        _ = try self.chunk.emit(.pop, 0);
+    }
+
+    fn compileHoistedStmtList(self: *Compiler, stmts: []*Node) CompileError!void {
         for (stmts) |s| {
-            if (s.* == .func_decl) continue;
+            if (annex_b.functionDeclaration(s)) |declaration| {
+                try self.emitAnnexBUpdate(declaration);
+                continue;
+            }
             try self.compileStmt(s);
         }
+    }
+
+    fn compileStmtList(self: *Compiler, stmts: []*Node) CompileError!void {
+        try self.emitHoistedFunctions(stmts);
+        try self.compileHoistedStmtList(stmts);
     }
 
     /// NamedEvaluation: if `value_node` is a bare anonymous function/class def
@@ -2980,9 +3033,27 @@ pub const Compiler = struct {
                 _ = try self.chunk.emitAB(.bind_pattern, pi, mode);
             },
             .func_decl => |fnode| {
+                // A bare Annex B IfStatement declaration has an implicit block.
+                // Only the entered branch initializes its lexical/legacy pair.
+                try self.pushLexicalScope();
+                defer self.popLexicalScope();
+                const captured_environment = if (self.repeated_body_captures) |captures|
+                    repeatedBodyNodeNeedsEnvironment(node, captures)
+                else
+                    false;
+                if (self.repeated_body_captures) |captures|
+                    try self.predeclareRepeatedBodyNode(node, captures)
+                else
+                    try self.predeclareLexicalNode(node);
+                if (captured_environment) {
+                    try self.emitEnterEnvironment();
+                    try self.emitDeclareRepeatedBodyNode(node, self.repeated_body_captures.?);
+                }
                 const fi = try self.compileFunction(node, fnode, false);
                 _ = try self.chunk.emit(.make_closure, fi);
                 try self.emitDefineForce(fnode.name);
+                try self.emitAnnexBUpdate(node);
+                if (captured_environment) try self.emitExitEnvironment();
             },
             .return_stmt => |maybe| {
                 // A `return` that crosses a PENDING finally (one not currently
@@ -3046,10 +3117,14 @@ pub const Compiler = struct {
                     repeatedBodyListNeedsEnvironment(stmts, captures)
                 else
                     false;
-                if (repeated_captures) |captures|
-                    try self.predeclareRepeatedBodyList(stmts, captures)
-                else
-                    try self.predeclareLexicalList(stmts);
+                const function_body = if (self.scope) |scope| node == scope.function_body else false;
+                for (stmts) |statement| {
+                    if (function_body and annex_b.functionDeclaration(statement) != null) continue;
+                    if (repeated_captures) |captures|
+                        try self.predeclareRepeatedBodyNode(statement, captures)
+                    else
+                        try self.predeclareLexicalNode(statement);
+                }
                 const disposable_scope = self.scope == null and stmtListHasDisposableDecl(stmts);
                 if (disposable_scope) {
                     // This first VM block-disposal slice handles normal completion.
@@ -3134,9 +3209,8 @@ pub const Compiler = struct {
                 // ECMA-262 WithStatement restores the outer environment for
                 // every completion. Jumps carry their target environment depth,
                 // handlers retain the exact unwind prefix, and function exit
-                // restores the caller's activation. Annex B block function
-                // declarations still need source-order legacy binding updates.
-                if (stmtContainsFuncDecl(w.body)) return error.Unsupported;
+                // restores the caller's activation.
+                if (self.scope == null and stmtContainsFuncDecl(w.body)) return error.Unsupported;
                 try self.compileExpr(w.obj);
                 _ = try self.chunk.emit(.enter_with, 0);
                 self.environment_depth += 1;
@@ -3318,6 +3392,10 @@ pub const Compiler = struct {
             for (cases) |case| try self.emitDeclareRepeatedBodyList(case.body, repeated_captures.?);
         }
         if (self.scope != null) for (cases) |case| try self.emitLexicalInitializersForList(case.body);
+        // The frame-mode plan owns a distinct CaseBlock binding. Instantiate it
+        // before case tests, including clauses that never execute. Environment
+        // mode still needs its separate global/suspendable declaration plan.
+        if (self.scope != null) for (cases) |case| try self.emitHoistedFunctions(case.body);
 
         const sw = try self.pushLoop();
         sw.is_switch = true;
@@ -3343,7 +3421,10 @@ pub const Compiler = struct {
             } else {
                 self.chunk.patchToHere(body_jumps[i]);
             }
-            try self.compileStmtList(c.body);
+            if (self.scope != null)
+                try self.compileHoistedStmtList(c.body)
+            else
+                try self.compileStmtList(c.body);
         }
         const end = self.chunk.here();
         self.chunk.patchTo(to_default, default_target orelse end);
@@ -4474,11 +4555,12 @@ pub const Compiler = struct {
                     // A frame slot is a declarative binding and cannot be deleted.
                     // Activation-local block/with records may still shadow it, so
                     // search exactly those records before taking the false fallback.
-                    .local => {
-                        if (self.environment_depth == 0)
+                    .local => |binding| {
+                        const environment_depth = self.environment_depth - binding.lexical_environment_depth;
+                        if (environment_depth == 0)
                             _ = try self.chunk.emit(.load_false, 0)
                         else
-                            _ = try self.chunk.emitAB(.delete_name, try self.chunk.addName(name), self.environment_depth);
+                            _ = try self.chunk.emitAB(.delete_name, try self.chunk.addName(name), environment_depth);
                     },
                     .upval => |upvalue| {
                         const environment_depth = self.environment_depth + upvalue.environment_depth;
@@ -5946,7 +6028,9 @@ pub const Compiler = struct {
         // correctly and can retain the compiled generator/async template.
         if ((fnode.is_generator or fnode.is_async) and self.scope != null) return error.Unsupported;
         if (!fnode.is_generator and !fnode.is_async and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
-        if (!fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
+        // Async environment-mode declaration planning remains separate from
+        // the ordinary frame-mode lexical/legacy plan below.
+        if (fnode.is_async and !fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
@@ -5994,7 +6078,7 @@ pub const Compiler = struct {
                 error.OutOfMemory => return error.OutOfMemory,
             };
             const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode);
-            if (!fnode.is_expr_body) try collectFunctionLocals(self.arena, scope, fnode.body);
+            try planFunctionDeclarations(self.arena, scope, fnode, arguments_slot != null);
             const mapped_parameter_indices = try configureMappedParameters(self.arena, scope, fnode, arguments_slot);
 
             compiled.param_count = @intCast(fnode.params.len);
@@ -6160,6 +6244,31 @@ pub const Compiler = struct {
 /// Hoist only function-scoped declarations. Lexical declarations are allocated
 /// when their exact block/loop/switch/catch scope is entered during compilation,
 /// so same-spelled bindings receive distinct activation slots.
+fn planFunctionDeclarations(arena: std.mem.Allocator, scope: *FnScope, function: *const ast.FunctionNode, arguments_object_needed: bool) CompileError!void {
+    if (function.is_expr_body) return;
+    scope.function_body = function.body;
+    const statements = switch (function.body.*) {
+        .block => |statements| statements,
+        else => return error.Unsupported,
+    };
+    // FunctionDeclarationInstantiation: only declarations directly in the body
+    // own ordinary variable slots. Block functions get separate lexical cells.
+    try collectFunctionLocals(arena, scope, function.body);
+    if (!function.is_strict and functionHasBlockNestedFuncDecl(function)) {
+        const Collector = struct {
+            arena: std.mem.Allocator,
+            scope: *FnScope,
+
+            pub fn add(self: *@This(), declaration: *Node, name: []const u8) CompileError!void {
+                const slot = try self.scope.addLocal(self.arena, name, false, false);
+                try self.scope.annex_b_variables.put(self.arena, declaration, slot);
+            }
+        };
+        var collector = Collector{ .arena = arena, .scope = scope };
+        try annex_b.collect(CompileError, arena, statements, 0, function.params, arguments_object_needed, &collector);
+    }
+}
+
 fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) CompileError!void {
     switch (node.*) {
         .var_decl => |d| {
@@ -6169,8 +6278,14 @@ fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node)
             var collector = FunctionLocalBindingCollector{ .scope = scope };
             try collectPatternBindingNames(arena, d.pattern, &collector);
         },
-        .func_decl => |f| _ = try scope.addLocal(arena, f.name, false, false),
-        .block => |stmts| for (stmts) |s| try collectFunctionLocals(arena, scope, s),
+        .func_decl => {},
+        .block => |stmts| for (stmts) |s| {
+            if (node == scope.function_body) if (annex_b.functionDeclaration(s)) |declaration| {
+                _ = try scope.addLocal(arena, declaration.func_decl.name, false, false);
+                continue;
+            };
+            try collectFunctionLocals(arena, scope, s);
+        },
         .decl_group => |stmts| for (stmts) |s| try collectFunctionLocals(arena, scope, s),
         .if_stmt => |s| {
             try collectFunctionLocals(arena, scope, s.consequent);
@@ -6193,6 +6308,7 @@ fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node)
         },
         .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try collectFunctionLocals(arena, scope, st),
         .labeled_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
+        .with_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
         .try_stmt => |t| {
             try collectFunctionLocals(arena, scope, t.block);
             if (t.catch_block) |cb| try collectFunctionLocals(arena, scope, cb);
@@ -6488,6 +6604,33 @@ test "compiler hash seeds preserve frame and nested chunk layout" {
     try expectChunkLayoutEqual(first.chunk, second.chunk);
 }
 
+/// Fault replay must observe the same allocation points on every attempt.
+/// Arena backing-buffer resize can succeed in one address-space layout and
+/// fail in another, bypassing an injected alloc failure. Refuse resize/remap
+/// only in this fixture, so every arena growth exercises the alloc path.
+const CompilerAllocationReplay = struct {
+    backing: std.mem.Allocator,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = allocate,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = release,
+        } };
+    }
+
+    fn allocate(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.backing.rawAlloc(len, alignment, return_address);
+    }
+
+    fn release(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.backing.rawFree(memory, alignment, return_address);
+    }
+};
+
 fn exerciseCompilerBindingAllocationFailures(allocator: std.mem.Allocator) !void {
     var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer ast_arena.deinit();
@@ -6497,7 +6640,8 @@ fn exerciseCompilerBindingAllocationFailures(allocator: std.mem.Allocator) !void
     );
     const program = try parser.parseProgram();
 
-    var compile_arena = std.heap.ArenaAllocator.init(allocator);
+    var replay = CompilerAllocationReplay{ .backing = allocator };
+    var compile_arena = std.heap.ArenaAllocator.init(replay.allocator());
     defer compile_arena.deinit();
     switch (try Compiler.admitPlainFunction(compile_arena.allocator(), program.program[0].func_decl)) {
         .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
@@ -6511,6 +6655,39 @@ test "compiler binding publication survives every allocation failure" {
         exerciseCompilerBindingAllocationFailures,
         .{},
     );
+}
+
+fn exerciseBlockFunctionAllocationFailures(allocator: std.mem.Allocator) !void {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(ast_arena.allocator(),
+        \\function target(parameter) {
+        \\  label: function body() { return 1; }
+        \\  { function parameter() {} }
+        \\  var reads = [];
+        \\  with ({ value: 1 }) {
+        \\    for (let i = 0; i < 3; i++) {
+        \\      switch (i) {
+        \\        case 0: function local() { return local.value + i; }
+        \\        default: local.value = value; reads.push(local);
+        \\      }
+        \\    }
+        \\  }
+        \\  return reads;
+        \\}
+    );
+    const program = try parser.parseProgram();
+    var replay = CompilerAllocationReplay{ .backing = allocator };
+    var compile_arena = std.heap.ArenaAllocator.init(replay.allocator());
+    defer compile_arena.deinit();
+    switch (try Compiler.admitPlainFunction(compile_arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "block functions compiler planning propagates allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseBlockFunctionAllocationFailures, .{});
 }
 
 test "compiler preserves a first-statement debugger checkpoint" {
@@ -6698,7 +6875,6 @@ test "compiler reports stable plain-function admission reasons" {
     }{
         .{ .source = "function* f(){}", .expected = .generator_or_async },
         .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
-        .{ .source = "function f(){ { function nested(){} } }", .expected = .block_nested_function_declaration },
         .{ .source = "function f(value = outer){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = undefined){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = holder.value){}", .expected = .parameter_prologue },
