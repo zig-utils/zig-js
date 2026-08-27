@@ -26025,8 +26025,8 @@ test "forced tree-walker and required bytecode preserve strict arguments objects
         \\automaticArguments(6) + strictTailEval(1, 2);
     )).asNum());
     const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
-    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
-    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_rejected_unsupported_lowering));
+    try std.testing.expectEqual(@as(u64, 2), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_unsupported_lowering));
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_arguments));
 }
 
@@ -27710,10 +27710,10 @@ test "forced tree-walker and required bytecode preserve derived constructor acti
     try std.testing.expectEqualStrings(actual[1], actual[2]);
     try std.testing.expectEqualStrings(expected, actual[1]);
 
-    // Direct eval remains a causal unsupported-lowering boundary: automatic
-    // mode deliberately executes the complete tree-walker activation, while
-    // required mode cannot silently callback or fall back from constructor
-    // bytecode. The old broad class-semantics policy reason stays removed.
+    // Direct eval in a derived constructor now enters bytecode with the exact
+    // live super constructor and shared this-initialization cell. Keep this
+    // automatic-mode witness alongside the broader required-mode differential
+    // so a stale causal admission barrier cannot return unnoticed.
     const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
         .enable_jit = false,
@@ -27730,8 +27730,8 @@ test "forced tree-walker and required bytecode preserve derived constructor acti
     const eval_constructor = try automatic.evaluate("EvalDerived");
     const eval_raw = eval_constructor.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const eval_function: *interp.Function = @ptrCast(@alignCast(eval_raw));
-    try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_rejected_unsupported_lowering, eval_function.bytecode_admission_reason);
-    try std.testing.expect(eval_function.chunk == null);
+    try std.testing.expectEqual(interp.BytecodeAdmissionReason.plain_compiled, eval_function.bytecode_admission_reason);
+    try std.testing.expect(eval_function.chunk != null);
     const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_class_constructor_semantics));
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));

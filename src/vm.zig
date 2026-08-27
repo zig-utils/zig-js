@@ -4703,6 +4703,11 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
     try std.testing.expectEqual(@as(f64, 7), identity.asNum());
     try std.testing.expectEqual(@as(?*Environment, null), identity_frame.direct_eval_environment.load(.acquire));
     try std.testing.expectEqual(&root, machine.env);
+    // The failing allocator above proves that non-string eval returns before
+    // parsing or materializing an activation environment. Restore the test
+    // arena before exercising an empty string program, whose parser may make
+    // implementation-dependent scratch allocations.
+    machine.arena = allocator;
     const empty = try callActivationEvalValue(
         &machine,
         &chunk,
