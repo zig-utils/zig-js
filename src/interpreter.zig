@@ -17731,6 +17731,11 @@ pub const Interpreter = struct {
         return try self.callValueWithThis(method, &.{ receiver, arg(args, 1) }, search);
     }
 
+    fn stringReceiverValue(self: *Interpreter, s: []const u8, s_cell: ?*const StringCell) EvalError!Value {
+        if (s_cell) |cell| return Value.strCell(cell);
+        return Value.strAlloc(self.arena, s);
+    }
+
     /// ToIntegerOrInfinity(v) clamped into `[0, len]` — the position argument of
     /// `includes`/`startsWith`/`endsWith` (a Symbol/BigInt throws via toNumberV).
     fn clampPos(self: *Interpreter, v: Value, len: usize) EvalError!usize {
@@ -17747,13 +17752,17 @@ pub const Interpreter = struct {
     fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool, s_cell: ?*const StringCell) EvalError!?Value {
         const s_ascii = if (s_cell) |cell| cell.isAscii() else false;
         if (check_protocol and eq(name, "replaceAll"))
-            if (try self.replaceAllProtocolDispatch(try Value.strAlloc(self.arena, s), args)) |r| return r;
+            if (try self.replaceAllProtocolDispatch(try self.stringReceiverValue(s, s_cell), args)) |r| return r;
         // Well-known Symbol method protocol: `split`/`match`/`matchAll`/`search`/
         // `replace`/`replaceAll` first check their first argument for the matching
         // `Symbol.*` method and, if it is callable, delegate to it (with `this` =
         // that argument and the string as the first parameter). RegExp instances
         // use the protocol for methods whose spec algorithms are implemented.
-        if (check_protocol) if (try self.stringProtocolDispatch(name, try Value.strAlloc(self.arena, s), args)) |r| return r;
+        // Plain methods have no protocol lookup, so they must not materialize a
+        // receiver Value at all. Protocol methods retain an existing immutable
+        // StringData cell instead of copying its canonical bytes into a new one.
+        if (check_protocol and self.stringProtocolSymbol(name) != null)
+            if (try self.stringProtocolDispatch(name, try self.stringReceiverValue(s, s_cell), args)) |r| return r;
         if (eq(name, "charAt")) {
             const pos = try self.stringPosition(s, arg0(args), s_ascii, s_cell) orelse return Value.str("");
             const cu = try self.stringCodeUnitAtAccess(s, pos, s_ascii, s_cell) orelse return Value.str("");
@@ -53033,6 +53042,34 @@ test "String value methods return the exact StringData cell" {
             }
         }
     }
+    try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
+}
+
+test "String method dispatch materializes protocol receivers only when required" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = Environment{ .arena = a };
+    const root_shape = try Shape.createRoot(a);
+    var machine = Interpreter{ .arena = a, .env = &env, .root_shape = root_shape };
+
+    const ascii = try Value.strAlloc(a, "AZ");
+    const latin1 = try Value.strAlloc(a, "caf\xc3\xa9\xc3\xbf");
+    try std.testing.expect(latin1.strIsFlatLatin1());
+    const canonical_latin1 = try latin1.asWtf8(a);
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = unavailable.allocator();
+
+    // charCodeAt has no Symbol protocol. A fail-first allocator proves the
+    // generic method path does not eagerly create a duplicate receiver cell.
+    const char_code = (try machine.builtinMethod(ascii, "charCodeAt", &.{Value.num(1)})).?;
+    try std.testing.expectEqual(@as(f64, 'Z'), char_code.asNum());
+
+    // When a protocol path does need a receiver Value, retain the original
+    // physical flat-latin1 cell rather than wrapping its canonical byte view.
+    const receiver = try machine.stringReceiverValue(canonical_latin1, latin1.asStringCell());
+    try std.testing.expectEqual(latin1.rawBits(), receiver.rawBits());
     try std.testing.expectEqual(@as(usize, 0), unavailable.allocations);
 }
 
