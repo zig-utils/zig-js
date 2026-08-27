@@ -4686,6 +4686,7 @@ pub const Context = struct {
         const global_obj = try gc_mod.allocObj(a);
         global_obj.* = .{};
         self.global_object = global_obj;
+        self.env.realm_global = global_obj;
         const tdz = try gc_mod.allocObj(a);
         tdz.* = .{};
         self.tdz_marker = tdz;
@@ -4966,6 +4967,7 @@ pub const Context = struct {
         const global_obj = try gc_mod.allocObj(a);
         global_obj.* = .{};
         self.global_object = global_obj;
+        self.env.realm_global = global_obj;
         // A unique sentinel object marking a `let`/`const` binding in its
         // temporal dead zone (declared but not yet initialized).
         const tdz = try gc_mod.allocObj(a);
@@ -29243,6 +29245,25 @@ test "block functions preserve lexical and Annex B identity in required bytecode
             try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
             try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
         }
+    };
+}
+
+test "realm global identity is independent of mutable globalThis" {
+    const cases = [_][]const u8{
+        "var realm = globalThis; function realmThis() { return this; } globalThis = {}; var captured = realmThis(); var match = captured === realm; globalThis = realm; String(match)",
+        "var realm = globalThis, read; { let globalThis = {}; read = function () { return this; }; } String(read() === realm)",
+        "var realm = $262.createRealm(), original = realm.global; realm.evalScript('globalThis = {}; var marker = 17;'); var read = original.Function('return this.marker'); String(read() === 17 && original.marker === 17)",
+    };
+    for (cases) |source| for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer context.destroy();
+        try std.testing.expectEqualStrings("true", (try context.evaluate(source)).asStr());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), context.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
     };
 }
 

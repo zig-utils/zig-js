@@ -703,6 +703,10 @@ pub const ActivationBindingsView = struct {
 
 pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
+    /// Root-realm identity, initialized before publication and immutable to
+    /// mutators. The stopped collector rewrites it with the other owned edges;
+    /// the writable globalThis binding is not an authority for realm selection.
+    realm_global: ?*value.Object = null,
     /// Present only on lazily materialized ordinary-VM direct-eval records. The
     /// immutable name table resolves into the activation's real frame slots;
     /// `vars` remains available for genuinely new sloppy-eval declarations.
@@ -2007,11 +2011,17 @@ test "import.meta slot retries cleanly after allocation failure" {
 
 /// Resolve a function's realm global once, when its closure is created. The
 /// ambient interpreter may currently be entered from another realm (notably
-/// through that realm's `Function` constructor), so the closure environment is
-/// authoritative and the ambient global is only a fallback for minimal hosts.
+/// through that realm's `Function` constructor), so the owned environment
+/// identity is authoritative. Minimal hosts can supply the explicit fallback.
 pub fn functionRealmGlobal(env: *Environment, fallback: ?*value.Object) ?*value.Object {
+    var current: ?*Environment = env;
+    while (current) |scope| {
+        if (scope.bindingRecord().realm_global) |global| return global;
+        current = scope.parent;
+    }
+    if (fallback) |global| return global;
     if (env.get("globalThis")) |global| if (global.isObject()) return global.asObj();
-    return fallback;
+    return null;
 }
 
 pub fn vmChunkAllowsInlineCalls(chunk: *const bc.Chunk) bool {
@@ -3668,15 +3678,7 @@ pub const Interpreter = struct {
     /// An own data property of the global object, used as the fallback for a
     /// bare global reference (`this.x = 1` at top level → bare `x`).
     fn currentGlobalObject(self: *Interpreter) ?*value.Object {
-        var env: ?*Environment = self.env;
-        while (env) |e| {
-            if (e.get("globalThis")) |gt| {
-                if (gt.isObject()) return gt.asObj();
-            }
-            if (e.parent == null) break;
-            env = e.parent;
-        }
-        return self.global_object;
+        return functionRealmGlobal(self.env, self.global_object);
     }
 
     /// A bare global reference's value: a proper [[Get]] on the global object —
@@ -20025,10 +20027,10 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         const fnobj = self.active_native orelse return Value.undef();
         const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return Value.undef()));
         self.env = genv;
-        if (genv.get("globalThis")) |gt| if (gt.isObject()) {
-            self.this_value = Value.obj(gt.asObj());
-            self.global_object = gt.asObj();
-        };
+        if (functionRealmGlobal(genv, null)) |global| {
+            self.this_value = Value.obj(global);
+            self.global_object = global;
+        }
     }
 
     const eval_env = try gc_mod.allocEnv(self.arena);
@@ -22076,7 +22078,7 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     parser.useRealmHashKeys(self.root_shape);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("evalScript", src, &parser, err);
     const prog_strict = parser.strict;
-    const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
+    const gobj = functionRealmGlobal(genv, null);
     const s_env = self.env;
     const s_this = self.this_value;
     const s_glob = self.global_object;
@@ -22170,6 +22172,7 @@ fn makeChildRealm(self: *Interpreter) EvalError!*Environment {
     self.initEnvironment(genv, null, true);
     const gobj = try gc_mod.allocObj(a);
     gobj.* = .{};
+    genv.realm_global = gobj;
     const parent_symbol: ?*value.Object = if (self.env.get("Symbol")) |sv| (if (sv.isObject()) sv.asObj() else null) else null;
     const parent_symbol_registry = try symbolRegistry(self);
     try installGlobalsInner(genv, self.root_shape, parent_symbol);
@@ -22388,7 +22391,7 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     parser.useRealmHashKeys(self.root_shape);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, &parser, err);
     const prog_strict = parser.strict;
-    const gobj: ?*value.Object = if (genv.get("globalThis")) |g| (if (g.isObject()) g.asObj() else null) else null;
+    const gobj = functionRealmGlobal(genv, null);
     const s_env = self.env;
     const s_this = self.this_value;
     const s_glob = self.global_object;
@@ -34531,6 +34534,7 @@ fn agentThreadRun(src: []const u8) void {
     installGlobals(&env, root_shape) catch return;
     const global_obj = gc_mod.allocObj(a) catch return;
     global_obj.* = .{};
+    env.realm_global = global_obj;
     env.put("globalThis", Value.obj(global_obj)) catch {};
     if (env.get("$262")) |d| if (d.isObject()) {
         d.asObj().setOwn(a, root_shape, "global", Value.obj(global_obj)) catch {};

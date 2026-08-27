@@ -1147,6 +1147,7 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
             markValueInternal(v, "direct-eval VM activation binding", activation.frame.read(binding.slot));
     }
     if (e.direct_eval_forward_target) |target| markManaged(v, target);
+    if (e.realm_global) |global| v.mark(global);
     var vit = e.vars.iterator();
     while (vit.next()) |entry| markValueVariable(v, entry.key_ptr.*, entry.value_ptr.*);
     for (e.disposables.items) |d| {
@@ -1174,6 +1175,7 @@ pub fn relocateEnv(e: *Environment, v: anytype) void {
         }
     }
     gc_relocation.rewriteOptionalSlot(v, Environment, &e.direct_eval_forward_target);
+    gc_relocation.rewriteOptionalSlot(v, Object, &e.realm_global);
     var values = e.vars.valueIterator();
     while (values.next()) |slot| gc_relocation.rewriteValueSlot(v, slot);
     for (e.disposables.items) |*disposable| {
@@ -1190,8 +1192,8 @@ pub fn relocateEnv(e: *Environment, v: anytype) void {
 }
 
 test "Environment relocation rewrites every managed binding slot" {
-    var old_objects: [6]Object = undefined;
-    var new_objects: [6]Object = undefined;
+    var old_objects: [7]Object = undefined;
+    var new_objects: [7]Object = undefined;
     var old_environments = [_]Environment{
         .{ .arena = std.testing.allocator, .gc_managed = true },
         .{ .arena = std.testing.allocator, .gc_managed = true },
@@ -1204,6 +1206,7 @@ test "Environment relocation rewrites every managed binding slot" {
         .arena = std.testing.allocator,
         .gc_managed = true,
         .direct_eval_forward_target = &old_environments[1],
+        .realm_global = &old_objects[6],
         .dispose_pending = Value.obj(&old_objects[3]),
         .object_proto_intrinsic = &old_objects[4],
         .parent = &old_environments[0],
@@ -1224,8 +1227,8 @@ test "Environment relocation rewrites every managed binding slot" {
     });
 
     const Plan = struct {
-        old_objects: *[6]Object,
-        new_objects: *[6]Object,
+        old_objects: *[7]Object,
+        new_objects: *[7]Object,
         old_environments: *[2]Environment,
         new_environments: *[2]Environment,
 
@@ -1259,6 +1262,7 @@ test "Environment relocation rewrites every managed binding slot" {
     try std.testing.expectEqual(&new_environments[1], alias.env);
     try std.testing.expectEqualStrings("exported", alias.name);
     try std.testing.expectEqual(&new_objects[5], environment.with_object.?);
+    try std.testing.expectEqual(&new_objects[6], environment.realm_global.?);
 }
 
 test "Environment relocation rewrites live direct eval activation slots" {
