@@ -9579,9 +9579,11 @@ pub const Interpreter = struct {
     /// ArraySetLength's numeric path: ToUint32(value), then ToNumber(value)
     /// again, so observable coercions run in spec order before descriptor checks.
     pub fn arrayLengthFromValue(self: *Interpreter, v: Value) EvalError!u32 {
+        const value_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(value_root);
         const uint_n = try self.toNumberV(v);
         const new_len = Value.uint32FromF64(uint_n);
-        const number_len = try self.toNumberV(v);
+        const number_len = try self.toNumberV(self.tempRoot(value_root, v));
         if (@as(f64, @floatFromInt(new_len)) != number_len)
             return self.throwError("RangeError", "Invalid array length");
         return new_len;
@@ -13647,13 +13649,20 @@ pub const Interpreter = struct {
     pub fn proxyPreventExt(self: *Interpreter, o: *value.Object) EvalError!bool {
         try self.proxyDepth();
         const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'preventExtensions' on a proxy that has been revoked");
-        const trap = (try self.proxyTrap(o, "preventExtensions")) orelse {
-            if (target.proxyHandler() != null) return self.proxyPreventExt(target);
-            target.setExtensible(false);
+        const handler = o.proxyHandler() orelse return self.throwError("TypeError", "Cannot perform 'preventExtensions' on a proxy that has been revoked");
+        const target_root = try self.pushTempRoot(Value.obj(target));
+        defer self.restoreTempRoots(target_root);
+        const handler_root = try self.pushTempRoot(Value.obj(handler));
+        const trap = (try self.proxyTrapFromHandler(Value.obj(handler), "preventExtensions")) orelse {
+            const captured_target = self.tempRoot(target_root, Value.obj(target)).asObj();
+            if (captured_target.proxyHandler() != null or captured_target.proxy_revoked)
+                return self.proxyPreventExt(captured_target);
+            if (!builtins.isTypedArrayFixedLength(captured_target)) return false;
+            captured_target.setExtensible(false);
             return true;
         };
-        const res = (try self.callValueWithThis(trap, &.{Value.obj(target)}, Value.obj(o.proxyHandler().?))).toBoolean();
-        if (res and try self.ordinaryIsExtensible(target))
+        const res = (try self.callValueWithThis(trap, &.{self.tempRoot(target_root, Value.obj(target))}, self.tempRoot(handler_root, Value.obj(handler)))).toBoolean();
+        if (res and try self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj()))
             return self.throwError("TypeError", "proxy 'preventExtensions' cannot report success while the target is extensible");
         return res;
     }
@@ -13762,7 +13771,8 @@ pub const Interpreter = struct {
     /// An object's [[OwnPropertyKeys]] as encoded key strings — proxy-aware, and
     /// including an array's dense element indices and `length` (which live
     /// outside the shape).
-    pub fn objectOwnKeysList(self: *Interpreter, t: *value.Object) EvalError![]const []const u8 {
+    pub fn objectOwnKeysList(self: *Interpreter, target: *value.Object) EvalError![]const []const u8 {
+        var t = target;
         if (t.proxyHandler() != null or t.proxy_revoked) return self.proxyOwnKeys(t);
         const scratch = self.scratch_allocator orelse self.arena;
         const appendReflectable = struct {
@@ -13889,8 +13899,12 @@ pub const Interpreter = struct {
         var seen_strings: ?SecureStringMembership = null;
         defer if (seen_strings) |*membership| membership.deinit(scratch);
         if (t.hostClassHooks()) |hooks| if (hooks.own_keys) |own_keys| {
+            const target_root = try self.pushTempRoot(Value.obj(t));
+            defer self.restoreTempRoots(target_root);
             self.recordExecutionTier(.host_callbacks);
-            for (try own_keys(@ptrCast(self), t)) |k| {
+            const host_keys = try own_keys(@ptrCast(self), t);
+            t = self.tempRoot(target_root, Value.obj(target)).asObj();
+            for (host_keys) |k| {
                 if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                 if (value.isRealSymbolKey(k)) {
                     try symbols.append(self.arena, k);
@@ -54126,6 +54140,59 @@ test "Proxy metadata roots unwind on every allocation failure" {
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{false});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{true});
+}
+
+test "Object reflection roots unwind on every allocation failure" {
+    const Operation = enum { assign, define_properties, descriptors };
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator, operation: Operation) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const ctx = try @import("context.zig").Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+            defer ctx.destroy();
+            _ = try ctx.evaluate(
+                \\globalThis.reflectionAllocationValue = {marker: 37};
+                \\globalThis.reflectionAllocationSource = new Proxy({a: reflectionAllocationValue}, {
+                \\  ownKeys(t) {return Reflect.ownKeys(t);},
+                \\  getOwnPropertyDescriptor(t,k) {return Reflect.getOwnPropertyDescriptor(t,k);},
+                \\  get(t,k,r) {return Reflect.get(t,k,r);}
+                \\});
+                \\globalThis.reflectionAllocationProperties = new Proxy({a: {value: reflectionAllocationValue, configurable: true}}, {
+                \\  ownKeys(t) {return Reflect.ownKeys(t);},
+                \\  getOwnPropertyDescriptor(t,k) {return Reflect.getOwnPropertyDescriptor(t,k);},
+                \\  get(t,k,r) {return Reflect.get(t,k,r);}
+                \\});
+            );
+            const saved_gc = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(saved_gc);
+            var machine = ctx.interpreter();
+            machine.arena = arena.allocator();
+            machine.scratch_allocator = backing;
+            machine.gc_safepoint_fn = null;
+            defer {
+                std.debug.assert(machine.gc_temp_roots.items.len == 0);
+                std.debug.assert(machine.gc_env_roots.items.len == 0);
+                std.debug.assert(machine.gc_tree_call_roots == null);
+                std.debug.assert(machine.depth == 0);
+                std.debug.assert(machine.env == &ctx.env);
+            }
+            const target = try machine.newObject();
+            const result = switch (operation) {
+                .assign => try builtins.objectAssign(&machine, Value.undef(), &.{ target, ctx.global_object.getOwn("reflectionAllocationSource").? }),
+                .define_properties => try builtins.objectDefineProperties(&machine, Value.undef(), &.{ target, ctx.global_object.getOwn("reflectionAllocationProperties").? }),
+                .descriptors => try builtins.objectGetOwnPropertyDescriptors(&machine, Value.undef(), &.{ctx.global_object.getOwn("reflectionAllocationSource").?}),
+            };
+            try std.testing.expect(result.isObject());
+            const property = result.asObj().getOwn("a").?;
+            const result_value = if (operation == .descriptors) property.asObj().getOwn("value").? else property;
+            try std.testing.expectEqual(@as(f64, 37), result_value.asObj().getOwn("marker").?.asNum());
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{Operation.assign});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{Operation.define_properties});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{Operation.descriptors});
 }
 
 test "numeric updates unwind temporary roots on every allocation failure" {

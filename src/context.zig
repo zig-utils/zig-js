@@ -28018,6 +28018,83 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "Object reflection preserves descriptor collection semantics" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "descriptors_own_publication", .source = "(function(){var effects=0;Object.defineProperty(Object.prototype,'x',{set(v){effects++;},configurable:true});try{var result=Object.getOwnPropertyDescriptors({x:7});return effects===0&&Object.hasOwn(result,'x')&&result.x.value===7;}finally{delete Object.prototype.x;}})()" },
+            .{ .name = "define_getter_validation", .source = "(function(){var log='';try{Object.defineProperty({},'x',{get:7,get set(){log+='s';return undefined;}});}catch(e){return e instanceof TypeError&&log==='';}return false;})()" },
+            .{ .name = "define_nested_nonextensible", .source = "(function(){var target=Object.preventExtensions({});var proxy=new Proxy(new Proxy(target,{}),{defineProperty(){return true;}});try{Object.defineProperty(proxy,'x',{value:7,configurable:true});}catch(e){return e instanceof TypeError;}return false;})()" },
+            .{ .name = "define_nested_order", .source = "(function(){var log='';var inner=new Proxy({},{getOwnPropertyDescriptor(){log+='d';return undefined;},isExtensible(){log+='e';return true;}});var outer=new Proxy(inner,{defineProperty(){log+='o';return true;}});Object.defineProperty(outer,'x',{value:7,configurable:true});return log==='ode';})()" },
+            .{ .name = "define_revocation_lookup", .source = "(function(){var target={},record;var handler={get defineProperty(){record.revoke();return function(t,k,d){return this===handler&&t===target;};}};record=Proxy.revocable(target,handler);return Reflect.defineProperty(record.proxy,'x',{value:7,configurable:true});})()" },
+            .{ .name = "arrow_descriptor_no_inherited_get", .source = "(function(){var effects=0;Object.defineProperty(Function.prototype,'prototype',{get(){effects++;return 7;},configurable:true});try{return Object.getOwnPropertyDescriptor(()=>{},'prototype')===undefined&&effects===0;}finally{delete Function.prototype.prototype;}})()" },
+            .{ .name = "descriptor_output_order", .source = "Object.keys(Object.getOwnPropertyDescriptor({x:7},'x')).join(',')==='value,writable,enumerable,configurable'" },
+            .{ .name = "define_properties_atomic", .source = "(function(){var target={};try{Object.defineProperties(target,{a:{value:1},b:{get get(){throw 7;}}});}catch(e){return e===7&&!Object.hasOwn(target,'a');}return false;})()" },
+            .{ .name = "descriptor_field_order", .source = "(function(){var log='';var desc={get enumerable(){log+='e';return true;},get configurable(){log+='c';return true;},get value(){log+='v';return 1;},get writable(){log+='w';return true;},get get(){log+='g';return function(){};},get set(){log+='s';return function(){};}};try{Object.defineProperty({},'x',desc);}catch(e){return e instanceof TypeError&&log==='ecvwgs';}return false;})()" },
+            .{ .name = "define_trap_descriptor_own_fields", .source = "(function(){var effects=0;Object.defineProperty(Object.prototype,'value',{set(v){effects++;},configurable:true});try{var seen;var proxy=new Proxy({},{defineProperty(t,k,d){seen=d;return true;}});Reflect.defineProperty(proxy,'x',{value:7,configurable:true});return effects===0&&Object.hasOwn(seen,'value')&&seen.value===7;}finally{delete Object.prototype.value;}})()" },
+            .{ .name = "prevent_extensions_nested_revoked", .source = "(function(){var record=Proxy.revocable({},{});var outer=new Proxy(record.proxy,{});record.revoke();try{Object.preventExtensions(outer);}catch(e){return e instanceof TypeError;}return false;})()" },
+            .{ .name = "prevent_extensions_variable_typed_array", .source = "(function(){var target=new Uint8Array(new ArrayBuffer(8,{maxByteLength:16}));var proxy=new Proxy(target,{});return Reflect.preventExtensions(proxy)===false&&Object.isExtensible(target);})()" },
+            .{ .name = "seal_no_descriptor_probe", .source = "(function(){var log='';var proxy=new Proxy({x:7},{preventExtensions(t){log+='p';return Reflect.preventExtensions(t);},ownKeys(t){log+='k';return Reflect.ownKeys(t);},getOwnPropertyDescriptor(t,k){log+='g';return Reflect.getOwnPropertyDescriptor(t,k);},defineProperty(t,k,d){log+='d';return Reflect.defineProperty(t,k,d);}});Object.seal(proxy);return log==='pkd';})()" },
+        }) |case| {
+            errdefer std.debug.print("Object reflection semantics {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
+test "Object reflection shared no-GIL callers retain invocation-local operands" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .gil = false,
+    });
+    defer ctx.destroy();
+    ctx.setBytecodeExecutionModeForTesting(.required);
+    const result = try ctx.evaluate(
+        \\var reflectionValue = {marker: 37};
+        \\var reflectionSource = new Proxy({value: reflectionValue}, {
+        \\  ownKeys(t) { return Reflect.ownKeys(t); },
+        \\  getOwnPropertyDescriptor(t, k) { return Reflect.getOwnPropertyDescriptor(t, k); },
+        \\  get(t, k, r) { return Reflect.get(t, k, r); }
+        \\});
+        \\function reflectionLane() {
+        \\  var total = 0;
+        \\  for (var i = 0; i < 64; i++) {
+        \\    var descriptors = Object.getOwnPropertyDescriptors(reflectionSource);
+        \\    var entries = Object.entries(reflectionSource);
+        \\    var copy = Object.assign({}, reflectionSource);
+        \\    var local = {};
+        \\    Object.defineProperties(local, {a: {value: reflectionValue}, b: {value: i}});
+        \\    Object.defineProperty(local, 'c', {value: reflectionValue});
+        \\    if (Object.getOwnPropertyNames(reflectionSource)[0] !== 'value' ||
+        \\        Object.keys(reflectionSource)[0] !== 'value' ||
+        \\        Object.values(reflectionSource)[0] !== reflectionValue ||
+        \\        entries[0][1] !== reflectionValue || descriptors.value.value !== reflectionValue ||
+        \\        copy.value !== reflectionValue || local.a !== reflectionValue ||
+        \\        local.b !== i || local.c !== reflectionValue || !Object.hasOwn(reflectionSource, 'value')) throw 99;
+        \\    total += copy.value.marker;
+        \\  }
+        \\  return total;
+        \\}
+        \\var reflectionLanes = [];
+        \\for (var lane = 0; lane < 4; lane++) reflectionLanes.push(new Thread(reflectionLane));
+        \\var reflectionTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) reflectionTotal += reflectionLanes[lane].join();
+        \\reflectionTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4 * 64 * 37), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 fn expectProxyMetadataMoving(setup: []const u8, expression: []const u8) !void {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const Host = struct {
@@ -28199,6 +28276,126 @@ test "Proxy metadata shared no-GIL traps retain invocation-local descriptor stat
     );
     try std.testing.expectEqual(@as(f64, 4 * 64 * 37), result.asNum());
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
+test "Object reflection moving names_own_keys" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{ownKeys(){proxyMovingLoop(20000);return ['value'];}});", "Object.getOwnPropertyNames(proxy).join(',')==='value'");
+}
+
+test "Object reflection moving symbols_own_keys" {
+    try expectProxyMetadataMoving("var symbol=Symbol('kept');var target={[symbol]:proxySubject};var proxy=new Proxy(target,{ownKeys(){proxyMovingLoop(20000);return [symbol];}});", "Object.getOwnPropertySymbols(proxy)[0]===symbol");
+}
+
+test "Object reflection moving descriptors_own_keys" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{ownKeys(){proxyMovingLoop(20000);return ['value'];}});", "Object.getOwnPropertyDescriptors(proxy).value.value===proxySubject");
+}
+
+test "Object reflection moving descriptors_get_own" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{getOwnPropertyDescriptor(t,k){proxyMovingLoop(20000);return {value:proxySubject,configurable:true,writable:true,enumerable:true};}});", "Object.getOwnPropertyDescriptors(proxy).value.value===proxySubject");
+}
+
+test "Object reflection moving keys_own_keys" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{ownKeys(){proxyMovingLoop(20000);return ['value'];}});", "Object.keys(proxy).join(',')==='value'");
+}
+
+test "Object reflection moving keys_get_own" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{getOwnPropertyDescriptor(t,k){proxyMovingLoop(20000);return {value:proxySubject,configurable:true,writable:true,enumerable:true};}});", "Object.keys(proxy).join(',')==='value'");
+}
+
+test "Object reflection moving values_get" {
+    try expectProxyMetadataMoving("var target={get value(){proxyMovingLoop(20000);return proxySubject;},other:7};", "(function(){var result=Object.values(target);return result[0]===proxySubject&&result[1]===7;})()");
+}
+
+test "Object reflection moving entries_get" {
+    try expectProxyMetadataMoving("var target={get value(){proxyMovingLoop(20000);return proxySubject;},other:7};", "(function(){var result=Object.entries(target);return result[0][0]==='value'&&result[0][1]===proxySubject&&result[1][1]===7;})()");
+}
+
+test "Object reflection moving assign_own_keys" {
+    try expectProxyMetadataMoving("var target={};var source=new Proxy({value:proxySubject},{ownKeys(){proxyMovingLoop(20000);return ['value'];}});", "Object.assign(target,source)===target&&target.value===proxySubject");
+}
+
+test "Object reflection moving assign_get" {
+    try expectProxyMetadataMoving("var target={};var source={get value(){proxyMovingLoop(20000);return proxySubject;},other:7};", "Object.assign(target,source)===target&&target.value===proxySubject&&target.other===7");
+}
+
+test "Object reflection moving assign_set" {
+    try expectProxyMetadataMoving("var target={set value(v){proxyMovingLoop(20000);this.saved=v;}};var source={value:proxySubject,other:7};", "Object.assign(target,source)===target&&target.saved===proxySubject&&target.other===7");
+}
+
+test "Object reflection moving has_own_key" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var key={toString(){proxyMovingLoop(20000);return 'value';}};", "Object.hasOwn(target,key)===true");
+}
+
+test "Object reflection moving define_key" {
+    try expectProxyMetadataMoving("var target={};var key={toString(){proxyMovingLoop(20000);return 'value';}};", "Object.defineProperty(target,key,{value:proxySubject})===target&&target.value===proxySubject");
+}
+
+test "Object reflection moving define_field" {
+    try expectProxyMetadataMoving("var target={};var desc={value:proxySubject,get writable(){proxyMovingLoop(20000);return true;},enumerable:true,configurable:true};", "Object.defineProperty(target,'value',desc)===target&&target.value===proxySubject");
+}
+
+test "Object reflection moving has_own_proxy_key" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{});var key={toString(){proxyMovingLoop(20000);return 'value';}};", "Object.hasOwn(proxy,key)===true");
+}
+
+test "Object reflection moving define_trap_lookup" {
+    try expectProxyMetadataMoving("var target={};var handler={get defineProperty(){proxyMovingLoop(20000);return function(t,k,d){return t===target&&this===handler&&d.value===proxySubject;};}};var proxy=new Proxy(target,handler);", "Reflect.defineProperty(proxy,'value',{value:proxySubject,configurable:true})");
+}
+
+test "Object reflection moving define_trap_call" {
+    try expectProxyMetadataMoving("var target={};var proxy=new Proxy(target,{defineProperty(t,k,d){proxyMovingLoop(20000);return d.value===proxySubject;}});", "Reflect.defineProperty(proxy,'value',{value:proxySubject,configurable:true})");
+}
+
+test "Object reflection moving define_target_descriptor" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var inner=new Proxy(target,{getOwnPropertyDescriptor(t,k){proxyMovingLoop(20000);return Reflect.getOwnPropertyDescriptor(t,k);}});var proxy=new Proxy(inner,{defineProperty(){return true;}});", "Reflect.defineProperty(proxy,'value',{value:proxySubject,configurable:true})");
+}
+
+test "Object reflection moving define_target_extensible" {
+    try expectProxyMetadataMoving("var target={};var inner=new Proxy(target,{isExtensible(t){proxyMovingLoop(20000);return true;}});var proxy=new Proxy(inner,{defineProperty(){return true;}});", "Reflect.defineProperty(proxy,'value',{value:proxySubject,configurable:true})");
+}
+
+test "Object reflection moving define_array_length" {
+    try expectProxyMetadataMoving("var calls=0;var length={valueOf(){calls++;if(calls===1)proxyMovingLoop(20000);return 7;}};var target=[];", "Object.defineProperty(target,'length',{value:length})===target&&target.length===7&&calls===2");
+}
+
+test "Object reflection moving define_properties_collect" {
+    try expectProxyMetadataMoving("var target={};var properties={a:{value:proxySubject,configurable:true},get b(){proxyMovingLoop(20000);return {value:7,configurable:true};}};", "Object.defineProperties(target,properties)===target&&target.a===proxySubject&&target.b===7");
+}
+
+test "Object reflection moving create_properties" {
+    try expectProxyMetadataMoving("var properties={get value(){proxyMovingLoop(20000);return {value:proxySubject,configurable:true};}};", "Object.create(null,properties).value===proxySubject");
+}
+
+test "Object reflection moving define_revocation" {
+    try expectProxyMetadataMoving("var target={};var record;var handler={get defineProperty(){record.revoke();proxyMovingLoop(20000);return function(t,k,d){return t===target&&this===handler&&d.value===proxySubject;};}};record=Proxy.revocable(target,handler);", "Reflect.defineProperty(record.proxy,'value',{value:proxySubject,configurable:true})");
+}
+
+test "Object reflection moving prevent_extensions" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{preventExtensions(t){proxyMovingLoop(20000);return Reflect.preventExtensions(t);}});", "Object.preventExtensions(proxy)===proxy&&!Reflect.isExtensible(target)");
+}
+
+test "Object reflection moving prevent_extensions_lookup" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var record;var handler={get preventExtensions(){record.revoke();proxyMovingLoop(20000);return function(t){return this===handler&&t===target&&Reflect.preventExtensions(t);};}};record=Proxy.revocable(target,handler);", "Object.preventExtensions(record.proxy)===record.proxy&&!Object.isExtensible(target)");
+}
+
+test "Object reflection moving is_extensible" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{isExtensible(t){proxyMovingLoop(20000);return Reflect.isExtensible(t);}});", "Object.isExtensible(proxy)===true");
+}
+
+test "Object reflection moving seal" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{preventExtensions(t){proxyMovingLoop(20000);return Reflect.preventExtensions(t);}});", "Object.seal(proxy)===proxy&&Object.isSealed(target)");
+}
+
+test "Object reflection moving freeze" {
+    try expectProxyMetadataMoving("var target={value:proxySubject};var proxy=new Proxy(target,{defineProperty(t,k,d){proxyMovingLoop(20000);return Reflect.defineProperty(t,k,d);}});", "Object.freeze(proxy)===proxy&&Object.isFrozen(target)&&target.value===proxySubject");
+}
+
+test "Object reflection moving is_sealed" {
+    try expectProxyMetadataMoving("var target=Object.seal({value:proxySubject});var proxy=new Proxy(target,{isExtensible(t){proxyMovingLoop(20000);return Reflect.isExtensible(t);}});", "Object.isSealed(proxy)===true");
+}
+
+test "Object reflection moving is_frozen" {
+    try expectProxyMetadataMoving("var target=Object.freeze({value:proxySubject});var proxy=new Proxy(target,{isExtensible(t){proxyMovingLoop(20000);return Reflect.isExtensible(t);}});", "Object.isFrozen(proxy)===true");
 }
 
 test "canonical parameter expressions retain exact identities through moving nursery" {
