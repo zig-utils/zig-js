@@ -3218,16 +3218,21 @@ pub const Parser = struct {
         return m;
     }
 
+    fn parseMemberName(self: *Parser) ParseError![]const u8 {
+        const name = self.advance();
+        if (name.kind != .identifier and name.kind != .private_name) return ParseError.UnexpectedToken;
+        if (name.kind == .private_name and !self.in_class) return ParseError.UnexpectedToken;
+        return name.text;
+    }
+
     /// Consume a chain of `.prop`, `[expr]`, `?.…`, and `(args)` operators on `e`.
     fn parseMemberTail(self: *Parser, start: *Node) ParseError!*Node {
         var e = start;
         var has_optional = false;
         while (true) {
             if (self.match(.dot)) {
-                const name = self.advance();
-                if (name.kind != .identifier and name.kind != .private_name) return ParseError.UnexpectedToken;
-                if (name.kind == .private_name and !self.in_class) return ParseError.UnexpectedToken;
-                e = try self.alloc(.{ .member = .{ .object = e, .property = name.text } });
+                const name = try self.parseMemberName();
+                e = try self.alloc(.{ .member = .{ .object = e, .property = name } });
             } else if (self.match(.question_dot)) {
                 has_optional = true;
                 if (self.check(.lparen)) {
@@ -3241,10 +3246,8 @@ pub const Parser = struct {
                     try self.expect(.rbracket);
                     e = try self.alloc(.{ .member = .{ .object = e, .computed = idx, .optional = true } });
                 } else {
-                    const name = self.advance();
-                    if (name.kind != .identifier and name.kind != .private_name) return ParseError.UnexpectedToken;
-                    if (name.kind == .private_name and !self.in_class) return ParseError.UnexpectedToken;
-                    e = try self.alloc(.{ .member = .{ .object = e, .property = name.text, .optional = true } });
+                    const name = try self.parseMemberName();
+                    e = try self.alloc(.{ .member = .{ .object = e, .property = name, .optional = true } });
                 }
             } else if (self.match(.lbracket)) {
                 const saved_no_in = self.no_in; // a computed key is `[+In]`
@@ -3323,9 +3326,10 @@ pub const Parser = struct {
         if (!parenthesized_callee and callee.* == .import_call) return ParseError.UnexpectedToken;
         while (true) {
             if (self.match(.dot)) {
-                const name = self.advance();
-                if (name.kind != .identifier) return ParseError.UnexpectedToken;
-                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name.text } });
+                // `new MemberExpression Arguments` includes private property
+                // access; it has the same lexical-name gate as ordinary access.
+                const name = try self.parseMemberName();
+                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name } });
             } else if (self.check(.question_dot)) {
                 // `new o?.C()` / `new C?.()` is syntactically invalid; callers
                 // must parenthesize the optional chain (`new (o?.C)()`).
@@ -5864,6 +5868,61 @@ test "parser validates class private name uses" {
     );
     const nested_prog = try nested.parseModule();
     try std.testing.expectEqual(@as(usize, 1), nested_prog.program.len);
+}
+
+test "parser private constructor members preserve lexical name validation" {
+    const valid = [_][]const u8{
+        "class C { #Ctor; make() { return new this.#Ctor(); } }",
+        "class C { #Ctor; make() { return new this.#Ctor; } }",
+        "class C { #holder; make() { return new this.#holder.Ctor(7).value; } }",
+        "class C { get #Ctor() {} make(value = new this.#Ctor()) {} }",
+        "class C { #Ctor; make(value = new (this.#Ctor)()) {} }",
+        "class C { #Ctor; make() { return class D { run(c) { return new c.#Ctor(); } }; } }",
+    };
+    const Probe = struct {
+        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const backing: *std.mem.Allocator = @ptrCast(@alignCast(raw));
+            return backing.rawAlloc(len, alignment, ra);
+        }
+
+        fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            const backing: *std.mem.Allocator = @ptrCast(@alignCast(raw));
+            backing.rawFree(memory, alignment, ra);
+        }
+
+        fn run(allocator: std.mem.Allocator, source: []const u8) !void {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            var parser = try Parser.init(arena.allocator(), source);
+            // Freeze the keyed parse input for deterministic allocation replay.
+            parser.secure_hash_state.context = .{ .seed = 0x807_7061_7273_65 };
+            const program = try parser.parseProgram();
+            try std.testing.expectEqual(@as(usize, 1), program.program.len);
+        }
+    };
+    var backing = std.testing.allocator;
+    // Arena growth must allocate during replay: whether the host can resize a
+    // particular mapping in place is address-dependent, not parser behavior.
+    const non_resizing: std.mem.Allocator = .{ .ptr = &backing, .vtable = &.{
+        .alloc = Probe.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = Probe.free,
+    } };
+    for (valid) |source| try std.testing.checkAllAllocationFailures(non_resizing, Probe.run, .{source});
+    const invalid = [_][]const u8{
+        "new value.#Ctor()",
+        "class C { make() { return new this.#Ctor(); } }",
+        "class C { #Ctor; make() { return new this?.#Ctor(); } }",
+        "class C { #Ctor; make() { return new this.#Ctor?.(); } }",
+        "class C extends Base { #Ctor; make() { return new super.#Ctor(); } }",
+    };
+    for (invalid) |source| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try Parser.init(arena.allocator(), source);
+        try std.testing.expectError(ParseError.UnexpectedToken, parser.parseProgram());
+    }
 }
 
 test "private eval contexts validate exact enclosing names" {
