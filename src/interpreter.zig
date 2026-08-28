@@ -183,30 +183,60 @@ fn jsTrim(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
             lo += cp_len;
         }
     }
-    if (trim_end_) {
-        var last_end: usize = lo;
-        var i: usize = lo;
-        while (i < hi) {
-            const c = s[i];
-            const cp_len: usize = if (c < 0x80) 1 else (std.unicode.utf8ByteSequenceLength(c) catch {
-                last_end = hi;
-                break;
-            });
-            if (i + cp_len > hi) {
-                last_end = hi;
-                break;
-            }
-            const cp: u21 = if (cp_len == 1) @as(u21, c) else (std.unicode.utf8Decode(s[i .. i + cp_len]) catch {
-                last_end = i + cp_len;
-                i += cp_len;
-                continue;
-            });
-            i += cp_len;
-            if (!isJsTrimCp(cp)) last_end = i;
-        }
-        hi = last_end;
-    }
+    if (trim_end_) hi = jsTrimEnd(s, lo, hi);
     return s[lo..hi];
+}
+
+/// End of `s[lo..hi]` with trailing WhiteSpace removed. UTF-8 is
+/// self-synchronizing — a continuation byte is always 0x80..0xBF — so the last
+/// sequence can be found by stepping back over at most three of them, and the
+/// scan costs the trailing whitespace rather than the whole string. Anything
+/// that does not decode cleanly hands off to the forward scan, which defines the
+/// behavior for malformed bytes.
+fn jsTrimEnd(s: []const u8, lo: usize, hi: usize) usize {
+    var end = hi;
+    while (end > lo) {
+        var seq_start = end - 1;
+        while (seq_start > lo and s[seq_start] & 0xC0 == 0x80 and end - seq_start < 4) seq_start -= 1;
+        const cp_len = end - seq_start;
+        const lead = s[seq_start];
+        const lead_len: usize = if (lead < 0x80)
+            1
+        else
+            (std.unicode.utf8ByteSequenceLength(lead) catch return jsTrimEndForward(s, lo, hi));
+        if (lead_len != cp_len) return jsTrimEndForward(s, lo, hi);
+        const cp: u21 = if (cp_len == 1)
+            lead
+        else
+            (std.unicode.utf8Decode(s[seq_start..end]) catch return jsTrimEndForward(s, lo, hi));
+        if (!isJsTrimCp(cp)) break;
+        end = seq_start;
+    }
+    return end;
+}
+
+fn jsTrimEndForward(s: []const u8, lo: usize, hi: usize) usize {
+    var last_end: usize = lo;
+    var i: usize = lo;
+    while (i < hi) {
+        const c = s[i];
+        const cp_len: usize = if (c < 0x80) 1 else (std.unicode.utf8ByteSequenceLength(c) catch {
+            last_end = hi;
+            break;
+        });
+        if (i + cp_len > hi) {
+            last_end = hi;
+            break;
+        }
+        const cp: u21 = if (cp_len == 1) @as(u21, c) else (std.unicode.utf8Decode(s[i .. i + cp_len]) catch {
+            last_end = i + cp_len;
+            i += cp_len;
+            continue;
+        });
+        i += cp_len;
+        if (!isJsTrimCp(cp)) last_end = i;
+    }
+    return last_end;
 }
 
 fn localeIsTurkic(loc: []const u8) bool {
