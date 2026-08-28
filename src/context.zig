@@ -21563,6 +21563,191 @@ test "variadic String concat roots pending arguments across moving nursery" {
     try std.testing.expect(last_argument_before != last_argument_after);
 }
 
+test "deferred class captures retain live defining bindings in both tiers" {
+    const cases = [_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
+        .{ .name = "late_eval_no_slot", .source = "(function(){class Box{read(){return later;}}eval('var later=7');return new Box().read();})()", .expected = "7" },
+        .{ .name = "late_outer_eval", .source = "(function(){var Box=(function(){return class{read(){return later;}};})();eval('var later=7');return new Box().read();})()", .expected = "7" },
+        .{ .name = "late_parameter_eval", .source = "(function(maker=()=>{return class{read(){return later;}};},Box=maker(),x=eval('var later=7')){return new Box().read();})()", .expected = "7" },
+        .{ .name = "eval_self_collision", .source = "(function(){var Box=class Self{read(){return Self;}};eval('var Self=7');return new Box().read()===Box;})()", .expected = "true" },
+        .{ .name = "mutable", .source = "(function(seed){class Box{read(){return seed;}write(n){seed=n;}}var b=new Box();seed=7;b.write(9);return b.read()*10+seed;})(1)", .expected = "99" },
+        .{ .name = "escaped", .source = "(function(){function make(seed){class Box{read(){return seed;}write(n){seed=n;}}return [Box,()=>seed];}var pair=make(3),box=new pair[0]();box.write(8);return box.read()*10+pair[1]();})()", .expected = "88" },
+        .{ .name = "instance_field", .source = "(function(seed){class Box{field=seed;read(){return seed;}}seed=7;var a=new Box();seed=8;return a.field*10+new Box().field;})(1)", .expected = "78" },
+        .{ .name = "static_order", .source = "(function(seed){var log='';class Box{[(log+='k','m')](){return seed;}static field=(log+='f',++seed);static{log+='b';seed+=2;}}return log+':'+Box.field+':'+new Box().m();})(3)", .expected = "kfb:4:6" },
+        .{ .name = "nested_frame", .source = "(function(outer){return (function(inner){class Box{read(){return outer+inner;}write(){outer++;inner+=2;}}var b=new Box();b.write();return b.read();})(4);})(3)", .expected = "10" },
+        .{ .name = "nested_escape", .source = "(function(){function make(outer){return function(inner){return class{read(){return outer+inner;}write(){outer++;inner++;}};};}var Box=make(3)(4),a=new Box();a.write();return a.read();})()", .expected = "9" },
+        .{ .name = "lexical_shadow", .source = "(function(seed){let Box;{let seed=7;Box=class{read(){return seed;}write(){seed++;}};}var b=new Box();b.write();return b.read()*10+seed;})(3)", .expected = "83" },
+        .{ .name = "with_shadow", .source = "(function(seed){var Box;with({seed:8}){Box=class{read(){return seed;}write(){seed++;}};}var b=new Box();b.write();return b.read()*10+seed;})(3)", .expected = "93" },
+        .{ .name = "inside_with_lexical", .source = "(function(seed){var Box;with({seed:8}){let seed=7;Box=class{read(){return seed;}write(){seed++;}};}var b=new Box();b.write();return b.read()*10+seed;})(3)", .expected = "83" },
+        .{ .name = "class_self", .source = "(function(Self){var Box=class Self{read(){return Self;}static read(){return Self;}};return new Box().read()===Box&&Box.read()===Box;})(1)", .expected = "true" },
+        .{ .name = "class_self_const", .source = "(function(seed){class Box{read(){try{Box=seed;}catch(e){return e instanceof TypeError;}}}return new Box().read();})(3)", .expected = "true" },
+        .{ .name = "tdz", .source = "(function(){try{class Box{static field=seed;}let seed=7;}catch(e){return e instanceof ReferenceError;}return false;})()", .expected = "true" },
+        .{ .name = "const_write", .source = "(function(){const seed=7;class Box{write(){seed=9;}}try{new Box().write();}catch(e){return e instanceof TypeError;}return false;})()", .expected = "true" },
+        .{ .name = "mapped_arguments", .source = "(function(seed){var args=arguments;class Box{read(){return seed;}write(){seed++;}}args[0]=6;var b=new Box();b.write();return args[0]*10+b.read();})(3)", .expected = "77" },
+        .{ .name = "method_eval", .source = "(function(seed){class Box{read(){return eval('seed');}write(){eval('seed += 2');}}var b=new Box();b.write();return b.read()+seed;})(3)", .expected = "10" },
+        .{ .name = "static_eval", .source = "(function(seed){class Box{static{eval('seed += 2');}read(){return seed;}}return new Box().read();})(3)", .expected = "5" },
+        .{ .name = "body_eval", .source = "(function(seed){class Box{read(){return seed;}}eval('seed=7');return new Box().read();})(3)", .expected = "7" },
+        .{ .name = "late_eval_binding", .source = "(function(seed){class Box{read(){return late+seed;}}eval('var late=4');return new Box().read();})(3)", .expected = "7" },
+        .{ .name = "parameter_body", .source = "(function(seed=3,maker=()=>{class Box{read(){return seed;}}return Box;}){var seed=7;var Box=maker();return new Box().read()*10+seed;})()", .expected = "37" },
+        .{ .name = "constructor_default", .source = "(function(seed){class Box{constructor(n=seed){this.n=n;}read(){return this.n+seed;}}seed=7;return new Box().read();})(3)", .expected = "14" },
+        .{ .name = "private", .source = "(function(seed){class Box{#x=seed;read(){return this.#x+seed;}write(){seed++;}}var b=new Box();b.write();return b.read();})(3)", .expected = "7" },
+        .{ .name = "super", .source = "(function(seed){class Base{read(){return seed;}}class Box extends Base{read(){return super.read()+seed;}}seed=7;return new Box().read();})(3)", .expected = "14" },
+        .{ .name = "eager_keys", .source = "(function(seed){var log='';class Box extends (log+='h',Object){[(log+='k',seed)](){return seed;}static x=(log+='s',seed);}seed=7;return log+':'+new Box()[3]()+':'+Box.x;})(3)", .expected = "hks:7:3" },
+        .{ .name = "catch_shadow", .source = "(function(seed){var Box;try{throw 8;}catch(seed){Box=class{read(){return seed;}};}return new Box().read()*10+seed;})(3)", .expected = "83" },
+        .{ .name = "repeated_classes", .source = "(function(seed){var out=[];for(let i=0;i<3;i++){class Box{read(){return seed+i;}}out.push(new Box());}seed=7;return out[0].read()+out[1].read()+out[2].read();})(3)", .expected = "24" },
+        .{ .name = "method_parameter", .source = "(function(seed){class Box{read(seed){return seed;}other(){return seed;}}var b=new Box();return b.read(7)*10+b.other();})(3)", .expected = "73" },
+        .{ .name = "nested_class", .source = "(function(seed){class Outer{make(){return class{read(){return seed;}};}}seed=7;var Box=new Outer().make();return new Box().read();})(3)", .expected = "7" },
+        .{ .name = "abrupt_static", .source = "(function(seed){var caught;try{class Box{static{seed++;throw 9;}}}catch(e){caught=e;}return caught*10+seed;})(3)", .expected = "94" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |case| {
+            errdefer std.debug.print("deferred class {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const source = try std.fmt.allocPrint(std.testing.allocator, "String({s})", .{case.source});
+            defer std.testing.allocator.free(source);
+            try std.testing.expectEqualStrings(case.expected, (try ctx.evaluate(source)).asStr());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "ordinary constructors retain implicit receivers for every primitive result" {
+    const cases = [_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "(function(){function C(){this.x=7;return undefined;}return new C().x;})()", .expected = "7" },
+        .{ .source = "(function(){function C(){this.x=7;return null;}return new C().x;})()", .expected = "7" },
+        .{ .source = "(function(){function C(){this.x=7;return true;}return new C().x;})()", .expected = "7" },
+        .{ .source = "(function(){function C(){this.x=7;return 'ignored';}return new C().x;})()", .expected = "7" },
+        .{ .source = "(function(){function C(){this.x=7;return Symbol('x');}return new C().x;})()", .expected = "7" },
+        .{ .source = "(function(){function C(){this.x=7;return 1n;}return new C().x;})()", .expected = "7" },
+        .{ .source = "(function(){var expected={x:8};function C(){this.x=7;return expected;}return new C()===expected;})()", .expected = "true" },
+        .{ .source = "(function(){function C(){this.x=7;return 9;}return new C().x;})()", .expected = "7" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |case| {
+            const source = try std.fmt.allocPrint(std.testing.allocator, "String({s})", .{case.source});
+            defer std.testing.allocator.free(source);
+            try std.testing.expectEqualStrings(case.expected, (try ctx.evaluate(source)).asStr());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "deferred class captures isolate concurrent no-GIL defining frames" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .enable_jit = false,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\function makeClass(seed) {
+            \\  let value = seed;
+            \\  return class Box {
+            \\    read() { return value; }
+            \\    write(next) { value = next; }
+            \\  };
+            \\}
+            \\function classLane(Box) {
+            \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+            \\  var box = new Box();
+            \\  var Local = makeClass(box.read()), local = new Local();
+            \\  for (var i=0;i<32;i++) {
+            \\    box.write(box.read()+1);
+            \\    local.write(local.read()+1);
+            \\  }
+            \\  return box.read()+local.read();
+            \\}
+            \\var classes=[],lanes=[],sum=0;
+            \\for(var i=0;i<4;i++) classes.push(makeClass(i));
+            \\for(var i=0;i<4;i++) lanes.push(new Thread(classLane,classes[i]));
+            \\for(var i=0;i<4;i++) sum+=lanes[i].join()+new classes[i]().read();
+            \\sum
+        );
+        try std.testing.expectEqual(@as(f64, 402), result.asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "deferred class captures retain exact identities through moving nursery" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const Host = struct {
+        fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const ctx: *Context = @ptrCast(@alignCast(machine.gc_realm_context.?));
+            ctx.gc.?.nursery_threshold_bytes = 1;
+            ctx.gc_moving_checkpoint_requested.store(true, .release);
+            return Value.undef();
+        }
+    };
+    const cases = [_]struct { name: []const u8, setup: []const u8, run: []const u8 }{
+        .{ .name = "ordinary_body", .setup = "function Box(){classMovingLoop(20000);this.field=classSubject;}", .run = "new Box().field===classSubject" },
+        .{ .name = "explicit_object", .setup = "class Box{constructor(){classMovingLoop(20000);return classSubject;}}", .run = "new Box()===classSubject" },
+        .{ .name = "escaped_method", .setup = "function make(seed){return class{read(){classMovingLoop(20000);return seed;}};}globalThis.Box=make(classSubject);", .run = "new Box().read()===classSubject" },
+        .{ .name = "active_factory", .setup = "function make(seed){class Box{read(){return seed;}}classMovingLoop(20000);return Box;}", .run = "new (make(classSubject))().read()===classSubject" },
+        .{ .name = "static_block", .setup = "function make(seed){return class Box{static{globalThis.createdClass=this;classMovingLoop(20000);}read(){return seed;}};}", .run = "make(classSubject)===createdClass&&new createdClass().read()===classSubject" },
+        .{ .name = "static_field", .setup = "function make(seed){return class Box{static field=(globalThis.createdClass=this,classMovingLoop(20000),seed);static next=this.field;read(){return seed;}};}", .run = "make(classSubject)===createdClass&&createdClass.field===classSubject&&createdClass.next===classSubject" },
+        .{ .name = "heritage", .setup = "function Base(){}globalThis.baseProxy=new Proxy(Base,{get(t,k,r){if(k==='prototype')classMovingLoop(20000);return Reflect.get(t,k,r);}});function make(seed){return class Box extends baseProxy{read(){return seed;}};}", .run = "new (make(classSubject))().read()===classSubject" },
+        .{ .name = "instance_field", .setup = "function make(seed){return class{field=(classMovingLoop(20000),seed);};}globalThis.Box=make(classSubject);", .run = "new Box().field===classSubject" },
+        .{ .name = "computed_key", .setup = "function make(seed){return class{[(classMovingLoop(20000),'read')](){return seed;}};}", .run = "new (make(classSubject))().read()===classSubject" },
+        .{ .name = "nested_frame", .setup = "function outer(seed){return function inner(extra){return class{read(){classMovingLoop(20000);return seed===extra?seed:null;}};};}globalThis.Box=outer(classSubject)(classSubject);", .run = "new Box().read()===classSubject" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for (cases) |case| {
+            const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
+            defer ctx.destroy();
+            {
+                const saved = gc_mod.setActiveContext(ctx);
+                defer gc_mod.restoreActiveContext(saved);
+                const arm = try gc_mod.allocObj(ctx.arena());
+                arm.* = .{ .native = Host.arm };
+                try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "classArm", Value.obj(arm));
+                try ctx.env.put("classArm", Value.obj(arm));
+            }
+            _ = try ctx.evaluate(
+                \\function classMovingLoop(n){var total=0,i=0;while(i<n){total=total+i;i=i+1;}return total;}
+                \\for(var warm=0;warm<10;warm=warm+1)classMovingLoop(4096);
+            );
+            const loop: *interp.Function = @ptrCast(@alignCast(ctx.global_object.getOwn("classMovingLoop").?.asObj().jsFunction().?));
+            try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+            try std.testing.expect(loop.chunk.?.tier.loadCode().?.manages_steps);
+            ctx.collectGarbage();
+            ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+            ctx.setBytecodeExecutionModeForTesting(mode);
+            _ = try ctx.evaluate("globalThis.classSubject={marker:37};");
+            _ = try ctx.evaluate(case.setup);
+            const before = ctx.global_object.getOwn("classSubject").?.asObj();
+            const moving_before = ctx.gc.?.accounting().moving_minor_collections;
+            const source = try std.fmt.allocPrint(std.testing.allocator, "classArm();{s}", .{case.run});
+            defer std.testing.allocator.free(source);
+            errdefer std.debug.print("moving class capture {s} ({s})\n", .{ case.name, @tagName(mode) });
+            try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+            try std.testing.expectEqual(moving_before + 1, ctx.gc.?.accounting().moving_minor_collections);
+            try std.testing.expect(before != ctx.global_object.getOwn("classSubject").?.asObj());
+            try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
 test "reentrant property references preserve coercion and target order" {
     const cases = [_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
         .{ .name = "plain_order", .source = "var log='', box={set x(v){log+='set'+v;}}, key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 4;}var n=(box[key]=rhs());var result=n+':'+log;", .expected = "4:rhskeyset4" },

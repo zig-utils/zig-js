@@ -7555,11 +7555,13 @@ pub const Interpreter = struct {
         if (!isConstructorValue(superclass))
             return self.throwError("TypeError", "class extends value is not a constructor");
 
+        const superclass_root = try self.pushTempRoot(superclass);
+        defer self.restoreTempRoots(superclass_root);
         const prototype = try self.getProperty(superclass, "prototype");
         if (prototype.isObject() and !prototype.asObj().is_symbol and !prototype.asObj().is_bigint)
-            return .{ .constructor = superclass, .prototype = prototype };
+            return .{ .constructor = self.tempRoot(superclass_root, superclass), .prototype = prototype };
         if (prototype.isNull())
-            return .{ .constructor = superclass, .prototype = Value.nul() };
+            return .{ .constructor = self.tempRoot(superclass_root, superclass), .prototype = Value.nul() };
         return self.throwError("TypeError", "class heritage's 'prototype' is not an object or null");
     }
 
@@ -7576,10 +7578,13 @@ pub const Interpreter = struct {
         // evaluating heritage; buildClass installs the actual (const) binding once
         // the constructor exists.
         const outer_env = self.env;
+        const outer_env_root = try self.pushTempEnvRoot(outer_env);
+        defer self.restoreTempEnvRoots(outer_env_root);
         const class_env = try gc_mod.allocEnv(self.arena);
+        const class_env_root = try self.pushTempEnvRoot(class_env);
         self.initEnvironment(class_env, outer_env, false);
         self.env = class_env;
-        defer self.env = outer_env;
+        defer self.env = self.tempEnvRoot(outer_env_root, outer_env);
         const saved_strict = self.strict;
         self.strict = true;
         defer self.strict = saved_strict;
@@ -7593,7 +7598,7 @@ pub const Interpreter = struct {
             if (prepared) |heritage| if (heritage.prototype.isNull()) null else heritage.prototype.asObj() else null,
             source,
             derived,
-            class_env,
+            self.tempEnvRoot(class_env_root, class_env),
             computed_keys,
         );
     }
@@ -7627,6 +7632,11 @@ pub const Interpreter = struct {
     }
 
     fn buildClass(self: *Interpreter, name: []const u8, inferred_name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment, computed_keys: ?[]const Value) EvalError!Value {
+        const class_env_root = try self.pushTempEnvRoot(class_env);
+        defer self.restoreTempEnvRoots(class_env_root);
+        const superclass = if (super_obj) |object| Value.obj(object) else Value.nul();
+        const superclass_root = try self.pushTempRoot(superclass);
+        defer self.restoreTempRoots(superclass_root);
         // A class with private names is rewritten (`#x` → a unique storage key) in
         // place. Deep-copy the member ASTs first so EACH evaluation rewrites its
         // own copy — two evaluations of the same class source then have distinct
@@ -7756,9 +7766,11 @@ pub const Interpreter = struct {
             // rather than the legacy sloppy `null`).
             .is_strict = true,
         };
-        const class_val = try self.makeFunction(fnode, self.env);
-        const class_obj = class_val.asObj();
-        const proto = try self.protoObject(class_obj);
+        var class_val = try self.makeFunction(fnode, self.env);
+        const class_root = try self.pushTempRoot(class_val);
+        var class_obj = class_val.asObj();
+        var proto = try self.protoObject(class_obj);
+        const proto_root = try self.pushTempRoot(Value.obj(proto));
         // A class's `prototype` is non-writable, non-enumerable, non-configurable.
         try class_obj.setAttr(self.arena, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
         // The `constructor` back-link is created BEFORE the class element methods,
@@ -7832,6 +7844,11 @@ pub const Interpreter = struct {
                 }
                 break :blk try self.toPropertyKeyValue(try self.eval(ke));
             } else null;
+            const key_root = if (kv) |key_value| try self.pushTempRoot(key_value) else null;
+            defer if (key_root) |root| self.restoreTempRoots(root);
+            class_val = self.tempRoot(class_root, class_val);
+            class_obj = class_val.asObj();
+            proto = self.tempRoot(proto_root, Value.obj(proto)).asObj();
             const key = if (kv) |k| try self.keyOf(k) else try value.encodeStringKey(self.arena, m.key);
             // The name an anonymous field/method initializer takes from this key.
             // A private name (`#x`) was rewritten to the `#x\x00<serial>` storage
@@ -7873,17 +7890,22 @@ pub const Interpreter = struct {
                 // A static field's name is now resolved; its initializer (DefineField)
                 // is deferred to pass 2 so every element's name is evaluated first.
                 if (m.is_static) {
-                    static_keys[i] = key;
-                    static_names[i] = name_str;
+                    // Later computed names may collect the transient key cell.
+                    static_keys[i] = if (kv != null) try self.arena.dupe(u8, key) else key;
+                    static_names[i] = if (kv != null) try self.arena.dupe(u8, name_str) else name_str;
                 }
                 continue;
             }
             if (m.is_ctor) continue;
             const fv = try self.eval(m.func.?);
+            class_val = self.tempRoot(class_root, class_val);
+            class_obj = class_val.asObj();
+            proto = self.tempRoot(proto_root, Value.obj(proto)).asObj();
             const home = if (m.is_static) class_obj else proto;
             if (funcOf(fv)) |mf| {
                 mf.home_object = home;
-                mf.super_ctor = super_obj;
+                const current_superclass = self.tempRoot(superclass_root, superclass);
+                mf.super_ctor = if (current_superclass.isNull()) null else current_superclass.asObj();
                 mf.private_map = private_map; // a direct eval in this method resolves the class's private names
             }
             switch (m.accessor) {
@@ -7921,6 +7943,7 @@ pub const Interpreter = struct {
         // bytecode must see the one-time keys baked above. Complete admission
         // exactly once now; no tree-walker callback or per-instance key work is
         // introduced by this deferred compilation point.
+        class_val = self.tempRoot(class_root, class_val);
         if (fnode.defer_plain_bytecode_compilation) if (funcOf(class_val)) |cf| {
             const reason = try self.installPlainFunctionBytecode(cf, fnode);
             cf.bytecode_admission_reason = reason;
@@ -7930,58 +7953,67 @@ pub const Interpreter = struct {
         // Computed element names run while the inner class binding is still in
         // TDZ. Once names/methods are installed, initialize the immutable
         // binding so static elements and later method bodies can reference it.
-        if (name.len > 0) try class_env.putConst(name, class_val);
+        if (name.len > 0) try self.tempEnvRoot(class_env_root, class_env).putConst(name, class_val);
 
         // Pass 2 (step 34): run the static elements — `static { }` blocks and
         // static-field initializers — in source order, now that EVERY computed
         // name (including later instance/static field names) has been evaluated.
         // `this`/home is the class object so `super` and arrows resolve correctly.
         for (members, 0..) |m, i| {
+            class_val = self.tempRoot(class_root, class_val);
+            class_obj = class_val.asObj();
             if (m.static_block) |block| {
                 const saved_this = self.this_value;
+                const saved_this_root = try self.pushTempRoot(saved_this);
+                defer self.restoreTempRoots(saved_this_root);
                 const saved_home = self.home_object;
+                const saved_home_value = if (saved_home) |object| Value.obj(object) else Value.nul();
+                const saved_home_root = try self.pushTempRoot(saved_home_value);
                 const saved_env = self.env;
+                const saved_env_root = try self.pushTempEnvRoot(saved_env);
+                defer self.restoreTempEnvRoots(saved_env_root);
+                defer {
+                    self.this_value = self.tempRoot(saved_this_root, saved_this);
+                    const home_value = self.tempRoot(saved_home_root, saved_home_value);
+                    self.home_object = if (home_value.isNull()) null else home_value.asObj();
+                    self.env = self.tempEnvRoot(saved_env_root, saved_env);
+                }
                 self.this_value = class_val;
                 self.home_object = class_obj;
                 // A `static {}` block is its own function-like scope: it gets a
                 // fresh variable environment so its `var` declarations stay local
                 // (each block, and the outer scope, are independent).
                 const block_env = try gc_mod.allocEnv(self.arena);
-                self.initEnvironment(block_env, class_env, true);
+                self.initEnvironment(block_env, self.tempEnvRoot(class_env_root, class_env), true);
                 self.env = block_env;
                 if (block.* == .block) try self.hoistVarNames(block.block);
-                _ = self.eval(block) catch |e| {
-                    self.this_value = saved_this;
-                    self.home_object = saved_home;
-                    self.env = saved_env;
-                    return e;
-                };
-                self.this_value = saved_this;
-                self.home_object = saved_home;
-                self.env = saved_env;
+                _ = try self.eval(block);
                 continue;
             }
             if (!m.is_field or !m.is_static) continue;
             const key = static_keys[i];
             const name_str = static_names[i];
             const saved_this = self.this_value;
+            const saved_this_root = try self.pushTempRoot(saved_this);
+            defer self.restoreTempRoots(saved_this_root);
             const saved_home = self.home_object;
+            const saved_home_value = if (saved_home) |object| Value.obj(object) else Value.nul();
+            const saved_home_root = try self.pushTempRoot(saved_home_value);
             const saved_fi = self.in_field_initializer;
+            defer {
+                self.this_value = self.tempRoot(saved_this_root, saved_this);
+                const home_value = self.tempRoot(saved_home_root, saved_home_value);
+                self.home_object = if (home_value.isNull()) null else home_value.asObj();
+                self.in_field_initializer = saved_fi;
+            }
             self.this_value = class_val;
             self.home_object = class_obj;
             self.in_field_initializer = true;
             // DefineField order: evaluate the initializer FIRST, then
             // PrivateFieldAdd (brand + extensibility check) — so a static private
             // field whose initializer seals the class object makes its own add throw.
-            const fv2 = if (m.field_init) |init_node| self.eval(init_node) catch |e| {
-                self.this_value = saved_this;
-                self.home_object = saved_home;
-                self.in_field_initializer = saved_fi;
-                return e;
-            } else Value.undef();
-            self.this_value = saved_this;
-            self.home_object = saved_home;
-            self.in_field_initializer = saved_fi;
+            const fv2 = if (m.field_init) |init_node| try self.eval(init_node) else Value.undef();
+            class_obj = self.tempRoot(class_root, class_val).asObj();
             if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
             if (m.is_auto_accessor) {
                 const storage_key = auto_storage_keys[i];
@@ -7993,7 +8025,7 @@ pub const Interpreter = struct {
                 try self.setProp(class_obj, key, fv2);
             }
         }
-        return class_val;
+        return self.tempRoot(class_root, class_val);
     }
 
     fn evalArgs(self: *Interpreter, arg_nodes: []*Node) EvalError![]Value {
@@ -9365,8 +9397,12 @@ pub const Interpreter = struct {
             inst.* = .{ .proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), "Object") else try self.protoObject(obj) };
             try inst.setCtorRef(self.arena, obj);
             const this_val = Value.obj(inst);
+            const this_root = try self.pushTempRoot(this_val);
+            defer self.restoreTempRoots(this_root);
             const ret = try self.callFunctionNT(func, args, this_val, new_target);
-            return if (ret.isObject()) ret else this_val;
+            // [[Construct]] returns the implicit receiver when the body has no
+            // object result. A nested initializer may have moved that receiver.
+            return if (builtins.isRealObject(ret)) ret else self.tempRoot(this_root, this_val);
         }
         return self.throwError("TypeError", "value is not a constructor");
     }

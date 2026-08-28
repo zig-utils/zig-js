@@ -764,6 +764,14 @@ pub const FnTemplateAdmission = enum {
     async_compiled,
 };
 
+/// ClassDefinitionEvaluation captures the defining lexical environment for
+/// methods and initializers. Only classes referencing real frame slots need a
+/// live activation projection; eager heritage/keys remain ordinary bytecode.
+pub const ClassTemplate = struct {
+    node: *ast.Node,
+    capture_environment: ?*const DirectEvalPlan = null,
+};
+
 pub const FnTemplate = struct {
     /// Suspendable bodies resolve names through Environment Records rather than
     /// upvalue opcodes. Retain the exact defining activation/lexical projection.
@@ -915,7 +923,7 @@ pub const Chunk = struct {
     /// evaluates and prepares heritage plus any suspendable computed names first,
     /// then the VM delegates construction back to the interpreter while the
     /// activation-local class Environment remains active.
-    classes: std.ArrayListUnmanaged(*ast.Node) = .empty,
+    classes: std.ArrayListUnmanaged(ClassTemplate) = .empty,
     /// Tagged-template AST nodes referenced by `template_object`; the VM asks the
     /// interpreter for the per-site cached+frozen strings object (GetTemplateObject).
     templates: std.ArrayListUnmanaged(*ast.Node) = .empty,
@@ -1085,9 +1093,9 @@ pub const Chunk = struct {
         return idx;
     }
 
-    pub fn addClass(self: *Chunk, node: *ast.Node) std.mem.Allocator.Error!u32 {
+    pub fn addClass(self: *Chunk, node: *ast.Node, capture_environment: ?*const DirectEvalPlan) std.mem.Allocator.Error!u32 {
         const idx: u32 = @intCast(self.classes.items.len);
-        try self.classes.append(self.arena, node);
+        try self.classes.append(self.arena, .{ .node = node, .capture_environment = capture_environment });
         return idx;
     }
 

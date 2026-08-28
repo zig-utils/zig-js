@@ -1282,6 +1282,31 @@ fn foldChunk(seed_start: usize, chunk: anytype) usize {
         seed = foldChecksum(seed, @backingInt(template.admission));
         if (template.chunk) |nested| seed = foldChunk(seed, nested);
     }
+    for (chunk.classes.items) |template| {
+        seed = foldChecksum(seed, @intFromBool(template.capture_environment != null));
+        if (template.capture_environment) |plan| {
+            seed = foldChecksum(seed, plan.current_environment_depth);
+            for (plan.frame_boundaries) |boundary| {
+                seed = foldChecksum(seed, boundary.child_frame_depth);
+                seed = foldChecksum(seed, boundary.environment_depth);
+            }
+            for (plan.scopes) |scope| {
+                seed = foldChecksum(seed, @backingInt(scope.kind));
+                seed = foldChecksum(seed, scope.frame_depth);
+                seed = foldChecksum(seed, scope.environment_depth);
+                seed = foldChecksum(seed, @intFromBool(scope.declaration_target));
+                seed = foldChecksum(seed, @intFromBool(scope.is_catch_param));
+                for (scope.bindings) |binding| {
+                    seed = foldBytes(seed, binding.name);
+                    seed = foldChecksum(seed, binding.slot);
+                    seed = foldChecksum(seed, @intFromBool(binding.lexical));
+                    seed = foldChecksum(seed, @intFromBool(binding.immutable));
+                    seed = foldChecksum(seed, @intFromBool(binding.tdz_checked));
+                    seed = foldChecksum(seed, @intFromBool(binding.mapped_parameter));
+                }
+            }
+        }
+    }
     return seed;
 }
 
@@ -1376,24 +1401,27 @@ fn validateTdzCompileProgram(
     const admission = try js.Compiler.admitPlainFunction(allocator, declaration.func_decl);
     const class_deferred = shape == .class_field or shape == .class_static;
     const code = switch (admission) {
-        .rejected => |reason| {
-            if (!class_deferred or reason != .unsupported_lowering) return error.InvalidProgram;
-            var checksum = foldChecksum(source.len, width);
-            checksum = foldChecksum(checksum, @backingInt(shape));
-            return foldChecksum(checksum, @backingInt(reason));
-        },
+        .rejected => return error.InvalidProgram,
         .compiled => |compiled| compiled,
     };
-    if (class_deferred) return error.InvalidProgram;
-    const hazardous = shape == .forward or shape == .self or shape == .nested;
-    const expected_locals = width + @intFromBool(shape == .nested);
+    const hazardous = shape == .forward or shape == .self or shape == .nested or class_deferred;
+    const expected_locals = width + @intFromBool(shape == .nested or class_deferred);
     if (code.local_count != expected_locals or
-        code.chunk.lexical_slots.len != (if (hazardous) width else 0))
+        code.chunk.lexical_slots.len != (if (hazardous) width + @intFromBool(class_deferred) else 0))
         return error.InvalidProgram;
     const has_initializer = chunkHasOp(code.chunk, .init_local_lexical);
     const has_checked_load = chunkHasOp(code.chunk, .load_local_lexical) or
         chunkHasOp(code.chunk, .load_upval_lexical);
-    if (has_initializer != hazardous or has_checked_load != hazardous) return error.InvalidProgram;
+    if (has_initializer != hazardous or has_checked_load != (hazardous and !class_deferred)) return error.InvalidProgram;
+    if (class_deferred) {
+        if (code.chunk.classes.items.len != 1) return error.InvalidProgram;
+        const plan = code.chunk.classes.items[0].capture_environment orelse return error.InvalidProgram;
+        var checked_bindings: usize = 0;
+        for (plan.scopes) |scope| for (scope.bindings) |binding| {
+            if (binding.lexical and binding.tdz_checked) checked_bindings += 1;
+        };
+        if (checked_bindings != expected_locals) return error.InvalidProgram;
+    }
     var checksum = foldChecksum(source.len, width);
     checksum = foldChecksum(checksum, @backingInt(shape));
     checksum = foldChecksum(checksum, code.local_count);
@@ -1474,16 +1502,13 @@ fn validateClassFrameCompileProgram(
     const admission = try js.Compiler.admitPlainFunction(allocator, declaration.func_decl);
     const frame_capture = shape == .method_first or shape == .method_last or
         shape == .field_last or shape == .static_last;
-    const expected_rejection = frame_capture or shape == .superclass_last;
     switch (admission) {
-        .rejected => |reason| {
-            if (!expected_rejection or reason != .unsupported_lowering) return error.InvalidProgram;
-            var checksum = foldChecksum(source.len, width);
-            checksum = foldChecksum(checksum, @backingInt(shape));
-            return foldChecksum(checksum, @backingInt(reason));
-        },
+        .rejected => return error.InvalidProgram,
         .compiled => |code| {
-            if (expected_rejection or (shape != .environment_last and code.local_count < width))
+            if (shape != .environment_last and code.local_count < width)
+                return error.InvalidProgram;
+            if (code.chunk.classes.items.len != 1 or
+                (code.chunk.classes.items[0].capture_environment != null) != frame_capture)
                 return error.InvalidProgram;
             var checksum = foldChecksum(source.len, width);
             checksum = foldChecksum(checksum, @backingInt(shape));

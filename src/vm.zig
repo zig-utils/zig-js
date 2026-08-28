@@ -9410,7 +9410,8 @@ fn runChunk(
                 try stack.append(stack_alloc, exec.scratch[inst.a]);
             },
             .eval_class => {
-                const node = chunk.classes.items[inst.a];
+                const template = &chunk.classes.items[inst.a];
+                const node = template.node;
                 const c = node.class_expr;
                 const total_count: usize = inst.b;
                 const heritage_count: usize = if (c.superclass != null) 2 else 0;
@@ -9426,7 +9427,7 @@ fn runChunk(
                     .prototype = stack.pop().?,
                     .constructor = stack.pop().?,
                 } else null;
-                try stack.append(stack_alloc, try vm.evalClassWithPreparedHeritage(c.name, c.inferred_name, c.members, c.source, heritage, keys));
+                try stack.append(stack_alloc, try evalClassTemplate(vm, template, frame, heritage, keys));
             },
             .template_object => {
                 const node = chunk.templates.items[inst.a];
@@ -10908,6 +10909,79 @@ fn binOp(op: bc.Op) ast.BinaryOp {
     };
 }
 
+fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame: ?*Frame, heritage: ?Interpreter.PreparedClassHeritage, keys: []const Value) EvalError!Value {
+    const saved_environment = vm.env;
+    const saved_environment_root = if (template.capture_environment != null)
+        try vm.pushTempEnvRoot(saved_environment)
+    else
+        null;
+    defer if (saved_environment_root) |root| {
+        // The full defining view includes frame-backed lexicals; restore the
+        // runtime-only class/handler depth even when construction throws/OOMs.
+        vm.env = vm.tempEnvRoot(root, saved_environment);
+        vm.restoreTempEnvRoots(root);
+    };
+    if (template.capture_environment) |plan| {
+        const defining_frame = frame orelse
+            return vm.throwError("InternalError", "class capture requires its defining activation");
+        const materialized = try materializeDirectEvalEnvironment(vm, defining_frame, plan);
+        materialized.environment.markCaptured();
+    }
+    const class = template.node.class_expr;
+    return vm.evalClassWithPreparedHeritage(class.name, class.inferred_name, class.members, class.source, heritage, keys);
+}
+
+test "deferred class capture allocation failure restores its runtime environment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "function outer(seed){return class Box{static field=seed;static{this.next=seed;}read(){return seed;}};}");
+    const compiled = try Compiler.compilePlainFunction(allocator, (try parser.parseProgram()).program[0].func_decl);
+    const template = &compiled.chunk.classes.items[0];
+    var root = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&root, root_shape);
+    const slots = try allocator.alloc(Value, compiled.local_count);
+    @memset(slots, Value.undef());
+    slots[0] = Value.num(7);
+    var failures: usize = 0;
+    var succeeded = false;
+    for (0..2048) |fail_index| {
+        var class_environment = Environment{ .arena = allocator, .parent = &root };
+        var frame = Frame{ .slots = slots, .parent = null, .closure_environment = &root };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &class_environment, .root_shape = root_shape });
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        const attempt = evalClassTemplate(&machine, template, &frame, null, &.{});
+        try std.testing.expectEqual(&class_environment, machine.env);
+        if (attempt) |class| {
+            const function = Interpreter.funcOf(class) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(f64, 7), function.closure.get("seed").?.asNum());
+            frame.writeSlot(0, Value.num(9), false);
+            try std.testing.expectEqual(@as(f64, 9), function.closure.get("seed").?.asNum());
+            try std.testing.expect(frame.escaped.load(.acquire));
+            succeeded = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+    }
+    try std.testing.expect(succeeded and failures > 10);
+
+    const context = try @import("context.zig").Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer context.destroy();
+    var machine = context.interpreter();
+    var frame = Frame{ .slots = slots, .parent = null, .closure_environment = machine.env };
+    var unavailable = std.testing.FailingAllocator.init(machine.arena, .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = unavailable.allocator();
+    try std.testing.expectError(error.OutOfMemory, evalClassTemplate(&machine, template, &frame, null, &.{}));
+    try std.testing.expectEqual(&context.env, machine.env);
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+    try std.testing.expect(frame.direct_eval_environment.load(.acquire) == null);
+    try std.testing.expect(!frame.escaped.load(.acquire));
+}
+
 /// Build a Function value from a template, capturing the current `frame` as the
 /// closure's upvalue source. Templates with a compiled `chunk` take the VM path;
 /// env-mode templates may leave it null and use the tree-walker body fallback.
@@ -11186,8 +11260,13 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
                 return vm.throwError("TypeError", "value is not a constructor");
             if (func.chunk) |fchunk| {
                 const this_val = try vm.newInstance(callee.asObj());
+                const this_root = try vm.pushTempRoot(this_val);
+                defer vm.restoreTempRoots(this_root);
                 const ret = try runFunction(vm, func, fchunk, args, this_val, callee);
-                return if (ret.isObject()) ret else this_val;
+                return if (ret.isObject() and !ret.asObj().is_symbol and !ret.asObj().is_bigint)
+                    ret
+                else
+                    vm.tempRoot(this_root, this_val);
             }
         }
     }
