@@ -7702,12 +7702,24 @@ fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void {
 /// The instruction loop proper. Operates on `exec.stack` directly so the
 /// operand stack is always current when a throw unwinds (and persists across a
 /// generator's yield/resume). Returns the completion value or propagates a throw.
+/// A temporal-dead-zone read or write names its binding the way the
+/// tree-walker does. Every function chunk populates `debug_local_names`, so the
+/// name costs nothing until the error path is taken; the upvalue opcodes reach
+/// into an ancestor activation whose chunk this frame does not retain, and keep
+/// the unnamed wording.
+fn throwTdzSlot(vm: *Interpreter, chunk: *const Chunk, slot: u32) EvalError {
+    if (slot < chunk.debug_local_names.len and chunk.debug_local_names[slot].len != 0)
+        return vm.throwUninitializedBinding(chunk.debug_local_names[slot]);
+    return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+}
+
 fn storeStaticBindingFallback(
     vm: *Interpreter,
     frame: ?*Frame,
     fallback: bc.BindingReferenceFallback,
     stored: Value,
     parallel: bool,
+    name: []const u8,
 ) EvalError!void {
     switch (fallback.op) {
         .store_local => frame.?.writeSlot(fallback.a, stored, parallel),
@@ -7718,8 +7730,8 @@ fn storeStaticBindingFallback(
             const in_tdz = vm.isTdz(target.slots[fallback.a]);
             if (!in_tdz and fallback.b == 0) target.slots[fallback.a] = stored;
             target.unlockSlots(held);
-            if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
-            if (fallback.b != 0) return vm.throwError("TypeError", "Assignment to constant variable");
+            if (in_tdz) return vm.throwUninitializedBinding(name);
+            if (fallback.b != 0) return vm.throwError("TypeError", "Assignment to constant variable.");
         },
         .store_upval, .store_upval_mapped, .store_upval_lexical => {
             var target = frame.?;
@@ -7736,8 +7748,8 @@ fn storeStaticBindingFallback(
             const in_tdz = fallback.op == .store_upval_lexical and vm.isTdz(target.slots[slot]);
             if (!in_tdz and !immutable) target.slots[slot] = stored;
             target.unlockSlots(held);
-            if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
-            if (immutable) return vm.throwError("TypeError", "Assignment to constant variable");
+            if (in_tdz) return vm.throwUninitializedBinding(name);
+            if (immutable) return vm.throwError("TypeError", "Assignment to constant variable.");
         },
         else => return vm.throwError("InternalError", "invalid binding-reference fallback"),
     }
@@ -7748,13 +7760,14 @@ fn loadStaticBindingFallback(
     frame: ?*Frame,
     fallback: bc.BindingReferenceFallback,
     parallel: bool,
+    name: []const u8,
 ) EvalError!Value {
     return switch (fallback.op) {
         .store_local, .store_local_mapped => frame.?.readSlot(fallback.a, parallel),
         .store_local_lexical => blk: {
             const value_word = frame.?.readSlot(fallback.a, parallel);
             if (vm.isTdz(value_word))
-                return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                return vm.throwUninitializedBinding(name);
             break :blk value_word;
         },
         .store_upval, .store_upval_mapped, .store_upval_lexical => blk: {
@@ -7765,7 +7778,7 @@ fn loadStaticBindingFallback(
             const slot = if (fallback.op == .store_upval_lexical) fallback.b & ~immutable_mask else fallback.b;
             const value_word = target.readSlot(slot, parallel);
             if (fallback.op == .store_upval_lexical and vm.isTdz(value_word))
-                return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                return vm.throwUninitializedBinding(name);
             break :blk value_word;
         },
         else => vm.throwError("InternalError", "invalid binding-reference fallback"),
@@ -7958,7 +7971,7 @@ fn runChunk(
                     exec.binding_references[inst.a] = .empty;
                 };
                 const loaded: interp.CapturedBindingValue = if (reference == .static)
-                    .{ .value = try loadStaticBindingFallback(vm, frame, plan.fallback, parallel_sync) }
+                    .{ .value = try loadStaticBindingFallback(vm, frame, plan.fallback, parallel_sync, chunk.names.items[plan.name_index]) }
                 else
                     try vm.loadCapturedBindingReference(
                         reference,
@@ -7976,7 +7989,7 @@ fn runChunk(
                 exec.binding_references[inst.a] = .empty;
                 const stored = stack.pop().?;
                 if (reference == .static)
-                    try storeStaticBindingFallback(vm, frame, plan.fallback, stored, parallel_sync)
+                    try storeStaticBindingFallback(vm, frame, plan.fallback, stored, parallel_sync, chunk.names.items[plan.name_index])
                 else
                     try vm.storeCapturedBindingReference(reference, chunk.names.items[plan.name_index], stored);
             },
@@ -8121,7 +8134,7 @@ fn runChunk(
                 const v = cf.slots[inst.a];
                 const in_tdz = vm.isTdz(v);
                 cf.unlockSlots(held);
-                if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                if (in_tdz) return throwTdzSlot(vm, chunk, inst.a);
                 try stack.append(stack_alloc, v);
             },
             .store_local => {
@@ -8142,8 +8155,8 @@ fn runChunk(
                 const in_tdz = vm.isTdz(cf.slots[inst.a]);
                 if (!in_tdz and inst.b == 0) cf.slots[inst.a] = v;
                 cf.unlockSlots(held);
-                if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
-                if (inst.b != 0) return vm.throwError("TypeError", "Assignment to constant variable");
+                if (in_tdz) return throwTdzSlot(vm, chunk, inst.a);
+                if (inst.b != 0) return vm.throwError("TypeError", "Assignment to constant variable.");
             },
             .load_upval => {
                 var f = frame.?;
@@ -8199,7 +8212,7 @@ fn runChunk(
                 if (!in_tdz and !immutable) f.slots[slot] = v;
                 f.unlockSlots(held);
                 if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
-                if (immutable) return vm.throwError("TypeError", "Assignment to constant variable");
+                if (immutable) return vm.throwError("TypeError", "Assignment to constant variable.");
             },
 
             .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => {

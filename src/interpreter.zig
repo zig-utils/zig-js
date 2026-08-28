@@ -3985,7 +3985,7 @@ pub const Interpreter = struct {
                     // deleted it), GetBindingValue with S=true throws a
                     // ReferenceError; a sloppy reference reads undefined.
                     if (!try self.hasPropertyResult(self.tempRoot(object_root, object_fallback).asObj(), name)) {
-                        if (self.strict) return self.throwError("ReferenceError", name);
+                        if (self.strict) return self.throwNotDefined(name);
                         return .{ .value = Value.undef() };
                     }
                     const result = try self.getProperty(self.tempRoot(object_root, object_fallback), name);
@@ -4689,6 +4689,18 @@ pub const Interpreter = struct {
     /// built rather than literal; the arena owns the text for the frame's life.
     pub fn throwErrorFmt(self: *Interpreter, name: []const u8, comptime fmt: []const u8, fmt_args: anytype) EvalError {
         return self.throwError(name, try std.fmt.allocPrint(self.arena, fmt, fmt_args));
+    }
+
+    /// GetValue/PutValue on an unresolvable Reference. JavaScriptCore words this
+    /// "Can't find variable: x"; the name is the only thing a caller can act on.
+    pub fn throwNotDefined(self: *Interpreter, name: []const u8) EvalError {
+        return self.throwErrorFmt("ReferenceError", "Can't find variable: {s}", .{name});
+    }
+
+    /// A declarative binding read or written inside its temporal dead zone.
+    /// Distinct from `throwNotDefined`: the binding exists, it is uninitialized.
+    pub fn throwUninitializedBinding(self: *Interpreter, name: []const u8) EvalError {
+        return self.throwErrorFmt("ReferenceError", "Cannot access '{s}' before initialization.", .{name});
     }
 
     fn throwMissingRequiredChunk(self: *Interpreter, func: *const Function, kind: []const u8) EvalError {
@@ -15087,14 +15099,14 @@ pub const Interpreter = struct {
         // wrongly falls through to a fresh global.
         if (try self.assignWithObject(name)) |o| {
             const still = try self.hasPropertyResult(o, name); // SetMutableBinding step 2
-            if (!still and self.strict) return self.throwError("ReferenceError", name);
+            if (!still and self.strict) return self.throwNotDefined(name);
             return self.setMember(Value.obj(o), name, v);
         }
         // SetMutableBinding observes an uninitialized declarative binding before
         // its mutability. In particular `const x = (x = 1)` is a ReferenceError,
         // not the TypeError used for assignment after initialization.
         if (self.env.get(name)) |current|
-            if (self.isTdz(current)) return self.throwError("ReferenceError", name);
+            if (self.isTdz(current)) return self.throwUninitializedBinding(name);
         if (self.env.isAlias(name)) return self.throwError("TypeError", "Assignment to constant variable.");
         if (self.env.isConst(name)) |c| {
             if (c) return self.throwError("TypeError", "Assignment to constant variable.");
@@ -15105,7 +15117,7 @@ pub const Interpreter = struct {
         }
         if (self.env.get(name) == null) {
             if (self.strict and !try self.globalHasBinding(name))
-                return self.throwError("ReferenceError", name);
+                return self.throwNotDefined(name);
             if (self.currentGlobalObject()) |g| return self.setMember(Value.obj(g), name, v);
         }
         if (self.globalBindingObject(name)) |g| {
@@ -15135,7 +15147,7 @@ pub const Interpreter = struct {
                 const object_root = try self.pushTempRoot(object_fallback);
                 defer self.restoreTempRoots(object_root);
                 if (!try self.hasPropertyResult(self.tempRoot(object_root, object_fallback).asObj(), name)) {
-                    if (self.strict) return self.throwError("ReferenceError", name);
+                    if (self.strict) return self.throwNotDefined(name);
                     return .{ .value = Value.undef() };
                 }
                 const result = try self.getProperty(self.tempRoot(object_root, object_fallback), name);
@@ -15149,12 +15161,12 @@ pub const Interpreter = struct {
             },
             .unresolvable => {
                 if (allow_unresolvable) return .{ .value = Value.undef() };
-                return self.throwError("ReferenceError", name);
+                return self.throwNotDefined(name);
             },
             .environment => |environment| {
                 const result = environment.getOwnResolved(name) orelse
-                    return self.throwError("ReferenceError", name);
-                if (self.isTdz(result)) return self.throwError("ReferenceError", name);
+                    return self.throwNotDefined(name);
+                if (self.isTdz(result)) return self.throwUninitializedBinding(name);
                 return .{ .value = result };
             },
         }
@@ -15166,12 +15178,12 @@ pub const Interpreter = struct {
         // References remain mandatory for assignment/update/destructuring paths
         // whose RHS can retarget the environment before PutValue.
         if (try self.lookupIdentValue(name)) |resolved| {
-            if (self.isTdz(resolved.value)) return self.throwError("ReferenceError", name);
+            if (self.isTdz(resolved.value)) return self.throwUninitializedBinding(name);
             return resolved;
         }
         if (try self.globalProp(name)) |global| return .{ .value = global };
         if (allow_unresolvable) return .{ .value = Value.undef() };
-        return self.throwError("ReferenceError", name);
+        return self.throwNotDefined(name);
     }
 
     /// PutValue for a dynamically captured identifier Reference. Static
@@ -15193,7 +15205,7 @@ pub const Interpreter = struct {
                 const object_root = try self.pushTempRoot(object_fallback);
                 defer self.restoreTempRoots(object_root);
                 const still = try self.hasPropertyResult(self.tempRoot(object_root, object_fallback).asObj(), name);
-                if (!still and self.strict) return self.throwError("ReferenceError", name);
+                if (!still and self.strict) return self.throwNotDefined(name);
                 return self.setMember(
                     self.tempRoot(object_root, object_fallback),
                     name,
@@ -15201,24 +15213,24 @@ pub const Interpreter = struct {
                 );
             },
             .unresolvable => {
-                if (self.strict) return self.throwError("ReferenceError", name);
+                if (self.strict) return self.throwNotDefined(name);
                 const global = self.currentGlobalObject() orelse return self.env.assign(name, self.tempRoot(value_root, v));
                 return self.setMember(Value.obj(global), name, self.tempRoot(value_root, v));
             },
             .environment => |environment| {
                 switch (environment.resolvedBindingState(name, self.tdz_marker)) {
-                    .tdz => return self.throwError("ReferenceError", name),
+                    .tdz => return self.throwUninitializedBinding(name),
                     .immutable => return self.throwError("TypeError", "Assignment to constant variable."),
                     .function_name => {
                         if (self.strict) return self.throwError("TypeError", "Assignment to constant variable.");
                         return;
                     },
-                    .missing => return self.throwError("ReferenceError", name),
+                    .missing => return self.throwNotDefined(name),
                     .mutable => {},
                 }
 
                 if (!environment.assignOwnResolved(name, self.tempRoot(value_root, v)))
-                    return self.throwError("ReferenceError", name);
+                    return self.throwNotDefined(name);
             },
         }
     }
@@ -35452,7 +35464,7 @@ fn moduleNsGet(self: *Interpreter, ns: *ModuleNs, key: []const u8) EvalError!Val
     if (moduleNsIndex(ns, key)) |i| {
         const v = ns.envs[i].get(ns.locals[i]) orelse Value.undef();
         if (self.tdz_marker) |tz| if (v.isObject() and v.asObj() == tz)
-            return self.throwError("ReferenceError", "Cannot access uninitialized binding");
+            return self.throwUninitializedBinding(key);
         return v;
     }
     return Value.undef();
