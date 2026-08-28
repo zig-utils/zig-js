@@ -4141,7 +4141,7 @@ pub const Interpreter = struct {
                         if (objectHasOwn(global, name)) {
                             const deleted = try self.deleteOwn(global, name);
                             if (deleted) _ = e.removeVar(name);
-                            if (!deleted and strict) return self.throwError("TypeError", "Cannot delete property");
+                            if (!deleted and strict) return self.throwError("TypeError", "Unable to delete property.");
                             return deleted;
                         }
                     }
@@ -4152,7 +4152,7 @@ pub const Interpreter = struct {
             if (record.with_object) |object| {
                 if (try self.withHasBinding(object, name)) {
                     const deleted = try self.deleteOwn(object, name);
-                    if (!deleted and strict) return self.throwError("TypeError", "Cannot delete property");
+                    if (!deleted and strict) return self.throwError("TypeError", "Unable to delete property.");
                     return deleted;
                 }
             }
@@ -4165,7 +4165,7 @@ pub const Interpreter = struct {
         if (self.global_object) |global| {
             if (objectHasOwn(global, name)) {
                 const deleted = try self.deleteOwn(global, name);
-                if (!deleted and strict) return self.throwError("TypeError", "Cannot delete property");
+                if (!deleted and strict) return self.throwError("TypeError", "Unable to delete property.");
                 return deleted;
             }
         }
@@ -6313,7 +6313,7 @@ pub const Interpreter = struct {
             const property = try self.key(machine, &buffer);
             if (self.is_super) {
                 if (!try machine.setMemberResult(base, property, rhs, machine.tempRoot(self.receiver_root, self.receiver))) {
-                    if (machine.strict) return machine.throwError("TypeError", "Cannot set property");
+                    if (machine.strict) return machine.throwSetFailed(base, property);
                 }
             } else {
                 try machine.setMember(base, property, rhs);
@@ -6541,7 +6541,7 @@ pub const Interpreter = struct {
                 update.result(self, true),
                 self.tempRoot(receiver_root, receiver),
             )) {
-                if (self.strict) return self.throwError("TypeError", "Cannot set property");
+                if (self.strict) return self.throwSetFailed(self.tempRoot(parent_root, Value.obj(parent)), store_key);
             }
             return update.result(self, prefix);
         }
@@ -8207,11 +8207,11 @@ pub const Interpreter = struct {
             const key = try key_ref.resolve(self);
             if (obj.isString()) {
                 if (std.mem.eql(u8, key, "length")) {
-                    if (strict) return self.throwError("TypeError", "Cannot delete property");
+                    if (strict) return self.throwError("TypeError", "Unable to delete property.");
                     return false;
                 }
                 if (arrayIndex(key)) |i| if (i < utf16LenOfValue(obj)) {
-                    if (strict) return self.throwError("TypeError", "Cannot delete property");
+                    if (strict) return self.throwError("TypeError", "Unable to delete property.");
                     return false;
                 };
             }
@@ -8221,7 +8221,7 @@ pub const Interpreter = struct {
         const ok = try self.deleteOwn(obj.asObj(), key);
         // Strict mode: a failed delete (a non-configurable property) is a
         // TypeError rather than a `false` result.
-        if (!ok and strict) return self.throwError("TypeError", "Cannot delete property");
+        if (!ok and strict) return self.throwError("TypeError", "Unable to delete property.");
         return ok;
     }
 
@@ -15106,12 +15106,12 @@ pub const Interpreter = struct {
         // not the TypeError used for assignment after initialization.
         if (self.env.get(name)) |current|
             if (self.isTdz(current)) return self.throwUninitializedBinding(name);
-        if (self.env.isAlias(name)) return self.throwError("TypeError", "Assignment to constant variable.");
+        if (self.env.isAlias(name)) return self.throwError("TypeError", "Attempted to assign to readonly property.");
         if (self.env.isConst(name)) |c| {
-            if (c) return self.throwError("TypeError", "Assignment to constant variable.");
+            if (c) return self.throwError("TypeError", "Attempted to assign to readonly property.");
         }
         if (self.env.isFnName(name)) {
-            if (self.strict) return self.throwError("TypeError", "Assignment to constant variable.");
+            if (self.strict) return self.throwError("TypeError", "Attempted to assign to readonly property.");
             return;
         }
         if (self.env.get(name) == null) {
@@ -15219,9 +15219,9 @@ pub const Interpreter = struct {
             .environment => |environment| {
                 switch (environment.resolvedBindingState(name, self.tdz_marker)) {
                     .tdz => return self.throwUninitializedBinding(name),
-                    .immutable => return self.throwError("TypeError", "Assignment to constant variable."),
+                    .immutable => return self.throwError("TypeError", "Attempted to assign to readonly property."),
                     .function_name => {
-                        if (self.strict) return self.throwError("TypeError", "Assignment to constant variable.");
+                        if (self.strict) return self.throwError("TypeError", "Attempted to assign to readonly property.");
                         return;
                     },
                     .missing => return self.throwNotDefined(name),
@@ -15272,12 +15272,28 @@ pub const Interpreter = struct {
         }
     }
 
+    /// The message for a `[[Set]]` that returned false. JavaScriptCore words
+    /// the three distinguishable causes separately, and all three are still
+    /// recoverable from the receiver on this (cold) path — nothing was mutated.
+    pub fn throwSetFailed(self: *Interpreter, recv: Value, key: []const u8) EvalError {
+        if (recv.isObject()) {
+            const o = recv.asObj();
+            if (o.proxyHandler() != null or o.proxy_revoked)
+                return self.throwErrorFmt("TypeError", "Proxy object's 'set' trap returned falsy value for property '{s}'", .{key});
+            if (o.is_array and std.mem.eql(u8, key, "length") and !arrayLenWritable(o))
+                return self.throwError("TypeError", "Array length is not writable");
+            if (!o.isExtensible() and o.getOwn(key) == null and o.getAccessor(key) == null)
+                return self.throwError("TypeError", "Attempting to define property on object that is not extensible.");
+        }
+        return self.throwError("TypeError", "Attempted to assign to readonly property.");
+    }
+
     /// Assign `recv[key] = v`. Arrays route integer keys to the dense element
     /// store (growing with holes); everything else is a named property. Shared
     /// by the tree-walker and the VM.
     pub fn setMember(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
         if (!try self.setMemberResult(recv, key, v, recv)) {
-            if (self.strict) return self.throwError("TypeError", "Cannot set property");
+            if (self.strict) return self.throwSetFailed(recv, key);
         }
     }
 
@@ -17154,13 +17170,13 @@ pub const Interpreter = struct {
     fn arraySetLengthThrowing(self: *Interpreter, o: *value.Object, new_len: usize) EvalError!void {
         if (o.is_array) {
             if (new_len > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
-            if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+            if (!arrayLenWritable(o)) return self.throwError("TypeError", "Array length is not writable");
             if (!try self.setArrayLength(o, new_len))
                 return self.throwError("TypeError", "Cannot delete a non-configurable array element");
             return;
         }
         if (o.boxedPrimitive()) |p| if (p.isString())
-            return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+            return self.throwError("TypeError", "Array length is not writable");
         // Set(O, "length", newLen, true) — force strict so a non-writable /
         // setter-less length on an array-like rejects with a TypeError.
         const saved = self.strict;
@@ -17271,11 +17287,11 @@ pub const Interpreter = struct {
             const element = try self.getProperty(Value.obj(o), idx);
             if (o.is_array) {
                 if (arrayElemNonConfigurable(o, last)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
-                if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+                if (!arrayLenWritable(o)) return self.throwError("TypeError", "Array length is not writable");
                 try o.truncateDenseElementsAndSetLength(self.arena, last);
                 return element;
             }
-            if (!try self.deleteOwn(o, idx)) return self.throwError("TypeError", "Cannot delete property");
+            if (!try self.deleteOwn(o, idx)) return self.throwError("TypeError", "Unable to delete property.");
             try self.setMember(Value.obj(o), "length", Value.num(@floatFromInt(last)));
             return element;
         }
@@ -17287,7 +17303,7 @@ pub const Interpreter = struct {
             const first = try self.getProperty(Value.obj(o), "0"); // fires accessor on a hole
             if (o.is_array) {
                 if (arrayElemNonConfigurable(o, 0)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
-                if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
+                if (!arrayLenWritable(o)) return self.throwError("TypeError", "Array length is not writable");
             }
             // Move each element down, delete the tail, set length.
             var k: usize = 1;
@@ -21831,7 +21847,7 @@ fn protoSetterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // object, or any change that would form a [[Prototype]] cycle. The
     // `__proto__` setter turns that false result into a TypeError.
     if (!try self.setPrototypeOfObject(o, new_proto))
-        return self.throwError("TypeError", "Cannot set object prototype");
+        return self.throwError("TypeError", "Attempted to assign to readonly property.");
     return Value.undef();
 }
 
@@ -22065,7 +22081,7 @@ fn setterIgnoringProto(self: *Interpreter, this: Value, home: ?*value.Object, ke
     // Set(this, key, v, true) — honors an own accessor or writability.
     const receiver = self.tempRoot(receiver_root, this);
     if (!try self.setMemberResult(receiver, key, self.tempRoot(value_root, v), receiver))
-        return self.throwError("TypeError", "Cannot set property");
+        return self.throwSetFailed(receiver, key);
     return Value.undef();
 }
 

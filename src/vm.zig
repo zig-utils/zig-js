@@ -4070,7 +4070,7 @@ fn setSuperProperty(vm: *Interpreter, parent: Value, name: []const u8, key: ?Val
     const receiver_root = try vm.pushTempRoot(receiver);
     const property = if (key) |computed| try propKey(vm, computed) else name;
     if (!try vm.setMemberResult(vm.tempRoot(parent_root, parent), property, vm.tempRoot(value_root, stored), vm.tempRoot(receiver_root, receiver)) and strict)
-        return vm.throwError("TypeError", "Cannot set property");
+        return vm.throwSetFailed(vm.tempRoot(parent_root, parent), property);
     return vm.tempRoot(value_root, stored);
 }
 
@@ -7731,7 +7731,7 @@ fn storeStaticBindingFallback(
             if (!in_tdz and fallback.b == 0) target.slots[fallback.a] = stored;
             target.unlockSlots(held);
             if (in_tdz) return vm.throwUninitializedBinding(name);
-            if (fallback.b != 0) return vm.throwError("TypeError", "Assignment to constant variable.");
+            if (fallback.b != 0) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
         },
         .store_upval, .store_upval_mapped, .store_upval_lexical => {
             var target = frame.?;
@@ -7749,7 +7749,7 @@ fn storeStaticBindingFallback(
             if (!in_tdz and !immutable) target.slots[slot] = stored;
             target.unlockSlots(held);
             if (in_tdz) return vm.throwUninitializedBinding(name);
-            if (immutable) return vm.throwError("TypeError", "Assignment to constant variable.");
+            if (immutable) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
         },
         else => return vm.throwError("InternalError", "invalid binding-reference fallback"),
     }
@@ -8156,7 +8156,7 @@ fn runChunk(
                 if (!in_tdz and inst.b == 0) cf.slots[inst.a] = v;
                 cf.unlockSlots(held);
                 if (in_tdz) return throwTdzSlot(vm, chunk, inst.a);
-                if (inst.b != 0) return vm.throwError("TypeError", "Assignment to constant variable.");
+                if (inst.b != 0) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
             },
             .load_upval => {
                 var f = frame.?;
@@ -8212,7 +8212,7 @@ fn runChunk(
                 if (!in_tdz and !immutable) f.slots[slot] = v;
                 f.unlockSlots(held);
                 if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
-                if (immutable) return vm.throwError("TypeError", "Assignment to constant variable.");
+                if (immutable) return vm.throwError("TypeError", "Attempted to assign to readonly property.");
             },
 
             .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => {

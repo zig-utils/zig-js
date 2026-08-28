@@ -1704,9 +1704,20 @@ fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?
     return try self.getProperty(self.tempRoot(root, Value.obj(d)), name);
 }
 
+/// The message for a `[[DefineOwnProperty]]` that returned false. Like
+/// `throwSetFailed`, JavaScriptCore words the causes separately and each is
+/// still readable from the target on this cold path.
+pub fn throwDefineFailed(self: *Interpreter, target: *value.Object, key: []const u8) HostError {
+    if (target.proxyHandler() != null or target.proxy_revoked)
+        return self.throwErrorFmt("TypeError", "Proxy's 'defineProperty' trap returned falsy value for property '{s}'", .{key});
+    if (!target.isExtensible() and target.getOwn(key) == null and target.getAccessor(key) == null)
+        return self.throwError("TypeError", "Attempting to define property on object that is not extensible.");
+    return self.throwError("TypeError", "Attempting to change value of a readonly property.");
+}
+
 fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!void {
     if (!try defineOneResult(self, target, key, d_obj))
-        return self.throwError("TypeError", "Cannot define property");
+        return throwDefineFailed(self, target, key);
 }
 
 fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!bool {
@@ -1753,7 +1764,7 @@ fn readDescriptor(self: *Interpreter, input: *value.Object) HostError!PropertyDe
 
 pub fn defineDescriptor(self: *Interpreter, target: *value.Object, key: []const u8, d: PropertyDescriptor) HostError!void {
     if (!try defineDescriptorResult(self, target, key, d))
-        return self.throwError("TypeError", "Cannot define property");
+        return throwDefineFailed(self, target, key);
 }
 
 /// [[DefineOwnProperty]] accepts a native record, never ToPropertyDescriptor.
@@ -2195,7 +2206,7 @@ fn applyProperties(self: *Interpreter, target_input: *value.Object, props: Value
     for (pending.items) |entry| {
         const descriptor = entry.descriptor.get(self);
         if (!try applyDescriptor(self, self.tempRoot(target_root, Value.obj(target_input)).asObj(), entry.key, descriptor))
-            return self.throwError("TypeError", "Cannot define property");
+            return throwDefineFailed(self, self.tempRoot(target_root, Value.obj(target_input)).asObj(), entry.key);
     }
 }
 
@@ -2459,7 +2470,7 @@ pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) H
     if (!o.isObject()) return o; // a primitive `this` has no own [[Prototype]] to set
     const new_proto: ?*value.Object = if (p.isObject()) p.asObj() else null;
     if (!try self.setPrototypeOfObject(o.asObj(), new_proto))
-        return self.throwError("TypeError", "Cannot set object prototype");
+        return self.throwError("TypeError", "Attempted to assign to readonly property.");
     return o;
 }
 
