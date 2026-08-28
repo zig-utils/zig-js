@@ -4178,15 +4178,7 @@ fn applyUnaryEffect(vm: *Interpreter, op: bc.Op, input: Value) EvalError!Value {
     return switch (op) {
         .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => vm.applyUnary(unaryOp(op), input),
         .to_property_key => vm.toPropertyKeyValue(input),
-        .inc, .dec => update: {
-            const numeric = try vm.toNumericPrimitive(input);
-            if (numeric.isObject() and numeric.asObj().is_bigint) {
-                const one = try vm.makeBigInt(1);
-                break :update vm.applyBinary(if (op == .inc) .add else .sub, numeric, one);
-            }
-            const number = try vm.toNumberV(numeric);
-            break :update Value.num(if (op == .inc) number + 1 else number - 1);
-        },
+        .inc, .dec => vm.applyNumericUpdate(input, op == .inc),
         else => unreachable,
     };
 }

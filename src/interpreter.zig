@@ -6261,36 +6261,75 @@ pub const Interpreter = struct {
         }
     }
 
+    const NumericUpdate = struct {
+        old: Value,
+        updated: Value,
+        root_mark: ?usize = null,
+
+        fn result(self: NumericUpdate, machine: *Interpreter, prefix: bool) Value {
+            const fallback = if (prefix) self.updated else self.old;
+            return if (self.root_mark) |mark|
+                machine.tempRoot(mark + @intFromBool(prefix), fallback)
+            else
+                fallback;
+        }
+
+        fn deinit(self: NumericUpdate, machine: *Interpreter) void {
+            if (self.root_mark) |mark| machine.restoreTempRoots(mark);
+        }
+    };
+
+    fn prepareNumericUpdate(self: *Interpreter, input: Value, inc: bool) EvalError!NumericUpdate {
+        // Update Expressions performs ToNumeric once before PutValue. Keep the
+        // Number hot path allocation-free; managed old/new BigInts must remain
+        // rewritable through a setter, including the postfix expression result.
+        if (input.isNumber()) return .{
+            .old = input,
+            .updated = Value.num(if (inc) input.asNum() + 1 else input.asNum() - 1),
+        };
+        const mark = try self.pushTempRoot(input);
+        errdefer self.restoreTempRoots(mark);
+        const numeric = try self.toNumericValue(self.tempRoot(mark, input));
+        if (numeric.isNumber()) {
+            self.restoreTempRoots(mark);
+            return .{
+                .old = numeric,
+                .updated = Value.num(if (inc) numeric.asNum() + 1 else numeric.asNum() - 1),
+            };
+        }
+        self.setTempRoot(mark, numeric);
+        const one = try self.makeBigInt(1);
+        const updated = try self.applyBinary(if (inc) .add else .sub, self.tempRoot(mark, numeric), one);
+        _ = try self.pushTempRoot(updated);
+        return .{ .old = numeric, .updated = updated, .root_mark = mark };
+    }
+
+    /// Shared by interpreter updates and the VM/native runtime-operation path.
+    pub fn applyNumericUpdate(self: *Interpreter, input: Value, inc: bool) EvalError!Value {
+        const update = try self.prepareNumericUpdate(input, inc);
+        defer update.deinit(self);
+        return update.result(self, true);
+    }
+
     fn evalUpdate(self: *Interpreter, inc: bool, prefix: bool, target: *Node) EvalError!Value {
         if (target.* == .identifier) {
             const name = target.identifier;
             const reference = try self.captureBindingReference(name, null);
             const reference_root = try self.pushTempBindingReferenceRoot(reference);
             defer self.restoreTempBindingReferenceRoots(reference_root);
-            var old = (try self.loadCapturedBindingReference(
+            const old = (try self.loadCapturedBindingReference(
                 self.tempBindingReferenceRoot(reference_root, reference),
                 name,
                 false,
             )).value;
-            if (old.isObject() and !old.asObj().is_bigint and !old.asObj().is_symbol)
-                old = try self.toPrimitive(old, .number);
-            if (old.isObject() and old.asObj().is_bigint) {
-                const updated = try self.makeBigInt(if (inc) old.asObj().bigIntValue() +% 1 else old.asObj().bigIntValue() -% 1);
-                try self.storeCapturedBindingReference(
-                    self.tempBindingReferenceRoot(reference_root, reference),
-                    name,
-                    updated,
-                );
-                return if (prefix) updated else old;
-            }
-            const old_number = old.toNumber();
-            const updated = Value.num(if (inc) old_number + 1 else old_number - 1);
+            const update = try self.prepareNumericUpdate(old, inc);
+            defer update.deinit(self);
             try self.storeCapturedBindingReference(
                 self.tempBindingReferenceRoot(reference_root, reference),
                 name,
-                updated,
+                update.result(self, true),
             );
-            return if (prefix) updated else Value.num(old_number);
+            return update.result(self, prefix);
         }
         // A member update evaluates its Reference once: both a side-effecting
         // base in `base().name++` and a computed key are captured for the later
@@ -6298,73 +6337,72 @@ pub const Interpreter = struct {
         if (target.* == .member and !target.member.optional) {
             const member = target.member;
             const recv = try self.eval(member.object);
-            const key = if (member.computed) |computed| key: {
+            const recv_root = try self.pushTempRoot(recv);
+            defer self.restoreTempRoots(recv_root);
+            var key_value: ?Value = null;
+            var key_root: ?usize = null;
+            if (member.computed) |computed| {
                 // Evaluate the key expression (GetValue) but reject a nullish
                 // base before observable ToPropertyKey coercion.
                 const key_val = try self.eval(computed);
-                if (recv.isNull() or recv.isUndefined())
+                key_root = try self.pushTempRoot(key_val);
+                const current_recv = self.tempRoot(recv_root, recv);
+                if (current_recv.isNull() or current_recv.isUndefined())
                     return self.throwError("TypeError", "Cannot read properties of null or undefined");
-                break :key try self.keyOf(key_val);
-            } else member.property;
-            var ov = try self.getProperty(recv, key);
-            if (ov.isObject() and !ov.asObj().is_bigint and !ov.asObj().is_symbol)
-                ov = try self.toPrimitive(ov, .number);
-            if (ov.isObject() and ov.asObj().is_bigint) {
-                const b = ov.asObj().bigIntValue();
-                const up = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
-                try self.setMember(recv, key, up);
-                return if (prefix) up else ov;
+                key_value = try self.toPropertyKeyValue(self.tempRoot(key_root.?, key_val));
+                self.setTempRoot(key_root.?, key_value.?);
             }
-            const o = ov.toNumber();
-            const up = if (inc) o + 1 else o - 1;
-            try self.setMember(recv, key, Value.num(up));
-            return Value.num(if (prefix) up else o);
+            const key = if (key_value) |kv| try self.keyOf(self.tempRoot(key_root.?, kv)) else member.property;
+            const update = try self.prepareNumericUpdate(try self.getProperty(self.tempRoot(recv_root, recv), key), inc);
+            defer update.deinit(self);
+            // Re-encode a primitive key after GetValue/ToNumeric: no user coercion is
+            // repeated, and neither a moved receiver nor key storage is reused.
+            const store_key = if (key_value) |kv| try self.keyOf(self.tempRoot(key_root.?, kv)) else member.property;
+            try self.setMember(self.tempRoot(recv_root, recv), store_key, update.result(self, true));
+            return update.result(self, prefix);
         }
         if (target.* == .super_member) {
             const m = target.super_member;
             const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
             if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-            const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
-            const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
-            const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
-            var ov = try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
-            if (ov.isObject() and !ov.asObj().is_bigint and !ov.asObj().is_symbol)
-                ov = try self.toPrimitive(ov, .number);
-            if (ov.isObject() and ov.asObj().is_bigint) {
-                const b = ov.asObj().bigIntValue();
-                const up = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
-                if (!try self.setMemberResult(Value.obj(parent), key, up, self.this_value)) {
-                    if (self.strict) return self.throwError("TypeError", "Cannot set property");
-                }
-                return if (prefix) up else ov;
+            const home_root = try self.pushTempRoot(Value.obj(home));
+            defer self.restoreTempRoots(home_root);
+            const receiver = self.this_value;
+            const receiver_root = try self.pushTempRoot(receiver);
+            var key_value: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
+            const key_root: ?usize = if (key_value) |kv| try self.pushTempRoot(kv) else null;
+            const parent = self.tempRoot(home_root, Value.obj(home)).asObj().protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+            const parent_root = try self.pushTempRoot(Value.obj(parent));
+            if (key_value) |kv| {
+                key_value = try self.toPropertyKeyValue(self.tempRoot(key_root.?, kv));
+                self.setTempRoot(key_root.?, key_value.?);
             }
-            const o = ov.toNumber();
-            const up = if (inc) o + 1 else o - 1;
-            if (!try self.setMemberResult(Value.obj(parent), key, Value.num(up), self.this_value)) {
+            const key = if (key_value) |kv| try self.keyOf(self.tempRoot(key_root.?, kv)) else m.property;
+            const update = try self.prepareNumericUpdate(try self.getPropertyWithReceiver(
+                self.tempRoot(parent_root, Value.obj(parent)),
+                key,
+                self.tempRoot(receiver_root, receiver),
+            ), inc);
+            defer update.deinit(self);
+            const store_key = if (key_value) |kv| try self.keyOf(self.tempRoot(key_root.?, kv)) else m.property;
+            if (!try self.setMemberResult(
+                self.tempRoot(parent_root, Value.obj(parent)),
+                store_key,
+                update.result(self, true),
+                self.tempRoot(receiver_root, receiver),
+            )) {
                 if (self.strict) return self.throwError("TypeError", "Cannot set property");
             }
-            return Value.num(if (prefix) up else o);
+            return update.result(self, prefix);
         }
         if (target.* == .call) {
             _ = try self.eval(target);
             return self.throwError("ReferenceError", "invalid assignment target");
         }
-        var old_val = try self.eval(target);
-        // ToNumeric: an object operand coerces via ToPrimitive(number); a BigInt
-        // is incremented/decremented by 1n (not the Number 1), and the result
-        // stays a BigInt.
-        if (old_val.isObject() and !old_val.asObj().is_bigint and !old_val.asObj().is_symbol)
-            old_val = try self.toPrimitive(old_val, .number);
-        if (old_val.isObject() and old_val.asObj().is_bigint) {
-            const b = old_val.asObj().bigIntValue();
-            const updated = try self.makeBigInt(if (inc) b +% 1 else b -% 1);
-            try self.assignTo(target, updated);
-            return if (prefix) updated else old_val;
-        }
-        const old = old_val.toNumber();
-        const updated = if (inc) old + 1 else old - 1;
-        try self.assignTo(target, Value.num(updated));
-        return Value.num(if (prefix) updated else old);
+        const update = try self.prepareNumericUpdate(try self.eval(target), inc);
+        defer update.deinit(self);
+        try self.assignTo(target, update.result(self, true));
+        return update.result(self, prefix);
     }
 
     /// Pre-declare every `var`-scoped name in `stmts` as `undefined` (hoisting),
@@ -53892,6 +53930,153 @@ test "binary observable coercions remain once-only and left-to-right" {
         \\results.join(',') + '|' + log
     );
     try std.testing.expectEqualStrings("AB,5,true,2,true,true,LM|abcdefghijklm", try result.asWtf8(arena.allocator()));
+}
+
+test "numeric updates preserve exact ToNumeric and arbitrary-precision results" {
+    const Context = @import("context.zig").Context;
+    const cases = [_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
+        .{ .name = "symbol_identifier", .source = "var x=Symbol('x'),old=x,result;try{x++;result='miss';}catch(e){result=e.name+':'+(x===old);}", .expected = "TypeError:true" },
+        .{ .name = "symbol_member", .source = "var n=0,s=Symbol(),box={get x(){return s;},set x(v){n++;}},result;try{--box.x;result='miss';}catch(e){result=e.name+':'+n;}", .expected = "TypeError:0" },
+        .{ .name = "wrapped_symbol", .source = "var x=Object(Symbol()),old=x,result;try{++x;result='miss';}catch(e){result=e.name+':'+(x===old);}", .expected = "TypeError:true" },
+        .{ .name = "primitive_symbol", .source = "var log='',x={[Symbol.toPrimitive](hint){log+=hint;return Symbol();}},old=x,result;try{x--;result='miss';}catch(e){result=e.name+':'+log+':'+(x===old);}", .expected = "TypeError:number:true" },
+        .{ .name = "super_symbol", .source = "globalThis.updateSymbolStores=0;class B{get x(){return Symbol();}set x(v){globalThis.updateSymbolStores++;}}class C extends B{constructor(){super();this.result=super.x++;}}var result;try{var obj=new C();result='miss';}catch(e){result=e.name+':'+globalThis.updateSymbolStores;}", .expected = "TypeError:0" },
+        .{ .name = "positive_boundary", .source = "var x=170141183460469231731687303715884105727n,old=x++;var result=old+':'+x;", .expected = "170141183460469231731687303715884105727:170141183460469231731687303715884105728" },
+        .{ .name = "negative_boundary", .source = "var x=-170141183460469231731687303715884105728n,old=x--;var result=old+':'+x;", .expected = "-170141183460469231731687303715884105728:-170141183460469231731687303715884105729" },
+        .{ .name = "wide_identifier", .source = "var x=1361129467683753853853498429727072845824n,a=x++,b=++x,c=x--,d=--x;var result=[a,b,c,d,x,typeof a].join(':');", .expected = "1361129467683753853853498429727072845824:1361129467683753853853498429727072845826:1361129467683753853853498429727072845826:1361129467683753853853498429727072845824:1361129467683753853853498429727072845824:bigint" },
+        .{ .name = "wide_member", .source = "var log='',saved,box={get x(){log+='get';return {valueOf(){log+='numeric';return 1361129467683753853853498429727072845824n;}};},set x(v){log+='set';saved=v;}},key={toString(){log+='key';return 'x';}};var old=box[key]++;var result=old+':'+saved+':'+log;", .expected = "1361129467683753853853498429727072845824:1361129467683753853853498429727072845825:keygetnumericset" },
+        .{ .name = "wide_super", .source = "class B{get x(){return -1361129467683753853853498429727072845824n;}set x(v){this.saved=v;}}class C extends B{constructor(){super();this.result=--super.x;}}var c=new C();var result=c.result+':'+c.saved;", .expected = "-1361129467683753853853498429727072845825:-1361129467683753853853498429727072845825" },
+        .{ .name = "number_conversion", .source = "var log='',x={valueOf(){log+='n';return '3';}},a=x++,z=-0,b=z--;var result=[a,typeof a,x,log,Object.is(b,-0),z].join(':');", .expected = "3:number:4:n:true:-1" },
+        .{ .name = "abrupt_conversion", .source = "var log='',box={get x(){log+='get';return {valueOf(){log+='numeric';throw 7;}};},set x(v){log+='set';}},result;try{box.x++;result='miss';}catch(e){result=e+':'+log;}", .expected = "7:getnumeric" },
+        .{ .name = "generator", .source = "function* run(){var s=Symbol(),error;try{s++;}catch(e){error=e.name;}var x=1361129467683753853853498429727072845824n,old=x++;yield old;return x+':'+error;}var g=run(),a=g.next().value,b=g.next().value;var result=a+':'+b;", .expected = "1361129467683753853853498429727072845824:1361129467683753853853498429727072845825:TypeError" },
+        .{ .name = "const_update", .source = "const x=1361129467683753853853498429727072845824n;var result;try{++x;result='miss';}catch(e){result=e.name+':'+x;}", .expected = "TypeError:1361129467683753853853498429727072845824" },
+        .{ .name = "with_update", .source = "var x=99,box={x:1361129467683753853853498429727072845824n},old;with(box){old=x++;}var result=old+':'+box.x+':'+x;", .expected = "1361129467683753853853498429727072845824:1361129467683753853853498429727072845825:99" },
+        .{ .name = "setter_abrupt", .source = "var log='',box={get x(){log+='get';return 1361129467683753853853498429727072845824n;},set x(v){log+='set'+v;throw 7;}},result;try{box.x++;result='miss';}catch(e){result=e+':'+log;}", .expected = "7:getset1361129467683753853853498429727072845825" },
+    };
+    for ([_]BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |case| {
+            const source = try std.fmt.allocPrint(std.testing.allocator, "(function(){{{s}return result;}})()", .{case.source});
+            defer std.testing.allocator.free(source);
+            errdefer std.debug.print("numeric update {s} ({s}): {s}\n", .{ case.name, @tagName(mode), case.source });
+            const result = try ctx.evaluate(source);
+            try std.testing.expectEqualStrings(case.expected, result.asStr());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "numeric updates unwind temporary roots on every allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            var env = Environment{ .arena = arena.allocator() };
+            // This operation does not collect; the sentinel enables the same
+            // precise-root publication/unwind path used by a managed Context.
+            var gc_sentinel: u8 = 0;
+            var machine = Interpreter{
+                .arena = arena.allocator(),
+                .env = &env,
+                .root_shape = undefined,
+                .gc = &gc_sentinel,
+            };
+            defer std.debug.assert(machine.gc_temp_roots.items.len == 0);
+            const input = try machine.makeBigIntText("1361129467683753853853498429727072845824");
+            const input_root = try machine.pushTempRoot(input);
+            defer machine.restoreTempRoots(input_root);
+            const next = machine.applyNumericUpdate(machine.tempRoot(input_root, input), true) catch |err| {
+                try std.testing.expectEqual(input_root + 1, machine.gc_temp_roots.items.len);
+                return err;
+            };
+            try std.testing.expectEqualStrings("1361129467683753853853498429727072845825", next.asObj().bigIntText().?);
+            try std.testing.expectEqual(input_root + 1, machine.gc_temp_roots.items.len);
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+
+    var exhausted = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var machine = Interpreter{ .arena = exhausted.allocator(), .env = undefined, .root_shape = undefined };
+    try std.testing.expectEqual(@as(f64, 8), (try machine.applyNumericUpdate(Value.num(7), true)).asNum());
+    try std.testing.expectEqual(@as(f64, 6), (try machine.applyNumericUpdate(Value.num(7), false)).asNum());
+}
+
+test "numeric updates retain receiver key and postfix BigInt across moving nursery" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |move_in_setter| {
+        const ctx = try Context.createWith(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = true,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\function updateMovingLoop(n) {
+            \\  var total = 0;
+            \\  var i = 0;
+            \\  while (i < n) { total = total + i; i = i + 1; }
+            \\  return total;
+            \\}
+            \\for (var warm = 0; warm < 10; warm = warm + 1) updateMovingLoop(4096);
+        );
+        const loop_object = ctx.global_object.getOwn("updateMovingLoop").?.asObj();
+        const loop: *Function = @ptrCast(@alignCast(loop_object.jsFunction().?));
+        try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+        try std.testing.expect(loop.chunk.?.tier.loadCode().?.manages_steps);
+        ctx.collectGarbage();
+        ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+        _ = try ctx.evaluate(if (move_in_setter)
+            \\globalThis.updateMovingOld = 1361129467683753853853498429727072845824n;
+            \\globalThis.updateMovingKey = 'x'.repeat(32);
+            \\globalThis.updateMovingBox = {
+            \\  get [updateMovingKey]() { return updateMovingOld; },
+            \\  set [updateMovingKey](v) { updateMovingLoop(20000); this.saved = v; }
+            \\};
+        else
+            \\globalThis.updateMovingOld = 1361129467683753853853498429727072845824n;
+            \\globalThis.updateMovingKey = 'x'.repeat(32);
+            \\globalThis.updateMovingBox = {
+            \\  get [updateMovingKey]() { return { valueOf() { updateMovingLoop(20000); return updateMovingOld; } }; },
+            \\  set [updateMovingKey](v) { this.saved = v; }
+            \\};
+        );
+        var parser = try Parser.init(ctx.arena(), "updateMovingBox[updateMovingKey]++;");
+        const program = try parser.parseProgram();
+        const update = program.program[0].expr_stmt.update;
+        const box_before = ctx.global_object.getOwn("updateMovingBox").?.asObj();
+        const bigint_before = ctx.global_object.getOwn("updateMovingOld").?.asObj();
+        const gc_saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(gc_saved);
+        const sa_saved = strcell.setActiveArena(ctx.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
+        const ss_saved = stack_scan.enter(@frameAddress());
+        defer stack_scan.leave(ss_saved);
+        var machine = ctx.interpreter();
+        try ctx.pushActiveInterpreter(&machine);
+        defer ctx.popActiveInterpreter(&machine);
+        const ai_saved = gc_mod.setActiveInterpreter(&machine);
+        defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        const heap = ctx.gc.?;
+        heap.nursery_threshold_bytes = 1;
+        ctx.gc_moving_checkpoint_requested.store(true, .release);
+        const moving_before = heap.accounting().moving_minor_collections;
+        const result = try machine.evalUpdate(update.inc, update.prefix, update.target);
+        try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+        const box_after = ctx.global_object.getOwn("updateMovingBox").?.asObj();
+        try std.testing.expect(box_before != box_after);
+        try std.testing.expect(bigint_before != ctx.global_object.getOwn("updateMovingOld").?.asObj());
+        try std.testing.expectEqualStrings("1361129467683753853853498429727072845824", result.asObj().bigIntText().?);
+        try std.testing.expectEqualStrings("1361129467683753853853498429727072845825", box_after.getOwn("saved").?.asObj().bigIntText().?);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+        try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+    }
 }
 
 test "ToString canonicalizes object-produced StringData" {
