@@ -18648,9 +18648,13 @@ pub const Interpreter = struct {
                 }
                 return result;
             }
-            if (s_ascii and stringBytesAreAscii(sep)) {
-                // One byte is exactly one UTF-16 code unit for both operands,
-                // so the standard iterator is the allocation-free fast path.
+            if (stringBytesAreAscii(sep)) {
+                // An ASCII separator can only match at a code-unit boundary: every
+                // byte of a multi-byte WTF-8 sequence is >= 0x80, so no ASCII byte
+                // occurs inside one. Byte positions therefore correspond exactly to
+                // the UTF-16 positions this algorithm is specified over, whatever
+                // the haystack's representation, and each piece is a whole number
+                // of sequences. This is the allocation-free path.
                 var it = std.mem.splitSequence(u8, s, sep);
                 while (it.next()) |part| {
                     if (out.items.len >= lim) return result;
