@@ -1258,10 +1258,18 @@ var quick_numeric_call_loop_test_enabled: std.atomic.Value(bool) = .init(true);
 var quick_numeric_recurrence_hits: std.atomic.Value(u64) = .init(0);
 var quick_observable_recurrence_hits: std.atomic.Value(u64) = .init(0);
 
+/// A guard miss resumes the exact property opcode, which constructs the
+/// ConcurrentAccessError outside any held object/frame locks. Never cache this
+/// decision with a shape: Thread.restrict does not change the shape.
+inline fn quickPropertyAccessAllowed(object: *const value.Object) bool {
+    const owner = object.restrictionOwner();
+    return owner == 0 or owner == @as(u64, @intCast(std.Thread.getCurrentId()));
+}
+
 inline fn quickPlainObject(value_: Value) ?*value.Object {
     if (!value_.isObject()) return null;
     const object = value_.asObj();
-    if (object.is_array or object.accessorsMap() != null or object.attrsMap() != null) return null;
+    if (!quickPropertyAccessAllowed(object) or object.is_array or object.accessorsMap() != null or object.attrsMap() != null) return null;
     return object;
 }
 
@@ -1276,6 +1284,7 @@ fn quickArrayPrototypeData(
     name: []const u8,
     parallel_sync: bool,
 ) ?Value {
+    if (!quickPropertyAccessAllowed(array)) return null;
     if (parallel_sync) array.lockProperties();
     const plain_receiver = array.accessorsMap() == null and array.attrsMap() == null;
     const own_data = if (plain_receiver) if (array.shape) |shape| shape.lookup(name) else null else null;
@@ -2492,8 +2501,10 @@ fn tryQuickNumericCallLoop(
             (if (completes_loop) @as(u64, 4) else 0);
         if (completed_extra_steps > max_extra_steps) break;
         if (parallel_sync) if (method_get_instruction) |instruction| {
-            const live_method = quickOwnDataPropertyValue(chunk, instruction, method_receiver.?, true) orelse return null;
-            if (live_method.rawBits() != callee.?.rawBits()) return null;
+            // Preserve completed iterations if ownership changes between
+            // snapshots; resume the next iteration at its guarded opcode.
+            const live_method = quickOwnDataPropertyValue(chunk, instruction, method_receiver.?, true) orelse break;
+            if (live_method.rawBits() != callee.?.rawBits()) break;
         };
         var receiver_property = stable_receiver_property;
         if (parallel_sync) if (leaf.receiver_property_instruction) |raw_instruction| {
@@ -2502,7 +2513,7 @@ fn tryQuickNumericCallLoop(
                 raw_instruction,
                 method_receiver.?,
                 true,
-            ) orelse return null;
+            ) orelse break;
         };
         var captured_value: ?f64 = null;
         if (leaf.captured_local) |raw_slot| {
@@ -2729,8 +2740,15 @@ fn runQuickObservableRecurrence(
     // Execute every logical invocation and counter mutation. Only the bytecode
     // dispatch and activation materialization are compiled away; checkpoint and
     // step positions stay identical to the 28-instruction function body.
-    try advanceQuickObservableSteps(vm, 6); // property update through set_prop
-    const updated_counter = Value.num(state.slotsItems()[counter_slot].asNum() + recurrence.counter_increment);
+    try advanceQuickObservableSteps(vm, 3); // through get_prop
+    try vm.checkRestricted(state);
+    const current_counter = state.slotsItems()[counter_slot].asNum();
+    try advanceQuickObservableSteps(vm, 2); // constant + add
+    const updated_counter = Value.num(current_counter + recurrence.counter_increment);
+    try advanceQuickObservableSteps(vm, 1); // set_prop
+    // A checkpoint can hand the GIL to a thread that claims the object after
+    // our read. Ownership is an operation guard, not a recurrence-entry guard.
+    try vm.checkRestricted(state);
     gc_mod.barrierValueFrom(state, updated_counter);
     state.slotsItems()[counter_slot] = updated_counter;
     try advanceQuickObservableSteps(vm, 5); // pop + condition + branch
@@ -2748,6 +2766,7 @@ fn runQuickObservableRecurrence(
 }
 
 fn quickParallelCounterRead(vm: *Interpreter, state: *value.Object, name: []const u8) EvalError!Value {
+    try vm.checkRestricted(state);
     state.lockProperties();
     if (!state.is_array and state.proxyHandler() == null and !state.proxy_revoked and
         state.accessorsMap() == null and state.attrsMap() == null)
@@ -2763,6 +2782,7 @@ fn quickParallelCounterRead(vm: *Interpreter, state: *value.Object, name: []cons
 }
 
 fn quickParallelCounterWrite(vm: *Interpreter, state: *value.Object, name: []const u8, updated: Value) EvalError!void {
+    try vm.checkRestricted(state);
     state.lockProperties();
     if (!state.is_array and state.proxyHandler() == null and !state.proxy_revoked and
         state.accessorsMap() == null and state.attrsMap() == null)
@@ -2987,6 +3007,9 @@ fn tryQuickObjectAllocationLoopMode(
     var iterations: u64 = 0;
     var completed = false;
     while (iterations < max_iterations and counter < bound) {
+        // This loop publishes each completed iteration. Stop before the next
+        // indexed read if a peer claimed the array between iterations.
+        if (!quickPropertyAccessAllowed(array)) break;
         const counter_int32: i32 = @bitCast(counter_integer);
         const selected = counter_int32 & allocation.selector_mask;
         if (selected < 0) break;
@@ -3184,7 +3207,7 @@ fn tryQuickArrayLoop(
             const array_value = frame.slots[array_slot];
             if (!array_value.isObject()) break :quick null;
             const array = array_value.asObj();
-            if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
+            if (!quickPropertyAccessAllowed(array) or !array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked or
                 array.accessorsMap() != null or array.holesMap() != null or
                 array.arrayLengthFloor() > array.elementsItems().len)
                 break :quick null;
@@ -3259,6 +3282,9 @@ fn tryQuickArrayLoop(
                 break :quick null;
             const elements_locked = if (parallel_sync) array.lockElements() else false;
             defer array.unlockElements(elements_locked);
+            // claimRestriction takes this same lock before publishing an
+            // owner, so the entire numeric read batch precedes that claim.
+            if (!quickPropertyAccessAllowed(array)) break :quick null;
             if (array.accessorsMap() != null or array.holesMap() != null or array.arrayLengthFloor() > array.elementsItems().len)
                 break :quick null;
             var index_value = frame.slots[index_slot];
@@ -3320,6 +3346,7 @@ fn tryQuickArrayLoop(
 }
 
 inline fn quickOwnDataSlot(chunk: *Chunk, raw_instruction: u32, object: *value.Object) ?usize {
+    if (!quickPropertyAccessAllowed(object)) return null;
     const instruction: usize = @intCast(raw_instruction);
     if (instruction >= chunk.code.items.len or instruction >= chunk.ics.len) return null;
     const name_index = chunk.code.items[instruction].a;
@@ -3340,6 +3367,7 @@ inline fn quickPropertySlot(chunk: *Chunk, instruction: usize, object: *value.Ob
 }
 
 inline fn quickPropertySlotMode(chunk: *Chunk, instruction: usize, object: *value.Object, parallel_sync: bool) ?usize {
+    if (!quickPropertyAccessAllowed(object)) return null;
     if (instruction >= chunk.ics.len) return null;
     const slot: usize = @intCast(chunk.ics[instruction].lookupSlotMode(object.shape, parallel_sync) orelse return null);
     if (slot >= object.slotsItems().len) return null;
@@ -4130,6 +4158,7 @@ fn nativeGetProperty(
 ) EvalError!Value {
     if (object_value.isObject()) {
         const object = object_value.asObj();
+        try vm.checkRestricted(object);
         const parallel = bc.ic_seqlock_enabled.load(.monotonic);
         if (parallel) object.lockProperties();
         defer if (parallel) object.unlockProperties();
@@ -4159,6 +4188,7 @@ fn nativeSetProperty(
 ) EvalError!Value {
     if (object_value.isObject()) {
         const object = object_value.asObj();
+        try vm.checkRestricted(object);
         const parallel = bc.ic_seqlock_enabled.load(.monotonic);
         if (parallel) object.lockProperties();
         defer if (parallel) object.unlockProperties();
@@ -8481,6 +8511,7 @@ fn runChunk(
             },
             .get_prop => {
                 const obj = stack.pop().?;
+                if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = chunk.names.items[inst.a];
                 var result: Value = undefined;
                 fast: {
@@ -8573,6 +8604,7 @@ fn runChunk(
                         const o = obj.asObj();
                         if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked) {
                             if (quickArrayIndex(key)) |index| {
+                                try vm.checkRestricted(o);
                                 const element = if (parallel_sync)
                                     o.denseElement(index)
                                 else if (o.accessorsMap() == null and o.holesMap() == null and index < o.elementsItems().len)
@@ -8705,6 +8737,7 @@ fn runChunk(
             .set_prop => {
                 var v = stack.pop().?;
                 const obj = stack.pop().?;
+                if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = chunk.names.items[inst.a];
                 fast: {
                     // Inline cache hits only update an existing slot; adding a
@@ -15143,6 +15176,132 @@ test "vm: optimizer environment load resumes an exact ReferenceError" {
 
     const result = try run(&machine, root, null);
     try std.testing.expectEqualStrings("caught:12", result.asStr());
+}
+
+test "vm: Thread restriction gates recurrence operations after a checkpoint" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |parallel| {
+        for ([_]u64{ 1020, 1022 }) |initial_steps| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var env = Environment{ .arena = allocator, .fn_scope = true };
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .steps = initial_steps });
+            const state = (try machine.newObject()).asObj();
+            try machine.setProp(state, "calls", Value.num(7));
+            const Claim = struct {
+                state: *value.Object,
+                allocator: std.mem.Allocator,
+                called: bool = false,
+                fn peer(self: *@This()) void {
+                    const previous = self.state.claimRestriction(self.allocator, @intCast(std.Thread.getCurrentId())) catch unreachable;
+                    std.debug.assert(previous == null);
+                }
+                fn checkpoint(raw: *anyopaque, _: *anyopaque) void {
+                    const self: *@This() = @ptrCast(@alignCast(raw));
+                    std.debug.assert(!self.called);
+                    self.called = true;
+                    const thread = std.Thread.spawn(.{}, peer, .{self}) catch unreachable;
+                    thread.join();
+                }
+            };
+            var claim = Claim{ .state = state, .allocator = allocator };
+            machine.gc_safepoint_ctx = &claim;
+            machine.gc_safepoint_fn = Claim.checkpoint;
+            const recurrence = QuickObservableAddRecurrence{
+                .threshold = 2,
+                .first_delta = 1,
+                .second_delta = 2,
+                .first_binding_instruction = 0,
+                .second_binding_instruction = 0,
+                .counter_read_instruction = 0,
+                .counter_write_instruction = 0,
+                .counter_name = 0,
+                .counter_increment = 1,
+            };
+            if (parallel) {
+                try std.testing.expectError(error.Throw, runQuickObservableRecurrenceParallel(&machine, recurrence, state, "calls", 0));
+            } else {
+                try std.testing.expectError(error.Throw, runQuickObservableRecurrence(&machine, recurrence, state, state.shape.?.lookup("calls").?, 0));
+            }
+            try std.testing.expect(claim.called);
+            try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+            try std.testing.expectEqual(@as(f64, 7), state.getOwn("calls").?.asNum());
+            // The foreign claim happens at 1024: either after the read (throw
+            // at set_prop), or before it (throw at get_prop), never after a write.
+            try std.testing.expectEqual(@as(u64, if (initial_steps == 1020) 1026 else 1025), machine.steps);
+        }
+    }
+}
+
+test "vm: Thread restriction gates warmed native property artifacts" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64 or builtin.single_threaded) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        for ([_]bool{ false, true }) |write| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var env = Environment{ .arena = allocator, .fn_scope = true };
+            const root_shape = try Shape.createRoot(allocator);
+            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+            const target = try machine.newObject();
+            try machine.setProp(target.asObj(), "value", Value.num(7));
+            const owner_target = try machine.newObject();
+            try machine.setProp(owner_target.asObj(), "value", Value.num(7));
+
+            var chunk = bc.Chunk.init(allocator);
+            chunk.param_count = if (write) 2 else 1;
+            chunk.local_count = chunk.param_count;
+            const name = try chunk.addName("value");
+            _ = try chunk.emit(.load_local, 0);
+            if (write) _ = try chunk.emit(.load_local, 1);
+            const property_ip = try chunk.emit(if (write) .set_prop else .get_prop, name);
+            _ = try chunk.emit(.ret, 0);
+            try chunk.finalize();
+            const shape = target.asObj().shape.?;
+            chunk.ics[property_ip].recordMode(shape, shape.lookup("value").?, parallel);
+            var compiled = try optimizer_compiler.compile(&chunk);
+            defer compiled.deinit();
+
+            const callbacks = if (write) &optimizer_native_property_write_callbacks else &optimizer_native_property_read_callbacks;
+            const before = callbacks.load(.monotonic);
+            var slots = [_]Value{ target, Value.num(9) };
+            const warm = try tryRunManagedNative(&machine, &compiled, slots[0..chunk.local_count], null);
+            try std.testing.expect(warm == .complete);
+            try std.testing.expectEqual(@as(f64, if (write) 9 else 7), warm.complete.asNum());
+            // Prove that isolated execution used direct machine-code slots;
+            // shared execution must use the synchronized runtime operation.
+            try std.testing.expectEqual(before + @as(u64, if (parallel) 1 else 0), callbacks.load(.monotonic));
+
+            const Claim = struct {
+                fn run(object: *value.Object, alloc: std.mem.Allocator) void {
+                    const previous = object.claimRestriction(alloc, @intCast(std.Thread.getCurrentId())) catch unreachable;
+                    std.debug.assert(previous == null);
+                }
+            };
+            const peer = try std.Thread.spawn(.{}, Claim.run, .{ target.asObj(), allocator });
+            peer.join();
+            try std.testing.expectEqual(shape, target.asObj().shape.?);
+            slots[1] = Value.num(99);
+            const denied_before = callbacks.load(.monotonic);
+            try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &compiled, slots[0..chunk.local_count], null));
+            try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+            try std.testing.expectEqual(denied_before + 1, callbacks.load(.monotonic));
+            try std.testing.expectEqual(@as(f64, if (write) 9 else 7), target.asObj().getOwn("value").?.asNum());
+
+            // The owning thread retains the same optimized artifact and cache.
+            try std.testing.expectEqual(@as(?u64, null), try owner_target.asObj().claimRestriction(allocator, @intCast(std.Thread.getCurrentId())));
+            machine.exception = Value.undef();
+            slots[0] = owner_target;
+            const owned = try tryRunManagedNative(&machine, &compiled, slots[0..chunk.local_count], null);
+            try std.testing.expect(owned == .complete);
+            try std.testing.expectEqual(@as(f64, if (write) 99 else 7), owned.complete.asNum());
+        }
+    }
 }
 
 test "vm: optimizer native property cache guards polymorphic shapes and malformed slots" {

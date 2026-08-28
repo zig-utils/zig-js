@@ -3434,6 +3434,9 @@ fn emitDirectPropertyGuards(
     try assembler.movImmediate64(10, Value.boxed_payload_mask);
     try assembler.andRegister64(9, 9, 10);
 
+    // Thread.restrict installs cold state through storage without changing the
+    // shape. This live guard also routes restricted receivers to the runtime
+    // ownership check, even for an artifact compiled before the claim.
     try assembler.load64(10, 9, try objectByteOffset("storage"));
     try assembler.compareImmediate64(10, 0);
     try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);

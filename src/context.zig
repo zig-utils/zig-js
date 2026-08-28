@@ -28018,6 +28018,67 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "Thread restriction gates property paths across execution tiers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var failures: usize = 0;
+    for ([_]bool{ false, true }) |parallel_js| {
+        for ([_]bool{ false, true }) |enable_jit| {
+            for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+                const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                    .enable_gc = true,
+                    .enable_jit = enable_jit,
+                    .enable_threads = true,
+                    .parallel_gc = true,
+                    .parallel_js = parallel_js,
+                    .bytecode_execution_mode = mode,
+                });
+                defer ctx.destroy();
+                const result = try ctx.evaluate(
+                    \\var restrictedObject={x:7,a:1,b:2,c:3,d:4};var restrictedArray=[7,8];
+                    \\function restrictedRead(o){return o.x;}
+                    \\function restrictedWrite(o){o.x=9;return o.x;}
+                    \\function restrictedIndex(o){return o[0];}
+                    \\function restrictedLength(o){return o.length;}
+                    \\function restrictedLoop(o){for(var i=0;i<20;i++)o.x=o.x+1;return o.x;}
+                    \\function restrictedKernel(o){for(var i=0;i<20;i++){o.a=(o.a+i)%97;o.b=o.b+1;o.c=o.a+o.b;o.d=o.c-o.b;}return o.d;}
+                    \\for(var warm=0;warm<20;warm++){var dummy={x:7,a:1,b:2,c:3,d:4};restrictedRead(dummy);restrictedWrite(dummy);restrictedLoop(dummy);restrictedKernel(dummy);restrictedIndex([7]);restrictedLength([7]);}
+                    \\Thread.restrict(restrictedObject);Thread.restrict(restrictedArray);
+                    \\var worker=new Thread(function(){
+                    \\ var failures=[];
+                    \\ function denied(name,operation){try{operation();failures.push(name+':allowed');}catch(e){if(!(e instanceof ConcurrentAccessError))failures.push(name+':'+e.name);}}
+                    \\ denied('cold-read',function(){return restrictedObject.x;});
+                    \\ denied('warm-read',function(){return restrictedRead(restrictedObject);});
+                    \\ denied('cold-write',function(){restrictedObject.x=8;});
+                    \\ denied('warm-write',function(){return restrictedWrite(restrictedObject);});
+                    \\ denied('numeric-loop',function(){return restrictedLoop(restrictedObject);});
+                    \\ denied('property-kernel',function(){return restrictedKernel(restrictedObject);});
+                    \\ denied('dense-index',function(){return restrictedArray[0];});
+                    \\ denied('warm-index',function(){return restrictedIndex(restrictedArray);});
+                    \\ denied('array-length',function(){return restrictedArray.length;});
+                    \\ denied('warm-length',function(){return restrictedLength(restrictedArray);});
+                    \\ denied('array-method',function(){return restrictedArray.push;});
+                    \\ denied('dense-write',function(){restrictedArray[0]=9;});
+                    \\ denied('has',function(){return 'x' in restrictedObject;});
+                    \\ denied('delete',function(){return delete restrictedObject.x;});
+                    \\ denied('own-keys',function(){return Reflect.ownKeys(restrictedObject);});
+                    \\ denied('descriptor',function(){return Object.getOwnPropertyDescriptor(restrictedObject,'x');});
+                    \\ var coercions=0;denied('computed-read',function(){return restrictedArray[{toString(){coercions++;return '0';}}];});
+                    \\ if(coercions!==1)failures.push('key-coercion:'+coercions);
+                    \\ return failures.join(',');
+                    \\});
+                    \\var deniedResult=worker.join();
+                    \\if(restrictedObject.x!==7||restrictedObject.a!==1||restrictedObject.b!==2||restrictedObject.c!==3||restrictedObject.d!==4||restrictedArray[0]!==7)deniedResult+=';mutated';
+                    \\deniedResult
+                );
+                try std.testing.expect(result.isString());
+                std.debug.print("restriction matrix mode={s} jit={} parallel={} result={s}\n", .{ @tagName(mode), enable_jit, parallel_js, result.asStr() });
+                if (result.asStr().len != 0) failures += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
 test "class call guards precede callee effects across execution tiers" {
     for ([_]bool{ false, true }) |enable_jit| {
         for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {

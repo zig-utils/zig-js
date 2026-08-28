@@ -3118,6 +3118,14 @@ pub const Object = struct {
     pub fn claimRestriction(self: *Object, fallback: std.mem.Allocator, tid: u64) std.mem.Allocator.Error!?u64 {
         std.debug.assert(tid != 0);
         const cold = try self.ensureCold(fallback);
+        // Property/packed-array kernels hold these locks across their bounded
+        // batch. Publish ownership after that batch, never in its middle. Cold
+        // allocation finishes before taking structure locks (property then
+        // elements, matching indexed-property mutation ordering).
+        self.lockProperties();
+        defer self.unlockProperties();
+        const elements_locked = if (self.is_array) self.lockElements() else false;
+        defer self.unlockElements(elements_locked);
         return cold.restricted_to.cmpxchgStrong(0, tid, .acq_rel, .acquire);
     }
 
@@ -8109,8 +8117,7 @@ test "Object.restricted_to CAS lets exactly one concurrent claimer win" {
     o.storage.store(&storage, .release);
     const Worker = struct {
         fn run(target: *Object, my_tid: u64, won: *std.atomic.Value(u32)) void {
-            // Mirror Thread.restrict's claim: CAS 0 -> tid; null means we won.
-            if (target.coldState().?.restricted_to.cmpxchgStrong(0, my_tid, .acq_rel, .acquire) == null)
+            if ((target.claimRestriction(std.testing.allocator, my_tid) catch unreachable) == null)
                 _ = won.fetchAdd(1, .acq_rel);
         }
     };

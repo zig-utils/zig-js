@@ -2568,6 +2568,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     const key = try scratch.dupe(u8, try self.keyOf(arg(args, 1)));
     defer scratch.free(key);
     o = self.tempRoot(object_root, object_value).asObj();
+    // ToPropertyKey precedes [[GetOwnProperty]], including its ownership
+    // check. Object.* and Reflect.* must not expose a restricted data slot.
+    try self.checkRestricted(o);
     // Private members are internal slots — invisible to reflection.
     if (value.isPrivateKey(key)) return Value.undef();
     if (interpreter.isModuleNs(o)) {
