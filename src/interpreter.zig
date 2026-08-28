@@ -20356,10 +20356,8 @@ pub const Interpreter = struct {
             if (cur.asObj() == p.asObj()) return true;
             cur = try self.objectGetPrototypeValue(cur.asObj());
         }
-        if (rc.errorCtor()) |name| {
-            if (lo.behavior.is_error and (std.mem.eql(u8, lo.errorName(), name) or std.mem.eql(u8, name, "Error")))
-                return true;
-        }
+        // OrdinaryHasInstance depends only on this prototype chain. Error
+        // names cannot establish identity across realms or after reparenting.
         return false;
     }
 };
@@ -37179,8 +37177,8 @@ fn defineGlobalFnC(env: *Environment, rs: *Shape, name: []const u8, len: usize, 
     try installNativeProps(env.arena, rs, o, name, len);
     // A constructor's `.prototype` is an own, non-writable/-enumerable/
     // -configurable data property (so `getOwnPropertyDescriptor(C, "prototype")`
-    // and reflection see it). Methods still dispatch via `builtinMethod`, and
-    // `instanceof` keeps working through its `ctorRef()`/`errorCtor()` fallbacks.
+    // and reflection see it). Methods still dispatch via `builtinMethod`;
+    // `instanceof` follows the instance's actual prototype chain.
     if (is_ctor) {
         const proto = try gc_mod.allocObj(env.arena);
         proto.* = .{};
@@ -56123,6 +56121,46 @@ test "DataView cross-realm brand errors use the method realm" {
         \\try { av.buffer; } catch (e) { getterRealm = e.constructor === alien.TypeError; }
         \\methodRealm && getterRealm
     )).asBool());
+}
+
+test "Error instanceof uses exact prototype identity across realms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expect((try evalSource(allocator,
+        \\var otherErrorRealm=$262.createRealm().global;
+        \\var ForeignTypeError=otherErrorRealm.TypeError;
+        \\var foreignError=new ForeignTypeError('foreign');
+        \\var localError=new TypeError('local');
+        \\var foreignBound=ForeignTypeError.bind(null);
+        \\foreignError instanceof ForeignTypeError && foreignError instanceof otherErrorRealm.Error &&
+        \\foreignError instanceof foreignBound && !(foreignError instanceof TypeError) && !(foreignError instanceof Error) &&
+        \\localError instanceof TypeError && localError instanceof Error && !(localError instanceof ForeignTypeError)
+    )).toBoolean());
+    try std.testing.expect((try evalSource(allocator,
+        \\var detachedError=new TypeError('detached');
+        \\Object.setPrototypeOf(detachedError,null);
+        \\var reparentedError=new TypeError('reparented');
+        \\Object.setPrototypeOf(reparentedError,RangeError.prototype);
+        \\var ordinaryErrorLike=Object.create(TypeError.prototype);
+        \\!(detachedError instanceof TypeError) && !(detachedError instanceof Error) &&
+        \\reparentedError instanceof RangeError && reparentedError instanceof Error && !(reparentedError instanceof TypeError) &&
+        \\ordinaryErrorLike instanceof TypeError && ordinaryErrorLike instanceof Error
+    )).toBoolean());
+}
+
+test "Error instanceof preserves custom hooks and abrupt prototype lookup" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expect((try evalSource(allocator,
+        \\var error=new TypeError('value'),seen=0;
+        \\var accepts={[Symbol.hasInstance](value){seen++;return value===error;}};
+        \\var rejects={[Symbol.hasInstance](){seen++;return false;}};
+        \\var abrupt=false,proxy=new Proxy(error,{getPrototypeOf(){throw 37;}});
+        \\try{proxy instanceof TypeError;}catch(e){abrupt=e===37;}
+        \\(error instanceof accepts) && !(error instanceof rejects) && seen===2 && abrupt
+    )).toBoolean());
 }
 
 test "class constructor call TypeError uses the callee realm" {
