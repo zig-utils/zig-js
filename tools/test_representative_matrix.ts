@@ -73,7 +73,7 @@ export function selfTest(): void {
   rejects("exact-parent batch concurrency drift", value => { value.exact_parent_integration.serial_batch.execution = "parallel"; value.completed_metric_panels.efficiency_thermal.scored_integration.serial_batch.execution = "parallel"; }, "exact-parent batch policy drift");
   rejects("direct binary provenance drift", value => { value.exact_parent_integration.binary_provenance_profiles.schema_v2 = "unchecked"; value.completed_metric_panels.efficiency_thermal.scored_integration.binary_provenance_profiles.schema_v2 = "unchecked"; }, "binary provenance profile drift");
   rejects("frontend native runner drift", value => { value.exact_parent_integration.native_runners[1].sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.native_runners[1].sha256 = "0".repeat(64); }, "changed without a matrix version bump");
-  rejects("unsupported future matrix", value => { value.schema_version = 30; }, "unsupported representative matrix schema");
+  rejects("unsupported future matrix", value => { value.schema_version = 31; }, "unsupported representative matrix schema");
   console.log("representative matrix structural tests: 65/65 passed");
 }
 
