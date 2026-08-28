@@ -22716,7 +22716,7 @@ fn throwErrorInRealm(self: *Interpreter, realm: *Environment, name: []const u8, 
     return self.throwError(name, message);
 }
 
-fn throwClassConstructorCallError(self: *Interpreter, func: *Function) EvalError {
+pub fn throwClassConstructorCallError(self: *Interpreter, func: *Function) EvalError {
     // JSC names the class: "Cannot call a class constructor C without |new|".
     if (func.name.len != 0) {
         if (std.fmt.allocPrint(self.arena, "Cannot call a class constructor {s} without |new|", .{func.name})) |named|

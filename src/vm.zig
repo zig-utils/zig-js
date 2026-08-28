@@ -10961,6 +10961,108 @@ fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame:
     return vm.evalClassWithPreparedHeritage(class.name, inferred_name, class.members, class.source, heritage, keys);
 }
 
+test "class call guards restore direct VM entry state through allocation failure" {
+    const Entry = enum { value, driver, inline_ };
+    for ([_]Entry{ .value, .driver, .inline_ }) |entry| {
+        var failures: usize = 0;
+        var completed = false;
+        for (0..256) |fail_index| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var parser = try Parser.init(allocator, "var effect=0;class Guard{constructor(n=(effect=1)){effect=2;}}Guard;");
+            const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+            var root = Environment{ .arena = allocator, .fn_scope = true };
+            const root_shape = try Shape.createRoot(allocator);
+            try interp.installGlobals(&root, root_shape);
+            var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape, .bytecode_execution_mode = .required });
+            const class = try run(&machine, chunk, null);
+            const function = Interpreter.funcOf(class) orelse return error.TestUnexpectedResult;
+            const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+            try std.testing.expect(jsPlainFunction(class) == null);
+            try std.testing.expect(jsChunkFn(class) == null);
+            const activations = machine.vm_activation_allocations;
+            machine.this_value = Value.num(91);
+            machine.new_target = Value.num(92);
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+            machine.arena = failing.allocator();
+            const result = switch (entry) {
+                .value => callValue(&machine, class, &.{}, Value.undef()),
+                .driver => runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef()),
+                .inline_ => runInlineFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef()),
+            };
+            machine.arena = allocator;
+            try std.testing.expectEqual(&root, machine.env);
+            try std.testing.expectEqual(@as(f64, 91), machine.this_value.asNum());
+            try std.testing.expectEqual(@as(f64, 92), machine.new_target.asNum());
+            try std.testing.expectEqual(activations, machine.vm_activation_allocations);
+            try std.testing.expectEqual(@as(f64, 0), root.get("effect").?.asNum());
+            try std.testing.expectEqual(@as(u32, 0), machine.depth);
+            try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+            try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+            try std.testing.expect(machine.pending_activation == null);
+            try std.testing.expect(machine.current_private_map == null);
+            if (result) |_| return error.TestUnexpectedResult else |err| {
+                if (err == error.Throw) {
+                    try std.testing.expectEqual(root.get("TypeError").?.rawBits(), (try machine.getProperty(machine.exception, "constructor")).rawBits());
+                    if (!failing.has_induced_failure) {
+                        completed = true;
+                        break;
+                    }
+                } else try std.testing.expectEqual(error.OutOfMemory, err);
+                failures += 1;
+            }
+        }
+        try std.testing.expect(completed and failures > 0);
+    }
+}
+
+test "class call guards preserve native optimizer exceptional exits" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function good(){return 7;}
+        \\function invoke(f){try{const result=f();return result;}catch(e){return e instanceof TypeError?42:-1;}}
+        \\class Guard{constructor(){return 7;}}
+        \\invoke(good);invoke(good);invoke(good);invoke(good);invoke(good);
+        \\invoke(good);invoke(good);invoke(good);invoke(good);invoke(Guard)
+    ;
+    try std.testing.expectEqual(@as(f64, 42), (try vmRun(allocator, source)).asNum());
+    var parser = try Parser.init(allocator, source);
+    const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var root = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&root, root_shape);
+    var inventory: interp.ExecutionTierInventory = .{};
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape, .jit_owner = &owner, .execution_tier_inventory = &inventory });
+    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, chunk, null)).asNum());
+    const invoke_chunk = chunk.fns.items[1].chunk.?;
+    const artifact = invoke_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_call = false;
+    for (operations.descriptors) |operation| {
+        if (operation.bytecode_op != @backingInt(bc.Op.call)) continue;
+        saw_call = true;
+        try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
+        try std.testing.expectEqual(jit.NativeExceptionalTargetKind.catch_, operations.exceptional_targets[operation.exceptional_target].kind);
+    }
+    try std.testing.expect(saw_call);
+    const before = inventory.snapshot();
+    const invoke = Interpreter.funcOf(root.get("invoke").?).?;
+    try std.testing.expectEqual(@as(f64, 42), (try runFunction(&machine, invoke, invoke_chunk, &.{root.get("Guard").?}, Value.undef(), Value.undef())).asNum());
+    const after = inventory.snapshot();
+    // The native call exits to its exact catch handler, so a complete-native
+    // hit is not expected. Prove entry, callback execution and recovery.
+    try std.testing.expect(after.count(.optimizer_entries) > before.count(.optimizer_entries));
+    try std.testing.expect(after.count(.runtime_operation_calls) > before.count(.runtime_operation_calls));
+    try std.testing.expect(after.count(.deoptimizations) > before.count(.deoptimizations));
+    try std.testing.expectEqual(&root, machine.env);
+}
+
 test "vm program exits unwind lexical environments before returning to the host" {
     const cases = [_]struct { source: []const u8, throws: bool, exception: f64 = 2 }{
         .{ .source = "let outer=41;{let outer=0;{throw 2;}}", .throws = true },
@@ -11308,7 +11410,7 @@ fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Val
     if (callee.isObject()) {
         if (callee.asObj().jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
-            if (!func.is_generator and !func.is_async) {
+            if (!func.is_generator and !func.is_async and !func.is_class_constructor) {
                 if (func.chunk) |fchunk| return runFunction(vm, func, fchunk, args, this_val, Value.undef());
             }
         }
@@ -11575,6 +11677,11 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
 /// On a throw from `bindThisForCall` the caller state is restored before
 /// propagating, so the caller is never left with the callee's state.
 fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!*Activation {
+    // ECMA-262 10.2.1 [[Call]], step 4 rejects a class before parameter,
+    // field or body evaluation, creating its TypeError in the callee realm.
+    // Direct VM entries must enforce the same contract as callFunctionNT.
+    if (new_target.isUndefined() and func.is_class_constructor)
+        return interp.throwClassConstructorCallError(vm, func);
     const act = try acquireActivation(vm, func.local_count);
     var exec = act.exec;
     ensureBindingReferenceStorage(vm, &exec, fchunk) catch |err| {
@@ -12038,14 +12145,14 @@ fn callValueWithInlineCallsDisabled(vm: *Interpreter, callee: Value, args: []con
     return callValue(vm, callee, args, this_val);
 }
 
-/// If `callee` is a plain JS-chunk function (not generator/async/native/bound/
-/// proxy), return it — those are the calls the trampoline pushes onto its
+/// If `callee` is a plain JS-chunk function (not class/generator/async/native/
+/// bound/proxy), return it — those are the calls the trampoline pushes onto its
 /// activation stack. Everything else takes the native call path.
 inline fn jsPlainFunction(callee: Value) ?*Function {
     if (!callee.isObject()) return null;
     const erased = callee.asObj().jsFunction() orelse return null;
     const func: *Function = @ptrCast(@alignCast(erased));
-    if (func.is_generator or func.is_async) return null;
+    if (func.is_generator or func.is_async or func.is_class_constructor) return null;
     return func;
 }
 

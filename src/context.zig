@@ -28018,6 +28018,121 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "class call guards precede callee effects across execution tiers" {
+    for ([_]bool{ false, true }) |enable_jit| {
+        for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = enable_jit,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            for ([_]struct { name: []const u8, source: []const u8 }{
+                .{ .name = "base_default", .source = "(function(){class C{}try{C();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "derived_default", .source = "(function(){class B{}class C extends B{}try{C();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "derived_explicit", .source = "(function(){var effects='';class B{}class C extends B{constructor(x=(effects+='d',1)){effects+='b';super();}}try{C((effects+='a',undefined));}catch(e){return e instanceof TypeError&&effects==='a';}return false;})()" },
+                .{ .name = "base_effects", .source = "(function(){var effects='';class C{field=(effects+='f',1);constructor(x=(effects+='d',1)){effects+='b';}}try{C((effects+='a',undefined));}catch(e){return e instanceof TypeError&&effects==='a';}return false;})()" },
+                .{ .name = "anonymous", .source = "(function(){try{(0,class{})();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "method", .source = "(function(){var holder={C:class{}};try{holder.C();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "computed_method", .source = "(function(){var holder={C:class{}},key='C';try{holder[key]();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "spread", .source = "(function(){var effects='';class C{constructor(){effects+='b';}}function* args(){effects+='a';yield 1;effects+='z';}try{C(...args());}catch(e){return e instanceof TypeError&&effects==='az';}return false;})()" },
+                .{ .name = "tail", .source = "(function(){class C{}function call(n){'use strict';if(n)return call(n-1);return C();}try{call(100);}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "tail_spread", .source = "(function(){class C{}function call(){'use strict';return C(...[1]);}try{call();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "tail_method", .source = "(function(){var holder={C:class{}};function call(){'use strict';return holder.C();}try{call();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "tail_computed_spread", .source = "(function(){var holder={C:class{}},key='C';function call(){'use strict';return holder[key](...[1]);}try{call();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "bound", .source = "(function(){class C{}var bound=C.bind({});try{bound();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "proxy_forward", .source = "(function(){class C{}var proxy=new Proxy(C,{});try{proxy();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "proxy_apply", .source = "(function(){var effects='';class C{constructor(){effects+='b';}}var proxy=new Proxy(C,{apply(t,r,a){effects+='p';return Reflect.apply(t,r,a);}});try{proxy((effects+='a',1));}catch(e){return e instanceof TypeError&&effects==='ap';}return false;})()" },
+                .{ .name = "reflect_apply", .source = "(function(){class C{}try{Reflect.apply(C,{},[]);}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "function_call", .source = "(function(){class C{}try{C.call({});}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "optional", .source = "(function(){class C{}try{C?.();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "tagged", .source = "(function(){class C{}try{C`text`;}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "generator", .source = "(function(){class C{}function* call(){yield C();}try{call().next();}catch(e){return e instanceof TypeError;}return false;})()" },
+                .{ .name = "numeric_leaf", .source = "(function(){class C{constructor(n){return n+1;}}for(var i=0;i<128;i++){try{C(i);return false;}catch(e){if(!(e instanceof TypeError))return false;}}return true;})()" },
+                .{ .name = "arguments_leaf", .source = "(function(){class C{constructor(n){return arguments[0]+1;}}for(var i=0;i<128;i++){try{C(i);return false;}catch(e){if(!(e instanceof TypeError))return false;}}return true;})()" },
+                .{ .name = "construct_controls", .source = "(function(){class B{constructor(n){this.n=n;}}class C extends B{constructor(n){super(n);this.nt=new.target;}}var a=new C(7),Bound=C.bind(null,8),b=new Bound();function Other(){}var c=Reflect.construct(C,[9],Other);return a.n===7&&a.nt===C&&b.n===8&&b.nt===C&&c.n===9&&c.nt===Other&&Object.getPrototypeOf(c)===Other.prototype;})()" },
+            }) |case| {
+                errdefer std.debug.print("class call guard {s} ({s}, jit={})\n", .{ case.name, @tagName(mode), enable_jit });
+                try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+            }
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
+test "class call guards use the callee realm for TypeError" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\var otherClassRealm=$262.createRealm().global;
+            \\var ForeignClass=otherClassRealm.eval('(class ForeignClass{})');
+            \\var classRealmCorrect=false;
+            \\try{ForeignClass();}catch(e){classRealmCorrect=e.constructor===otherClassRealm.TypeError&&!(e instanceof TypeError);}
+            \\classRealmCorrect
+        )).toBoolean());
+    }
+}
+
+test "class call guards preserve a moving callee through argument evaluation" {
+    try expectProxyMetadataMoving("var Guard=class Guard{};", "(function(){try{Guard(proxyMovingLoop(20000));}catch(e){return e instanceof TypeError&&e.message==='Cannot call a class constructor Guard without |new|';}return false;})()");
+}
+
+test "class call guards reject from async and async generator bodies" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\class AsyncGuard{}
+            \\var classCallRejected=0;
+            \\async function classCallAsync(){return AsyncGuard();}
+            \\async function* classCallAsyncGenerator(){yield AsyncGuard();}
+            \\classCallAsync().catch(function(e){if(e instanceof TypeError)classCallRejected++;});
+            \\classCallAsyncGenerator().next().catch(function(e){if(e instanceof TypeError)classCallRejected++;});
+        );
+        try std.testing.expectEqual(@as(f64, 2), (try ctx.evaluate("classCallRejected")).asNum());
+    }
+}
+
+test "class call guards isolate shared no-GIL exception state" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqual(@as(f64, 128), (try ctx.evaluate(
+            \\class SharedGuard{constructor(){throw new Error('body entered');}}
+            \\function classCallLane(){
+            \\  if($vm.useThreadGIL()!==false)throw 99;
+            \\  var rejected=0;
+            \\  for(var i=0;i<32;i++){try{SharedGuard(i);}catch(e){if(e instanceof TypeError)rejected++;else throw e;}}
+            \\  return rejected;
+            \\}
+            \\var classCallLanes=[],classCallTotal=0;
+            \\for(var i=0;i<4;i++)classCallLanes.push(new Thread(classCallLane));
+            \\for(var i=0;i<4;i++)classCallTotal+=classCallLanes[i].join();
+            \\classCallTotal
+        )).asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
 test "class key conversion completes before the next element name" {
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
