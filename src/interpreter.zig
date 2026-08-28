@@ -12103,6 +12103,14 @@ pub const Interpreter = struct {
     /// cursor threaded through the increasing slices of `regexpReplace`'s output
     /// makes that loop O(n) instead of O(n^2).
     fn appendUtf16SliceFrom(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, cursor: *RxCursor, start: usize, end: usize) !void {
+        // One byte per code unit: the requested unit range IS a byte range, so
+        // copy it whole instead of walking the string a sequence at a time.
+        if (cursor.ascii) {
+            const lo = @min(start, s.len);
+            const hi = @min(end, s.len);
+            if (lo < hi) try buf.appendSlice(a, s[lo..hi]);
+            return;
+        }
         if (start < cursor.units) {
             cursor.byte = 0;
             cursor.units = 0;
@@ -12120,6 +12128,11 @@ pub const Interpreter = struct {
         if (start >= end) return;
         var units: usize = from_units;
         var i: usize = from_byte;
+        // Sequences that lie wholly inside the range keep their bytes verbatim, so
+        // accumulate them and copy each run once instead of appending per
+        // sequence. Only a range boundary that splits an astral pair interrupts a
+        // run, since that half has to be re-encoded on its own.
+        var run_start: ?usize = null;
         while (i < s.len and units < end) {
             const seq_len = jsStringSeqLen(s, i);
             const seq_units = utf16LenOfSeq(s, i);
@@ -12137,8 +12150,12 @@ pub const Interpreter = struct {
                     const include_high = start <= units and units < end;
                     const include_low = start <= units + 1 and units + 1 < end;
                     if (include_high and include_low) {
-                        try buf.appendSlice(a, s[i .. i + seq_len]);
+                        if (run_start == null) run_start = i; // keeps its bytes verbatim
                     } else {
+                        // A boundary splitting the pair: emit the half that is in
+                        // range on its own, so the run has to stop here.
+                        if (run_start) |run| try buf.appendSlice(a, s[run..i]);
+                        run_start = null;
                         if (include_high) try appendWtf8CodeUnit(buf, a, high);
                         if (include_low) try appendWtf8CodeUnit(buf, a, low);
                     }
@@ -12147,10 +12164,16 @@ pub const Interpreter = struct {
                     continue;
                 }
             }
-            if (units >= start and units < end) try buf.appendSlice(a, s[i .. i + seq_len]);
+            if (units >= start and units < end) {
+                if (run_start == null) run_start = i;
+            } else if (run_start) |run| {
+                try buf.appendSlice(a, s[run..i]);
+                run_start = null;
+            }
             units += seq_units;
             i += seq_len;
         }
+        if (run_start) |run| try buf.appendSlice(a, s[run..i]);
     }
 
     fn advanceStringIndex(s: []const u8, index: usize, unicode: bool) usize {
