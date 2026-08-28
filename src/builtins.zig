@@ -1598,7 +1598,7 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
     _ = this;
     const self = interp(ctx);
     const target = arg(args, 0);
-    if (!isRealObject(target)) return self.throwError("TypeError", "Object.defineProperty called on non-object");
+    if (!isRealObject(target)) return self.throwError("TypeError", "Properties can only be defined on Objects.");
     try self.checkRestricted(target.asObj());
     const target_root = try self.pushTempRoot(target);
     defer self.restoreTempRoots(target_root);
@@ -1607,7 +1607,7 @@ pub fn objectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) H
     const desc = self.tempRoot(desc_root, arg(args, 2));
     // ToPropertyDescriptor requires an Object — a BigInt or Symbol value (boxed
     // as an object internally) is a primitive and must be rejected.
-    if (!isRealObject(desc)) return self.throwError("TypeError", "Property description must be an object");
+    if (!isRealObject(desc)) return self.throwError("TypeError", "Property description must be an object.");
     try defineOne(self, self.tempRoot(target_root, target).asObj(), key, desc.asObj());
     return self.tempRoot(target_root, target);
 }
@@ -1622,7 +1622,7 @@ pub fn reflectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) 
     const desc_root = try self.pushTempRoot(arg(args, 2));
     const key = try self.keyOf(arg(args, 1));
     const desc = self.tempRoot(desc_root, arg(args, 2));
-    if (!isRealObject(desc)) return self.throwError("TypeError", "Property description must be an object");
+    if (!isRealObject(desc)) return self.throwError("TypeError", "Property description must be an object.");
     return Value.boolVal(try defineOneResult(self, self.tempRoot(target_root, target).asObj(), key, desc.asObj()));
 }
 
@@ -1710,7 +1710,9 @@ fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?
 pub fn throwDefineFailed(self: *Interpreter, target: *value.Object, key: []const u8) HostError {
     if (target.proxyHandler() != null or target.proxy_revoked)
         return self.throwErrorFmt("TypeError", "Proxy's 'defineProperty' trap returned falsy value for property '{s}'", .{key});
-    if (!target.isExtensible() and !try self.hasOwnPropertyResult(target, key))
+    // A module namespace is skipped for the same reason as in `throwSetFailed`:
+    // probing its own properties would evaluate a deferred module.
+    if (target.moduleNs() == null and !target.isExtensible() and !try self.hasOwnPropertyResult(target, key))
         return self.throwError("TypeError", "Attempting to define property on object that is not extensible.");
     return self.throwError("TypeError", "Attempting to change value of a readonly property.");
 }
@@ -2169,7 +2171,7 @@ pub fn objectDefineProperties(ctx: *anyopaque, this: Value, args: []const Value)
     _ = this;
     const self = interp(ctx);
     const target = arg(args, 0);
-    if (!isRealObject(target)) return self.throwError("TypeError", "Object.defineProperties called on non-object");
+    if (!isRealObject(target)) return self.throwError("TypeError", "Properties can only be defined on Objects.");
     const target_root = try self.pushTempRoot(target);
     defer self.restoreTempRoots(target_root);
     try applyProperties(self, self.tempRoot(target_root, target).asObj(), arg(args, 1));
@@ -2196,7 +2198,7 @@ fn applyProperties(self: *Interpreter, target_input: *value.Object, props: Value
         const prop_desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ self.tempRoot(props_root, props_value), try self.keyToValue(key) });
         if (!prop_desc.isObject() or !completedDescAttr(prop_desc.asObj()).enumerable) continue;
         const raw = try self.getProperty(self.tempRoot(props_root, props_value), key);
-        if (!isRealObject(raw)) return self.throwError("TypeError", "Property description must be an object");
+        if (!isRealObject(raw)) return self.throwError("TypeError", "Property description must be an object.");
         const descriptor = try readDescriptor(self, raw.asObj());
         const descriptor_root = try RootedDescriptor.init(self, descriptor);
         const owned_key = try scratch.dupe(u8, key);

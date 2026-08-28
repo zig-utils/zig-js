@@ -15282,10 +15282,15 @@ pub const Interpreter = struct {
                 return self.throwErrorFmt("TypeError", "Proxy object's 'set' trap returned falsy value for property '{s}'", .{key});
             if (o.is_array and std.mem.eql(u8, key, "length") and !arrayLenWritable(o))
                 return self.throwError("TypeError", "Array length is not writable");
-            // `hasOwnPropertyResult` rather than `getOwn`: a frozen array's
-            // dense elements are own properties that the shape map does not hold.
-            if (!o.isExtensible() and !try self.hasOwnPropertyResult(o, key))
-                return self.throwError("TypeError", "Attempting to define property on object that is not extensible.");
+            // A module namespace's [[Set]] always fails, and its [[GetOwnProperty]]
+            // would force a deferred module to evaluate — which the failing store
+            // is specified not to do. Do not probe it.
+            if (o.moduleNs() == null) {
+                // `hasOwnPropertyResult` rather than `getOwn`: a frozen array's
+                // dense elements are own properties that the shape map does not hold.
+                if (!o.isExtensible() and !try self.hasOwnPropertyResult(o, key))
+                    return self.throwError("TypeError", "Attempting to define property on object that is not extensible.");
+            }
         }
         return self.throwError("TypeError", "Attempted to assign to readonly property.");
     }
@@ -27637,7 +27642,7 @@ fn canonicalizeLocaleTag(a: std.mem.Allocator, tag: []const u8) ?[]const u8 {
 /// user-visible RangeError or, worse, a partially lowercased locale.
 fn canonicalizeLocaleTagForIntl(self: *Interpreter, a: std.mem.Allocator, tag: []const u8) EvalError![]const u8 {
     if (!isStructurallyValidLanguageTag(tag))
-        return self.throwError("RangeError", "Incorrect locale information provided");
+        return self.throwErrorFmt("RangeError", "invalid language tag: {s}", .{tag});
     return canonicalizeLocaleTag(a, tag) orelse error.OutOfMemory;
 }
 
@@ -28011,7 +28016,7 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     else if (std.mem.eql(u8, key, "unit"))
         &sanctioned_units
     else
-        return self.throwError("RangeError", "Intl.supportedValuesOf: invalid key");
+        return self.throwError("RangeError", "Unknown key for Intl.supportedValuesOf");
     // supportedValuesOf("timeZone") returns only PRIMARY (canonical) identifiers:
     // an alias like `Etc/GMT`/`Etc/UTC`/`GMT` (all canonicalized to `UTC`) is
     // omitted so the list has no two entries that would compare equal — a
@@ -28226,7 +28231,7 @@ fn intlLocaleConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Intl.Locale requires 'new'");
     const tagv = if (args.len > 0) args[0] else Value.undef();
-    if (!tagv.isString() and !tagv.isObject()) return self.throwError("TypeError", "Locale tag must be a string or Intl.Locale");
+    if (!tagv.isString() and !tagv.isObject()) return self.throwError("TypeError", "First argument to Intl.Locale must be a string or an object");
     const tag_raw = intlLocaleTag(tagv) orelse try self.toStringV(tagv);
     var canon = try canonicalizeLocaleTagForIntl(self, self.arena, tag_raw);
 
@@ -28597,14 +28602,14 @@ fn dtfCanonOffsetTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const 
     if (s.len == 6 and (s[3] != ':' or !std.ascii.isDigit(s[4]) or !std.ascii.isDigit(s[5]))) return null;
     const hh = std.fmt.parseInt(u8, s[1..3], 10) catch return null;
     const mm = if (s.len == 5) std.fmt.parseInt(u8, s[3..5], 10) catch return null else if (s.len == 6) std.fmt.parseInt(u8, s[4..6], 10) catch return null else 0;
-    if (hh > 23 or mm > 59) return self.throwError("RangeError", "invalid timeZone");
+    if (hh > 23 or mm > 59) return self.throwErrorFmt("RangeError", "invalid time zone: {s}", .{s});
     const sign: u8 = if (hh == 0 and mm == 0) '+' else s[0];
     return try std.fmt.allocPrint(self.arena, "{c}{d:0>2}:{d:0>2}", .{ sign, hh, mm });
 }
 
 fn dtfCanonNamedTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const u8 {
     for (s) |c| if (c >= 0x80 or !(std.ascii.isAlphanumeric(c) or c == '/' or c == '_' or c == '-' or c == '+')) {
-        return self.throwError("RangeError", "invalid timeZone");
+        return self.throwErrorFmt("RangeError", "invalid time zone: {s}", .{s});
     };
     const fixed = [_][]const u8{
         "CET",        "CST6CDT",   "Cuba",          "EET",           "EST",        "EST5EDT",
@@ -28624,7 +28629,7 @@ fn dtfCanonNamedTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const u
     };
     for (fixed) |z| if (std.ascii.eqlIgnoreCase(s, z)) return z;
     if (std.ascii.startsWithIgnoreCase(s, "Etc/GMT+") or std.ascii.startsWithIgnoreCase(s, "Etc/GMT-"))
-        return self.throwError("RangeError", "invalid timeZone");
+        return self.throwErrorFmt("RangeError", "invalid time zone: {s}", .{s});
     const exact_case = [_][]const u8{
         "Africa/Dar_es_Salaam",
         "America/Argentina/ComodRivadavia",
@@ -28677,9 +28682,10 @@ fn dtfCanonNamedTimeZone(self: *Interpreter, s: []const u8) EvalError!?[]const u
 
 fn dtfCanonTimeZone(self: *Interpreter, s: []const u8) EvalError![]const u8 {
     if (try dtfCanonOffsetTimeZone(self, s)) |z| return z;
-    if (s.len > 0 and (s[0] == '+' or s[0] == '-' or s[0] >= 0x80)) return self.throwError("RangeError", "invalid timeZone");
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-' or s[0] >= 0x80))
+        return self.throwErrorFmt("RangeError", "invalid time zone: {s}", .{s});
     if (try dtfCanonNamedTimeZone(self, s)) |z| return z;
-    return self.throwError("RangeError", "invalid timeZone");
+    return self.throwErrorFmt("RangeError", "invalid time zone: {s}", .{s});
 }
 
 /// The calendar types a full implementation reports from AvailableCalendars.
@@ -29165,14 +29171,14 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     // A missing currency under style:"currency" is a TypeError (takes precedence
     // over the unit check); a present-but-malformed unit is a RangeError for any
     // style.
-    if (std.mem.eql(u8, style, "currency") and cur_code == null) return self.throwError("TypeError", "currency code is required with style \"currency\"");
+    if (std.mem.eql(u8, style, "currency") and cur_code == null) return self.throwError("TypeError", "currency must be a string");
     if (unit) |u| if (!isWellFormedUnitIdentifier(u)) return self.throwError("RangeError", "invalid unit identifier");
     if (std.mem.eql(u8, style, "currency")) {
         try self.setProp(ro, "currency", try Value.strOwned(self.arena, try std.ascii.allocUpperString(self.arena, cur_code.?)));
         if (cdisp == null) try self.setProp(ro, "currencyDisplay", Value.str("symbol"));
         if (csign == null) try self.setProp(ro, "currencySign", Value.str("standard"));
     } else if (std.mem.eql(u8, style, "unit")) {
-        if (unit == null) return self.throwError("TypeError", "unit is required with style \"unit\"");
+        if (unit == null) return self.throwError("TypeError", "unit must be a string");
         try self.setProp(ro, "unit", try Value.strAlloc(self.arena, unit.?));
         if (udisp == null) try self.setProp(ro, "unitDisplay", Value.str("short"));
     }
