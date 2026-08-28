@@ -564,17 +564,22 @@ fn runEval(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     defer gpa.free(src);
     const ctx = js.Context.create(gpa) catch return;
     defer ctx.destroy();
-    var buf: [4096]u8 = undefined;
+    // Written in three pieces rather than through a fixed buffer: a probe that
+    // returns more than a few kilobytes (a batched case table, say) used to
+    // overflow `bufPrint` and fall back to a bare "OK", which reads as an empty
+    // result rather than as truncation.
     if (ctx.evaluate(src)) |v| {
         const s = v.toString(ctx.arena()) catch "?";
-        const line = std.fmt.bufPrint(&buf, "OK {s}\n", .{s}) catch "OK\n";
-        out.writeStreamingAll(io, line) catch {};
+        out.writeStreamingAll(io, "OK ") catch {};
+        out.writeStreamingAll(io, s) catch {};
+        out.writeStreamingAll(io, "\n") catch {};
     } else |err| {
         var d: std.ArrayListUnmanaged(u8) = .empty;
         defer d.deinit(gpa);
         captureDetail(gpa, ctx, err, &d);
-        const line = std.fmt.bufPrint(&buf, "ERR {s}\n", .{d.items}) catch "ERR\n";
-        out.writeStreamingAll(io, line) catch {};
+        out.writeStreamingAll(io, "ERR ") catch {};
+        out.writeStreamingAll(io, d.items) catch {};
+        out.writeStreamingAll(io, "\n") catch {};
     }
 }
 

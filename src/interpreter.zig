@@ -4684,6 +4684,13 @@ pub const Interpreter = struct {
         return error.Throw;
     }
 
+    /// `throwError` with a formatted message. JavaScriptCore names the offending
+    /// builtin in most of its `TypeError`s, so a great many of these messages are
+    /// built rather than literal; the arena owns the text for the frame's life.
+    pub fn throwErrorFmt(self: *Interpreter, name: []const u8, comptime fmt: []const u8, fmt_args: anytype) EvalError {
+        return self.throwError(name, try std.fmt.allocPrint(self.arena, fmt, fmt_args));
+    }
+
     fn throwMissingRequiredChunk(self: *Interpreter, func: *const Function, kind: []const u8) EvalError {
         const function_name = if (func.name.len == 0) "<anonymous>" else func.name;
         const message = try std.fmt.allocPrint(self.arena, "required bytecode {s} function '{s}' has no compiled chunk ({s})", .{
@@ -17166,7 +17173,7 @@ pub const Interpreter = struct {
         if (eq(name, "sort") or eq(name, "toSorted")) {
             const cmp = arg0(args);
             if (!cmp.isUndefined() and !cmp.isCallable())
-                return self.throwError("TypeError", "Array.prototype sort comparator is not a function");
+                return self.throwErrorFmt("TypeError", "Array.prototype.{s} requires the comparator argument to be a function or undefined", .{name});
         }
         // Real arrays use the dense element store directly; an array-like `this`
         // (via `.call`) materializes its `length`/indexed properties into a
@@ -17205,7 +17212,7 @@ pub const Interpreter = struct {
         };
         for (cb_methods) |m| {
             if (eq(name, m) and !arg0(args).isCallable())
-                return self.throwError("TypeError", "Array.prototype callback is not a function");
+                return self.throwErrorFmt("TypeError", "Array.prototype.{s} callback must be a function", .{name});
         }
         // The logical length for index iteration: a real array's includes any
         // sparse tail (`array_len`); an array-like uses its materialized slice.
@@ -17494,7 +17501,7 @@ pub const Interpreter = struct {
         if (eq(name, "toSorted")) {
             const cmp = arg0(args);
             if (!cmp.isUndefined() and !cmp.isCallable())
-                return self.throwError("TypeError", "Array.prototype.toSorted comparator is not a function");
+                return self.throwError("TypeError", "Array.prototype.toSorted requires the comparator argument to be a function or undefined");
             if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
             var k: usize = 0;
@@ -17666,7 +17673,7 @@ pub const Interpreter = struct {
                     }
                     acc = try self.callValue(cb, &.{ acc, el, Value.num(@floatFromInt(idx)), Value.obj(o) });
                 }
-                if (!seeded) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                if (!seeded) return self.throwErrorFmt("TypeError", "{s} of empty array with no initial value", .{name});
                 return acc;
             }
             if (args.len >= 2) {
@@ -17674,7 +17681,7 @@ pub const Interpreter = struct {
             } else {
                 // Seed with the first *present* element; empty (all-hole) → throw.
                 while (i < ilen and !(try self.arrIndexPresent(o, i))) i += 1;
-                if (i >= ilen) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                if (i >= ilen) return self.throwErrorFmt("TypeError", "{s} of empty array with no initial value", .{name});
                 acc = try self.arrIndexGet(o, i);
                 i += 1;
             }
@@ -17705,7 +17712,7 @@ pub const Interpreter = struct {
                     }
                     acc = try self.callValue(cb, &.{ acc, el, Value.num(@floatFromInt(idx)), Value.obj(o) });
                 }
-                if (!seeded) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                if (!seeded) return self.throwErrorFmt("TypeError", "{s} of empty array with no initial value", .{name});
                 return acc;
             }
             var i: usize = ilen;
@@ -17713,7 +17720,7 @@ pub const Interpreter = struct {
                 acc = args[1];
             } else {
                 while (i > 0 and !(try self.arrIndexPresent(o, i - 1))) i -= 1;
-                if (i == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+                if (i == 0) return self.throwErrorFmt("TypeError", "{s} of empty array with no initial value", .{name});
                 i -= 1;
                 acc = try self.arrIndexGet(o, i);
             }
@@ -17818,7 +17825,7 @@ pub const Interpreter = struct {
         if (eq(name, "sort")) {
             const cmp = arg0(args);
             if (!cmp.isUndefined() and !cmp.isCallable())
-                return self.throwError("TypeError", "Array.prototype.sort comparator is not a function");
+                return self.throwError("TypeError", "Array.prototype.sort requires the comparator argument to be a function or undefined");
             // Gather the *present* elements (holes excluded), sort them — with
             // `undefined` ordered last and never passed to the comparator — then
             // write them back, leaving holes at the tail.
@@ -20735,7 +20742,7 @@ fn objectGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const cb = if (args.len > 1) args[1] else Value.undef();
-    if (!cb.isCallable()) return self.throwError("TypeError", "Object.groupBy: callback is not a function");
+    if (!cb.isCallable()) return self.throwError("TypeError", "Object.groupBy requires that the second argument must be a function");
     const elems = try collectIterable(self, if (args.len > 0) args[0] else Value.undef());
     const obj = (try self.newObject()).asObj();
     obj.setProtoAtomic(null); // groupBy result has a null prototype
@@ -20759,7 +20766,7 @@ fn mapGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const cb = if (args.len > 1) args[1] else Value.undef();
-    if (!cb.isCallable()) return self.throwError("TypeError", "Map.groupBy: callback is not a function");
+    if (!cb.isCallable()) return self.throwError("TypeError", "Map.groupBy requires that the second argument must be a function");
     const elems = try collectIterable(self, if (args.len > 0) args[0] else Value.undef());
     const map = (try self.makeMap(Value.undef())).asObj();
     for (elems, 0..) |el, i| {
@@ -25818,6 +25825,18 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     const len = cur_len orelse 0;
     const recv = Value.obj(o);
     const cb_this: Value = if (args.len > 1) args[1] else Value.undef();
+    // %TypedArray%.prototype.{forEach,map,filter,some,every} step 3: "If
+    // IsCallable(callback) is false, throw a TypeError" — before the length is
+    // consulted and before `map`/`filter` run TypedArraySpeciesCreate. Letting
+    // the per-element call raise it instead is invisible on a populated array but
+    // wrong on an empty one, which test262 never pairs with a non-callable.
+    {
+        const cb_methods = [_][]const u8{ "forEach", "map", "filter", "some", "every" };
+        for (cb_methods) |m| {
+            if (eq(name, m) and !arg0(args).isCallable())
+                return self.throwErrorFmt("TypeError", "TypedArray.prototype.{s} callback must be a function", .{name});
+        }
+    }
     if (eq(name, "at")) {
         const n = if (args.len > 0) try self.toNumberV(args[0]) else 0;
         const rel = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
@@ -25903,7 +25922,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         const want_idx = eq(name, "findIndex") or eq(name, "findLastIndex");
         const from_end = eq(name, "findLast") or eq(name, "findLastIndex");
         const cb = if (args.len > 0) args[0] else Value.undef();
-        if (!cb.isCallable()) return self.throwError("TypeError", "TypedArray.prototype.find predicate is not callable");
+        if (!cb.isCallable()) return self.throwErrorFmt("TypeError", "TypedArray.prototype.{s} callback must be a function", .{name});
         var k: usize = 0;
         while (k < len) : (k += 1) {
             const i = if (from_end) len - 1 - k else k;
@@ -25916,7 +25935,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     if (eq(name, "reduce") or eq(name, "reduceRight")) {
         const right = eq(name, "reduceRight");
         const cb = if (args.len > 0) args[0] else Value.undef();
-        if (!cb.isCallable()) return self.throwError("TypeError", "TypedArray.prototype.reduce callback is not callable");
+        if (!cb.isCallable()) return self.throwErrorFmt("TypeError", "TypedArray.prototype.{s} callback must be a function", .{name});
         var acc: Value = undefined;
         var count: usize = 0;
         const idxOf = struct {
@@ -25927,7 +25946,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
         if (args.len > 1) {
             acc = args[1];
         } else {
-            if (len == 0) return self.throwError("TypeError", "Reduce of empty array with no initial value");
+            if (len == 0) return self.throwErrorFmt("TypeError", "TypedArray.prototype.{s} of empty array with no initial value", .{name});
             acc = try self.taLoadIdx(ta, idxOf(right, len, 0));
             count = 1;
         }
@@ -26105,7 +26124,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     }
     if (eq(name, "sort") or eq(name, "toSorted")) {
         const cmp = if (args.len > 0) args[0] else Value.undef();
-        if (!cmp.isUndefined() and !cmp.isCallable()) return self.throwError("TypeError", "The comparison function must be either a function or undefined");
+        if (!cmp.isUndefined() and !cmp.isCallable()) return self.throwErrorFmt("TypeError", "TypedArray.prototype.{s} requires the comparator argument to be a function or undefined", .{name});
         if (cmp.isUndefined()) {
             if (eq(name, "toSorted")) {
                 const result = try newTypedArray(self, ta.kind, len);
@@ -36278,7 +36297,7 @@ fn arrayValuesIterFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this.isUndefined() or this.isNull())
-        return self.throwError("TypeError", "Array.prototype.values called on null or undefined");
+        return self.throwError("TypeError", "Array.prototype.values requires that |this| not be null or undefined");
     return self.makeCursorIterator(this);
 }
 
@@ -37052,7 +37071,7 @@ fn arrayProtoMethod(comptime name: []const u8) value.NativeFn {
             }
             defer self.env = saved_env;
             if (this.isNull() or this.isUndefined())
-                return self.throwError("TypeError", "Array.prototype." ++ name ++ " called on null or undefined");
+                return self.throwError("TypeError", "Array.prototype." ++ name ++ " requires that |this| not be null or undefined");
             const o = try self.toObject(this);
             if (try self.arrayMethod(o, name, args)) |r| return r;
             // `toString`/`toLocaleString` aren't in `arrayMethod`; fall back to the
@@ -37096,7 +37115,7 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (this.isNull() or this.isUndefined())
-                return self.throwError("TypeError", "String.prototype." ++ name ++ " called on null or undefined");
+                return self.throwError("TypeError", "String.prototype." ++ name ++ " requires that |this| not be null or undefined");
             if (comptime std.mem.eql(u8, name, "replaceAll"))
                 if (try self.replaceAllProtocolDispatch(this, args)) |r| return r;
             if (try self.stringProtocolDispatch(name, this, args)) |r| return r;

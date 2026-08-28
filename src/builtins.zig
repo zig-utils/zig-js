@@ -890,6 +890,8 @@ pub fn objectKeys(ctx: *anyopaque, this: Value, args: []const Value) HostError!V
 pub fn objectValues(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    if (arg(args, 0).isNull() or arg(args, 0).isUndefined())
+        return self.throwError("TypeError", "Object.values requires that input parameter not be null or undefined");
     if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
     return enumerableOwnProperties(self, arg(args, 0), .value);
 }
@@ -912,6 +914,8 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
     _ = this;
     const self = interp(ctx);
     // ToObject(target): null/undefined throw; a primitive boxes to a wrapper.
+    if (arg(args, 0).isNull() or arg(args, 0).isUndefined())
+        return self.throwError("TypeError", "Object.assign requires that input parameter not be null or undefined");
     const to = try self.toObject(arg(args, 0));
     const to_v: Value = Value.obj(to);
     const target_root = try self.pushTempRoot(to_v);
@@ -971,6 +975,8 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
 pub fn objectEntries(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    if (arg(args, 0).isNull() or arg(args, 0).isUndefined())
+        return self.throwError("TypeError", "Object.entries requires that input parameter not be null or undefined");
     if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
     return enumerableOwnProperties(self, arg(args, 0), .key_value);
 }
@@ -1155,7 +1161,7 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const this_root = try self.pushTempRoot(this_arg);
     var mapping = false;
     if (!map_fn.isUndefined()) {
-        if (!map_fn.isCallable()) return self.throwError("TypeError", "Array.from: mapping function is not callable");
+        if (!map_fn.isCallable()) return self.throwError("TypeError", "Array.from requires that the second argument, when provided, be a function");
         mapping = true;
     }
     const use_ctor = interpreter.isConstructorValue(C);
@@ -1259,7 +1265,7 @@ const FromAsyncOutcome = union(enum) {
 fn arrayFromAsyncImpl(self: *Interpreter, out_promise: Value, C: Value, items: Value, mapfn: Value, this_arg: Value) HostError!FromAsyncOutcome {
     var mapping = false;
     if (!mapfn.isUndefined()) {
-        if (!mapfn.isCallable()) return self.throwError("TypeError", "Array.fromAsync: mapping function is not callable");
+        if (!mapfn.isCallable()) return self.throwError("TypeError", "Array.fromAsync requires that the second argument, when provided, be a function");
         mapping = true;
     }
     const use_ctor = interpreter.isConstructorValue(C);
@@ -2829,10 +2835,10 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const self = interp(ctx);
     const cooked = arg(args, 0);
     if (cooked.isNull() or cooked.isUndefined())
-        return self.throwError("TypeError", "Cannot convert undefined or null to object");
+        return self.throwError("TypeError", "String.raw requires template not be null or undefined");
     const raw = try self.getProperty(cooked, "raw");
     if (raw.isNull() or raw.isUndefined())
-        return self.throwError("TypeError", "Cannot convert undefined or null to object");
+        return self.throwError("TypeError", "String.raw requires template.raw not be null or undefined");
     // ToLength(Get(raw,"length")) — ToNumber throws for a Symbol/BigInt length.
     const segs = interpreter.toLen(try self.toNumberV(try self.getProperty(raw, "length")));
     if (segs == 0) return Value.str("");
