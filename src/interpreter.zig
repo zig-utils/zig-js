@@ -13497,7 +13497,11 @@ pub const Interpreter = struct {
     fn proxyTrap(self: *Interpreter, o: *value.Object, name: []const u8) EvalError!?Value {
         if (o.proxy_revoked or o.proxyHandler() == null)
             return self.throwError("TypeError", "Cannot perform 'get' on a proxy that has been revoked");
-        const trap = try self.getProperty(Value.obj(o.proxyHandler().?), name);
+        return self.proxyTrapFromHandler(Value.obj(o.proxyHandler().?), name);
+    }
+
+    fn proxyTrapFromHandler(self: *Interpreter, handler: Value, name: []const u8) EvalError!?Value {
+        const trap = try self.getProperty(handler, name);
         if (trap.isUndefined() or trap.isNull()) return null;
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy trap is not a function");
         return trap;
@@ -13624,9 +13628,16 @@ pub const Interpreter = struct {
     pub fn proxyIsExtensible(self: *Interpreter, o: *value.Object) EvalError!bool {
         try self.proxyDepth();
         const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'isExtensible' on a proxy that has been revoked");
-        const trap = (try self.proxyTrap(o, "isExtensible")) orelse return self.ordinaryIsExtensible(target);
-        const res = (try self.callValueWithThis(trap, &.{Value.obj(target)}, Value.obj(o.proxyHandler().?))).toBoolean();
-        if (res != try self.ordinaryIsExtensible(target))
+        const handler = o.proxyHandler() orelse return self.throwError("TypeError", "Cannot perform 'isExtensible' on a proxy that has been revoked");
+        const target_root = try self.pushTempRoot(Value.obj(target));
+        defer self.restoreTempRoots(target_root);
+        const handler_root = try self.pushTempRoot(Value.obj(handler));
+        // ValidateNonRevokedProxy captures both slots before GetMethod. A getter
+        // may revoke the proxy without changing this operation's captured slots.
+        const trap = (try self.proxyTrapFromHandler(Value.obj(handler), "isExtensible")) orelse
+            return self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj());
+        const res = (try self.callValueWithThis(trap, &.{self.tempRoot(target_root, Value.obj(target))}, self.tempRoot(handler_root, Value.obj(handler)))).toBoolean();
+        if (res != try self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj()))
             return self.throwError("TypeError", "proxy 'isExtensible' trap result must match the target's extensibility");
         return res;
     }
@@ -14007,54 +14018,57 @@ pub const Interpreter = struct {
         defer self.depth -= 1;
         const scratch = self.scratch_allocator orelse self.arena;
         const target = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'ownKeys' on a proxy that has been revoked");
-        if (try self.proxyTrap(o, "ownKeys")) |trap| {
-            const res = try self.callValueWithThis(trap, &.{Value.obj(target)}, Value.obj(o.proxyHandler().?));
-            if (!res.isObject()) return self.throwError("TypeError", "ownKeys trap must return an object");
-            // CreateListFromArrayLike(types: String, Symbol): every element must
-            // be a String or Symbol.
-            const len = toLen(try self.toNumberV(try self.getProperty(res, "length")));
-            var list: std.ArrayListUnmanaged([]const u8) = .empty;
-            var i: usize = 0;
-            while (i < len) : (i += 1) {
-                const k = try self.getProperty(res, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-                if (!k.isString() and !(k.isObject() and k.asObj().is_symbol))
-                    return self.throwError("TypeError", "ownKeys trap result includes a non-String, non-Symbol key");
-                try list.append(self.arena, try self.keyOf(k));
-            }
-            // [[OwnPropertyKeys]] invariants: no duplicates; every
-            // non-configurable target key must be present; for a non-extensible
-            // target the result must be exactly the target's keys.
-            var seen: SecureStringMembership = .{};
-            defer seen.deinit(scratch);
-            for (list.items) |k| {
-                if (try seen.getOrPutSecure(self, scratch, k))
-                    return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
-            }
-            const extensible = target.isExtensible();
-            const tkeys = try self.objectOwnKeysList(target);
-            var has_nonconfig = false;
-            for (tkeys) |tk| {
-                if (objectHasOwn(target, tk) and !target.getAttr(tk).configurable) has_nonconfig = true;
-            }
-            if (!extensible or has_nonconfig) {
-                // Every non-configurable target key must appear.
-                for (tkeys) |tk| {
-                    if (!objectHasOwn(target, tk) or target.getAttr(tk).configurable) continue;
-                    if (!seen.remove(tk)) return self.throwError("TypeError", "ownKeys trap omitted a non-configurable key");
-                }
-                if (!extensible) {
-                    // Non-extensible: the remaining (configurable) target keys must
-                    // also appear, and nothing extra may be present.
-                    for (tkeys) |tk| {
-                        if (!objectHasOwn(target, tk) or !target.getAttr(tk).configurable) continue;
-                        if (!seen.remove(tk)) return self.throwError("TypeError", "ownKeys trap omitted a key on a non-extensible target");
-                    }
-                    if (seen.count() != 0) return self.throwError("TypeError", "ownKeys trap added a key absent from a non-extensible target");
-                }
-            }
-            return list.items;
+        const handler = o.proxyHandler() orelse return self.throwError("TypeError", "Cannot perform 'ownKeys' on a proxy that has been revoked");
+        const target_root = try self.pushTempRoot(Value.obj(target));
+        defer self.restoreTempRoots(target_root);
+        const handler_root = try self.pushTempRoot(Value.obj(handler));
+        // ECMA-262 10.5.11 retains the validated target and handler through
+        // GetMethod, including revocation and relocation from the trap getter.
+        const trap = (try self.proxyTrapFromHandler(Value.obj(handler), "ownKeys")) orelse
+            return self.objectOwnKeysList(self.tempRoot(target_root, Value.obj(target)).asObj());
+        const res = try self.callValueWithThis(trap, &.{self.tempRoot(target_root, Value.obj(target))}, self.tempRoot(handler_root, Value.obj(handler)));
+        if (!builtins.isRealObject(res)) return self.throwError("TypeError", "ownKeys trap must return an object");
+        const result_root = try self.pushTempRoot(res);
+        const len = toLen(try self.toNumberV(try self.getProperty(res, "length")));
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const k = try self.getProperty(self.tempRoot(result_root, res), try std.fmt.allocPrint(self.arena, "{d}", .{i}));
+            if (!k.isString() and !(k.isObject() and k.asObj().is_symbol))
+                return self.throwError("TypeError", "ownKeys trap result includes a non-String, non-Symbol key");
+            // CreateListFromArrayLike owns each key beyond subsequent getters;
+            // borrowed String-cell bytes cannot outlive their current address.
+            try list.append(self.arena, try self.arena.dupe(u8, try self.keyOf(k)));
         }
-        return self.objectOwnKeysList(target);
+        var seen: SecureStringMembership = .{};
+        defer seen.deinit(scratch);
+        for (list.items) |k| {
+            if (try seen.getOrPutSecure(self, scratch, k))
+                return self.throwError("TypeError", "ownKeys trap result contains duplicate keys");
+        }
+        const extensible = try self.ordinaryIsExtensible(self.tempRoot(target_root, Value.obj(target)).asObj());
+        const tkeys = try self.objectOwnKeysList(self.tempRoot(target_root, Value.obj(target)).asObj());
+        const nonconfigurable = try scratch.alloc(bool, tkeys.len);
+        defer scratch.free(nonconfigurable);
+        var has_nonconfig = false;
+        // Snapshot the partition exactly once, in key order. Nested targets must
+        // observe [[GetOwnProperty]], and later traps may delete earlier keys.
+        for (tkeys, 0..) |tk, index| {
+            nonconfigurable[index] = try builtins.objectOwnPropertyNonConfigurable(self, self.tempRoot(target_root, Value.obj(target)).asObj(), tk);
+            has_nonconfig = has_nonconfig or nonconfigurable[index];
+        }
+        if (extensible and !has_nonconfig) return list.items;
+        for (tkeys, nonconfigurable) |tk, nonconfig| {
+            if (nonconfig and !seen.remove(tk))
+                return self.throwError("TypeError", "ownKeys trap omitted a non-configurable key");
+        }
+        if (extensible) return list.items;
+        for (tkeys, nonconfigurable) |tk, nonconfig| {
+            if (!nonconfig and !seen.remove(tk))
+                return self.throwError("TypeError", "ownKeys trap omitted a key on a non-extensible target");
+        }
+        if (seen.count() != 0) return self.throwError("TypeError", "ownKeys trap added a key absent from a non-extensible target");
+        return list.items;
     }
 
     /// `Thread.restrict` enforcement: every essential-internal-method funnel
@@ -54060,6 +54074,58 @@ test "reentrant assignment roots unwind on every allocation failure" {
     try std.testing.expectEqual(@as(f64, 7), (try machine.toPrimitive(Value.num(7), .number)).asNum());
     try std.testing.expect((try machine.toPrimitive(Value.undef(), .string)).isUndefined());
     try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+}
+
+test "Proxy metadata roots unwind on every allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator, descriptor: bool) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const ctx = try @import("context.zig").Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+            defer ctx.destroy();
+            const proxy = try ctx.evaluate(
+                \\var metadataTarget = {x: {marker: 37}};
+                \\var metadataInner = new Proxy(metadataTarget, {
+                \\  ownKeys(t) {return ['x'];},
+                \\  isExtensible(t) {return true;},
+                \\  getOwnPropertyDescriptor(t,k) {return {value:t.x,configurable:true,enumerable:true,writable:true};}
+                \\});
+                \\new Proxy(metadataInner, {
+                \\  ownKeys(t) {return {get length(){return 1;},get 0(){return 'x';}};},
+                \\  getOwnPropertyDescriptor(t,k) {
+                \\    return {get enumerable(){return true;},configurable:true,value:metadataTarget.x,get writable(){return true;}};
+                \\  }
+                \\});
+            );
+            const saved_gc = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(saved_gc);
+            // Sweep interpreter allocations without collecting: a separate
+            // moving witness covers relocation at every observable callback.
+            var machine = ctx.interpreter();
+            machine.arena = arena.allocator();
+            machine.scratch_allocator = backing;
+            machine.gc_safepoint_fn = null;
+            defer {
+                std.debug.assert(machine.gc_temp_roots.items.len == 0);
+                std.debug.assert(machine.gc_env_roots.items.len == 0);
+                std.debug.assert(machine.gc_tree_call_roots == null);
+                std.debug.assert(machine.depth == 0);
+                std.debug.assert(machine.env == &ctx.env);
+            }
+            if (descriptor) {
+                const result = try builtins.objectGetOwnPropertyDescriptor(&machine, Value.undef(), &.{ proxy, Value.str("x") });
+                try std.testing.expectEqual(@as(f64, 37), result.asObj().getOwn("value").?.asObj().getOwn("marker").?.asNum());
+            } else {
+                const keys = try machine.proxyOwnKeys(proxy.asObj());
+                try std.testing.expectEqual(@as(usize, 1), keys.len);
+                try std.testing.expectEqualStrings("x", keys[0]);
+            }
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{false});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{true});
 }
 
 test "numeric updates unwind temporary roots on every allocation failure" {

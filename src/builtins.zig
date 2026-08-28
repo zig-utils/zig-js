@@ -1583,8 +1583,10 @@ pub fn reflectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) 
 /// HasProperty (own *or inherited*), value via Get (so an inherited or accessor
 /// descriptor field is honored). Returns null when absent.
 fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?Value {
+    const root = try self.pushTempRoot(Value.obj(d));
+    defer self.restoreTempRoots(root);
     if (!try self.hasPropertyResult(d, name)) return null;
-    return try self.getProperty(Value.obj(d), name);
+    return try self.getProperty(self.tempRoot(root, Value.obj(d)), name);
 }
 
 pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!void {
@@ -2297,34 +2299,43 @@ pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []con
 /// descriptor object — fills omitted fields with their defaults and returns a
 /// fresh, fully-populated data or accessor descriptor object.
 fn completeDescriptor(self: *Interpreter, desc_obj: *value.Object) HostError!Value {
-    const enumerable = try descField(self, desc_obj, "enumerable");
-    const configurable = try descField(self, desc_obj, "configurable");
-    const valuef = try descField(self, desc_obj, "value");
-    const writable = try descField(self, desc_obj, "writable");
-    const getf = try descField(self, desc_obj, "get");
-    const setf = try descField(self, desc_obj, "set");
-    const is_accessor = getf != null or setf != null;
-    const is_data = valuef != null or writable != null;
-    if (is_accessor and is_data)
-        return self.throwError("TypeError", "Invalid property descriptor: cannot both specify accessors and a value or writable attribute");
+    const input = Value.obj(desc_obj);
+    const input_root = try self.pushTempRoot(input);
+    defer self.restoreTempRoots(input_root);
+    // ToPropertyDescriptor observes fields in order, normalizes flags at once,
+    // and validates each accessor before reading the next field. Retained
+    // descriptor values must survive reentrant HasProperty/Get callbacks.
+    const enumerable = if (try descField(self, desc_obj, "enumerable")) |v| v.toBoolean() else false;
+    const configurable = if (try descField(self, self.tempRoot(input_root, input).asObj(), "configurable")) |v| v.toBoolean() else false;
+    const valuef = try descField(self, self.tempRoot(input_root, input).asObj(), "value");
+    const value_root = try self.pushTempRoot(valuef orelse Value.undef());
+    const writable_field = try descField(self, self.tempRoot(input_root, input).asObj(), "writable");
+    const writable = if (writable_field) |v| v.toBoolean() else false;
+    const getf = try descField(self, self.tempRoot(input_root, input).asObj(), "get");
     if (getf) |g| {
-        if (!g.isUndefined() and !(g.isObject() and g.asObj().isCallableObject()))
+        if (!g.isUndefined() and !g.isCallable())
             return self.throwError("TypeError", "Getter must be a function");
     }
+    const get_root = try self.pushTempRoot(getf orelse Value.undef());
+    const setf = try descField(self, self.tempRoot(input_root, input).asObj(), "set");
     if (setf) |s| {
-        if (!s.isUndefined() and !(s.isObject() and s.asObj().isCallableObject()))
+        if (!s.isUndefined() and !s.isCallable())
             return self.throwError("TypeError", "Setter must be a function");
     }
+    const is_accessor = getf != null or setf != null;
+    if (is_accessor and (valuef != null or writable_field != null))
+        return self.throwError("TypeError", "Invalid property descriptor: cannot both specify accessors and a value or writable attribute");
     const out = (try self.newObject()).asObj();
+    // FromPropertyDescriptor uses CreateDataProperty, never inherited setters.
     if (is_accessor) {
-        try self.setMember(Value.obj(out), "get", getf orelse Value.undef());
-        try self.setMember(Value.obj(out), "set", setf orelse Value.undef());
+        try out.setOwn(self.arena, self.root_shape, "get", self.tempRoot(get_root, getf orelse Value.undef()));
+        try out.setOwn(self.arena, self.root_shape, "set", setf orelse Value.undef());
     } else {
-        try self.setMember(Value.obj(out), "value", valuef orelse Value.undef());
-        try self.setMember(Value.obj(out), "writable", Value.boolVal(if (writable) |w| w.toBoolean() else false));
+        try out.setOwn(self.arena, self.root_shape, "value", self.tempRoot(value_root, valuef orelse Value.undef()));
+        try out.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(writable));
     }
-    try self.setMember(Value.obj(out), "enumerable", Value.boolVal(if (enumerable) |e| e.toBoolean() else false));
-    try self.setMember(Value.obj(out), "configurable", Value.boolVal(if (configurable) |c| c.toBoolean() else false));
+    try out.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(enumerable));
+    try out.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(configurable));
     return Value.obj(out);
 }
 
@@ -2347,19 +2358,46 @@ fn proxyTargetExtensible(self: *Interpreter, target: *value.Object) HostError!bo
     return target.isExtensible();
 }
 
+/// The non-configurable partition of [[GetOwnProperty]] for Proxy ownKeys.
+/// Ordinary storage needs only attributes, not a freshly allocated JavaScript
+/// descriptor per key. Exotic targets retain their full observable dispatch.
+pub fn objectOwnPropertyNonConfigurable(self: *Interpreter, target: *value.Object, key: []const u8) HostError!bool {
+    if (target.proxyHandler() == null and !target.proxy_revoked and
+        !interpreter.isModuleNs(target) and target.typedArray() == null and
+        target.boxedPrimitive() == null and target.hostClassHooks() == null and !target.is_array)
+    {
+        if (target.getOwn(key) != null or target.getAccessor(key) != null)
+            return !target.getAttr(key).configurable;
+        if (arrayIndexOf(key)) |index| {
+            if (target.denseElement(index) != null) return !target.getAttr(key).configurable;
+        }
+        return false;
+    }
+    const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(target), try self.keyToValue(key) });
+    return desc.isObject() and !completedDescAttr(desc.asObj()).configurable;
+}
+
 pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
     const ov = arg(args, 0);
     // ES2015+: ToObject(O) — null/undefined throw; a primitive boxes to its
     // wrapper (so `Object.getOwnPropertyDescriptor("ab", 0)` sees the chars).
-    const o = if (ov.isObject()) ov.asObj() else try self.toObject(ov);
-    const key = try self.keyOf(arg(args, 1));
+    var o = if (ov.isObject()) ov.asObj() else try self.toObject(ov);
+    const object_value = Value.obj(o);
+    const object_root = try self.pushTempRoot(object_value);
+    defer self.restoreTempRoots(object_root);
+    // ToPropertyKey can reenter. Own the encoded bytes for subsequent traps,
+    // which may relocate the String cell that supplied them.
+    const scratch = self.scratch_allocator orelse self.arena;
+    const key = try scratch.dupe(u8, try self.keyOf(arg(args, 1)));
+    defer scratch.free(key);
+    o = self.tempRoot(object_root, object_value).asObj();
     // Private members are internal slots — invisible to reflection.
     if (value.isPrivateKey(key)) return Value.undef();
     if (interpreter.isModuleNs(o)) {
         try interpreter.triggerDeferForKey(self, o, key); // `import defer`: a string [[GetOwnProperty]] evaluates first
-        return interpreter.moduleNsDesc(self, o, key);
+        return interpreter.moduleNsDesc(self, self.tempRoot(object_root, object_value).asObj(), key);
     }
 
     // [[GetOwnProperty]] on a Proxy: the trap returns a descriptor object or
@@ -2369,30 +2407,37 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         if (o.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
         const handler = o.proxyHandler().?;
         const tgt = o.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
+        const target_root = try self.pushTempRoot(Value.obj(tgt));
+        const handler_root = try self.pushTempRoot(Value.obj(handler));
         const trap = try self.getProperty(Value.obj(handler), "getOwnPropertyDescriptor");
         if (trap.isUndefined() or trap.isNull())
-            return objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(tgt), arg(args, 1) });
+            return objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ self.tempRoot(target_root, Value.obj(tgt)), try self.keyToValue(key) });
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap is not callable");
-        const res = try self.callValueWithThis(trap, &.{ Value.obj(tgt), try self.keyToValue(key) }, Value.obj(handler));
+        const res = try self.callValueWithThis(trap, &.{ self.tempRoot(target_root, Value.obj(tgt)), try self.keyToValue(key) }, self.tempRoot(handler_root, Value.obj(handler)));
         if (!res.isUndefined() and !isRealObject(res)) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' trap must return an object or undefined");
-        const target_desc = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ Value.obj(tgt), try self.keyToValue(key) });
-        const target_extensible = try proxyTargetExtensible(self, tgt);
+        const result_root = try self.pushTempRoot(res);
+        const target_desc = try objectGetOwnPropertyDescriptor(ctx, Value.undef(), &.{ self.tempRoot(target_root, Value.obj(tgt)), try self.keyToValue(key) });
+        const descriptor_root = try self.pushTempRoot(target_desc);
+        // 10.5.5 returns/throws for absent/non-configurable descriptors before
+        // querying extensibility; nested Proxy targets can observe that order.
         if (res.isUndefined()) {
             if (target_desc.isObject()) {
                 const target_attr = completedDescAttr(target_desc.asObj());
                 if (!target_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a non-configurable property as absent");
-                if (!target_extensible) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a property of a non-extensible target as absent");
+                if (!try proxyTargetExtensible(self, self.tempRoot(target_root, Value.obj(tgt)).asObj()))
+                    return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a property of a non-extensible target as absent");
             }
             return Value.undef();
         }
-        const completed = try completeDescriptor(self, res.asObj());
+        const target_extensible = try proxyTargetExtensible(self, self.tempRoot(target_root, Value.obj(tgt)).asObj());
+        const completed = try completeDescriptor(self, self.tempRoot(result_root, res).asObj());
         const result_desc = completed.asObj();
         const result_attr = completedDescAttr(result_desc);
         if (!target_desc.isObject()) {
             if (!target_extensible) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a new property on a non-extensible target");
             if (!result_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a new non-configurable property");
         } else {
-            const target_obj = target_desc.asObj();
+            const target_obj = self.tempRoot(descriptor_root, target_desc).asObj();
             const target_attr = completedDescAttr(target_obj);
             const target_acc = completedDescAccessor(target_obj);
             const target_data = target_obj.getOwn("value");
@@ -2414,12 +2459,13 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
     if (o.typedArray()) |ta| {
         if (interpreter.canonicalNumericIndexString(key)) |n| {
             if (!interpreter.isValidIntegerIndex(ta, n)) return Value.undef();
-            const el = try self.getProperty(ov, key);
+            const el = try self.getProperty(Value.obj(o), key);
             return dataDescriptor(self, el, .{ .writable = true, .enumerable = true, .configurable = true });
         }
     }
     if (std.mem.eql(u8, key, "prototype") and o.jsFunction() != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
-        _ = try self.getProperty(ov, key);
+        _ = try self.getProperty(Value.obj(o), key);
+    o = self.tempRoot(object_root, object_value).asObj();
     if (o.boxedPrimitive()) |p| {
         if (p.isString()) {
             if (std.mem.eql(u8, key, "length"))
@@ -2433,14 +2479,15 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
         switch (try get(@ptrCast(self), o, key)) {
             .unhandled => {},
             .value => |v| {
+                const value_root = try self.pushTempRoot(v);
                 const configurable = if (hooks.attributes) |attributes|
                     if (blk: {
                         self.recordExecutionTier(.host_callbacks);
-                        break :blk try attributes(@ptrCast(self), o, key);
+                        break :blk try attributes(@ptrCast(self), self.tempRoot(object_root, object_value).asObj(), key);
                     }) |attr| attr.configurable else true
                 else
                     true;
-                return dataDescriptor(self, v, .{
+                return dataDescriptor(self, self.tempRoot(value_root, v), .{
                     .writable = false,
                     .enumerable = false,
                     .configurable = configurable,
@@ -2448,13 +2495,14 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             },
         }
     };
+    o = self.tempRoot(object_root, object_value).asObj();
     if (o.getAccessor(key)) |acc| {
         const a = o.getAttr(key);
         const desc = try self.newObject();
-        try self.setMember(desc, "get", acc.get orelse Value.undef());
-        try self.setMember(desc, "set", acc.set orelse Value.undef());
-        try self.setMember(desc, "enumerable", Value.boolVal(a.enumerable));
-        try self.setMember(desc, "configurable", Value.boolVal(a.configurable));
+        try desc.asObj().setOwn(self.arena, self.root_shape, "get", acc.get orelse Value.undef());
+        try desc.asObj().setOwn(self.arena, self.root_shape, "set", acc.set orelse Value.undef());
+        try desc.asObj().setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(a.enumerable));
+        try desc.asObj().setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(a.configurable));
         return desc;
     }
     if (o.getOwn(key)) |v| {
@@ -2490,10 +2538,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
 
 fn dataDescriptor(self: *Interpreter, v: Value, a: value.PropAttr) HostError!Value {
     const desc = try self.newObject();
-    try self.setMember(desc, "value", v);
-    try self.setMember(desc, "writable", Value.boolVal(a.writable));
-    try self.setMember(desc, "enumerable", Value.boolVal(a.enumerable));
-    try self.setMember(desc, "configurable", Value.boolVal(a.configurable));
+    try desc.asObj().setOwn(self.arena, self.root_shape, "value", v);
+    try desc.asObj().setOwn(self.arena, self.root_shape, "writable", Value.boolVal(a.writable));
+    try desc.asObj().setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(a.enumerable));
+    try desc.asObj().setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(a.configurable));
     return desc;
 }
 
