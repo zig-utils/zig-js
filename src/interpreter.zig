@@ -13482,7 +13482,7 @@ pub const Interpreter = struct {
     /// `has`/`keys` are dispatched, not stored properties), so it's served from
     /// its own elements rather than the protocol.
     fn getSetRecord(self: *Interpreter, v: Value) EvalError!SetRecord {
-        if (!v.isObject()) return self.throwError("TypeError", "argument is not an object");
+        if (!v.isObject()) return self.throwError("TypeError", "Set operation expects first argument to be an object");
         // GetSetRecord: rawSize = Get(obj,"size"); numSize = ToNumber(rawSize)
         // (a Symbol/BigInt size throws a TypeError); NaN throws; intSize < 0 is a
         // RangeError. ToNumber runs before `has`/`keys` are read.
@@ -13629,7 +13629,8 @@ pub const Interpreter = struct {
     fn proxyTrapFromHandler(self: *Interpreter, handler: Value, name: []const u8) EvalError!?Value {
         const trap = try self.getProperty(handler, name);
         if (trap.isUndefined() or trap.isNull()) return null;
-        if (!trap.isCallable()) return self.throwError("TypeError", "proxy trap is not a function");
+        if (!trap.isCallable())
+            return self.throwErrorFmt("TypeError", "'{s}' property of a Proxy's handler should be callable", .{name});
         return trap;
     }
 
@@ -15294,7 +15295,8 @@ pub const Interpreter = struct {
     /// Annex B __defineGetter__/__defineSetter__: ToPropertyKey can move both
     /// the receiver and callable before DefinePropertyOrThrow consumes them.
     fn defineLegacyAccessor(self: *Interpreter, o: *value.Object, key_value: Value, f: Value, getter: bool) EvalError!Value {
-        if (!f.isCallable()) return self.throwError("TypeError", "Object.prototype.__define[GS]etter__: Expecting function");
+        if (!f.isCallable())
+            return self.throwError("TypeError", if (getter) "invalid getter usage" else "invalid setter usage");
         const receiver_root = try self.pushTempRoot(Value.obj(o));
         defer self.restoreTempRoots(receiver_root);
         const function_root = try self.pushTempRoot(f);
@@ -20554,7 +20556,7 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     // `Promise(...)` without `new` is a TypeError (only [[Construct]] sets new.target).
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Promise constructor cannot be invoked without 'new'");
     const executor = if (args.len > 0) args[0] else Value.undef();
-    if (!executor.isCallable()) return self.throwError("TypeError", "Promise resolver is not a function");
+    if (!executor.isCallable()) return self.throwError("TypeError", "Promise constructor takes a function argument");
     const pobj = try promise.newPromise(self);
     if (self.new_target.isObject()) pobj.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Promise"));
     const pp = pobj.promiseData().?;
@@ -22133,7 +22135,7 @@ fn thisSymbol(self: *Interpreter, this: Value, method: []const u8) EvalError!*va
             if (p.isObject() and p.asObj().is_symbol) return p.asObj();
         }
     }
-    return self.throwError("TypeError", try std.fmt.allocPrint(self.arena, "{s} requires that 'this' be a Symbol", .{method}));
+    return self.throwError("TypeError", try std.fmt.allocPrint(self.arena, "{s} requires that |this| be a symbol or a symbol object", .{method}));
 }
 
 // ---- Proxy / Reflect natives ----------------------------------------------
@@ -22145,8 +22147,10 @@ fn proxyConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         return self.throwError("TypeError", "Constructor Proxy requires 'new'");
     const target = if (args.len > 0) args[0] else Value.undef();
     const handler = if (args.len > 1) args[1] else Value.undef();
-    if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
-        return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
+    if (!builtins.isRealObject(target))
+        return self.throwError("TypeError", "A Proxy's 'target' should be an Object");
+    if (!builtins.isRealObject(handler))
+        return self.throwError("TypeError", "A Proxy's 'handler' should be an Object");
     const o = try gc_mod.allocObj(self.arena);
     o.* = .{ .behavior = .{ .proxy_callable = target.asObj().isCallableObject() } };
     try o.setProxyState(self.arena, target.asObj(), handler.asObj());
@@ -22162,8 +22166,10 @@ fn proxyRevocableFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     defer self.new_target = saved_nt;
     const target = if (args.len > 0) args[0] else Value.undef();
     const handler = if (args.len > 1) args[1] else Value.undef();
-    if (!builtins.isRealObject(target) or !builtins.isRealObject(handler))
-        return self.throwError("TypeError", "Cannot create proxy with a non-object as target or handler");
+    if (!builtins.isRealObject(target))
+        return self.throwError("TypeError", "A Proxy's 'target' should be an Object");
+    if (!builtins.isRealObject(handler))
+        return self.throwError("TypeError", "A Proxy's 'handler' should be an Object");
     const p = try gc_mod.allocObj(self.arena);
     p.* = .{ .behavior = .{ .proxy_callable = target.asObj().isCallableObject() } };
     try p.setProxyState(self.arena, target.asObj(), handler.asObj());
@@ -22194,7 +22200,7 @@ fn reflectGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.get called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.get requires the first argument be an object");
     const receiver = if (args.len > 2) args[2] else target;
     return self.getPropertyWithReceiver(target, try self.keyOf(if (args.len > 1) args[1] else Value.undef()), receiver);
 }
@@ -22203,7 +22209,7 @@ fn reflectSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.set called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.set requires the first argument be an object");
     // A module namespace's [[Set]] returns false (Reflect.set reports it without
     // throwing, unlike a strict assignment).
     if (target.isObject() and isModuleNs(target.asObj())) return Value.boolVal(false);
@@ -22215,7 +22221,7 @@ fn reflectHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.has called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.has requires the first argument be an object");
     return Value.boolVal(try self.inOperator(if (args.len > 1) args[1] else Value.undef(), target));
 }
 
@@ -22223,7 +22229,7 @@ fn reflectDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.deleteProperty called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.deleteProperty requires the first argument be an object");
     return Value.boolVal(try self.deleteOwn(target.asObj(), try self.keyOf(if (args.len > 1) args[1] else Value.undef())));
 }
 
@@ -22232,7 +22238,7 @@ fn reflectOwnKeysFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.ownKeys called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.ownKeys requires the first argument be an object");
     // objectOwnKeysList is proxy- and module-namespace-aware (sorted exotic keys).
     const keys = try self.objectOwnKeysList(target.asObj());
     const arr = try self.newArray();
@@ -22244,7 +22250,7 @@ fn reflectGetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.getPrototypeOf called on non-object");
+    if (!builtins.isRealObject(target)) return self.throwError("TypeError", "Reflect.getPrototypeOf requires the first argument be an object");
     if (target.asObj().proxyHandler() != null or target.asObj().proxy_revoked) return self.proxyGetProto(target.asObj());
     return if (target.asObj().proto) |p| Value.obj(p) else Value.nul();
 }
@@ -22271,7 +22277,7 @@ fn reflectApplyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!target.isCallable()) return self.throwError("TypeError", "Reflect.apply target is not a function");
+    if (!target.isCallable()) return self.throwError("TypeError", "Reflect.apply requires the first argument be a function");
     const this_arg = if (args.len > 1) args[1] else Value.undef();
     const list = try createListFromArrayLike(self, if (args.len > 2) args[2] else Value.undef());
     return self.callValueWithThis(target, list, this_arg);
@@ -22281,7 +22287,7 @@ fn reflectConstructFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!isConstructorValue(target)) return self.throwError("TypeError", "Reflect.construct target is not a constructor");
+    if (!isConstructorValue(target)) return self.throwError("TypeError", "Reflect.construct requires the first argument be a constructor");
     // A new.target (3rd arg) must itself be a constructor — this is what the
     // `isConstructor` harness probes via `Reflect.construct(fn, [], target)`.
     if (args.len > 2 and !isConstructorValue(args[2]))
@@ -22296,7 +22302,7 @@ fn reflectConstructFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
 fn reflectGetOwnDescFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!builtins.isRealObject(if (args.len > 0) args[0] else Value.undef()))
-        return self.throwError("TypeError", "Reflect.getOwnPropertyDescriptor called on non-object");
+        return self.throwError("TypeError", "Reflect.getOwnPropertyDescriptor requires the first argument be an object");
     return builtins.objectGetOwnPropertyDescriptor(ctx, this, args);
 }
 
@@ -22305,7 +22311,7 @@ fn reflectIsExtensibleFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
     if (!builtins.isRealObject(if (args.len > 0) args[0] else Value.undef()))
-        return self.throwError("TypeError", "Reflect.isExtensible called on non-object");
+        return self.throwError("TypeError", "Reflect.isExtensible requires the first argument be an object");
     return builtins.objectIsExtensible(ctx, this, args);
 }
 
@@ -22317,7 +22323,7 @@ fn reflectPreventExtFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (args.len > 0 and args[0].isObject()) try self.checkRestricted(args[0].asObj());
     const target = if (args.len > 0) args[0] else Value.undef();
     if (!builtins.isRealObject(target))
-        return self.throwError("TypeError", "Reflect.preventExtensions called on non-object");
+        return self.throwError("TypeError", "Reflect.preventExtensions requires the first argument be an object");
     if (target.asObj().proxyHandler() != null or target.asObj().proxy_revoked)
         return Value.boolVal(try self.proxyPreventExt(target.asObj()));
     // A length-variable TypedArray's [[PreventExtensions]] returns false (Reflect
@@ -22336,10 +22342,10 @@ fn reflectSetProtoFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const target = if (args.len > 0) args[0] else Value.undef();
     if (!builtins.isRealObject(target))
-        return self.throwError("TypeError", "Reflect.setPrototypeOf called on non-object");
+        return self.throwError("TypeError", "Reflect.setPrototypeOf requires the first argument be an object");
     const p = if (args.len > 1) args[1] else Value.undef();
     if (!p.isNull() and !builtins.isRealObject(p))
-        return self.throwError("TypeError", "Object prototype may only be an Object or null");
+        return self.throwError("TypeError", "Object prototype may only be an Object or null.");
     const new_proto: ?*value.Object = if (p.isObject()) p.asObj() else null;
     return Value.boolVal(try self.setPrototypeOfObject(target.asObj(), new_proto));
 }
@@ -23857,7 +23863,7 @@ fn iterMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
         self.iteratorClose(this) catch {};
-        return self.throwError("TypeError", "Iterator.prototype.map: mapper is not a function");
+        return self.throwError("TypeError", "Iterator.prototype.map callback must be a function.");
     }
     return makeIterHelper(self, this, .map, f, 0);
 }
@@ -23867,7 +23873,7 @@ fn iterFilterFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
         self.iteratorClose(this) catch {};
-        return self.throwError("TypeError", "Iterator.prototype.filter: predicate is not a function");
+        return self.throwError("TypeError", "Iterator.prototype.filter callback must be a function.");
     }
     return makeIterHelper(self, this, .filter, f, 0);
 }
@@ -23877,7 +23883,7 @@ fn iterFlatMapFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
         self.iteratorClose(this) catch {};
-        return self.throwError("TypeError", "Iterator.prototype.flatMap: mapper is not a function");
+        return self.throwError("TypeError", "Iterator.prototype.flatMap callback must be a function.");
     }
     return makeIterHelper(self, this, .flat_map, f, 0);
 }
@@ -23892,12 +23898,12 @@ fn iterLimitArg(self: *Interpreter, this: Value, arg_v: Value, comptime who: []c
     };
     if (std.math.isNan(n)) {
         self.iteratorClose(this) catch {};
-        return self.throwError("RangeError", who ++ ": invalid count");
+        return self.throwError("RangeError", who ++ " argument must not be NaN.");
     }
     const lim = @trunc(n); // ToIntegerOrInfinity (-0.5 → -0, which is not < 0)
     if (lim < 0) {
         self.iteratorClose(this) catch {};
-        return self.throwError("RangeError", who ++ ": invalid count");
+        return self.throwError("RangeError", who ++ " argument must be non-negative.");
     }
     return lim;
 }
@@ -23955,7 +23961,7 @@ fn iterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
         self.iteratorClose(this) catch {};
-        return self.throwError("TypeError", "Iterator.prototype.forEach: fn is not a function");
+        return self.throwError("TypeError", "Iterator.prototype.forEach requires the callback argument to be callable.");
     }
     const next_method = try self.getProperty(this, "next");
     var i: f64 = 0;
@@ -23979,7 +23985,7 @@ fn iterReduceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
         self.iteratorClose(this) catch {};
-        return self.throwError("TypeError", "Iterator.prototype.reduce: reducer is not a function");
+        return self.throwError("TypeError", "Iterator.prototype.reduce reducer argument must be a function.");
     }
     const next_method = try self.getProperty(this, "next");
     var acc: Value = undefined;
@@ -24016,7 +24022,7 @@ fn iterSomeEveryFindFn(comptime which: enum { some, every, find }) value.NativeF
                 // IteratorClose(O, ThrowCompletion): a non-callable predicate
                 // closes the underlying iterator before the TypeError propagates.
                 self.iteratorClose(this) catch {};
-                return self.throwError("TypeError", "Iterator.prototype method: fn is not a function");
+                return self.throwErrorFmt("TypeError", "Iterator.prototype.{s} callback must be a function.", .{@tagName(which)});
             }
             const next_method = try self.getProperty(this, "next");
             var i: f64 = 0;
@@ -24812,14 +24818,14 @@ fn asyncIterTakeFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "AsyncIterator.prototype.take called on a non-object");
     const n = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
-    if (std.math.isNan(n) or n < 0) return self.throwError("RangeError", "AsyncIterator.prototype.take: invalid count");
+    if (std.math.isNan(n) or n < 0) return self.throwErrorFmt("RangeError", "AsyncIterator.prototype.take argument must {s}.", .{if (std.math.isNan(n)) "not be NaN" else "be non-negative"});
     return makeAsyncIterHelper(self, this, .take, Value.undef(), @trunc(n));
 }
 fn asyncIterDropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return self.throwError("TypeError", "AsyncIterator.prototype.drop called on a non-object");
     const n = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
-    if (std.math.isNan(n) or n < 0) return self.throwError("RangeError", "AsyncIterator.prototype.drop: invalid count");
+    if (std.math.isNan(n) or n < 0) return self.throwErrorFmt("RangeError", "AsyncIterator.prototype.drop argument must {s}.", .{if (std.math.isNan(n)) "not be NaN" else "be non-negative"});
     return makeAsyncIterHelper(self, this, .drop, Value.undef(), @trunc(n));
 }
 
@@ -25225,7 +25231,7 @@ fn weakRefConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor WeakRef requires 'new'");
     const target = if (args.len > 0) args[0] else Value.undef();
-    if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "WeakRef: target must be an object or a symbol");
+    if (!canBeHeldWeakly(target)) return self.throwError("TypeError", "First argument to WeakRef should be an object or a non-registered symbol");
     self.noteWeakWork();
     const o = (try self.newObject()).asObj();
     o.behavior.is_weak_ref = true;
@@ -25248,7 +25254,7 @@ fn finalizationRegistryConstructorFn(ctx: *anyopaque, this: Value, args: []const
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor FinalizationRegistry requires 'new'");
     const cb = if (args.len > 0) args[0] else Value.undef();
-    if (!cb.isCallable()) return self.throwError("TypeError", "FinalizationRegistry: cleanup callback must be callable");
+    if (!cb.isCallable()) return self.throwError("TypeError", "First argument to FinalizationRegistry should be a function");
     self.noteWeakWork();
     const o = (try self.newObject()).asObj();
     o.behavior.is_finalization_registry = true;
@@ -37168,7 +37174,10 @@ fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
             }
             defer self.env = saved_env;
             if (!(this.isObject() and this.asObj().isCallableObject()))
-                return self.throwError("TypeError", "Function.prototype." ++ name ++ " requires that 'this' be callable");
+                return self.throwError("TypeError", if (eq(name, "bind"))
+                    "|this| is not a function inside Function.prototype.bind"
+                else
+                    "Function.prototype." ++ name ++ " requires that |this| be callable");
             if (std.mem.eql(u8, name, "toString")) return self.functionToString(this.asObj());
             return (try self.builtinMethod(this, name, args)) orelse Value.undef();
         }

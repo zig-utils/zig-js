@@ -1583,7 +1583,7 @@ pub fn objectCreate(ctx: *anyopaque, this: Value, args: []const Value) HostError
     switch (arg(args, 0).kind()) {
         .object => obj.setPrototypeStateAtomic(arg(args, 0).asObj()),
         .null => obj.setPrototypeStateAtomic(null),
-        else => return self.throwError("TypeError", "Object prototype may only be an Object or null"),
+        else => return self.throwError("TypeError", "Object prototype may only be an Object or null."),
     }
     // The optional second argument is a Properties object processed exactly like
     // `Object.defineProperties` (skipped only when undefined).
@@ -1732,7 +1732,7 @@ fn readDescriptor(self: *Interpreter, input: *value.Object) HostError!PropertyDe
         if (try descField(self, self.tempRoot(input_root, Value.obj(input)).asObj(), name)) |v| {
             // Validate each accessor before observing the following field.
             if (index >= 4 and !v.isUndefined() and !v.isCallable())
-                return self.throwError("TypeError", "Descriptor accessor must be a function");
+                return self.throwError("TypeError", if (index == 4) "Getter must be a function." else "Setter must be a function.");
             fields[index] = if (index == 0 or index == 1 or index == 3) Value.boolVal(v.toBoolean()) else v;
             present[index] = true;
             self.setTempRoot(fields_root + index, fields[index]);
@@ -2455,7 +2455,7 @@ pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) H
         return self.throwError("TypeError", "Object.setPrototypeOf called on null or undefined");
     const p = arg(args, 1);
     if (!p.isNull() and !isRealObject(p))
-        return self.throwError("TypeError", "Object prototype may only be an Object or null");
+        return self.throwError("TypeError", "Object prototype may only be an Object or null.");
     if (!o.isObject()) return o; // a primitive `this` has no own [[Prototype]] to set
     const new_proto: ?*value.Object = if (p.isObject()) p.asObj() else null;
     if (!try self.setPrototypeOfObject(o.asObj(), new_proto))
