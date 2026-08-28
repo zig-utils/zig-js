@@ -388,9 +388,9 @@ pub const Op = enum(u8) {
     new_object, // push a fresh {}
     new_array, // push a fresh []
     collect_rest_parameter, // operand a: frame slot; create the pending call-tail Array at this exact parameter-entry point
-    init_prop, // operand a: name index; pop value, define own data prop on object at top, leave object
+    init_prop, // operand a: name index, b: literal function flags; pop value, define own data prop on object at top, leave object
     init_proto, // pop value; if object/null set it as the [[Prototype]] of object at top (the `__proto__: v` colon form), leave object
-    init_prop_computed, // pop key, pop value, set on object at top, leave object
+    init_prop_computed, // operand a: literal function flags; pop value then canonical key, define own data prop, leave object
     object_rest, // operand a: excluded-key count; pop keys then source, push CopyDataProperties result
     init_spread, // pop source, CopyDataProperties into object at top, leave object
     init_getter, // pop fn, pop key; install getter on object at top, leave object
@@ -507,6 +507,11 @@ pub const Inst = struct {
     a: u32 = 0,
     b: u32 = 0,
 };
+
+/// PropertyDefinitionEvaluation intent belongs to syntax, not the stored
+/// callable: copying a method must not change its [[HomeObject]] or name.
+pub const literal_function_method: u32 = 1 << 0;
+pub const literal_function_anonymous: u32 = 1 << 1;
 
 /// `delete_name` searches the complete Environment chain for name-backed
 /// generator/async/program bindings. Any smaller operand bounds the search

@@ -365,6 +365,8 @@ pub const NativeOperationDescriptor = extern struct {
 
     pub const none = std.math.maxInt(u16);
     pub const numeric_result: u16 = 1 << 0;
+    pub const literal_function_method: u16 = 1 << 1;
+    pub const literal_function_anonymous: u16 = 1 << 2;
 };
 
 /// Immutable advisory shape/slot pairs copied from one warmed bytecode inline

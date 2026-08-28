@@ -28018,12 +28018,122 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "literal function metadata preserves names keys and method identity" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "string_method", .source = "(function(){var k='method';var o={[k](){}};return o[k].name==='method';})()" },
+            .{ .name = "symbol_method", .source = "(function(){var k=Symbol('method');var o={[k](){}};return o[k].name==='[method]';})()" },
+            .{ .name = "empty_symbol_method", .source = "(function(){var k=Symbol('');var o={[k](){}};return o[k].name==='[]';})()" },
+            .{ .name = "anonymous_symbol_method", .source = "(function(){var k=Symbol();var o={[k](){}};return o[k].name==='';})()" },
+            .{ .name = "string_function", .source = "(function(){var k='fn';var o={[k]:function(){}};return o[k].name==='fn';})()" },
+            .{ .name = "symbol_function", .source = "(function(){var k=Symbol('fn');var o={[k]:function(){}};return o[k].name==='[fn]';})()" },
+            .{ .name = "string_arrow", .source = "(function(){var k='fn';var o={[k]:()=>7};return o[k].name==='fn';})()" },
+            .{ .name = "symbol_generator", .source = "(function(){var k=Symbol('gen');var o={[k]:function*(){}};return o[k].name==='[gen]';})()" },
+            .{ .name = "named_function_control", .source = "(function(){var k='new';var o={[k]:function original(){}};return o[k].name==='original';})()" },
+            .{ .name = "existing_anonymous_control", .source = "(function(){var f=(0,function(){});var k='new';var o={[k]:f};return o[k].name==='';})()" },
+            .{ .name = "copied_method_static", .source = "(function(){var a={__proto__:{x:7},read(){return super.x;}};var b={__proto__:{x:9},read:a.read};return a.read()===7&&b.read()===7;})()" },
+            .{ .name = "copied_method_computed", .source = "(function(){var a={__proto__:{x:7},read(){return super.x;}};var k='read';var b={__proto__:{x:9},[k]:a.read};return a.read()===7&&b.read()===7;})()" },
+            .{ .name = "getter_key_once", .source = "(function(){var n=0;var k={[Symbol.toPrimitive](hint){n++;return 'x';}};var o={get [k](){return 7;}};return n===1&&o.x===7&&Object.getOwnPropertyDescriptor(o,'x').get.name==='get x';})()" },
+            .{ .name = "setter_key_once", .source = "(function(){var n=0;var k={[Symbol.toPrimitive](hint){n++;return 'x';}};var o={set [k](v){this.value=v;}};o.x=7;return n===1&&o.value===7&&Object.getOwnPropertyDescriptor(o,'x').set.name==='set x';})()" },
+            .{ .name = "symbol_accessor_control", .source = "(function(){var k=Symbol('x');var o={get [k](){return 7;},set [k](v){}};var d=Object.getOwnPropertyDescriptor(o,k);return d.get.name==='get [x]'&&d.set.name==='set [x]';})()" },
+            .{ .name = "computed_class_own_name_control", .source = "(function(){var k='C';var o={[k]:class{static name=7;}};return o[k].name===7;})()" },
+            .{ .name = "async_method", .source = "(function(){var k=Symbol('async');var o={async [k](){}};return o[k].name==='[async]';})()" },
+            .{ .name = "async_generator_method", .source = "(function(){var k=Symbol('asyncGen');var o={async *[k](){}};return o[k].name==='[asyncGen]';})()" },
+            .{ .name = "async_function", .source = "(function(){var k='async';var o={[k]:async function(){}};return o[k].name==='async';})()" },
+            .{ .name = "name_attributes", .source = "(function(){var k='name';var o={[k]:function(){}};var d=Object.getOwnPropertyDescriptor(o[k],'name');return d.value==='name'&&!d.writable&&!d.enumerable&&d.configurable;})()" },
+            .{ .name = "symbol_accessor_key_once", .source = "(function(){var n=0,s=Symbol('x');var k={[Symbol.toPrimitive](hint){if(hint!=='string')throw 99;n++;return s;}};var o={get [k](){return 7;}};return n===1&&o[s]===7&&Object.getOwnPropertyDescriptor(o,s).get.name==='get [x]';})()" },
+            .{ .name = "accessor_key_abrupt", .source = "(function(){var n=0;var k={[Symbol.toPrimitive](){throw 37;}};try{var o={get [k](){},later:++n};}catch(e){return e===37&&n===0;}return false;})()" },
+        }) |case| {
+            errdefer std.debug.print("literal function metadata {s} ({s})\n", .{ case.name, @tagName(mode) });
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "literal function metadata retains getter key through moving nursery" {
+    try expectProxyMetadataMoving("var calls=0;var key={toString(){calls++;proxyMovingLoop(20000);return 'x';}};", "(function(){var o={held:proxySubject,get [key](){return this.held;}};return calls===1&&o.x===proxySubject&&Object.getOwnPropertyDescriptor(o,'x').get.name==='get x';})()");
+}
+
+test "literal function metadata owns its inferred diagnostic name" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    const function = try ctx.evaluate("(0,function(){})");
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    var machine = ctx.interpreter();
+    var name = "inferred".*;
+    try machine.nameAnonValue(function, &name);
+    @memset(&name, 'U');
+    try std.testing.expectEqualStrings("inferred", function.asObj().getOwn("name").?.asStr());
+    try std.testing.expectEqualStrings("inferred", interp.Interpreter.funcOf(function).?.name);
+}
+
+test "literal function metadata retains diagnostic names through moving nursery" {
+    try expectProxyMetadataMoving("var name='method'+37;var object={[name]:function(){return new Error('sentinel').stack;}};name=null;", "(proxyMovingLoop(20000),object.method37.name==='method37'&&object.method37().includes('method37'))");
+}
+
+test "literal function metadata retains setter key through moving nursery" {
+    try expectProxyMetadataMoving("var calls=0;var key={toString(){calls++;proxyMovingLoop(20000);return 'x';}};", "(function(){var o={held:proxySubject,set [key](v){this.saved=v;}};o.x=o.held;return calls===1&&o.saved===proxySubject&&Object.getOwnPropertyDescriptor(o,'x').set.name==='set x';})()");
+}
+
+test "literal function metadata retains method key through moving nursery" {
+    try expectProxyMetadataMoving("var calls=0;var key={toString(){calls++;proxyMovingLoop(20000);return 'x';}};", "(function(){var o={held:proxySubject,[key](){return this.held;}};return calls===1&&o.x()===proxySubject&&o.x.name==='x';})()");
+}
+
+test "literal function metadata retains Symbol accessor key through moving nursery" {
+    try expectProxyMetadataMoving("var calls=0,symbol=Symbol('x');var key={[Symbol.toPrimitive](){calls++;proxyMovingLoop(20000);return symbol;}};", "(function(){var o={held:proxySubject,get [key](){return this.held;}};return calls===1&&o[symbol]===proxySubject&&Object.getOwnPropertyDescriptor(o,symbol).get.name==='get [x]';})()");
+}
+
 test "Symbol description ownership survives moving nursery" {
     try expectProxyMetadataMoving("var symbol=Symbol('x');", "(proxyMovingLoop(20000),symbol.description==='x'&&symbol.toString()==='Symbol(x)'&&String(symbol)==='Symbol(x)')");
 }
 
 test "Symbol description ownership retains registered and WTF-8 names through moving nursery" {
     try expectProxyMetadataMoving("var registered=Symbol.for('registered');var wide=Symbol('é\\uD800');var absent=Symbol();var empty=Symbol('');", "(proxyMovingLoop(20000),registered===Symbol.for('registered')&&registered.description==='registered'&&Symbol.keyFor(registered)==='registered'&&wide.description==='é\\uD800'&&absent.description===undefined&&empty.description==='')");
+}
+
+test "literal function metadata preserves shared methods without the GIL" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\var original={__proto__:{x:7},read(){return super.x;}};
+            \\function literalMetadataLane(seed){
+            \\  if($vm.useThreadGIL()!==false)throw 99;
+            \\  for(var i=0;i<32;i++){
+            \\    var a={__proto__:{x:seed+i},read:original.read};
+            \\    var key='read',b={__proto__:{x:seed+i},[key]:original.read};
+            \\    if(a.read()!==7||b.read()!==7||original.read()!==7)throw 98;
+            \\    var symbol=Symbol('fresh'),fresh={[symbol](){}};
+            \\    if(fresh[symbol].name!=='[fresh]')throw 97;
+            \\  }
+            \\  return 32;
+            \\}
+            \\var lanes=[],total=0;
+            \\for(var i=0;i<4;i++)lanes.push(new Thread(literalMetadataLane,i));
+            \\for(var i=0;i<4;i++)total+=lanes[i].join();
+            \\total
+        );
+        try std.testing.expectEqual(@as(f64, 128), result.asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
 }
 
 test "internal descriptors preserve specification record boundaries" {

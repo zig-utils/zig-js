@@ -5683,11 +5683,11 @@ fn literalArrayTarget(vm: *Interpreter, target: Value) EvalError!*value.Object {
     return object;
 }
 
-fn nativeInitProperty(vm: *Interpreter, target: Value, name: []const u8, stored: Value) EvalError!Value {
+fn nativeInitProperty(vm: *Interpreter, target: Value, name: []const u8, stored: Value, make_method: bool) EvalError!Value {
     const object = try literalObjectTarget(vm, target);
-    if (Interpreter.funcOf(stored)) |function| {
-        if (function.is_method) function.home_object = object;
-    }
+    if (make_method) if (Interpreter.funcOf(stored)) |function| {
+        function.home_object = object;
+    };
     try vm.defineLiteralDataProp(object, name, stored);
     return target;
 }
@@ -5701,11 +5701,12 @@ fn nativeInitPrototype(vm: *Interpreter, target: Value, prototype: Value) EvalEr
     return target;
 }
 
-fn nativeInitComputedProperty(vm: *Interpreter, target: Value, key: Value, stored: Value) EvalError!Value {
+fn nativeInitComputedProperty(vm: *Interpreter, target: Value, key: Value, stored: Value, make_method: bool, name_anonymous: bool) EvalError!Value {
     const object = try literalObjectTarget(vm, target);
-    if (Interpreter.funcOf(stored)) |function| {
-        if (function.is_method) function.home_object = object;
-    }
+    if (make_method) if (Interpreter.funcOf(stored)) |function| {
+        function.home_object = object;
+    };
+    if (name_anonymous) try vm.nameAnonValueForKey(stored, key);
     try vm.defineLiteralDataProp(object, try propKey(vm, key), stored);
     return target;
 }
@@ -5940,7 +5941,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             frame,
             vm,
             operation_id,
-            nativeInitProperty(vm, Value.fromRawBits(inputs[0]), name, Value.fromRawBits(inputs[1])),
+            nativeInitProperty(vm, Value.fromRawBits(inputs[0]), name, Value.fromRawBits(inputs[1]), descriptor.flags & jit.NativeOperationDescriptor.literal_function_method != 0),
         );
     }
     if (descriptor.bytecode_op == @backingInt(bc.Op.init_proto) and inputs.len == 2)
@@ -5960,6 +5961,8 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
                 Value.fromRawBits(inputs[0]),
                 Value.fromRawBits(inputs[1]),
                 Value.fromRawBits(inputs[2]),
+                descriptor.flags & jit.NativeOperationDescriptor.literal_function_method != 0,
+                descriptor.flags & jit.NativeOperationDescriptor.literal_function_anonymous != 0,
             ),
         );
     if (descriptor.bytecode_op == @backingInt(bc.Op.init_spread) and inputs.len == 2)
@@ -8405,9 +8408,9 @@ fn runChunk(
                 // Object-literal property init is CreateDataPropertyOrThrow — a
                 // direct own data property, NOT [[Set]] (so an own `__proto__`
                 // shorthand/method/computed key does not trip the prototype setter).
-                if (Interpreter.funcOf(v)) |f| {
-                    if (f.is_method) f.home_object = obj.asObj();
-                }
+                if (inst.b & bc.literal_function_method != 0) if (Interpreter.funcOf(v)) |f| {
+                    f.home_object = obj.asObj();
+                };
                 const object = obj.asObj();
                 const key = chunk.names.items[inst.a];
                 const base_shape = object.shape orelse vm.root_shape;
@@ -8439,10 +8442,7 @@ fn runChunk(
                 const v = stack.pop().?;
                 const key = stack.pop().?;
                 const obj = stack.items[stack.items.len - 1]; // leave object on stack
-                if (Interpreter.funcOf(v)) |f| {
-                    if (f.is_method) f.home_object = obj.asObj();
-                }
-                try vm.defineLiteralDataProp(obj.asObj(), try propKey(vm, key), v); // CreateDataProperty (a computed `__proto__` is a normal own prop)
+                _ = try nativeInitComputedProperty(vm, obj, key, v, inst.a & bc.literal_function_method != 0, inst.a & bc.literal_function_anonymous != 0);
             },
             .object_rest => {
                 const excluded_count: usize = inst.a;
@@ -14282,6 +14282,122 @@ test "vm: optimizer native tail call replaces the current activation" {
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
+test "literal function metadata unwinds every runtime allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const ctx = try @import("context.zig").Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+            defer ctx.destroy();
+            _ = try ctx.evaluate("var literalMethod=(0,function(){});var literalTarget={};");
+            const saved = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(saved);
+            var machine = ctx.interpreter();
+            machine.arena = arena.allocator();
+            machine.scratch_allocator = backing;
+            machine.gc_safepoint_fn = null;
+            defer {
+                std.debug.assert(machine.gc_temp_roots.items.len == 0);
+                std.debug.assert(machine.gc_env_roots.items.len == 0);
+                std.debug.assert(machine.gc_tree_call_roots == null);
+                std.debug.assert(machine.env == &ctx.env);
+                std.debug.assert(machine.depth == 0);
+            }
+            const method = ctx.global_object.getOwn("literalMethod").?;
+            const target = ctx.global_object.getOwn("literalTarget").?;
+            const result = try nativeInitComputedProperty(&machine, target, Value.str("method"), method, true, true);
+            try std.testing.expectEqual(target.rawBits(), result.rawBits());
+            try std.testing.expectEqual(method.rawBits(), target.asObj().getOwn("method").?.rawBits());
+            try std.testing.expectEqualStrings("method", method.asObj().getOwn("name").?.asStr());
+            try std.testing.expect(Interpreter.funcOf(method).?.home_object == target.asObj());
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "literal function metadata executes through the native flag contract" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function publish(key, value) { return { [key]: value }; }
+        \\function fresh() { return 7; }
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
+    _ = try run(&machine, root, null);
+    const publish = Interpreter.funcOf(env.get("publish").?).?;
+    const chunk = publish.chunk.?;
+    // Exercise the native instruction contract with fresh unpublished methods.
+    // The compiler test separately proves these flags come only from syntax;
+    // make_closure itself is an interpreter-owned native side exit.
+    for (chunk.code.items) |*inst| if (inst.op == .init_prop_computed) {
+        inst.a = bc.literal_function_method | bc.literal_function_anonymous;
+    };
+    var fresh = program.program[1].func_decl.*;
+    fresh.name = "";
+    fresh.is_method = true;
+    const hits_before = optimizer_native_hits.load(.monotonic);
+    for (0..16) |_| {
+        const method = try machine.makeFunction(&fresh, &env);
+        const result = try runFunction(&machine, publish, chunk, &.{ Value.str("method"), method }, Value.undef(), Value.undef());
+        try std.testing.expectEqual(method.rawBits(), result.asObj().getOwn("method").?.rawBits());
+        try std.testing.expect(Interpreter.funcOf(method).?.home_object == result.asObj());
+        try std.testing.expectEqualStrings("method", method.asObj().getOwn("name").?.asStr());
+    }
+    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_flags = false;
+    for (operations.descriptors) |descriptor| if (descriptor.bytecode_op == @backingInt(bc.Op.init_prop_computed)) {
+        saw_flags = true;
+        try std.testing.expectEqual(jit.NativeOperationDescriptor.literal_function_method | jit.NativeOperationDescriptor.literal_function_anonymous, descriptor.flags);
+    };
+    try std.testing.expect(saw_flags);
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+}
+
+test "literal function metadata preserves copied methods in native execution" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\var original={__proto__:{x:7},read(){return super.x;}};
+        \\function copy(key, method){var o={__proto__:{x:9},read:method,[key]:method};return o.read();}
+        \\copy('other',original.read);copy('other',original.read);copy('other',original.read);
+        \\copy('other',original.read);copy('other',original.read);copy('other',original.read);
+        \\copy('other',original.read);copy('other',original.read);copy('other',original.read);
+        \\copy('other',original.read);copy('other',original.read);copy('other',original.read);
+    );
+    const root = try Compiler.compileProgram(allocator, try parser.parseProgram());
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
+    const hits_before = optimizer_native_hits.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 7), (try run(&machine, root, null)).asNum());
+    const original = env.get("original").?.asObj();
+    try std.testing.expect(Interpreter.funcOf(original.getOwn("read").?).?.home_object == original);
+    const chunk = Interpreter.funcOf(env.get("copy").?).?.chunk.?;
+    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    for (artifact.native_operations.?.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.init_prop) or descriptor.bytecode_op == @backingInt(bc.Op.init_prop_computed))
+            try std.testing.expectEqual(@as(u16, 0), descriptor.flags & (jit.NativeOperationDescriptor.literal_function_method | jit.NativeOperationDescriptor.literal_function_anonymous));
+    }
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 }
 
 test "vm: optimizer executes native object and array construction effects" {

@@ -7294,6 +7294,13 @@ pub const Interpreter = struct {
         try self.nameAnonValue(val, name);
     }
 
+    /// The compiler has already checked IsAnonymousFunctionDefinition and
+    /// evaluated ToPropertyKey. No conversion callback may run during naming.
+    pub fn nameAnonValueForKey(self: *Interpreter, val: Value, key: Value) EvalError!void {
+        std.debug.assert(key.isString() or (key.isObject() and key.asObj().is_symbol));
+        try self.nameAnonValue(val, try self.keyDisplayName(key));
+    }
+
     /// The naming step of NamedEvaluation, without the syntactic isAnonFnDef gate.
     /// The VM's `name_anon` opcode is emitted by the compiler only for a bare
     /// anonymous function/class value, so the gate is applied at compile time;
@@ -7309,9 +7316,14 @@ pub const Interpreter = struct {
             // is overridable.
             if (!c.isString() or c.asStr().len != 0) return;
         }
+        // Function.name is unmanaged diagnostic metadata, unlike the public
+        // String Value. A computed key may borrow a movable String cell, and
+        // deleting the public name must not release the internal name's bytes.
+        const function = funcOf(val);
+        const retained_name = if (function != null) try self.arena.dupe(u8, name) else name;
         try o.setOwn(self.arena, self.root_shape, "name", try Value.strAlloc(self.arena, name));
         try o.setAttr(self.arena, "name", .{ .writable = false, .enumerable = false, .configurable = true });
-        if (funcOf(val)) |f| f.name = name; // keep Function.name in sync
+        if (function) |f| f.name = retained_name;
     }
 
     fn nextPrivateStorageKey(self: *Interpreter, name: []const u8) ![]const u8 {

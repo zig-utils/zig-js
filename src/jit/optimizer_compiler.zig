@@ -403,6 +403,14 @@ fn stageNativeOperationDescriptors(
                 previous_runtime_steps = absolute_steps;
         }
         const descriptor_index = std.math.cast(u32, descriptors.items.len) orelse return error.UnsupportedChunk;
+        const literal_flags = switch (inst.op) {
+            .init_prop => inst.b,
+            .init_prop_computed => inst.a,
+            else => 0,
+        };
+        const function_flags: u16 =
+            (if (literal_flags & bc.literal_function_method != 0) jit.NativeOperationDescriptor.literal_function_method else @as(u16, 0)) |
+            (if (literal_flags & bc.literal_function_anonymous != 0) jit.NativeOperationDescriptor.literal_function_anonymous else @as(u16, 0));
         try descriptors.append(allocator, .{
             .bytecode_op = std.math.cast(u16, @backingInt(inst.op)) orelse return error.UnsupportedChunk,
             .first_input = @intCast(first_input),
@@ -414,7 +422,7 @@ fn stageNativeOperationDescriptors(
                 break :deopt indexes[state_index];
             } else std.math.cast(u16, state_index) orelse return error.UnsupportedChunk,
             .step_delta = step_delta,
-            .flags = if (numeric_results) |required|
+            .flags = function_flags | (if (numeric_results) |required|
                 if (runtime_operation) |operation|
                     if (operation.destination < required.len and required[operation.destination])
                         jit.NativeOperationDescriptor.numeric_result
@@ -423,7 +431,7 @@ fn stageNativeOperationDescriptors(
                 else
                     0
             else
-                0,
+                0),
             .origin = state.origin,
         });
         if (runtime_operation) |operation| operation.immediate = descriptor_index;
@@ -5397,6 +5405,46 @@ test "optimizer lowering publishes executable object and array construction effe
             roots,
             program.stack_maps[operation.deopt_index].scratch_pointer_slots & roots,
         );
+    }
+}
+
+test "literal function metadata survives native operation lowering" {
+    const cases = [_]struct { op: bc.Op, flags: u32 }{
+        .{ .op = .init_prop, .flags = 0 },
+        .{ .op = .init_prop, .flags = bc.literal_function_method },
+        .{ .op = .init_prop_computed, .flags = 0 },
+        .{ .op = .init_prop_computed, .flags = bc.literal_function_method },
+        .{ .op = .init_prop_computed, .flags = bc.literal_function_anonymous },
+        .{ .op = .init_prop_computed, .flags = bc.literal_function_method | bc.literal_function_anonymous },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        const inputs: u32 = if (case.op == .init_prop) 2 else 3;
+        chunk.param_count = inputs;
+        chunk.local_count = inputs;
+        for (0..inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        if (case.op == .init_prop)
+            _ = try chunk.emitAB(case.op, try chunk.addName("method"), case.flags)
+        else
+            _ = try chunk.emit(case.op, case.flags);
+        _ = try chunk.emit(.ret, 0);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        const descriptor = program.native_operations[0];
+        const expected: u16 =
+            (if (case.flags & bc.literal_function_method != 0) jit.NativeOperationDescriptor.literal_function_method else @as(u16, 0)) |
+            (if (case.flags & bc.literal_function_anonymous != 0) jit.NativeOperationDescriptor.literal_function_anonymous else @as(u16, 0));
+        try std.testing.expectEqual(expected, descriptor.flags);
+        var roots: u64 = 0;
+        for (descriptor.first_input..descriptor.first_input + descriptor.input_count) |slot|
+            roots |= @as(u64, 1) << @intCast(slot);
+        try std.testing.expectEqual(roots, program.stack_maps[descriptor.deopt_index].scratch_pointer_slots & roots);
     }
 }
 

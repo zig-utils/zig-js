@@ -2979,6 +2979,13 @@ pub const Compiler = struct {
         if (anon) _ = try self.chunk.emit(.name_anon, try self.chunk.addName(name));
     }
 
+    fn literalFunctionFlags(node: *const Node) u32 {
+        if (node.* != .function) return 0;
+        const function = node.function;
+        return (if (function.is_method) bc.literal_function_method else @as(u32, 0)) |
+            (if (function.name.len == 0) bc.literal_function_anonymous else @as(u32, 0));
+    }
+
     fn compileStmt(self: *Compiler, node: *Node) CompileError!void {
         if (self.debug_checkpoints) try self.chunk.markDebugStatement(node);
         switch (node.*) {
@@ -5266,6 +5273,7 @@ pub const Compiler = struct {
                         // Getter/setter: push key, push the function, install.
                         if (p.key_expr) |ke| {
                             try self.compileExpr(ke);
+                            _ = try self.chunk.emit(.to_property_key, 0);
                         } else {
                             const ci = try self.chunk.addConst(try Value.strAlloc(self.arena, p.key));
                             _ = try self.chunk.emit(.load_const, ci);
@@ -5282,14 +5290,14 @@ pub const Compiler = struct {
                         try self.compileExpr(ke);
                         _ = try self.chunk.emit(.to_property_key, 0);
                         try self.compileExpr(p.value);
-                        _ = try self.chunk.emit(.init_prop_computed, 0);
+                        _ = try self.chunk.emit(.init_prop_computed, literalFunctionFlags(p.value));
                     } else {
                         try self.compileExpr(p.value);
                         if (p.proto_setter) {
                             _ = try self.chunk.emit(.init_proto, 0); // `__proto__: v` colon form
                         } else {
                             try self.emitNamedEval(p.value, p.key);
-                            _ = try self.chunk.emit(.init_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, p.key)));
+                            _ = try self.chunk.emitAB(.init_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, p.key)), literalFunctionFlags(p.value) & bc.literal_function_method);
                         }
                     }
                 }
@@ -7004,6 +7012,53 @@ test "canonical parameter lowering unwinds every compiler allocation failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+fn exerciseLiteralFunctionMetadata(backing: std.mem.Allocator) !void {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(ast_arena.allocator(),
+        \\function build(key, original) {
+        \\  return { fixed(){}, copy:original.read, [key](){},
+        \\    [key]:function(){}, [key]:original.read, [key]:function named(){},
+        \\    get [key](){}, set [key](value){} };
+        \\}
+    );
+    const program = try parser.parseProgram();
+    var replay = CompilerAllocationReplay{ .backing = backing };
+    var arena = std.heap.ArenaAllocator.init(replay.allocator());
+    defer arena.deinit();
+    const compiled = try Compiler.compilePlainFunction(arena.allocator(), program.program[0].func_decl);
+    var computed: usize = 0;
+    var fixed: usize = 0;
+    var accessors: usize = 0;
+    const expected = [_]u32{ bc.literal_function_method | bc.literal_function_anonymous, bc.literal_function_anonymous, 0, 0 };
+    for (compiled.chunk.code.items, 0..) |inst, index| switch (inst.op) {
+        .init_prop => {
+            const name = compiled.chunk.names.items[inst.a];
+            try std.testing.expectEqual(if (std.mem.eql(u8, name, "fixed")) bc.literal_function_method else @as(u32, 0), inst.b);
+            fixed += 1;
+        },
+        .init_prop_computed => {
+            try std.testing.expect(computed < expected.len);
+            try std.testing.expectEqual(expected[computed], inst.a);
+            computed += 1;
+        },
+        .init_getter, .init_setter => {
+            try std.testing.expect(index >= 2);
+            try std.testing.expectEqual(bc.Op.make_closure, compiled.chunk.code.items[index - 1].op);
+            try std.testing.expectEqual(bc.Op.to_property_key, compiled.chunk.code.items[index - 2].op);
+            accessors += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), fixed);
+    try std.testing.expectEqual(expected.len, computed);
+    try std.testing.expectEqual(@as(usize, 2), accessors);
+}
+
+test "literal function metadata preserves syntax through compiler allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseLiteralFunctionMetadata, .{});
 }
 
 test "compiler reports stable plain-function admission reasons" {
