@@ -28018,6 +28018,123 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "realm error intrinsics ignore public bindings and preserve construction" {
+    const cases = [_]struct { name: []const u8, source: []const u8 }{
+        .{ .name = "lexical_shadow", .source = "(function(){var original=TypeError;return (function(TypeError){class C{}try{C();}catch(e){return Object.getPrototypeOf(e)===original.prototype;}return false;})(function Fake(){});})()" },
+        .{ .name = "replaced_global", .source = "(function(){var original=TypeError;globalThis.TypeError=function Fake(){};class C{}try{C();}catch(e){return Object.getPrototypeOf(e)===original.prototype;}return false;})()" },
+        .{ .name = "deleted_global", .source = "(function(){var original=TypeError;delete globalThis.TypeError;try{null.x;}catch(e){return Object.getPrototypeOf(e)===original.prototype;}return false;})()" },
+        .{ .name = "global_getter", .source = "(function(){var original=TypeError,hits=0;Object.defineProperty(globalThis,'TypeError',{get(){hits++;throw 37;},configurable:true});class C{}try{C();}catch(e){return hits===0&&Object.getPrototypeOf(e)===original.prototype;}return false;})()" },
+        .{ .name = "with_shadow", .source = "(function(){var original=TypeError,ok=false;with({TypeError:function Fake(){}}){try{null.x;}catch(e){ok=Object.getPrototypeOf(e)===original.prototype;}}return ok;})()" },
+        .{ .name = "foreign_class", .source = "(function(){var r=$262.createRealm(),p=r.global.TypeError.prototype,C=r.evalScript('(class C{})');r.global.TypeError=function Fake(){};try{C();}catch(e){return Object.getPrototypeOf(e)===p&&!(e instanceof TypeError);}return false;})()" },
+        .{ .name = "foreign_call", .source = "(function(){var g=$262.createRealm().global,E=g.TypeError,p=E.prototype;g.TypeError=function Fake(){};return Object.getPrototypeOf(E('x'))===p&&Object.getPrototypeOf(E.call(null,'x'))===p&&Object.getPrototypeOf(E.bind(null)('x'))===p&&Object.getPrototypeOf(new Proxy(E,{})('x'))===p;})()" },
+        .{ .name = "foreign_message_error", .source = "(function(){var g=$262.createRealm().global,E=g.Error,p=g.TypeError.prototype;g.TypeError=function Fake(){};try{E(Symbol());}catch(e){return Object.getPrototypeOf(e)===p&&!(e instanceof TypeError);}return false;})()" },
+        .{ .name = "foreign_newtarget_fallback", .source = "(function(){var r=$262.createRealm(),p=r.global.TypeError.prototype,N=r.evalScript('(function N(){})');N.prototype=3;r.global.TypeError=function Fake(){};var e=Reflect.construct(TypeError,['x'],N);return Object.getPrototypeOf(e)===p;})()" },
+        .{ .name = "foreign_newtarget_message_error", .source = "(function(){var r=$262.createRealm(),N=r.evalScript('(function N(){})');N.prototype=null;try{Reflect.construct(Error,[Symbol()],N);}catch(e){return Object.getPrototypeOf(e)===TypeError.prototype;}return false;})()" },
+        .{ .name = "explicit_prototype_order", .source = "(function(){var log='',p={},N=new Proxy(function(){},{get(t,k){if(k==='prototype'){log+='p';return p;}return Reflect.get(t,k);}});var e=Reflect.construct(TypeError,[{toString(){log+='m';return 'x';}},{get cause(){log+='c';return 37;}}],N);return log==='pmc'&&Object.getPrototypeOf(e)===p&&e.message==='x'&&e.cause===37;})()" },
+        .{ .name = "prototype_abrupt", .source = "(function(){var effects=0,N=new Proxy(function(){},{get(t,k){if(k==='prototype')throw 37;return Reflect.get(t,k);}});try{Reflect.construct(TypeError,[{toString(){effects++;return 'x';}}],N);}catch(e){return e===37&&effects===0;}return false;})()" },
+        .{ .name = "aggregate_cause_order", .source = "(function(){var log='',errors={[Symbol.iterator](){log+='i';return {next(){return {done:true};}};}};var e=new AggregateError(errors,{toString(){log+='m';return 'x';}},{get cause(){log+='c';return 37;}});return log==='mci'&&e.cause===37&&e.errors.length===0;})()" },
+        .{ .name = "suppressed_extra_argument", .source = "(function(){var effects=0,e=new SuppressedError(1,2,'x',{get cause(){effects++;return 37;}});return effects===0&&!Object.hasOwn(e,'cause')&&e.error===1&&e.suppressed===2;})()" },
+        .{ .name = "error_name_mutation", .source = "(function(){var p=TypeError.prototype;p.name='renamed';globalThis.TypeError=function Fake(){};try{null.x;}catch(e){return Object.getPrototypeOf(e)===p&&e.name==='renamed'&&!Object.hasOwn(e,'name');}return false;})()" },
+        .{ .name = "wasm_error_name", .source = "(function(){var p=WebAssembly.CompileError.prototype;p.name='renamed';var e=new WebAssembly.CompileError('x');return Object.getPrototypeOf(e)===p&&e.name==='renamed'&&!Object.hasOwn(e,'name');})()" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for (cases) |case| {
+            errdefer std.debug.print("realm error intrinsic {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
+test "realm error intrinsics retain private identities through collection" {
+    for ([_]bool{ false, true }) |gc_enabled| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = gc_enabled, .enable_jit = false });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var errorNames=['Error','TypeError','RangeError','ReferenceError','SyntaxError','EvalError','URIError','AggregateError','SuppressedError','OutOfMemoryError'];
+            \\for(var i=0;i<errorNames.length;i++){globalThis[errorNames[i]]=undefined;delete globalThis[errorNames[i]];}
+        );
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const intrinsics = ctx.env.error_intrinsics orelse return error.TestUnexpectedResult;
+        for (interp.ErrorIntrinsics.core_names, 0..) |name, index| {
+            const ctor = intrinsics.constructors[index] orelse return error.TestUnexpectedResult;
+            const proto = intrinsics.prototypes[index] orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings(name, ctor.errorCtor().?);
+            try std.testing.expectEqual(proto, ctor.getOwn("prototype").?.asObj());
+            try std.testing.expectEqual(ctor, proto.getOwn("constructor").?.asObj());
+        }
+        try std.testing.expect((try ctx.evaluate("Reflect.ownKeys(globalThis).every(function(k){return typeof k!=='string'||k.indexOf('ErrorIntrinsic')<0;})")).toBoolean());
+    }
+}
+
+test "realm error intrinsics preserve moving message and cause callbacks" {
+    try expectProxyMetadataMoving("var E=TypeError;TypeError=function Fake(){};var msg={toString(){proxyMovingLoop(20000);return 'message';}};", "(function(){var e=E(msg,{cause:proxySubject});return Object.getPrototypeOf(e)===E.prototype&&e.message==='message'&&e.cause===proxySubject;})()");
+    try expectProxyMetadataMoving("var E=TypeError;var options={get cause(){proxyMovingLoop(20000);return proxySubject;}};", "(function(){var e=new E('message',options);return Object.getPrototypeOf(e)===E.prototype&&e.cause===proxySubject;})()");
+}
+
+test "realm error intrinsics preserve moving AggregateError iteration" {
+    try expectProxyMetadataMoving("var entries={[Symbol.iterator](){return {next(){proxyMovingLoop(20000);return {done:true};}};}};", "(function(){var e=new AggregateError(entries,'message',{cause:proxySubject});return Object.getPrototypeOf(e)===AggregateError.prototype&&e.message==='message'&&e.cause===proxySubject&&e.errors.length===0;})()");
+}
+
+test "realm error intrinsics retain a moving foreign constructor realm" {
+    try expectProxyMetadataMoving("var foreign=$262.createRealm();var E=foreign.global.Error,P=foreign.global.TypeError.prototype;foreign=null;var message={toString(){proxyMovingLoop(20000);return 'message';}};", "(function(){var e=E(message);if(Object.getPrototypeOf(e)!==E.prototype||e.message!=='message')return false;try{E(Symbol());}catch(e){return Object.getPrototypeOf(e)===P;}return false;})()");
+}
+
+test "realm error intrinsics isolate shared no-GIL construction" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expectEqual(@as(f64, 128), (try ctx.evaluate(
+            \\var originalErrorPrototype=TypeError.prototype;TypeError=function Fake(){};
+            \\function realmErrorLane(){var count=0;if($vm.useThreadGIL()!==false)throw 99;for(var i=0;i<32;i++){try{null.x;}catch(e){if(Object.getPrototypeOf(e)===originalErrorPrototype)count++;else throw e;}}return count;}
+            \\var lanes=[],total=0;for(var i=0;i<4;i++)lanes.push(new Thread(realmErrorLane));for(var i=0;i<4;i++)total+=lanes[i].join();total
+        )).asNum());
+    }
+}
+
+test "realm error intrinsics preserve optional ConcurrentAccessError" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ordinary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ordinary.destroy();
+    try std.testing.expect((try ordinary.evaluate("typeof ConcurrentAccessError==='undefined'")).toBoolean());
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        errdefer std.debug.print("ConcurrentAccessError mode {s}\n", .{@tagName(mode)});
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(
+            \\var originalConcurrentError=ConcurrentAccessError,concurrentPrototype=ConcurrentAccessError.prototype;
+            \\ConcurrentAccessError=function Fake(){};var restrictedBox=Thread.restrict({x:1});
+            \\var lane=new Thread(function(){try{restrictedBox.x;}catch(e){return (Object.getPrototypeOf(e)===concurrentPrototype)+':'+e.name+':'+(e instanceof originalConcurrentError);}return 'readable';});
+            \\var restrictionDiagnostic=lane.join()+':'+(Object.getPrototypeOf(originalConcurrentError('x'))===concurrentPrototype);
+            \\if(restrictionDiagnostic!=='true:ConcurrentAccessError:true:true')throw new Error(restrictionDiagnostic);
+            \\true
+        )).toBoolean());
+    }
+}
+
 test "Thread restriction gates property paths across execution tiers" {
     if (builtin.single_threaded) return error.SkipZigTest;
     var failures: usize = 0;

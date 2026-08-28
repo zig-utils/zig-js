@@ -820,6 +820,25 @@ pub const ActivationBindingsView = struct {
     }
 };
 
+/// Realm-owned identities, never JavaScript bindings. Backing storage belongs
+/// to the root Environment; traceEnv/relocateEnv visit every managed slot.
+pub const ErrorIntrinsics = struct {
+    pub const core_names = [_][]const u8{
+        "Error",           "TypeError",        "RangeError", "ReferenceError",
+        "SyntaxError",     "EvalError",        "URIError",   "AggregateError",
+        "SuppressedError", "OutOfMemoryError",
+    };
+    pub const names = core_names ++ [_][]const u8{"ConcurrentAccessError"};
+    constructors: [names.len]?*value.Object = @splat(null),
+    prototypes: [names.len]?*value.Object = @splat(null),
+
+    pub fn index(name: []const u8) ?usize {
+        inline for (names, 0..) |candidate, i|
+            if (std.mem.eql(u8, name, candidate)) return i;
+        return null;
+    }
+};
+
 pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
     /// Root-realm identity, initialized before publication and immutable to
@@ -888,6 +907,10 @@ pub const Environment = struct {
     /// intrinsic there so lexical shadowing, global replacement, and temporary
     /// cross-realm entry cannot change ordinary-object prototype identity.
     object_proto_intrinsic: ?*value.Object = null,
+    /// Allocated only for a realm root, before publication. All access uses
+    /// binding_lock/the existing marker handshake; stopped GC rewrites slots.
+    /// Ordinary activation environments pay one pointer, not a per-call table.
+    error_intrinsics: ?*ErrorIntrinsics = null,
     /// Set when a closure captures this environment (or a descendant, via
     /// `markCaptured` walking the parent chain at closure creation). A `for
     /// (let …)` loop uses it to decide whether each iteration needs a fresh
@@ -1582,8 +1605,37 @@ pub const Environment = struct {
         return copy;
     }
 
+    fn errorIntrinsic(self: *Environment, name: []const u8, prototype: bool) ?*value.Object {
+        const index = ErrorIntrinsics.index(name) orelse return null;
+        const realm = rootEnv(self);
+        const locked = realm.lockBindingsForRead();
+        defer realm.unlockBindingsForRead(locked);
+        const intrinsics = realm.error_intrinsics orelse return null;
+        return if (prototype) intrinsics.prototypes[index] else intrinsics.constructors[index];
+    }
+
+    fn initErrorIntrinsics(self: *Environment) !void {
+        const intrinsics = try self.bindingAllocator().create(ErrorIntrinsics);
+        intrinsics.* = .{};
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
+        std.debug.assert(self.error_intrinsics == null);
+        self.error_intrinsics = intrinsics;
+    }
+
+    pub fn installErrorIntrinsic(self: *Environment, index: usize, constructor: *value.Object, prototype: ?*value.Object) void {
+        gc_mod.barrierCellFrom(self, @ptrCast(constructor));
+        if (prototype) |p| gc_mod.barrierCellFrom(self, @ptrCast(p));
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
+        self.error_intrinsics.?.constructors[index] = constructor;
+        self.error_intrinsics.?.prototypes[index] = prototype;
+    }
+
     fn deinitOwnedBindingStorage(self: *Environment) void {
         const a = self.bindings_allocator orelse return;
+        if (self.error_intrinsics) |intrinsics| a.destroy(intrinsics);
+        self.error_intrinsics = null;
 
         var vit = self.vars.keyIterator();
         while (vit.next()) |key| self.freeBindingName(key.*);
@@ -1637,6 +1689,7 @@ pub const Environment = struct {
         // publishing it in the interpreter cache.
         self.parent = null;
         self.object_proto_intrinsic = null;
+        std.debug.assert(self.error_intrinsics == null);
         self.captured.store(false, .monotonic);
         self.fn_scope = false;
         self.private_activation.store(false, .monotonic);
@@ -1666,6 +1719,7 @@ pub const Environment = struct {
         self.dispose_pending = null;
         self.parent = null;
         self.object_proto_intrinsic = null;
+        std.debug.assert(self.error_intrinsics == null);
         self.captured.store(false, .monotonic);
         self.fn_scope = false;
         self.private_activation.store(false, .monotonic);
@@ -4615,19 +4669,25 @@ pub const Interpreter = struct {
         obj.* = .{ .behavior = .{ .is_error = true } };
         try obj.setErrorName(self.arena, name);
         try self.captureErrorStack(obj);
-        // Link to `<name>.prototype` so `name` (and `toString`) are inherited and
-        // `instanceof` / `Object.getPrototypeOf` see a real chain.
+        // ECMA-262 6.2.4.2: engine exceptions use the realm intrinsic, never a
+        // shadowing lexical or replaced global binding. Explicit construction
+        // prototypes have already passed GetPrototypeFromConstructor.
         if (proto) |p| {
             obj.setProtoAtomic(p);
-        } else if (self.env.get(name)) |ctor_v| {
-            if (ctor_v.isObject()) {
-                if (ctor_v.asObj().getOwn("prototype")) |proto_v| {
-                    if (proto_v.isObject()) obj.setProtoAtomic(proto_v.asObj());
-                }
-            }
+        } else {
+            obj.setProtoAtomic(self.env.errorIntrinsic(name, true) orelse self.env.errorIntrinsic("Error", true));
         }
-        // `message` is an own property only when one was supplied (else inherited,
-        // = "" from the prototype); `name` is always inherited from the prototype.
+        // Engine-only errors (e.g. InternalError) inherit Error.prototype but
+        // retain their diagnostic name; no unprototyped/name-tag heuristic.
+        if (proto == null and ErrorIntrinsics.index(name) == null) {
+            try obj.setOwnWithAttr(self.arena, self.root_shape, "name", try Value.strAlloc(self.arena, name), .{
+                .enumerable = false,
+                .configurable = true,
+                .writable = true,
+            });
+        }
+        // `message` is an own property only when supplied (otherwise inherited,
+        // = ""); standard Error names remain inherited from their prototypes.
         if (message.len > 0) {
             try self.setProp(obj, "message", try Value.strAlloc(self.arena, message));
             try obj.setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
@@ -4671,9 +4731,8 @@ pub const Interpreter = struct {
     /// non-finite/non-positive values disable collection and very large values
     /// are bounded by the structured-frame ABI's u8-sized practical limit.
     pub fn selectedStackTraceLimit(self: *Interpreter) usize {
-        const ctor = self.env.get("Error") orelse return 10;
-        if (!ctor.isObject()) return 10;
-        const configured = ctor.asObj().getOwn("stackTraceLimit") orelse return 10;
+        const ctor = self.env.errorIntrinsic("Error", false) orelse return 10;
+        const configured = ctor.getOwn("stackTraceLimit") orelse return 10;
         if (!configured.isNumber()) return 0;
         const number = configured.asNum();
         if (!std.math.isFinite(number) or number <= 0) return 0;
@@ -8550,7 +8609,7 @@ pub const Interpreter = struct {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             return self.callValueWithThis(bf.target, try self.concatArgs(bf.args, args), bf.this);
         }
-        if (obj.errorCtor()) |name| return self.makeErrorWithArgs(name, args);
+        if (obj.errorCtor()) |name| return self.callErrorConstructor(obj, name, args, callee);
         if (obj.hostClassHooks()) |hooks| if (hooks.call) |call| {
             if (hooks.is_callable == null or hooks.is_callable.?(obj)) {
                 try self.stackGuard();
@@ -8688,7 +8747,27 @@ pub const Interpreter = struct {
         return self.makeErrorWithArgsNT(name, args, Value.undef());
     }
 
+    fn callErrorConstructor(self: *Interpreter, ctor: *value.Object, name: []const u8, args: []const Value, new_target: Value) EvalError!Value {
+        // NativeError/Error/AggregateError/SuppressedError step 1 uses the
+        // active function as newTarget for [[Call]]. Coercion failures belong
+        // to this constructor's realm, even for a foreign Reflect.construct.
+        const saved_env = self.env;
+        const saved_root = try self.pushTempEnvRoot(saved_env);
+        defer self.restoreTempEnvRoots(saved_root);
+        if (ctor.private_data) |data| self.env = @ptrCast(@alignCast(data));
+        defer self.env = self.tempEnvRoot(saved_root, saved_env);
+        return self.makeErrorWithArgsNT(name, args, new_target);
+    }
+
+    fn errorArgument(self: *Interpreter, args: []const Value, root: usize, index: usize) Value {
+        return if (index < args.len) self.tempRoot(root + index, args[index]) else Value.undef();
+    }
+
     fn makeErrorWithArgsNT(self: *Interpreter, name: []const u8, args: []const Value, new_target: Value) EvalError!Value {
+        const args_root = try self.pushTempRootSlice(args);
+        defer self.restoreTempRoots(args_root);
+        const target_root = try self.pushTempRoot(new_target);
+        defer self.restoreTempRoots(target_root);
         // AggregateError(errors, message, options) shifts message/options by one
         // and carries an own `errors` array built from the first (iterable) arg.
         const aggregate = std.mem.eql(u8, name, "AggregateError");
@@ -8700,67 +8779,89 @@ pub const Interpreter = struct {
             try self.functionRealmIntrinsicProto(new_target.asObj(), "Array")
         else
             null;
-        const proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), name) else null;
+        const array_proto_value = if (ctor_realm_array_proto) |p| Value.obj(p) else Value.undef();
+        const array_proto_root = try self.pushTempRoot(array_proto_value);
+        defer self.restoreTempRoots(array_proto_root);
+        const target = self.tempRoot(target_root, new_target);
+        const proto = if (target.isObject()) try self.ctorRealmIntrinsicProto(target.asObj(), name) else null;
+        // OrdinaryCreateFromConstructor precedes message coercion. Keep the
+        // allocated error, its chosen prototype, and arguments precise across
+        // message/cause/iterator callbacks that may move the nursery.
+        const err = try self.makeErrorWithProto(name, "", proto);
+        const err_root = try self.pushTempRoot(err);
+        defer self.restoreTempRoots(err_root);
 
         // The message is ToString'd (via ToPrimitive(string), so an object's
         // toString/valueOf runs); a Symbol message throws a TypeError.
-        const has_msg = args.len > msg_i and !args[msg_i].isUndefined();
+        const message = self.errorArgument(args, args_root, msg_i);
+        const has_msg = !message.isUndefined();
         const msg = if (has_msg) blk: {
-            const prim = try self.toPrimitive(args[msg_i], .string);
+            const prim = try self.toPrimitive(message, .string);
             if (prim.isObject() and prim.asObj().is_symbol)
                 return self.throwError("TypeError", "Cannot convert a symbol to a string");
             break :blk if (prim.isString()) try prim.asWtf8(self.arena) else try prim.toString(self.arena);
         } else "";
-        const err = try self.makeErrorWithProto(name, msg, proto);
-        if (has_msg and msg.len == 0) {
-            try self.setProp(err.asObj(), "message", Value.str(""));
-            try err.asObj().setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
-        }
-
-        if (aggregate) {
-            // `errors` is a fresh Array built from the (iterable) first argument.
-            const errs = try self.iterableToArray(if (args.len > 0) args[0] else Value.undef(), ctor_realm_array_proto);
-            try self.setProp(err.asObj(), "errors", errs);
-            try err.asObj().setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
+        if (has_msg) {
+            const message_value = try Value.strAlloc(self.arena, msg);
+            const rooted_error = self.tempRoot(err_root, err).asObj();
+            try self.setProp(rooted_error, "message", message_value);
+            try rooted_error.setAttr(self.arena, "message", .{ .enumerable = false, .configurable = true, .writable = true });
         }
 
         if (suppressed) {
             // SuppressedError(error, suppressed, message): the first two arguments
             // become non-enumerable own `error` / `suppressed` properties.
-            try self.setProp(err.asObj(), "error", if (args.len > 0) args[0] else Value.undef());
-            try err.asObj().setAttr(self.arena, "error", .{ .enumerable = false, .configurable = true, .writable = true });
-            try self.setProp(err.asObj(), "suppressed", if (args.len > 1) args[1] else Value.undef());
-            try err.asObj().setAttr(self.arena, "suppressed", .{ .enumerable = false, .configurable = true, .writable = true });
+            const rooted_error = self.tempRoot(err_root, err).asObj();
+            try self.setProp(rooted_error, "error", self.errorArgument(args, args_root, 0));
+            try rooted_error.setAttr(self.arena, "error", .{ .enumerable = false, .configurable = true, .writable = true });
+            try self.setProp(rooted_error, "suppressed", self.errorArgument(args, args_root, 1));
+            try rooted_error.setAttr(self.arena, "suppressed", .{ .enumerable = false, .configurable = true, .writable = true });
         }
 
         // ES2022 `cause` option: `new Error(msg, { cause })` installs a
         // non-enumerable `cause` own property when the options object HAS one —
         // a real HasProperty (walks the prototype chain and fires a Proxy `has`
         // trap), then [[Get]] reads the value.
-        if (args.len > opt_i and args[opt_i].isObject()) {
-            if (try self.inOperator(Value.str("cause"), args[opt_i])) {
-                const cause = try self.getProperty(args[opt_i], "cause");
-                try self.setProp(err.asObj(), "cause", cause);
-                try err.asObj().setAttr(self.arena, "cause", .{ .enumerable = false, .configurable = true, .writable = true });
+        // AggregateError installs cause before iterating errors; SuppressedError
+        // has no options argument and must not inspect an extra fourth value.
+        const options = self.errorArgument(args, args_root, opt_i);
+        if (!suppressed and options.isObject()) {
+            if (try self.inOperator(Value.str("cause"), options)) {
+                const cause = try self.getProperty(self.errorArgument(args, args_root, opt_i), "cause");
+                const rooted_error = self.tempRoot(err_root, err).asObj();
+                try self.setProp(rooted_error, "cause", cause);
+                try rooted_error.setAttr(self.arena, "cause", .{ .enumerable = false, .configurable = true, .writable = true });
             }
         }
-        return err;
+        if (aggregate) {
+            const array_proto = self.tempRoot(array_proto_root, array_proto_value);
+            const errs = try self.iterableToArray(self.errorArgument(args, args_root, 0), if (array_proto.isObject()) array_proto.asObj() else null);
+            const rooted_error = self.tempRoot(err_root, err).asObj();
+            try self.setProp(rooted_error, "errors", errs);
+            try rooted_error.setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
+        }
+        return self.tempRoot(err_root, err);
     }
 
     fn iterableToArray(self: *Interpreter, v: Value, proto: ?*value.Object) EvalError!Value {
         const arr = try self.newArrayWithProto(proto);
+        const arr_root = try self.pushTempRoot(arr);
+        defer self.restoreTempRoots(arr_root);
         const record = try self.getIteratorRecord(v);
         const iter_root = try self.pushTempRoot(record.iterator);
         defer self.restoreTempRoots(iter_root);
         const next_root = try self.pushTempRoot(record.next_method);
         defer self.restoreTempRoots(next_root);
         while (true) {
-            const result = try self.callValueWithThis(record.next_method, &.{}, record.iterator);
+            const result = try self.callValueWithThis(self.tempRoot(next_root, record.next_method), &.{}, self.tempRoot(iter_root, record.iterator));
             if (!builtins.isRealObject(result)) return self.throwError("TypeError", "Iterator result interface is not an object");
+            const result_root = try self.pushTempRoot(result);
+            defer self.restoreTempRoots(result_root);
             if ((try self.getProperty(result, "done")).toBoolean()) break;
-            try arr.asObj().appendElement(self.arena, try self.getProperty(result, "value"));
+            const item = try self.getProperty(self.tempRoot(result_root, result), "value");
+            try self.tempRoot(arr_root, arr).asObj().appendElement(self.arena, item);
         }
-        return arr;
+        return self.tempRoot(arr_root, arr);
     }
 
     fn callFunction(self: *Interpreter, func: *Function, args: []const Value, this_val: Value) EvalError!Value {
@@ -9537,7 +9638,7 @@ pub const Interpreter = struct {
             const nt = if (std.meta.eql(new_target, callee)) bf.target else new_target;
             return self.constructNT(bf.target, try self.concatArgs(bf.args, args), nt);
         }
-        if (obj.errorCtor()) |name| return self.makeErrorWithArgsNT(name, args, new_target);
+        if (obj.errorCtor()) |name| return self.callErrorConstructor(obj, name, args, new_target);
         if (obj.hostClassHooks()) |hooks| if (hooks.construct) |construct_callback| {
             if (hooks.is_constructor != null and hooks.is_constructor.?(obj)) {
                 self.recordExecutionTier(.host_callbacks);
@@ -9920,6 +10021,7 @@ pub const Interpreter = struct {
     }
 
     fn envIntrinsicProto(env: *Environment, intrinsic: []const u8) ?*value.Object {
+        if (ErrorIntrinsics.index(intrinsic) != null) return env.errorIntrinsic(intrinsic, true);
         if (env.get("globalThis")) |gt| {
             if (gt.isObject()) {
                 if (gt.asObj().getOwn(intrinsic)) |ctor_v| {
@@ -9942,6 +10044,7 @@ pub const Interpreter = struct {
     }
 
     fn envIntrinsicObject(env: *Environment, intrinsic: []const u8) ?*value.Object {
+        if (ErrorIntrinsics.index(intrinsic) != null) return env.errorIntrinsic(intrinsic, false);
         if (env.get(intrinsic)) |v| {
             if (v.isObject()) return v.asObj();
         }
@@ -21123,10 +21226,10 @@ inline fn tracePrivateValue(v: anytype, val: Value) void {
 /// hook keeps type-erased side records from hiding GC-managed Values/Objects.
 pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
     const pd = o.private_data orelse return;
-    // A ShadowRealm instance owns its child Realm through this otherwise-opaque
-    // slot. The realm (and its intrinsics/global graph) must move with the live
-    // instance even though the instance itself is not a native function.
-    if (o.behavior.is_shadow_realm) {
+    // ShadowRealm instances and Error constructors own their realm through
+    // this otherwise-opaque slot, even though neither uses Object.native.
+    // A retained foreign constructor must keep its realm alive and relocated.
+    if (o.behavior.is_shadow_realm or o.errorCtor() != null) {
         const realm: *Environment = @ptrCast(@alignCast(pd));
         if (realm.gc_managed) v.mark(realm);
         return;
@@ -21182,7 +21285,7 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
 
 pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
     const pd = o.private_data orelse return;
-    if (o.behavior.is_shadow_realm) {
+    if (o.behavior.is_shadow_realm or o.errorCtor() != null) {
         const realm: *Environment = @ptrCast(@alignCast(pd));
         if (realm.gc_managed) gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
         return;
@@ -35688,12 +35791,8 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 /// realms) and keys all its `@@`-methods under them.
 pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol: ?*value.Object) EvalError!void {
     const a = env.arena;
-    const error_names = [_][]const u8{
-        "Error",           "TypeError",        "RangeError", "ReferenceError",
-        "SyntaxError",     "EvalError",        "URIError",   "AggregateError",
-        "SuppressedError", "OutOfMemoryError",
-    };
-    for (error_names) |name| {
+    try env.initErrorIntrinsics();
+    for (ErrorIntrinsics.core_names, 0..) |name, index| {
         const o = try gc_mod.allocObj(a);
         o.* = .{ .private_data = @ptrCast(env) };
         try o.setErrorCtor(a, name);
@@ -35702,6 +35801,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         const arity: usize = if (std.mem.eql(u8, name, "SuppressedError")) 3 else if (std.mem.eql(u8, name, "AggregateError")) 2 else 1;
         try installNativeProps(a, root_shape, o, name, arity);
         try env.put(name, Value.obj(o));
+        env.installErrorIntrinsic(index, o, null);
     }
     try env.put("NaN", Value.num(std.math.nan(f64)));
     try env.put("Infinity", Value.num(std.math.inf(f64)));
@@ -35993,7 +36093,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // NativeError constructors below can set it as their [[Prototype]] (spec:
     // `Object.getPrototypeOf(TypeError) === Error`).
     var error_ctor_obj: ?*value.Object = null;
-    for (error_names) |ename| {
+    for (ErrorIntrinsics.core_names, 0..) |ename, index| {
         const ctor_v = env.get(ename) orelse continue;
         const ctor = ctor_v.asObj();
         const is_base = std.mem.eql(u8, ename, "Error");
@@ -36028,6 +36128,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         }
         try ctor.setOwn(a, root_shape, "prototype", Value.obj(proto));
         try ctor.setAttr(a, "prototype", .{ .enumerable = false, .configurable = false, .writable = false });
+        env.installErrorIntrinsic(index, ctor, proto);
     }
 
     const func_proto = try gc_mod.allocObj(a);
@@ -56121,6 +56222,71 @@ test "DataView cross-realm brand errors use the method realm" {
         \\try { av.buffer; } catch (e) { getterRealm = e.constructor === alien.TypeError; }
         \\methodRealm && getterRealm
     )).asBool());
+}
+
+test "realm error intrinsics trace and relocate a retained foreign constructor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var old_realm = Environment{ .arena = arena.allocator(), .gc_managed = true };
+    var new_realm = Environment{ .arena = arena.allocator(), .gc_managed = true };
+    var ctor = value.Object{ .private_data = &old_realm };
+    try ctor.setErrorCtor(arena.allocator(), "TypeError");
+    const Visitor = struct {
+        old: *Environment,
+        new: *Environment,
+        marked: bool = false,
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected cell pointer"),
+            };
+            if (@intFromPtr(cell) == @intFromPtr(self.old)) self.marked = true;
+        }
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            return if (old == @as(*anyopaque, @ptrCast(self.old))) @ptrCast(self.new) else old;
+        }
+    };
+    var visitor = Visitor{ .old = &old_realm, .new = &new_realm };
+    traceNativePrivateData(&ctor, &visitor);
+    try std.testing.expect(visitor.marked);
+    relocateNativePrivateData(&ctor, &visitor);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_realm)), ctor.private_data.?);
+}
+
+test "realm error intrinsics own storage and error construction through OOM" {
+    const probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var root = Environment{ .arena = allocator, .bindings_allocator = backing, .fn_scope = true };
+            defer root.finalizeOwnedBindingStorage();
+            try root.initErrorIntrinsics();
+            var ctor = value.Object{};
+            var proto = value.Object{};
+            root.installErrorIntrinsic(ErrorIntrinsics.index("Error").?, &ctor, &proto);
+            root.installErrorIntrinsic(ErrorIntrinsics.index("TypeError").?, &ctor, &proto);
+            var machine = Interpreter{ .arena = allocator, .env = &root, .root_shape = try Shape.createRoot(allocator) };
+            const standard = try machine.makeErrorWithArgs("TypeError", &.{Value.str("message")});
+            try std.testing.expectEqual(&proto, standard.asObj().protoAtomic().?);
+            try std.testing.expect(standard.asObj().getOwn("name") == null);
+            const internal = try machine.makeError("InternalError", "diagnostic");
+            try std.testing.expectEqual(&proto, internal.asObj().protoAtomic().?);
+            try std.testing.expectEqualStrings("InternalError", internal.asObj().getOwn("name").?.asStr());
+            const attr = internal.asObj().getAttr("name");
+            try std.testing.expect(!attr.enumerable and attr.writable and attr.configurable);
+            var override = value.Object{};
+            const explicit = try machine.makeErrorWithProto("TypeError", "", &override);
+            try std.testing.expectEqual(&override, explicit.asObj().protoAtomic().?);
+            const wasm = try machine.makeErrorWithProto("CompileError", "", &override);
+            try std.testing.expectEqual(&override, wasm.asObj().protoAtomic().?);
+            try std.testing.expect(wasm.asObj().getOwn("name") == null);
+        }
+    }.run;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, probe, .{});
 }
 
 test "Error instanceof uses exact prototype identity across realms" {

@@ -706,7 +706,7 @@ pub fn installThreadAPI(ctx: *Context) !void {
 
 /// The `ConcurrentAccessError` global error constructor (PR-249: thrown by
 /// enforced access to a `Thread.restrict`ed object). Rides the engine's
-/// name-driven error machinery, chained under %Error%.
+/// realm-owned error machinery, chained under %Error%.
 fn installConcurrentAccessError(ctx: *Context) !void {
     const a = ctx.arena();
     const rs = ctx.root_shape;
@@ -731,6 +731,7 @@ fn installConcurrentAccessError(ctx: *Context) !void {
     try proto.setAttr(a, "constructor", ro);
     try ctor.setOwn(a, rs, "prototype", Value.obj(proto));
     try ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
+    ctx.env.installErrorIntrinsic(interp.ErrorIntrinsics.index(name).?, ctor, proto);
     try ctx.env.put(name, Value.obj(ctor));
     try ctx.global_object.setOwn(a, rs, name, Value.obj(ctor));
     try ctx.global_object.setAttr(a, name, .{ .writable = true, .enumerable = false, .configurable = true });
