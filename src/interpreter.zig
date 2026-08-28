@@ -2515,6 +2515,28 @@ const LegacyCallFrame = struct {
     lazy_func: ?*Function = null,
     lazy_args: []const Value = &.{},
     lazy_env: ?*Environment = null,
+    lazy_args_root: ?usize = null,
+};
+
+/// A synchronous tree-walker call owns these slots until its Zig frame exits.
+/// They are published before switching realms/environments, so a nested native
+/// checkpoint rewrites the suspended caller as well as the running callee. The
+/// intrusive chain needs no allocation and is private to this interpreter;
+/// collectors visit it under the existing interpreter safepoint/park protocol.
+pub const TreeCallRoots = struct {
+    previous: ?*TreeCallRoots,
+    function: *Function,
+    environment: ?*Environment = null,
+    caller_environment: *Environment,
+    caller_return: Value,
+    caller_this: Value,
+    caller_home: ?*value.Object,
+    caller_super: ?*value.Object,
+    caller_new_target: Value,
+    caller_global: ?*value.Object,
+    caller_import_meta: ?*value.Object,
+    caller_this_cell: ?*ThisCell,
+    caller_function: ?*value.Object,
 };
 
 /// Non-local control flow the tree-walker propagates up the statement list:
@@ -2864,6 +2886,7 @@ pub const Interpreter = struct {
     /// live only in Zig locals. VM values are covered by `gc_execs`; this stack
     /// covers interpreter paths such as iterator records/results in `for...of`.
     gc_temp_roots: std.ArrayListUnmanaged(Value) = .empty,
+    gc_tree_call_roots: ?*TreeCallRoots = null,
     /// Tree-walker identifier References retained across RHS, iterator, getter,
     /// coercion, or argument evaluation. Unlike VM references these do not live
     /// in a registered Exec, so their tagged Environment/Object bases need an
@@ -4384,16 +4407,20 @@ pub const Interpreter = struct {
             if (self.mark_fn_body) self.mark_fn_body = false;
             return self.evalStatements(stmts);
         }
-        const block_env = try self.acquireBlockEnvironment(self.env);
+        const saved_env = self.env;
+        const saved_env_root = try self.pushTempEnvRoot(saved_env);
+        defer self.restoreTempEnvRoots(saved_env_root);
+        var block_env = try self.acquireBlockEnvironment(self.env);
+        const block_env_root = try self.pushTempEnvRoot(block_env);
         if (self.mark_fn_body) {
             block_env.fn_body = true;
             self.mark_fn_body = false;
         }
-        const saved_env = self.env;
         self.env = block_env;
         if (self.reusable_block_env == block_env) self.reusable_block_env = null;
-        defer self.env = saved_env;
+        defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
         const result = self.evalStatements(stmts);
+        block_env = self.tempEnvRoot(block_env_root, block_env);
         if (block_env.disposables.items.len == 0) {
             if (result) |val| {
                 self.releaseBlockEnvironment(block_env);
@@ -4414,13 +4441,15 @@ pub const Interpreter = struct {
             body_err = self.exception;
             break :blk Value.undef();
         };
+        const result_root = try self.pushTempRoot(val);
+        defer self.restoreTempRoots(result_root);
         if (try self.disposeScope(block_env, body_err)) |err| {
             self.exception = err;
-            self.releaseBlockEnvironment(block_env);
+            self.releaseBlockEnvironment(self.tempEnvRoot(block_env_root, block_env));
             return error.Throw;
         }
-        self.releaseBlockEnvironment(block_env);
-        return val;
+        self.releaseBlockEnvironment(self.tempEnvRoot(block_env_root, block_env));
+        return self.tempRoot(result_root, val);
     }
 
     fn labeledFunctionDeclNode(node: *Node) ?*Node {
@@ -4819,79 +4848,30 @@ pub const Interpreter = struct {
                 // non-extensible receiver. The anonymous RHS is named with the
                 // field name.
                 if (a.value.* == .field_init_value and a.target.* == .member) {
-                    const m = a.target.member;
-                    const obj = try self.eval(m.object);
                     // Computed public class fields are resolved once at class
                     // definition time, then baked into this desugared member node
                     // as an already-encoded storage key. Reusing memberKey would
                     // double-escape NUL-led string keys and turn Symbol storage
-                    // keys into public strings.
-                    const key = if (m.computed == null and m.property.len > 0 and m.property[0] == 0)
-                        m.property
-                    else
-                        try self.memberKey(m.property, m.computed);
+                    // keys into public strings. Static Reference keys stay encoded.
+                    const reference = try self.capturePropertyReference(a.target, true);
+                    defer reference.deinit(self);
                     const v = try self.eval(a.value);
-                    try self.maybeNameAnon(v, a.value.field_init_value, key);
-                    try self.initializePublicClassField(obj, key, v);
-                    break :blk v;
+                    const value_root = try self.pushTempRoot(v);
+                    var key_buffer: [24]u8 = undefined;
+                    try self.maybeNameAnon(v, a.value.field_init_value, try reference.key(self, &key_buffer));
+                    try self.initializePublicClassField(
+                        self.tempRoot(reference.base_root, reference.base),
+                        try reference.key(self, &key_buffer),
+                        self.tempRoot(value_root, v),
+                    );
+                    break :blk self.tempRoot(value_root, v);
                 }
                 if (a.target.* == .call) {
                     _ = try self.eval(a.target);
                     return self.throwError("ReferenceError", "invalid assignment target");
                 }
-                // `base[key] = value`: the LeftHandSide is evaluated before the RHS,
-                // but RequireObjectCoercible(base) and ToPropertyKey(key) are deferred
-                // to PutValue — so the spec order is base, key expression, RHS, THEN
-                // the null/undefined check and ToPropertyKey. assignTo would run the
-                // RHS first (its caller already evaluated it), tripping a key
-                // `toString` / the base check before the RHS.
-                if (a.target.* == .member) {
-                    const m = a.target.member;
-                    if (m.computed) |ce| {
-                        const recv = try self.eval(m.object);
-                        const kv = try self.eval(ce);
-                        const v = try self.eval(a.value);
-                        if (recv.isNull() or recv.isUndefined())
-                            return self.throwError("TypeError", notAnObjectMessage(recv));
-                        if (fastNumericIndex(kv)) |idx| {
-                            if (try self.setFastArrayNumericIndex(recv, idx, v)) break :blk v;
-                            var fast_key_buf: [24]u8 = undefined;
-                            const key = std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
-                            try self.setMember(recv, key, v);
-                        } else {
-                            try self.setMember(recv, try self.keyOf(kv), v);
-                        }
-                        break :blk v;
-                    } else {
-                        // `obj.name = rhs`: evaluate the object (the MemberExpression)
-                        // BEFORE the RHS, per spec order (PutValue runs after both).
-                        // assignTo's member arm does the same [[Set]] — via setMember,
-                        // so private/getter-setter/primitive semantics are unchanged —
-                        // but only after the caller already evaluated the RHS.
-                        const recv = try self.eval(m.object);
-                        const v = try self.eval(a.value);
-                        try self.setMember(recv, m.property, v);
-                        break :blk v;
-                    }
-                }
-                // `super[key] = value`: the SuperReference is created before the
-                // RHS, so GetThisBinding/GetSuperBase and the computed expression
-                // run first. ToPropertyKey(key) is part of PutValue, so it remains
-                // after the RHS.
-                if (a.target.* == .super_member) {
-                    const m = a.target.super_member;
-                    const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                    if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-                    const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
-                    const parent = home.protoAtomic();
-                    const v = try self.eval(a.value);
-                    const parent_obj = parent orelse return self.throwError("TypeError", "Cannot set property of null (super)");
-                    const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
-                    if (!try self.setMemberResult(Value.obj(parent_obj), key, v, self.this_value)) {
-                        if (self.strict) return self.throwError("TypeError", "Cannot set property");
-                    }
-                    break :blk v;
-                }
+                if (a.target.* == .member or a.target.* == .super_member)
+                    break :blk try self.evalPropertyAssignment(a.target, a.value, .assign);
                 // Resolve an identifier Reference before the RHS and retain its
                 // exact base. This covers strict unresolvable references and
                 // `with` Object Environment Records without a second HasBinding.
@@ -4905,6 +4885,8 @@ pub const Interpreter = struct {
                     null;
                 defer if (binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
                 const v = try self.eval(a.value);
+                const value_root = try self.pushTempRoot(v);
+                defer self.restoreTempRoots(value_root);
                 // NamedEvaluation: `f = function(){}` names the function "f"
                 // (only a bare, *unparenthesized* identifier target — a
                 // parenthesized `(f) =` is not an IdentifierRef).
@@ -4913,11 +4895,11 @@ pub const Interpreter = struct {
                     try self.storeCapturedBindingReference(
                         self.tempBindingReferenceRoot(binding_reference_root.?, reference),
                         a.target.identifier,
-                        v,
+                        self.tempRoot(value_root, v),
                     )
                 else
-                    try self.assignTo(a.target, v);
-                break :blk v;
+                    try self.assignTo(a.target, self.tempRoot(value_root, v));
+                break :blk self.tempRoot(value_root, v);
             },
 
             // Compound assignment `target op= value`: resolve the LeftHandSide
@@ -4937,65 +4919,28 @@ pub const Interpreter = struct {
                         defer self.restoreTempRoots(old_root);
                         const rhs = try self.eval(oa.value);
                         const new = try self.applyBinary(oa.op, self.tempRoot(old_root, old), rhs);
+                        self.setTempRoot(old_root, new);
                         try self.storeCapturedBindingReference(
                             self.tempBindingReferenceRoot(reference_root, reference),
                             name,
-                            new,
+                            self.tempRoot(old_root, new),
                         );
-                        break :blk new;
+                        break :blk self.tempRoot(old_root, new);
                     },
-                    .member => |m| {
-                        // The base (and a computed key expression) evaluate exactly
-                        // once. Mirror a member read's order: the key expression is
-                        // evaluated, then the null/undefined base is rejected BEFORE
-                        // ToPropertyKey (so `null[obj.toString]` throws without
-                        // calling toString), then the property key is formed.
-                        const obj = try self.eval(m.object);
-                        var fast_key_buf: [24]u8 = undefined;
-                        const key: []const u8 = if (m.computed) |ce| blk2: {
-                            const kv = try self.eval(ce);
-                            if (m.optional and (obj.isNull() or obj.isUndefined())) break :blk Value.undef();
-                            if (obj.isNull() or obj.isUndefined())
-                                return self.throwError("TypeError", notAnObjectMessage(obj));
-                            if (fastNumericIndex(kv)) |idx|
-                                break :blk2 std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
-                            break :blk2 try self.keyOf(kv);
-                        } else m.property;
-                        const old = try self.getProperty(obj, key);
-                        const rhs = try self.eval(oa.value);
-                        const new = try self.applyBinary(oa.op, old, rhs);
-                        try self.setMember(obj, key, new);
-                        break :blk new;
-                    },
-                    .super_member => |m| {
-                        // Logical assignment carries one SuperReference through
-                        // GetValue, the short-circuit decision, and PutValue. A
-                        // getter/RHS may mutate the method home's prototype, but
-                        // the eventual write still targets this captured base.
-                        const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                        if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-                        const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
-                        const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
-                        const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
-                        const old = try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
-                        const rhs = try self.eval(oa.value);
-                        const new = try self.applyBinary(oa.op, old, rhs);
-                        if (!try self.setMemberResult(Value.obj(parent), key, new, self.this_value)) {
-                            if (self.strict) return self.throwError("TypeError", "Cannot set property");
-                        }
-                        break :blk new;
-                    },
+                    .member, .super_member => break :blk try self.evalPropertyAssignment(oa.target, oa.value, .{ .compound = oa.op }),
                     else => {
                         if (oa.target.* == .call) {
                             _ = try self.eval(oa.target);
                             return self.throwError("ReferenceError", "invalid assignment target");
                         }
-                        // super.x etc.: the base is stable, so read + assignTo are safe.
                         const old = try self.eval(oa.target);
+                        const result_root = try self.pushTempRoot(old);
+                        defer self.restoreTempRoots(result_root);
                         const rhs = try self.eval(oa.value);
-                        const new = try self.applyBinary(oa.op, old, rhs);
+                        const new = try self.applyBinary(oa.op, self.tempRoot(result_root, old), rhs);
+                        self.setTempRoot(result_root, new);
                         try self.assignTo(oa.target, new);
-                        break :blk new;
+                        break :blk self.tempRoot(result_root, new);
                     },
                 }
             },
@@ -5022,54 +4967,16 @@ pub const Interpreter = struct {
                         };
                         if (short) break :blk old;
                         const rhs = try self.eval(la.value);
+                        const result_root = try self.pushTempRoot(rhs);
+                        defer self.restoreTempRoots(result_root);
                         try self.storeCapturedBindingReference(
                             self.tempBindingReferenceRoot(reference_root, reference),
                             name,
                             rhs,
                         );
-                        break :blk rhs;
+                        break :blk self.tempRoot(result_root, rhs);
                     },
-                    .member => |m| {
-                        const obj = try self.eval(m.object);
-                        var fast_key_buf: [24]u8 = undefined;
-                        const key: []const u8 = if (m.computed) |ce| blk2: {
-                            const kv = try self.eval(ce);
-                            if (obj.isNull() or obj.isUndefined())
-                                return self.throwError("TypeError", notAnObjectMessage(obj));
-                            if (fastNumericIndex(kv)) |idx|
-                                break :blk2 std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
-                            break :blk2 try self.keyOf(kv);
-                        } else m.property;
-                        const old = try self.getProperty(obj, key);
-                        const short = switch (la.op) {
-                            .@"and" => !old.toBoolean(),
-                            .@"or" => old.toBoolean(),
-                            .nullish => !(old.isNull() or old.isUndefined()),
-                        };
-                        if (short) break :blk old;
-                        const rhs = try self.eval(la.value);
-                        try self.setMember(obj, key, rhs);
-                        break :blk rhs;
-                    },
-                    .super_member => |m| {
-                        const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                        if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-                        const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
-                        const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
-                        const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
-                        const old = try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
-                        const short = switch (la.op) {
-                            .@"and" => !old.toBoolean(),
-                            .@"or" => old.toBoolean(),
-                            .nullish => !(old.isNull() or old.isUndefined()),
-                        };
-                        if (short) break :blk old;
-                        const rhs = try self.eval(la.value);
-                        if (!try self.setMemberResult(Value.obj(parent), key, rhs, self.this_value)) {
-                            if (self.strict) return self.throwError("TypeError", "Cannot set property");
-                        }
-                        break :blk rhs;
-                    },
+                    .member, .super_member => break :blk try self.evalPropertyAssignment(la.target, la.value, .{ .logical = la.op }),
                     else => {
                         const old = try self.eval(la.target);
                         const short = switch (la.op) {
@@ -5079,8 +4986,10 @@ pub const Interpreter = struct {
                         };
                         if (short) break :blk old;
                         const rhs = try self.eval(la.value);
+                        const result_root = try self.pushTempRoot(rhs);
+                        defer self.restoreTempRoots(result_root);
                         try self.assignTo(la.target, rhs);
-                        break :blk rhs;
+                        break :blk self.tempRoot(result_root, rhs);
                     },
                 }
             },
@@ -6259,6 +6168,164 @@ pub const Interpreter = struct {
                 return true; // labeled continue for an outer loop: exit, keep signal
             },
         }
+    }
+
+    const RootedPropertyReference = struct {
+        roots_mark: usize,
+        base: Value,
+        base_root: usize,
+        receiver: Value,
+        receiver_root: usize,
+        property: []const u8,
+        key_value: ?Value = null,
+        key_root: ?usize = null,
+        is_super: bool = false,
+
+        fn deinit(self: RootedPropertyReference, machine: *Interpreter) void {
+            machine.restoreTempRoots(self.roots_mark);
+        }
+
+        fn coerceKey(self: *RootedPropertyReference, machine: *Interpreter) EvalError!void {
+            const base = machine.tempRoot(self.base_root, self.base);
+            if (base.isNull() or base.isUndefined())
+                return machine.throwError("TypeError", "Cannot access property of null or undefined");
+            if (self.key_value) |original| {
+                const current = machine.tempRoot(self.key_root.?, original);
+                // Retain the existing allocation-free dense numeric-index path.
+                // All other keys become primitives once; later re-encoding must
+                // never repeat observable ToPropertyKey after a getter or RHS.
+                if (fastNumericIndex(current) != null) return;
+                self.key_value = try machine.toPropertyKeyValue(current);
+                machine.setTempRoot(self.key_root.?, self.key_value.?);
+            }
+        }
+
+        fn key(self: RootedPropertyReference, machine: *Interpreter, buffer: *[24]u8) EvalError![]const u8 {
+            const original = self.key_value orelse return self.property;
+            const current = machine.tempRoot(self.key_root.?, original);
+            if (fastNumericIndex(current)) |index|
+                return std.fmt.bufPrint(buffer, "{d}", .{index}) catch unreachable;
+            return machine.keyOf(current);
+        }
+
+        fn get(self: RootedPropertyReference, machine: *Interpreter) EvalError!Value {
+            var buffer: [24]u8 = undefined;
+            const property = try self.key(machine, &buffer);
+            const base = machine.tempRoot(self.base_root, self.base);
+            return if (self.is_super)
+                machine.getPropertyWithReceiver(base, property, machine.tempRoot(self.receiver_root, self.receiver))
+            else
+                machine.getProperty(base, property);
+        }
+
+        fn put(self: RootedPropertyReference, machine: *Interpreter, rhs: Value, numeric_fastpath: bool) EvalError!void {
+            const base = machine.tempRoot(self.base_root, self.base);
+            if (!self.is_super and numeric_fastpath) {
+                if (self.key_value) |original| {
+                    if (fastNumericIndex(machine.tempRoot(self.key_root.?, original))) |index|
+                        if (try machine.setFastArrayNumericIndex(base, index, rhs)) return;
+                }
+            }
+            var buffer: [24]u8 = undefined;
+            const property = try self.key(machine, &buffer);
+            if (self.is_super) {
+                if (!try machine.setMemberResult(base, property, rhs, machine.tempRoot(self.receiver_root, self.receiver))) {
+                    if (machine.strict) return machine.throwError("TypeError", "Cannot set property");
+                }
+            } else {
+                try machine.setMember(base, property, rhs);
+            }
+        }
+    };
+
+    fn capturePropertyReference(self: *Interpreter, target: *Node, coerce_key: bool) EvalError!RootedPropertyReference {
+        const mark = self.gc_temp_roots.items.len;
+        errdefer self.restoreTempRoots(mark);
+        var reference: RootedPropertyReference = undefined;
+        switch (target.*) {
+            .member => |member| {
+                const base = try self.eval(member.object);
+                const base_root = try self.pushTempRoot(base);
+                reference = .{
+                    .roots_mark = mark,
+                    .base = base,
+                    .base_root = base_root,
+                    .receiver = base,
+                    .receiver_root = base_root,
+                    .property = member.property,
+                };
+                if (member.computed) |expression| {
+                    reference.key_value = try self.eval(expression);
+                    reference.key_root = try self.pushTempRoot(reference.key_value.?);
+                }
+            },
+            .super_member => |member| {
+                const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
+                if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                const home_root = try self.pushTempRoot(Value.obj(home));
+                const receiver = self.this_value;
+                const receiver_root = try self.pushTempRoot(receiver);
+                const raw_key: ?Value = if (member.computed) |expression| try self.eval(expression) else null;
+                const key_root = if (raw_key) |key_value| try self.pushTempRoot(key_value) else null;
+                // SuperProperty captures this before the key expression, then
+                // GetSuperBase after it. A later coercion/RHS cannot redirect it.
+                const parent = self.tempRoot(home_root, Value.obj(home)).asObj().protoAtomic();
+                const base = if (parent) |object| Value.obj(object) else Value.nul();
+                const base_root = try self.pushTempRoot(base);
+                reference = .{
+                    .roots_mark = mark,
+                    .base = base,
+                    .base_root = base_root,
+                    .receiver = receiver,
+                    .receiver_root = receiver_root,
+                    .property = member.property,
+                    .key_value = raw_key,
+                    .key_root = key_root,
+                    .is_super = true,
+                };
+            },
+            else => unreachable,
+        }
+        if (coerce_key) try reference.coerceKey(self);
+        return reference;
+    }
+
+    const PropertyAssignment = union(enum) {
+        assign,
+        compound: ast.BinaryOp,
+        logical: ast.LogicalOp,
+    };
+
+    fn evalPropertyAssignment(self: *Interpreter, target: *Node, rhs_node: *Node, operation: PropertyAssignment) EvalError!Value {
+        // Assignment Evaluation retains one Reference through GetValue, RHS,
+        // coercion and PutValue. Plain assignment defers ToPropertyKey until
+        // after the RHS; compound/logical forms need it for the initial read.
+        var reference = try self.capturePropertyReference(target, operation != .assign);
+        defer reference.deinit(self);
+        var old = Value.undef();
+        var old_root: ?usize = null;
+        if (operation != .assign) {
+            old = try reference.get(self);
+            if (operation == .logical) {
+                const short = switch (operation.logical) {
+                    .@"and" => !old.toBoolean(),
+                    .@"or" => old.toBoolean(),
+                    .nullish => !old.isNull() and !old.isUndefined(),
+                };
+                if (short) return old;
+            } else {
+                old_root = try self.pushTempRoot(old);
+            }
+        }
+        const rhs = try self.eval(rhs_node);
+        const result = if (operation == .compound)
+            try self.applyBinary(operation.compound, self.tempRoot(old_root.?, old), rhs)
+        else
+            rhs;
+        const result_root = try self.pushTempRoot(result);
+        if (operation == .assign) try reference.coerceKey(self);
+        try reference.put(self, self.tempRoot(result_root, result), operation == .assign);
+        return self.tempRoot(result_root, result);
     }
 
     const NumericUpdate = struct {
@@ -8595,7 +8662,8 @@ pub const Interpreter = struct {
     /// The body of a plain (sync) function call: scope setup, param binding, and
     /// evaluation. Async functions route through `callFunctionNT`, which wraps
     /// this in a Promise.
-    fn callPlain(self: *Interpreter, func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+    fn callPlain(self: *Interpreter, initial_func: *Function, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+        var func = initial_func;
         // Calling a `function*` builds a generator object (its body runs lazily,
         // on the suspendable VM, via `.next()`). Async generators can't yet run
         // their body (need yield+await suspension), but per spec their parameters
@@ -8613,30 +8681,39 @@ pub const Interpreter = struct {
         self.depth += 1;
         defer self.depth -= 1;
 
-        const call_env = try self.acquireCallEnvironment(func);
+        var roots = TreeCallRoots{
+            .previous = self.gc_tree_call_roots,
+            .function = func,
+            .caller_environment = self.env,
+            .caller_return = self.ret_value,
+            .caller_this = self.this_value,
+            .caller_home = self.home_object,
+            .caller_super = self.super_ctor,
+            .caller_new_target = self.new_target,
+            .caller_global = self.global_object,
+            .caller_import_meta = self.import_meta_obj,
+            .caller_this_cell = self.this_cell,
+            .caller_function = self.active_function,
+        };
+        self.gc_tree_call_roots = &roots;
+        defer self.gc_tree_call_roots = roots.previous;
+        const args_root = try self.pushTempRootSlice(args);
+        defer self.restoreTempRoots(args_root);
+        var call_env = try self.acquireCallEnvironment(func);
+        roots.environment = call_env;
         // On normal completion the activation is fully instantiated and safe to
         // clear. Any error can interrupt a binding insertion, so preserve that
         // cell for the GC finalizer rather than caching a potentially partial
         // table; caught JavaScript throws complete normally at this boundary.
         var call_failed = false;
-        defer if (!call_failed) self.releaseCallEnvironment(call_env, func);
+        defer if (!call_failed) self.releaseCallEnvironment(roots.environment.?, roots.function);
         errdefer call_failed = true;
 
-        const saved_env = self.env;
         const saved_signal = self.signal;
-        const saved_ret = self.ret_value;
-        const saved_this = self.this_value;
-        const saved_home = self.home_object;
-        const saved_super = self.super_ctor;
-        const saved_nt = self.new_target;
         const saved_strict = self.strict;
-        const saved_global = self.global_object;
         const saved_import_meta_slot = self.import_meta_slot;
-        const saved_import_meta_obj = self.import_meta_obj;
         const saved_cur_module = self.cur_module;
         const saved_this_initialized = self.this_initialized;
-        const saved_this_cell = self.this_cell;
-        const saved_active_function = self.active_function;
         const saved_eval_nt = self.direct_eval_new_target_allowed;
         const saved_fi = self.in_field_initializer;
         const saved_pe = self.in_param_expr;
@@ -8684,6 +8761,47 @@ pub const Interpreter = struct {
         }
         const saved_pfi = self.pending_field_inits;
         const saved_pbn = self.pending_brand_names;
+        defer {
+            self.env = roots.caller_environment;
+            self.signal = saved_signal;
+            self.ret_value = roots.caller_return;
+            self.home_object = roots.caller_home;
+            self.super_ctor = roots.caller_super;
+            self.new_target = roots.caller_new_target;
+            self.strict = saved_strict;
+            self.global_object = roots.caller_global;
+            self.import_meta_slot = saved_import_meta_slot;
+            self.import_meta_obj = roots.caller_import_meta;
+            self.cur_module = saved_cur_module;
+            self.this_value = roots.caller_this;
+            self.this_initialized = saved_this_initialized;
+            self.this_cell = roots.caller_this_cell;
+            self.active_function = roots.caller_function;
+            self.active_call_frame = saved_call_frame;
+            self.debug_call_frame = saved_debug_call_frame;
+            self.stack_trace_call_frame = saved_stack_trace_call_frame;
+            self.tree_tail_allowed = saved_tree_tail_allowed;
+            // Re-sync the ambient this-state from the (restored) enclosing derived
+            // ctor's shared cell: a `super()` that ran during this call — possibly
+            // via an arrow invoked from an unrelated context — initialized the
+            // cell, and that binding must remain visible to the enclosing ctor.
+            if (self.this_cell) |c| if (c.isInitialized()) {
+                self.this_value = c.value();
+                self.this_initialized = true;
+            };
+            self.direct_eval_new_target_allowed = saved_eval_nt;
+            self.in_field_initializer = saved_fi;
+            self.in_param_expr = saved_pe;
+            self.in_param_default = saved_pd;
+            self.cur_func_params = saved_params;
+            self.cur_func_args_needed = saved_args_needed;
+            self.eval_decl_deletable = saved_edd;
+            self.in_derived_ctor = saved_idc;
+            self.in_default_ctor = saved_dfc;
+            self.current_private_map = saved_pm;
+            self.pending_field_inits = saved_pfi;
+            self.pending_brand_names = saved_pbn;
+        }
         // A derived constructor's field initializers + private brands wait for its
         // SuperCall.
         self.pending_field_inits = func.field_inits;
@@ -8771,47 +8889,6 @@ pub const Interpreter = struct {
         } else {
             self.this_cell = null;
         }
-        defer {
-            self.env = saved_env;
-            self.signal = saved_signal;
-            self.ret_value = saved_ret;
-            self.home_object = saved_home;
-            self.super_ctor = saved_super;
-            self.new_target = saved_nt;
-            self.strict = saved_strict;
-            self.global_object = saved_global;
-            self.import_meta_slot = saved_import_meta_slot;
-            self.import_meta_obj = saved_import_meta_obj;
-            self.cur_module = saved_cur_module;
-            self.this_value = saved_this;
-            self.this_initialized = saved_this_initialized;
-            self.this_cell = saved_this_cell;
-            self.active_function = saved_active_function;
-            self.active_call_frame = saved_call_frame;
-            self.debug_call_frame = saved_debug_call_frame;
-            self.stack_trace_call_frame = saved_stack_trace_call_frame;
-            self.tree_tail_allowed = saved_tree_tail_allowed;
-            // Re-sync the ambient this-state from the (restored) enclosing derived
-            // ctor's shared cell: a `super()` that ran during this call — possibly
-            // via an arrow invoked from an unrelated context — initialized the
-            // cell, and that binding must remain visible to the enclosing ctor.
-            if (self.this_cell) |c| if (c.isInitialized()) {
-                self.this_value = c.value();
-                self.this_initialized = true;
-            };
-            self.direct_eval_new_target_allowed = saved_eval_nt;
-            self.in_field_initializer = saved_fi;
-            self.in_param_expr = saved_pe;
-            self.in_param_default = saved_pd;
-            self.cur_func_params = saved_params;
-            self.cur_func_args_needed = saved_args_needed;
-            self.eval_decl_deletable = saved_edd;
-            self.in_derived_ctor = saved_idc;
-            self.in_default_ctor = saved_dfc;
-            self.current_private_map = saved_pm;
-            self.pending_field_inits = saved_pfi;
-            self.pending_brand_names = saved_pbn;
-        }
         if (func.is_class_constructor and new_target.isUndefined())
             return throwClassConstructorCallError(self, func);
 
@@ -8838,6 +8915,7 @@ pub const Interpreter = struct {
                 if (func.obj != null and fr.func_obj == func.obj.?) {
                     fr.lazy_func = func;
                     fr.lazy_args = args;
+                    fr.lazy_args_root = if (self.gc != null) args_root else null;
                     fr.lazy_env = call_env;
                 }
             }
@@ -8847,12 +8925,15 @@ pub const Interpreter = struct {
         if (func.is_class_constructor and !func.is_derived_constructor and self.this_value.isObject()) {
             for (func.private_brand_names) |bn| try self.addPrivateMethodOrAccessorChecked(self.this_value.asObj(), func.home_object, bn);
             for (func.field_inits) |fi| _ = try self.eval(fi);
+            func = roots.function;
         }
 
         // Bind parameters in `call_env` (so a default can reference earlier
         // params). A non-arrow parameter scope owns `arguments`, so a direct eval
         // in a default expression may not redeclare it (checked in evalFn).
-        try self.bindFunctionParams(func, args);
+        try self.bindRootedParams(func.params, args, args_root, func.is_arrow);
+        func = roots.function;
+        call_env = roots.environment.?;
 
         // Async generator: params have now bound (propagating any side-effect
         // throws). We can't run the body yet, so hand back an inert object
@@ -8899,13 +8980,14 @@ pub const Interpreter = struct {
         self.skip_next_annex_b_scan = !func.annex_b_possible;
         self.mark_fn_body = true;
         _ = try self.eval(func.body);
+        func = roots.function;
         self.mark_fn_body = false;
         if (func.is_class_constructor and func.is_derived_constructor) {
             if (self.signal == .ret) {
                 if (self.ret_value.isObject() and !self.ret_value.asObj().is_symbol and !self.ret_value.asObj().is_bigint) return self.ret_value;
                 if (!self.ret_value.isUndefined()) {
-                    self.env = saved_env;
-                    self.global_object = saved_global;
+                    self.env = roots.caller_environment;
+                    self.global_object = roots.caller_global;
                     return self.throwError("TypeError", "Derived constructors may only return object or undefined");
                 }
             }
@@ -8915,8 +8997,8 @@ pub const Interpreter = struct {
             // cell — not the ambient flag — is authoritative.
             const inited = if (self.this_cell) |c| c.isInitialized() else self.this_initialized;
             if (!inited) {
-                self.env = saved_env;
-                self.global_object = saved_global;
+                self.env = roots.caller_environment;
+                self.global_object = roots.caller_global;
                 return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
             }
             // The bound `this` (the object `super()` produced) is what `new`
@@ -9116,6 +9198,12 @@ pub const Interpreter = struct {
     }
 
     pub fn bindParams2(self: *Interpreter, params: []const ast.Param, args: []const Value, is_arrow: bool) EvalError!void {
+        const args_root = try self.pushTempRootSlice(args);
+        defer self.restoreTempRoots(args_root);
+        return self.bindRootedParams(params, args, args_root, is_arrow);
+    }
+
+    fn bindRootedParams(self: *Interpreter, params: []const ast.Param, args: []const Value, args_root: usize, is_arrow: bool) EvalError!void {
         // The parameter scope binds `arguments` when this is a non-arrow function
         // (the arguments object) or when a parameter is named `arguments`; in
         // either case a direct eval in a default may not declare `arguments`.
@@ -9168,11 +9256,11 @@ pub const Interpreter = struct {
             if (p.is_rest) {
                 const rest = try self.newArray();
                 var j = i;
-                while (j < args.len) : (j += 1) try rest.asObj().appendElement(self.arena, args[j]);
+                while (j < args.len) : (j += 1) try rest.asObj().appendElement(self.arena, self.tempRoot(args_root + j, args[j]));
                 if (p.pattern) |pat| try self.bindPattern(pat, rest, true) else try self.env.put(p.name, rest);
                 break;
             }
-            var v: Value = if (i < args.len) args[i] else Value.undef();
+            var v: Value = if (i < args.len) self.tempRoot(args_root + i, args[i]) else Value.undef();
             if (v.isUndefined()) {
                 if (p.default) |d| {
                     v = try self.eval(d);
@@ -10089,6 +10177,13 @@ pub const Interpreter = struct {
         if (self.gc == null) return 0;
         const mark = self.gc_temp_roots.items.len;
         try self.gc_temp_roots.append(self.arena, v);
+        return mark;
+    }
+
+    fn pushTempRootSlice(self: *Interpreter, values: []const Value) EvalError!usize {
+        if (self.gc == null) return 0;
+        const mark = self.gc_temp_roots.items.len;
+        try self.gc_temp_roots.appendSlice(self.arena, values);
         return mark;
     }
 
@@ -14088,7 +14183,11 @@ pub const Interpreter = struct {
                             // Legacy-only case: build the exotic object on demand
                             // (deferred from the call) and cache it for repeat reads.
                             if (frame.lazy_func) |lf| {
-                                const obj = try self.createArgumentsObject(lf, frame.lazy_args, frame.lazy_env.?);
+                                const args = if (frame.lazy_args_root) |root|
+                                    self.gc_temp_roots.items[root..][0..frame.lazy_args.len]
+                                else
+                                    frame.lazy_args;
+                                const obj = try self.createArgumentsObject(lf, args, frame.lazy_env.?);
                                 frame.arguments = obj;
                                 return obj;
                             }
@@ -14377,11 +14476,7 @@ pub const Interpreter = struct {
                 // Assignment-form target: route through `assignTo` so const/TDZ/
                 // strict/with checks apply (e.g. `[c] = …` with const `c`).
                 try self.assignTo(target, val),
-            .member => |m| { // assignment destructuring into obj.prop / arr[i]
-                const recv = try self.eval(m.object);
-                const key = try self.memberKey(m.property, m.computed);
-                try self.setMember(recv, key, val);
-            },
+            .member => try self.assignTo(target, val),
             .super_member => try self.assignTo(target, val),
             .obj_pattern => |p| try self.destructureObject(p.props, p.rest, val, declare),
             .arr_pattern => |p| try self.destructureArray(p.elems, p.rest, val, declare),
@@ -14411,16 +14506,6 @@ pub const Interpreter = struct {
         return self.bindPattern(target, val, declare);
     }
 
-    fn setSuperMemberResolved(self: *Interpreter, property: []const u8, computed: ?*Node, computed_key: Value, v: Value) EvalError!void {
-        const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-        if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-        const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot set property of null (super)");
-        const key = if (computed != null) try self.keyOf(computed_key) else try value.encodeStringKey(self.arena, property);
-        if (!try self.setMemberResult(Value.obj(parent), key, v, self.this_value)) {
-            if (self.strict) return self.throwError("TypeError", "Cannot set property");
-        }
-    }
-
     /// JavaScriptCore reports the first statically-known key of an object
     /// binding pattern and omits it when there is none (a computed first key, an
     /// empty pattern, or rest-only). Both execution tiers share this wording.
@@ -14437,51 +14522,45 @@ pub const Interpreter = struct {
     fn destructureObject(self: *Interpreter, props: []ast.ObjPatProp, rest: ?*Node, val: Value, declare: bool) EvalError!void {
         if (val.isUndefined() or val.isNull())
             return self.throwDestructureError(if (props.len != 0 and props[0].key_expr == null) props[0].key else null);
+        const source_root = try self.pushTempRoot(val);
+        defer self.restoreTempRoots(source_root);
         var consumed: std.ArrayListUnmanaged([]const u8) = .empty;
         for (props) |prop| {
-            const key = if (prop.key_expr) |ke| try self.keyOf(try self.eval(ke)) else try value.encodeStringKey(self.arena, prop.key);
+            const key = if (prop.key_expr) |ke| key: {
+                const primitive = try self.toPropertyKeyValue(try self.eval(ke));
+                // Excluded keys stay live through later getters and rest-copy.
+                // StringCell payload storage stays stable when its cell moves.
+                _ = try self.pushTempRoot(primitive);
+                break :key try self.keyOf(primitive);
+            } else try value.encodeStringKey(self.arena, prop.key);
             try consumed.append(self.arena, key);
             // KeyedDestructuringAssignmentEvaluation: when the target is a plain
             // member reference (assignment form), its reference (base, then the key
             // EXPRESSION) is evaluated BEFORE GetV(value, key) — and ToPropertyKey of
             // the target's computed key is deferred to PutValue, after GetV.
-            const member_assign = !declare and (prop.target.* == .member or prop.target.* == .super_member);
-            var m_base: Value = undefined;
-            var m_keyval: Value = undefined;
-            if (member_assign) {
-                switch (prop.target.*) {
-                    .member => |m| {
-                        m_base = try self.eval(m.object);
-                        if (m.computed) |ce| m_keyval = try self.eval(ce);
-                    },
-                    .super_member => |m| {
-                        if (m.computed) |ce| m_keyval = try self.eval(ce);
-                    },
-                    else => unreachable,
-                }
-            }
+            var property_reference: ?RootedPropertyReference = if (!declare and
+                (prop.target.* == .member or prop.target.* == .super_member))
+                try self.capturePropertyReference(prop.target, false)
+            else
+                null;
+            defer if (property_reference) |reference| reference.deinit(self);
             // KeyedBindingInitialization/AssignmentEvaluation resolves a plain
             // identifier target before GetV(value, P). Retain that exact base,
             // not merely the observable `with` lookup, across getters/defaults.
             const binding_reference = try self.capturePatternIdentifierReference(prop.target, declare);
             const binding_reference_root = try self.pushOptionalBindingReferenceRoot(binding_reference);
             defer if (binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
-            var v = try self.getProperty(val, key);
+            var v = try self.getProperty(self.tempRoot(source_root, val), key);
             if (v.isUndefined()) {
                 if (prop.default) |d| {
                     v = try self.eval(d);
                     if (prop.target.* == .identifier) try self.maybeNameAnon(v, d, prop.target.identifier);
                 }
             }
-            if (member_assign) {
-                switch (prop.target.*) {
-                    .member => |m| {
-                        const tkey = if (m.computed != null) try self.keyOf(m_keyval) else m.property;
-                        try self.setMember(m_base, tkey, v);
-                    },
-                    .super_member => |m| try self.setSuperMemberResolved(m.property, m.computed, m_keyval, v),
-                    else => unreachable,
-                }
+            if (property_reference) |*reference| {
+                const value_root = try self.pushTempRoot(v);
+                try reference.coerceKey(self);
+                try reference.put(self, self.tempRoot(value_root, v), false);
             } else {
                 try self.bindPatternWithReference(
                     prop.target,
@@ -14496,65 +14575,29 @@ pub const Interpreter = struct {
             // before CopyDataProperties. Keep its base, raw computed key, and
             // super base stable while source getters run; ToPropertyKey and the
             // final PutValue deliberately remain after the copy.
-            var rest_recv: Value = Value.undef();
-            var rest_member: ?struct { property: []const u8, computed: bool, keyval: Value } = null;
-            var rest_super: ?struct { base: Value, property: []const u8, computed: bool, keyval: Value } = null;
+            var property_reference: ?RootedPropertyReference = if (!declare and
+                (rest_target.* == .member or rest_target.* == .super_member))
+                try self.capturePropertyReference(rest_target, false)
+            else
+                null;
+            defer if (property_reference) |reference| reference.deinit(self);
             const rest_binding_reference = try self.capturePatternIdentifierReference(rest_target, declare);
             const rest_binding_reference_root = try self.pushOptionalBindingReferenceRoot(rest_binding_reference);
             defer if (rest_binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
-            if (!declare) switch (rest_target.*) {
-                .member => |member| {
-                    rest_recv = try self.eval(member.object);
-                    const keyval = if (member.computed) |key| try self.eval(key) else Value.undef();
-                    rest_member = .{ .property = member.property, .computed = member.computed != null, .keyval = keyval };
-                },
-                .super_member => |member| {
-                    _ = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                    if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-                    const keyval = if (member.computed) |key| try self.eval(key) else Value.undef();
-                    // The key expression may collect and relocate the home
-                    // object. Re-read the interpreter-owned root before the
-                    // spec's subsequent GetSuperBase step.
-                    const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                    rest_super = .{
-                        .base = if (home.protoAtomic()) |base| Value.obj(base) else Value.nul(),
-                        .property = member.property,
-                        .computed = member.computed != null,
-                        .keyval = keyval,
-                    };
-                },
-                else => {},
-            };
-            const rest_obj = try self.copyObjectRest(val, consumed.items);
+            const rest_obj = try self.copyObjectRest(self.tempRoot(source_root, val), consumed.items);
             // A declaration binds the rest name; an assignment writes through the
             // target reference — which may be a member (`({...obj.y} = …)`), so it
             // runs a setter / honors a const binding like any other assignment.
-            if (declare) {
-                try self.bindPatternWithReference(
-                    rest_target,
-                    rest_obj,
-                    true,
-                    self.tempOptionalBindingReferenceRoot(rest_binding_reference_root, rest_binding_reference),
-                );
-            } else if (rest_member) |member| {
-                // PutValue checks the captured base before coercing the raw
-                // computed key. A nullish base therefore throws without running
-                // a user-defined toString after CopyDataProperties completes.
-                if (rest_recv.isNull() or rest_recv.isUndefined())
-                    return self.throwError("TypeError", notAnObjectMessage(rest_recv));
-                const key = if (member.computed) try self.keyOf(member.keyval) else member.property;
-                try self.setMember(rest_recv, key, rest_obj);
-            } else if (rest_super) |super_ref| {
-                if (!super_ref.base.isObject()) return self.throwError("TypeError", "Cannot set property of null (super)");
-                const key = if (super_ref.computed) try self.keyOf(super_ref.keyval) else super_ref.property;
-                if (!try self.setMemberResult(super_ref.base, key, rest_obj, self.this_value)) {
-                    if (self.strict) return self.throwError("TypeError", "Cannot set property");
-                }
+            const rest_root = try self.pushTempRoot(rest_obj);
+            defer self.restoreTempRoots(rest_root);
+            if (property_reference) |*reference| {
+                try reference.coerceKey(self);
+                try reference.put(self, self.tempRoot(rest_root, rest_obj), false);
             } else {
                 try self.bindPatternWithReference(
                     rest_target,
-                    rest_obj,
-                    false,
+                    self.tempRoot(rest_root, rest_obj),
+                    declare,
                     self.tempOptionalBindingReferenceRoot(rest_binding_reference_root, rest_binding_reference),
                 );
             }
@@ -14566,23 +14609,31 @@ pub const Interpreter = struct {
     fn copyObjectRest(self: *Interpreter, val: Value, excluded: []const []const u8) EvalError!Value {
         if (val.isUndefined() or val.isNull())
             return self.throwDestructureError(null);
+        const source_root = try self.pushTempRoot(val);
+        defer self.restoreTempRoots(source_root);
         const rest_obj = try self.newObject();
+        const rest_root = try self.pushTempRoot(rest_obj);
         if (val.isObject()) {
             // Object rest copies only enumerable own properties, in
             // [[OwnPropertyKeys]] order. That includes dense array indexes and
             // symbol keys, not just named shape slots.
             const vo = val.asObj();
-            const keys = try self.objectOwnKeysList(vo);
+            const borrowed_keys = try self.objectOwnKeysList(vo);
+            const keys = try self.arena.alloc([]const u8, borrowed_keys.len);
+            // A proxy's list can contain transient string cells. Snapshot the
+            // encoded keys before descriptor/getter calls can retire that list.
+            for (borrowed_keys, 0..) |key, i| keys[i] = try self.arena.dupe(u8, key);
             outer: for (keys) |k| {
                 if (value.isPrivateKey(k)) continue;
                 for (excluded) |excluded_key| {
                     if (std.mem.eql(u8, excluded_key, k)) continue :outer;
                 }
-                const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ val, try self.keyToValue(k) });
+                const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ self.tempRoot(source_root, val), try self.keyToValue(k) });
                 if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
                 // Copy via [[Get]] so an accessor's getter runs (and a data
                 // property's value is read), landing as a plain data prop.
-                try self.setProp(rest_obj.asObj(), k, try self.getProperty(val, k));
+                const property_value = try self.getProperty(self.tempRoot(source_root, val), k);
+                try self.setProp(self.tempRoot(rest_root, rest_obj).asObj(), k, property_value);
             }
         } else if (val.isString()) {
             // ToObject(string): a String exotic object whose own *enumerable*
@@ -14600,7 +14651,7 @@ pub const Interpreter = struct {
                 try self.setProp(rest_obj.asObj(), k, try self.stringValueFromCodeUnit(cu.unit));
             }
         }
-        return rest_obj;
+        return self.tempRoot(rest_root, rest_obj);
     }
 
     pub fn objectRestVM(self: *Interpreter, val: Value, excluded_values: []const Value) EvalError!Value {
@@ -14628,33 +14679,24 @@ pub const Interpreter = struct {
         // reference, default expression, assignment, or pattern) throws while the
         // iterator is still open, close it (the original throw wins). A throw from
         // IteratorStep/IteratorValue itself marks the iterator done (no close).
-        errdefer if (!done) self.iteratorCloseKeepingThrow(iter_obj);
+        errdefer if (!done) self.iteratorCloseKeepingThrow(self.tempRoot(iter_root, iter_obj));
         for (elems) |elem| {
             // Assignment destructuring evaluates a member target's Reference
             // (its object, then the computed key EXPRESSION) BEFORE IteratorStep, so
             // a throw there closes the still-open iterator without ever calling
             // `next()`. ToPropertyKey of the computed key is deferred to PutValue.
-            var member_recv: Value = Value.undef();
-            var member_keyval: Value = Value.undef();
-            var member_kind: enum { none, member, super_member } = .none;
+            var property_reference: ?RootedPropertyReference = if (!declare and elem.target != null and
+                (elem.target.?.* == .member or elem.target.?.* == .super_member))
+                try self.capturePropertyReference(elem.target.?, false)
+            else
+                null;
+            defer if (property_reference) |reference| reference.deinit(self);
             const binding_reference = try self.capturePatternIdentifierReference(elem.target, declare);
             const binding_reference_root = try self.pushOptionalBindingReferenceRoot(binding_reference);
             defer if (binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
-            if (!declare) if (elem.target) |t| switch (t.*) {
-                .member => |m| {
-                    member_kind = .member;
-                    member_recv = try self.eval(m.object);
-                    if (m.computed) |ce| member_keyval = try self.eval(ce);
-                },
-                .super_member => |m| {
-                    member_kind = .super_member;
-                    if (m.computed) |ce| member_keyval = try self.eval(ce);
-                },
-                else => {},
-            };
             var v: Value = Value.undef();
             if (!done) {
-                const res = self.callValueWithThis(next_method, &.{}, iter_obj) catch |e| {
+                const res = self.callValueWithThis(self.tempRoot(next_root, next_method), &.{}, self.tempRoot(iter_root, iter_obj)) catch |e| {
                     done = true;
                     return e;
                 };
@@ -14662,11 +14704,13 @@ pub const Interpreter = struct {
                     done = true;
                     return self.throwError("TypeError", "iterator result is not an object");
                 }
+                const result_root = try self.pushTempRoot(res);
+                defer self.restoreTempRoots(result_root);
                 const is_done = (self.getProperty(res, "done") catch |e| {
                     done = true;
                     return e;
                 }).toBoolean();
-                if (is_done) done = true else v = self.getProperty(res, "value") catch |e| {
+                if (is_done) done = true else v = self.getProperty(self.tempRoot(result_root, res), "value") catch |e| {
                     done = true;
                     return e;
                 };
@@ -14678,50 +14722,36 @@ pub const Interpreter = struct {
                         if (t.* == .identifier) try self.maybeNameAnon(v, d, t.identifier);
                     }
                 }
-                switch (member_kind) {
-                    .member => {
-                        const m = t.member;
-                        const tkey = if (m.computed != null) try self.keyOf(member_keyval) else m.property;
-                        try self.setMember(member_recv, tkey, v);
-                    },
-                    .super_member => {
-                        const m = t.super_member;
-                        try self.setSuperMemberResolved(m.property, m.computed, member_keyval, v);
-                    },
-                    .none => try self.bindPatternWithReference(
-                        t,
-                        v,
-                        declare,
-                        self.tempOptionalBindingReferenceRoot(binding_reference_root, binding_reference),
-                    ),
-                }
+                if (property_reference) |*reference| {
+                    const value_root = try self.pushTempRoot(v);
+                    try reference.coerceKey(self);
+                    try reference.put(self, self.tempRoot(value_root, v), false);
+                } else try self.bindPatternWithReference(
+                    t,
+                    v,
+                    declare,
+                    self.tempOptionalBindingReferenceRoot(binding_reference_root, binding_reference),
+                );
             }
         }
         if (rest) |rest_target| {
             // Like an element, a member rest target's Reference is evaluated BEFORE
             // the iterator is drained (a throw here closes it, having stepped only
             // for the preceding elements).
-            var rest_recv: Value = Value.undef();
-            var rest_key: ?[]const u8 = null;
-            var rest_super: ?struct { property: []const u8, computed: ?*Node, keyval: Value } = null;
+            var property_reference: ?RootedPropertyReference = if (!declare and
+                (rest_target.* == .member or rest_target.* == .super_member))
+                try self.capturePropertyReference(rest_target, false)
+            else
+                null;
+            defer if (property_reference) |reference| reference.deinit(self);
             const binding_reference = try self.capturePatternIdentifierReference(rest_target, declare);
             const binding_reference_root = try self.pushOptionalBindingReferenceRoot(binding_reference);
             defer if (binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
-            if (!declare) switch (rest_target.*) {
-                .member => |m| {
-                    rest_recv = try self.eval(m.object);
-                    rest_key = try self.memberKey(m.property, m.computed);
-                },
-                .super_member => |m| {
-                    var keyval: Value = Value.undef();
-                    if (m.computed) |ce| keyval = try self.eval(ce);
-                    rest_super = .{ .property = m.property, .computed = m.computed, .keyval = keyval };
-                },
-                else => {},
-            };
             const rest_arr = try self.newArray();
+            const rest_root = try self.pushTempRoot(rest_arr);
+            defer self.restoreTempRoots(rest_root);
             while (!done) {
-                const res = self.callValueWithThis(next_method, &.{}, iter_obj) catch |e| {
+                const res = self.callValueWithThis(self.tempRoot(next_root, next_method), &.{}, self.tempRoot(iter_root, iter_obj)) catch |e| {
                     done = true;
                     return e;
                 };
@@ -14729,6 +14759,8 @@ pub const Interpreter = struct {
                     done = true;
                     return self.throwError("TypeError", "iterator result is not an object");
                 }
+                const result_root = try self.pushTempRoot(res);
+                defer self.restoreTempRoots(result_root);
                 if ((self.getProperty(res, "done") catch |e| {
                     done = true;
                     return e;
@@ -14736,19 +14768,18 @@ pub const Interpreter = struct {
                     done = true;
                     break;
                 }
-                try rest_arr.asObj().appendElement(self.arena, try self.getProperty(res, "value"));
+                const next_value = try self.getProperty(self.tempRoot(result_root, res), "value");
+                try self.tempRoot(rest_root, rest_arr).asObj().appendElement(self.arena, next_value);
             }
-            if (rest_key) |k|
-                try self.setMember(rest_recv, k, rest_arr)
-            else if (rest_super) |s|
-                try self.setSuperMemberResolved(s.property, s.computed, s.keyval, rest_arr)
-            else
-                try self.bindPatternWithReference(
-                    rest_target,
-                    rest_arr,
-                    declare,
-                    self.tempOptionalBindingReferenceRoot(binding_reference_root, binding_reference),
-                ); // iterator already exhausted
+            if (property_reference) |*reference| {
+                try reference.coerceKey(self);
+                try reference.put(self, self.tempRoot(rest_root, rest_arr), false);
+            } else try self.bindPatternWithReference(
+                rest_target,
+                self.tempRoot(rest_root, rest_arr),
+                declare,
+                self.tempOptionalBindingReferenceRoot(binding_reference_root, binding_reference),
+            ); // iterator already exhausted
             return;
         }
         // IteratorClose: if destructuring finished before the iterator was
@@ -14757,7 +14788,7 @@ pub const Interpreter = struct {
         // errdefer first (set `done`) to avoid a double close.
         const needs_close = !done;
         done = true;
-        if (needs_close) try self.iteratorClose(iter_obj);
+        if (needs_close) try self.iteratorClose(self.tempRoot(iter_root, iter_obj));
     }
 
     /// IteratorClose: invoke `iterator.return()` if present (generators are
@@ -15009,76 +15040,23 @@ pub const Interpreter = struct {
     }
 
     fn assignTo(self: *Interpreter, target: *Node, v: Value) EvalError!void {
+        const value_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(value_root);
         switch (target.*) {
             .identifier => |name| {
-                // A `with` object that provides this name (and isn't shadowed by a
-                // closer binding) takes the write (honoring `[Symbol.unscopables]`).
-                if (try self.assignWithObject(name)) |o| return self.setMember(Value.obj(o), name, v);
-                // Assigning to a binding still in its TDZ is a ReferenceError.
-                if (self.env.get(name)) |cur| {
-                    if (self.isTdz(cur)) return self.throwError("ReferenceError", name);
-                }
-                // An imported binding is immutable (a module indirect binding):
-                // assigning to it is a TypeError.
-                if (self.env.isAlias(name)) return self.throwError("TypeError", "Assignment to constant variable.");
-                // Assigning to a `const` binding is a TypeError.
-                if (self.env.isConst(name)) |c| {
-                    if (c) return self.throwError("TypeError", "Assignment to constant variable.");
-                }
-                // A named function expression's own name is immutable: throw in
-                // strict code, silently ignore in sloppy code.
-                if (self.env.isFnName(name)) {
-                    if (self.strict) return self.throwError("TypeError", "Assignment to constant variable.");
-                    return;
-                }
-                // Strict mode forbids creating a global by assigning to an
-                // undeclared binding. Sloppy mode creates/configures a global
-                // object property, not a non-deletable `var` binding.
-                if (self.env.get(name) == null) {
-                    if (self.strict and !try self.globalHasBinding(name))
-                        return self.throwError("ReferenceError", name);
-                    if (self.global_object) |g| return self.setMember(Value.obj(g), name, v);
-                }
-                if (self.globalBindingObject(name)) |g| {
-                    try self.setMember(Value.obj(g), name, v);
-                    if (g.getOwn(name)) |nv| try self.env.assign(name, nv);
-                    return;
-                }
-                try self.env.assign(name, v);
+                const reference = try self.captureBindingReference(name, null);
+                const reference_root = try self.pushTempBindingReferenceRoot(reference);
+                defer self.restoreTempBindingReferenceRoots(reference_root);
+                try self.storeCapturedBindingReference(
+                    self.tempBindingReferenceRoot(reference_root, reference),
+                    name,
+                    self.tempRoot(value_root, v),
+                );
             },
-            .member => |m| {
-                const recv = try self.eval(m.object);
-                if (m.computed) |ce| {
-                    // Same spec order as a member read: key expression first, then
-                    // the null/undefined base check, then ToPropertyKey.
-                    const kv = try self.eval(ce);
-                    if (recv.isNull() or recv.isUndefined())
-                        return self.throwError("TypeError", notAnObjectMessage(recv));
-                    var fast_key_buf: [24]u8 = undefined;
-                    const key = if (fastNumericIndex(kv)) |idx| blk: {
-                        if (try self.setFastArrayNumericIndex(recv, idx, v)) return;
-                        break :blk std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable;
-                    } else try self.keyOf(kv);
-                    return self.setMember(recv, key, v);
-                }
-                try self.setMember(recv, m.property, v);
-            },
-            // `super.x = v` / `super[e] = v`: PutValue on a super reference sets
-            // the property with `this` as the receiver, so the write lands on (or
-            // through an inherited setter of) the current instance.
-            .super_member => |m| {
-                const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                // GetThisBinding precedes evaluating the key (see the read path): a
-                // derived-ctor `super[expr] = …` before `super()` is a ReferenceError.
-                if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
-                // GetSuperBase before ToPropertyKey of the computed key (see the
-                // read path), so a key `toString` that mutates the home prototype
-                // can't redirect the write.
-                const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot set property of null (super)");
-                const key = try self.memberKey(m.property, m.computed);
-                if (!try self.setMemberResult(Value.obj(parent), key, v, self.this_value)) {
-                    if (self.strict) return self.throwError("TypeError", "Cannot set property");
-                }
+            .member, .super_member => {
+                const reference = try self.capturePropertyReference(target, true);
+                defer reference.deinit(self);
+                try reference.put(self, self.tempRoot(value_root, v), true);
             },
             .call => {
                 _ = try self.eval(target);
@@ -19392,22 +19370,33 @@ pub const Interpreter = struct {
     /// (order flipped for a string hint) via `callMethod` — so the universal
     /// `valueOf`/`toString` apply even to proto-less plain objects — and the
     /// first primitive result wins.
-    pub fn toPrimitive(self: *Interpreter, v: Value, hint: enum { default, number, string }) EvalError!Value {
-        if (!v.isObject() or v.asObj().is_symbol or v.asObj().is_bigint) return v;
-        const o = v.asObj();
+    pub fn toPrimitive(self: *Interpreter, input: Value, hint: enum { default, number, string }) EvalError!Value {
+        if (!input.isObject() or input.asObj().is_symbol or input.asObj().is_bigint) return input;
+        // ToPrimitive/OrdinaryToPrimitive may continue after an observable Get
+        // or a method returning an object. Caller roots cannot rewrite these
+        // callee-local receiver copies when that callback evacuates the nursery.
+        const input_root = try self.pushTempRoot(input);
+        defer self.restoreTempRoots(input_root);
+        var v = input;
+        var o = v.asObj();
         // GetMethod(v, @@toPrimitive): if present, it alone decides — it is called
         // with the hint string and must return a non-object (an object result is
         // the "Cannot convert" TypeError); a non-callable @@toPrimitive throws.
         if (self.wellKnownSymbolKey("toPrimitive")) |tpkey| {
             const exotic = try self.getProperty(v, tpkey);
+            v = self.tempRoot(input_root, input);
+            o = v.asObj();
             if (!exotic.isUndefined() and !exotic.isNull()) {
                 if (!exotic.isCallable()) return self.throwError("TypeError", "@@toPrimitive value is not callable");
+                const method_root = try self.pushTempRoot(exotic);
+                defer self.restoreTempRoots(method_root);
                 const hint_str: []const u8 = switch (hint) {
                     .string => "string",
                     .number => "number",
                     .default => "default",
                 };
-                const res = try self.callValueWithThis(exotic, &.{try Value.strAlloc(self.arena, hint_str)}, v);
+                const hint_value = try Value.strAlloc(self.arena, hint_str);
+                const res = try self.callValueWithThis(self.tempRoot(method_root, exotic), &.{hint_value}, self.tempRoot(input_root, input));
                 if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) return res;
                 return self.throwError("TypeError", "Cannot convert object to primitive value");
             }
@@ -19431,12 +19420,14 @@ pub const Interpreter = struct {
         var builtin_to_string = false;
         var builtin_to_string_method: ?Value = null;
         outer: for (names) |m| {
+            v = self.tempRoot(input_root, input);
+            o = v.asObj();
             if (moduleNsOf(o) != null) {
                 const method = try self.getProperty(v, m);
                 if (method.isUndefined() or method.isNull()) continue;
                 if (!method.isCallable()) break :outer;
                 user_tried += 1;
-                const res = try self.callValueWithThis(method, &.{}, v);
+                const res = try self.callValueWithThis(method, &.{}, self.tempRoot(input_root, input));
                 if (!res.isObject() or res.asObj().is_bigint or res.asObj().is_symbol) return res;
                 continue;
             }
@@ -19445,7 +19436,7 @@ pub const Interpreter = struct {
                 if (method.isUndefined() or method.isNull()) continue;
                 if (!method.isCallable()) break :outer;
                 user_tried += 1;
-                const res = try self.callValueWithThis(method, &.{}, v);
+                const res = try self.callValueWithThis(method, &.{}, self.tempRoot(input_root, input));
                 if (!res.isObject() or res.asObj().is_bigint or res.asObj().is_symbol) return res;
                 continue;
             }
@@ -19491,13 +19482,15 @@ pub const Interpreter = struct {
             if (method) |fnv| {
                 if (fnv.isCallable()) {
                     user_tried += 1;
-                    const res = try self.callValueWithThis(fnv, &.{}, v);
+                    const res = try self.callValueWithThis(fnv, &.{}, self.tempRoot(input_root, input));
                     // A BigInt or Symbol result is a primitive (it is represented
                     // as an object internally), so it ends ToPrimitive too.
                     if (!res.isObject() or res.asObj().is_bigint or res.asObj().is_symbol) return res;
                 }
             }
         }
+        v = self.tempRoot(input_root, input);
+        o = v.asObj();
         // Both `toString` and `valueOf` were user-defined and each returned an
         // object — there's no built-in to fall back to, so this is the spec's
         // "Cannot convert object to primitive value" TypeError.
@@ -53969,6 +53962,59 @@ test "numeric updates preserve exact ToNumeric and arbitrary-precision results" 
         if (mode == .required)
             try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
     }
+}
+
+test "reentrant assignment roots unwind on every allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const ctx = try @import("context.zig").Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+            defer ctx.destroy();
+            const saved_gc = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(saved_gc);
+            var env = Environment{ .arena = allocator, .fn_scope = true };
+            const root_shape = try Shape.createRoot(allocator);
+            // Replay interpreter-side allocations against a real heap; only
+            // the moving tests run collections. Heap allocation is independent
+            // of this deterministic root/parameter/assignment failure sweep.
+            var machine = ctx.interpreter();
+            machine.arena = allocator;
+            machine.env = &env;
+            machine.root_shape = root_shape;
+            machine.bytecode_execution_mode = .tree_walker;
+            machine.gc_safepoint_fn = null;
+            defer {
+                std.debug.assert(machine.gc_temp_roots.items.len == 0);
+                std.debug.assert(machine.gc_env_roots.items.len == 0);
+                std.debug.assert(machine.gc_binding_reference_roots.items.len == 0);
+                std.debug.assert(machine.gc_tree_call_roots == null);
+                std.debug.assert(machine.env == &env);
+                std.debug.assert(machine.depth == 0);
+            }
+            var parser = try Parser.init(allocator,
+                \\(function(a = {x: {get valueOf() {return function() {return 3;};}}}, b = (a.x += 4)) {
+                \\  let holder = {}, key = {toString() {return 'x';}};
+                \\  holder[key] = b;
+                \\  holder.y ||= holder.x;
+                \\  return holder.y;
+                \\})()
+            );
+            const result = try machine.eval(try parser.parseProgram());
+            try std.testing.expectEqual(@as(f64, 7), result.asNum());
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+
+    var exhausted = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var sentinel: u8 = 0;
+    var machine = Interpreter{ .arena = exhausted.allocator(), .env = undefined, .root_shape = undefined, .gc = &sentinel };
+    try std.testing.expectEqual(@as(f64, 7), (try machine.toPrimitive(Value.num(7), .number)).asNum());
+    try std.testing.expect((try machine.toPrimitive(Value.undef(), .string)).isUndefined());
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
 }
 
 test "numeric updates unwind temporary roots on every allocation failure" {

@@ -1645,8 +1645,8 @@ pub fn traceFunction(f: *interp.Function, v: anytype) void {
 }
 
 /// Rewrite the same complete Function edge set that `traceFunction` marks.
-/// The function record, import-meta slot, shared this cell, and with-stack
-/// allocation are arena-owned containers; only their managed payloads move.
+/// The Function cell moves; its import-meta slot, shared this cell, and
+/// with-stack storage are arena-owned containers with managed payloads.
 pub fn relocateFunction(f: *interp.Function, v: anytype) void {
     gc_relocation.rewriteRequiredSlot(v, Environment, &f.closure);
     gc_relocation.rewriteOptionalSlot(v, Object, &f.realm_global);
@@ -2535,6 +2535,24 @@ fn relocateActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
 pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markManaged(v, machine.env);
     traceEnv(machine.env, v);
+    var tree_call = machine.gc_tree_call_roots;
+    while (tree_call) |call| : (tree_call = call.previous) {
+        v.mark(call.function);
+        traceFunction(call.function, v);
+        for ([_]?*Environment{ call.environment, call.caller_environment }) |maybe_env| if (maybe_env) |env| {
+            markManaged(v, env);
+            traceEnv(env, v);
+        };
+        markValue(v, call.caller_return);
+        markValue(v, call.caller_this);
+        markValue(v, call.caller_new_target);
+        v.mark(call.caller_home);
+        v.mark(call.caller_super);
+        v.mark(call.caller_global);
+        v.mark(call.caller_import_meta);
+        v.mark(call.caller_function);
+        if (call.caller_this_cell) |cell| markValue(v, cell.value());
+    }
     // Active VM operand stacks: arena-backed, so their live `Value`s are
     // invisible to both the precise object graph and the conservative native
     // stack scan. The VM flushes `acc`/`ip` into each `Exec` at the safepoint
@@ -2658,12 +2676,15 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markValue(v, machine.this_value);
     markValue(v, machine.exception);
     markValue(v, machine.new_target);
+    if (machine.this_cell) |cell| markValue(v, cell.value());
     if (machine.active_native) |o| v.mark(o);
     if (machine.active_function) |o| v.mark(o);
     var call_frame = machine.active_call_frame;
     while (call_frame) |fr| : (call_frame = fr.caller) {
         v.mark(fr.func_obj);
         if (fr.arguments) |args| markValue(v, args);
+        if (fr.lazy_func) |function| v.mark(function);
+        if (fr.lazy_env) |env| markManaged(v, env);
     }
     // Inspector frames point at the real lexical environments and `this`
     // values used by suspended execution. Keep every caller scope alive during
@@ -2690,6 +2711,22 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
 pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     gc_relocation.rewriteRequiredSlot(v, Environment, &machine.env);
     relocateEnv(machine.env, v);
+    var tree_call = machine.gc_tree_call_roots;
+    while (tree_call) |call| : (tree_call = call.previous) {
+        gc_relocation.rewriteRequiredSlot(v, interp.Function, &call.function);
+        relocateFunction(call.function, v);
+        gc_relocation.rewriteOptionalSlot(v, Environment, &call.environment);
+        gc_relocation.rewriteRequiredSlot(v, Environment, &call.caller_environment);
+        gc_relocation.rewriteValueSlot(v, &call.caller_return);
+        gc_relocation.rewriteValueSlot(v, &call.caller_this);
+        gc_relocation.rewriteValueSlot(v, &call.caller_new_target);
+        gc_relocation.rewriteOptionalSlot(v, Object, &call.caller_home);
+        gc_relocation.rewriteOptionalSlot(v, Object, &call.caller_super);
+        gc_relocation.rewriteOptionalSlot(v, Object, &call.caller_global);
+        gc_relocation.rewriteOptionalSlot(v, Object, &call.caller_import_meta);
+        gc_relocation.rewriteOptionalSlot(v, Object, &call.caller_function);
+        if (call.caller_this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
+    }
     for (machine.gc_execs.items) |exec| {
         if (exec.chunk) |chunk| relocateChunk(chunk, v);
         for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
@@ -2775,12 +2812,15 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     gc_relocation.rewriteValueSlot(v, &machine.this_value);
     gc_relocation.rewriteValueSlot(v, &machine.exception);
     gc_relocation.rewriteValueSlot(v, &machine.new_target);
+    if (machine.this_cell) |cell| gc_relocation.rewriteAtomicValueSlot(v, &cell.value_bits);
     gc_relocation.rewriteOptionalSlot(v, Object, &machine.active_native);
     gc_relocation.rewriteOptionalSlot(v, Object, &machine.active_function);
     var call_frame = machine.active_call_frame;
     while (call_frame) |frame| : (call_frame = frame.caller) {
         gc_relocation.rewriteRequiredSlot(v, Object, &frame.func_obj);
         gc_relocation.rewriteOptionalValueSlot(v, &frame.arguments);
+        gc_relocation.rewriteOptionalSlot(v, interp.Function, &frame.lazy_func);
+        gc_relocation.rewriteOptionalSlot(v, Environment, &frame.lazy_env);
     }
     var debug_frame = machine.debug_call_frame;
     while (debug_frame) |frame| : (debug_frame = frame.caller) {
@@ -2794,6 +2834,85 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     gc_relocation.rewriteOptionalSlot(v, Object, &machine.super_ctor);
     for (machine.with_stack.items) |*object|
         gc_relocation.rewriteRequiredSlot(v, Object, object);
+}
+
+test "tree call roots trace and rewrite suspended caller state" {
+    var old_envs: [2]Environment = @splat(.{ .arena = std.testing.allocator, .gc_managed = true });
+    var new_envs = old_envs;
+    var old_objects: [10]Object = @splat(.{});
+    var new_objects = old_objects;
+    var body: ast.Node = .undefined_lit;
+    var old_function = interp.Function{ .params = &.{}, .body = &body, .is_expr_body = true, .closure = &old_envs[0] };
+    var new_function = old_function;
+    var caller_cell = interp.ThisCell.init(Value.obj(&old_objects[8]), true);
+    var active_cell = interp.ThisCell.init(Value.obj(&old_objects[9]), true);
+    var roots = interp.TreeCallRoots{
+        .previous = null,
+        .function = &old_function,
+        .environment = &old_envs[0],
+        .caller_environment = &old_envs[1],
+        .caller_return = Value.obj(&old_objects[0]),
+        .caller_this = Value.obj(&old_objects[1]),
+        .caller_home = &old_objects[2],
+        .caller_super = &old_objects[3],
+        .caller_new_target = Value.obj(&old_objects[4]),
+        .caller_global = &old_objects[5],
+        .caller_import_meta = &old_objects[6],
+        .caller_function = &old_objects[7],
+        .caller_this_cell = &caller_cell,
+    };
+    var machine = interp.Interpreter{ .arena = std.testing.allocator, .env = &old_envs[0], .root_shape = undefined, .gc_tree_call_roots = &roots, .this_cell = &active_cell };
+    const Visitor = struct {
+        old_envs: *[2]Environment,
+        new_envs: *[2]Environment,
+        old_objects: *[10]Object,
+        new_objects: *[10]Object,
+        old_function: *interp.Function,
+        new_function: *interp.Function,
+        seen: std.AutoHashMap(usize, void),
+
+        pub fn concurrent(_: *@This()) bool {
+            return false;
+        }
+
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected cell pointer"),
+            };
+            self.seen.put(@intFromPtr(cell), {}) catch @panic("trace test allocation failed");
+        }
+
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            for (self.old_envs, 0..) |*env, i| if (old == @as(*anyopaque, @ptrCast(env))) return &self.new_envs[i];
+            for (self.old_objects, 0..) |*object, i| if (old == @as(*anyopaque, @ptrCast(object))) return &self.new_objects[i];
+            if (old == @as(*anyopaque, @ptrCast(self.old_function))) return self.new_function;
+            return old;
+        }
+    };
+    var visitor = Visitor{ .old_envs = &old_envs, .new_envs = &new_envs, .old_objects = &old_objects, .new_objects = &new_objects, .old_function = &old_function, .new_function = &new_function, .seen = .init(std.testing.allocator) };
+    defer visitor.seen.deinit();
+    traceInterpreterRoots(&machine, &visitor);
+    try std.testing.expectEqual(@as(usize, 13), visitor.seen.count());
+    for (&old_objects) |*object| try std.testing.expect(visitor.seen.contains(@intFromPtr(object)));
+    for (&old_envs) |*env| try std.testing.expect(visitor.seen.contains(@intFromPtr(env)));
+    try std.testing.expect(visitor.seen.contains(@intFromPtr(&old_function)));
+    relocateInterpreterRoots(&machine, &visitor);
+    try std.testing.expectEqual(&new_function, roots.function);
+    try std.testing.expectEqual(&new_envs[0], roots.function.closure);
+    try std.testing.expectEqual(&new_envs[0], roots.environment.?);
+    try std.testing.expectEqual(&new_envs[1], roots.caller_environment);
+    try std.testing.expectEqual(&new_objects[0], roots.caller_return.asObj());
+    try std.testing.expectEqual(&new_objects[1], roots.caller_this.asObj());
+    try std.testing.expectEqual(&new_objects[2], roots.caller_home.?);
+    try std.testing.expectEqual(&new_objects[3], roots.caller_super.?);
+    try std.testing.expectEqual(&new_objects[4], roots.caller_new_target.asObj());
+    try std.testing.expectEqual(&new_objects[5], roots.caller_global.?);
+    try std.testing.expectEqual(&new_objects[6], roots.caller_import_meta.?);
+    try std.testing.expectEqual(&new_objects[7], roots.caller_function.?);
+    try std.testing.expectEqual(&new_objects[8], caller_cell.value().asObj());
+    try std.testing.expectEqual(&new_objects[9], active_cell.value().asObj());
 }
 
 test "realm root relocation rewrites active interpreter containers" {

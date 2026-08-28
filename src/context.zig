@@ -21563,6 +21563,179 @@ test "variadic String concat roots pending arguments across moving nursery" {
     try std.testing.expect(last_argument_before != last_argument_after);
 }
 
+test "reentrant property references preserve coercion and target order" {
+    const cases = [_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
+        .{ .name = "plain_order", .source = "var log='', box={set x(v){log+='set'+v;}}, key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 4;}var n=(box[key]=rhs());var result=n+':'+log;", .expected = "4:rhskeyset4" },
+        .{ .name = "compound_order", .source = "var log='',box={get x(){log+='get';return {valueOf(){log+='left';return 3;}};},set x(v){log+='set'+v;}},key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return {valueOf(){log+='right';return 4;}};}var result=(box[key]+=rhs())+':'+log;", .expected = "7:keygetrhsleftrightset7" },
+        .{ .name = "logical_short", .source = "var log='',box={get x(){log+='get';return 3;},set x(v){log+='set';}},key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 4;}var result=(box[key]||=rhs())+':'+log;", .expected = "3:keyget" },
+        .{ .name = "array_rest_order", .source = "var log='',box={},key={toString(){log+='key';return 'x';}},it={[Symbol.iterator](){return this;},next(){log+='next';return {done:true};}};[...box[key]]=it;var result=box.x.length+':'+log;", .expected = "0:nextkey" },
+        .{ .name = "object_target_order", .source = "var log='',box={},key={toString(){log+='key';return 'x';}},source={get v(){log+='get';return 4;}};function target(){log+='base';return box;}({v:target()[key]}=source);var result=box.x+':'+log;", .expected = "4:basegetkey" },
+        .{ .name = "object_rest_order", .source = "var log='',box={},key={toString(){log+='key';return 'x';}},source={get v(){log+='get';return 4;}};function target(){log+='base';return box;}({...target()[key]}=source);var result=box.x.v+':'+log;", .expected = "4:basegetkey" },
+        .{ .name = "super_base_order", .source = "var log='',key={toString(){log+='key';return 'x';}};class A{set x(v){log+='A';this.saved=v;}}class B{set x(v){log+='B';this.saved=v;}}class C extends A{run(){return super[(log+='expr',Object.setPrototypeOf(C.prototype,B.prototype),key)]=(log+='rhs',Object.setPrototypeOf(C.prototype,A.prototype),4);}}var c=new C();var n=c.run();var result=n+':'+c.saved+':'+log;", .expected = "4:4:exprrhskeyB" },
+        .{ .name = "super_pattern_base", .source = "var log='';class A{set x(v){log+='A';this.saved=v;}}class B{set x(v){log+='B';this.saved=v;}}class C extends A{run(){({v:super.x}={get v(){Object.setPrototypeOf(C.prototype,B.prototype);return 4;}});}}var c=new C();c.run();var result=c.saved+':'+log;", .expected = "4:A" },
+        .{ .name = "abrupt_key", .source = "var log='',box={set x(v){log+='set';}},key={toString(){log+='key';throw 7;}};function rhs(){log+='rhs';return 4;}var result;try{box[key]=rhs();result='miss';}catch(e){result=e+':'+log;}", .expected = "7:rhskey" },
+        .{ .name = "symbol_key", .source = "var key=Symbol('x'),box={[key]:3};var result=(box[key]+=4)+':'+box[key];", .expected = "7:7" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |case| {
+            // A block scope isolates class declarations while retaining
+            // both program execution tiers. Function-scoped class admission is
+            // independently tracked by #465, not a property-Reference oracle.
+            const source = try std.fmt.allocPrint(std.testing.allocator, "{{{s}result;}}", .{case.source});
+            defer std.testing.allocator.free(source);
+            errdefer std.debug.print("property reference {s} ({s})\n", .{ case.name, @tagName(mode) });
+            try std.testing.expectEqualStrings(case.expected, (try ctx.evaluate(source)).asStr());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "reentrant coercion roots isolate shared no-GIL calls" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .enable_jit = false,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\function rootShared(n) {
+            \\  var box = {x: {get valueOf() {return function() {return n;};}}};
+            \\  box.x += 2;
+            \\  var receiver = {set item(v) {this.saved = v;}};
+            \\  receiver.item ??= box.x;
+            \\  var out = {}, key = {toString() {return 'x';}};
+            \\  [out[key]] = [receiver.saved];
+            \\  return out.x;
+            \\}
+            \\function rootLane() {
+            \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+            \\  var sum = 0;
+            \\  for (var i = 0; i < 32; i++) sum += rootShared(i);
+            \\  return sum;
+            \\}
+            \\var lanes = [], sum = 0;
+            \\for (var i = 0; i < 4; i++) lanes.push(new Thread(rootLane));
+            \\for (var i = 0; i < 4; i++) sum += lanes[i].join();
+            \\sum
+        );
+        try std.testing.expectEqual(@as(f64, 2240), result.asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "reentrant coercion and assignment roots survive moving nursery" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const Host = struct {
+        fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const ctx: *Context = @ptrCast(@alignCast(machine.gc_realm_context.?));
+            ctx.gc.?.nursery_threshold_bytes = 1;
+            ctx.gc_moving_checkpoint_requested.store(true, .release);
+            return Value.undef();
+        }
+        fn finish(_: *value.CApiObjectOwner) void {}
+        fn convert(raw: *anyopaque, object: *value.Object, _: value.HostClassConvertHint) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const expected = machine.global_object.?.getOwn("rootSubject").?.asObj();
+            return Value.num(if (object == expected) 37 else -1);
+        }
+        const hooks: value.HostClassHooks = .{ .convert = convert };
+    };
+    const cases = [_]struct { name: []const u8, setup: []const u8, run: []const u8, expected: f64, tree_only: bool = false }{
+        .{ .name = "object_destructure", .setup = "globalThis.rootSubject={};globalThis.rootKey={toString(){rootMovingLoop(20000);return 'x';}};", .run = "rootArm();({v:rootSubject[rootKey]}={v:4});rootSubject.x", .expected = 4 },
+        .{ .name = "object_source_getter", .setup = "globalThis.rootSubject={};globalThis.rootSource={get v(){rootMovingLoop(20000);return 4;}};", .run = "rootArm();({v:rootSubject.x}=rootSource);rootSubject.x", .expected = 4 },
+        .{ .name = "object_rest_key", .setup = "globalThis.rootSubject={};globalThis.rootKey={toString(){rootMovingLoop(20000);return 'x';}};", .run = "rootArm();({...rootSubject[rootKey]}={v:4});rootSubject.x.v", .expected = 4 },
+        .{ .name = "object_rest_getter", .setup = "globalThis.rootSubject={};globalThis.rootSource={get v(){rootMovingLoop(20000);return 4;},w:7};", .run = "rootArm();({...rootSubject.x}=rootSource);rootSubject.x.v+rootSubject.x.w", .expected = 11 },
+        .{ .name = "array_rest_key", .setup = "globalThis.rootSubject={};globalThis.rootKey={toString(){rootMovingLoop(20000);return 'x';}};", .run = "rootArm();[...rootSubject[rootKey]]=[4];rootSubject.x[0]", .expected = 4 },
+        .{ .name = "array_later_element", .setup = "globalThis.rootSubject={};globalThis.rootKey={toString(){rootMovingLoop(20000);return 'x';}};", .run = "rootArm();[rootSubject[rootKey],rootSubject.y]=[4,7];rootSubject.x+rootSubject.y", .expected = 11 },
+        .{ .name = "pending_parameter", .setup = "globalThis.rootSubject={marker:37};function rootRead(a=(rootMovingLoop(20000),0),b){return b===rootSubject?37:-1;}", .run = "rootArm();rootRead(undefined,rootSubject)", .expected = 37 },
+        .{ .name = "pending_rest_parameter", .setup = "globalThis.rootSubject={marker:37};function rootRead(a=(rootMovingLoop(20000),0),...rest){return rest[0]===rootSubject?37:-1;}", .run = "rootArm();rootRead(undefined,rootSubject)", .expected = 37 },
+        .{ .name = "caller_this", .setup = "globalThis.rootSubject={run(){rootOther();return this===rootSubject?37:-1;}};function rootOther(){rootMovingLoop(20000);}", .run = "rootArm();rootSubject.run()", .expected = 37 },
+        .{ .name = "caller_scope", .setup = "globalThis.rootSubject={marker:37};function rootRead(){let local=rootSubject;rootOther();return local===rootSubject?37:-1;}function rootOther(){rootMovingLoop(20000);}", .run = "rootArm();rootRead()", .expected = 37 },
+        .{ .name = "legacy_arguments", .setup = "globalThis.rootSubject={marker:37};function rootRead(value){rootMovingLoop(20000);return rootRead.arguments[0]===rootSubject?37:-1;}", .run = "rootArm();rootRead(rootSubject)", .expected = 37, .tree_only = true },
+        .{ .name = "compound_getter", .setup = "globalThis.rootSubject={get x(){rootMovingLoop(20000);return 3;},set x(v){this.saved=v;}};", .run = "rootArm();rootSubject.x+=4;rootSubject.saved", .expected = 7 },
+        .{ .name = "exotic_method", .setup = "globalThis.rootSubject={[Symbol.toPrimitive](){rootMovingLoop(20000);return this===rootSubject?37:-1;}};", .run = "rootArm();+rootSubject", .expected = 37 },
+        .{ .name = "exotic_getter", .setup = "globalThis.rootSubject={get [Symbol.toPrimitive](){rootMovingLoop(20000);return function(){return this===rootSubject?37:-1;};}};", .run = "rootArm();+rootSubject", .expected = 37 },
+        .{ .name = "ordinary_getter", .setup = "globalThis.rootSubject={get valueOf(){rootMovingLoop(20000);return function(){return this===rootSubject?37:-1;};}};", .run = "rootArm();+rootSubject", .expected = 37 },
+        .{ .name = "object_result", .setup = "globalThis.rootSubject={valueOf(){rootMovingLoop(20000);return {};},toString(){return this===rootSubject?'37':'-1';}};", .run = "rootArm();+rootSubject", .expected = 37 },
+        .{ .name = "string_getter", .setup = "globalThis.rootSubject={get toString(){rootMovingLoop(20000);return function(){return this===rootSubject?'37':'-1';};}};", .run = "rootArm();Number(String(rootSubject))", .expected = 37 },
+        .{ .name = "proxy_getter", .setup = "globalThis.rootSubject=new Proxy({}, {get(t,k,r){if(k===Symbol.toPrimitive){rootMovingLoop(20000);return function(){return this===rootSubject?37:-1;};}}});", .run = "rootArm();+rootSubject", .expected = 37 },
+        .{ .name = "wrapper_fallthrough", .setup = "globalThis.rootSubject=new Number(37);Object.defineProperty(rootSubject,'valueOf',{get(){rootMovingLoop(20000);return undefined;}});", .run = "rootArm();+rootSubject", .expected = 37 },
+        .{ .name = "compound_receiver", .setup = "globalThis.rootSubject={x:3};function rootSide(){rootMovingLoop(20000);return 4;}", .run = "rootArm();rootSubject.x+=rootSide();rootSubject.x", .expected = 7 },
+        .{ .name = "logical_receiver", .setup = "globalThis.rootSubject={x:0};function rootSide(){rootMovingLoop(20000);return 4;}", .run = "rootArm();rootSubject.x||=rootSide();rootSubject.x", .expected = 4 },
+        .{ .name = "simple_receiver", .setup = "globalThis.rootSubject={x:0};function rootSide(){rootMovingLoop(20000);return 4;}", .run = "rootArm();rootSubject.x=rootSide();rootSubject.x", .expected = 4 },
+        .{ .name = "computed_compound", .setup = "globalThis.rootKey='x'.repeat(32);globalThis.rootSubject={[rootKey]:3};function rootSide(){rootMovingLoop(20000);return 4;}", .run = "rootArm();rootSubject[rootKey]+=rootSide();rootSubject[rootKey]", .expected = 7 },
+        .{ .name = "key_coercion", .setup = "globalThis.rootSubject={};globalThis.rootKey={toString(){rootMovingLoop(20000);return 'x';}};", .run = "rootArm();rootSubject[rootKey]=4;rootSubject.x", .expected = 4 },
+        .{ .name = "old_value", .setup = "globalThis.rootSubject={x:{valueOf(){return this===rootSubject.x?3:-1;}}};function rootSide(){rootMovingLoop(20000);return 4;}", .run = "rootArm();rootSubject.x+=rootSide();rootSubject.x", .expected = 7 },
+        .{ .name = "setter_result", .setup = "globalThis.rootSubject={marker:37};globalThis.rootBox={set x(v){rootMovingLoop(20000);}};", .run = "rootArm();(rootBox.x=rootSubject)===rootSubject?37:-1", .expected = 37 },
+        .{ .name = "logical_setter_result", .setup = "globalThis.rootSubject={marker:37};globalThis.rootBox={get x(){return null;},set x(v){rootMovingLoop(20000);}};", .run = "rootArm();(rootBox.x??=rootSubject)===rootSubject?37:-1", .expected = 37 },
+        .{ .name = "identifier_setter_result", .setup = "globalThis.rootSubject={marker:37};Object.defineProperty(globalThis,'rootTarget',{set(v){rootMovingLoop(20000);},configurable:true});", .run = "rootArm();(rootTarget=rootSubject)===rootSubject?37:-1", .expected = 37 },
+        .{ .name = "super_compound", .setup = "class RootBase{get x(){return 3;}set x(v){this.saved=v;}}class RootChild extends RootBase{run(){return super.x+=rootSide();}}globalThis.rootSubject=new RootChild();function rootSide(){rootMovingLoop(20000);return 4;}", .run = "rootArm();rootSubject.run();rootSubject.saved", .expected = 7 },
+        .{ .name = "super_key", .setup = "class RootBase{set x(v){this.saved=v;}}class RootChild extends RootBase{run(){return super[rootKey]=4;}}globalThis.rootSubject=new RootChild();globalThis.rootKey={toString(){rootMovingLoop(20000);return 'x';}};", .run = "rootArm();rootSubject.run();rootSubject.saved", .expected = 4 },
+        .{ .name = "destructure_target", .setup = "globalThis.rootSubject={};globalThis.rootKey={toString(){rootMovingLoop(20000);return 'x';}};", .run = "rootArm();[rootSubject[rootKey]]=[4];rootSubject.x", .expected = 4 },
+        .{ .name = "host_convert", .setup = "globalThis.rootSubject={marker:37,get [Symbol.toPrimitive](){rootMovingLoop(20000);return undefined;}};", .run = "rootArm();+rootSubject", .expected = 37 },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for (cases) |case| {
+            // #802 independently tracks missing VM legacy introspection even
+            // without GC. This case exercises the existing tree-walker view.
+            if (case.tree_only and mode != .tree_walker) continue;
+            const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
+            defer ctx.destroy();
+            {
+                const saved = gc_mod.setActiveContext(ctx);
+                defer gc_mod.restoreActiveContext(saved);
+                const object = try gc_mod.allocObj(ctx.arena());
+                object.* = .{ .native = Host.arm };
+                try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "rootArm", Value.obj(object));
+                try ctx.env.put("rootArm", Value.obj(object));
+            }
+            _ = try ctx.evaluate(
+                \\function rootMovingLoop(n){var total=0,i=0;while(i<n){total=total+i;i=i+1;}return total;}
+                \\for(var warm=0;warm<10;warm=warm+1)rootMovingLoop(4096);
+            );
+            const loop_object = ctx.global_object.getOwn("rootMovingLoop").?.asObj();
+            const loop: *interp.Function = @ptrCast(@alignCast(loop_object.jsFunction().?));
+            try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+            try std.testing.expect(loop.chunk.?.tier.loadCode().?.manages_steps);
+            ctx.collectGarbage();
+            ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+            // The warmed loop keeps its native artifact. The expression under
+            // test and newly created methods use the selected execution mode.
+            ctx.setBytecodeExecutionModeForTesting(mode);
+            errdefer std.debug.print("moving root case {s} ({s})\n", .{ case.name, @tagName(mode) });
+            _ = try ctx.evaluate(case.setup);
+            if (std.mem.eql(u8, case.name, "host_convert")) {
+                const subject = ctx.global_object.getOwn("rootSubject").?.asObj();
+                const owner = try ctx.createCApiObjectOwner(@ptrCast(ctx), Host.finish);
+                try subject.setCApiObjectClass(ctx.arena(), owner, &Host.hooks);
+            }
+            const before = ctx.global_object.getOwn("rootSubject").?.asObj();
+            const moving_before = ctx.gc.?.accounting().moving_minor_collections;
+            const result = try ctx.evaluate(case.run);
+            try std.testing.expectEqual(case.expected, result.asNum());
+            try std.testing.expectEqual(moving_before + 1, ctx.gc.?.accounting().moving_minor_collections);
+            try std.testing.expect(before != ctx.global_object.getOwn("rootSubject").?.asObj());
+            try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
 test "binary coercion roots pending and completed operands across moving nursery" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 

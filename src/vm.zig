@@ -4046,7 +4046,32 @@ fn nativeGetIndex(vm: *Interpreter, object: Value, key: Value) EvalError!Value {
     // can run observable ToPropertyKey hooks.
     if (object.isNull() or object.isUndefined())
         return vm.throwError("TypeError", interp.notAnObjectMessage(object));
-    return vm.getProperty(object, try propKey(vm, key));
+    const object_root = try vm.pushTempRoot(object);
+    defer vm.restoreTempRoots(object_root);
+    const property = try propKey(vm, key);
+    return vm.getProperty(vm.tempRoot(object_root, object), property);
+}
+
+fn getSuperIndex(vm: *Interpreter, parent: Value, key: Value, receiver: Value) EvalError!Value {
+    if (!parent.isObject()) return vm.throwError("TypeError", "Cannot read property of null (super)");
+    const parent_root = try vm.pushTempRoot(parent);
+    defer vm.restoreTempRoots(parent_root);
+    const receiver_root = try vm.pushTempRoot(receiver);
+    const property = try propKey(vm, key);
+    return vm.getPropertyWithReceiver(vm.tempRoot(parent_root, parent), property, vm.tempRoot(receiver_root, receiver));
+}
+
+fn setSuperProperty(vm: *Interpreter, parent: Value, name: []const u8, key: ?Value, stored: Value, strict: bool) EvalError!Value {
+    if (!parent.isObject()) return vm.throwError("TypeError", "Cannot set property of null (super)");
+    const parent_root = try vm.pushTempRoot(parent);
+    defer vm.restoreTempRoots(parent_root);
+    const value_root = try vm.pushTempRoot(stored);
+    const receiver = vm.this_value;
+    const receiver_root = try vm.pushTempRoot(receiver);
+    const property = if (key) |computed| try propKey(vm, computed) else name;
+    if (!try vm.setMemberResult(vm.tempRoot(parent_root, parent), property, vm.tempRoot(value_root, stored), vm.tempRoot(receiver_root, receiver)) and strict)
+        return vm.throwError("TypeError", "Cannot set property");
+    return vm.tempRoot(value_root, stored);
 }
 
 fn nativePropertyCacheSlot(cache: ?*const jit.NativePropertyCache, object: *const value.Object) ?usize {
@@ -4149,8 +4174,10 @@ fn nativeSetProperty(
             }
         }
     }
+    const value_root = try vm.pushTempRoot(value_word);
+    defer vm.restoreTempRoots(value_root);
     try vm.setMember(object_value, name, value_word);
-    return value_word;
+    return vm.tempRoot(value_root, value_word);
 }
 
 fn nativeSetIndex(vm: *Interpreter, object: Value, key: Value, value_word: Value) EvalError!Value {
@@ -4158,8 +4185,12 @@ fn nativeSetIndex(vm: *Interpreter, object: Value, key: Value, value_word: Value
     // before an object key can run observable ToPropertyKey hooks.
     if (object.isNull() or object.isUndefined())
         return vm.throwError("TypeError", interp.notAnObjectMessage(object));
-    try vm.setMember(object, try propKey(vm, key), value_word);
-    return value_word;
+    const object_root = try vm.pushTempRoot(object);
+    defer vm.restoreTempRoots(object_root);
+    const value_root = try vm.pushTempRoot(value_word);
+    const property = try propKey(vm, key);
+    try vm.setMember(vm.tempRoot(object_root, object), property, vm.tempRoot(value_root, value_word));
+    return vm.tempRoot(value_root, value_word);
 }
 
 fn nativeInOperator(vm: *Interpreter, key: Value, object: Value) EvalError!Value {
@@ -8534,7 +8565,7 @@ fn runChunk(
                             }
                         }
                     }
-                    try stack.append(stack_alloc, try vm.getProperty(obj, try propKey(vm, key)));
+                    try stack.append(stack_alloc, try nativeGetIndex(vm, obj, key));
                 }
             },
             .super_get => {
@@ -8551,7 +8582,7 @@ fn runChunk(
                 const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
                 const receiver = try initializedThis(vm);
                 const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
-                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), try propKey(vm, key), receiver));
+                try stack.append(stack_alloc, try getSuperIndex(vm, Value.obj(parent), key, receiver));
             },
             .check_super_this => {
                 _ = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
@@ -8576,7 +8607,7 @@ fn runChunk(
                 const parent = stack.pop().?;
                 if (!parent.isObject())
                     return vm.throwError("TypeError", "Cannot read property of null (super)");
-                try stack.append(stack_alloc, try vm.getPropertyWithReceiver(parent, try propKey(vm, key), vm.this_value));
+                try stack.append(stack_alloc, try getSuperIndex(vm, parent, key, vm.this_value));
             },
             .enter_block => {
                 const benv = try gc_mod.allocEnv(vm.arena);
@@ -8650,7 +8681,7 @@ fn runChunk(
                 try vm.addDisposable(stack.pop().?, inst.a == 1);
             },
             .set_prop => {
-                const v = stack.pop().?;
+                var v = stack.pop().?;
                 const obj = stack.pop().?;
                 const name = chunk.names.items[inst.a];
                 fast: {
@@ -8679,7 +8710,7 @@ fn runChunk(
                             }
                         }
                     }
-                    try vm.setMember(obj, name, v);
+                    v = try nativeSetProperty(vm, null, obj, name, v);
                 }
                 try stack.append(stack_alloc, v); // assignment yields the value
             },
@@ -8696,17 +8727,14 @@ fn runChunk(
                     try stack.append(stack_alloc, v);
                     continue;
                 }
-                try vm.setMember(obj, try propKey(vm, key), v);
-                try stack.append(stack_alloc, v);
+                try stack.append(stack_alloc, try nativeSetIndex(vm, obj, key, v));
             },
             .super_set_from => {
                 const v = stack.pop().?;
                 const parent = stack.pop().?;
                 if (!parent.isObject())
                     return vm.throwError("TypeError", "Cannot set property of null (super)");
-                if (!try vm.setMemberResult(parent, chunk.names.items[inst.a], v, vm.this_value) and inst.b != 0)
-                    return vm.throwError("TypeError", "Cannot set property");
-                try stack.append(stack_alloc, v);
+                try stack.append(stack_alloc, try setSuperProperty(vm, parent, chunk.names.items[inst.a], null, v, inst.b != 0));
             },
             .super_set_index_from => {
                 const v = stack.pop().?;
@@ -8714,9 +8742,7 @@ fn runChunk(
                 const parent = stack.pop().?;
                 if (!parent.isObject())
                     return vm.throwError("TypeError", "Cannot set property of null (super)");
-                if (!try vm.setMemberResult(parent, try propKey(vm, key), v, vm.this_value) and inst.a != 0)
-                    return vm.throwError("TypeError", "Cannot set property");
-                try stack.append(stack_alloc, v);
+                try stack.append(stack_alloc, try setSuperProperty(vm, parent, "", key, v, inst.a != 0));
             },
             .init_class_field => {
                 const field_value = stack.pop().?;
