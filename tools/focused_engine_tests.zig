@@ -301,7 +301,7 @@ const runtime_cases = [_]Case{
         .source =
         \\function rejectsDepth(text) {
         \\  try { JSON.parse(text); return false; }
-        \\  catch (error) { return error instanceof RangeError && error.message === "Maximum call stack size exceeded"; }
+        \\  catch (error) { return error instanceof RangeError && error.message === "Maximum call stack size exceeded."; }
         \\}
         \\let shallow = "[".repeat(96) + "7" + "]".repeat(96);
         \\let value = JSON.parse(shallow);
@@ -315,7 +315,7 @@ const runtime_cases = [_]Case{
         \\let mixed = rejectsDepth("[{\"v\":".repeat(20000) + "0" + "}]".repeat(20000));
         \\let raw = false;
         \\try { JSON.rawJSON("[".repeat(50000) + "0" + "]".repeat(50000)); }
-        \\catch (error) { raw = error instanceof RangeError && error.message === "Maximum call stack size exceeded"; }
+        \\catch (error) { raw = error instanceof RangeError && error.message === "Maximum call stack size exceeded."; }
         \\value === 7 && revived === 7 && syntax && arrays && objects && mixed && raw ? 1 : 0
         ,
         .expected = 1,
