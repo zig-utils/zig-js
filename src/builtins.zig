@@ -1065,9 +1065,19 @@ pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Valu
 pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const saved_env = self.env;
+    const env_root = try self.pushTempEnvRoot(saved_env);
+    defer self.restoreTempEnvRoots(env_root);
+    _ = enterActiveNativeRealm(self);
+    defer self.env = self.tempEnvRoot(env_root, saved_env);
+    const args_root = try self.pushTempRootSlice(args);
+    defer self.restoreTempRoots(args_root);
+    // Array [[Call]] uses the active constructor as NewTarget. Resolve its
+    // prototype before ArrayCreate, preserving getters and moving callbacks.
+    const target = if (self.new_target.isObject()) self.new_target else if (self.active_native) |callee| Value.obj(callee) else Value.undef();
+    const proto = if (target.isObject()) try self.ctorRealmIntrinsicProto(target.asObj(), "Array") else null;
     const arr = try self.newArray();
-    if (self.new_target.isObject())
-        arr.asObj().proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Array");
+    if (proto) |p| arr.asObj().proto = p;
     if (args.len == 1 and args[0].isNumber()) {
         const n = args[0].asNum();
         if (n < 0 or @trunc(n) != n or n > 4294967295) return self.throwError("RangeError", "Array length must be a positive integer of safe magnitude.");
@@ -1076,7 +1086,7 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
         // them). Only the logical length is set.
         try arr.asObj().extendArrayLengthFloor(self.arena, @intFromFloat(n));
     } else {
-        for (args) |v| try arr.asObj().appendElement(self.arena, v);
+        for (args, 0..) |v, i| try arr.asObj().appendElement(self.arena, self.tempRoot(args_root + i, v));
     }
     return arr;
 }

@@ -839,6 +839,14 @@ pub const ErrorIntrinsics = struct {
     }
 };
 
+/// One allocation per realm, not per activation. Identity slots are published
+/// under the root Environment's binding lock and visited by its GC hooks.
+pub const RealmIntrinsics = struct {
+    errors: ErrorIntrinsics = .{},
+    array_constructor: ?*value.Object = null,
+    array_prototype: ?*value.Object = null,
+};
+
 pub const Environment = struct {
     vars: std.StringHashMapUnmanaged(Value) = .{},
     /// Root-realm identity, initialized before publication and immutable to
@@ -910,7 +918,7 @@ pub const Environment = struct {
     /// Allocated only for a realm root, before publication. All access uses
     /// binding_lock/the existing marker handshake; stopped GC rewrites slots.
     /// Ordinary activation environments pay one pointer, not a per-call table.
-    error_intrinsics: ?*ErrorIntrinsics = null,
+    realm_intrinsics: ?*RealmIntrinsics = null,
     /// Set when a closure captures this environment (or a descendant, via
     /// `markCaptured` walking the parent chain at closure creation). A `for
     /// (let …)` loop uses it to decide whether each iteration needs a fresh
@@ -1610,17 +1618,25 @@ pub const Environment = struct {
         const realm = rootEnv(self);
         const locked = realm.lockBindingsForRead();
         defer realm.unlockBindingsForRead(locked);
-        const intrinsics = realm.error_intrinsics orelse return null;
-        return if (prototype) intrinsics.prototypes[index] else intrinsics.constructors[index];
+        const intrinsics = realm.realm_intrinsics orelse return null;
+        return if (prototype) intrinsics.errors.prototypes[index] else intrinsics.errors.constructors[index];
     }
 
-    fn initErrorIntrinsics(self: *Environment) !void {
-        const intrinsics = try self.bindingAllocator().create(ErrorIntrinsics);
+    fn arrayIntrinsic(self: *Environment, prototype: bool) ?*value.Object {
+        const realm = rootEnv(self);
+        const locked = realm.lockBindingsForRead();
+        defer realm.unlockBindingsForRead(locked);
+        const intrinsics = realm.realm_intrinsics orelse return null;
+        return if (prototype) intrinsics.array_prototype else intrinsics.array_constructor;
+    }
+
+    fn initRealmIntrinsics(self: *Environment) !void {
+        const intrinsics = try self.bindingAllocator().create(RealmIntrinsics);
         intrinsics.* = .{};
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
-        std.debug.assert(self.error_intrinsics == null);
-        self.error_intrinsics = intrinsics;
+        std.debug.assert(self.realm_intrinsics == null);
+        self.realm_intrinsics = intrinsics;
     }
 
     pub fn installErrorIntrinsic(self: *Environment, index: usize, constructor: *value.Object, prototype: ?*value.Object) void {
@@ -1628,14 +1644,23 @@ pub const Environment = struct {
         if (prototype) |p| gc_mod.barrierCellFrom(self, @ptrCast(p));
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
-        self.error_intrinsics.?.constructors[index] = constructor;
-        self.error_intrinsics.?.prototypes[index] = prototype;
+        self.realm_intrinsics.?.errors.constructors[index] = constructor;
+        self.realm_intrinsics.?.errors.prototypes[index] = prototype;
+    }
+
+    fn installArrayIntrinsic(self: *Environment, constructor: *value.Object, prototype: *value.Object) void {
+        gc_mod.barrierCellFrom(self, @ptrCast(constructor));
+        gc_mod.barrierCellFrom(self, @ptrCast(prototype));
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
+        self.realm_intrinsics.?.array_constructor = constructor;
+        self.realm_intrinsics.?.array_prototype = prototype;
     }
 
     fn deinitOwnedBindingStorage(self: *Environment) void {
         const a = self.bindings_allocator orelse return;
-        if (self.error_intrinsics) |intrinsics| a.destroy(intrinsics);
-        self.error_intrinsics = null;
+        if (self.realm_intrinsics) |intrinsics| a.destroy(intrinsics);
+        self.realm_intrinsics = null;
 
         var vit = self.vars.keyIterator();
         while (vit.next()) |key| self.freeBindingName(key.*);
@@ -1689,7 +1714,7 @@ pub const Environment = struct {
         // publishing it in the interpreter cache.
         self.parent = null;
         self.object_proto_intrinsic = null;
-        std.debug.assert(self.error_intrinsics == null);
+        std.debug.assert(self.realm_intrinsics == null);
         self.captured.store(false, .monotonic);
         self.fn_scope = false;
         self.private_activation.store(false, .monotonic);
@@ -1719,7 +1744,7 @@ pub const Environment = struct {
         self.dispose_pending = null;
         self.parent = null;
         self.object_proto_intrinsic = null;
-        std.debug.assert(self.error_intrinsics == null);
+        std.debug.assert(self.realm_intrinsics == null);
         self.captured.store(false, .monotonic);
         self.fn_scope = false;
         self.private_activation.store(false, .monotonic);
@@ -8775,13 +8800,6 @@ pub const Interpreter = struct {
         const msg_i: usize = if (aggregate) 1 else if (suppressed) 2 else 0;
         const opt_i: usize = if (aggregate) 2 else if (suppressed) 3 else 1;
 
-        const ctor_realm_array_proto = if (aggregate and new_target.isObject())
-            try self.functionRealmIntrinsicProto(new_target.asObj(), "Array")
-        else
-            null;
-        const array_proto_value = if (ctor_realm_array_proto) |p| Value.obj(p) else Value.undef();
-        const array_proto_root = try self.pushTempRoot(array_proto_value);
-        defer self.restoreTempRoots(array_proto_root);
         const target = self.tempRoot(target_root, new_target);
         const proto = if (target.isObject()) try self.ctorRealmIntrinsicProto(target.asObj(), name) else null;
         // OrdinaryCreateFromConstructor precedes message coercion. Keep the
@@ -8834,8 +8852,9 @@ pub const Interpreter = struct {
             }
         }
         if (aggregate) {
-            const array_proto = self.tempRoot(array_proto_root, array_proto_value);
-            const errs = try self.iterableToArray(self.errorArgument(args, args_root, 0), if (array_proto.isObject()) array_proto.asObj() else null);
+            // AggregateError: CreateArrayFromList uses the active constructor
+            // realm, independently of the outer error's NewTarget prototype.
+            const errs = try self.iterableToArray(self.errorArgument(args, args_root, 0));
             const rooted_error = self.tempRoot(err_root, err).asObj();
             try self.setProp(rooted_error, "errors", errs);
             try rooted_error.setAttr(self.arena, "errors", .{ .enumerable = false, .configurable = true, .writable = true });
@@ -8843,8 +8862,8 @@ pub const Interpreter = struct {
         return self.tempRoot(err_root, err);
     }
 
-    fn iterableToArray(self: *Interpreter, v: Value, proto: ?*value.Object) EvalError!Value {
-        const arr = try self.newArrayWithProto(proto);
+    fn iterableToArray(self: *Interpreter, v: Value) EvalError!Value {
+        const arr = try self.newArray();
         const arr_root = try self.pushTempRoot(arr);
         defer self.restoreTempRoots(arr_root);
         const record = try self.getIteratorRecord(v);
@@ -10022,6 +10041,7 @@ pub const Interpreter = struct {
 
     fn envIntrinsicProto(env: *Environment, intrinsic: []const u8) ?*value.Object {
         if (ErrorIntrinsics.index(intrinsic) != null) return env.errorIntrinsic(intrinsic, true);
+        if (std.mem.eql(u8, intrinsic, "Array")) return env.arrayIntrinsic(true);
         if (env.get("globalThis")) |gt| {
             if (gt.isObject()) {
                 if (gt.asObj().getOwn(intrinsic)) |ctor_v| {
@@ -10045,6 +10065,7 @@ pub const Interpreter = struct {
 
     fn envIntrinsicObject(env: *Environment, intrinsic: []const u8) ?*value.Object {
         if (ErrorIntrinsics.index(intrinsic) != null) return env.errorIntrinsic(intrinsic, false);
+        if (std.mem.eql(u8, intrinsic, "Array")) return env.arrayIntrinsic(false);
         if (env.get(intrinsic)) |v| {
             if (v.isObject()) return v.asObj();
         }
@@ -10130,11 +10151,15 @@ pub const Interpreter = struct {
     /// `%AggregateError.prototype%`: own `newTarget.prototype` wins; otherwise
     /// use the NewTarget realm's intrinsic prototype when that realm is known.
     pub fn ctorRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!*value.Object {
-        const p = try self.getProperty(Value.obj(ctor), "prototype");
+        const target = Value.obj(ctor);
+        const target_root = try self.pushTempRoot(target);
+        defer self.restoreTempRoots(target_root);
+        const p = try self.getProperty(target, "prototype");
         if (p.isObject() and !p.asObj().is_symbol) return self.preparePrototypeUse(p.asObj());
-        if (try self.functionRealmIntrinsicProto(ctor, intrinsic)) |proto| return proto;
+        const live_target = self.tempRoot(target_root, target).asObj();
+        if (try self.functionRealmIntrinsicProto(live_target, intrinsic)) |proto| return proto;
         if (envIntrinsicProto(self.env, intrinsic)) |proto| return proto;
-        return try self.protoObject(ctor);
+        return try self.protoObject(live_target);
     }
 
     /// GetPrototypeFromConstructor(newTarget, %ctor_name.prototype%): read
@@ -10493,7 +10518,7 @@ pub const Interpreter = struct {
         return mark;
     }
 
-    fn pushTempRootSlice(self: *Interpreter, values: []const Value) EvalError!usize {
+    pub fn pushTempRootSlice(self: *Interpreter, values: []const Value) EvalError!usize {
         if (self.gc == null) return 0;
         const mark = self.gc_temp_roots.items.len;
         try self.gc_temp_roots.appendSlice(self.arena, values);
@@ -11077,13 +11102,7 @@ pub const Interpreter = struct {
 
     fn newArrayInRealm(self: *Interpreter, env: *Environment) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
-        const proto: ?*value.Object = blk: {
-            const av = env.get("Array") orelse break :blk null;
-            if (!av.isObject()) break :blk null;
-            const p = av.asObj().getOwn("prototype") orelse break :blk null;
-            break :blk if (p.isObject()) p.asObj() else null;
-        };
-        obj.* = .{ .is_array = true, .proto = proto };
+        obj.* = .{ .is_array = true, .proto = env.arrayIntrinsic(true) };
         return Value.obj(obj);
     }
 
@@ -11137,14 +11156,11 @@ pub const Interpreter = struct {
         return arr;
     }
 
-    /// `Array.prototype`, resolved from the live `Array` binding, so array
-    /// instances inherit from it (inherited index access, `in`, iteration over
-    /// inherited indices). Null only before globals are installed.
+    /// ArrayCreate uses the realm intrinsic, never the public Array binding.
+    /// Its properties remain live; only the prototype identity is retained.
+    /// Null only before the Array intrinsic is installed during bootstrap.
     fn arrayProto(self: *Interpreter) ?*value.Object {
-        const av = self.env.get("Array") orelse return null;
-        if (!av.isObject()) return null;
-        const p = av.asObj().getOwn("prototype") orelse return null;
-        return if (p.isObject()) p.asObj() else null;
+        return self.env.arrayIntrinsic(true);
     }
 
     /// `%Object.prototype%`, the [[Prototype]] of an ordinary plain object.
@@ -16248,25 +16264,28 @@ pub const Interpreter = struct {
     /// non-constructor species throws a TypeError, and any other constructor is
     /// `new`-ed with the length (its abrupt completion propagates).
     pub fn arraySpeciesCreate(self: *Interpreter, original: Value, len: usize) EvalError!Value {
-        const default_realm: *Environment = if (self.active_native) |nat| blk: {
+        var default_realm: *Environment = if (self.active_native) |nat| blk: {
             if (nat.private_data) |pd| break :blk @ptrCast(@alignCast(pd));
             break :blk self.env;
         } else self.env;
+        const realm_root = try self.pushTempEnvRoot(default_realm);
+        defer self.restoreTempEnvRoots(realm_root);
         if (!original.isObject() or !try objectToStringIsArray(self, original.asObj())) return self.newArrayWithLengthInRealm(default_realm, len);
         const c = try self.getProperty(original, "constructor");
+        default_realm = self.tempEnvRoot(realm_root, default_realm);
         if (c.isObject() and (c.asObj().is_symbol or c.asObj().is_bigint))
             return self.throwError("TypeError", "Array species is not a constructor");
         // GetFunctionRealm cross-realm check: a `constructor` that is another
         // realm's %Array% is treated as the default — ArrayCreate, WITHOUT
         // consulting its @@species (so a cross-realm species getter is untouched).
         if (c.isObject() and c.asObj().native == builtins.arrayConstructor) {
-            const cur = default_realm.get("Array");
-            if (cur == null or !cur.?.isObject() or c.asObj() != cur.?.asObj()) return self.newArrayWithLengthInRealm(default_realm, len);
+            if (c.asObj() != default_realm.arrayIntrinsic(false)) return self.newArrayWithLengthInRealm(default_realm, len);
         }
         var ctor: Value = c;
         if (c.isObject()) {
             const skey = self.wellKnownSymbolKey("species") orelse return self.newArrayWithLengthInRealm(default_realm, len);
             const s = try self.getProperty(c, skey);
+            default_realm = self.tempEnvRoot(realm_root, default_realm);
             if (s.isNull() or s.isUndefined()) return self.newArrayWithLengthInRealm(default_realm, len);
             ctor = s;
         } else if (c.isUndefined()) {
@@ -16274,8 +16293,8 @@ pub const Interpreter = struct {
         }
         // The intrinsic Array constructor → a plain array (fast path, matching
         // `new Array(len)` then filling in 0..len).
-        if (default_realm.get("Array")) |arr| {
-            if (ctor.isObject() and arr.isObject() and ctor.asObj() == arr.asObj()) return self.newArrayWithLengthInRealm(default_realm, len);
+        if (default_realm.arrayIntrinsic(false)) |arr| {
+            if (ctor.isObject() and ctor.asObj() == arr) return self.newArrayWithLengthInRealm(default_realm, len);
         }
         if (!isConstructorValue(ctor)) return self.throwError("TypeError", "Array species is not a constructor");
         return self.construct(ctor, &.{Value.num(@floatFromInt(len))});
@@ -16829,14 +16848,9 @@ pub const Interpreter = struct {
         return (try self.getProperty(r, "done")).toBoolean();
     }
 
-    /// `Array.prototype` (the global), for consulting/observing its
-    /// `[Symbol.iterator]` slot. Arrays don't carry a `proto` pointer, so this
-    /// resolves it through the `Array` global instead.
+    /// Retained Array prototype identity; observable iterator slots stay live.
     fn arrayProtoObj(self: *Interpreter) ?*value.Object {
-        const av = self.env.get("Array") orelse return null;
-        if (!av.isObject()) return null;
-        const p = av.asObj().getOwn("prototype") orelse return null;
-        return if (p.isObject()) p.asObj() else null;
+        return self.arrayProto();
     }
 
     /// The current `Array.prototype[Symbol.iterator]` slot: `.intact` (still the
@@ -17409,7 +17423,36 @@ pub const Interpreter = struct {
         return !o.getAttr(k).configurable;
     }
 
+    /// Array.prototype.map (23.1.3.21): every observable step can relocate the
+    /// receiver, callback, thisArg, and result. Keep their invocation-local
+    /// roots, not raw cells captured before ArraySpeciesCreate or a callback.
+    fn arrayMap(self: *Interpreter, o: *value.Object, args: []const Value) EvalError!Value {
+        const receiver = Value.obj(o);
+        const callback = arg0(args);
+        const this_arg = arg(args, 1);
+        const roots = try self.pushTempRootSlice(&.{ receiver, callback, this_arg });
+        defer self.restoreTempRoots(roots);
+        const len = if (o.is_array and !o.is_arguments) o.arrayLength() else toArrayLikeLen(try self.toNumberV(try self.getProperty(receiver, "length")));
+        if (!self.tempRoot(roots + 1, callback).isCallable())
+            return self.throwError("TypeError", "Array.prototype.map callback must be a function");
+        const result = try self.arraySpeciesCreate(self.tempRoot(roots, receiver), len);
+        const result_root = try self.pushTempRoot(result);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            if (!try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i)) continue;
+            const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
+            const mapped = try self.callValueWithThis(
+                self.tempRoot(roots + 1, callback),
+                &.{ element, Value.num(@floatFromInt(i)), self.tempRoot(roots, receiver) },
+                self.tempRoot(roots + 2, this_arg),
+            );
+            try self.arrayResultPush(self.tempRoot(result_root, result), i, mapped);
+        }
+        return self.tempRoot(result_root, result);
+    }
+
     fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
+        if (eq(name, "map")) return try self.arrayMap(o, args);
         // sort/toSorted validate comparefn before LengthOfArrayLike(this), so a
         // borrowed call with a poisoned `length` still reports the comparator
         // TypeError first.
@@ -17449,9 +17492,8 @@ pub const Interpreter = struct {
         // The callback-driven methods require a callable first argument, checked
         // up front (so `[].map(undefined)` throws even on an empty array).
         const cb_methods = [_][]const u8{
-            "forEach",     "map",       "filter",   "some",          "every",
-            "find",        "findIndex", "findLast", "findLastIndex", "reduce",
-            "reduceRight", "flatMap",
+            "forEach",  "filter",        "some",   "every",       "find",    "findIndex",
+            "findLast", "findLastIndex", "reduce", "reduceRight", "flatMap",
         };
         for (cb_methods) |m| {
             if (eq(name, m) and !arg0(args).isCallable())
@@ -17796,27 +17838,6 @@ pub const Interpreter = struct {
             if (args.len > 2) for (args[2..]) |v| try ra.appendElement(self.arena, v);
             i = start + del;
             while (i < len) : (i += 1) try ra.appendElement(self.arena, try self.arrIndexGet(o, i));
-            return result;
-        }
-        if (eq(name, "map")) {
-            const cb = arg0(args);
-            const result = try self.arraySpeciesCreate(Value.obj(o), ilen);
-            // Only a freshly-created plain dense Array preserves holes by filling
-            // them (a custom-species result leaves an absent index).
-            const dense = result.asObj().is_array and result.asObj().accessorsMap() == null and result.asObj().attrsMap() == null and result.asObj().proxyHandler() == null;
-            var i: usize = 0;
-            while (i < ilen) : (i += 1) {
-                if (!(try self.arrIndexPresent(o, i))) {
-                    if (dense) {
-                        try result.asObj().appendElement(self.arena, Value.undef());
-                        try result.asObj().markHole(self.arena, i); // map preserves holes
-                    }
-                    continue;
-                }
-                const el = try self.arrIndexGet(o, i);
-                const r = try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this);
-                try self.arrayResultPush(result, i, r); // CreateDataPropertyOrThrow
-            }
             return result;
         }
         if (eq(name, "filter")) {
@@ -21239,10 +21260,9 @@ inline fn tracePrivateValue(v: anytype, val: Value) void {
 /// hook keeps type-erased side records from hiding GC-managed Values/Objects.
 pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
     const pd = o.private_data orelse return;
-    // ShadowRealm instances and Error constructors own their realm through
-    // this otherwise-opaque slot, even though neither uses Object.native.
-    // A retained foreign constructor must keep its realm alive and relocated.
-    if (o.behavior.is_shadow_realm or o.errorCtor() != null) {
+    // Retained constructors and Array methods keep their defining realm alive
+    // through this otherwise-opaque slot, including after public replacement.
+    if (o.behavior.is_shadow_realm or o.errorCtor() != null or isArrayRealmNative(o.native)) {
         const realm: *Environment = @ptrCast(@alignCast(pd));
         if (realm.gc_managed) v.mark(realm);
         return;
@@ -21298,7 +21318,7 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
 
 pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
     const pd = o.private_data orelse return;
-    if (o.behavior.is_shadow_realm or o.errorCtor() != null) {
+    if (o.behavior.is_shadow_realm or o.errorCtor() != null or isArrayRealmNative(o.native)) {
         const realm: *Environment = @ptrCast(@alignCast(pd));
         if (realm.gc_managed) gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
         return;
@@ -35804,7 +35824,7 @@ pub fn installGlobals(env: *Environment, root_shape: *Shape) EvalError!void {
 /// realms) and keys all its `@@`-methods under them.
 pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol: ?*value.Object) EvalError!void {
     const a = env.arena;
-    try env.initErrorIntrinsics();
+    try env.initRealmIntrinsics();
     for (ErrorIntrinsics.core_names, 0..) |name, index| {
         const o = try gc_mod.allocObj(a);
         o.* = .{ .private_data = @ptrCast(env) };
@@ -36218,18 +36238,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     array_proto.* = .{ .proto = object_proto, .is_array = true };
     try array_proto.setOwn(a, root_shape, "length", Value.num(0));
     try array_proto.setAttr(a, "length", .{ .writable = true, .enumerable = false, .configurable = false });
-    try setArrayProtoMethods(a, root_shape, array_proto, env, .{
-        .{ "join", 1 },        .{ "push", 1 },           .{ "pop", 0 },           .{ "shift", 0 },
-        .{ "unshift", 1 },     .{ "slice", 2 },          .{ "splice", 2 },        .{ "concat", 1 },
-        .{ "reverse", 0 },     .{ "indexOf", 1 },        .{ "lastIndexOf", 1 },   .{ "includes", 1 },
-        .{ "map", 1 },         .{ "filter", 1 },         .{ "forEach", 1 },       .{ "reduce", 1 },
-        .{ "reduceRight", 1 }, .{ "some", 1 },           .{ "every", 1 },         .{ "find", 1 },
-        .{ "findIndex", 1 },   .{ "findLast", 1 },       .{ "findLastIndex", 1 }, .{ "fill", 1 },
-        .{ "flat", 0 },        .{ "flatMap", 1 },        .{ "sort", 1 },          .{ "keys", 0 },
-        .{ "values", 0 },      .{ "entries", 0 },        .{ "copyWithin", 2 },    .{ "at", 1 },
-        .{ "toString", 0 },    .{ "toReversed", 0 },     .{ "toSorted", 1 },      .{ "toSpliced", 2 },
-        .{ "with", 2 },        .{ "toLocaleString", 0 },
-    });
+    try setArrayProtoMethods(a, root_shape, array_proto, env, array_proto_specs);
     const array_values_fn = try gc_mod.allocObj(a);
     array_values_fn.* = .{ .native = arrayValuesIterFn };
     try installFunctionProps(a, root_shape, array_values_fn, &.{}, "values");
@@ -36238,6 +36247,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try array_ns.setOwn(a, root_shape, "prototype", Value.obj(array_proto));
     try array_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, array_proto, array_ns);
+    env.installArrayIntrinsic(array_ns, array_proto);
 
     const string_proto = try gc_mod.allocObj(a);
     // String.prototype is a String Exotic Object with [[StringData]] = "",
@@ -37344,6 +37354,29 @@ fn setProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, compt
 /// name-keyed dispatch) makes a *borrowed* generic method work — e.g. `obj.slice
 /// = Array.prototype.slice; obj.slice(0, 3)` — where `obj` has an own property of
 /// that name (which would otherwise suppress the array-generic path).
+const array_proto_specs = .{
+    .{ "join", 1 },        .{ "push", 1 },           .{ "pop", 0 },           .{ "shift", 0 },
+    .{ "unshift", 1 },     .{ "slice", 2 },          .{ "splice", 2 },        .{ "concat", 1 },
+    .{ "reverse", 0 },     .{ "indexOf", 1 },        .{ "lastIndexOf", 1 },   .{ "includes", 1 },
+    .{ "map", 1 },         .{ "filter", 1 },         .{ "forEach", 1 },       .{ "reduce", 1 },
+    .{ "reduceRight", 1 }, .{ "some", 1 },           .{ "every", 1 },         .{ "find", 1 },
+    .{ "findIndex", 1 },   .{ "findLast", 1 },       .{ "findLastIndex", 1 }, .{ "fill", 1 },
+    .{ "flat", 0 },        .{ "flatMap", 1 },        .{ "sort", 1 },          .{ "keys", 0 },
+    .{ "values", 0 },      .{ "entries", 0 },        .{ "copyWithin", 2 },    .{ "at", 1 },
+    .{ "toString", 0 },    .{ "toReversed", 0 },     .{ "toSorted", 1 },      .{ "toSpliced", 2 },
+    .{ "with", 2 },        .{ "toLocaleString", 0 },
+};
+
+fn isArrayRealmNative(native: ?value.NativeFn) bool {
+    const nf = native orelse return false;
+    if (nf == builtins.arrayConstructor or nf == builtins.arrayOf or
+        nf == builtins.arrayFrom or nf == builtins.arrayFromAsync) return true;
+    inline for (array_proto_specs) |spec| {
+        if (nf == arrayProtoMethod(spec[0])) return true;
+    }
+    return false;
+}
+
 fn setArrayProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, env: *Environment, comptime specs: anytype) EvalError!void {
     inline for (specs) |s| try setNativeWithData(a, rs, proto, s[0], s[1], arrayProtoMethod(s[0]), @ptrCast(env));
 }
@@ -37353,10 +37386,12 @@ fn arrayProtoMethod(comptime name: []const u8) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const saved_env = self.env;
+            const env_root = try self.pushTempEnvRoot(saved_env);
+            defer self.restoreTempEnvRoots(env_root);
             if (self.active_native) |callee| {
                 if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
             }
-            defer self.env = saved_env;
+            defer self.env = self.tempEnvRoot(env_root, saved_env);
             if (this.isNull() or this.isUndefined())
                 return self.throwError("TypeError", "Array.prototype." ++ name ++ " requires that |this| not be null or undefined");
             const o = try self.toObject(this);
@@ -56237,6 +56272,48 @@ test "DataView cross-realm brand errors use the method realm" {
     )).asBool());
 }
 
+test "realm array intrinsics trace and relocate retained native realms" {
+    const Probe = struct {
+        old: *Environment,
+        new: *Environment,
+        marked: bool = false,
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected cell pointer"),
+            };
+            if (@intFromPtr(cell) == @intFromPtr(self.old)) self.marked = true;
+        }
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            return if (old == @as(*anyopaque, @ptrCast(self.old))) @ptrCast(self.new) else old;
+        }
+        fn check(native: value.NativeFn) !void {
+            var old_realm = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+            var new_realm = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+            var closure = value.Object{ .native = native, .private_data = &old_realm };
+            var visitor = @This(){ .old = &old_realm, .new = &new_realm };
+            traceNativePrivateData(&closure, &visitor);
+            try std.testing.expect(visitor.marked);
+            relocateNativePrivateData(&closure, &visitor);
+            try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_realm)), closure.private_data.?);
+
+            old_realm.gc_managed = false;
+            closure.private_data = &old_realm;
+            visitor.marked = false;
+            traceNativePrivateData(&closure, &visitor);
+            relocateNativePrivateData(&closure, &visitor);
+            try std.testing.expect(!visitor.marked);
+            try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&old_realm)), closure.private_data.?);
+        }
+    };
+    inline for (.{ builtins.arrayConstructor, builtins.arrayOf, builtins.arrayFrom, builtins.arrayFromAsync }) |nf|
+        try Probe.check(nf);
+    inline for (array_proto_specs) |spec| try Probe.check(arrayProtoMethod(spec[0]));
+    try std.testing.expect(!isArrayRealmNative(null));
+    try std.testing.expect(!isArrayRealmNative(builtins.arrayIsArray));
+}
+
 test "realm error intrinsics trace and relocate a retained foreign constructor" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -56275,7 +56352,7 @@ test "realm error intrinsics own storage and error construction through OOM" {
             const allocator = arena.allocator();
             var root = Environment{ .arena = allocator, .bindings_allocator = backing, .fn_scope = true };
             defer root.finalizeOwnedBindingStorage();
-            try root.initErrorIntrinsics();
+            try root.initRealmIntrinsics();
             var ctor = value.Object{};
             var proto = value.Object{};
             root.installErrorIntrinsic(ErrorIntrinsics.index("Error").?, &ctor, &proto);
@@ -56295,6 +56372,38 @@ test "realm error intrinsics own storage and error construction through OOM" {
             const wasm = try machine.makeErrorWithProto("CompileError", "", &override);
             try std.testing.expectEqual(&override, wasm.asObj().protoAtomic().?);
             try std.testing.expect(wasm.asObj().getOwn("name") == null);
+        }
+    }.run;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, probe, .{});
+}
+
+test "realm array intrinsics own storage and construction through OOM" {
+    const probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var root = Environment{ .arena = allocator, .bindings_allocator = backing, .fn_scope = true };
+            defer root.finalizeOwnedBindingStorage();
+            try root.initRealmIntrinsics();
+            var ctor = value.Object{ .native = builtins.arrayConstructor, .native_ctor = true, .private_data = &root };
+            var proto = value.Object{ .is_array = true };
+            root.installArrayIntrinsic(&ctor, &proto);
+            const shape = try Shape.createRoot(allocator);
+            try ctor.setOwn(allocator, shape, "prototype", Value.obj(&proto));
+            var child = Environment{ .arena = allocator, .parent = &root };
+            var machine = Interpreter{ .arena = allocator, .env = &child, .root_shape = shape };
+            try std.testing.expect(child.realm_intrinsics == null);
+            try std.testing.expectEqual(&ctor, child.arrayIntrinsic(false).?);
+            const arr = try machine.newArray();
+            try std.testing.expectEqual(&proto, arr.asObj().protoAtomic().?);
+            const called = try machine.callValue(Value.obj(&ctor), &.{ Value.obj(&ctor), Value.obj(&proto) });
+            try std.testing.expectEqual(&proto, called.asObj().protoAtomic().?);
+            try std.testing.expectEqual(&ctor, called.asObj().denseElement(0).?.asObj());
+            try std.testing.expectEqual(&proto, called.asObj().denseElement(1).?.asObj());
+            try std.testing.expectEqual(&child, machine.env);
         }
     }.run;
     const previous_heap = gc_mod.setActiveHeap(null);

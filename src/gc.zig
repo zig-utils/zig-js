@@ -1158,9 +1158,11 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     var ait = e.aliases.valueIterator();
     while (ait.next()) |a| markManaged(v, a.env);
     if (e.object_proto_intrinsic) |o| v.mark(o);
-    if (e.error_intrinsics) |intrinsics| {
-        for (intrinsics.constructors) |slot| if (slot) |o| v.mark(o);
-        for (intrinsics.prototypes) |slot| if (slot) |o| v.mark(o);
+    if (e.realm_intrinsics) |intrinsics| {
+        for (intrinsics.errors.constructors) |slot| if (slot) |o| v.mark(o);
+        for (intrinsics.errors.prototypes) |slot| if (slot) |o| v.mark(o);
+        if (intrinsics.array_constructor) |o| v.mark(o);
+        if (intrinsics.array_prototype) |o| v.mark(o);
     }
     if (e.parent) |p| markManaged(v, p);
     if (e.with_object) |o| v.mark(o);
@@ -1191,9 +1193,11 @@ pub fn relocateEnv(e: *Environment, v: anytype) void {
     while (aliases.next()) |alias|
         gc_relocation.rewriteRequiredSlot(v, Environment, &alias.env);
     gc_relocation.rewriteOptionalSlot(v, Object, &e.object_proto_intrinsic);
-    if (e.error_intrinsics) |intrinsics| {
-        for (&intrinsics.constructors) |*slot| gc_relocation.rewriteOptionalSlot(v, Object, slot);
-        for (&intrinsics.prototypes) |*slot| gc_relocation.rewriteOptionalSlot(v, Object, slot);
+    if (e.realm_intrinsics) |intrinsics| {
+        for (&intrinsics.errors.constructors) |*slot| gc_relocation.rewriteOptionalSlot(v, Object, slot);
+        for (&intrinsics.errors.prototypes) |*slot| gc_relocation.rewriteOptionalSlot(v, Object, slot);
+        gc_relocation.rewriteOptionalSlot(v, Object, &intrinsics.array_constructor);
+        gc_relocation.rewriteOptionalSlot(v, Object, &intrinsics.array_prototype);
     }
     gc_relocation.rewriteOptionalSlot(v, Environment, &e.parent);
     gc_relocation.rewriteOptionalSlot(v, Object, &e.with_object);
@@ -1208,7 +1212,8 @@ test "realm error intrinsics trace and relocate every private identity" {
         intrinsics.constructors[index] = &old_objects[index];
         intrinsics.prototypes[index] = &old_objects[count + index];
     }
-    var environment = Environment{ .arena = std.testing.allocator, .error_intrinsics = &intrinsics };
+    var realm_intrinsics = interp.RealmIntrinsics{ .errors = intrinsics };
+    var environment = Environment{ .arena = std.testing.allocator, .realm_intrinsics = &realm_intrinsics };
     const Visitor = struct {
         old: *[count * 2]Object,
         new: *[count * 2]Object,
@@ -1238,9 +1243,49 @@ test "realm error intrinsics trace and relocate every private identity" {
     for (visitor.seen) |seen| try std.testing.expect(seen);
     relocateEnv(&environment, &visitor);
     for (0..count) |index| {
-        try std.testing.expectEqual(&new_objects[index], intrinsics.constructors[index].?);
-        try std.testing.expectEqual(&new_objects[count + index], intrinsics.prototypes[index].?);
+        try std.testing.expectEqual(&new_objects[index], realm_intrinsics.errors.constructors[index].?);
+        try std.testing.expectEqual(&new_objects[count + index], realm_intrinsics.errors.prototypes[index].?);
     }
+}
+
+test "realm array intrinsics trace and relocate both private identities" {
+    var old_objects: [2]Object = .{ .{}, .{} };
+    var new_objects: [2]Object = .{ .{}, .{} };
+    var intrinsics = interp.RealmIntrinsics{
+        .array_constructor = &old_objects[0],
+        .array_prototype = &old_objects[1],
+    };
+    var environment = Environment{ .arena = std.testing.allocator, .realm_intrinsics = &intrinsics };
+    const Visitor = struct {
+        old: *[2]Object,
+        new: *[2]Object,
+        seen: [2]bool = .{ false, false },
+        pub fn concurrent(_: *@This()) bool {
+            return false;
+        }
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected cell pointer"),
+            };
+            for (self.old, 0..) |*object, index|
+                if (@intFromPtr(object) == @intFromPtr(cell)) {
+                    self.seen[index] = true;
+                };
+        }
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            for (self.old, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object))) return @ptrCast(&self.new[index]);
+            return old;
+        }
+    };
+    var visitor = Visitor{ .old = &old_objects, .new = &new_objects };
+    traceEnv(&environment, &visitor);
+    for (visitor.seen) |seen| try std.testing.expect(seen);
+    relocateEnv(&environment, &visitor);
+    try std.testing.expectEqual(&new_objects[0], intrinsics.array_constructor.?);
+    try std.testing.expectEqual(&new_objects[1], intrinsics.array_prototype.?);
 }
 
 test "Environment relocation rewrites every managed binding slot" {
