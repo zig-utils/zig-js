@@ -8068,11 +8068,9 @@ pub const Interpreter = struct {
     /// observable mutable property, so a direct element-copy shortcut would skip
     /// both its lookup and calls.
     pub fn spreadInto(self: *Interpreter, list: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
-        // A nullish spread argument reports the spread-specific message rather
-        // than the generic nullish-base one; both tiers route through here.
-        if (v.isUndefined() or v.isNull())
-            return self.throwError("TypeError", "Spread syntax requires ...iterable not be null or undefined");
-        const record = try self.getIteratorRecord(v); // throws TypeError if not iterable
+        // Spread words both of its failures after the syntax; both tiers route
+        // through here, so that wording is settled in one place.
+        const record = try self.getIteratorRecordFor(v, .spread);
         const iter_obj = record.iterator;
         const iter_root = try self.pushTempRoot(iter_obj);
         defer self.restoreTempRoots(iter_root);
@@ -15690,12 +15688,35 @@ pub const Interpreter = struct {
     /// observable @@iterator method and require its result to be an Object. VM
     /// bytecode uses this boundary because compiled sites capture `next` in their
     /// own activation immediately afterward.
+    /// Which syntax is acquiring the iterator. JavaScriptCore words a spread's
+    /// failures after the spread itself rather than after the value, so the
+    /// context has to reach the throw: the `@@iterator` read is observable, and
+    /// a caller cannot pre-check it without running a getter twice.
+    pub const IteratorUse = enum { generic, spread };
+
     pub fn getIterator(self: *Interpreter, v: Value) EvalError!Value {
+        return self.getIteratorFor(v, .generic);
+    }
+
+    pub fn getIteratorRecordFor(self: *Interpreter, v: Value, use: IteratorUse) EvalError!IteratorRecord {
+        const iterator = try self.getIteratorFor(v, use);
+        const iterator_root = try self.pushTempRoot(iterator);
+        defer self.restoreTempRoots(iterator_root);
+        const next_method = try self.getProperty(iterator, "next");
+        return .{
+            .iterator = self.tempRoot(iterator_root, iterator),
+            .next_method = next_method,
+        };
+    }
+
+    pub fn getIteratorFor(self: *Interpreter, v: Value, use: IteratorUse) EvalError!Value {
         // GetIterator(v) begins with GetMethod(v, @@iterator), i.e. a property
         // read on `v` — so a nullish `v` fails RequireObjectCoercible, not an
         // iterability check. Report it as the nullish-base error, as JSC does.
-        if (v.isUndefined() or v.isNull())
-            return self.throwError("TypeError", notAnObjectMessage(v));
+        if (v.isUndefined() or v.isNull()) return self.throwError("TypeError", switch (use) {
+            .generic => notAnObjectMessage(v),
+            .spread => "Spread syntax requires ...iterable not be null or undefined",
+        });
         const key = self.symbolIteratorKey() orelse
             return self.throwError("TypeError", "value is not iterable");
         const input_root = try self.pushTempRoot(v);
@@ -15704,7 +15725,11 @@ pub const Interpreter = struct {
         // Absent and present-but-uncallable @@iterator are the same failure to a
         // caller: the value is not iterable. JSC names the subject; see
         // `notIterableSubject` for how.
-        if (!method.isCallable())
+        if (!method.isCallable()) {
+            if (use == .spread) return self.throwError(
+                "TypeError",
+                "Spread syntax requires ...iterable[Symbol.iterator] to be a function",
+            );
             return self.throwError("TypeError", try std.fmt.allocPrint(
                 self.arena,
                 // Read the ROOTED value: the @@iterator lookup above can run a
@@ -15712,6 +15737,7 @@ pub const Interpreter = struct {
                 "{s} is not iterable",
                 .{notIterableSubject(self.tempRoot(input_root, v))},
             ));
+        }
         return self.requireIteratorObject(try self.callValueWithThis(method, &.{}, self.tempRoot(input_root, v)));
     }
 
