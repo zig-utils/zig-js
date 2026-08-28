@@ -29267,6 +29267,102 @@ test "realm global identity is independent of mutable globalThis" {
     };
 }
 
+test "parameter assignments preserve exact references and effect order" {
+    const cases = [_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
+        .{ .name = "symbol_update", .source = "var held=Symbol(),old=held;function f(a=held++){}var result;try{f();result='miss';}catch(e){result=e.name+':'+(held===old);}", .expected = "TypeError:true" },
+        .{ .name = "wide_update", .source = "function f(a=1361129467683753853853498429727072845824n,b=a++,c=--a){return b+':'+c+':'+a;}var result=f();", .expected = "1361129467683753853853498429727072845824:1361129467683753853853498429727072845824:1361129467683753853853498429727072845824" },
+        .{ .name = "boundary_update", .source = "function f(a=170141183460469231731687303715884105727n,b=++a){return a+':'+b;}var result=f();", .expected = "170141183460469231731687303715884105728:170141183460469231731687303715884105728" },
+        .{ .name = "wrapped_symbol_update", .source = "var log='',held={[Symbol.toPrimitive](hint){log+=hint;return Symbol();}};function f(a=held++){}var result;try{f();result='miss';}catch(e){result=e.name+':'+log;}", .expected = "TypeError:number" },
+        .{ .name = "compound", .source = "function f(a=3,b=(a+=4),c=(a*=2)){return a+':'+b+':'+c;}var result=f();", .expected = "14:7:14" },
+        .{ .name = "operators", .source = "function f(a=24,b=(a/=3),c=(a%=3),d=(a**=3),e=(a-=1),g=(a<<=2),h=(a>>=1),i=(a>>>=1),j=(a&=6),k=(a^=3),l=(a|=8)){return [b,c,d,e,g,h,i,j,k,l].join(':');}var result=f();", .expected = "8:2:8:7:28:14:7:6:5:13" },
+        .{ .name = "global", .source = "assignmentGlobal=3;function f(v=assignmentGlobal+=4){var assignmentGlobal=99;return v;}var result=f()+':'+assignmentGlobal;", .expected = "7:7" },
+        .{ .name = "closure", .source = "function owner(){let held=3;return function(v=held+=2){var held=99;return v;};}var f=owner();var result=f()+':'+f();", .expected = "5:7" },
+        .{ .name = "self", .source = "function f(a=a+=1){}var result;try{f();result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .name = "later", .source = "function f(a=++b,b=1){}var result;try{f();result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .name = "logical_tdz", .source = "function f(a=a||=1){}var result;try{f();result='miss';}catch(e){result=e.name;}", .expected = "ReferenceError" },
+        .{ .name = "const", .source = "const held=3;function f(a=held+=1){}var result;try{f();result='miss';}catch(e){result=e.name;}", .expected = "TypeError" },
+        .{ .name = "const_short", .source = "const held=3;function f(a=held||=4){return a;}var result=String(f());", .expected = "3" },
+        .{ .name = "strict_missing", .source = "'use strict';var touched=0;function side(){touched++;return 1;}function f(a=absentAssignmentName+=side()){}var result;try{f();result='miss';}catch(e){result=e.name+':'+touched;}", .expected = "ReferenceError:0" },
+        .{ .name = "prefix_postfix", .source = "function f(a='3',b=a++,c=--a){return b+':'+typeof b+':'+c+':'+a;}var result=f();", .expected = "3:number:3:3" },
+        .{ .name = "bigint", .source = "function f(a=3n,b=a++,c=(a*=2n),d=--a){return b+':'+c+':'+d+':'+a;}var result=f();", .expected = "3:8:7:7" },
+        .{ .name = "bigint_error", .source = "function f(a=3n,b=(a+=2)){}var result;try{f();result='miss';}catch(e){result=e.name;}", .expected = "TypeError" },
+        .{ .name = "logical", .source = "var n=0;function side(){n++;return 7;}function f(a=0,b=(a&&=side()),c=(a||=side()),d=(a??=side())){return a+':'+b+':'+c+':'+d;}var result=f()+':'+n;", .expected = "7:0:7:7:1" },
+        .{ .name = "nullish", .source = "function f(a=null,b=(a??=7)){return a+':'+b;}var result=f();", .expected = "7:7" },
+        .{ .name = "provided", .source = "var n=0;function f(a=++n,b=(n+=2),c=(n||=3)){return a+b+c;}var result=f(1,2,3)+':'+n;", .expected = "6:0" },
+        .{ .name = "abrupt", .source = "var log='';function stop(){log+='rhs';throw 7;}function f(a=1,b=(a+=stop()),c=++assignmentGlobal){log+='body';}assignmentGlobal=0;try{f();}catch(e){}var result=log+':'+assignmentGlobal;", .expected = "rhs:0" },
+        .{ .name = "with_reference", .source = "var held=100,box={held:3},fn;function side(){delete box.held;return 4;}with(box){fn=function(v=held+=side()){return v;};}var result=fn()+':'+box.held+':'+held;", .expected = "7:7:100" },
+        .{ .name = "unscopables", .source = "var held=3,box={held:100},fn;box[Symbol.unscopables]={held:true};with(box){fn=function(v=held+=4){return v;};}var result=fn()+':'+held+':'+box.held;", .expected = "7:7:100" },
+        .{ .name = "computed_binding", .source = "var key='';function f({[key+='x']:v=++assignmentGlobal}){return v;}assignmentGlobal=6;var result=f({})+':'+key+':'+assignmentGlobal;", .expected = "7:x:7" },
+        .{ .name = "destructure_default", .source = "var n=6;function f([a=++n],{b=n+=1}){return a+':'+b;}var result=f([],{});", .expected = "7:8" },
+        .{ .name = "arrow", .source = "function owner(v){return ((a=arguments[0]++,b=++v)=>a+':'+b+':'+arguments[0])(undefined);}var result=owner(3);", .expected = "3:5:5" },
+        .{ .name = "method", .source = "class C{read(a=(this.value+=2),b=this.value++){return a+':'+b+':'+this.value;}}var obj=new C();obj.value=3;var result=obj.read();", .expected = "5:5:6" },
+        .{ .name = "simple_member", .source = "var log='',box={set x(v){log+='set'+v;}},key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 7;}function f(a=box[key]=rhs()){return a;}var result=f()+':'+log;", .expected = "7:rhskeyset7" },
+        .{ .name = "member_compound", .source = "var log='',box={get x(){log+='get';return 3;},set x(v){log+='set'+v;}},key={toString(){log+='key';return 'x';}};function base(){log+='base';return box;}function rhs(){log+='rhs';return 4;}function f(a=base()[key]+=rhs()){return a;}var result=f()+':'+log;", .expected = "7:basekeygetrhsset7" },
+        .{ .name = "member_short", .source = "var log='',box={get x(){log+='get';return 3;},set x(v){log+='set';}},key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 4;}function f(a=box[key]||=rhs()){return a;}var result=f()+':'+log;", .expected = "3:keyget" },
+        .{ .name = "member_logical", .source = "var log='',box={get x(){log+='get';return 0;},set x(v){log+='set'+v;}},key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 7;}function f(a=box[key]||=rhs()){return a;}var result=f()+':'+log;", .expected = "7:keygetrhsset7" },
+        .{ .name = "member_update", .source = "var log='',box={get x(){log+='get';return '3';},set x(v){log+='set'+v;}},key={toString(){log+='key';return 'x';}};function f(a=box[key]++){return a+':'+typeof a;}var result=f()+':'+log;", .expected = "3:number:keygetset4" },
+        .{ .name = "null_compound", .source = "var log='',key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 7;}function f(a=null[key]+=rhs()){}var result;try{f();result='miss';}catch(e){result=e.name+':'+log;}", .expected = "TypeError:" },
+        .{ .name = "null_simple", .source = "var log='',key={toString(){log+='key';return 'x';}};function rhs(){log+='rhs';return 7;}function f(a=null[key]=rhs()){}var result;try{f();result='miss';}catch(e){result=e.name+':'+log;}", .expected = "TypeError:rhs" },
+        .{ .name = "setter_error", .source = "var log='',box={get x(){log+='get';return 3;},set x(v){log+='set';throw 7;}};function f(a=box.x++){log+='body';}try{f();}catch(e){}var result=log;", .expected = "getset" },
+        .{ .name = "coercion", .source = "var log='',box={get x(){log+='get';return {valueOf(){log+='left';return 3;}};},set x(v){log+='set'+v;}};function rhs(){log+='rhs';return {valueOf(){log+='right';return 4;}};}function f(a=box.x+=rhs()){return a;}var result=f()+':'+log;", .expected = "7:getrhsleftrightset7" },
+        .{ .name = "reentrant", .source = "var box={x:1},entered=false;function rhs(){if(!entered){entered=true;f();}return 2;}function f(a=box.x+=rhs()){return a;}var result=f()+':'+box.x;", .expected = "3:3" },
+        .{ .name = "named", .source = "var held;function f(a=held||=function(){}){return a.name+':'+held.name;}var result=f();", .expected = "held:held" },
+        .{ .name = "parenthesized_name", .source = "var held;function f(a=(held)||=function(){}){return a.name+':'+held.name;}var result=f();", .expected = ":" },
+        .{ .name = "member_name", .source = "var box={};function f(a=box.held||=function(){}){return a.name;}var result=f();", .expected = "" },
+        .{ .name = "escaped", .source = "function f(a=1,b=(a+=2),read=()=>a){return read;}var result=String(f()());", .expected = "3" },
+        .{ .name = "eval_reference", .source = "function f(a=3,b=(a+=eval('a=5; 2'))){return a+':'+b;}var result=f();", .expected = "5:5" },
+        .{ .name = "super", .source = "class B{get x(){return 3;}set x(v){this.saved=v;}}class D extends B{constructor(v=(super(),super.x+=4)){this.result=v;}}var obj=new D();var result=obj.result+':'+obj.saved;", .expected = "7:7" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate("var assignmentGlobal = 1;");
+        for (cases) |case| {
+            // Each case owns a fresh lexical activation, while explicit free
+            // global references still exercise the realm Environment path.
+            const source = try std.fmt.allocPrint(std.testing.allocator, "(function(){{{s}return result;}})()", .{case.source});
+            defer std.testing.allocator.free(source);
+            errdefer std.debug.print("parameter assignment {s} ({s}): {s}\n", .{ case.name, @tagName(mode), case.source });
+            const result = try ctx.evaluate(source);
+            try std.testing.expectEqualStrings(case.expected, result.asStr());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "parameter assignments isolate shared no-GIL activation temporaries" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function shared(box, a = box.x++, b = box.x += 2, c = box.x ||= 99) { return a + b + c; }
+        \\function lane() {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+        \\  var sum = 0;
+        \\  for (var i = 0; i < 32; i++) sum += shared({x: i});
+        \\  return sum;
+        \\}
+        \\var lanes = [], sum = 0;
+        \\for (var i = 0; i < 4; i++) lanes.push(new Thread(lane));
+        \\for (var i = 0; i < 4; i++) sum += lanes[i].join();
+        \\sum
+    );
+    try std.testing.expectEqual(@as(f64, 6720), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 test "parameter references preserve exact lexical initialization" {
     const cases = [_]struct { source: []const u8, expected: []const u8 }{
         .{ .source = "var outer=7; function f(value=outer){var outer=99; return value;} var result=String(f());", .expected = "7" },

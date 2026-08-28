@@ -538,6 +538,13 @@ const PlainParameterLayout = struct {
     }
 };
 
+fn supportedPlainParameterReference(node: *const ast.Node, fnode: *const ast.FunctionNode) bool {
+    return switch (node.*) {
+        .identifier, .member, .super_member => supportedPlainParameterDefault(node, fnode),
+        else => false,
+    };
+}
+
 fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode) bool {
     // FunctionDeclarationInstantiation installs invocation context first, and
     // each prior formal completes BindingInitialization before the next one.
@@ -562,12 +569,17 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
             supportedPlainParameterDefault(conditional.alternate, fnode),
         .sequence => |sequence| supportedPlainParameterDefault(sequence.first, fnode) and
             supportedPlainParameterDefault(sequence.second, fnode),
-        // Identifier assignment preserves Reference resolution and leaves the
-        // assigned value on the parameter initializer's expression stack. The
-        // target may be a formal (including one still in TDZ) or an outer name;
-        // the ordinary checked/global store opcodes retain that distinction.
-        .assign => |assignment| assignment.target.* == .identifier and
+        // Assignment/Update Evaluation retains one Reference through GetValue,
+        // RHS/coercion, and PutValue. Use the ordinary parameter-phase binding
+        // plans and activation-owned member temporaries; resolving the target
+        // again after an observable effect would select the wrong binding.
+        .assign => |assignment| supportedPlainParameterReference(assignment.target, fnode) and
             supportedPlainParameterDefault(assignment.value, fnode),
+        .op_assign => |assignment| supportedPlainParameterReference(assignment.target, fnode) and
+            supportedPlainParameterDefault(assignment.value, fnode),
+        .logical_assign => |assignment| supportedPlainParameterReference(assignment.target, fnode) and
+            supportedPlainParameterDefault(assignment.value, fnode),
+        .update => |update| supportedPlainParameterReference(update.target, fnode),
         // Function/arrow creation itself has no user-code side effect. Its
         // nested compiler performs the exact capture/admission checks, while
         // eager parameter-environment materialization preserves closure identity.
@@ -577,8 +589,7 @@ fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.Funct
             supportedPlainParameterDefault(member.object, fnode) and
             (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode)),
         .call => |call| blk: {
-            const direct_eval = call.callee.* == .identifier and std.mem.eql(u8, call.callee.identifier, "eval");
-            if (call.optional or (!direct_eval and !supportedPlainParameterDefault(call.callee, fnode)))
+            if (call.optional or !supportedPlainParameterDefault(call.callee, fnode))
                 break :blk false;
             for (call.args) |argument|
                 if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode))
@@ -6855,6 +6866,25 @@ test "parameter references compiler planning propagates allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseParameterReferenceAllocationFailures, .{});
 }
 
+fn exerciseParameterAssignmentAllocationFailures(allocator: std.mem.Allocator) !void {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        ast_arena.allocator(),
+        "function outer(box) { let held = 1; with (box) { return function(value = held += side(), next = box[key()]++, last = held ||= next) { return () => value + last; }; } }",
+    );
+    const program = try parser.parseProgram();
+    var replay = CompilerAllocationReplay{ .backing = allocator };
+    var compile_arena = std.heap.ArenaAllocator.init(replay.allocator());
+    defer compile_arena.deinit();
+    const compiled = try Compiler.compilePlainFunction(compile_arena.allocator(), program.program[0].func_decl);
+    try std.testing.expect(compiled.chunk.fns.items[0].chunk != null);
+}
+
+test "parameter assignments compiler planning propagates allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseParameterAssignmentAllocationFailures, .{});
+}
+
 test "compiler preserves a first-statement debugger checkpoint" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -7048,7 +7078,8 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = []){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = class {}){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = ++outer){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = (holder.value = {})){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = (outer += side?.())){}", .expected = .parameter_prologue },
         .{ .source = "function f(value = delete holder.value){}", .expected = .parameter_prologue },
         .{ .source = "function f([value] = []){}", .expected = .parameter_prologue },
     };
@@ -7066,6 +7097,17 @@ test "compiler reports stable plain-function admission reasons" {
     }
 
     const admitted_parameter_prologues = [_][]const u8{
+        "function f(value = ++outer){}",
+        "function f(value = outer--){}",
+        "function f(value = outer += 2){}",
+        "function f(value = outer ||= 2){}",
+        "function f(value = outer &&= 2){}",
+        "function f(value = outer ??= 2){}",
+        "function f(value = holder.value = 2){}",
+        "function f(value = holder[key()] *= 2){}",
+        "function f(value = ++holder.value){}",
+        "function f(value = holder[key()]--){}",
+        "function f({ [key += 'x']: value = ++outer }){}",
         "function f(value = outer){}",
         "function f(value = undefined){}",
         "function f(value = holder.value){}",
