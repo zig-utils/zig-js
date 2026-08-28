@@ -10773,8 +10773,7 @@ pub const Interpreter = struct {
     }
 
     /// Create a fresh Symbol primitive linked to this realm's live
-    /// Symbol.prototype. The description storage must already outlive the
-    /// returned value (callers normally duplicate it into the realm arena).
+    /// Symbol.prototype, owning a stable copy of the optional description.
     pub fn makeSymbol(self: *Interpreter, description: ?[]const u8) EvalError!Value {
         const symbol = try makeSymbolObj(self.arena, self.root_shape, description, symbolProto(self));
         _ = self.registerSymbol(symbol.asObj());
@@ -52794,15 +52793,43 @@ var symbol_counter = std.atomic.Value(usize).init(0);
 /// string that can't collide with user property names) and a `description`.
 fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*value.Object) EvalError!Value {
     _ = rs;
+    // Symbol [[Description]] outlives ToString's borrowed String bytes. The
+    // primitive sidecar stores unmanaged bytes, so own them in this realm's
+    // stable arena instead of retaining an untraced pointer into a moving cell.
+    const owned_desc = if (desc) |bytes| try a.dupe(u8, bytes) else null;
     const o = try gc_mod.allocObj(a);
     o.* = .{
         .is_symbol = true,
         .proto = proto,
     };
-    try o.setPrimitiveState(a, .{ .symbol = .{ .description = .init(desc) } });
+    try o.setPrimitiveState(a, .{ .symbol = .{ .description = .init(owned_desc) } });
     const n = try mintUniqueAtomicSerial(usize, &symbol_counter);
     o.setSymbolKey(try std.fmt.allocPrint(a, "\x00s{d}", .{n}));
     return Value.obj(o);
+}
+
+test "Symbol description ownership copies borrowed bytes and unwinds allocation failures" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            const root_shape = try Shape.createRoot(allocator);
+            var bytes = [_]u8{ 'x', 0, 0xc3, 0xa9, 0xed, 0xa0, 0x80 };
+            const expected = bytes;
+            const symbol = try makeSymbolObj(allocator, root_shape, &bytes, null);
+            @memset(&bytes, 'U');
+            try std.testing.expectEqualStrings(&expected, symbol.asObj().symbolDescription().?);
+            try std.testing.expect(symbol.asObj().symbolDescription().?.ptr != &bytes);
+            const absent = try makeSymbolObj(allocator, root_shape, null, null);
+            const empty = try makeSymbolObj(allocator, root_shape, "", null);
+            try std.testing.expect(absent.asObj().symbolDescription() == null);
+            try std.testing.expectEqualStrings("", empty.asObj().symbolDescription().?);
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 /// `Symbol.prototype`, resolved from the live `Symbol` binding (for linking

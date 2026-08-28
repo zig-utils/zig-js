@@ -28018,6 +28018,14 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "Symbol description ownership survives moving nursery" {
+    try expectProxyMetadataMoving("var symbol=Symbol('x');", "(proxyMovingLoop(20000),symbol.description==='x'&&symbol.toString()==='Symbol(x)'&&String(symbol)==='Symbol(x)')");
+}
+
+test "Symbol description ownership retains registered and WTF-8 names through moving nursery" {
+    try expectProxyMetadataMoving("var registered=Symbol.for('registered');var wide=Symbol('é\\uD800');var absent=Symbol();var empty=Symbol('');", "(proxyMovingLoop(20000),registered===Symbol.for('registered')&&registered.description==='registered'&&Symbol.keyFor(registered)==='registered'&&wide.description==='é\\uD800'&&absent.description===undefined&&empty.description==='')");
+}
+
 test "internal descriptors preserve specification record boundaries" {
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         for ([_]struct { name: []const u8, source: []const u8 }{

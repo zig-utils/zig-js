@@ -19728,7 +19728,7 @@ export fn JSValueMakeSymbol(ctx: JSContextRef, description: JSStringRef) callcon
     const c = ctxFrom(ctx) orelse return null;
     const desc: ?[]const u8 = if (description) |_| blk: {
         const source = strFrom(description) orelse return null;
-        break :blk c.arena().dupe(u8, source.bytes) catch return null;
+        break :blk source.bytes;
     } else null;
 
     const gc_saved = gc_mod.setActiveContext(c);
