@@ -7164,6 +7164,11 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
         }
     }
     var exec = Exec{};
+    // This entry cannot suspend. An escaping throw/OOM may bypass lexical
+    // exit bytecodes, but must not leave the host in an inner environment.
+    // Follow the live, GC-updated chain; cleanup requires no saved raw pointer
+    // or allocation. Suspended/function activations own their separate unwind.
+    defer unwindEnvironmentToDepth(vm, null, &exec, 0);
     return execLoop(vm, &exec, chunk, frame, null);
 }
 
@@ -10954,6 +10959,83 @@ fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame:
     }
     const class = template.node.class_expr;
     return vm.evalClassWithPreparedHeritage(class.name, inferred_name, class.members, class.source, heritage, keys);
+}
+
+test "vm program exits unwind lexical environments before returning to the host" {
+    const cases = [_]struct { source: []const u8, throws: bool, exception: f64 = 2 }{
+        .{ .source = "let outer=41;{let outer=0;{throw 2;}}", .throws = true },
+        .{ .source = "let outer=41;with({outer:0}){throw 2;}", .throws = true },
+        .{ .source = "let outer=41;class Hidden extends (function(){throw 2;})(){}", .throws = true },
+        .{ .source = "let outer=41;class Hidden{static{throw 2;}}", .throws = true },
+        .{ .source = "let outer=41;for(let i=0;i<1;i++){throw 2;}", .throws = true },
+        .{ .source = "let outer=41;try{{throw 2;}}finally{{throw 3;}}", .throws = true, .exception = 3 },
+        .{ .source = "let outer=41;try{class Hidden{static{throw 2;}}}catch(e){if(e!==2)throw 3;}", .throws = false },
+        .{ .source = "let outer=41;class Kept{};{let outer=0;}", .throws = false },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try Parser.init(allocator, case.source);
+        const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+        var root = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        try interp.installGlobals(&root, root_shape);
+        // A nested entry must restore its own environment, not the realm root.
+        var entry = Environment{ .arena = allocator, .parent = &root, .fn_scope = true };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &entry, .root_shape = root_shape });
+        const result = run(&machine, chunk, null);
+        if (case.throws) {
+            try std.testing.expectError(error.Throw, result);
+            try std.testing.expectEqual(case.exception, machine.exception.asNum());
+        } else {
+            _ = try result;
+        }
+        try std.testing.expectEqual(&entry, machine.env);
+        try std.testing.expect(!machine.strict);
+        try std.testing.expect(machine.current_private_map == null);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+        try std.testing.expectEqual(@as(u32, 0), machine.depth);
+        var resume_parser = try Parser.init(allocator, "outer+1");
+        const resume_chunk = try Compiler.compileProgram(allocator, try resume_parser.parseProgram());
+        try std.testing.expectEqual(@as(f64, 42), (try run(&machine, resume_chunk, null)).asNum());
+    }
+}
+
+test "vm program exits unwind the class environment on allocation failure" {
+    var failures: usize = 0;
+    var succeeded = false;
+    for (0..2048) |fail_index| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try Parser.init(allocator, "var key={toString(){return 'member'+37;}};var C=class{[key](){}['later'](){}};");
+        const chunk = try Compiler.compileProgram(allocator, try parser.parseProgram());
+        var root = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        try interp.installGlobals(&root, root_shape);
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &root, .root_shape = root_shape });
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        const result = run(&machine, chunk, null);
+        try std.testing.expectEqual(&root, machine.env);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+        try std.testing.expectEqual(@as(u32, 0), machine.depth);
+        try std.testing.expect(machine.current_private_map == null);
+        if (result) |_| {
+            const class = root.get("C") orelse return error.TestUnexpectedResult;
+            const prototype = class.asObj().getOwn("prototype").?;
+            try std.testing.expect(prototype.asObj().getOwn("member37") != null);
+            succeeded = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+    }
+    try std.testing.expect(succeeded and failures > 10);
 }
 
 test "class naming allocation failures restore class evaluation state" {
