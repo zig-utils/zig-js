@@ -153,6 +153,19 @@ fn jsTrimFlat(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
 /// 'x.p')` — which needs spans the AST does not carry, so only the leading
 /// clause is reproduced. Distinguishing null from undefined is the part callers
 /// actually branch on, and it is what zig-js previously collapsed.
+/// How JavaScriptCore names the subject of "<x> is not iterable". It does not
+/// render the value: every object — plain, function, Date, RegExp, class
+/// instance — is reported as `{}`, a number is reported by its TYPE, a boolean
+/// by its literal, and anything else falls back to `value`.
+fn notIterableSubject(v: Value) []const u8 {
+    return switch (v.kind()) {
+        .object => if (v.asObj().is_symbol) "value" else "{}",
+        .number => "number",
+        .boolean => if (v.asBool()) "true" else "false",
+        else => "value",
+    };
+}
+
 pub fn notAnObjectMessage(base: Value) []const u8 {
     return if (base.isNull()) "null is not an object" else "undefined is not an object";
 }
@@ -15688,8 +15701,17 @@ pub const Interpreter = struct {
         const input_root = try self.pushTempRoot(v);
         defer self.restoreTempRoots(input_root);
         const method = try self.getProperty(v, key);
+        // Absent and present-but-uncallable @@iterator are the same failure to a
+        // caller: the value is not iterable. JSC names the subject; see
+        // `notIterableSubject` for how.
         if (!method.isCallable())
-            return self.throwError("TypeError", "Symbol.iterator is not callable");
+            return self.throwError("TypeError", try std.fmt.allocPrint(
+                self.arena,
+                // Read the ROOTED value: the @@iterator lookup above can run a
+                // getter, and a moving collection would leave `v` stale.
+                "{s} is not iterable",
+                .{notIterableSubject(self.tempRoot(input_root, v))},
+            ));
         return self.requireIteratorObject(try self.callValueWithThis(method, &.{}, self.tempRoot(input_root, v)));
     }
 
