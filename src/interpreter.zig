@@ -166,6 +166,56 @@ fn notIterableSubject(v: Value) []const u8 {
     };
 }
 
+/// How JavaScriptCore names the value in "<subject> is not a constructor":
+/// a primitive by its literal text (a string quoted, a BigInt without its `n`),
+/// any callable as the bare word "function", and every other object by the tag
+/// `Object.prototype.toString` would use.
+///
+/// The tag lookup is deliberately data-only — no `getProperty`, no proto walk
+/// through a proxy. Building an error message must not run a `@@toStringTag`
+/// getter (or a proxy trap), which could observe, mutate, or throw over the
+/// error being reported.
+pub fn notAConstructorSubject(self: *Interpreter, v: Value) EvalError![]const u8 {
+    switch (v.kind()) {
+        .undefined => return "undefined",
+        .null => return "null",
+        .boolean => return if (v.asBool()) "true" else "false",
+        .number => return try value.numberToString(self.arena, v.asNum()),
+        .string => return try std.fmt.allocPrint(self.arena, "\"{s}\"", .{try self.toStringWtf8(v)}),
+        .object => {},
+    }
+    const o = v.asObj();
+    if (o.is_symbol) return try std.fmt.allocPrint(self.arena, "Symbol({s})", .{o.symbolDescription() orelse ""});
+    if (o.is_bigint) return try self.toStringWtf8(v);
+    if (o.isCallableObject()) return "function";
+    if (o.proxyHandler() == null and !o.proxy_revoked) {
+        if (symbolToStringTagKey(self)) |tk| {
+            var cur: ?*value.Object = o;
+            while (cur) |c| {
+                if (c.proxyHandler() != null or c.proxy_revoked) break;
+                if (c.getAccessor(tk) != null) break;
+                if (c.getOwn(tk)) |tv| {
+                    if (tv.isString()) return try self.toStringWtf8(tv);
+                    break;
+                }
+                cur = c.protoAtomic();
+            }
+        }
+    }
+    if (o.is_arguments) return "Arguments";
+    if (o.is_array) return "Array";
+    if (o.behavior.is_error) return "Error";
+    if (o.behavior.is_date) return "Date";
+    if (o.behavior.is_regex) return "RegExp";
+    if (o.boxedPrimitive()) |prim| return switch (prim.kind()) {
+        .number => "Number",
+        .string => "String",
+        .boolean => "Boolean",
+        else => "Object",
+    };
+    return "Object";
+}
+
 pub fn notAnObjectMessage(base: Value) []const u8 {
     return if (base.isNull()) "null is not an object" else "undefined is not an object";
 }
@@ -3293,12 +3343,12 @@ pub const Interpreter = struct {
         // stack can overflow before `max_call_depth`).
         if (self.depth < stack_check_floor) return;
         if (self.depth >= max_call_depth or stack_scan.nearLimit(stack_redzone))
-            return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded");
+            return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded.");
         // If the native stack-pointer probe can't see this thread's bounds, it
         // can't catch a real overflow — fall back to the conservative depth cap
         // so an unsupported platform can't run off the end of the stack.
         if (!stack_scan.boundsKnown() and self.depth >= conservative_call_depth)
-            return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded");
+            return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded.");
     }
 
     // ---- exception helpers ------------------------------------------------
@@ -4863,9 +4913,9 @@ pub const Interpreter = struct {
             // ReferenceError. `this_initialized` is true everywhere else (base
             // ctors, methods, ordinary functions), so this only fires before super().
             .this_expr => if (self.this_cell) |c| blk: {
-                if (!c.isInitialized()) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                if (!c.isInitialized()) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
                 break :blk c.value();
-            } else if (self.this_initialized) self.this_value else return self.throwError("ReferenceError", "Must call super constructor before using 'this'"),
+            } else if (self.this_initialized) self.this_value else return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object."),
             // A class field initializer / static block is run as a method-like
             // function (it is [[Call]]ed, never [[Construct]]ed), so `new.target`
             // inside it — including inside a direct `eval` in it — is undefined.
@@ -4888,7 +4938,7 @@ pub const Interpreter = struct {
                 // SuperReference. So `delete super[{toString(){throw}}]` yields the
                 // ReferenceError, not the toString error.
                 if (target.* == .super_member) {
-                    if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                    if (!self.this_initialized) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
                     if (target.super_member.computed) |c| _ = try self.eval(c);
                     return self.throwError("ReferenceError", "Cannot delete a super property");
                 }
@@ -5143,8 +5193,8 @@ pub const Interpreter = struct {
                 // BindThisValue: `super()` initializes `this` exactly once — a
                 // second call (after the construct's side effects) is a ReferenceError.
                 if (self.this_cell) |c| {
-                    if (!c.bind(sup_ret)) return self.throwError("ReferenceError", "Super constructor may only be called once");
-                } else if (self.this_initialized) return self.throwError("ReferenceError", "Super constructor may only be called once");
+                    if (!c.bind(sup_ret)) return self.throwError("ReferenceError", "'super()' can't be called more than once in a constructor.");
+                } else if (self.this_initialized) return self.throwError("ReferenceError", "'super()' can't be called more than once in a constructor.");
                 // The object the super constructor produces (a built-in exotic from
                 // `extends Map/Array/...`, or an object a JS base explicitly returns)
                 // *becomes* the `this` binding — its prototype was already set from
@@ -5172,12 +5222,12 @@ pub const Interpreter = struct {
                 // GetThisBinding (SuperProperty step 2) precedes evaluating the
                 // property key (step 3): in a derived constructor before `super()`,
                 // `super[expr]` / `super.x` is a ReferenceError and `expr` never runs.
-                if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                if (!self.this_initialized) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
                 const key_val: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
                 // Computed SuperProperty evaluates the key expression before
                 // MakeSuperPropertyReference checks the current super base, but
                 // ToPropertyKey is deferred until GetValue below.
-                const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+                const parent = home.protoAtomic() orelse return self.throwError("TypeError", "null is not an object");
                 const key = if (key_val) |kv| try self.keyOf(kv) else m.property;
                 break :blk try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
             },
@@ -5664,7 +5714,7 @@ pub const Interpreter = struct {
                 defer self.restoreTempRoots(res_root);
                 // IteratorNext: the result of `next()` must be an Object (a Symbol
                 // or BigInt is object-tagged here but is not an Object per Type()).
-                if (!builtins.isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
+                if (!builtins.isRealObject(res)) return self.throwError("TypeError", "Iterator result interface is not an object");
                 if ((try self.getProperty(res, "done")).toBoolean()) break; // exhausted — no close
                 const saved_env = self.env;
                 defer self.env = saved_env;
@@ -6344,7 +6394,7 @@ pub const Interpreter = struct {
             },
             .super_member => |member| {
                 const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-                if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                if (!self.this_initialized) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
                 const home_root = try self.pushTempRoot(Value.obj(home));
                 const receiver = self.this_value;
                 const receiver_root = try self.pushTempRoot(receiver);
@@ -6514,14 +6564,14 @@ pub const Interpreter = struct {
         if (target.* == .super_member) {
             const m = target.super_member;
             const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
-            if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+            if (!self.this_initialized) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
             const home_root = try self.pushTempRoot(Value.obj(home));
             defer self.restoreTempRoots(home_root);
             const receiver = self.this_value;
             const receiver_root = try self.pushTempRoot(receiver);
             var key_value: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
             const key_root: ?usize = if (key_value) |kv| try self.pushTempRoot(kv) else null;
-            const parent = self.tempRoot(home_root, Value.obj(home)).asObj().protoAtomic() orelse return self.throwError("TypeError", "Cannot read property of null (super)");
+            const parent = self.tempRoot(home_root, Value.obj(home)).asObj().protoAtomic() orelse return self.throwError("TypeError", "null is not an object");
             const parent_root = try self.pushTempRoot(Value.obj(parent));
             if (key_value) |kv| {
                 key_value = try self.toPropertyKeyValue(self.tempRoot(key_root.?, kv));
@@ -8154,7 +8204,7 @@ pub const Interpreter = struct {
             const res = try self.callValueWithThis(self.tempRoot(next_root, next_method), &.{}, self.tempRoot(iter_root, iter_obj));
             const result_root = try self.pushTempRoot(res);
             defer self.restoreTempRoots(result_root);
-            if (!builtins.isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
+            if (!builtins.isRealObject(res)) return self.throwError("TypeError", "Iterator result interface is not an object");
             if ((try self.getProperty(res, "done")).toBoolean()) break;
             try list.append(self.arena, try self.getProperty(self.tempRoot(result_root, res), "value"));
         }
@@ -8291,7 +8341,7 @@ pub const Interpreter = struct {
             const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
             // GetThisBinding precedes the key/lookup (see the super read path): a
             // derived-ctor `super.m()` before `super()` is a ReferenceError.
-            if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+            if (!self.this_initialized) return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
             const key_val: ?Value = if (sm.computed) |ce| try self.eval(ce) else null;
             const parent = home.protoAtomic() orelse
                 return self.throwError("TypeError", "no superclass method");
@@ -8391,10 +8441,10 @@ pub const Interpreter = struct {
             .super_member => |m| {
                 const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
                 if (!self.this_initialized)
-                    return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                    return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
                 const key_value: ?Value = if (m.computed) |key| try self.eval(key) else null;
                 const parent = home.protoAtomic() orelse
-                    return self.throwError("TypeError", "Cannot read property of null (super)");
+                    return self.throwError("TypeError", "null is not an object");
                 const key = if (key_value) |key_primitive| try self.keyOf(key_primitive) else m.property;
                 callee = try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
                 receiver = self.this_value;
@@ -8670,7 +8720,7 @@ pub const Interpreter = struct {
         defer self.restoreTempRoots(next_root);
         while (true) {
             const result = try self.callValueWithThis(record.next_method, &.{}, record.iterator);
-            if (!builtins.isRealObject(result)) return self.throwError("TypeError", "iterator result is not an object");
+            if (!builtins.isRealObject(result)) return self.throwError("TypeError", "Iterator result interface is not an object");
             if ((try self.getProperty(result, "done")).toBoolean()) break;
             try arr.asObj().appendElement(self.arena, try self.getProperty(result, "value"));
         }
@@ -9103,7 +9153,11 @@ pub const Interpreter = struct {
                 if (!self.ret_value.isUndefined()) {
                     self.env = roots.caller_environment;
                     self.global_object = roots.caller_global;
-                    return self.throwError("TypeError", "Derived constructors may only return object or undefined");
+                    // JSC names the class when it has one.
+                    return if (func.name.len == 0)
+                        self.throwError("TypeError", "Cannot return a non-object type in the constructor of a derived class.")
+                    else
+                        self.throwErrorFmt("TypeError", "Cannot return a non-object type in the constructor of a derived class {s}.", .{func.name});
                 }
             }
             // GetThisBinding reads the shared cell: `super()` may have run during
@@ -9114,7 +9168,7 @@ pub const Interpreter = struct {
             if (!inited) {
                 self.env = roots.caller_environment;
                 self.global_object = roots.caller_global;
-                return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
+                return self.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
             }
             // The bound `this` (the object `super()` produced) is what `new`
             // yields — not the discarded eager placeholder.
@@ -9422,14 +9476,14 @@ pub const Interpreter = struct {
     /// `new_target` drives the new instance's prototype and the `new.target` seen
     /// by the constructor; `callee` is the function actually invoked.
     pub fn constructNT(self: *Interpreter, callee: Value, args: []const Value, new_target: Value) EvalError!Value {
-        if (!callee.isObject()) return self.throwError("TypeError", "value is not a constructor");
+        if (!callee.isObject()) return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
         const obj = callee.asObj();
         if (obj.proxyHandler() != null or obj.proxy_revoked) {
             const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'construct' on a proxy that has been revoked");
             // A Proxy has a [[Construct]] method only if its target is a
             // constructor; if not, `new proxy()` is a TypeError before the
             // construct trap runs (9.5.13).
-            if (!isConstructorValue(Value.obj(target))) return self.throwError("TypeError", "value is not a constructor");
+            if (!isConstructorValue(Value.obj(target))) return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.asObj().appendElement(self.arena, a);
@@ -9457,7 +9511,7 @@ pub const Interpreter = struct {
         };
         if (obj.native) |nf| {
             // Most built-ins aren't constructors; only flagged ones are `new`-able.
-            if (!obj.native_ctor) return self.throwError("TypeError", "value is not a constructor");
+            if (!obj.native_ctor) return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
             // Signal [[Construct]] to the native via `new_target` (restored after),
             // so e.g. `new Number(x)` boxes a wrapper object while `Number(x)`
             // returns a primitive.
@@ -9474,7 +9528,7 @@ pub const Interpreter = struct {
             // Arrow / async / generator functions and concise methods / accessors
             // are not constructors (a class constructor is not flagged is_method).
             if (func.is_arrow or func.is_async or func.is_generator or func.is_method)
-                return self.throwError("TypeError", "value is not a constructor");
+                return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
             // OrdinaryCreateFromConstructor: the instance proto comes from NewTarget.
             const inst = try gc_mod.allocObj(self.arena);
             inst.* = .{ .proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), "Object") else try self.protoObject(obj) };
@@ -9487,7 +9541,7 @@ pub const Interpreter = struct {
             // object result. A nested initializer may have moved that receiver.
             return if (builtins.isRealObject(ret)) ret else self.tempRoot(this_root, this_val);
         }
-        return self.throwError("TypeError", "value is not a constructor");
+        return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
     }
 
     // ---- objects, arrays, members -----------------------------------------
@@ -14906,7 +14960,7 @@ pub const Interpreter = struct {
                 };
                 if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) {
                     done = true;
-                    return self.throwError("TypeError", "iterator result is not an object");
+                    return self.throwError("TypeError", "Iterator result interface is not an object");
                 }
                 const result_root = try self.pushTempRoot(res);
                 defer self.restoreTempRoots(result_root);
@@ -14961,7 +15015,7 @@ pub const Interpreter = struct {
                 };
                 if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) {
                     done = true;
-                    return self.throwError("TypeError", "iterator result is not an object");
+                    return self.throwError("TypeError", "Iterator result interface is not an object");
                 }
                 const result_root = try self.pushTempRoot(res);
                 defer self.restoreTempRoots(result_root);
@@ -16458,7 +16512,7 @@ pub const Interpreter = struct {
         defer self.restoreTempRoots(next_root);
         while (true) {
             const result = try self.callValueWithThis(next_method, &.{}, iterator);
-            if (!builtins.isRealObject(result)) return self.throwError("TypeError", "iterator result is not an object");
+            if (!builtins.isRealObject(result)) return self.throwError("TypeError", "Iterator result interface is not an object");
             if ((try self.getProperty(result, "done")).toBoolean()) break;
             try out.append(self.arena, try self.getProperty(result, "value"));
         }
@@ -16608,7 +16662,7 @@ pub const Interpreter = struct {
     /// without re-reading `it.next` or observing a later replacement.
     fn iterStepM(self: *Interpreter, it: Value, next_method: Value) EvalError!IterStepResult {
         const r = try self.callValueWithThis(next_method, &.{}, it);
-        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
+        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "Iterator result interface is not an object");
         const done = (try self.getProperty(r, "done")).toBoolean();
         const val = if (done) Value.undef() else try self.getProperty(r, "value");
         return .{ .done = done, .value = val };
@@ -16618,7 +16672,7 @@ pub const Interpreter = struct {
     /// (the `value` is not read). Used by `Iterator.zip` strict-mode checking.
     fn iterStepDoneOnlyM(self: *Interpreter, it: Value, next_method: Value) EvalError!bool {
         const r = try self.callValueWithThis(next_method, &.{}, it);
-        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
+        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "Iterator result interface is not an object");
         return (try self.getProperty(r, "done")).toBoolean();
     }
 
@@ -20515,7 +20569,7 @@ const AsyncFromSyncData = struct {
 
 fn asyncFromSyncContinuation(self: *Interpreter, sync_iter: Value, result: Value, close_on_rejection: bool) value.HostError!Value {
     if (!result.isObject())
-        return promiseRejectValue(self, try self.makeError("TypeError", "iterator result is not an object"));
+        return promiseRejectValue(self, try self.makeError("TypeError", "Iterator result interface is not an object"));
     const done = (self.getProperty(result, "done") catch |err| return promiseRejectAbrupt(self, err)).toBoolean();
     const value_v = self.getProperty(result, "value") catch |err| return promiseRejectAbrupt(self, err);
     const out = try promise.newPromise(self);
@@ -24676,7 +24730,7 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
 fn asyncIterStep(self: *Interpreter, it: Value) EvalError!struct { done: bool, value: Value } {
     const r0 = try self.callMethod(it, "next", &.{});
     const r = try self.awaitValue(r0);
-    if (!r.isObject()) return self.throwError("TypeError", "iterator result is not an object");
+    if (!r.isObject()) return self.throwError("TypeError", "Iterator result interface is not an object");
     const done = (try self.getProperty(r, "done")).toBoolean();
     const val = if (done) Value.undef() else try self.awaitValue(try self.getProperty(r, "value"));
     return .{ .done = done, .value = val };
@@ -33348,7 +33402,7 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
     defer self.restoreTempRoots(next_root);
     while (true) {
         const r = try self.callValueWithThis(next_method, &.{}, it);
-        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator result is not an object");
+        if (!builtins.isRealObject(r)) return self.throwError("TypeError", "Iterator result interface is not an object");
         if ((try self.getProperty(r, "done")).toBoolean()) break;
         const nv = try self.getProperty(r, "value");
         if (!nv.isString()) {
@@ -53261,7 +53315,7 @@ fn dateNow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
 fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!self.new_target.isUndefined()) return self.throwError("TypeError", "Symbol is not a constructor");
+    if (!self.new_target.isUndefined()) return self.throwError("TypeError", "function is not a constructor");
     // `description` is ToString'd (honoring a `{toString}`/`{valueOf}` object);
     // a Symbol description is a TypeError, and `undefined` means none.
     const desc: ?[]const u8 = if (args.len > 0 and !args[0].isUndefined())

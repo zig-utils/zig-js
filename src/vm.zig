@@ -4053,7 +4053,7 @@ fn nativeGetIndex(vm: *Interpreter, object: Value, key: Value) EvalError!Value {
 }
 
 fn getSuperIndex(vm: *Interpreter, parent: Value, key: Value, receiver: Value) EvalError!Value {
-    if (!parent.isObject()) return vm.throwError("TypeError", "Cannot read property of null (super)");
+    if (!parent.isObject()) return vm.throwError("TypeError", "null is not an object");
     const parent_root = try vm.pushTempRoot(parent);
     defer vm.restoreTempRoots(parent_root);
     const receiver_root = try vm.pushTempRoot(receiver);
@@ -4062,7 +4062,7 @@ fn getSuperIndex(vm: *Interpreter, parent: Value, key: Value, receiver: Value) E
 }
 
 fn setSuperProperty(vm: *Interpreter, parent: Value, name: []const u8, key: ?Value, stored: Value, strict: bool) EvalError!Value {
-    if (!parent.isObject()) return vm.throwError("TypeError", "Cannot set property of null (super)");
+    if (!parent.isObject()) return vm.throwError("TypeError", "null is not an object");
     const parent_root = try vm.pushTempRoot(parent);
     defer vm.restoreTempRoots(parent_root);
     const value_root = try vm.pushTempRoot(stored);
@@ -8590,7 +8590,7 @@ fn runChunk(
                 // the current `this` as receiver (so an inherited getter sees it).
                 const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
                 const receiver = try initializedThis(vm);
-                const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
+                const parent = home.proto orelse return vm.throwError("TypeError", "null is not an object");
                 const name = chunk.names.items[inst.a];
                 try stack.append(stack_alloc, try vm.getPropertyWithReceiver(Value.obj(parent), name, receiver));
             },
@@ -8598,7 +8598,7 @@ fn runChunk(
                 const key = stack.pop().?;
                 const home = vm.home_object orelse return vm.throwError("SyntaxError", "'super' outside a method");
                 const receiver = try initializedThis(vm);
-                const parent = home.proto orelse return vm.throwError("TypeError", "Cannot read property of null (super)");
+                const parent = home.proto orelse return vm.throwError("TypeError", "null is not an object");
                 try stack.append(stack_alloc, try getSuperIndex(vm, Value.obj(parent), key, receiver));
             },
             .check_super_this => {
@@ -8610,20 +8610,20 @@ fn runChunk(
                 _ = try initializedThis(vm);
                 const parent = home.protoAtomic();
                 if (parent == null and inst.a != 0)
-                    return vm.throwError("TypeError", "Cannot read property of null (super)");
+                    return vm.throwError("TypeError", "null is not an object");
                 try stack.append(stack_alloc, if (parent) |object| Value.obj(object) else Value.nul());
             },
             .super_get_from => {
                 const parent = stack.pop().?;
                 if (!parent.isObject())
-                    return vm.throwError("TypeError", "Cannot read property of null (super)");
+                    return vm.throwError("TypeError", "null is not an object");
                 try stack.append(stack_alloc, try vm.getPropertyWithReceiver(parent, chunk.names.items[inst.a], vm.this_value));
             },
             .super_get_index_from => {
                 const key = stack.pop().?;
                 const parent = stack.pop().?;
                 if (!parent.isObject())
-                    return vm.throwError("TypeError", "Cannot read property of null (super)");
+                    return vm.throwError("TypeError", "null is not an object");
                 try stack.append(stack_alloc, try getSuperIndex(vm, parent, key, vm.this_value));
             },
             .enter_block => {
@@ -8750,7 +8750,7 @@ fn runChunk(
                 const v = stack.pop().?;
                 const parent = stack.pop().?;
                 if (!parent.isObject())
-                    return vm.throwError("TypeError", "Cannot set property of null (super)");
+                    return vm.throwError("TypeError", "null is not an object");
                 try stack.append(stack_alloc, try setSuperProperty(vm, parent, chunk.names.items[inst.a], null, v, inst.b != 0));
             },
             .super_set_index_from => {
@@ -8758,7 +8758,7 @@ fn runChunk(
                 const key = stack.pop().?;
                 const parent = stack.pop().?;
                 if (!parent.isObject())
-                    return vm.throwError("TypeError", "Cannot set property of null (super)");
+                    return vm.throwError("TypeError", "null is not an object");
                 try stack.append(stack_alloc, try setSuperProperty(vm, parent, "", key, v, inst.a != 0));
             },
             .init_class_field => {
@@ -9316,7 +9316,7 @@ fn runChunk(
                 // but is not an Object.
                 const r = stack.items[stack.items.len - 1];
                 if (!r.isObject() or r.asObj().is_symbol or r.asObj().is_bigint)
-                    return vm.throwError("TypeError", "iterator result is not an object");
+                    return vm.throwError("TypeError", "Iterator result interface is not an object");
             },
             .iter_of => {
                 const v = stack.pop().?;
@@ -9718,7 +9718,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     // temporary trace ownership. Claim the native borrow first, so another
     // resume still throws while this caller waits for the collector to finish.
     if (g.native_resume_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
-        return vm.throwError("TypeError", "generator is already running");
+        return vm.throwError("TypeError", "Generator is executing");
     g.resume_mutex.lockUncancelable(agent.engineIo());
     defer {
         // No JavaScript/safepoint runs between releasing the address borrow and
@@ -9726,7 +9726,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
         g.native_resume_active.store(false, .release);
         g.resume_mutex.unlock(agent.engineIo());
     }
-    if (g.running.load(.monotonic)) return vm.throwError("TypeError", "generator is already running");
+    if (g.running.load(.monotonic)) return vm.throwError("TypeError", "Generator is executing");
 
     // Reserve the saved caller roots before changing any suspended state. A
     // root-allocation failure must leave the generator resumable and unlocked.
@@ -11210,14 +11210,14 @@ fn derivedConstructorObject(vm: *Interpreter) ?*value.Object {
 fn initializedThis(vm: *Interpreter) EvalError!Value {
     if (vm.this_cell) |cell| {
         if (!cell.isInitialized())
-            return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+            return vm.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
         const bound = cell.value();
         vm.this_value = bound;
         vm.this_initialized = true;
         return bound;
     }
     if (!vm.this_initialized)
-        return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+        return vm.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
     return vm.this_value;
 }
 
@@ -11232,7 +11232,7 @@ fn constructSuper(vm: *Interpreter, super_constructor: Value, args: []const Valu
 
     const cell = vm.this_cell orelse return vm.throwError("InternalError", "derived constructor has no this binding");
     if (!cell.bind(result))
-        return vm.throwError("ReferenceError", "Super constructor may only be called once");
+        return vm.throwError("ReferenceError", "'super()' can't be called more than once in a constructor.");
     vm.this_value = result;
     vm.this_initialized = true;
 
@@ -11249,15 +11249,19 @@ fn finishDerivedConstructor(vm: *Interpreter, exec: *Exec, result: Value) EvalEr
     if (result.isObject() and !result.asObj().is_symbol and !result.asObj().is_bigint) return result;
     if (!result.isUndefined()) {
         exec.handlers.clearRetainingCapacity();
-        return vm.throwError("TypeError", "Derived constructors may only return object or undefined");
+        // JSC names the class when it has one; `activeFunction` is the running
+        // constructor, which is what the tree-walker reports here too.
+        if (activeFunction(vm)) |func| if (func.name.len != 0)
+            return vm.throwErrorFmt("TypeError", "Cannot return a non-object type in the constructor of a derived class {s}.", .{func.name});
+        return vm.throwError("TypeError", "Cannot return a non-object type in the constructor of a derived class.");
     }
     const cell = vm.this_cell orelse {
         exec.handlers.clearRetainingCapacity();
-        return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+        return vm.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
     };
     if (!cell.isInitialized()) {
         exec.handlers.clearRetainingCapacity();
-        return vm.throwError("ReferenceError", "Must call super constructor before using 'this'");
+        return vm.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
     }
     return cell.value();
 }
@@ -11274,7 +11278,7 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
             // bytecode chunk. Mirror the tree-walker's constructNT check before the
             // chunk shortcut (a plain-function chunk is the only constructible one).
             if (func.is_arrow or func.is_method or func.is_generator or func.is_async)
-                return vm.throwError("TypeError", "value is not a constructor");
+                return vm.throwErrorFmt("TypeError", "{s} is not a constructor", .{try interp.notAConstructorSubject(vm, callee)});
             if (func.chunk) |fchunk| {
                 const this_val = try vm.newInstance(callee.asObj());
                 const this_root = try vm.pushTempRoot(this_val);
@@ -12032,7 +12036,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
             } else {
                 if (vm.depth >= interp.max_call_depth) {
                     releaseActivation(vm, callee);
-                    _ = vm.throwError("RangeError", "Maximum call stack size exceeded") catch {};
+                    _ = vm.throwError("RangeError", "Maximum call stack size exceeded.") catch {};
                     if (try unwindThrow(vm, &acts)) continue;
                     return error.Throw;
                 }
