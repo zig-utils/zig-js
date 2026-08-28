@@ -308,8 +308,34 @@ fn turkicLower(self: *Interpreter, s: []const u8) EvalError![]const u8 {
     return unicode_case.toLower(self.arena, try buf.toOwnedSlice(self.arena));
 }
 
+/// Rewrite every U+0130 to its lowercase expansion `i` U+0307, which is already
+/// in NFD, so a later decomposition cannot merge it with a source-level
+/// combining dot. Returns `s` unchanged when there is none.
+fn replaceDottedCapitalI(arena: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (std.mem.indexOf(u8, s, "\xc4\xb0") == null) return s;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.ensureTotalCapacity(arena, s.len);
+    var i: usize = 0;
+    while (i < s.len) {
+        if (i + 2 <= s.len and s[i] == 0xC4 and s[i + 1] == 0xB0) {
+            try out.appendSlice(arena, "i\xcc\x87");
+            i += 2;
+            continue;
+        }
+        try out.append(arena, s[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(arena);
+}
+
 fn lithuanianLower(self: *Interpreter, s: []const u8) EvalError![]const u8 {
-    const nfd = try unicode_normalize.normalize(self.arena, s, .nfd);
+    // U+0130 already carries its dot, so it lowercases to `i` + U+0307 and the
+    // More_Above rule must not add a second one. Decomposing it first would make
+    // it indistinguishable from a source `I` followed by a combining dot, which
+    // DOES take the rule (SpecialCasing gives `I` U+0307 two dots there), so
+    // resolve it before normalizing rather than after.
+    const predotted = try replaceDottedCapitalI(self.arena, s);
+    const nfd = try unicode_normalize.normalize(self.arena, predotted, .nfd);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     while (i < nfd.len) {
