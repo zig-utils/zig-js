@@ -1295,6 +1295,7 @@ fn quickArrayPrototypeData(
     if (prototype.proxyHandler() != null or prototype.proxy_revoked) return null;
     if (parallel_sync) prototype.lockProperties();
     defer if (parallel_sync) prototype.unlockProperties();
+    if (!quickPropertyAccessAllowed(prototype)) return null;
     if (prototype.accessorsMap() != null) return null;
     if (instruction >= chunk.ics.len) return null;
     const ic = &chunk.ics[instruction];
@@ -4124,6 +4125,9 @@ fn nativeInheritedPropertyCacheValue(
     const holder = receiver.protoAtomic() orelse return null;
     holder.lockProperties();
     defer holder.unlockProperties();
+    // Claims preserve shapes. Recheck the holder while its slot is locked,
+    // then let the canonical lookup throw after the caller releases its locks.
+    if (!quickPropertyAccessAllowed(holder)) return null;
     if (holder.is_array or holder.is_arguments or holder.is_symbol or holder.is_bigint or
         holder.proxyHandler() != null or holder.proxy_revoked or holder.accessorsMap() != null or
         holder.attrsMap() != null)
@@ -15301,6 +15305,73 @@ test "vm: Thread restriction gates warmed native property artifacts" {
             try std.testing.expect(owned == .complete);
             try std.testing.expectEqual(@as(f64, if (write) 99 else 7), owned.complete.asNum());
         }
+    }
+}
+
+test "vm: Thread restriction guards warmed prototype holders without shape changes" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64 or builtin.single_threaded) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    for ([_]bool{ false, true }) |parallel| {
+        bc.ic_seqlock_enabled.store(parallel, .monotonic);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var env = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape });
+        const holder = try machine.newObject();
+        try machine.setProp(holder.asObj(), "value", Value.num(7));
+        const receiver = try machine.newObject();
+        receiver.asObj().setProtoAtomic(holder.asObj());
+        const array = try machine.newArray();
+        array.asObj().setProtoAtomic(holder.asObj());
+        var chunk = bc.Chunk.init(allocator);
+        chunk.param_count = 1;
+        chunk.local_count = 1;
+        const name = try chunk.addName("value");
+        _ = try chunk.emit(.load_local, 0);
+        const property_ip = try chunk.emit(.get_prop, name);
+        _ = try chunk.emit(.ret, 0);
+        try chunk.finalize();
+        const holder_shape = holder.asObj().shape.?;
+        chunk.ics[property_ip].recordInheritedMode(receiver.asObj().shape, holder_shape, holder_shape.lookup("value").?, parallel);
+        var compiled = try optimizer_compiler.compile(&chunk);
+        defer compiled.deinit();
+        const callbacks = &optimizer_native_property_read_callbacks;
+        const before = callbacks.load(.monotonic);
+        var slots = [_]Value{receiver};
+        const warm = try tryRunManagedNative(&machine, &compiled, &slots, null);
+        try std.testing.expect(warm == .complete);
+        try std.testing.expectEqual(@as(f64, 7), warm.complete.asNum());
+        try std.testing.expectEqual(before + @as(u64, if (parallel) 1 else 0), callbacks.load(.monotonic));
+        try std.testing.expectEqual(@as(f64, 7), quickArrayPrototypeData(&chunk, property_ip, array.asObj(), "value", parallel).?.asNum());
+
+        const Claim = struct {
+            fn run(object: *value.Object, alloc: std.mem.Allocator) void {
+                std.debug.assert((object.claimRestriction(alloc, @intCast(std.Thread.getCurrentId())) catch unreachable) == null);
+            }
+        };
+        const peer = try std.Thread.spawn(.{}, Claim.run, .{ holder.asObj(), allocator });
+        peer.join();
+        try std.testing.expectEqual(holder_shape, holder.asObj().shape.?);
+        const denied_before = callbacks.load(.monotonic);
+        try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &compiled, &slots, null));
+        try std.testing.expectEqual(denied_before + 1, callbacks.load(.monotonic));
+        try std.testing.expectEqualStrings("ConcurrentAccessError", machine.exception.asObj().errorName());
+        try std.testing.expect(quickArrayPrototypeData(&chunk, property_ip, array.asObj(), "value", parallel) == null);
+        try std.testing.expectError(error.Throw, machine.getPropertyIfExists(receiver, "value"));
+        try std.testing.expectError(error.Throw, machine.getPropertyIfExists(receiver, "missing"));
+
+        // An owning thread still uses the same artifact and shape assumptions.
+        const owned_holder = try machine.newObject();
+        try machine.setProp(owned_holder.asObj(), "value", Value.num(19));
+        try std.testing.expectEqual(@as(?u64, null), try owned_holder.asObj().claimRestriction(allocator, @intCast(std.Thread.getCurrentId())));
+        receiver.asObj().setProtoAtomic(owned_holder.asObj());
+        machine.exception = Value.undef();
+        const owned = try tryRunManagedNative(&machine, &compiled, &slots, null);
+        try std.testing.expect(owned == .complete);
+        try std.testing.expectEqual(@as(f64, 19), owned.complete.asNum());
     }
 }
 

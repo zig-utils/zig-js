@@ -14026,6 +14026,7 @@ pub const Interpreter = struct {
             // [[Get]] invariant (9.5.8): a non-configurable non-writable data
             // property must report its value; a non-configurable accessor with
             // no getter must report undefined.
+            try self.checkRestricted(target); // target.[[GetOwnProperty]] follows the trap
             if (target.proxyHandler() == null and !target.proxy_revoked and objectHasOwn(target, key) and !target.getAttr(key).configurable) {
                 if (target.getAccessor(key)) |acc| {
                     if ((acc.get == null or acc.get.?.isUndefined()) and !res.isUndefined())
@@ -14050,6 +14051,7 @@ pub const Interpreter = struct {
             // [[Set]] invariant (9.5.9): a successful set can't disagree with a
             // non-configurable non-writable data property, nor target a
             // non-configurable accessor that has no setter.
+            if (ok) try self.checkRestricted(target);
             if (ok and target.proxyHandler() == null and !target.proxy_revoked and objectHasOwn(target, key) and !target.getAttr(key).configurable) {
                 if (target.getAccessor(key)) |acc| {
                     if (acc.set == null or acc.set.?.isUndefined()) return self.throwError("TypeError", "proxy 'set' cannot succeed for a non-configurable accessor with no setter");
@@ -14072,6 +14074,7 @@ pub const Interpreter = struct {
             const b = (try self.callValueWithThis(trap, &.{ Value.obj(target), try self.keyToValue(key) }, Value.obj(o.proxyHandler().?))).toBoolean();
             // [[HasProperty]] invariant (9.5.7): can't hide a non-configurable
             // own property, nor an own property of a non-extensible target.
+            if (!b) try self.checkRestricted(target);
             if (!b and target.proxyHandler() == null and !target.proxy_revoked and objectHasOwn(target, key)) {
                 if (!target.getAttr(key).configurable) return self.throwError("TypeError", "proxy 'has' cannot report a non-configurable own property as absent");
                 if (!try self.ordinaryIsExtensible(target)) return self.throwError("TypeError", "proxy 'has' cannot report an own property of a non-extensible target as absent");
@@ -14427,7 +14430,6 @@ pub const Interpreter = struct {
     }
 
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
-        if (recv.isObject()) try self.checkRestricted(recv.asObj());
         return self.getPropertyWithReceiverFound(recv, key, recv, null, null);
     }
 
@@ -14438,7 +14440,6 @@ pub const Interpreter = struct {
         observation: *?InheritedPropertyObservation,
     ) EvalError!Value {
         observation.* = null;
-        if (recv.isObject()) try self.checkRestricted(recv.asObj());
         return self.getPropertyWithReceiverFound(recv, key, recv, null, observation);
     }
 
@@ -14554,6 +14555,9 @@ pub const Interpreter = struct {
         found: ?*bool,
         inherited_observation: ?*?InheritedPropertyObservation,
     ) EvalError!Value {
+        // Guard the actual lookup target, including Reflect.get, super, and
+        // Proxy forwarding, not just the source-language member receiver.
+        if (recv.isObject()) try self.checkRestricted(recv.asObj());
         if (found) |slot| slot.* = true;
         // PrivateGet is not OrdinaryGet: it resolves the PrivateElement directly
         // (a setter-only accessor read is a TypeError; an absent brand is a
@@ -14700,6 +14704,7 @@ pub const Interpreter = struct {
                 var cur: ?*value.Object = o;
                 var prototype_depth: usize = 0;
                 while (cur) |c| {
+                    if (c != o) try self.checkRestricted(c);
                     if (c.proxyHandler() != null or c.proxy_revoked)
                         return self.proxyGet(c, key, receiver);
                     // A module namespace reached through the prototype chain (its
@@ -14805,6 +14810,7 @@ pub const Interpreter = struct {
         const boxed = try self.boxPrimitiveBase(recv);
         var cur: ?*value.Object = boxed;
         while (cur) |c| {
+            try self.checkRestricted(c);
             if (c.proxyHandler() != null or c.proxy_revoked)
                 return self.proxyGet(c, key, recv);
             if (c.getAccessor(key)) |acc| {
@@ -15592,6 +15598,7 @@ pub const Interpreter = struct {
                 if (!isValidIntegerIndex(ta, n)) return true;
                 if (!receiver.isObject()) return true;
                 const rcv = receiver.asObj();
+                try self.checkRestricted(rcv);
                 if (rcv.typedArray()) |rta| {
                     if (!isValidIntegerIndex(rta, n)) return false;
                     if (rta.kind.isBigInt()) {
@@ -15695,6 +15702,7 @@ pub const Interpreter = struct {
         // A setter anywhere on the prototype chain intercepts the assignment.
         var cur: ?*value.Object = o;
         while (cur) |c| {
+            if (c != o) try self.checkRestricted(c);
             if (c.proxyHandler() != null or c.proxy_revoked)
                 return self.proxySet(c, key, v, receiver);
             // OrdinarySet delegates to an ancestor's [[Set]]: an Integer-Indexed
@@ -15770,6 +15778,9 @@ pub const Interpreter = struct {
         }
         if (!builtins.isRealObject(receiver)) return false;
         const ro = receiver.asObj();
+        // OrdinarySetWithOwnDescriptor consults Receiver.[[GetOwnProperty]]
+        // before defining a data slot, even when the lookup target is public.
+        try self.checkRestricted(ro);
         if (ro.proxyHandler() != null or ro.proxy_revoked)
             return self.defineReceiverDataProperty(receiver, key, v);
         if (moduleNsOf(ro) != null) {
@@ -15865,6 +15876,7 @@ pub const Interpreter = struct {
         const boxed = try self.boxPrimitiveBase(recv);
         var cur: ?*value.Object = boxed;
         while (cur) |c| {
+            try self.checkRestricted(c);
             if (c.proxyHandler() != null or c.proxy_revoked)
                 return self.proxySet(c, key, v, recv);
             if (c.getAccessor(key)) |acc| {
@@ -20370,6 +20382,7 @@ pub const Interpreter = struct {
     /// Spec [[HasProperty]]: own property first, then prototype chain, invoking
     /// Proxy `has` traps at whichever object in the chain provides them.
     pub fn hasPropertyResult(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
+        try self.checkRestricted(o);
         // Integer-Indexed Exotic [[HasProperty]]: a canonical numeric key resolves
         // purely to index validity — it never consults the prototype chain.
         if (o.typedArray()) |ta| {
@@ -20377,6 +20390,7 @@ pub const Interpreter = struct {
         }
         var cur: ?*value.Object = o;
         while (cur) |c| {
+            if (c != o) try self.checkRestricted(c);
             if (c.proxyHandler() != null or c.proxy_revoked) return self.proxyHas(c, key);
             if (moduleNsOf(c)) |ns| {
                 try triggerDeferIfString(self, ns, key);
@@ -20393,7 +20407,6 @@ pub const Interpreter = struct {
     }
 
     pub fn inOperator(self: *Interpreter, l: Value, r: Value) EvalError!bool {
-        if (r.isObject()) try self.checkRestricted(r.asObj());
         if (!r.isObject()) return self.throwError("TypeError", "cannot use 'in' on a non-object");
         const o = r.asObj();
         const key = try self.keyOf(l);

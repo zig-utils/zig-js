@@ -28196,6 +28196,82 @@ test "Thread restriction gates property paths across execution tiers" {
     try std.testing.expectEqual(@as(usize, 0), failures);
 }
 
+test "Thread restriction guards forwarded targets holders and write receivers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |parallel_js| {
+        for ([_]bool{ false, true }) |enable_jit| {
+            for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+                errdefer std.debug.print("forwarded restriction mode={s} jit={} parallel={}\n", .{ @tagName(mode), enable_jit, parallel_js });
+                const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                    .enable_gc = true,
+                    .enable_jit = enable_jit,
+                    .enable_threads = true,
+                    .parallel_gc = true,
+                    .parallel_js = parallel_js,
+                    .bytecode_execution_mode = mode,
+                });
+                defer ctx.destroy();
+                const result = try ctx.evaluate(
+                    \\var forwardedEffects=0,forwardedTraps='';
+                    \\var holder={secret:37,get accessor(){forwardedEffects++;return this.tag;},set setter(v){forwardedEffects++;this.tag=v;}};
+                    \\var child=Object.create(holder);child.tag=19;
+                    \\var shadow=Object.create(holder);Object.defineProperty(shadow,'secret',{value:29,writable:true});
+                    \\var proxy=new Proxy(holder,{}),deepProxy=new Proxy(proxy,{});
+                    \\var intercepted=new Proxy(holder,{get(){forwardedTraps+='g';return 9;},has(){forwardedTraps+='h';return false;},set(){forwardedTraps+='s';return true;}});
+                    \\var noTargetRead=new Proxy(holder,{get(){throw 41;},has(){return true;},set(){return false;}});
+                    \\var array=[];Object.setPrototypeOf(array,holder);
+                    \\var inheritedArray=[43],arrayChild=Object.create(inheritedArray);
+                    \\var home={read(){return super.secret;},write(){super.setter=71;}};Object.setPrototypeOf(home,holder);
+                    \\Object.setPrototypeOf(Number.prototype,holder);
+                    \\function forwardedRead(o){return o.secret;}
+                    \\for(var i=0;i<30;i++){forwardedRead(child);forwardedRead(array);}
+                    \\Thread.restrict(holder);Thread.restrict(inheritedArray);
+                    \\var worker=new Thread(function(){var failures=[],coercions=0;
+                    \\ function denied(name,action){try{action();failures.push(name+':allowed');}catch(e){if(!(e instanceof ConcurrentAccessError))failures.push(name+':'+e.name);}}
+                    \\ denied('reflect-get',function(){return Reflect.get(holder,'secret',child);});
+                    \\ denied('inherited-get',function(){return child.secret;});
+                    \\ denied('warm-inherited-get',function(){return forwardedRead(child);});
+                    \\ denied('missing-get',function(){return child.absent;});
+                    \\ denied('accessor-get',function(){return child.accessor;});
+                    \\ denied('proxy-get',function(){return proxy.secret;});
+                    \\ denied('deep-proxy-get',function(){return deepProxy.secret;});
+                    \\ denied('proxy-get-invariant',function(){return intercepted.secret;});
+                    \\ denied('array-holder',function(){return forwardedRead(array);});
+                    \\ denied('inherited-dense',function(){return arrayChild[0];});
+                    \\ denied('inherited-length',function(){return arrayChild.length;});
+                    \\ denied('primitive-get',function(){return (1).secret;});
+                    \\ denied('super-get',function(){return home.read();});
+                    \\ denied('inherited-has',function(){return 'secret' in child;});
+                    \\ denied('missing-has',function(){return 'absent' in child;});
+                    \\ denied('proxy-has',function(){return 'secret' in proxy;});
+                    \\ denied('proxy-has-invariant',function(){return 'secret' in intercepted;});
+                    \\ denied('inherited-set',function(){child.secret=71;});
+                    \\ denied('inherited-setter',function(){child.setter=72;});
+                    \\ denied('receiver-set',function(){return Reflect.set({secret:1},'secret',73,holder);});
+                    \\ denied('proxy-set-invariant',function(){return Reflect.set(intercepted,'secret',74);});
+                    \\ denied('primitive-set',function(){(1).setter=75;});
+                    \\ denied('super-set',function(){home.write();});
+                    \\ denied('computed-get',function(){return Reflect.get(holder,{toString(){coercions++;return 'secret';}});});
+                    \\ denied('computed-has',function(){return {toString(){coercions++;return 'secret';}} in holder;});
+                    \\ if(coercions!==2)failures.push('coercion:'+coercions);
+                    \\ if(shadow.secret!==29||!('secret' in shadow))failures.push('own-shadow');shadow.secret=31;
+                    \\ if(!('secret' in noTargetRead)||Reflect.set(noTargetRead,'secret',76)!==false)failures.push('trap-short-circuit');
+                    \\ try{noTargetRead.secret;failures.push('trap-abrupt');}catch(e){if(e!==41)failures.push('trap-abrupt-value');}
+                    \\ return failures.join(',');});
+                    \\var report=worker.join();
+                    \\if(forwardedEffects!==0||forwardedTraps!=='ghs'||holder.secret!==37||child.tag!==19||Object.hasOwn(child,'secret')||shadow.secret!==31)report+=';effects';
+                    \\if(child.secret!==37||Reflect.get(holder,'secret',child)!==37||proxy.secret!==37||arrayChild[0]!==43)report+=';owner';
+                    \\report
+                );
+                try std.testing.expect(result.isString());
+                try std.testing.expectEqualStrings("", result.asStr());
+                if (mode == .required)
+                    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+            }
+        }
+    }
+}
+
 test "class call guards precede callee effects across execution tiers" {
     for ([_]bool{ false, true }) |enable_jit| {
         for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
