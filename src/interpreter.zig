@@ -11384,14 +11384,46 @@ pub const Interpreter = struct {
         return value.strictEquals(a, b);
     }
 
+    /// One sequence's byte length and UTF-16 width, classified in a single pass.
+    /// Walking a string used to ask for these separately, and each answer ran a
+    /// surrogate probe plus `utf8ValidateSlice` over the same bytes — four passes
+    /// per character to learn two small numbers. Malformed bytes are reported as
+    /// a one-byte, one-unit sequence, exactly as before.
+    const Wtf8Seq = struct { len: usize, units: usize };
+
+    fn wtf8SeqAt(s: []const u8, i: usize) Wtf8Seq {
+        const lead = s[i];
+        if (lead < 0x80) return .{ .len = 1, .units = 1 };
+        const len: usize = if (lead >= 0xC2 and lead <= 0xDF)
+            2
+        else if (lead >= 0xE0 and lead <= 0xEF)
+            3
+        else if (lead >= 0xF0 and lead <= 0xF4)
+            4
+        else
+            return .{ .len = 1, .units = 1 };
+        if (i + len > s.len) return .{ .len = 1, .units = 1 };
+        for (s[i + 1 .. i + len]) |continuation| {
+            if (continuation & 0xC0 != 0x80) return .{ .len = 1, .units = 1 };
+        }
+        // Reject the overlong and out-of-range forms `utf8ValidateSlice` rejected,
+        // but keep WTF-8's surrogates, which it does not.
+        const second = s[i + 1];
+        switch (lead) {
+            0xE0 => if (second < 0xA0) return .{ .len = 1, .units = 1 },
+            0xF0 => if (second < 0x90) return .{ .len = 1, .units = 1 },
+            0xF4 => if (second > 0x8F) return .{ .len = 1, .units = 1 },
+            else => {},
+        }
+        return .{ .len = len, .units = if (len == 4) 2 else 1 };
+    }
+
     fn jsStringSeqLen(s: []const u8, i: usize) usize {
-        if (wtf8SurrogateAt(s, i) != null) return 3;
-        return utf8SeqLen(s, i);
+        return wtf8SeqAt(s, i).len;
     }
 
     fn utf16LenOfSeq(s: []const u8, i: usize) usize {
-        if (wtf8SurrogateAt(s, i) != null) return 1;
-        return if (utf8SeqLen(s, i) == 4) @as(usize, 2) else 1;
+        return wtf8SeqAt(s, i).units;
     }
 
     pub fn utf16LenOfString(s: []const u8) usize {
