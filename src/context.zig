@@ -28018,6 +28018,126 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "internal descriptors preserve specification record boundaries" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "json", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'get',{get(){calls++;throw 123;},configurable:true});try{var r=JSON.parse('{\"a\":1}',function(k,v){return v;});return r.a===1&&calls===0;}finally{delete Object.prototype.get;}})()" },
+            .{ .name = "array_from", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'get',{get(){calls++;throw 123;},configurable:true});try{function C(){}var r=Array.from.call(C,{0:7,length:1});return r[0]===7&&calls===0;}finally{delete Object.prototype.get;}})()" },
+            .{ .name = "array_of", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'set',{get(){calls++;throw 123;},configurable:true});try{function C(){}var r=Array.of.call(C,7);return r[0]===7&&calls===0;}finally{delete Object.prototype.set;}})()" },
+            .{ .name = "species_map", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'get',{get(){calls++;throw 123;},configurable:true});try{var a=[7];a.constructor={[Symbol.species]:function(){return {};}};var r=a.map(x=>x);return r[0]===7&&calls===0;}finally{delete Object.prototype.get;}})()" },
+            .{ .name = "class_field", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'set',{get(){calls++;throw 123;},configurable:true});try{var target={};class B{constructor(){return new Proxy(new Proxy(target,{}),{});}}class C extends B{x=7;}new C();return target.x===7&&calls===0;}finally{delete Object.prototype.set;}})()" },
+            .{ .name = "legacy_getter", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'value',{get(){calls++;throw 123;},configurable:true});try{var o={};o.__defineGetter__('x',function(){return 7;});return o.x===7&&calls===0;}finally{delete Object.prototype.value;}})()" },
+            .{ .name = "legacy_setter", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'writable',{get(){calls++;throw 123;},configurable:true});try{var o={},seen;o.__defineSetter__('x',function(v){seen=v;});o.x=7;return seen===7&&calls===0;}finally{delete Object.prototype.writable;}})()" },
+            .{ .name = "legacy_getter_call", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'value',{get(){calls++;throw 123;},configurable:true});try{var o={};Object.prototype.__defineGetter__.call(o,'x',function(){return 7;});return o.x===7&&calls===0;}finally{delete Object.prototype.value;}})()" },
+            .{ .name = "legacy_setter_call", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'writable',{get(){calls++;throw 123;},configurable:true});try{var o={},seen;Object.prototype.__defineSetter__.call(o,'x',function(v){seen=v;});o.x=7;return seen===7&&calls===0;}finally{delete Object.prototype.writable;}})()" },
+            .{ .name = "set_new_receiver", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'get',{get(){calls++;throw 123;},configurable:true});try{var r={};return Reflect.set({x:0},'x',7,new Proxy(r,{}))&&r.x===7&&calls===0;}finally{delete Object.prototype.get;}})()" },
+            .{ .name = "set_existing_receiver", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'get',{get(){calls++;throw 123;},configurable:true});try{var r={x:1};return Reflect.set({x:0},'x',7,new Proxy(r,{}))&&r.x===7&&calls===0;}finally{delete Object.prototype.get;}})()" },
+            .{ .name = "typed_set_proxy_receiver", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'set',{get(){calls++;throw 123;},configurable:true});try{var r={};return Reflect.set(new Uint8Array(1),'0',7,new Proxy(r,{}))&&r[0]===7&&calls===0;}finally{delete Object.prototype.set;}})()" },
+            .{ .name = "typed_set_plain_receiver", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'get',{get(){calls++;throw 123;},configurable:true});try{var r={};return Reflect.set(new Uint8Array(1),'0',7,r)&&r[0]===7&&calls===0;}finally{delete Object.prototype.get;}})()" },
+            .{ .name = "public_inherited", .source = "(function(){var n=0;var proto={get value(){n++;return 7;},writable:true};var o={};Object.defineProperty(o,'x',Object.create(proto));return n===1&&o.x===7&&Object.getOwnPropertyDescriptor(o,'x').writable;})()" },
+            .{ .name = "public_abrupt", .source = "(function(){var calls=0;Object.defineProperty(Object.prototype,'get',{get(){calls++;throw 123;},configurable:true});try{try{Reflect.defineProperty({},'x',{value:7});}catch(e){return e===123&&calls===1;}return false;}finally{delete Object.prototype.get;}})()" },
+            .{ .name = "public_proxy_field_order", .source = "(function(){var log=[];var d=new Proxy({value:7},{has(t,k){log.push('h:'+k);return Reflect.has(t,k);},get(t,k){log.push('g:'+k);return t[k];}});var o={};Object.defineProperty(o,'x',d);return o.x===7&&log.join(',')==='h:enumerable,h:configurable,h:value,g:value,h:writable,h:get,h:set';})()" },
+            .{ .name = "partial_trap_record", .source = "(function(){var records=[];var r=new Proxy({x:1},{defineProperty(t,k,d){records.push(Object.keys(d).join(','));return Reflect.defineProperty(t,k,d);}});Reflect.set({x:0},'x',7,r);Reflect.set({y:0},'y',8,r);return records.join('|')==='value|value,writable,enumerable,configurable'&&r.x===7&&r.y===8;})()" },
+            .{ .name = "accessor_trap_record", .source = "(function(){var seen;var r=new Proxy({},{defineProperty(t,k,d){seen=d;return true;}});var f=function(){};r.__defineGetter__('x',f);return Object.keys(seen).join(',')==='get,enumerable,configurable'&&seen.get===f&&!Object.hasOwn(seen,'set');})()" },
+            .{ .name = "json_reject_ignored", .source = "(function(){var r=JSON.parse('{\"a\":1,\"b\":2}',function(k,v){if(k==='a')Object.defineProperty(this,'b',{value:8,configurable:false});return v;});return r.a===1&&r.b===8;})()" },
+            .{ .name = "create_data_trap_abrupt", .source = "(function(){function C(){return new Proxy({},{defineProperty(){throw 37;}});}try{Array.from.call(C,{0:7,length:1});}catch(e){return e===37;}return false;})()" },
+        }) |case| {
+            errdefer std.debug.print("internal descriptors {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
+test "internal descriptors retain ordinary receiver metadata through moving nursery" {
+    try expectProxyMetadataMoving("var target={};var receiver=new Proxy(target,{getOwnPropertyDescriptor(){proxyMovingLoop(20000);return undefined;}});", "Reflect.set({x:0},'x',proxySubject,receiver)&&target.x===proxySubject");
+}
+
+test "internal descriptors retain typed receiver metadata through moving nursery" {
+    try expectProxyMetadataMoving("var target={};var receiver=new Proxy(target,{getOwnPropertyDescriptor(){proxyMovingLoop(20000);return undefined;}});", "Reflect.set(new Uint8Array(1),'0',proxySubject,receiver)&&target[0]===proxySubject");
+}
+
+test "internal descriptors retain legacy getter key through moving nursery" {
+    try expectProxyMetadataMoving("var target={};var getter=function(){return proxySubject;};var key={toString(){proxyMovingLoop(20000);return 'x';}};", "(target.__defineGetter__(key,getter),Object.getOwnPropertyDescriptor(target,'x').get===getter&&target.x===proxySubject)");
+}
+
+test "internal descriptors retain legacy setter key through moving nursery" {
+    try expectProxyMetadataMoving("var target={};var setter=function(v){this.seen=v;};var key={toString(){proxyMovingLoop(20000);return 'x';}};", "(Object.prototype.__defineSetter__.call(target,key,setter),target.x=proxySubject,Object.getOwnPropertyDescriptor(target,'x').set===setter&&target.seen===proxySubject)");
+}
+
+test "internal descriptors retain array from trap through moving nursery" {
+    try expectProxyMetadataMoving("var target={};function C(){return new Proxy(target,{defineProperty(t,k,d){if(k==='0')proxyMovingLoop(20000);return Reflect.defineProperty(t,k,d);}});}", "Array.from.call(C,{0:proxySubject,length:1})[0]===proxySubject&&target[0]===proxySubject");
+}
+
+test "internal descriptors retain array species trap through moving nursery" {
+    try expectProxyMetadataMoving("var target={};var source=[proxySubject];source.constructor={[Symbol.species]:function(){return new Proxy(target,{defineProperty(t,k,d){proxyMovingLoop(20000);return Reflect.defineProperty(t,k,d);}});}};", "source.map(x=>x)[0]===proxySubject&&target[0]===proxySubject");
+}
+
+test "internal descriptors retain class field trap through moving nursery" {
+    try expectProxyMetadataMoving("var target={};class B{constructor(){return new Proxy(target,{defineProperty(t,k,d){proxyMovingLoop(20000);return Reflect.defineProperty(t,k,d);}});}}class C extends B{x=proxySubject;}", "new C().x===proxySubject&&target.x===proxySubject");
+}
+
+test "internal descriptors retain accessor trap lookup through moving nursery" {
+    try expectProxyMetadataMoving("var target={};var getter=function(){return proxySubject;};var receiver=new Proxy(target,{get defineProperty(){proxyMovingLoop(20000);return function(t,k,d){return Reflect.defineProperty(t,k,d);};}});", "(receiver.__defineGetter__('x',getter),Object.getOwnPropertyDescriptor(target,'x').get===getter&&target.x===proxySubject)");
+}
+
+test "internal descriptors retain array of arguments through moving nursery" {
+    try expectProxyMetadataMoving("var target={};function C(){return new Proxy(target,{defineProperty(t,k,d){if(k==='0')proxyMovingLoop(20000);return Reflect.defineProperty(t,k,d);}});}", "Array.of.call(C,proxySubject,proxySubject)[1]===proxySubject&&target[0]===proxySubject");
+}
+
+test "internal descriptors retain iterable array result through moving nursery" {
+    try expectProxyMetadataMoving("var target={};function C(){return new Proxy(target,{defineProperty(t,k,d){if(k==='0')proxyMovingLoop(20000);return Reflect.defineProperty(t,k,d);}});}", "Array.from.call(C,[proxySubject,proxySubject])[1]===proxySubject&&target[0]===proxySubject");
+}
+
+test "internal descriptors retain inherited iterator setter through moving nursery" {
+    try expectProxyMetadataMoving("var setter=Object.getOwnPropertyDescriptor(Iterator.prototype,'constructor').set;var target={};var receiver=new Proxy(target,{getOwnPropertyDescriptor(){proxyMovingLoop(20000);return undefined;}});", "(setter.call(receiver,proxySubject),target.constructor===proxySubject)");
+}
+
+test "internal descriptors isolate shared no-GIL callers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    ctx.setBytecodeExecutionModeForTesting(.required);
+    const result = try ctx.evaluate(
+        \\Object.defineProperty(Object.prototype,'get',{get(){throw 123;},configurable:true});
+        \\function descriptorLane(seed) {
+        \\  if ($vm.useThreadGIL() !== false) throw 99;
+        \\  var total=0;
+        \\  for(var i=0;i<32;i++){
+        \\    var value={marker:seed+i}, target={};
+        \\    // Handler GetMethod('get') must not itself see the descriptor poison.
+        \\    var receiver=new Proxy(target,{get:undefined});
+        \\    if(!Reflect.set({x:0},'x',value,receiver)||target.x!==value)throw 98;
+        \\    function C(){return receiver;}
+        \\    if(Array.of.call(C,value)[0]!==value)throw 97;
+        \\    if(JSON.parse('{"x":7}',function(k,v){return v;}).x!==7)throw 96;
+        \\    total+=target.x.marker;
+        \\  }
+        \\  return total;
+        \\}
+        \\var lanes=[],total=0;
+        \\for(var i=0;i<4;i++)lanes.push(new Thread(descriptorLane,i));
+        \\for(var i=0;i<4;i++)total+=lanes[i].join();
+        \\delete Object.prototype.get;
+        \\total
+    );
+    try std.testing.expectEqual(@as(f64, 2176), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 test "Object reflection preserves descriptor collection semantics" {
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         for ([_]struct { name: []const u8, source: []const u8 }{

@@ -1040,13 +1040,17 @@ pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Valu
     // Array.of uses `this` as a constructor when it is one (so a subclass's
     // Array.of produces a subclass instance), via Construct(C, « len »).
     const len = args.len;
+    const roots = try self.pushTempRoot(this);
+    defer self.restoreTempRoots(roots);
+    for (args) |v| _ = try self.pushTempRoot(v);
     const result: Value = if (interpreter.isConstructorValue(this))
         try self.construct(this, &.{Value.num(@floatFromInt(len))})
     else
         try self.newArray();
-    for (args, 0..) |v, k| try createDataIndexOrThrow(self, result, k, v);
-    try self.setMember(result, "length", Value.num(@floatFromInt(len)));
-    return result;
+    const result_root = try self.pushTempRoot(result);
+    for (args, 0..) |v, k| try createDataIndexOrThrow(self, self.tempRoot(result_root, result), k, self.tempRoot(roots + 1 + k, v));
+    try setLengthOrThrow(self, self.tempRoot(result_root, result), len);
+    return self.tempRoot(result_root, result);
 }
 
 /// `Array(...)` / `new Array(...)`: a single numeric argument is a length
@@ -1115,13 +1119,8 @@ fn createDataIndexOrThrow(self: *Interpreter, target: Value, k: usize, v: Value)
         if (try target.asObj().appendDataIndexIfDense(self.arena, k, v)) return;
     }
     const key = try std.fmt.allocPrint(self.arena, "{d}", .{k});
-    const desc = (try self.newObject()).asObj();
-    try desc.setOwn(self.arena, self.root_shape, "value", v);
-    try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
-    try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-    try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
     if (!target.isObject()) return self.throwError("TypeError", "Cannot create property on non-object");
-    if (!try defineOneResult(self, target.asObj(), key, desc))
+    if (!try defineDescriptorResult(self, target.asObj(), key, .data(v)))
         return self.throwError("TypeError", "Cannot create property");
 }
 
@@ -1149,6 +1148,11 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const items = arg(args, 0);
     const map_fn = arg(args, 1);
     const this_arg = arg(args, 2);
+    const constructor_root = try self.pushTempRoot(C);
+    defer self.restoreTempRoots(constructor_root);
+    const items_root = try self.pushTempRoot(items);
+    const map_root = try self.pushTempRoot(map_fn);
+    const this_root = try self.pushTempRoot(this_arg);
     var mapping = false;
     if (!map_fn.isUndefined()) {
         if (!map_fn.isCallable()) return self.throwError("TypeError", "Array.from: mapping function is not callable");
@@ -1169,26 +1173,31 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     }
 
     if (!iter_method.isUndefined()) {
-        const result: Value = if (use_ctor) try self.construct(C, &.{}) else try self.newArray();
-        const it = try self.callValueWithThis(iter_method, &.{}, items);
+        const method_root = try self.pushTempRoot(iter_method);
+        const result: Value = if (use_ctor) try self.construct(self.tempRoot(constructor_root, C), &.{}) else try self.newArray();
+        const result_root = try self.pushTempRoot(result);
+        const it = try self.callValueWithThis(self.tempRoot(method_root, iter_method), &.{}, self.tempRoot(items_root, items));
+        const iterator_root = try self.pushTempRoot(it);
         var k: usize = 0;
         while (true) {
-            const res = try self.callMethod(it, "next", &.{});
+            const res = try self.callMethod(self.tempRoot(iterator_root, it), "next", &.{});
             if (!isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
+            const step_root = try self.pushTempRoot(res);
+            defer self.restoreTempRoots(step_root);
             if ((try self.getProperty(res, "done")).toBoolean()) break;
-            const v = try self.getProperty(res, "value");
-            const mapped: Value = if (mapping) self.callValueWithThis(map_fn, &.{ v, Value.num(@floatFromInt(k)) }, this_arg) catch |e| {
-                self.iteratorCloseKeepingThrow(it);
+            const v = try self.getProperty(self.tempRoot(step_root, res), "value");
+            const mapped: Value = if (mapping) self.callValueWithThis(self.tempRoot(map_root, map_fn), &.{ v, Value.num(@floatFromInt(k)) }, self.tempRoot(this_root, this_arg)) catch |e| {
+                self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, it));
                 return e;
             } else v;
-            createDataIndexOrThrow(self, result, k, mapped) catch |e| {
-                self.iteratorCloseKeepingThrow(it);
+            createDataIndexOrThrow(self, self.tempRoot(result_root, result), k, mapped) catch |e| {
+                self.iteratorCloseKeepingThrow(self.tempRoot(iterator_root, it));
                 return e;
             };
             k += 1;
         }
-        try setLengthOrThrow(self, result, k);
-        return result;
+        try setLengthOrThrow(self, self.tempRoot(result_root, result), k);
+        return self.tempRoot(result_root, result);
     }
 
     // Not iterable: ToObject(items), then copy indices 0..LengthOfArrayLike-1
@@ -1196,25 +1205,27 @@ pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     // message; name the method instead, as JSC does.
     if (items.isUndefined() or items.isNull())
         return self.throwError("TypeError", "Array.from requires an array-like object - not null or undefined");
-    const array_like = try self.toObject(items);
+    const array_like = try self.toObject(self.tempRoot(items_root, items));
+    const array_like_root = try self.pushTempRoot(Value.obj(array_like));
     // LengthOfArrayLike = ToLength(Get(arrayLike,"length")), clamped to
     // 2^53-1. `interpreter.toLen` intentionally caps at array-index range, which
     // would turn Infinity into a valid Array length here instead of letting
     // ArrayCreate/new Array reject it.
-    const raw_len = try self.toNumberV(try self.getProperty(Value.obj(array_like), "length"));
+    const raw_len = try self.toNumberV(try self.getProperty(self.tempRoot(array_like_root, Value.obj(array_like)), "length"));
     const to_length: f64 = if (std.math.isNan(raw_len) or raw_len <= 0) 0 else @min(@trunc(raw_len), 9007199254740991.0);
     if (!use_ctor and to_length > 4294967295.0) return self.throwError("RangeError", "Array.from: invalid array length");
     const len: usize = @intFromFloat(@min(to_length, 4294967295.0));
-    const result: Value = if (use_ctor) try self.construct(C, &.{Value.num(to_length)}) else try self.newArray();
+    const result: Value = if (use_ctor) try self.construct(self.tempRoot(constructor_root, C), &.{Value.num(to_length)}) else try self.newArray();
+    const result_root = try self.pushTempRoot(result);
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
-        const v = try self.getProperty(Value.obj(array_like), key);
-        const mapped: Value = if (mapping) try self.callValueWithThis(map_fn, &.{ v, Value.num(@floatFromInt(i)) }, this_arg) else v;
-        try createDataIndexOrThrow(self, result, i, mapped);
+        const v = try self.getProperty(self.tempRoot(array_like_root, Value.obj(array_like)), key);
+        const mapped: Value = if (mapping) try self.callValueWithThis(self.tempRoot(map_root, map_fn), &.{ v, Value.num(@floatFromInt(i)) }, self.tempRoot(this_root, this_arg)) else v;
+        try createDataIndexOrThrow(self, self.tempRoot(result_root, result), i, mapped);
     }
-    try setLengthOrThrow(self, result, len);
-    return result;
+    try setLengthOrThrow(self, self.tempRoot(result_root, result), len);
+    return self.tempRoot(result_root, result);
 }
 
 /// `Array.fromAsync(asyncItems, mapfn, thisArg)` — ES2024. Returns a promise of
@@ -1609,8 +1620,74 @@ pub fn reflectDefineProperty(ctx: *anyopaque, this: Value, args: []const Value) 
     return Value.boolVal(try defineOneResult(self, self.tempRoot(target_root, target).asObj(), key, desc.asObj()));
 }
 
-/// Core of `Object.defineProperty` / `defineProperties`: apply descriptor `d` to
-/// `target[key]`, honoring attributes and bypassing [[Set]].
+/// ECMA-262 Property Descriptor specification record. Absence is distinct from
+/// an explicitly undefined value/getter/setter. This is never a JavaScript object.
+pub const PropertyDescriptor = struct {
+    value: ?Value = null,
+    writable: ?bool = null,
+    get: ?Value = null,
+    set: ?Value = null,
+    enumerable: ?bool = null,
+    configurable: ?bool = null,
+
+    pub fn data(v: Value) PropertyDescriptor {
+        return .{ .value = v, .writable = true, .enumerable = true, .configurable = true };
+    }
+
+    fn complete(input: PropertyDescriptor) PropertyDescriptor {
+        var d = input;
+        d.enumerable = d.enumerable orelse false;
+        d.configurable = d.configurable orelse false;
+        if (d.get != null or d.set != null) {
+            d.get = d.get orelse Value.undef();
+            d.set = d.set orelse Value.undef();
+        } else {
+            d.value = d.value orelse Value.undef();
+            d.writable = d.writable orelse false;
+        }
+        return d;
+    }
+
+    /// FromPropertyDescriptor: materialize only when crossing into JavaScript.
+    fn toObject(input: PropertyDescriptor, self: *Interpreter) HostError!Value {
+        const rooted = try RootedDescriptor.init(self, input);
+        defer self.restoreTempRoots(rooted.root);
+        const out = try self.newObject();
+        const out_root = try self.pushTempRoot(out);
+        // Canonical publication order differs from ToPropertyDescriptor's reads.
+        inline for (.{ "value", "writable", "get", "set", "enumerable", "configurable" }) |name| {
+            if (@field(rooted.get(self), name)) |field| {
+                const v = if (@TypeOf(field) == bool) Value.boolVal(field) else field;
+                try self.tempRoot(out_root, out).asObj().setOwn(self.arena, self.root_shape, name, v);
+            }
+        }
+        return self.tempRoot(out_root, out);
+    }
+};
+
+/// Invocation-local precise roots: callbacks can relocate every descriptor
+/// payload independently. No descriptor object or shared mutable state is needed.
+const RootedDescriptor = struct {
+    descriptor: PropertyDescriptor,
+    root: usize,
+
+    fn init(self: *Interpreter, d: PropertyDescriptor) HostError!RootedDescriptor {
+        const root = try self.pushTempRoot(d.value orelse Value.undef());
+        errdefer self.restoreTempRoots(root);
+        _ = try self.pushTempRoot(d.get orelse Value.undef());
+        _ = try self.pushTempRoot(d.set orelse Value.undef());
+        return .{ .descriptor = d, .root = root };
+    }
+
+    fn get(rooted: RootedDescriptor, self: *Interpreter) PropertyDescriptor {
+        var d = rooted.descriptor;
+        if (d.value) |v| d.value = self.tempRoot(rooted.root, v);
+        if (d.get) |v| d.get = self.tempRoot(rooted.root + 1, v);
+        if (d.set) |v| d.set = self.tempRoot(rooted.root + 2, v);
+        return d;
+    }
+};
+
 /// Read a property-descriptor field per ToPropertyDescriptor: present iff
 /// HasProperty (own *or inherited*), value via Get (so an inherited or accessor
 /// descriptor field is honored). Returns null when absent.
@@ -1621,24 +1698,23 @@ fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?
     return try self.getProperty(self.tempRoot(root, Value.obj(d)), name);
 }
 
-pub fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!void {
+fn defineOne(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!void {
     if (!try defineOneResult(self, target, key, d_obj))
         return self.throwError("TypeError", "Cannot define property");
 }
 
-pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!bool {
+fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u8, d_obj: *value.Object) HostError!bool {
     const target_root = try self.pushTempRoot(Value.obj(target));
     defer self.restoreTempRoots(target_root);
     const scratch = self.scratch_allocator orelse self.arena;
     const owned_key = try scratch.dupe(u8, key);
     defer scratch.free(owned_key);
-    const descriptor = try readDescriptor(self, d_obj, false);
-    return defineDescriptorResult(self, self.tempRoot(target_root, Value.obj(target)).asObj(), owned_key, descriptor.asObj());
+    const descriptor = try readDescriptor(self, d_obj);
+    return applyDescriptor(self, self.tempRoot(target_root, Value.obj(target)).asObj(), owned_key, descriptor);
 }
 
-/// ToPropertyDescriptor, materialized once into private own-field storage.
-/// The record is never re-read through HasProperty/Get during application.
-fn readDescriptor(self: *Interpreter, input: *value.Object, complete: bool) HostError!Value {
+/// ToPropertyDescriptor is the only user-object conversion boundary.
+fn readDescriptor(self: *Interpreter, input: *value.Object) HostError!PropertyDescriptor {
     const input_root = try self.pushTempRoot(Value.obj(input));
     defer self.restoreTempRoots(input_root);
     const names = [_][]const u8{ "enumerable", "configurable", "value", "writable", "get", "set" };
@@ -1659,43 +1735,47 @@ fn readDescriptor(self: *Interpreter, input: *value.Object, complete: bool) Host
     const accessor = present[4] or present[5];
     if (accessor and (present[2] or present[3]))
         return self.throwError("TypeError", "Invalid property descriptor: cannot both specify accessors and a value or writable attribute");
-    if (complete) {
-        present[0] = true;
-        present[1] = true;
-        if (accessor) {
-            present[4] = true;
-            present[5] = true;
-        } else {
-            present[2] = true;
-            present[3] = true;
-        }
-    }
-    const out = try self.newObject();
-    const out_root = try self.pushTempRoot(out);
-    // FromPropertyDescriptor publishes in canonical own-key order, which is
-    // different from ToPropertyDescriptor's observable field-read order.
-    for ([_]usize{ 2, 3, 4, 5, 0, 1 }) |index| {
-        if (present[index])
-            try self.tempRoot(out_root, out).asObj().setOwn(self.arena, self.root_shape, names[index], self.tempRoot(fields_root + index, fields[index]));
-    }
-    return self.tempRoot(out_root, out);
+    return .{
+        .enumerable = if (present[0]) fields[0].toBoolean() else null,
+        .configurable = if (present[1]) fields[1].toBoolean() else null,
+        .value = if (present[2]) self.tempRoot(fields_root + 2, fields[2]) else null,
+        .writable = if (present[3]) fields[3].toBoolean() else null,
+        .get = if (present[4]) self.tempRoot(fields_root + 4, fields[4]) else null,
+        .set = if (present[5]) self.tempRoot(fields_root + 5, fields[5]) else null,
+    };
 }
 
-fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: []const u8, descriptor_input: *value.Object) HostError!bool {
+pub fn defineDescriptor(self: *Interpreter, target: *value.Object, key: []const u8, d: PropertyDescriptor) HostError!void {
+    if (!try defineDescriptorResult(self, target, key, d))
+        return self.throwError("TypeError", "Cannot define property");
+}
+
+/// [[DefineOwnProperty]] accepts a native record, never ToPropertyDescriptor.
+/// Own the key across user callbacks; recursive Proxy forwarding reuses it.
+pub fn defineDescriptorResult(self: *Interpreter, target: *value.Object, key: []const u8, d: PropertyDescriptor) HostError!bool {
+    const scratch = self.scratch_allocator orelse self.arena;
+    const owned_key = try scratch.dupe(u8, key);
+    defer scratch.free(owned_key);
+    return applyDescriptor(self, target, owned_key, d);
+}
+
+fn applyDescriptor(self: *Interpreter, target_input: *value.Object, key: []const u8, descriptor_input: PropertyDescriptor) HostError!bool {
+    std.debug.assert((descriptor_input.get == null and descriptor_input.set == null) or
+        (descriptor_input.value == null and descriptor_input.writable == null));
     const target_root = try self.pushTempRoot(Value.obj(target_input));
     defer self.restoreTempRoots(target_root);
-    const descriptor_root = try self.pushTempRoot(Value.obj(descriptor_input));
+    const descriptor_root = try RootedDescriptor.init(self, descriptor_input);
     var target = target_input;
     var d = descriptor_input;
-    var get = d.getOwn("get");
-    var set = d.getOwn("set");
+    var get = d.get;
+    var set = d.set;
     if (interpreter.isModuleNs(target)) {
         try interpreter.triggerDeferForKey(self, target, key); // `import defer`: a string [[DefineOwnProperty]] evaluates first
-        return moduleNamespaceDefine(self, self.tempRoot(target_root, Value.obj(target_input)).asObj(), key, self.tempRoot(descriptor_root, Value.obj(descriptor_input)).asObj());
+        return moduleNamespaceDefine(self, self.tempRoot(target_root, Value.obj(target_input)).asObj(), key, descriptor_root.get(self));
     }
     // [[DefineOwnProperty]] on a Proxy: invoke the `defineProperty` trap with a
-    // FromPropertyDescriptor object; a falsy result is a TypeError. An absent
-    // trap forwards to the target.
+    // FromPropertyDescriptor object; return a falsy trap result to the caller,
+    // which decides whether to throw. An absent trap forwards the native record.
     if (target.proxyHandler() != null or target.proxy_revoked) {
         if (target.proxy_revoked) return self.throwError("TypeError", "Cannot perform 'defineProperty' on a revoked proxy");
         const handler = target.proxyHandler().?;
@@ -1703,11 +1783,11 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
         const handler_root = try self.pushTempRoot(Value.obj(handler));
         const proxy_target_root = try self.pushTempRoot(Value.obj(tgt));
         const trap = try self.getProperty(Value.obj(handler), "defineProperty");
-        d = self.tempRoot(descriptor_root, Value.obj(descriptor_input)).asObj();
+        d = descriptor_root.get(self);
         if (trap.isUndefined() or trap.isNull())
-            return defineDescriptorResult(self, self.tempRoot(proxy_target_root, Value.obj(tgt)).asObj(), key, d);
+            return applyDescriptor(self, self.tempRoot(proxy_target_root, Value.obj(tgt)).asObj(), key, d);
         if (!trap.isCallable()) return self.throwError("TypeError", "proxy 'defineProperty' trap is not callable");
-        const trap_desc = try descriptorObjectForProxyTrap(self, d);
+        const trap_desc = try d.toObject(self);
         const res = try self.callValueWithThis(trap, &.{ self.tempRoot(proxy_target_root, Value.obj(tgt)), try self.keyToValue(key), trap_desc }, self.tempRoot(handler_root, Value.obj(handler)));
         if (!res.toBoolean()) return false;
         // ECMA-262 10.5.6 queries the target descriptor before extensibility,
@@ -1715,8 +1795,8 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
         const target_desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ self.tempRoot(proxy_target_root, Value.obj(tgt)), try self.keyToValue(key) });
         const target_desc_root = try self.pushTempRoot(target_desc);
         const extensible = try proxyTargetExtensible(self, self.tempRoot(proxy_target_root, Value.obj(tgt)).asObj());
-        d = self.tempRoot(descriptor_root, Value.obj(descriptor_input)).asObj();
-        const setting_nonconfig = if (d.getOwn("configurable")) |c| !c.toBoolean() else false;
+        d = descriptor_root.get(self);
+        const setting_nonconfig = if (d.configurable) |c| !c else false;
         if (target_desc.isUndefined()) {
             if (!extensible) return self.throwError("TypeError", "proxy 'defineProperty' cannot add a property to a non-extensible target");
             if (setting_nonconfig) return self.throwError("TypeError", "proxy 'defineProperty' cannot define a non-configurable property absent from the target");
@@ -1728,7 +1808,7 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
             if (setting_nonconfig and current_attr.configurable)
                 return self.throwError("TypeError", "proxy 'defineProperty' cannot report a configurable target property as non-configurable");
             if (!current_attr.configurable and current_attr.writable) {
-                if (d.getOwn("writable")) |w| if (!w.toBoolean())
+                if (d.writable) |w| if (!w)
                     return self.throwError("TypeError", "proxy 'defineProperty' cannot report a non-configurable writable property as non-writable");
             }
         }
@@ -1742,10 +1822,10 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
         if (interpreter.canonicalNumericIndexString(key)) |n| {
             if (!interpreter.isValidIntegerIndex(ta, n)) return false;
             if (get != null or set != null) return false;
-            if (d.getOwn("configurable")) |c| if (!c.toBoolean()) return false;
-            if (d.getOwn("enumerable")) |e| if (!e.toBoolean()) return false;
-            if (d.getOwn("writable")) |w| if (!w.toBoolean()) return false;
-            if (d.getOwn("value")) |val|
+            if (d.configurable) |c| if (!c) return false;
+            if (d.enumerable) |e| if (!e) return false;
+            if (d.writable) |w| if (!w) return false;
+            if (d.value) |val|
                 _ = try self.setMemberResult(Value.obj(target), key, val, Value.obj(target));
             return true;
         }
@@ -1765,9 +1845,9 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
         }
     }
     target = self.tempRoot(target_root, Value.obj(target_input)).asObj();
-    d = self.tempRoot(descriptor_root, Value.obj(descriptor_input)).asObj();
-    get = d.getOwn("get");
-    set = d.getOwn("set");
+    d = descriptor_root.get(self);
+    get = d.get;
+    set = d.set;
     const indexed_locked = value.canonicalIndex(key) != null;
     if (indexed_locked) target.lockIndexedProperty();
     defer if (indexed_locked) target.unlockIndexedProperty();
@@ -1782,22 +1862,22 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
         // value whose ToUint32 differs from its ToNumber is a RangeError, *before*
         // the (non-configurable / non-enumerable) attribute-compatibility checks.
         var new_len_opt: ?u32 = null;
-        if (d.getOwn("value")) |val| {
+        if (d.value) |val| {
             new_len_opt = try self.arrayLengthFromValue(val);
             target = self.tempRoot(target_root, Value.obj(target_input)).asObj();
-            d = self.tempRoot(descriptor_root, Value.obj(descriptor_input)).asObj();
+            d = descriptor_root.get(self);
         }
         const cur_writable = if (target.attrsMap() != null) target.getAttr("length").writable else true;
         const old_len = target.arrayLength();
-        if (d.getOwn("configurable")) |c| {
-            if (c.toBoolean()) return false;
+        if (d.configurable) |c| {
+            if (c) return false;
         }
-        if (d.getOwn("enumerable")) |e| {
-            if (e.toBoolean()) return false;
+        if (d.enumerable) |e| {
+            if (e) return false;
         }
         if (!cur_writable) {
-            if (d.getOwn("writable")) |w| {
-                if (w.toBoolean()) return false;
+            if (d.writable) |w| {
+                if (w) return false;
             }
         }
         // ArraySetLength: reducing `length` deletes elements from the top down; a
@@ -1809,7 +1889,7 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
             ok = try self.setArrayLength(target, u);
         }
         var lattr: value.PropAttr = .{ .writable = cur_writable, .enumerable = false, .configurable = false };
-        if (d.getOwn("writable")) |w| lattr.writable = w.toBoolean();
+        if (d.writable) |w| lattr.writable = w;
         try target.setAttr(self.arena, "length", lattr);
         return ok;
     }
@@ -1835,7 +1915,7 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
                     return false;
                 }
                 const am_mapped = target.is_arguments and interpreter.argMapHas(target, i);
-                const new_value = if (d.getOwn("value")) |val|
+                const new_value = if (d.value) |val|
                     val
                 else if (am_mapped)
                     // No explicit value: snapshot the binding so an unmap below
@@ -1848,16 +1928,16 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
                 // Defining the index makes it a present own element (clearing any
                 // hole) and materializes gaps under `elements_lock`.
                 if (!try target.setOrGrowDenseElement(self.arena, i, new_value, 1 << 24)) return false;
-                if (d.getOwn("value")) |val| {
+                if (d.value) |val| {
                     // A mapped index also writes its parameter binding.
                     if (am_mapped) interpreter.argMapSet(target, i, val);
                 }
                 // Omitted fields keep the current value when redefining an
                 // existing element (implicitly all-true), else default to false.
                 var attr: value.PropAttr = if (within) cur_attr else .{ .writable = false, .enumerable = false, .configurable = false };
-                if (d.getOwn("writable")) |w| attr.writable = w.toBoolean();
-                if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
-                if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
+                if (d.writable) |w| attr.writable = w;
+                if (d.enumerable) |e| attr.enumerable = e;
+                if (d.configurable) |c| attr.configurable = c;
                 try target.setAttr(self.arena, key, attr);
                 target.has_indexed_property.store(true, .monotonic);
                 // Redefining a mapped index as non-writable severs the parameter link.
@@ -1891,7 +1971,7 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
     var cur_data = target.getOwn(key) orelse (if (dense_elem_index) |i| target.denseElement(i) else null);
     var cur_acc = target.getAccessor(key);
     const exists = cur_data != null or cur_acc != null;
-    const has_data_field = d.getOwn("value") != null or d.getOwn("writable") != null;
+    const has_data_field = d.value != null or d.writable != null;
     // ValidateAndApplyPropertyDescriptor: reject (TypeError) any change that the
     // current state forbids — adding to a non-extensible object, or altering a
     // non-configurable property in an incompatible way.
@@ -1900,8 +1980,8 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
     } else if (!target.getAttr(key).configurable) {
         if (!try compatibleRedefine(target.getAttr(key), cur_data, cur_acc, d)) return false;
     }
-    const has_attribute_field = d.getOwn("writable") != null or
-        d.getOwn("enumerable") != null or d.getOwn("configurable") != null;
+    const has_attribute_field = d.writable != null or
+        d.enumerable != null or d.configurable != null;
     const has_descriptor_effect = get != null or set != null or has_data_field or has_attribute_field;
     if (exists and !has_descriptor_effect) return true;
 
@@ -1921,9 +2001,9 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
         if (indexed_locked) target.unlockIndexedProperty();
         self.invalidateJitHeapFactsFor(target);
         target = self.tempRoot(target_root, Value.obj(target_input)).asObj();
-        d = self.tempRoot(descriptor_root, Value.obj(descriptor_input)).asObj();
-        get = d.getOwn("get");
-        set = d.getOwn("set");
+        d = descriptor_root.get(self);
+        get = d.get;
+        set = d.set;
         if (cur_data) |v| cur_data = self.tempRoot(data_root, v);
         if (cur_acc) |*accessor| {
             if (accessor.get) |v| accessor.get = self.tempRoot(getter_root, v);
@@ -1935,8 +2015,8 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
     // Redefining keeps the current attributes for any omitted field; a new
     // property defaults omitted fields to false.
     var attr: value.PropAttr = if (exists) target.getAttr(key) else .{ .writable = false, .enumerable = false, .configurable = false };
-    if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
-    if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
+    if (d.enumerable) |e| attr.enumerable = e;
+    if (d.configurable) |c| attr.configurable = c;
     if (get != null or set != null) {
         // (Partial) accessor definition: an omitted get/set keeps the existing
         // accessor's corresponding half (a redefine like `{get: g}` must not wipe
@@ -1970,15 +2050,15 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
                 .absent => unreachable,
             }
         }
-        if (d.getOwn("writable")) |w| {
-            attr.writable = w.toBoolean();
+        if (d.writable) |w| {
+            attr.writable = w;
         } else if (cur_acc != null) {
             attr.writable = false;
         }
         // An omitted `value` keeps the existing data property's value on a
         // redefine (a partial descriptor like `{enumerable:false}` must not reset
         // it); a brand-new property defaults to undefined.
-        const new_value = d.getOwn("value") orelse (cur_data orelse Value.undef());
+        const new_value = d.value orelse (cur_data orelse Value.undef());
         try target.setOwn(self.arena, self.root_shape, key, new_value);
     }
     // else: a generic descriptor on an existing accessor keeps the accessor as-is;
@@ -2002,33 +2082,18 @@ fn defineDescriptorResult(self: *Interpreter, target_input: *value.Object, key: 
     return true;
 }
 
-fn descriptorObjectForProxyTrap(self: *Interpreter, d: *value.Object) HostError!Value {
-    const descriptor = Value.obj(d);
-    const descriptor_root = try self.pushTempRoot(descriptor);
-    defer self.restoreTempRoots(descriptor_root);
-    const out = try self.newObject();
-    const out_root = try self.pushTempRoot(out);
-    // FromPropertyDescriptor copies exactly the present fields with ordinary
-    // own data publication; inherited setters cannot intercept this record.
-    for ([_][]const u8{ "value", "writable", "get", "set", "enumerable", "configurable" }) |field| {
-        if (self.tempRoot(descriptor_root, descriptor).asObj().getOwn(field)) |v|
-            try self.tempRoot(out_root, out).asObj().setOwn(self.arena, self.root_shape, field, v);
-    }
-    return self.tempRoot(out_root, out);
-}
-
-fn moduleNamespaceDefine(self: *Interpreter, target: *value.Object, key: []const u8, d: *value.Object) HostError!bool {
+fn moduleNamespaceDefine(self: *Interpreter, target: *value.Object, key: []const u8, d: PropertyDescriptor) HostError!bool {
     const current = try interpreter.moduleNsDesc(self, target, key);
     if (!current.isObject()) return false;
-    if (d.getOwn("get") != null or d.getOwn("set") != null) return false;
+    if (d.get != null or d.set != null) return false;
     const cur = current.asObj();
-    if (d.getOwn("configurable")) |v|
-        if (v.toBoolean() != descBool(cur, "configurable", false)) return false;
-    if (d.getOwn("enumerable")) |v|
-        if (v.toBoolean() != descBool(cur, "enumerable", false)) return false;
-    if (d.getOwn("writable")) |v|
-        if (v.toBoolean() != descBool(cur, "writable", false)) return false;
-    if (d.getOwn("value")) |v|
+    if (d.configurable) |v|
+        if (v != descBool(cur, "configurable", false)) return false;
+    if (d.enumerable) |v|
+        if (v != descBool(cur, "enumerable", false)) return false;
+    if (d.writable) |v|
+        if (v != descBool(cur, "writable", false)) return false;
+    if (d.value) |v|
         if (!sameValue(v, cur.getOwn("value") orelse Value.undef())) return false;
     return true;
 }
@@ -2047,18 +2112,18 @@ fn compatibleRedefine(
     cur_attr: value.PropAttr,
     cur_data: ?Value,
     cur_acc: ?value.Accessor,
-    d: *value.Object,
+    d: PropertyDescriptor,
 ) HostError!bool {
-    if (d.getOwn("configurable")) |c| {
-        if (c.toBoolean()) return false;
+    if (d.configurable) |c| {
+        if (c) return false;
     }
-    if (d.getOwn("enumerable")) |e| {
-        if (e.toBoolean() != cur_attr.enumerable) return false;
+    if (d.enumerable) |e| {
+        if (e != cur_attr.enumerable) return false;
     }
-    const d_get = d.getOwn("get");
-    const d_set = d.getOwn("set");
+    const d_get = d.get;
+    const d_set = d.set;
     const d_is_accessor = d_get != null or d_set != null;
-    const d_is_data = d.getOwn("value") != null or d.getOwn("writable") != null;
+    const d_is_data = d.value != null or d.writable != null;
     if (!d_is_accessor and !d_is_data) return true; // generic descriptor: nothing more to check
 
     const cur_is_accessor = cur_acc != null;
@@ -2073,10 +2138,10 @@ fn compatibleRedefine(
             if (!sameValue(s, acc.set orelse Value.undef())) return false;
         }
     } else if (!cur_attr.writable) {
-        if (d.getOwn("writable")) |w| {
-            if (w.toBoolean()) return false;
+        if (d.writable) |w| {
+            if (w) return false;
         }
-        if (d.getOwn("value")) |v| {
+        if (d.value) |v| {
             if (!sameValue(v, cur_data orelse Value.undef())) return false;
         }
     }
@@ -2104,7 +2169,7 @@ fn applyProperties(self: *Interpreter, target_input: *value.Object, props: Value
     const props_value = Value.obj(props_obj);
     const props_root = try self.pushTempRoot(props_value);
     const scratch = self.scratch_allocator orelse self.arena;
-    const Pending = struct { key: []const u8, descriptor: Value, root: usize };
+    const Pending = struct { key: []const u8, descriptor: RootedDescriptor };
     var pending: std.ArrayListUnmanaged(Pending) = .empty;
     defer {
         for (pending.items) |entry| scratch.free(entry.key);
@@ -2115,15 +2180,15 @@ fn applyProperties(self: *Interpreter, target_input: *value.Object, props: Value
         if (!prop_desc.isObject() or !completedDescAttr(prop_desc.asObj()).enumerable) continue;
         const raw = try self.getProperty(self.tempRoot(props_root, props_value), key);
         if (!isRealObject(raw)) return self.throwError("TypeError", "Property description must be an object");
-        const descriptor = try readDescriptor(self, raw.asObj(), false);
-        const descriptor_root = try self.pushTempRoot(descriptor);
+        const descriptor = try readDescriptor(self, raw.asObj());
+        const descriptor_root = try RootedDescriptor.init(self, descriptor);
         const owned_key = try scratch.dupe(u8, key);
         errdefer scratch.free(owned_key);
-        try pending.append(scratch, .{ .key = owned_key, .descriptor = descriptor, .root = descriptor_root });
+        try pending.append(scratch, .{ .key = owned_key, .descriptor = descriptor_root });
     }
     for (pending.items) |entry| {
-        const descriptor = self.tempRoot(entry.root, entry.descriptor);
-        if (!try defineDescriptorResult(self, self.tempRoot(target_root, Value.obj(target_input)).asObj(), entry.key, descriptor.asObj()))
+        const descriptor = entry.descriptor.get(self);
+        if (!try applyDescriptor(self, self.tempRoot(target_root, Value.obj(target_input)).asObj(), entry.key, descriptor))
             return self.throwError("TypeError", "Cannot define property");
     }
 }
@@ -2235,15 +2300,13 @@ fn setIntegrityLevel(ctx: *anyopaque, self: *Interpreter, object: *value.Object,
                 if (!cur.isObject()) continue;
                 break :blk cur.asObj().getOwn("get") != null or cur.asObj().getOwn("set") != null;
             } else false;
-            const descriptor = try self.newObject();
-            const descriptor_root = try self.pushTempRoot(descriptor);
-            defer self.restoreTempRoots(descriptor_root);
-            try descriptor.asObj().setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(false));
             // A frozen *data* property is also made non-writable; an accessor only
             // gets {configurable:false} (writable is invalid on an accessor).
-            if (freeze and !is_accessor)
-                try self.tempRoot(descriptor_root, descriptor).asObj().setOwn(self.arena, self.root_shape, "writable", Value.boolVal(false));
-            if (!try defineDescriptorResult(self, self.tempRoot(object_root, object_value).asObj(), k, self.tempRoot(descriptor_root, descriptor).asObj()))
+            const descriptor: PropertyDescriptor = .{
+                .configurable = false,
+                .writable = if (freeze and !is_accessor) false else null,
+            };
+            if (!try defineDescriptorResult(self, self.tempRoot(object_root, object_value).asObj(), k, descriptor))
                 return self.throwError("TypeError", "Object.seal/freeze: could not redefine property");
         }
         return;
@@ -2432,13 +2495,6 @@ pub fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, this: Value, args: []con
     return self.tempRoot(result_root, result);
 }
 
-/// CompletePropertyDescriptor ∘ FromPropertyDescriptor over a (possibly partial)
-/// descriptor object — fills omitted fields with their defaults and returns a
-/// fresh, fully-populated data or accessor descriptor object.
-fn completeDescriptor(self: *Interpreter, desc_obj: *value.Object) HostError!Value {
-    return readDescriptor(self, desc_obj, true);
-}
-
 fn completedDescAttr(d: *value.Object) value.PropAttr {
     return .{
         .writable = if (d.getOwn("writable")) |w| w.toBoolean() else false,
@@ -2530,9 +2586,12 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
             return Value.undef();
         }
         const target_extensible = try proxyTargetExtensible(self, self.tempRoot(target_root, Value.obj(tgt)).asObj());
-        const completed = try completeDescriptor(self, self.tempRoot(result_root, res).asObj());
-        const result_desc = completed.asObj();
-        const result_attr = completedDescAttr(result_desc);
+        const result_desc = (try readDescriptor(self, self.tempRoot(result_root, res).asObj())).complete();
+        const result_attr: value.PropAttr = .{
+            .writable = result_desc.writable orelse false,
+            .enumerable = result_desc.enumerable.?,
+            .configurable = result_desc.configurable.?,
+        };
         if (!target_desc.isObject()) {
             if (!target_extensible) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a new property on a non-extensible target");
             if (!result_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a new non-configurable property");
@@ -2545,13 +2604,13 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
                 return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' reported an incompatible descriptor");
             if (!result_attr.configurable) {
                 if (target_attr.configurable) return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a configurable target property as non-configurable");
-                if (result_desc.getOwn("writable")) |w| {
-                    if (!w.toBoolean() and target_attr.writable)
+                if (result_desc.writable) |w| {
+                    if (!w and target_attr.writable)
                         return self.throwError("TypeError", "proxy 'getOwnPropertyDescriptor' cannot report a non-configurable writable target property as non-writable");
                 }
             }
         }
-        return completed;
+        return result_desc.toObject(self);
     }
 
     // Integer-Indexed Exotic [[GetOwnProperty]]: a valid index is a configurable,
@@ -3442,8 +3501,7 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
 
 /// InternalizeJSONProperty's store step: `undefined` ⇒ DeletePropertyOrThrow,
 /// else CreateDataProperty. On a Proxy these route through the deleteProperty /
-/// defineProperty traps (so a throwing trap propagates); a plain object takes
-/// the fast `setMember` path.
+/// defineProperty traps (so a throwing trap propagates).
 fn internalizeStore(self: *Interpreter, o: *value.Object, val: Value, key: []const u8, nv: Value) HostError!void {
     _ = val;
     // InternalizeJSONProperty: a removed value is [[Delete]]'d, otherwise the
@@ -3455,12 +3513,7 @@ fn internalizeStore(self: *Interpreter, o: *value.Object, val: Value, key: []con
         return;
     }
     // CreateDataProperty(o, key, nv) — a full {value,w,e,c}=true data descriptor.
-    const desc = (try self.newObject()).asObj();
-    try desc.setOwn(self.arena, self.root_shape, "value", nv);
-    try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
-    try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-    try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-    _ = try defineOneResult(self, o, key, desc);
+    _ = try defineDescriptorResult(self, o, key, .data(nv));
 }
 
 /// Explicit error set so the mutually-recursive parser methods don't form an

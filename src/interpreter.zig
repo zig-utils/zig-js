@@ -3780,12 +3780,7 @@ pub const Interpreter = struct {
         if (!receiver.isObject()) return self.throwError("TypeError", "Class field receiver is not an object");
         const o = receiver.asObj();
         if (o.proxyHandler() != null or o.proxy_revoked or isModuleNs(o)) {
-            const desc = (try self.newObject()).asObj();
-            try self.setProp(desc, "value", field_value);
-            try self.setProp(desc, "writable", Value.boolVal(true));
-            try self.setProp(desc, "enumerable", Value.boolVal(true));
-            try self.setProp(desc, "configurable", Value.boolVal(true));
-            try builtins.defineOne(self, o, key, desc);
+            try builtins.defineDescriptor(self, o, key, .data(field_value));
             return;
         }
         if (!objectHasOwn(o, key) and !o.isExtensible())
@@ -15267,6 +15262,46 @@ pub const Interpreter = struct {
         }
     }
 
+    /// OrdinarySetWithOwnDescriptor's receiver branch retains both operands
+    /// through [[GetOwnProperty]], then applies a partial or full native record.
+    fn defineReceiverDataProperty(self: *Interpreter, receiver: Value, key: []const u8, v: Value) EvalError!bool {
+        const receiver_root = try self.pushTempRoot(receiver);
+        defer self.restoreTempRoots(receiver_root);
+        const value_root = try self.pushTempRoot(v);
+        const scratch = self.scratch_allocator orelse self.arena;
+        const owned_key = try scratch.dupe(u8, key);
+        defer scratch.free(owned_key);
+        const existing = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ receiver, try self.keyToValue(owned_key) });
+        var d: builtins.PropertyDescriptor = .{ .value = self.tempRoot(value_root, v) };
+        if (existing.isObject()) {
+            if (existing.asObj().getOwn("get") != null or existing.asObj().getOwn("set") != null) return false;
+            if (existing.asObj().getOwn("writable")) |w| if (!w.toBoolean()) return false;
+        } else {
+            d.writable = true;
+            d.enumerable = true;
+            d.configurable = true;
+        }
+        return builtins.defineDescriptorResult(self, self.tempRoot(receiver_root, receiver).asObj(), owned_key, d);
+    }
+
+    /// Annex B __defineGetter__/__defineSetter__: ToPropertyKey can move both
+    /// the receiver and callable before DefinePropertyOrThrow consumes them.
+    fn defineLegacyAccessor(self: *Interpreter, o: *value.Object, key_value: Value, f: Value, getter: bool) EvalError!Value {
+        if (!f.isCallable()) return self.throwError("TypeError", "Object.prototype.__define[GS]etter__: Expecting function");
+        const receiver_root = try self.pushTempRoot(Value.obj(o));
+        defer self.restoreTempRoots(receiver_root);
+        const function_root = try self.pushTempRoot(f);
+        const key = try self.keyOf(key_value);
+        const callable = self.tempRoot(function_root, f);
+        try builtins.defineDescriptor(self, self.tempRoot(receiver_root, Value.obj(o)).asObj(), key, .{
+            .get = if (getter) callable else null,
+            .set = if (getter) null else callable,
+            .enumerable = true,
+            .configurable = true,
+        });
+        return Value.undef();
+    }
+
     /// Internal [[Set]] returning the spec boolean result. Assignment callers
     /// translate a false result into a strict-mode TypeError; Reflect.set returns
     /// the boolean directly.
@@ -15329,20 +15364,8 @@ pub const Interpreter = struct {
                     }
                     return true;
                 }
-                if (rcv.proxyHandler() != null or rcv.proxy_revoked) {
-                    const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(rcv), try self.keyToValue(key) });
-                    const desc = (try self.newObject()).asObj();
-                    try desc.setOwn(self.arena, self.root_shape, "value", v);
-                    if (existing.isObject()) {
-                        if (existing.asObj().getOwn("get") != null or existing.asObj().getOwn("set") != null) return false;
-                        if (existing.asObj().getOwn("writable")) |w| if (!w.toBoolean()) return false;
-                    } else {
-                        try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
-                        try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-                        try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-                    }
-                    return try builtins.defineOneResult(self, rcv, key, desc);
-                }
+                if (rcv.proxyHandler() != null or rcv.proxy_revoked)
+                    return self.defineReceiverDataProperty(receiver, key, v);
                 if (rcv.getAccessor(key) != null) return false;
                 if (rcv.getOwn(key)) |_| {
                     if (!rcv.getAttr(key).writable) return false;
@@ -15350,12 +15373,7 @@ pub const Interpreter = struct {
                     return true;
                 }
                 if (!rcv.isExtensible()) return false;
-                const desc = (try self.newObject()).asObj();
-                try desc.setOwn(self.arena, self.root_shape, "value", v);
-                try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
-                try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-                try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-                return builtins.defineOneResult(self, rcv, key, desc);
+                return builtins.defineDescriptorResult(self, rcv, key, .data(v));
             }
             // non-index keys fall through to ordinary [[Set]].
         }
@@ -15514,22 +15532,8 @@ pub const Interpreter = struct {
         }
         if (!builtins.isRealObject(receiver)) return false;
         const ro = receiver.asObj();
-        if (ro.proxyHandler() != null or ro.proxy_revoked) {
-            const existing = try builtins.objectGetOwnPropertyDescriptor(@ptrCast(self), Value.undef(), &.{ Value.obj(ro), try self.keyToValue(key) });
-            const desc = (try self.newObject()).asObj();
-            try desc.setOwn(self.arena, self.root_shape, "value", v);
-            if (existing.isObject()) {
-                if (existing.asObj().getOwn("get") != null or existing.asObj().getOwn("set") != null) return false;
-                if (existing.asObj().getOwn("writable")) |w| {
-                    if (!w.toBoolean()) return false;
-                }
-            } else {
-                try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
-                try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-                try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-            }
-            return try builtins.defineOneResult(self, ro, key, desc);
-        }
+        if (ro.proxyHandler() != null or ro.proxy_revoked)
+            return self.defineReceiverDataProperty(receiver, key, v);
         if (moduleNsOf(ro) != null) {
             // OrdinarySetWithOwnDescriptor's [[GetOwnProperty]] on a namespace
             // receiver (e.g. `super[k] = v` whose receiver is a namespace): a
@@ -16454,7 +16458,7 @@ pub const Interpreter = struct {
     }
 
     /// Append `v` as the next element of a method's result (an array uses its
-    /// dense store; a custom species object gets a `[[Set]]` at `idx`).
+    /// dense store; a custom species object gets CreateDataProperty at `idx`).
     fn arrayResultPush(self: *Interpreter, result: Value, idx: usize, v: Value) EvalError!void {
         if (result.isObject() and result.asObj().is_array and result.asObj().accessorsMap() == null and
             result.asObj().attrsMap() == null and !result.asObj().proxy_revoked and result.asObj().proxyHandler() == null and
@@ -16468,12 +16472,7 @@ pub const Interpreter = struct {
             // path, which throws if the index is non-writable / non-extensible.
             var key_storage: [32]u8 = undefined;
             const k = borrowedIndexKey(&key_storage, idx);
-            const desc = (try self.newObject()).asObj();
-            try desc.setOwn(self.arena, self.root_shape, "value", v);
-            try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
-            try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-            try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-            if (!result.isObject() or !try builtins.defineOneResult(self, result.asObj(), k, desc))
+            if (!result.isObject() or !try builtins.defineDescriptorResult(self, result.asObj(), k, .data(v)))
                 return self.throwError("TypeError", "Cannot create array result property");
         }
     }
@@ -16708,17 +16707,8 @@ pub const Interpreter = struct {
         }
         const o = try self.toObject(recv);
         if (eq(name, "valueOf")) return Value.obj(o);
-        if (eq(name, "__defineGetter__") or eq(name, "__defineSetter__")) {
-            const f = arg(args, 1);
-            if (!f.isCallable()) return self.throwError("TypeError", "Object.prototype.__define[GS]etter__: Expecting function");
-            const key = try self.keyOf(arg0(args));
-            const desc = (try self.newObject()).asObj();
-            try desc.setOwn(self.arena, self.root_shape, if (eq(name, "__defineGetter__")) "get" else "set", f);
-            try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-            try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-            try builtins.defineOne(self, o, key, desc);
-            return Value.undef();
-        }
+        if (eq(name, "__defineGetter__") or eq(name, "__defineSetter__"))
+            return try self.defineLegacyAccessor(o, arg0(args), arg(args, 1), eq(name, "__defineGetter__"));
         if (eq(name, "__lookupGetter__") or eq(name, "__lookupSetter__")) {
             const key = try self.keyOf(arg0(args));
             const key_v = try self.keyToValue(key);
@@ -16794,23 +16784,8 @@ pub const Interpreter = struct {
                         return Value.boolVal(false);
                     }
                     // Annex-B legacy accessor helpers.
-                    if (eq(name, "__defineGetter__") or eq(name, "__defineSetter__")) {
-                        const f = arg(args, 1);
-                        if (!f.isCallable()) return self.throwError("TypeError", "Object.prototype.__define[GS]etter__: Expecting function");
-                        // ToPropertyKey(P): a Symbol key is honored and a thrown
-                        // valueOf/toString propagates.
-                        const key = try self.keyOf(arg0(args));
-                        // DefinePropertyOrThrow with { get|set, enumerable, configurable }:
-                        // route through the shared descriptor machinery so a
-                        // non-configurable existing property or a non-extensible
-                        // object throws a TypeError (not a silent overwrite).
-                        const desc = (try self.newObject()).asObj();
-                        try desc.setOwn(self.arena, self.root_shape, if (eq(name, "__defineGetter__")) "get" else "set", f);
-                        try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-                        try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-                        try builtins.defineOne(self, o, key, desc);
-                        return Value.undef();
-                    }
+                    if (eq(name, "__defineGetter__") or eq(name, "__defineSetter__"))
+                        return try self.defineLegacyAccessor(o, arg0(args), arg(args, 1), eq(name, "__defineGetter__"));
                     if (eq(name, "__lookupGetter__") or eq(name, "__lookupSetter__")) {
                         // Spec walk: at each level take [[GetOwnProperty]](key); if it
                         // exists, return its accessor get/set (or undefined for a data
@@ -22031,6 +22006,9 @@ fn setterIgnoringProto(self: *Interpreter, this: Value, home: ?*value.Object, ke
         self.exception = try self.makeErrorWithProto("TypeError", "Cannot assign to the read-only property of the home object", proto);
         return error.Throw;
     };
+    const receiver_root = try self.pushTempRoot(this);
+    defer self.restoreTempRoots(receiver_root);
+    const value_root = try self.pushTempRoot(v);
     const o = this.asObj();
     // [[GetOwnProperty]](this, key): own data slot, own accessor, or proxy trap.
     const has_own = if (o.proxyHandler() != null or o.proxy_revoked) blk: {
@@ -22040,17 +22018,13 @@ fn setterIgnoringProto(self: *Interpreter, this: Value, home: ?*value.Object, ke
     if (!has_own) {
         // CreateDataPropertyOrThrow(this, key, v) — own {w,e,c}=true data property;
         // fails (TypeError) on a non-extensible receiver.
-        const desc = (try self.newObject()).asObj();
-        try desc.setOwn(self.arena, self.root_shape, "value", v);
-        try desc.setOwn(self.arena, self.root_shape, "writable", Value.boolVal(true));
-        try desc.setOwn(self.arena, self.root_shape, "enumerable", Value.boolVal(true));
-        try desc.setOwn(self.arena, self.root_shape, "configurable", Value.boolVal(true));
-        if (!try builtins.defineOneResult(self, o, key, desc))
+        if (!try builtins.defineDescriptorResult(self, self.tempRoot(receiver_root, this).asObj(), key, .data(self.tempRoot(value_root, v))))
             return self.throwError("TypeError", "Cannot create property");
         return Value.undef();
     }
     // Set(this, key, v, true) — honors an own accessor or writability.
-    if (!try self.setMemberResult(Value.obj(o), key, v, Value.obj(o)))
+    const receiver = self.tempRoot(receiver_root, this);
+    if (!try self.setMemberResult(receiver, key, self.tempRoot(value_root, v), receiver))
         return self.throwError("TypeError", "Cannot set property");
     return Value.undef();
 }
@@ -54303,6 +54277,62 @@ test "Proxy metadata roots unwind on every allocation failure" {
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{false});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{true});
+}
+
+test "internal descriptors roots unwind on every allocation failure" {
+    const Operation = enum { data, accessor, receiver, legacy, array_of, array_from, ignoring_proto };
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator, operation: Operation) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const ctx = try @import("context.zig").Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+            defer ctx.destroy();
+            _ = try ctx.evaluate(
+                \\var descriptorValue = {marker: 37};
+                \\var descriptorTarget = {};
+                \\var descriptorProxy = new Proxy(new Proxy(descriptorTarget, {}), {
+                \\  get defineProperty(){return function(t,k,d){return Reflect.defineProperty(t,k,d);};},
+                \\  getOwnPropertyDescriptor(t,k){return Reflect.getOwnPropertyDescriptor(t,k);}
+                \\});
+                \\function descriptorGetter(){return descriptorValue;}
+                \\function DescriptorConstructor(){return descriptorProxy;}
+                \\var descriptorSource = {0: descriptorValue, length: 1};
+            );
+            const saved_gc = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(saved_gc);
+            var machine = ctx.interpreter();
+            machine.arena = arena.allocator();
+            machine.scratch_allocator = backing;
+            machine.gc_safepoint_fn = null;
+            defer {
+                std.debug.assert(machine.gc_temp_roots.items.len == 0);
+                std.debug.assert(machine.gc_env_roots.items.len == 0);
+                std.debug.assert(machine.gc_tree_call_roots == null);
+                std.debug.assert(machine.depth == 0);
+                std.debug.assert(machine.env == &ctx.env);
+            }
+            const target = ctx.global_object.getOwn("descriptorProxy").?;
+            const payload = ctx.global_object.getOwn("descriptorValue").?;
+            const getter = ctx.global_object.getOwn("descriptorGetter").?;
+            const ctor = ctx.global_object.getOwn("DescriptorConstructor").?;
+            switch (operation) {
+                .data => try builtins.defineDescriptor(&machine, target.asObj(), "x", .data(payload)),
+                .accessor => try builtins.defineDescriptor(&machine, target.asObj(), "x", .{ .get = getter, .configurable = true }),
+                .receiver => try std.testing.expect(try machine.defineReceiverDataProperty(target, "x", payload)),
+                .legacy => _ = try machine.defineLegacyAccessor(target.asObj(), Value.str("x"), getter, true),
+                .array_of => _ = try builtins.arrayOf(&machine, ctor, &.{payload}),
+                .array_from => _ = try builtins.arrayFrom(&machine, ctor, &.{ctx.global_object.getOwn("descriptorSource").?}),
+                .ignoring_proto => _ = try setterIgnoringProto(&machine, target, null, "x", payload),
+            }
+            const key = if (operation == .array_of or operation == .array_from) "0" else "x";
+            const result = try machine.getProperty(target, key);
+            try std.testing.expectEqual(@as(f64, 37), result.asObj().getOwn("marker").?.asNum());
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    inline for (std.meta.tags(Operation)) |operation|
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{operation});
 }
 
 test "Object reflection roots unwind on every allocation failure" {
