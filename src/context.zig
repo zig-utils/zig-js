@@ -27989,6 +27989,174 @@ test "forced tree-walker and required bytecode preserve earlier parameter defaul
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.template_plain_fallback));
 }
 
+test "canonical parameter expressions retain exact identities through moving nursery" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const Host = struct {
+        fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const ctx: *Context = @ptrCast(@alignCast(machine.gc_realm_context.?));
+            ctx.gc.?.nursery_threshold_bytes = 1;
+            ctx.gc_moving_checkpoint_requested.store(true, .release);
+            return Value.undef();
+        }
+    };
+    const cases = [_]struct { name: []const u8, setup: []const u8, run: []const u8 }{
+        .{ .name = "array", .setup = "function make(seed,value=[seed,(parameterMovingLoop(20000),seed)]){return value[0]===seed&&value[1]===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "object_key", .setup = "function make(seed,value={[(parameterMovingLoop(20000),'x')]:seed}){return value.x===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "object_spread", .setup = "function make(seed,source={get x(){parameterMovingLoop(20000);return seed;}},value={...source}){return value.x===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "spread_iterator_getter", .setup = "function make(seed,source={marker:seed,get [Symbol.iterator](){parameterMovingLoop(20000);return function(){var value=this.marker,n=0;return {next(){return {done:n++>0,value:value};}};};}},value=[...source]){return value[0]===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "spread_next_getter", .setup = "function make(seed,source={[Symbol.iterator](){return {marker:seed,done:false,get next(){parameterMovingLoop(20000);return function(){var done=this.done;this.done=true;return {done:done,value:this.marker};};}};}},value=[...source]){return value[0]===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "spread_done_getter", .setup = "function make(seed,source={[Symbol.iterator](){var n=0;return {next(){return n++?{done:true}:{value:seed,get done(){parameterMovingLoop(20000);return false;}};}};}},value=[...source]){return value[0]===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "spread_value_getter", .setup = "function make(seed,source={[Symbol.iterator](){var n=0;return {next(){return n++?{done:true}:{marker:seed,done:false,get value(){parameterMovingLoop(20000);return this.marker;}};}};}},value=[...source]){return value[0]===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "spread_call", .setup = "function first(a){return a;}function make(seed,value=first(...[seed,(parameterMovingLoop(20000),seed)])){return value===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "spread_construct", .setup = "function Box(seed){parameterMovingLoop(20000);this.value=seed;}function make(seed,value=new Box(...[seed])){return value.value===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "optional_call", .setup = "function make(seed,holder={value:seed,read(){parameterMovingLoop(20000);return this.value;}},value=holder?.read?.()){return value===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "nested_pattern", .setup = "function make(seed,[value={field:(parameterMovingLoop(20000),seed)}]=[]){return value.field===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "tagged", .setup = "function tag(parts,value){parameterMovingLoop(20000);return value;}function make(seed,value=tag`head${seed}tail`){return value===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "class_default", .setup = "function make(seed,Box=class{static value=(parameterMovingLoop(20000),seed);read(){return seed;}}){return Box.value===seed&&new Box().read()===seed;}", .run = "make(parameterSubject)" },
+        .{ .name = "private_construct", .setup = "class Box{get #Ctor(){parameterMovingLoop(20000);return class{value=parameterSubject;};}read(value=new this.#Ctor()){return value.value===parameterSubject;}}", .run = "new Box().read()" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for (cases) |case| {
+            const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
+            defer ctx.destroy();
+            {
+                const saved = gc_mod.setActiveContext(ctx);
+                defer gc_mod.restoreActiveContext(saved);
+                const arm = try gc_mod.allocObj(ctx.arena());
+                arm.* = .{ .native = Host.arm };
+                try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "parameterArm", Value.obj(arm));
+                try ctx.env.put("parameterArm", Value.obj(arm));
+            }
+            _ = try ctx.evaluate(
+                \\function parameterMovingLoop(n){var total=0,i=0;while(i<n){total=total+i;i=i+1;}return total;}
+                \\for(var warm=0;warm<10;warm=warm+1)parameterMovingLoop(4096);
+            );
+            const loop: *interp.Function = @ptrCast(@alignCast(ctx.global_object.getOwn("parameterMovingLoop").?.asObj().jsFunction().?));
+            try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+            try std.testing.expect(loop.chunk.?.tier.loadCode().?.manages_steps);
+            ctx.collectGarbage();
+            ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+            ctx.setBytecodeExecutionModeForTesting(mode);
+            _ = try ctx.evaluate("globalThis.parameterSubject={marker:37};");
+            _ = try ctx.evaluate(case.setup);
+            const before = ctx.global_object.getOwn("parameterSubject").?.asObj();
+            const moving_before = ctx.gc.?.accounting().moving_minor_collections;
+            const source = try std.fmt.allocPrint(std.testing.allocator, "parameterArm();{s}", .{case.run});
+            defer std.testing.allocator.free(source);
+            errdefer std.debug.print("moving parameter {s} ({s})\n", .{ case.name, @tagName(mode) });
+            try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+            try std.testing.expectEqual(moving_before + 1, ctx.gc.?.accounting().moving_minor_collections);
+            try std.testing.expect(before != ctx.global_object.getOwn("parameterSubject").?.asObj());
+            try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
+test "canonical parameter expressions isolate shared no-GIL calls" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\function make(seed, holder={value:seed}, Box=class{read(){return holder.value;}}, value=new Box(...[])) {
+            \\  holder.value++;
+            \\  return value;
+            \\}
+            \\function lane(seed) {
+            \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+            \\  var total=0;
+            \\  for(var i=0;i<16;i++) total+=make(seed+i)?.read();
+            \\  return total;
+            \\}
+            \\var lanes=[],sum=0;
+            \\for(var i=0;i<4;i++) lanes.push(new Thread(lane,i));
+            \\for(var i=0;i<4;i++) sum+=lanes[i].join();
+            \\sum
+        );
+        try std.testing.expectEqual(@as(f64, 640), result.asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "canonical parameter expressions preserve exact evaluation in both tiers" {
+    const cases = [_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
+        .{ .name = "nested_array", .source = "(function([[x,y,z]=[4,5,6]]){return x+y+z;})([])", .expected = "15" },
+        .{ .name = "nested_object", .source = "(function({a:{x=4}={}}={}){return x;})()", .expected = "4" },
+        .{ .name = "array_holes", .source = "(function(a=[,7,...[8,9]]){return a.length+':'+(0 in a)+':'+a.slice(1).join(',');})()", .expected = "4:false:7,8,9" },
+        .{ .name = "fresh_object", .source = "(function(){function f(a={x:1}){return a;}var a=f();a.x=8;return a!==f()&&f().x===1;})()", .expected = "true" },
+        .{ .name = "fresh_regex", .source = "(function(){function f(r=/x/g){return r;}var a=f();a.lastIndex=7;return a!==f()&&f().lastIndex===0&&f().test('x');})()", .expected = "true" },
+        .{ .name = "literal_order", .source = "(function(){var log='';function f(a={[(log+='k','x')]:(log+='v',4),...(log+='s',{y:5})}){return log+':'+a.x+a.y;}return f();})()", .expected = "kvs:45" },
+        .{ .name = "spread_own_setter", .source = "(function(){var effects=0;function f(a={set x(v){effects++;},...{x:7}}){return effects+':'+a.x+':'+Object.getOwnPropertyDescriptor(a,'x').writable;}return f();})()", .expected = "0:7:true" },
+        .{ .name = "spread_proto_setter", .source = "(function(){var effects=0;function f(a={__proto__:{set x(v){effects++;}},...{x:7}}){return effects+':'+a.x+':'+Object.hasOwn(a,'x');}return f();})()", .expected = "0:7:true" },
+        .{ .name = "spread_deleted_key", .source = "(function(){var source={get x(){delete source.y;return 7;},y:8};Object.setPrototypeOf(source,{y:9});function f(a={...source}){return a.x+':'+Object.hasOwn(a,'y');}return f();})()", .expected = "7:false" },
+        .{ .name = "spread_hidden_key", .source = "(function(){var source={get x(){Object.defineProperty(source,'y',{enumerable:false});return 7;},y:8};function f(a={...source}){return a.x+':'+Object.hasOwn(a,'y');}return f();})()", .expected = "7:false" },
+        .{ .name = "spread_proxy_order", .source = "(function(){var log='';var source=new Proxy({x:7},{ownKeys(t){log+='k';return ['x'];},getOwnPropertyDescriptor(t,k){log+='d';return Reflect.getOwnPropertyDescriptor(t,k);},get(t,k){log+='g';return t[k];}});function f(a={...source}){return log+':'+a.x;}return f();})()", .expected = "kdg:7" },
+        .{ .name = "object_method", .source = "(function(seed=3,holder={read(){return seed;}}){seed=7;return holder.read();})()", .expected = "7" },
+        .{ .name = "object_super", .source = "(function(holder={__proto__:{x:7},read(){return super.x;}}){return holder.read();})()", .expected = "7" },
+        .{ .name = "class_name", .source = "(function(Box=class{}){return Box.name;})()", .expected = "Box" },
+        .{ .name = "class_capture", .source = "(function(seed=3,Box=class{field=seed;read(){return seed;}}){seed=7;return new Box().field+new Box().read();})()", .expected = "14" },
+        .{ .name = "class_body_scope", .source = "(function(seed=3,Box=class{read(){return seed;}}){var seed=7;return new Box().read()*10+seed;})()", .expected = "37" },
+        .{ .name = "class_static", .source = "(function(seed=3,Box=class{static field=++seed;static{seed+=2;}}){return Box.field*10+seed;})()", .expected = "46" },
+        .{ .name = "class_later_tdz", .source = "(function(){try{(function(Box=class{static field=later;},later=7){})();}catch(e){return e instanceof ReferenceError;}return false;})()", .expected = "true" },
+        .{ .name = "class_deferred_later", .source = "(function(Box=class{read(){return later;}},later=7){return new Box().read();})()", .expected = "7" },
+        .{ .name = "optional_short", .source = "(function(){var effects=0;function f(a=null,b=a?.[effects++],c=a?.(effects++)){return b===undefined&&c===undefined&&effects===0;}return f();})()", .expected = "true" },
+        .{ .name = "optional_receiver", .source = "(function(a={x:7,m(){return this.x;}},v=a?.m?.()){return v;})()", .expected = "7" },
+        .{ .name = "optional_spread", .source = "(function(a={x:7,m(n){return this.x+n;}},v=a.m?.(...[3])){return v;})()", .expected = "10" },
+        .{ .name = "spread_call", .source = "(function(f=(a,b)=>a+b,args=[3,4],v=f(...args)){return v;})()", .expected = "7" },
+        .{ .name = "spread_new", .source = "(function(C=function(x){this.x=x;},v=new C(...[7])){return v.x;})()", .expected = "7" },
+        .{ .name = "spread_iterator", .source = "(function(){var log='';var input={[Symbol.iterator](){log+='i';var n=0;return {get next(){log+='n';return function(){return {done:n++>0,value:7};};}};}};function f(v=[...input]){return log+':'+v[0];}return f();})()", .expected = "in:7" },
+        .{ .name = "delete_optional", .source = "(function(a={x:7},v=delete a?.x){return v&&!(\"x\" in a);})()", .expected = "true" },
+        .{ .name = "delete_computed", .source = "(function(){var log='';var key={toString(){log+='k';return 'x';}};function f(a={x:7},v=delete a[key]){return log+':'+v+':'+('x' in a);}return f();})()", .expected = "k:true:false" },
+        .{ .name = "destructuring_assignment", .source = "(function(a=1,b=2,v=([a,b]=[7,8])){return a*100+b*10+v[0];})()", .expected = "787" },
+        .{ .name = "object_assignment", .source = "(function(a=1,b=2,v=({x:a,...b}={x:7,y:8})){return a*100+b.y*10+v.x;})()", .expected = "787" },
+        .{ .name = "assignment_later_tdz", .source = "(function(){try{(function(v=([later]=[7]),later){})();}catch(e){return e instanceof ReferenceError;}return false;})()", .expected = "true" },
+        .{ .name = "tagged_template", .source = "(function(tag=(strings,x)=>strings[0]+x+strings[1],v=tag`a${7}b`){return v;})()", .expected = "a7b" },
+        .{ .name = "template_string", .source = "(function(seed=7,v=`a${seed}b`){return v;})()", .expected = "a7b" },
+        .{ .name = "computed_pattern", .source = "(function(seed=7,{[String(seed)]:value}={7:8}){return value;})()", .expected = "8" },
+        .{ .name = "unmapped_arguments", .source = "(function(seed=3,a=[seed]){arguments[0]=9;return seed*10+a[0];})()", .expected = "33" },
+        .{ .name = "derived_super", .source = "(function(){class Base{constructor(x){this.x=x;}}class Box extends Base{constructor(value=super(...[7])){}}return new Box().x;})()", .expected = "7" },
+        .{ .name = "super_method", .source = "(function(){class Base{read(){return 7;}}class Box extends Base{read(value=super.read()){return value;}}return new Box().read();})()", .expected = "7" },
+        .{ .name = "private_method", .source = "(function(){class Box{#read(){return 7;}read(value=this.#read()){return value;}}return new Box().read();})()", .expected = "7" },
+        .{ .name = "private_new", .source = "(function(){class Box{#Ctor=class{value=7;};read(value=new this.#Ctor()){return value.value;}}return new Box().read();})()", .expected = "7" },
+        .{ .name = "default_selection", .source = "(function(){var count=0;function f(a=(count++,{})){return a;}return [f(null)===null,f(0)===0,f(false)===false,f('')==='',count,f()!==undefined,count].join(':');})()", .expected = "true:true:true:true:0:true:1" },
+        .{ .name = "iterator_close", .source = "(function(){var log='';var input={[Symbol.iterator](){return {next(){return {done:false,value:undefined};},return(){log+='r';return {};}};}};function f([x={value:7}]=input){return log+':'+x.value;}return f();})()", .expected = "r:7" },
+        .{ .name = "iterator_abrupt", .source = "(function(){var log='';var input={[Symbol.iterator](){return {next(){return {done:false,value:undefined};},return(){log+='r';throw 9;}};}};function f([x=(()=>{throw 7;})()]=input){}try{f();}catch(e){return log+':'+e;}})()", .expected = "r:7" },
+        .{ .name = "eval_literal_capture", .source = "(function(a={read(){return later;}},v=eval('var later=7')){return a.read();})()", .expected = "7" },
+        .{ .name = "eval_array_assignment", .source = "(function(seed=3,a=[eval('seed=7')]){return seed*10+a[0];})()", .expected = "77" },
+        .{ .name = "private_noargs", .source = "(function(){class Box{#Ctor=class{value=7;};read(){return (new this.#Ctor).value;}}return new Box().read();})()", .expected = "7" },
+        .{ .name = "private_getter", .source = "(function(){var log='';class Box{get #Ctor(){log+='g';return function(x){this.value=x;};}read(value=new this.#Ctor(7)){return value.value;}}return new Box().read()+':'+log;})()", .expected = "7:g" },
+        .{ .name = "private_chained", .source = "(function(){class Box{#holder={Ctor:class{value=7;}};read(value=new this.#holder.Ctor()){return value.value;}}return new Box().read();})()", .expected = "7" },
+        .{ .name = "super_new", .source = "(function(){class Base{}Base.prototype.Ctor=class{value=7;};class Box extends Base{read(value=new super.Ctor()){return value.value;}}return new Box().read();})()", .expected = "7" },
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for (cases) |case| {
+            errdefer std.debug.print("canonical parameter {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const source = try std.fmt.allocPrint(std.testing.allocator, "String({s})", .{case.source});
+            defer std.testing.allocator.free(source);
+            try std.testing.expectEqualStrings(case.expected, (try ctx.evaluate(source)).asStr());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
 test "forced tree-walker and required bytecode preserve parameter-safe default expressions" {
     const source =
         \\var parameterExpressionEffects = [];
@@ -28760,7 +28928,7 @@ test "moving GC relocates live severed and recycled mapped arguments cells" {
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
 }
 
-test "required bytecode rejects an unsupported object default instead of counting fallback coverage" {
+test "required bytecode rejects unsupported nested parameter lowering without fallback coverage" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,
         .bytecode_execution_mode = .required,
@@ -28768,7 +28936,7 @@ test "required bytecode rejects an unsupported object default instead of countin
     defer ctx.destroy();
 
     try std.testing.expectError(error.Throw, ctx.evaluate(
-        \\function needsParameterPrologue(value = {}) { return value; }
+        \\function needsParameterPrologue(value = function(){ using resource = source; }) { return value; }
         \\needsParameterPrologue();
     ));
     const exception = ctx.exception orelse return error.TestUnexpectedResult;

@@ -5712,8 +5712,10 @@ fn nativeInitComputedProperty(vm: *Interpreter, target: Value, key: Value, store
 
 fn nativeInitSpread(vm: *Interpreter, target: Value, source: Value) EvalError!Value {
     _ = try literalObjectTarget(vm, target);
+    const target_root = try vm.pushTempRoot(target);
+    defer vm.restoreTempRoots(target_root);
     try vm.spreadDataProps(target, source);
-    return target;
+    return vm.tempRoot(target_root, target);
 }
 
 fn nativeInitAccessor(vm: *Interpreter, target: Value, key: Value, function: Value, is_getter: bool) EvalError!Value {
@@ -5734,8 +5736,10 @@ fn nativeArrayAppendHole(vm: *Interpreter, target: Value) EvalError!Value {
 
 fn nativeArraySpread(vm: *Interpreter, target: Value, iterable: Value) EvalError!Value {
     const array = try literalArrayTarget(vm, target);
+    const target_root = try vm.pushTempRoot(target);
+    defer vm.restoreTempRoots(target_root);
     try vm.spreadInto(try array.ensureElementsList(vm.arena), iterable);
-    return target;
+    return vm.tempRoot(target_root, target);
 }
 
 const OptimizerCallTarget = struct {

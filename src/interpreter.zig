@@ -8070,10 +8070,12 @@ pub const Interpreter = struct {
         const next_root = try self.pushTempRoot(next_method);
         defer self.restoreTempRoots(next_root);
         while (true) {
-            const res = try self.callValueWithThis(next_method, &.{}, iter_obj);
+            const res = try self.callValueWithThis(self.tempRoot(next_root, next_method), &.{}, self.tempRoot(iter_root, iter_obj));
+            const result_root = try self.pushTempRoot(res);
+            defer self.restoreTempRoots(result_root);
             if (!builtins.isRealObject(res)) return self.throwError("TypeError", "iterator result is not an object");
             if ((try self.getProperty(res, "done")).toBoolean()) break;
-            try list.append(self.arena, try self.getProperty(res, "value"));
+            try list.append(self.arena, try self.getProperty(self.tempRoot(result_root, res), "value"));
         }
     }
 
@@ -10926,45 +10928,37 @@ pub const Interpreter = struct {
     /// array elements into `target` (a string spreads its chars by index).
     /// Shared by the tree-walker object literal and the VM `init_spread` op.
     pub fn spreadDataProps(self: *Interpreter, target: Value, src: Value) EvalError!void {
+        const target_root = try self.pushTempRoot(target);
+        defer self.restoreTempRoots(target_root);
+        const source_root = try self.pushTempRoot(src);
         switch (src.kind()) {
             .object => {
-                const so = src.asObj();
-                // A Proxy source must go through [[OwnPropertyKeys]] then, per key,
-                // [[GetOwnProperty]] — invoking the `ownKeys` and
-                // `getOwnPropertyDescriptor` traps in order (and reading only
-                // enumerable keys via Get) rather than its empty raw key set.
-                if (so.proxyHandler() != null or so.proxy_revoked) {
-                    for (try self.objectOwnKeysList(so)) |k| {
-                        if (value.isPrivateKey(k)) continue;
-                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src, try self.keyToValue(k) });
-                        if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
-                        try self.setMember(target, k, try self.getProperty(src, k));
-                    }
-                    return;
+                const source = src.asObj();
+                const proxy_source = source.proxyHandler() != null or source.proxy_revoked;
+                var keys = try self.objectOwnKeysList(source);
+                if (proxy_source) {
+                    // Proxy OwnPropertyKeys may return transient String cells.
+                    // Retain their canonical bytes through descriptor/get calls.
+                    const retained = try self.arena.alloc([]const u8, keys.len);
+                    for (keys, 0..) |key, index| retained[index] = try self.arena.dupe(u8, key);
+                    keys = retained;
                 }
-                if (so.is_array) {
-                    for (try self.objectOwnKeysList(so)) |k| {
-                        if (value.isPrivateKey(k)) continue;
-                        const desc = try builtins.objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ src, try self.keyToValue(k) });
-                        if (!(desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())) continue;
-                        try self.setMember(target, k, try self.getProperty(src, k));
-                    }
-                    return;
-                }
-                // [[OwnPropertyKeys]] (not just `ownKeys`): integer-indexed dense
-                // elements live outside the shape's key order, so a `{ ...src }`
-                // where `src.0` was set via `src[0]=…` would otherwise drop it.
-                for (try self.objectOwnKeysList(so)) |k| {
-                    if (value.isPrivateKey(k)) continue;
-                    if (!so.getAttr(k).enumerable) continue;
-                    try self.setMember(target, k, try self.getProperty(src, k));
+                for (keys) |key| {
+                    if (value.isPrivateKey(key)) continue;
+                    // CopyDataProperties checks each live own descriptor after
+                    // the previous Get: a deleted key must not expose an inherited
+                    // property, and target setters are never part of this operation.
+                    const current_source = self.tempRoot(source_root, src).asObj();
+                    if (!try self.objectProtoPropertyIsEnumerable(current_source, key)) continue;
+                    const property_value = try self.getProperty(self.tempRoot(source_root, src), key);
+                    try self.defineLiteralDataProp(self.tempRoot(target_root, target).asObj(), key, property_value);
                 }
             },
             .string => {
                 var code_units = StringCodeUnitIterator.initValue(src);
                 var i: usize = 0;
                 while (code_units.next()) |cu| : (i += 1)
-                    try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), try self.stringValueFromCodeUnit(cu.unit));
+                    try self.defineLiteralDataProp(self.tempRoot(target_root, target).asObj(), try std.fmt.allocPrint(self.arena, "{d}", .{i}), try self.stringValueFromCodeUnit(cu.unit));
             },
             else => {}, // null/undefined/number/boolean spread → no own enumerable props
         }
@@ -10985,55 +10979,61 @@ pub const Interpreter = struct {
 
     fn evalObjectLit(self: *Interpreter, props: []ast.Property) EvalError!Value {
         const v = try self.newObject();
+        const object_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(object_root);
         for (props) |p| {
             if (p.is_spread) {
                 const src = try self.eval(p.value);
-                try self.spreadDataProps(v, src);
+                try self.spreadDataProps(self.tempRoot(object_root, v), src);
                 continue;
             }
             // ToPropertyKey ONCE (its valueOf/@@toPrimitive runs a single time);
             // keyOf and keyDisplayName then read the resulting primitive without
             // re-coercing.
             const kv: ?Value = if (p.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
-            const key = if (kv) |k| try self.keyOf(k) else try value.encodeStringKey(self.arena, p.key);
+            const key_root = if (kv) |key| try self.pushTempRoot(key) else null;
+            defer if (key_root) |root| self.restoreTempRoots(root);
+            const pv = try self.eval(p.value);
+            const object = self.tempRoot(object_root, v).asObj();
+            // ToPropertyKey precedes value evaluation, but its retained primitive
+            // (and any borrowed string bytes) may move while evaluating the value.
+            const current_key = if (key_root) |root| self.tempRoot(root, kv.?) else null;
+            const key = if (current_key) |k| try self.keyOf(k) else try value.encodeStringKey(self.arena, p.key);
             // The name a method/accessor takes from this key (a symbol shows as
             // `[description]`, not its internal key).
-            const name_str = if (kv) |k| try self.keyDisplayName(k) else p.key;
+            const name_str = if (current_key) |k| try self.keyDisplayName(k) else p.key;
             switch (p.accessor) {
                 .none => {
-                    const pv = try self.eval(p.value);
                     if (p.proto_setter) { // only the `__proto__: value` colon form
                         // Only an Object or null sets [[Prototype]]; any other
                         // value (incl. a Symbol/BigInt, which are object-tagged) is
                         // discarded without creating an own `__proto__` property.
-                        if (builtins.isRealObject(pv)) v.asObj().proto = pv.asObj();
-                        if (pv.isNull()) v.asObj().proto = null;
+                        if (builtins.isRealObject(pv)) object.setProtoAtomic(pv.asObj());
+                        if (pv.isNull()) object.setProtoAtomic(null);
                         continue;
                     }
                     // A concise method's [[HomeObject]] is the object being built,
                     // so `super` inside it resolves on the object's prototype.
                     if (p.value.* == .function and p.value.function.is_method)
                         if (funcOf(pv)) |f| {
-                            f.home_object = v.asObj();
+                            f.home_object = object;
                         };
                     try self.maybeNameAnon(pv, p.value, name_str); // `{ x: function(){} }` ⇒ name "x"
-                    try self.defineLiteralDataProp(v.asObj(), key, pv);
+                    try self.defineLiteralDataProp(object, key, pv);
                 },
                 .get => {
-                    const gv = try self.eval(p.value);
-                    if (funcOf(gv)) |f| f.home_object = v.asObj();
-                    try self.nameAccessor(gv, "get", name_str);
-                    try self.defineAccessor(v.asObj(), key, gv, null);
+                    if (funcOf(pv)) |f| f.home_object = object;
+                    try self.nameAccessor(pv, "get", name_str);
+                    try self.defineAccessor(object, key, pv, null);
                 },
                 .set => {
-                    const sv = try self.eval(p.value);
-                    if (funcOf(sv)) |f| f.home_object = v.asObj();
-                    try self.nameAccessor(sv, "set", name_str);
-                    try self.defineAccessor(v.asObj(), key, null, sv);
+                    if (funcOf(pv)) |f| f.home_object = object;
+                    try self.nameAccessor(pv, "set", name_str);
+                    try self.defineAccessor(object, key, null, pv);
                 },
             }
         }
-        return v;
+        return self.tempRoot(object_root, v);
     }
 
     /// Build a `RegExp` instance with `source`/`flags`/`lastIndex` and the
@@ -13456,17 +13456,21 @@ pub const Interpreter = struct {
 
     fn evalArrayLit(self: *Interpreter, elems: []*Node) EvalError!Value {
         const v = try self.newArray();
+        const array_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(array_root);
         for (elems) |en| {
             if (en.* == .spread) {
-                try self.spreadInto(try v.asObj().ensureElementsList(self.arena), try self.eval(en.spread));
+                const iterable = try self.eval(en.spread);
+                try self.spreadInto(try self.tempRoot(array_root, v).asObj().ensureElementsList(self.arena), iterable);
             } else if (en.* == .elision) {
                 // A hole: a slot that reads as absent (skipped by iteration).
-                try v.asObj().appendArrayHole(self.arena);
+                try self.tempRoot(array_root, v).asObj().appendArrayHole(self.arena);
             } else {
-                try v.asObj().appendElement(self.arena, try self.eval(en));
+                const element = try self.eval(en);
+                try self.tempRoot(array_root, v).asObj().appendElement(self.arena, element);
             }
         }
-        return v;
+        return self.tempRoot(array_root, v);
     }
 
     /// `index`-as-string -> array element index, or null if not an integer.
@@ -15653,10 +15657,12 @@ pub const Interpreter = struct {
             return self.throwError("TypeError", notAnObjectMessage(v));
         const key = self.symbolIteratorKey() orelse
             return self.throwError("TypeError", "value is not iterable");
+        const input_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(input_root);
         const method = try self.getProperty(v, key);
         if (!method.isCallable())
             return self.throwError("TypeError", "Symbol.iterator is not callable");
-        return self.requireIteratorObject(try self.callValueWithThis(method, &.{}, v));
+        return self.requireIteratorObject(try self.callValueWithThis(method, &.{}, self.tempRoot(input_root, v)));
     }
 
     /// GetIterator(obj, sync): acquire the iterator object and capture its
@@ -15664,9 +15670,12 @@ pub const Interpreter = struct {
     /// consumers use their own entry points instead of this language contract.
     pub fn getIteratorRecord(self: *Interpreter, v: Value) EvalError!IteratorRecord {
         const iterator = try self.getIterator(v);
+        const iterator_root = try self.pushTempRoot(iterator);
+        defer self.restoreTempRoots(iterator_root);
+        const next_method = try self.getProperty(iterator, "next");
         return .{
-            .iterator = iterator,
-            .next_method = try self.getProperty(iterator, "next"),
+            .iterator = self.tempRoot(iterator_root, iterator),
+            .next_method = next_method,
         };
     }
 

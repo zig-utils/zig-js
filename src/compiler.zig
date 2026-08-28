@@ -542,115 +542,6 @@ const PlainParameterLayout = struct {
     }
 };
 
-fn supportedPlainParameterReference(node: *const ast.Node, fnode: *const ast.FunctionNode) bool {
-    return switch (node.*) {
-        .identifier, .member, .super_member => supportedPlainParameterDefault(node, fnode),
-        else => false,
-    };
-}
-
-fn supportedPlainParameterDefault(node: *const ast.Node, fnode: *const ast.FunctionNode) bool {
-    // FunctionDeclarationInstantiation installs invocation context first, and
-    // each prior formal completes BindingInitialization before the next one.
-    // The recursive cases below use only these exact leaves and canonical VM
-    // operations; every unlisted AST kind remains a fail-closed barrier.
-    return switch (node.*) {
-        .number, .bigint_lit, .string, .boolean, .null_lit, .undefined_lit => true,
-        .this_expr, .new_target_expr => !fnode.requires_tree_walk_class_constructor,
-        // FunctionDeclarationInstantiation creates all formal cells before
-        // initializing them left-to-right. Exceptions from self/later reads
-        // belong to execution, not admission. The parameter binding phase
-        // resolves checked formals and exact outer records without exposing
-        // the body's not-yet-created VariableEnvironment.
-        .identifier => true,
-        .unary => |unary| supportedPlainParameterDefault(unary.operand, fnode),
-        .binary => |binary| supportedPlainParameterDefault(binary.left, fnode) and
-            supportedPlainParameterDefault(binary.right, fnode),
-        .logical => |logical| supportedPlainParameterDefault(logical.left, fnode) and
-            supportedPlainParameterDefault(logical.right, fnode),
-        .conditional => |conditional| supportedPlainParameterDefault(conditional.cond, fnode) and
-            supportedPlainParameterDefault(conditional.consequent, fnode) and
-            supportedPlainParameterDefault(conditional.alternate, fnode),
-        .sequence => |sequence| supportedPlainParameterDefault(sequence.first, fnode) and
-            supportedPlainParameterDefault(sequence.second, fnode),
-        // Assignment/Update Evaluation retains one Reference through GetValue,
-        // RHS/coercion, and PutValue. Use the ordinary parameter-phase binding
-        // plans and activation-owned member temporaries; resolving the target
-        // again after an observable effect would select the wrong binding.
-        .assign => |assignment| supportedPlainParameterReference(assignment.target, fnode) and
-            supportedPlainParameterDefault(assignment.value, fnode),
-        .op_assign => |assignment| supportedPlainParameterReference(assignment.target, fnode) and
-            supportedPlainParameterDefault(assignment.value, fnode),
-        .logical_assign => |assignment| supportedPlainParameterReference(assignment.target, fnode) and
-            supportedPlainParameterDefault(assignment.value, fnode),
-        .update => |update| supportedPlainParameterReference(update.target, fnode),
-        // Function/arrow creation itself has no user-code side effect. Its
-        // nested compiler performs the exact capture/admission checks, while
-        // eager parameter-environment materialization preserves closure identity.
-        .function => true,
-        .member => |member| !member.optional and
-            (member.computed != null or !value_mod.isRawPrivateName(member.property)) and
-            supportedPlainParameterDefault(member.object, fnode) and
-            (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode)),
-        .call => |call| blk: {
-            if (call.optional or !supportedPlainParameterDefault(call.callee, fnode))
-                break :blk false;
-            for (call.args) |argument|
-                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode))
-                    break :blk false;
-            break :blk true;
-        },
-        .new_expr => |construction| blk: {
-            if (!supportedPlainParameterDefault(construction.callee, fnode))
-                break :blk false;
-            for (construction.args) |argument|
-                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode))
-                    break :blk false;
-            break :blk true;
-        },
-        .super_member => |member| fnode.is_derived_class_constructor and
-            (member.computed == null or supportedPlainParameterDefault(member.computed.?, fnode)),
-        .super_call => |arguments| blk: {
-            if (!fnode.is_derived_class_constructor) break :blk false;
-            for (arguments) |argument|
-                if (argument.* == .spread or !supportedPlainParameterDefault(argument, fnode))
-                    break :blk false;
-            break :blk true;
-        },
-        else => false,
-    };
-}
-
-fn supportedPlainParameterPattern(pattern: *const ast.Node, fnode: *const ast.FunctionNode) bool {
-    return switch (pattern.*) {
-        .identifier => true,
-        .obj_pattern => |object| blk: {
-            for (object.props) |property| {
-                if (property.key_expr) |key|
-                    if (!supportedPlainParameterDefault(key, fnode)) break :blk false;
-                if (property.default) |default|
-                    if (!supportedPlainParameterDefault(default, fnode)) break :blk false;
-                if (!supportedPlainParameterPattern(property.target, fnode)) break :blk false;
-            }
-            if (object.rest) |rest|
-                if (!supportedPlainParameterPattern(rest, fnode)) break :blk false;
-            break :blk true;
-        },
-        .arr_pattern => |array| blk: {
-            for (array.elems) |element| {
-                if (element.default) |default|
-                    if (!supportedPlainParameterDefault(default, fnode)) break :blk false;
-                if (element.target) |target|
-                    if (!supportedPlainParameterPattern(target, fnode)) break :blk false;
-            }
-            if (array.rest) |rest|
-                if (!supportedPlainParameterPattern(rest, fnode)) break :blk false;
-            break :blk true;
-        },
-        else => false,
-    };
-}
-
 fn configurePlainParameters(
     arena: std.mem.Allocator,
     scope: *FnScope,
@@ -659,12 +550,8 @@ fn configurePlainParameters(
     scope.may_extend_environment = !fnode.is_strict and fnode.uses_direct_eval;
     var has_parameter_expressions = false;
     for (fnode.params) |parameter| {
-        if (parameter.default) |default| {
-            if (!supportedPlainParameterDefault(default, fnode)) return error.Unsupported;
-            has_parameter_expressions = true;
-        }
+        if (parameter.default != null) has_parameter_expressions = true;
         if (parameter.pattern) |pattern| {
-            if (!supportedPlainParameterPattern(pattern, fnode)) return error.Unsupported;
             has_parameter_expressions = has_parameter_expressions or patternHasEvaluationExpressions(pattern);
         }
     }
@@ -2235,7 +2122,14 @@ pub const Compiler = struct {
             .debug_checkpoints = true,
         };
         if (!fnode.is_derived_class_constructor) try c.compileClassInitializers(fnode.class_instance_initializers);
-        try c.compilePlainParameterEntries(fnode, &parameter_layout);
+        // FunctionDeclarationInstantiation uses the same expression and pattern
+        // semantics as body evaluation, under the parameter binding phase. Let
+        // canonical lowering decide eligibility, preserving the causal audit
+        // reason rather than maintaining a second syntax whitelist.
+        c.compilePlainParameterEntries(fnode, &parameter_layout) catch |err| switch (err) {
+            error.Unsupported => return rejectPlainFunction(rejection, .parameter_prologue),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
         try c.emitParameterBodyCopies();
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
@@ -6215,7 +6109,16 @@ pub const Compiler = struct {
                 .derived_instance_initializers = if (fnode.is_arrow) self.derived_instance_initializers else &.{},
                 .debug_checkpoints = self.debug_checkpoints,
             };
-            try sub_c.compilePlainParameterEntries(fnode, &parameter_layout);
+            sub_c.compilePlainParameterEntries(fnode, &parameter_layout) catch |err| switch (err) {
+                error.Unsupported => {
+                    if (self.scope == null) {
+                        template_admission = .plain_parameter_prologue;
+                        break :blk null;
+                    }
+                    return error.Unsupported;
+                },
+                error.OutOfMemory => return error.OutOfMemory,
+            };
             try sub_c.emitParameterBodyCopies();
             if (fnode.is_expr_body) {
                 sub_c.compileExpr(fnode.body) catch |e| switch (e) {
@@ -7075,6 +6978,34 @@ test "compiler repeated body query preserves capture classifications" {
     }
 }
 
+test "canonical parameter lowering unwinds every compiler allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            var parser = try @import("parser.zig").Parser.init(arena.allocator(),
+                \\function make(seed, holder={value:seed}, [first,...rest]=[holder,...[]],
+                \\              Box=class{field=first;read(){return holder.value;}},
+                \\              pattern=/x/g, value=new Box(...[]),
+                \\              read=value?.read?.(), changed=({value:seed}=holder)) {
+                \\  return [value,pattern,read,changed];
+                \\}
+            );
+            const program = try parser.parseProgram();
+            const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+                .compiled => |compiled| compiled,
+                .rejected => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(@as(usize, 7), compiled.chunk.default_parameter_indices.len);
+            try std.testing.expectEqual(@as(usize, 1), compiled.chunk.destructuring_parameter_indices.len);
+            try std.testing.expectEqual(@as(usize, 1), compiled.chunk.classes.items.len);
+            try std.testing.expect(compiled.chunk.classes.items[0].capture_environment != null);
+            try std.testing.expect(compiled.chunk.has_non_simple_parameters);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 test "compiler reports stable plain-function admission reasons" {
     const cases = [_]struct {
         source: []const u8,
@@ -7082,18 +7013,7 @@ test "compiler reports stable plain-function admission reasons" {
     }{
         .{ .source = "function* f(){}", .expected = .generator_or_async },
         .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
-        .{ .source = "function f(first, value = first?.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, value = first?.()){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, args, value = first(...args)){}", .expected = .parameter_prologue },
-        .{ .source = "function f(first, args, value = new first(...args)){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = /x/){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = {}){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = []){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = class {}){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = (holder.value = {})){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = (outer += side?.())){}", .expected = .parameter_prologue },
-        .{ .source = "function f(value = delete holder.value){}", .expected = .parameter_prologue },
-        .{ .source = "function f([value] = []){}", .expected = .parameter_prologue },
+        .{ .source = "function f(value = function(){ using resource = source; }){}", .expected = .parameter_prologue },
     };
 
     for (cases) |case| {
@@ -7109,6 +7029,18 @@ test "compiler reports stable plain-function admission reasons" {
     }
 
     const admitted_parameter_prologues = [_][]const u8{
+        "function f(first, value = first?.value){}",
+        "function f(first, value = first?.()){}",
+        "function f(first, args, value = first(...args)){}",
+        "function f(first, args, value = new first(...args)){}",
+        "function f(value = /x/){}",
+        "function f(value = {}){}",
+        "function f(value = []){}",
+        "function f(value = class {}){}",
+        "function f(value = (holder.value = {})){}",
+        "function f(value = (outer += side?.())){}",
+        "function f(value = delete holder.value){}",
+        "function f([value] = []){}",
         "function f(value = ++outer){}",
         "function f(value = outer--){}",
         "function f(value = outer += 2){}",
@@ -7222,8 +7154,8 @@ test "compiler reports stable plain-function admission reasons" {
         return error.TestUnexpectedResult;
     const super_method = super_class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
     switch (try Compiler.admitPlainFunction(super_arena.allocator(), super_method.function)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
+        .compiled => {},
+        .rejected => return error.TestUnexpectedResult,
     }
 
     var private_new_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -7260,8 +7192,8 @@ test "compiler reports stable plain-function admission reasons" {
         return error.TestUnexpectedResult;
     const super_new_method = super_new_class.class_expr.members[0].func orelse return error.TestUnexpectedResult;
     switch (try Compiler.admitPlainFunction(super_new_arena.allocator(), super_new_method.function)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
+        .compiled => {},
+        .rejected => return error.TestUnexpectedResult,
     }
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
