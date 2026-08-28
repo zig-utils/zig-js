@@ -638,6 +638,76 @@ fn runDiag(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8
     out.writeStreamingAll(io, summary) catch {};
 }
 
+/// `--vm-witness-subtree <subtree> [substr]`: the sweepable form of
+/// `--vm-witness`. Every test in the subtree runs twice — once with plain
+/// synchronous functions forced onto the tree walker, once with every eligible
+/// program/template required to compile — and only the tests whose outcome
+/// DIFFERS between the two are printed. The tiers are supposed to agree on
+/// every observable, but test262 exercises the VM far less than the tree walker
+/// (the admission policy tiers only functions that can benefit), so a
+/// divergence is invisible to an ordinary corpus run. Unlike `--vm-witness`,
+/// this never stops at the first disagreement.
+fn runVmWitnessSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8, filter: ?[]const u8) !void {
+    const out = std.Io.File.stdout();
+    const path = resolveUnderRoot(gpa, root, sub) orelse return;
+    defer gpa.free(path);
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    const harness_path = std.fs.path.join(gpa, &.{ root, "harness" }) catch return;
+    defer gpa.free(harness_path);
+    var harness = Harness{ .io = io, .gpa = gpa, .dir = std.Io.Dir.cwd().openDir(io, harness_path, .{}) catch null };
+    defer harness.deinit();
+
+    var walker = dir.walk(gpa) catch return;
+    defer walker.deinit();
+
+    var n_diverge: usize = 0;
+    var n_agree: usize = 0;
+    while (walker.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".js")) continue;
+        if (std.mem.endsWith(u8, entry.basename, "_FIXTURE.js")) continue;
+        if (filter) |f| if (std.mem.indexOf(u8, entry.path, f) == null) continue;
+        if (shouldRemovePathFromConfiguredCorpus(sub, entry.path)) continue;
+        if (shouldExcludePath(sub, entry.path)) continue;
+        if (shouldSkipPath(sub, entry.path)) continue;
+        const src = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(max_test_source_bytes)) catch continue;
+        defer gpa.free(src);
+        const maybe_abs = std.fs.path.join(gpa, &.{ path, entry.path }) catch null;
+        defer if (maybe_abs) |a| gpa.free(a);
+        const abs_path = maybe_abs orelse entry.basename;
+
+        var tree_detail: std.ArrayListUnmanaged(u8) = .empty;
+        defer tree_detail.deinit(gpa);
+        const tree = runOneDetail(gpa, io, &harness, abs_path, src, &tree_detail, .tree_walker);
+        if (tree == .skip) continue;
+        var vm_detail: std.ArrayListUnmanaged(u8) = .empty;
+        defer vm_detail.deinit(gpa);
+        const required = runOneDetail(gpa, io, &harness, abs_path, src, &vm_detail, .required);
+        if (required == .skip) continue;
+        if (tree == required) {
+            n_agree += 1;
+            continue;
+        }
+        n_diverge += 1;
+        for (vm_detail.items) |*c| {
+            if (c.* == '\n' or c.* == '\r' or c.* == '\t') c.* = ' ';
+        }
+        var lb: [1024]u8 = undefined;
+        const line = std.fmt.bufPrint(&lb, "{s}->{s}\t{s}\t{s}\n", .{
+            @tagName(tree),
+            @tagName(required),
+            entry.path,
+            vm_detail.items,
+        }) catch continue;
+        out.writeStreamingAll(io, line) catch {};
+    }
+    var sb: [160]u8 = undefined;
+    const summary = std.fmt.bufPrint(&sb, "# {s}: {d} diverge, {d} agree\n", .{ sub, n_diverge, n_agree }) catch return;
+    out.writeStreamingAll(io, summary) catch {};
+}
+
 /// Run one checked-in positive test twice: with plain synchronous functions
 /// forced onto the tree walker, then with every eligible program/template
 /// required to compile. The test262 assertions (including `$DONE`) are the
@@ -1171,6 +1241,7 @@ pub fn main(init: std.process.Init) !void {
         .diag => |diagnostic| runDiag(gpa, io, root, diagnostic.subtree, diagnostic.filter),
         .eval => |path| runEval(gpa, io, path),
         .vm_witness => |paths| for (paths) |path| try runVmWitness(gpa, io, root, path),
+        .vm_witness_subtree => |w| runVmWitnessSubtree(gpa, io, root, w.subtree, w.filter),
         .list_skips => runListSkips(gpa, io, root),
         .list_excluded => runListExcluded(gpa, io, root),
     };

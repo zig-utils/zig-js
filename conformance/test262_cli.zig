@@ -9,6 +9,7 @@ pub const usage =
     \\  --diag <subtree> [path-substring]
     \\  --eval <file>
     \\  --vm-witness <test.js> [test.js ...]
+    \\  --vm-witness-subtree <subtree> [path-substring]
     \\  --list-skips
     \\  --list-excluded
     \\  --drive-subtree <subtree>                 (internal)
@@ -24,6 +25,7 @@ pub const Command = union(enum) {
     diag: struct { subtree: []const u8, filter: ?[]const u8 },
     eval: []const u8,
     vm_witness: []const []const u8,
+    vm_witness_subtree: struct { subtree: []const u8, filter: ?[]const u8 },
     list_skips,
     list_excluded,
 };
@@ -49,6 +51,10 @@ pub fn parse(args: []const []const u8) error{InvalidArguments}!Command {
     }
     if (std.mem.eql(u8, mode, "--eval"))
         return if (args.len == 2) .{ .eval = args[1] } else error.InvalidArguments;
+    if (std.mem.eql(u8, mode, "--vm-witness-subtree")) {
+        if (args.len != 2 and args.len != 3) return error.InvalidArguments;
+        return .{ .vm_witness_subtree = .{ .subtree = args[1], .filter = if (args.len == 3) args[2] else null } };
+    }
     if (std.mem.eql(u8, mode, "--vm-witness"))
         return if (args.len >= 2) .{ .vm_witness = args[1..] } else error.InvalidArguments;
     if (std.mem.eql(u8, mode, "--list-skips"))
@@ -79,6 +85,8 @@ test "test262 CLI recognizes every exact mode contract" {
     try expectTag(.eval, &.{ "--eval", "probe.js" });
     const witnesses = (try parse(&.{ "--vm-witness", "one.js", "two.js" })).vm_witness;
     try std.testing.expectEqual(@as(usize, 2), witnesses.len);
+    try expectTag(.vm_witness_subtree, &.{ "--vm-witness-subtree", "test/language" });
+    try expectTag(.vm_witness_subtree, &.{ "--vm-witness-subtree", "test/language", "for" });
     try expectTag(.list_skips, &.{"--list-skips"});
     try expectTag(.list_excluded, &.{"--list-excluded"});
 }
@@ -91,6 +99,7 @@ test "test262 CLI usage documents every accepted named mode" {
         "--diag",
         "--eval",
         "--vm-witness",
+        "--vm-witness-subtree",
         "--list-skips",
         "--list-excluded",
     }) |mode| try std.testing.expect(std.mem.indexOf(u8, usage, mode) != null);
@@ -109,6 +118,8 @@ test "test262 CLI rejects unknown incomplete malformed and trailing arguments" {
         &.{"--eval"},
         &.{ "--eval", "probe.js", "extra" },
         &.{"--vm-witness"},
+        &.{"--vm-witness-subtree"},
+        &.{ "--vm-witness-subtree", "test/language", "for", "extra" },
         &.{ "--list-skips", "extra" },
         &.{ "--list-excluded", "extra" },
     };
