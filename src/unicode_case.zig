@@ -114,13 +114,32 @@ fn isCaseIgnorable(cp: Codepoint) bool {
 const Case = enum { upper, lower };
 
 /// Map `s` (UTF-8) to upper/lowercase, allocating the result on `alloc`.
+/// Default (non-locale) case mapping of an ASCII byte. Within ASCII the mapping
+/// is 1:1 and stays ASCII, so these bytes need no decode, table lookup, or
+/// re-encode. The locale-sensitive Turkic and Lithuanian mappings have their own
+/// entry points and never reach here.
+inline fn asciiMapped(b: u8, comptime which: Case) u8 {
+    return switch (which) {
+        .upper => if (b >= 'a' and b <= 'z') b - ('a' - 'A') else b,
+        .lower => if (b >= 'A' and b <= 'Z') b + ('a' - 'A') else b,
+    };
+}
+
 fn mapAlloc(alloc: std.mem.Allocator, s: []const u8, comptime which: Case) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(alloc);
+    // Most case mappings neither grow nor shrink, so reserve the input's length
+    // once instead of growing the list repeatedly.
+    try out.ensureTotalCapacityPrecise(alloc, s.len);
     var buf: [4]u8 = undefined;
 
     var i: usize = 0;
     while (i < s.len) {
+        if (s[i] < 0x80) {
+            try out.append(alloc, asciiMapped(s[i], which));
+            i += 1;
+            continue;
+        }
         const seq = std.unicode.utf8ByteSequenceLength(s[i]) catch {
             try out.append(alloc, s[i]);
             i += 1;
