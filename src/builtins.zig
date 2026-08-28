@@ -1710,7 +1710,7 @@ fn descField(self: *Interpreter, d: *value.Object, name: []const u8) HostError!?
 pub fn throwDefineFailed(self: *Interpreter, target: *value.Object, key: []const u8) HostError {
     if (target.proxyHandler() != null or target.proxy_revoked)
         return self.throwErrorFmt("TypeError", "Proxy's 'defineProperty' trap returned falsy value for property '{s}'", .{key});
-    if (!target.isExtensible() and target.getOwn(key) == null and target.getAccessor(key) == null)
+    if (!target.isExtensible() and !try self.hasOwnPropertyResult(target, key))
         return self.throwError("TypeError", "Attempting to define property on object that is not extensible.");
     return self.throwError("TypeError", "Attempting to change value of a readonly property.");
 }

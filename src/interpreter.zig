@@ -13089,7 +13089,7 @@ pub const Interpreter = struct {
             if (eq(name, "getOrInsert") or eq(name, "getOrInsertComputed")) {
                 const cb = if (eq(name, "getOrInsertComputed")) cb: {
                     const candidate = arg(args, 1);
-                    if (!candidate.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed: callback is not a function");
+                    if (!candidate.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed requires the callback argument to be callable.");
                     break :cb candidate;
                 } else Value.undef();
                 if (o.weakEntryGet(key_obj)) |existing| return existing;
@@ -13187,7 +13187,7 @@ pub const Interpreter = struct {
         if (eq(name, "getOrInsert") or eq(name, "getOrInsertComputed")) {
             const cb = if (eq(name, "getOrInsertComputed")) cb: {
                 const candidate = arg(args, 1);
-                if (!candidate.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed: callback is not a function");
+                if (!candidate.isCallable()) return self.throwError("TypeError", "Map.prototype.getOrInsertComputed requires the callback argument to be callable.");
                 break :cb candidate;
             } else Value.undef();
             {
@@ -14255,7 +14255,7 @@ pub const Interpreter = struct {
         // instance of the declaring class evaluation, and — for a derived `this` —
         // `super()` has already returned).
         if (!recv.isObject() or !recv.asObj().hasPrivateBrand(key))
-            return self.throwError("TypeError", "Cannot read private member from an object whose class did not declare it");
+            return self.throwError("TypeError", "Cannot access invalid private field");
         var cur: ?*value.Object = recv.asObj();
         while (cur) |c| {
             if (c.getAccessor(key)) |acc| {
@@ -14277,7 +14277,7 @@ pub const Interpreter = struct {
     /// a TypeError if it has only a getter; an unbranded object is a TypeError.
     fn privateSet(self: *Interpreter, recv: Value, key: []const u8, v: Value) EvalError!void {
         if (!recv.isObject() or !recv.asObj().hasPrivateBrand(key))
-            return self.throwError("TypeError", "Cannot write private member to an object whose class did not declare it");
+            return self.throwError("TypeError", "Cannot access invalid private field");
         const o = recv.asObj();
         var cur: ?*value.Object = o;
         while (cur) |c| {
@@ -14581,7 +14581,7 @@ pub const Interpreter = struct {
                 }
                 // Accessing a private member the object doesn't carry is a brand
                 // violation — a TypeError, not `undefined`.
-                if (value.isPrivateKey(key)) return self.throwError("TypeError", "Cannot read private member from an object whose class did not declare it");
+                if (value.isPrivateKey(key)) return self.throwError("TypeError", "Cannot access invalid private field");
                 // Legacy intrinsic gaps may still use a kind constructor fallback,
                 // but an explicit null prototype must terminate lookup exactly.
                 if (std.mem.eql(u8, key, "constructor") and !o.protoExplicitNull()) {
@@ -15282,7 +15282,9 @@ pub const Interpreter = struct {
                 return self.throwErrorFmt("TypeError", "Proxy object's 'set' trap returned falsy value for property '{s}'", .{key});
             if (o.is_array and std.mem.eql(u8, key, "length") and !arrayLenWritable(o))
                 return self.throwError("TypeError", "Array length is not writable");
-            if (!o.isExtensible() and o.getOwn(key) == null and o.getAccessor(key) == null)
+            // `hasOwnPropertyResult` rather than `getOwn`: a frozen array's
+            // dense elements are own properties that the shape map does not hold.
+            if (!o.isExtensible() and !try self.hasOwnPropertyResult(o, key))
                 return self.throwError("TypeError", "Attempting to define property on object that is not extensible.");
         }
         return self.throwError("TypeError", "Attempted to assign to readonly property.");
@@ -20622,7 +20624,7 @@ fn promiseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
 /// `SpeciesConstructor(this, %Promise%)`, so a subclass's `.then` yields a
 /// subclass instance. The fast path (intrinsic species) skips the capability.
 fn promiseThenImpl(self: *Interpreter, this: Value, on_f: Value, on_r: Value) value.HostError!Value {
-    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "Promise.prototype.then called on a non-Promise");
+    const p = promise.promiseOf(this) orelse return self.throwError("TypeError", "|this| is not a Promise");
     const default_ctor = self.env.get("Promise") orelse Value.undef();
     const c = try self.speciesConstructor(this, default_ctor);
     // Intrinsic Promise → cheap native capability; a subclass/custom → its own.
@@ -20695,7 +20697,7 @@ fn promiseFinallyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     // `finally` requires an Object `this` (not necessarily a Promise) and ends in
     // `Invoke(this, "then", …)`, so it composes over any thenable.
-    if (!this.isObject()) return self.throwError("TypeError", "Promise.prototype.finally called on a non-object");
+    if (!this.isObject()) return self.throwError("TypeError", "|this| is not an object");
     const default_ctor = self.env.get("Promise") orelse Value.undef();
     const c = try self.speciesConstructor(this, default_ctor);
     const cb = if (args.len > 0) args[0] else Value.undef();
@@ -22620,7 +22622,13 @@ fn throwErrorInRealm(self: *Interpreter, realm: *Environment, name: []const u8, 
 }
 
 fn throwClassConstructorCallError(self: *Interpreter, func: *Function) EvalError {
-    return throwErrorInRealm(self, func.closure, "TypeError", "Class constructor cannot be invoked without 'new'");
+    // JSC names the class: "Cannot call a class constructor C without |new|".
+    if (func.name.len != 0) {
+        if (std.fmt.allocPrint(self.arena, "Cannot call a class constructor {s} without |new|", .{func.name})) |named|
+            return throwErrorInRealm(self, func.closure, "TypeError", named)
+        else |_| {}
+    }
+    return throwErrorInRealm(self, func.closure, "TypeError", "Cannot call a class constructor without |new|");
 }
 
 fn objectFunctionRealm(o: *value.Object) ?*Environment {
@@ -22997,7 +23005,7 @@ fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 
 fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) this.asObj().boxedPrimitive().?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toLocaleString requires that 'this' be a BigInt");
+    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) this.asObj().boxedPrimitive().?.asObj() else return self.throwError("TypeError", "'this' value must be a BigInt or BigIntObject");
     const locs = try canonicalizeLocaleList(self, if (args.len > 0) args[0] else Value.undef());
     const loc = localeListFirstOr(locs, "en");
     const ro = try nfProcessOptions(self, if (args.len > 1) args[1] else Value.undef());
@@ -23010,7 +23018,7 @@ fn bigIntToLocaleStringFn(ctx: *anyopaque, this: Value, args: []const Value) val
 /// `BigInt.prototype.toString(radix)` — the BigInt rendered in `radix` (2..36).
 fn bigIntToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) this.asObj().boxedPrimitive().?.asObj() else return self.throwError("TypeError", "BigInt.prototype.toString requires that 'this' be a BigInt");
+    const big = if (this.isObject() and this.asObj().is_bigint) this.asObj() else if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) this.asObj().boxedPrimitive().?.asObj() else return self.throwError("TypeError", "'this' value must be a BigInt or BigIntObject");
     // Validate the radix on the FLOAT before narrowing to u8: ToIntegerOrInfinity
     // then range-check, so 256/-1/Infinity/NaN/1e100 throw RangeError instead of
     // panicking in `@intFromFloat` on an out-of-range value.
@@ -23040,7 +23048,7 @@ fn bigIntValueOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     if (this.isObject() and this.asObj().is_bigint) return this;
     // A BigInt wrapper object (`Object(1n)`) unwraps to its boxed BigInt.
     if (this.isObject() and this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isObject() and this.asObj().boxedPrimitive().?.asObj().is_bigint) return this.asObj().boxedPrimitive().?;
-    return self.throwError("TypeError", "BigInt.prototype.valueOf requires that 'this' be a BigInt");
+    return self.throwError("TypeError", "'this' value must be a BigInt or BigIntObject");
 }
 
 /// StringToBigInt as a bignum, or null when the string is not a valid BigInt
@@ -23313,7 +23321,7 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
+            if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "Receiver of DataView method must be a DataView");
             const dv = this.asObj().dataView().?;
             const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef(), "byteOffset");
             const little = if (args.len > 1) args[1].toBoolean() else false;
@@ -23369,7 +23377,7 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.set" ++ t.name ++ " requires a DataView receiver");
+            if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "Receiver of DataView method must be a DataView");
             const dv = this.asObj().dataView().?;
             // SetViewValue checks IsImmutableBuffer before coercing the index/value.
             if (dv.buffer.arrayBuffer().?.immutable) return throwDataViewTypeError(self, "Cannot modify a DataView backed by an immutable ArrayBuffer");
@@ -23443,14 +23451,14 @@ fn numToRaw(comptime UInt: type, num: f64) UInt {
 fn dataViewBufferGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.buffer requires a DataView receiver");
+    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "Receiver of DataView method must be a DataView");
     return Value.obj(this.asObj().dataView().?.buffer);
 }
 
 fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.byteLength requires a DataView receiver");
+    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "Receiver of DataView method must be a DataView");
     const dv = this.asObj().dataView().?;
     // get byteLength throws when the view is detached or out of bounds.
     const cur = dv.currentByteLength() orelse return throwDataViewTypeError(self, "DataView is detached or out of bounds");
@@ -23460,7 +23468,7 @@ fn dataViewByteLengthGetter(ctx: *anyopaque, this: Value, args: []const Value) v
 fn dataViewByteOffsetGetter(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.byteOffset requires a DataView receiver");
+    if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "Receiver of DataView method must be a DataView");
     const dv = this.asObj().dataView().?;
     // get byteOffset throws when the view is detached or out of bounds.
     if (dv.currentByteLength() == null) return throwDataViewTypeError(self, "DataView is detached or out of bounds");
@@ -24453,7 +24461,7 @@ fn genProtoMethod(comptime which: enum { next, ret, throw }) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject() or this.asObj().generator() == null)
-                return self.throwError("TypeError", "method called on an incompatible receiver");
+                return self.throwError("TypeError", "|this| should be a generator");
             const v: Value = if (args.len > 0) args[0] else Value.undef();
             return switch (which) {
                 .next => vm.genNext(self, this.asObj(), v),
@@ -26542,7 +26550,10 @@ fn taProtoGetter(comptime which: enum { length, byte_length, byte_offset, buffer
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject() or this.asObj().typedArray() == null) {
                 if (which == .tag) return Value.undef();
-                return self.throwError("TypeError", "%TypedArray%.prototype accessor called on a non-TypedArray");
+                return self.throwError("TypeError", if (this.isObject())
+                    "Receiver should be a typed array view"
+                else
+                    "Receiver should be a typed array view but was not an object");
             }
             const ta = this.asObj().typedArray().?;
             const cur = ta.currentLength(); // null when detached / out of bounds
@@ -26955,7 +26966,7 @@ fn taProtoMethod(comptime name: []const u8) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject() or this.asObj().typedArray() == null)
-                return self.throwError("TypeError", "TypedArray.prototype method called on a non-TypedArray");
+                return self.throwError("TypeError", "Receiver should be a typed array view");
             return (try typedArrayMethod(self, this.asObj(), name, args)) orelse Value.undef();
         }
     }.call;
@@ -26993,7 +27004,7 @@ fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resiza
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = args;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype accessor called on a non-ArrayBuffer");
+            if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "Receiver must be ArrayBuffer");
             const ab = this.asObj().arrayBuffer().?;
             // These are %ArrayBuffer.prototype% accessors — a SharedArrayBuffer
             // receiver throws (it has its own byteLength/maxByteLength/growable).
@@ -27014,7 +27025,7 @@ fn arrayBufferGetter(comptime which: enum { byte_length, max_byte_length, resiza
 /// fixed-length immutable buffer and detach the source.
 fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transferToImmutable called on a non-ArrayBuffer");
+    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "Receiver must be ArrayBuffer");
     const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "transferToImmutable cannot be called on a SharedArrayBuffer");
     if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be transferred");
@@ -27040,7 +27051,7 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
 /// the resulting buffer is immutable and the source is left intact.
 fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.sliceToImmutable called on a non-ArrayBuffer");
+    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "Receiver must be ArrayBuffer");
     const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "sliceToImmutable cannot be called on a SharedArrayBuffer");
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
@@ -27070,7 +27081,7 @@ fn arrayBufferSliceToImmutableFn(ctx: *anyopaque, this: Value, args: []const Val
 /// `ArrayBuffer.prototype.resize(newByteLength)` — grow/shrink a resizable buffer.
 fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a non-ArrayBuffer");
+    if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "Receiver must be ArrayBuffer");
     const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a SharedArrayBuffer");
     if (ab.max_byte_length == null) return self.throwError("TypeError", "ArrayBuffer is not resizable");
@@ -27111,7 +27122,7 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
+            if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "Receiver must be ArrayBuffer");
             const ab = this.asObj().arrayBuffer().?;
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
             if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be transferred");
@@ -37307,7 +37318,7 @@ fn setProtoMethod(comptime name: []const u8, comptime weak: bool) value.NativeFn
             // requires the weakness to match (a Set method rejects a WeakSet and
             // vice versa).
             if (!this.isObject() or !this.asObj().is_set or this.asObj().is_weak != weak)
-                return self.throwError("TypeError", if (weak) "WeakSet.prototype method called on an incompatible receiver" else "Set.prototype method called on a non-Set");
+                return self.throwError("TypeError", if (weak) "Called WeakSet function on non-object" else "Set.prototype method called on a non-Set");
             return (try self.setMethod(this.asObj(), name, args)) orelse Value.undef();
         }
     }.call;
@@ -37323,8 +37334,9 @@ fn numberProtoMethod(comptime name: []const u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const n: f64 = switch (this.kind()) {
                 .number => this.asNum(),
-                .object => if (this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isNumber()) this.asObj().boxedPrimitive().?.asNum() else return self.throwError("TypeError", "Number.prototype method called on a non-Number"),
-                else => return self.throwError("TypeError", "Number.prototype method called on a non-Number"),
+                .object => if (this.asObj().boxedPrimitive() != null and this.asObj().boxedPrimitive().?.isNumber()) this.asObj().boxedPrimitive().?.asNum() else return self.throwErrorFmt("TypeError", "thisNumberValue called on incompatible {s}", .{this.typeOf()}),
+                // JSC reports the receiver's type; `null` reports as "object".
+                else => return self.throwErrorFmt("TypeError", "thisNumberValue called on incompatible {s}", .{if (this.isNull()) "object" else this.typeOf()}),
             };
             return (try self.numberMethod(n, name, args)) orelse Value.undef();
         }
@@ -37340,7 +37352,7 @@ fn mapProtoMethod(comptime name: []const u8, comptime weak: bool) value.NativeFn
             // requires the weakness to match (a Map method rejects a WeakMap and
             // vice versa).
             if (!this.isObject() or !this.asObj().is_map or this.asObj().is_weak != weak)
-                return self.throwError("TypeError", if (weak) "WeakMap.prototype method called on an incompatible receiver" else "Map.prototype method called on a non-Map");
+                return self.throwError("TypeError", if (weak) "Called WeakMap function on non-object" else "Map.prototype method called on a non-Map");
             return (try self.mapMethod(this.asObj(), name, args)) orelse Value.undef();
         }
     }.call;
