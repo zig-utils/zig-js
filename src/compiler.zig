@@ -1151,7 +1151,7 @@ fn nameRefInClosure(node: *const ast.Node, name: anytype, in_fn: bool) bool {
         },
         .member => |m| nameRefInClosure(m.object, name, in_fn) or (m.computed != null and nameRefInClosure(m.computed.?, name, in_fn)),
         .optional_chain => |c| nameRefInClosure(c, name, in_fn),
-        .field_init_value => |v| nameRefInClosure(v, name, in_fn),
+        .field_init_value => |v| nameRefInClosure(v.expression, name, in_fn),
         .private_field_def => |p| nameRefInClosure(p.value, name, in_fn),
         .object_lit => |props| blk: {
             for (props) |p| {
@@ -2010,8 +2010,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.load_undefined, 0);
                 _ = try self.chunk.emit(.eq_strict, 0);
                 const provided = try self.chunk.emit(.jump_if_false, 0);
-                try self.compileExpr(default);
-                if (parameter.pattern == null) try self.emitNamedEval(default, parameter.name);
+                try self.compileNamedExpr(default, if (parameter.pattern == null) parameter.name else null);
                 try self.emitStore(input_name);
                 _ = try self.chunk.emit(.pop, 0);
                 self.chunk.patchToHere(provided);
@@ -2964,16 +2963,21 @@ pub const Compiler = struct {
         try self.compileHoistedStmtList(stmts);
     }
 
-    /// NamedEvaluation: if `value_node` is a bare anonymous function/class def
-    /// (matching interpreter.isAnonFnDef), emit `name_anon` so the value now on
-    /// the stack takes `name` as its Function.name — mirroring the tree-walker's
-    /// maybeNameAnon so `var f = function(){}` / `{foo: function(){}}` / `x = () =>
-    /// {}` name their functions on the VM too.
+    fn compileNamedExpr(self: *Compiler, node: *Node, name: ?[]const u8) CompileError!void {
+        if (name) |inferred_name| {
+            if (node.* == .class_expr and node.class_expr.name.len == 0)
+                return self.compileClass(node, inferred_name, false);
+        }
+        try self.compileExpr(node);
+        if (name) |inferred_name| try self.emitNamedEval(node, inferred_name);
+    }
+
+    /// Function NamedEvaluation has no intervening user effects. Class names
+    /// instead enter ClassDefinitionEvaluation through compileNamedExpr.
     fn emitNamedEval(self: *Compiler, value_node: *const Node, name: []const u8) CompileError!void {
         const anon = switch (value_node.*) {
             .function => |f| f.name.len == 0,
             .func_decl => |f| f.name.len == 0,
-            .class_expr => |c| c.name.len == 0,
             else => false,
         };
         if (anon) _ = try self.chunk.emit(.name_anon, try self.chunk.addName(name));
@@ -3004,8 +3008,7 @@ pub const Compiler = struct {
                 else
                     null;
                 if (d.init) |init_node| {
-                    try self.compileExpr(init_node);
-                    try self.emitNamedEval(init_node, d.name);
+                    try self.compileNamedExpr(init_node, d.name);
                 } else {
                     _ = try self.chunk.emit(.load_undefined, 0);
                 }
@@ -3109,8 +3112,6 @@ pub const Compiler = struct {
             .private_field_def => |field| {
                 if (!self.in_field_initializer) return error.Unsupported;
                 try self.compileExpr(field.value);
-                const raw_value = if (field.value.* == .field_init_value) field.value.field_init_value else field.value;
-                try self.emitNamedEval(raw_value, std.mem.sliceTo(field.name, 0));
                 _ = try self.chunk.emit(.init_private_field, try self.chunk.addName(field.name));
                 _ = try self.chunk.emit(.pop, 0);
             },
@@ -3954,8 +3955,7 @@ pub const Compiler = struct {
     }
 
     fn emitPatternDefault(self: *Compiler, default: *Node, target: *Node, val: ActivationTemp) CompileError!void {
-        try self.compileExpr(default);
-        if (target.* == .identifier) try self.emitNamedEval(default, target.identifier);
+        try self.compileNamedExpr(default, if (target.* == .identifier) target.identifier else null);
         try self.emitStoreActivationTempDiscard(val);
     }
 
@@ -4966,15 +4966,13 @@ pub const Compiler = struct {
                 if (member.computed != null) return error.Unsupported;
                 try self.compileExpr(member.object);
                 try self.compileExpr(a.value);
-                try self.emitNamedEval(a.value.field_init_value, member.property);
                 _ = try self.chunk.emit(.init_class_field, try self.chunk.addName(member.property));
             } else switch (a.target.*) {
                 .identifier => |name| {
                     const reference = try self.assignmentBindingReferencePlan(name);
-                    try self.compileExpr(a.value);
                     // NamedEvaluation names `x = function(){}` (a bare, unparenthesized
                     // identifier target); `(x) = …` is not an IdentifierRef.
-                    if (!a.target_parenthesized) try self.emitNamedEval(a.value, name);
+                    try self.compileNamedExpr(a.value, if (!a.target_parenthesized) name else null);
                     if (reference) |binding|
                         try self.emitStoreBindingReferenceLeavingValue(binding)
                     else
@@ -5048,47 +5046,7 @@ pub const Compiler = struct {
                 const fi = try self.compileFunction(node, fnode, true);
                 _ = try self.chunk.emit(.make_closure, fi);
             },
-            .class_expr => |c| {
-                const captures_frame = if (self.scope) |scope|
-                    try classDeferredBodiesCaptureFrame(self.arena, scope, c.members, c.name)
-                else
-                    false;
-
-                // ClassDefinitionEvaluation creates its lexical Environment before
-                // evaluating heritage, and a named class binding is already in TDZ
-                // there. Keep that Environment activation-local across suspended
-                // heritage/computed names and through class construction.
-                try self.pushLexicalScope();
-                defer self.popLexicalScope();
-                if (c.name.len > 0) if (self.scope) |scope|
-                    try scope.addEnvironmentLexical(self.arena, c.name, true);
-                try self.emitEnterClassEnvironment();
-                if (c.name.len > 0) try self.emitDeclareEnvironmentLexicalName(c.name, true);
-
-                const saved_strict = self.is_strict;
-                self.is_strict = true;
-                defer self.is_strict = saved_strict;
-                var input_count: u32 = 0;
-                if (c.superclass) |superclass| {
-                    try self.compileExpr(superclass);
-                    _ = try self.chunk.emit(.prepare_class_heritage, 0);
-                    input_count = 2;
-                }
-                const computed_count = try self.compileClassComputedKeys(c.members);
-                input_count = std.math.add(u32, input_count, computed_count) catch return error.OutOfMemory;
-                const capture_environment = if (captures_frame) capture: {
-                    const plan = try self.arena.create(bc.DirectEvalPlan);
-                    plan.* = try buildDirectEvalPlan(
-                        self.arena,
-                        self.scope.?,
-                        if (self.function_binding_phase == .parameters) .parameter else .variable,
-                        self.environment_depth,
-                    );
-                    break :capture plan;
-                } else null;
-                _ = try self.chunk.emitAB(.eval_class, try self.chunk.addClass(node, capture_environment), input_count);
-                try self.emitExitClassEnvironment();
-            },
+            .class_expr => try self.compileClass(node, null, false),
             .call => |c| {
                 const spread = hasSpread(c.args);
                 if (spread and c.optional) return error.Unsupported;
@@ -5254,7 +5212,7 @@ pub const Compiler = struct {
             },
             .field_init_value => |value| {
                 if (!self.in_field_initializer) return error.Unsupported;
-                try self.compileExpr(value);
+                try self.compileNamedExpr(value.expression, value.name);
             },
             .object_lit => |props| {
                 _ = try self.chunk.emit(.new_object, 0);
@@ -5289,14 +5247,18 @@ pub const Compiler = struct {
                         // PropertyDefinitionEvaluation order.
                         try self.compileExpr(ke);
                         _ = try self.chunk.emit(.to_property_key, 0);
-                        try self.compileExpr(p.value);
+                        if (p.value.* == .class_expr and p.value.class_expr.name.len == 0) {
+                            // Retain the canonical property key as an ordinary
+                            // activation input across suspended heritage/keys.
+                            _ = try self.chunk.emit(.dup, 0);
+                            try self.compileClass(p.value, null, true);
+                        } else try self.compileExpr(p.value);
                         _ = try self.chunk.emit(.init_prop_computed, literalFunctionFlags(p.value));
                     } else {
-                        try self.compileExpr(p.value);
+                        try self.compileNamedExpr(p.value, if (p.proto_setter) null else p.key);
                         if (p.proto_setter) {
                             _ = try self.chunk.emit(.init_proto, 0); // `__proto__: v` colon form
                         } else {
-                            try self.emitNamedEval(p.value, p.key);
                             _ = try self.chunk.emitAB(.init_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, p.key)), literalFunctionFlags(p.value) & bc.literal_function_method);
                         }
                     }
@@ -5981,6 +5943,50 @@ pub const Compiler = struct {
     fn hasSpread(args: []const *Node) bool {
         for (args) |a| if (a.* == .spread) return true;
         return false;
+    }
+
+    fn compileClass(self: *Compiler, node: *Node, inferred_name: ?[]const u8, name_from_stack: bool) CompileError!void {
+        const c = node.class_expr;
+        const captures_frame = if (self.scope) |scope|
+            try classDeferredBodiesCaptureFrame(self.arena, scope, c.members, c.name)
+        else
+            false;
+
+        // ClassDefinitionEvaluation creates its lexical Environment before
+        // evaluating heritage, with an explicit class binding already in TDZ.
+        try self.pushLexicalScope();
+        defer self.popLexicalScope();
+        if (c.name.len > 0) if (self.scope) |scope|
+            try scope.addEnvironmentLexical(self.arena, c.name, true);
+        try self.emitEnterClassEnvironment();
+        if (c.name.len > 0) try self.emitDeclareEnvironmentLexicalName(c.name, true);
+
+        const saved_strict = self.is_strict;
+        self.is_strict = true;
+        defer self.is_strict = saved_strict;
+        var input_count: u32 = @intFromBool(name_from_stack);
+        if (c.superclass) |superclass| {
+            try self.compileExpr(superclass);
+            _ = try self.chunk.emit(.prepare_class_heritage, 0);
+            input_count += 2;
+        }
+        const computed_count = try self.compileClassComputedKeys(c.members);
+        input_count = std.math.add(u32, input_count, computed_count) catch return error.OutOfMemory;
+        const capture_environment = if (captures_frame) capture: {
+            const plan = try self.arena.create(bc.DirectEvalPlan);
+            plan.* = try buildDirectEvalPlan(
+                self.arena,
+                self.scope.?,
+                if (self.function_binding_phase == .parameters) .parameter else .variable,
+                self.environment_depth,
+            );
+            break :capture plan;
+        } else null;
+        const class_index = try self.chunk.addClass(node, capture_environment);
+        self.chunk.classes.items[class_index].inferred_name = inferred_name;
+        self.chunk.classes.items[class_index].name_from_stack = name_from_stack;
+        _ = try self.chunk.emitAB(.eval_class, class_index, input_count);
+        try self.emitExitClassEnvironment();
     }
 
     fn compileClassComputedKeys(self: *Compiler, members: []const ast.ClassMember) CompileError!u32 {
@@ -7889,6 +7895,39 @@ test "compiler deferred class capture plans unwind every allocation failure" {
                     try std.testing.expectEqual(@as(u32, 2), plan.current_environment_depth);
                 },
                 .rejected => return error.TestUnexpectedResult,
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "class naming carries immutable inputs through compiler allocation failures" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var parser = try @import("parser.zig").Parser.init(allocator, "function named(C=class{static seen=this.name;}){return C;} function computed(k,Base){return {[k]:class extends Base{[k](){}static seen=this.name;}};} function* suspended(k){return {[k]:class extends (yield Object){[yield k](){}static seen=this.name;}};}");
+            const program = try parser.parseProgram();
+            for (program.program, 0..) |statement, index| {
+                const function = statement.func_decl;
+                const chunk = if (function.is_generator)
+                    try Compiler.compileGenerator(allocator, function, false)
+                else
+                    (try Compiler.compilePlainFunction(allocator, function)).chunk;
+                try std.testing.expectEqual(@as(usize, 1), chunk.classes.items.len);
+                const template = chunk.classes.items[0];
+                try std.testing.expectEqual(index != 0, template.name_from_stack);
+                if (index == 0) try std.testing.expectEqualStrings("C", template.inferred_name.?);
+                var class_instructions: usize = 0;
+                for (chunk.code.items) |instruction| {
+                    if (instruction.op == .eval_class) {
+                        class_instructions += 1;
+                        try std.testing.expectEqual(@as(u32, if (index == 0) 0 else 4), instruction.b);
+                    }
+                    try std.testing.expect(instruction.op != .name_anon);
+                }
+                try std.testing.expectEqual(@as(usize, 1), class_instructions);
             }
         }
     };

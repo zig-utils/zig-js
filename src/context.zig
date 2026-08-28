@@ -28018,6 +28018,125 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "class naming precedes static effects across exact execution tiers" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "computed_string", .source = "(function(){var key='C';var o={[key]:class{static seen=this.name;}};return o.C.name==='C'&&o.C.seen==='C';})()" },
+            .{ .name = "computed_symbol", .source = "(function(){var key=Symbol('C');var o={[key]:class{static seen=this.name;}};return o[key].name==='[C]'&&o[key].seen==='[C]';})()" },
+            .{ .name = "empty_symbol", .source = "(function(){var key=Symbol('');var o={[key]:class{static seen=this.name;}};return o[key].name==='[]'&&o[key].seen==='[]';})()" },
+            .{ .name = "absent_symbol", .source = "(function(){var key=Symbol();var o={[key]:class{static seen=this.name;}};return o[key].name===''&&o[key].seen==='';})()" },
+            .{ .name = "empty_string", .source = "(function(){var o={['']:class{static seen=this.name;}};return o[''].name===''&&o[''].seen==='';})()" },
+            .{ .name = "nul_wtf8", .source = "(function(){var key='\\x00é\\uD800';var o={[key]:class{static seen=this.name;}};return o[key].name===key&&o[key].seen===key;})()" },
+            .{ .name = "block_escape", .source = "(function(){var escaped;var o={['C']:class{static{escaped=this;this.seen=this.name;}}};return escaped===o.C&&escaped.seen==='C';})()" },
+            .{ .name = "block_abrupt", .source = "(function(){var escaped,later=0;try{var o={['C']:class{static{escaped=this;throw 37;}},later:++later};}catch(e){return e===37&&later===0&&escaped.name==='C';}return false;})()" },
+            .{ .name = "static_name_field", .source = "(function(){var o={['C']:class{static first=this.name;static name='';static last=this.name;}};return o.C.first==='C'&&o.C.name===''&&o.C.last==='';})()" },
+            .{ .name = "static_name_method", .source = "(function(){var o={['C']:class{static seen=this.name;static name(){return 7;}}};return o.C.seen===o.C.name&&o.C.name()===7;})()" },
+            .{ .name = "deleted_name", .source = "(function(){var o={C:class{static{delete this.name;}}};return !Object.hasOwn(o.C,'name');})()" },
+            .{ .name = "redefined_name", .source = "(function(){var o={['C']:class{static{Object.defineProperty(this,'name',{value:'',writable:true});}}};return o.C.name===''&&Object.getOwnPropertyDescriptor(o.C,'name').writable;})()" },
+            .{ .name = "explicit_binding", .source = "(function(){var o={['C']:class Explicit{static seen=this.name;static self=Explicit;}};return o.C.name==='Explicit'&&o.C.seen==='Explicit'&&o.C.self===o.C;})()" },
+            .{ .name = "no_inferred_binding", .source = "(function(){var C=7;var o={['C']:class{static seen=C;}};return o.C.name==='C'&&o.C.seen===7;})()" },
+            .{ .name = "heritage_tdz", .source = "(function(){var effects=0;try{var o={['C']:class Explicit extends Explicit{static seen=++effects;}};}catch(e){return e instanceof ReferenceError&&effects===0;}return false;})()" },
+            .{ .name = "key_once_order", .source = "(function(){var log='',s=Symbol('C'),key={[Symbol.toPrimitive](hint){if(hint!=='string')throw 99;log+='k';return s;}};function base(){log+='h';return class{};}var o={[key]:class extends base(){[(log+='c','m')](){}static seen=(log+='s',this.name);}};return log==='khcs'&&o[s].seen==='[C]';})()" },
+            .{ .name = "key_abrupt", .source = "(function(){var effects=0,key={toString(){throw 37;}};try{var o={[key]:class extends (effects++,Object){static seen=++effects;}};}catch(e){return e===37&&effects===0;}return false;})()" },
+            .{ .name = "parameter_default", .source = "(function(){function f(C=class{static seen=this.name;}){return C.seen==='C';}return f();})()" },
+            .{ .name = "object_binding_default", .source = "(function(){var {C=class{static seen=this.name;}}={};return C.seen==='C';})()" },
+            .{ .name = "array_binding_default", .source = "(function(){var [C=class{static seen=this.name;}]=[];return C.seen==='C';})()" },
+            .{ .name = "assignment_default", .source = "(function(){var C;({C=class{static seen=this.name;}}={});return C.seen==='C';})()" },
+            .{ .name = "logical_assignment", .source = "(function(){var C;C||=class{static seen=this.name;};return C.seen==='C';})()" },
+            .{ .name = "member_not_named", .source = "(function(){var o={};o.C=class{static seen=this.name;};return o.C.name===''&&o.C.seen==='';})()" },
+            .{ .name = "sequence_not_named", .source = "(function(){var o={['C']:(0,class{static seen=this.name;})};return o.C.name===''&&o.C.seen==='';})()" },
+            .{ .name = "prototype_setter_not_named", .source = "(function(){var o={__proto__:class{static seen=this.name;}};return Object.getPrototypeOf(o).seen==='';})()" },
+            .{ .name = "instance_fields", .source = "(function(){var s=Symbol('inner');class Outer{[s]=class{static seen=this.name;};#private=class{static seen=this.name;};read(){return this.#private.seen;}}var o=new Outer();return o[s].seen==='[inner]'&&o.read()==='#private';})()" },
+            .{ .name = "static_fields", .source = "(function(){var s=Symbol('inner');class Outer{static [s]=class{static seen=this.name;};static #private=class{static seen=this.name;};static read(){return this.#private.seen;}}return Outer[s].seen==='[inner]'&&Outer.read()==='#private';})()" },
+            .{ .name = "field_function_names", .source = "(function(){var s=Symbol('f'),key='\\x00f';class Outer{[s]=function(){};[key]=()=>7;}var o=new Outer();return o[s].name==='[f]'&&o[key].name===key;})()" },
+            .{ .name = "repeated_class_factory", .source = "(function(){function factory(k){return {[k]:class{static seen=this.name;}}[k];}var a=factory('a'),b=factory('b');return a.seen==='a'&&b.seen==='b'&&a.name==='a';})()" },
+            .{ .name = "suspended_heritage_and_key", .source = "(function(){function* f(k){return {[k]:class extends (yield 1){[yield 2](){}static seen=this.name;}}[k];}var s=Symbol('C'),g=f(s);if(g.next().value!==1||g.next(Object).value!==2)return false;var end=g.next('m');return end.done&&end.value.name==='[C]'&&end.value.seen==='[C]';})()" },
+            .{ .name = "name_descriptor", .source = "(function(){var o={['C']:class{static seen=Object.getOwnPropertyDescriptor(this,'name');}};var d=o.C.seen;return d.value==='C'&&!d.writable&&!d.enumerable&&d.configurable;})()" },
+        }) |case| {
+            errdefer std.debug.print("class naming {s} ({s})\n", .{ case.name, @tagName(mode) });
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "class naming retains its key across async suspension" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var classNamingAsync=false,classNamingAsyncGenerator=false;
+            \\async function classNamingAwait(k){return {[k]:class extends (await Object){[await 'm'](){}static seen=this.name;}}[k];}
+            \\async function* classNamingYield(k){return {[k]:class extends (await Object){[yield 'm'](){}static seen=this.name;}}[k];}
+            \\classNamingAwait(Symbol('Async')).then(function(C){classNamingAsync=C.name==='[Async]'&&C.seen==='[Async]';});
+            \\var classNamingIterator=classNamingYield(Symbol('Generator'));
+            \\classNamingIterator.next().then(function(first){
+            \\  if(first.value!=='m'||first.done)throw 99;
+            \\  return classNamingIterator.next('method');
+            \\}).then(function(last){classNamingAsyncGenerator=last.done&&last.value.name==='[Generator]'&&last.value.seen==='[Generator]';});
+        );
+        try std.testing.expect((try ctx.evaluate("classNamingAsync&&classNamingAsyncGenerator")).toBoolean());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "class naming owns a computed name across moving heritage" {
+    try expectProxyMetadataMoving("var key='Class'+37;", "(function(){var o={[key]:class extends (proxyMovingLoop(20000),Object){static seen=this.name;}};return o.Class37.name==='Class37'&&o.Class37.seen==='Class37';})()");
+}
+
+test "class naming owns a computed name across moving static effects" {
+    try expectProxyMetadataMoving("var key='Class'+37;", "(function(){var o={[key]:class{static{proxyMovingLoop(20000);this.seen=this.name;}}};return o.Class37.name==='Class37'&&o.Class37.seen==='Class37';})()");
+}
+
+test "class naming retains deferred field display names across moving collection" {
+    try expectProxyMetadataMoving("var key='Inner'+37;class ClassNamingOuter{[key]=class{static seen=this.name;};}key=null;", "(proxyMovingLoop(20000),(new ClassNamingOuter()).Inner37.seen==='Inner37')");
+}
+
+test "class naming isolates immutable templates without the GIL" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\function classNamingLane(seed){
+            \\  if($vm.useThreadGIL()!==false)throw 99;
+            \\  for(var i=0;i<32;i++){
+            \\    var key='Class'+seed+'_'+i;
+            \\    var o={[key]:class{static seen=this.name;}};
+            \\    if(o[key].name!==key||o[key].seen!==key)throw 98;
+            \\  }
+            \\  return 32;
+            \\}
+            \\var lanes=[],total=0;
+            \\for(var i=0;i<4;i++)lanes.push(new Thread(classNamingLane,i));
+            \\for(var i=0;i<4;i++)total+=lanes[i].join();
+            \\total
+        );
+        try std.testing.expectEqual(@as(f64, 128), result.asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
 test "literal function metadata preserves names keys and method identity" {
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{

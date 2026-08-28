@@ -481,7 +481,7 @@ pub const Op = enum(u8) {
     prepare_class_heritage, // pop raw extends value; validate once, push normalized constructor + prototype roots
     scratch_store, // operand a: scratch slot; pop -> activation-local program scratch[a] (#706)
     scratch_load, // operand a: scratch slot; push activation-local program scratch[a]
-    eval_class, // operand a: class AST index, b: total prepared-heritage + computed-name inputs; build in the active class environment
+    eval_class, // operand a: class template index, b: total inferred-name + heritage + computed-name inputs
     template_object, // operand a: template-site AST index; push the cached, frozen GetTemplateObject strings array for that tagged-template site
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)
@@ -775,6 +775,10 @@ pub const FnTemplateAdmission = enum {
 pub const ClassTemplate = struct {
     node: *ast.Node,
     capture_environment: ?*const DirectEvalPlan = null,
+    /// NamedEvaluation is syntax, not a post-construction property mutation.
+    /// A computed name comes from the first rooted activation input instead.
+    inferred_name: ?[]const u8 = null,
+    name_from_stack: bool = false,
 };
 
 pub const FnTemplate = struct {

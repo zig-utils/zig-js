@@ -9432,8 +9432,9 @@ fn runChunk(
                 const c = node.class_expr;
                 const total_count: usize = inst.b;
                 const heritage_count: usize = if (c.superclass != null) 2 else 0;
-                if (total_count < heritage_count) return error.OutOfMemory;
-                const computed_count = total_count - heritage_count;
+                const name_count: usize = @intFromBool(template.name_from_stack);
+                if (total_count < heritage_count + name_count) return error.OutOfMemory;
+                const computed_count = total_count - heritage_count - name_count;
                 const keys = try vm.arena.alloc(Value, computed_count);
                 var i = computed_count;
                 while (i > 0) {
@@ -9444,7 +9445,8 @@ fn runChunk(
                     .prototype = stack.pop().?,
                     .constructor = stack.pop().?,
                 } else null;
-                try stack.append(stack_alloc, try evalClassTemplate(vm, template, frame, heritage, keys));
+                const name_key = if (template.name_from_stack) stack.pop().? else null;
+                try stack.append(stack_alloc, try evalClassTemplate(vm, template, frame, heritage, keys, name_key));
             },
             .template_object => {
                 const node = chunk.templates.items[inst.a];
@@ -10926,7 +10928,13 @@ fn binOp(op: bc.Op) ast.BinaryOp {
     };
 }
 
-fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame: ?*Frame, heritage: ?Interpreter.PreparedClassHeritage, keys: []const Value) EvalError!Value {
+fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame: ?*Frame, heritage: ?Interpreter.PreparedClassHeritage, keys: []const Value, name_key: ?Value) EvalError!Value {
+    // The canonical key may be a movable String. Constructor diagnostics and
+    // static effects need an owned name before construction can call user code.
+    const inferred_name = if (name_key) |key|
+        try vm.arena.dupe(u8, try vm.keyDisplayName(key))
+    else
+        template.inferred_name orelse template.node.class_expr.inferred_name;
     const saved_environment = vm.env;
     const saved_environment_root = if (template.capture_environment != null)
         try vm.pushTempEnvRoot(saved_environment)
@@ -10945,7 +10953,53 @@ fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame:
         materialized.environment.markCaptured();
     }
     const class = template.node.class_expr;
-    return vm.evalClassWithPreparedHeritage(class.name, class.inferred_name, class.members, class.source, heritage, keys);
+    return vm.evalClassWithPreparedHeritage(class.name, inferred_name, class.members, class.source, heritage, keys);
+}
+
+test "class naming allocation failures restore class evaluation state" {
+    var failures: usize = 0;
+    var succeeded = false;
+    for (0..2048) |fail_index| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var parser = try Parser.init(allocator, "function make(k,seed){return {[k]:class{static seen=this.name;static value=seed;}};}");
+        const compiled = try Compiler.compilePlainFunction(allocator, (try parser.parseProgram()).program[0].func_decl);
+        const template = &compiled.chunk.classes.items[0];
+        var root = Environment{ .arena = allocator, .fn_scope = true };
+        const root_shape = try Shape.createRoot(allocator);
+        try interp.installGlobals(&root, root_shape);
+        var class_environment = Environment{ .arena = allocator, .parent = &root };
+        const slots = try allocator.alloc(Value, compiled.local_count);
+        @memset(slots, Value.undef());
+        slots[0] = Value.str("Dynamic");
+        slots[1] = Value.num(7);
+        var frame = Frame{ .slots = slots, .parent = null, .closure_environment = &root };
+        var machine = try initTestInterpreter(.{ .arena = allocator, .env = &class_environment, .root_shape = root_shape });
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        machine.arena = failing.allocator();
+        const name_key = try Value.strAlloc(allocator, "Dynamic");
+        const result = evalClassTemplate(&machine, template, &frame, null, &.{}, name_key);
+        try std.testing.expectEqual(&class_environment, machine.env);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+        try std.testing.expectEqual(@as(u32, 0), machine.depth);
+        try std.testing.expect(!machine.strict);
+        try std.testing.expect(machine.current_private_map == null);
+        if (result) |class| {
+            try std.testing.expectEqualStrings("Dynamic", class.asObj().getOwn("name").?.asStr());
+            try std.testing.expectEqualStrings("Dynamic", class.asObj().getOwn("seen").?.asStr());
+            @memset(@constCast(name_key.asStr()), 'U');
+            try std.testing.expectEqualStrings("Dynamic", Interpreter.funcOf(class).?.name);
+            try std.testing.expectEqual(@as(f64, 7), class.asObj().getOwn("value").?.asNum());
+            succeeded = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+    }
+    try std.testing.expect(succeeded and failures > 10);
 }
 
 test "deferred class capture allocation failure restores its runtime environment" {
@@ -10969,7 +11023,7 @@ test "deferred class capture allocation failure restores its runtime environment
         var machine = try initTestInterpreter(.{ .arena = allocator, .env = &class_environment, .root_shape = root_shape });
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
         machine.arena = failing.allocator();
-        const attempt = evalClassTemplate(&machine, template, &frame, null, &.{});
+        const attempt = evalClassTemplate(&machine, template, &frame, null, &.{}, null);
         try std.testing.expectEqual(&class_environment, machine.env);
         if (attempt) |class| {
             const function = Interpreter.funcOf(class) orelse return error.TestUnexpectedResult;
@@ -10992,7 +11046,7 @@ test "deferred class capture allocation failure restores its runtime environment
     var frame = Frame{ .slots = slots, .parent = null, .closure_environment = machine.env };
     var unavailable = std.testing.FailingAllocator.init(machine.arena, .{ .fail_index = 0, .resize_fail_index = 0 });
     machine.arena = unavailable.allocator();
-    try std.testing.expectError(error.OutOfMemory, evalClassTemplate(&machine, template, &frame, null, &.{}));
+    try std.testing.expectError(error.OutOfMemory, evalClassTemplate(&machine, template, &frame, null, &.{}, null));
     try std.testing.expectEqual(&context.env, machine.env);
     try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
     try std.testing.expect(frame.direct_eval_environment.load(.acquire) == null);

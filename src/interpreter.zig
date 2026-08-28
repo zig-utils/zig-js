@@ -4991,7 +4991,6 @@ pub const Interpreter = struct {
                     const v = try self.eval(a.value);
                     const value_root = try self.pushTempRoot(v);
                     var key_buffer: [24]u8 = undefined;
-                    try self.maybeNameAnon(v, a.value.field_init_value, try reference.key(self, &key_buffer));
                     try self.initializePublicClassField(
                         self.tempRoot(reference.base_root, reference.base),
                         try reference.key(self, &key_buffer),
@@ -5017,13 +5016,12 @@ pub const Interpreter = struct {
                 else
                     null;
                 defer if (binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
-                const v = try self.eval(a.value);
+                const v = if (a.target.* == .identifier and !a.target_parenthesized)
+                    try self.evalNamed(a.value, a.target.identifier)
+                else
+                    try self.eval(a.value);
                 const value_root = try self.pushTempRoot(v);
                 defer self.restoreTempRoots(value_root);
-                // NamedEvaluation: `f = function(){}` names the function "f"
-                // (only a bare, *unparenthesized* identifier target — a
-                // parenthesized `(f) =` is not an IdentifierRef).
-                if (a.target.* == .identifier and !a.target_parenthesized) try self.maybeNameAnon(v, a.value, a.target.identifier);
                 if (binding_reference) |reference|
                     try self.storeCapturedBindingReference(
                         self.tempBindingReferenceRoot(binding_reference_root.?, reference),
@@ -5265,7 +5263,7 @@ pub const Interpreter = struct {
                 const saved_fi = self.in_field_initializer;
                 self.in_field_initializer = true;
                 defer self.in_field_initializer = saved_fi;
-                break :blk try self.eval(inner);
+                break :blk try self.evalNamed(inner.expression, inner.name);
             },
             .private_field_def => |d| blk: {
                 // PrivateFieldAdd: brand `this` with this field's name (in
@@ -5276,10 +5274,6 @@ pub const Interpreter = struct {
                 // whose initializer seals `this` (`#g = (preventExtensions(this),
                 // …)`) makes its own add throw, and a field cannot reference itself.
                 const fv = try self.eval(d.value);
-                // An anonymous initializer takes the field's source name (`#x`,
-                // the part of the storage key before the NUL marker).
-                const raw_init = if (d.value.* == .field_init_value) d.value.field_init_value else d.value;
-                try self.maybeNameAnon(fv, raw_init, std.mem.sliceTo(d.name, 0));
                 if (self.this_value.isObject())
                     try self.initializePrivateClassField(self.this_value.asObj(), d.name, fv);
                 break :blk Value.undef();
@@ -5310,8 +5304,7 @@ pub const Interpreter = struct {
                 defer if (binding_reference_root) |mark| self.restoreTempBindingReferenceRoots(mark);
                 var v: Value = Value.undef();
                 if (d.init) |init_node| {
-                    v = try self.eval(init_node);
-                    try self.maybeNameAnon(v, init_node, d.name); // `var f = function(){}` ⇒ name "f"
+                    v = try self.evalNamed(init_node, d.name);
                 }
                 // `var` hoists to the variable scope (and mirrors onto the global
                 // object); `let`/`const` bind in the current (possibly block) scope.
@@ -7282,14 +7275,32 @@ pub const Interpreter = struct {
     /// The function-name string a property key contributes (PropertyName's name):
     /// a string key as-is, a symbol as `[description]` (or `""` when undescribed),
     /// else ToString. Used to name concise methods/accessors from their key.
-    fn keyDisplayName(self: *Interpreter, kv: Value) EvalError![]const u8 {
+    pub fn keyDisplayName(self: *Interpreter, kv: Value) EvalError![]const u8 {
         if (kv.isObject() and kv.asObj().is_symbol)
             return if (kv.asObj().symbolDescription()) |d| try std.fmt.allocPrint(self.arena, "[{s}]", .{d}) else "";
         if (kv.isString()) return kv.asWtf8(self.arena);
         return self.toStringWtf8(kv);
     }
 
+    /// NamedEvaluation supplies ClassDefinitionEvaluation's name before any
+    /// heritage or static initialization effects. Retain dynamic key bytes before
+    /// those effects can evacuate the key's String cell; never mutate shared ASTs.
+    fn evalNamed(self: *Interpreter, node: *Node, name: []const u8) EvalError!Value {
+        if (node.* == .class_expr and node.class_expr.name.len == 0) {
+            const c = node.class_expr;
+            const retained_name = try self.arena.dupe(u8, name);
+            try self.beginNodeEvaluation(node);
+            return self.evalClass(c.name, retained_name, c.superclass, c.members, c.source);
+        }
+        const result = try self.eval(node);
+        try self.maybeNameAnon(result, node, name);
+        return result;
+    }
+
     pub fn maybeNameAnon(self: *Interpreter, val: Value, init_node: *Node, name: []const u8) EvalError!void {
+        // Class names are installed by ClassDefinitionEvaluation. A static block
+        // may delete/redefine `name`; post-evaluation naming must not undo that.
+        if (init_node.* == .class_expr) return;
         if (!isAnonFnDef(init_node)) return;
         try self.nameAnonValue(val, name);
     }
@@ -7303,7 +7314,7 @@ pub const Interpreter = struct {
 
     /// The naming step of NamedEvaluation, without the syntactic isAnonFnDef gate.
     /// The VM's `name_anon` opcode is emitted by the compiler only for a bare
-    /// anonymous function/class value, so the gate is applied at compile time;
+    /// anonymous function value, so the gate is applied at compile time;
     /// `maybeNameAnon` above applies it for the tree-walker.
     pub fn nameAnonValue(self: *Interpreter, val: Value, name: []const u8) EvalError!void {
         if (name.len == 0) return;
@@ -7430,7 +7441,7 @@ pub const Interpreter = struct {
                 }
             },
             .optional_chain => |n| try self.rewritePrivateNamesInNode(n, map),
-            .field_init_value => |n| try self.rewritePrivateNamesInNode(n, map),
+            .field_init_value => |n| try self.rewritePrivateNamesInNode(n.expression, map),
             .private_field_def => |d| try self.rewritePrivateNamesInNode(d.value, map),
             .object_lit => |props| for (props) |p| {
                 if (p.key_expr) |ke| try self.rewritePrivateNamesInNode(ke, map);
@@ -7590,7 +7601,7 @@ pub const Interpreter = struct {
             .tagged_template => |t| .{ .tagged_template = .{ .tag = try self.deepCopyNode(t.tag), .cooked = t.cooked, .raw = t.raw, .exprs = try self.deepCopyNodes(t.exprs) } },
             .member => |m| .{ .member = .{ .object = try self.deepCopyNode(m.object), .property = m.property, .computed = try self.deepCopyOpt(m.computed), .optional = m.optional } },
             .optional_chain => |x| .{ .optional_chain = try self.deepCopyNode(x) },
-            .field_init_value => |x| .{ .field_init_value = try self.deepCopyNode(x) },
+            .field_init_value => |x| .{ .field_init_value = .{ .expression = try self.deepCopyNode(x.expression), .name = x.name } },
             .private_field_def => |d| .{ .private_field_def = .{ .name = d.name, .value = try self.deepCopyNode(d.value) } },
             .object_lit => |props| blk: {
                 const out = try self.arena.alloc(ast.Property, props.len);
@@ -7823,6 +7834,8 @@ pub const Interpreter = struct {
         // instance.
         const field_member_nodes = try self.arena.alloc(?*Node, members.len);
         @memset(field_member_nodes, null);
+        const field_value_nodes = try self.arena.alloc(?*Node, members.len);
+        @memset(field_value_nodes, null);
         for (members, 0..) |m, i| {
             if (!m.is_field or m.is_static) continue;
             const this_node = try self.arena.create(Node);
@@ -7842,7 +7855,8 @@ pub const Interpreter = struct {
             // ordinary assignment semantics (notably for Symbol keys and an
             // inherited setter).
             const value_node = try self.arena.create(Node);
-            value_node.* = .{ .field_init_value = raw_value };
+            value_node.* = .{ .field_init_value = .{ .expression = raw_value, .name = std.mem.sliceTo(m.key, 0) } };
+            field_value_nodes[i] = value_node;
             const stmt = try self.arena.create(Node);
             // A private field is *defined* (PrivateFieldAdd) on `this`, not
             // assigned via PrivateSet; a public field is an ordinary assignment.
@@ -8005,6 +8019,17 @@ pub const Interpreter = struct {
                 std.mem.sliceTo(m.key, 0)
             else
                 m.key;
+            if (field_value_nodes[i]) |initializer| {
+                // DefineField's NamedEvaluation uses the public/private display
+                // name, never the encoded storage key. This immutable wrapper
+                // belongs to this evaluation, including auto-accessor backing fields.
+                initializer.field_init_value.name = if (kv != null and isAnonFnDef(initializer.field_init_value.expression))
+                    try self.arena.dupe(u8, name_str)
+                else if (kv == null)
+                    name_str
+                else
+                    "";
+            }
             // A public instance field's computed NAME was just evaluated here,
             // once and in source order. Bake the resulting key into its desugared
             // per-instance initializer so the name expression does not re-run for
@@ -8157,9 +8182,8 @@ pub const Interpreter = struct {
             // DefineField order: evaluate the initializer FIRST, then
             // PrivateFieldAdd (brand + extensibility check) — so a static private
             // field whose initializer seals the class object makes its own add throw.
-            const fv2 = if (m.field_init) |init_node| try self.eval(init_node) else Value.undef();
+            const fv2 = if (m.field_init) |init_node| try self.evalNamed(init_node, name_str) else Value.undef();
             class_obj = self.tempRoot(class_root, class_val).asObj();
-            if (m.field_init) |fi| try self.maybeNameAnon(fv2, fi, name_str);
             if (m.is_auto_accessor) {
                 const storage_key = auto_storage_keys[i];
                 try self.addPrivateBrandChecked(class_obj, storage_key);
@@ -9444,8 +9468,7 @@ pub const Interpreter = struct {
             var v: Value = if (i < args.len) self.tempRoot(args_root + i, args[i]) else Value.undef();
             if (v.isUndefined()) {
                 if (p.default) |d| {
-                    v = try self.eval(d);
-                    if (p.pattern == null) try self.maybeNameAnon(v, d, p.name); // `function f(x = () => {})` ⇒ name "x"
+                    v = if (p.pattern == null) try self.evalNamed(d, p.name) else try self.eval(d);
                 }
             }
             if (p.pattern) |pat| try self.bindPattern(pat, v, true) else try self.env.put(p.name, v);
@@ -11141,7 +11164,12 @@ pub const Interpreter = struct {
             const kv: ?Value = if (p.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
             const key_root = if (kv) |key| try self.pushTempRoot(key) else null;
             defer if (key_root) |root| self.restoreTempRoots(root);
-            const pv = try self.eval(p.value);
+            const named_class = p.accessor == .none and !p.proto_setter and
+                p.value.* == .class_expr and p.value.class_expr.name.len == 0;
+            const pv = if (named_class)
+                try self.evalNamed(p.value, if (kv) |k| try self.keyDisplayName(k) else p.key)
+            else
+                try self.eval(p.value);
             const object = self.tempRoot(object_root, v).asObj();
             // ToPropertyKey precedes value evaluation, but its retained primitive
             // (and any borrowed string bytes) may move while evaluating the value.
@@ -11149,7 +11177,7 @@ pub const Interpreter = struct {
             const key = if (current_key) |k| try self.keyOf(k) else try value.encodeStringKey(self.arena, p.key);
             // The name a method/accessor takes from this key (a symbol shows as
             // `[description]`, not its internal key).
-            const name_str = if (current_key) |k| try self.keyDisplayName(k) else p.key;
+            const name_str = if (p.value.* == .class_expr) "" else if (current_key) |k| try self.keyDisplayName(k) else p.key;
             switch (p.accessor) {
                 .none => {
                     if (p.proto_setter) { // only the `__proto__: value` colon form
@@ -11166,7 +11194,7 @@ pub const Interpreter = struct {
                         if (funcOf(pv)) |f| {
                             f.home_object = object;
                         };
-                    try self.maybeNameAnon(pv, p.value, name_str); // `{ x: function(){} }` ⇒ name "x"
+                    try self.maybeNameAnon(pv, p.value, name_str);
                     try self.defineLiteralDataProp(object, key, pv);
                 },
                 .get => {
@@ -14823,8 +14851,7 @@ pub const Interpreter = struct {
             var v = try self.getProperty(self.tempRoot(source_root, val), key);
             if (v.isUndefined()) {
                 if (prop.default) |d| {
-                    v = try self.eval(d);
-                    if (prop.target.* == .identifier) try self.maybeNameAnon(v, d, prop.target.identifier);
+                    v = if (prop.target.* == .identifier) try self.evalNamed(d, prop.target.identifier) else try self.eval(d);
                 }
             }
             if (property_reference) |*reference| {
@@ -14988,8 +15015,7 @@ pub const Interpreter = struct {
             if (elem.target) |t| {
                 if (v.isUndefined()) {
                     if (elem.default) |d| {
-                        v = try self.eval(d);
-                        if (t.* == .identifier) try self.maybeNameAnon(v, d, t.identifier);
+                        v = if (t.* == .identifier) try self.evalNamed(d, t.identifier) else try self.eval(d);
                     }
                 }
                 if (property_reference) |*reference| {

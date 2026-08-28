@@ -270,8 +270,10 @@ pub const Node = union(enum) {
     optional_chain: *Node,
     /// Wraps a class instance field's initializer expression so the interpreter
     /// can mark `in_field_initializer` while evaluating it (a direct eval inside
-    /// inherits the field-initializer early errors). Synthesized, never parsed.
-    field_init_value: *Node,
+    /// inherits the field-initializer early errors). The owned display name
+    /// supplies NamedEvaluation before effects, independently of the storage key.
+    /// Synthesized per class evaluation, never parsed.
+    field_init_value: struct { expression: *Node, name: []const u8 },
     /// Define (PrivateFieldAdd) a private instance field as an own property of
     /// `this` — distinct from a PrivateSet assignment, which requires the field to
     /// already exist. Synthesized for `#x = init` instance fields, never parsed.
