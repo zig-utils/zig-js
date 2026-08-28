@@ -88,9 +88,9 @@ pub fn numberFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
         // — e.g. a Date yields its time value; a Symbol is a TypeError. A BigInt
         // operand converts to the nearest Number (Number(10n) === 10).
         if (v.isObject() and !v.asObj().is_bigint) {
-            if (v.asObj().is_symbol) return ip.throwError("TypeError", "Cannot convert a Symbol value to a number");
+            if (v.asObj().is_symbol) return ip.throwError("TypeError", "Cannot convert a symbol to a number");
             const prim = try ip.toPrimitive(v, .number);
-            if (prim.isObject() and prim.asObj().is_symbol) return ip.throwError("TypeError", "Cannot convert a Symbol value to a number");
+            if (prim.isObject() and prim.asObj().is_symbol) return ip.throwError("TypeError", "Cannot convert a symbol to a number");
             break :blk prim.toNumber();
         }
         break :blk v.toNumber();
@@ -1070,7 +1070,7 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
         arr.asObj().proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Array");
     if (args.len == 1 and args[0].isNumber()) {
         const n = args[0].asNum();
-        if (n < 0 or @trunc(n) != n or n > 4294967295) return self.throwError("RangeError", "Invalid array length");
+        if (n < 0 or @trunc(n) != n or n > 4294967295) return self.throwError("RangeError", "Array length must be a positive integer of safe magnitude.");
         // `new Array(len)` is a sparse array — length `len`, no elements (every
         // index a hole, so `0 in new Array(1)` is false and forEach/map skip
         // them). Only the logical length is set.
@@ -3039,7 +3039,7 @@ const Stringifier = struct {
         };
         // A BigInt (primitive or [[BigIntData]] wrapper) is not serializable.
         if (v.isObject() and v.asObj().is_bigint)
-            return self.throwError("TypeError", "Do not know how to serialize a BigInt");
+            return self.throwError("TypeError", "JSON.stringify cannot serialize BigInt.");
         switch (v.kind()) {
             .undefined => return false,
             .null => try buf.appendSlice(output_allocator, "null"),

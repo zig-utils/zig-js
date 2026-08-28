@@ -13132,7 +13132,7 @@ export fn JSArray__constructArray(
     defer context.popActiveInterpreter(&machine);
 
     if (len > std.math.maxInt(u32)) {
-        const err = machine.throwError("RangeError", "Invalid array length");
+        const err = machine.throwError("RangeError", "Length exceeded the maximum array length");
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     }
@@ -19898,7 +19898,7 @@ fn numberConstructorConversion(machine: *interp.Interpreter, input: Value) inter
     if (primitive.isObject() and !primitive.asObj().is_bigint and !primitive.asObj().is_symbol)
         primitive = try machine.toPrimitive(primitive, .number);
     if (primitive.isObject() and primitive.asObj().is_symbol)
-        return machine.throwError("TypeError", "Cannot convert a Symbol value to a number");
+        return machine.throwError("TypeError", "Cannot convert a symbol to a number");
     return primitive.toNumber();
 }
 

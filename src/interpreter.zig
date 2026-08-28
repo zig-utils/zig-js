@@ -8622,7 +8622,7 @@ pub const Interpreter = struct {
         const msg = if (has_msg) blk: {
             const prim = try self.toPrimitive(args[msg_i], .string);
             if (prim.isObject() and prim.asObj().is_symbol)
-                return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+                return self.throwError("TypeError", "Cannot convert a symbol to a string");
             break :blk if (prim.isString()) try prim.asWtf8(self.arena) else try prim.toString(self.arena);
         } else "";
         const err = try self.makeErrorWithProto(name, msg, proto);
@@ -9593,11 +9593,11 @@ pub const Interpreter = struct {
     /// rendering), this observes user methods and rejects Symbols.
     pub fn toStringV(self: *Interpreter, v: Value) EvalError![]const u8 {
         if (v.isObject() and v.asObj().is_symbol)
-            return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+            return self.throwError("TypeError", "Cannot convert a symbol to a string");
         if (v.isObject()) {
             const prim = try self.toPrimitive(v, .string);
             if (prim.isObject() and prim.asObj().is_symbol)
-                return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+                return self.throwError("TypeError", "Cannot convert a symbol to a string");
             return prim.toString(self.arena);
         }
         return v.toString(self.arena);
@@ -9608,11 +9608,11 @@ pub const Interpreter = struct {
     /// existing string through an encoded byte slice and a new StringCell.
     pub fn toStringValue(self: *Interpreter, v: Value) EvalError!Value {
         if (v.isObject() and v.asObj().is_symbol)
-            return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+            return self.throwError("TypeError", "Cannot convert a symbol to a string");
         if (v.isObject()) {
             const prim = try self.toPrimitive(v, .string);
             if (prim.isObject() and prim.asObj().is_symbol)
-                return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+                return self.throwError("TypeError", "Cannot convert a symbol to a string");
             if (prim.isString()) return prim;
             return Value.strAlloc(self.arena, try prim.toString(self.arena));
         }
@@ -9627,11 +9627,11 @@ pub const Interpreter = struct {
     /// number/boolean/etc. renders to ASCII, for which `asWtf8`/`toString` agree.
     pub fn toStringWtf8(self: *Interpreter, v: Value) EvalError![]const u8 {
         if (v.isObject() and v.asObj().is_symbol)
-            return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+            return self.throwError("TypeError", "Cannot convert a symbol to a string");
         if (v.isObject()) {
             const prim = try self.toPrimitive(v, .string);
             if (prim.isObject() and prim.asObj().is_symbol)
-                return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+                return self.throwError("TypeError", "Cannot convert a symbol to a string");
             if (prim.isString()) return prim.asWtf8(self.arena);
             return prim.toString(self.arena);
         }
@@ -9643,15 +9643,15 @@ pub const Interpreter = struct {
     /// object (propagating throws), and a TypeError for a Symbol.
     pub fn toNumberV(self: *Interpreter, v: Value) EvalError!f64 {
         if (v.isObject() and v.asObj().is_symbol)
-            return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+            return self.throwError("TypeError", "Cannot convert a symbol to a number");
         if (v.isObject() and v.asObj().is_bigint)
-            return self.throwError("TypeError", "Cannot convert a BigInt value to a number");
+            return self.throwError("TypeError", "Conversion from 'BigInt' to 'number' is not allowed.");
         if (v.isObject()) {
             const prim = try self.toPrimitive(v, .number);
             if (prim.isObject() and prim.asObj().is_symbol)
-                return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+                return self.throwError("TypeError", "Cannot convert a symbol to a number");
             if (prim.isObject() and prim.asObj().is_bigint)
-                return self.throwError("TypeError", "Cannot convert a BigInt value to a number");
+                return self.throwError("TypeError", "Conversion from 'BigInt' to 'number' is not allowed.");
             return prim.toNumber();
         }
         return v.toNumber();
@@ -10820,7 +10820,7 @@ pub const Interpreter = struct {
             .object => {
                 const o = v.asObj();
                 if (o.is_bigint) return v;
-                if (o.is_symbol) return self.throwError("TypeError", "Cannot convert a Symbol value to a BigInt");
+                if (o.is_symbol) return self.throwError("TypeError", "Invalid argument type in ToBigInt operation");
                 const p = try self.toPrimitive(v, .number);
                 if (p.isObject() and !p.asObj().is_bigint and !p.asObj().is_symbol) return self.throwError("TypeError", "Cannot convert object to a BigInt");
                 return self.toBigIntValueImpl(p, number_ok);
@@ -10897,7 +10897,7 @@ pub const Interpreter = struct {
 
     /// ArrayCreate(length): allocate a fresh array with a logical length.
     pub fn newArrayWithLength(self: *Interpreter, len: usize) EvalError!Value {
-        if (len > 4294967295) return self.throwError("RangeError", "Invalid array length");
+        if (len > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
         const arr = try self.newArray();
         try arr.asObj().extendArrayLengthFloor(self.arena, len);
         return arr;
@@ -10926,7 +10926,7 @@ pub const Interpreter = struct {
         if (!array.is_array) return;
         const len = array.arrayLength();
         if (len >= std.math.maxInt(u32))
-            return self.throwError("RangeError", "Invalid array length");
+            return self.throwError("RangeError", "Length exceeded the maximum array length");
         try self.putArrayDirectIndex(array, @intCast(len), out);
     }
 
@@ -10939,7 +10939,7 @@ pub const Interpreter = struct {
     }
 
     fn newArrayWithLengthInRealm(self: *Interpreter, env: *Environment, len: usize) EvalError!Value {
-        if (len > 4294967295) return self.throwError("RangeError", "Invalid array length");
+        if (len > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
         const arr = try self.newArrayInRealm(env);
         try arr.asObj().extendArrayLengthFloor(self.arena, len);
         return arr;
@@ -12777,7 +12777,7 @@ pub const Interpreter = struct {
 
         // ---- string conversions ----------------------------------------------
         if (eq(name, "toISOString")) {
-            if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
+            if (!std.math.isFinite(t) or @abs(t) > 8.64e15) return self.throwError("RangeError", "Invalid Date");
             return try self.dateISOStringValue(t);
         }
         if (eq(name, "toJSON")) {
@@ -13339,7 +13339,7 @@ pub const Interpreter = struct {
             eq(name, "symmetricDifference") or eq(name, "isSubsetOf") or eq(name, "isSupersetOf") or
             eq(name, "isDisjointFrom");
         if (is_setop) {
-            const rec = try self.getSetRecord(arg0(args));
+            const rec = try self.getSetRecord(arg0(args), name);
             if (eq(name, "union")) {
                 var other_iter: Value = Value.undef();
                 var other_next: Value = Value.undef();
@@ -13492,19 +13492,19 @@ pub const Interpreter = struct {
     /// and callable `has`/`keys`. A native Set is recognized directly (its
     /// `has`/`keys` are dispatched, not stored properties), so it's served from
     /// its own elements rather than the protocol.
-    fn getSetRecord(self: *Interpreter, v: Value) EvalError!SetRecord {
+    fn getSetRecord(self: *Interpreter, v: Value, method: []const u8) EvalError!SetRecord {
         if (!v.isObject()) return self.throwError("TypeError", "Set operation expects first argument to be an object");
         // GetSetRecord: rawSize = Get(obj,"size"); numSize = ToNumber(rawSize)
         // (a Symbol/BigInt size throws a TypeError); NaN throws; intSize < 0 is a
         // RangeError. ToNumber runs before `has`/`keys` are read.
         const size = try self.toNumberV(try self.getProperty(v, "size"));
-        if (std.math.isNan(size)) return self.throwError("TypeError", "set-like 'size' is NaN");
-        if (@trunc(size) < 0) return self.throwError("RangeError", "set-like 'size' is negative"); // intSize = ToIntegerOrInfinity
+        if (std.math.isNan(size)) return self.throwError("TypeError", "Set operation expects first argument to have non-NaN 'size' property");
+        if (@trunc(size) < 0) return self.throwError("RangeError", "Set operation expects first argument to have non-negative 'size' property"); // intSize = ToIntegerOrInfinity
         if (v.asObj().is_set) return .{ .obj = v.asObj(), .has = Value.undef(), .keys = Value.undef(), .size = size, .is_set = true };
         const has = try self.getProperty(v, "has");
-        if (!has.isCallable()) return self.throwError("TypeError", "set-like 'has' is not callable");
+        if (!has.isCallable()) return self.throwErrorFmt("TypeError", "Set.prototype.{s} expects other.has to be callable", .{method});
         const keys = try self.getProperty(v, "keys");
-        if (!keys.isCallable()) return self.throwError("TypeError", "set-like 'keys' is not callable");
+        if (!keys.isCallable()) return self.throwErrorFmt("TypeError", "Set.prototype.{s} expects other.keys to be callable", .{method});
         return .{ .obj = v.asObj(), .has = has, .keys = keys, .size = size, .is_set = false };
     }
 
@@ -16263,10 +16263,10 @@ pub const Interpreter = struct {
             // alignment is checked before the length coerces, and the buffer is
             // re-checked for detachment AFTER both coercions run user code.
             const buffer = a0.asObj();
-            const byte_offset: usize = @intCast(if (args.len > 1) try toIndexArg(self, args[1]) else 0);
+            const byte_offset: usize = @intCast(if (args.len > 1) try toIndexArg(self, args[1], "byteOffset") else 0);
             if (byte_offset % size != 0) return self.throwError("RangeError", "invalid typed array offset");
             const has_len = args.len > 2 and !args[2].isUndefined();
-            const req_len: usize = if (has_len) @intCast(try toIndexArg(self, args[2])) else 0;
+            const req_len: usize = if (has_len) @intCast(try toIndexArg(self, args[2], "length")) else 0;
             // Snapshot detached + byte length under the buffer lock: a peer's
             // ArrayBuffer.resize swaps `local_data` concurrently (no-GIL), which
             // this read of `bytes()` would otherwise race. The earlier
@@ -16288,10 +16288,10 @@ pub const Interpreter = struct {
                 // A length-tracking view over a resizable buffer just tracks
                 // floor(available / elementSize); only a fixed-length view
                 // requires the byte length to be an exact multiple.
-                if (!track and (buflen - byte_offset) % size != 0) return self.throwError("RangeError", "byte length not a multiple of element size");
+                if (!track and (buflen - byte_offset) % size != 0) return self.throwError("RangeError", "ArrayBuffer length minus the byteOffset is not a multiple of the element size");
                 length = (buflen - byte_offset) / size;
             }
-            if (byte_offset + length * size > buflen) return self.throwError("RangeError", "invalid typed array length");
+            if (byte_offset + length * size > buflen) return self.throwError("RangeError", "Length out of range of buffer");
             ta.* = .{ .buffer = buffer, .byte_offset = byte_offset, .length = length, .kind = kind, .track_length = track };
             try o.setTypedArray(self.arena, ta);
             ta_installed = true;
@@ -16324,10 +16324,10 @@ pub const Interpreter = struct {
             if (use_iter and !itm.isCallable()) return self.throwError("TypeError", "@@iterator is not a function");
             const list = if (use_iter) try self.iterableToListFromMethod(a0, itm) else blk: {
                 const len = toLen(try self.toNumberV(try self.getProperty(a0, "length")));
-                if (len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
+                if (len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "Length out of range of buffer");
                 break :blk try self.arrayLikeToListLen(a0, len);
             };
-            if (list.len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
+            if (list.len > typedArrayLengthLimit(size)) return self.throwError("RangeError", "Length out of range of buffer");
             try self.initTypedArrayProto(o, kind);
             ta.* = .{ .buffer = try self.makeArrayBuffer(list.len * size), .byte_offset = 0, .length = list.len, .kind = kind };
             try o.setTypedArray(self.arena, ta);
@@ -16338,8 +16338,8 @@ pub const Interpreter = struct {
         }
         // new TA(length): ToIndex(length) — truncates (0.9→0, 1.9→1), a Symbol or
         // BigInt throws (ToNumber), a negative or >2^53-1 value is a RangeError.
-        const len_idx = try toIndexArg(self, a0);
-        if (len_idx > typedArrayLengthLimit(size)) return self.throwError("RangeError", "invalid typed array length");
+        const len_idx = try toIndexArg(self, a0, "length");
+        if (len_idx > typedArrayLengthLimit(size)) return self.throwError("RangeError", "Length out of range of buffer");
         const length: usize = @intCast(len_idx);
         try self.initTypedArrayProto(o, kind);
         ta.* = .{ .buffer = try self.makeArrayBuffer(length * size), .byte_offset = 0, .length = length, .kind = kind };
@@ -17153,7 +17153,7 @@ pub const Interpreter = struct {
     /// An array-like routes through [[Set]].
     fn arraySetLengthThrowing(self: *Interpreter, o: *value.Object, new_len: usize) EvalError!void {
         if (o.is_array) {
-            if (new_len > 4294967295) return self.throwError("RangeError", "Invalid array length");
+            if (new_len > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
             if (!arrayLenWritable(o)) return self.throwError("TypeError", "Cannot assign to read only property 'length'");
             if (!try self.setArrayLength(o, new_len))
                 return self.throwError("TypeError", "Cannot delete a non-configurable array element");
@@ -17206,7 +17206,7 @@ pub const Interpreter = struct {
             const real_len: f64 = if (std.math.isNan(lenf) or lenf <= 0) 0 else @min(@trunc(lenf), 9007199254740991.0);
             const species_array = try objectToStringIsArray(self, o);
             if (real_len > 4294967295 and arrayCreatesResult(name) and !species_array)
-                return self.throwError("RangeError", "Invalid array length");
+                return self.throwError("RangeError", "Length exceeded the maximum array length");
             array_like_len = toArrayLikeLen(lenf);
             // A full-length-iterating method on a pathological array-like length
             // would spin a native loop forever — bail (matches the prior guard).
@@ -17240,7 +17240,7 @@ pub const Interpreter = struct {
             // The new length may not exceed 2**53-1 — checked (in f64, exact near
             // the limit) BEFORE any element is set.
             if (@as(f64, @floatFromInt(len)) + @as(f64, @floatFromInt(args.len)) > 9007199254740991.0)
-                return self.throwError("TypeError", "push would exceed the maximum array length 2**53-1");
+                return self.throwError("TypeError", "push cannot produce an array of length larger than (2 ** 53) - 1");
             if (o.is_array and !o.is_arguments and o.accessorsMap() == null and o.attrsMap() == null and
                 !o.has_indexed_property.load(.monotonic) and o.isExtensible() and self.arrayProtoChainCleanForDenseAppend(o))
             {
@@ -17434,7 +17434,7 @@ pub const Interpreter = struct {
             const start = try relIndex(self, arg0(args), ilen, 0);
             const end = try relIndex(self, arg(args, 1), ilen, @floatFromInt(ilen));
             const count = if (end > start) end - start else 0;
-            if (count > 4294967295) return self.throwError("RangeError", "Invalid array length");
+            if (count > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
             if (count > (1 << 22)) return null;
             const result = try self.arraySpeciesCreate(Value.obj(o), count);
             const dense = result.asObj().is_array and result.asObj().accessorsMap() == null and result.asObj().attrsMap() == null and result.asObj().proxyHandler() == null;
@@ -17557,7 +17557,7 @@ pub const Interpreter = struct {
             if (insert_count > del and len > 9007199254740991 - (insert_count - del))
                 return self.throwError("TypeError", "Invalid array length");
             const new_len = len - del + insert_count;
-            if (new_len > 4294967295) return self.throwError("RangeError", "Invalid array length");
+            if (new_len > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
             if (new_len > (1 << 22)) return null;
             const result = try self.newArray();
             const ra = result.asObj();
@@ -18138,7 +18138,7 @@ pub const Interpreter = struct {
             if (args.len > 0 and !args[0].isUndefined()) {
                 const r = @trunc(try self.toNumberV(args[0]));
                 if (std.math.isNan(r) or r < 2 or r > 36)
-                    return self.throwError("RangeError", "toString() radix must be an integer between 2 and 36");
+                    return self.throwError("RangeError", "toString() radix argument must be between 2 and 36");
                 radix = @intFromFloat(r);
             }
             if (radix == 10) return try Value.strAlloc(self.arena, try value.numberToString(self.arena, n));
@@ -18153,7 +18153,7 @@ pub const Interpreter = struct {
             const f = try self.toNumberV(arg0(args));
             const fi = if (std.math.isNan(f)) @as(f64, 0) else @trunc(f);
             if (fi < 0 or fi > 100)
-                return self.throwError("RangeError", "toFixed() digits must be between 0 and 100");
+                return self.throwError("RangeError", "toFixed() argument must be between 0 and 100");
             if (std.math.isNan(n) or std.math.isInf(n))
                 return try Value.strAlloc(self.arena, try value.numberToString(self.arena, n));
             return try Value.strAlloc(self.arena, try toFixed(self.arena, n, @intFromFloat(fi)));
@@ -18463,7 +18463,7 @@ pub const Interpreter = struct {
         const count_number = try self.toNumberV(arg0(args));
         const count_integer = if (std.math.isNan(count_number)) @as(f64, 0) else @trunc(count_number);
         if (count_integer < 0 or std.math.isInf(count_integer))
-            return self.throwError("RangeError", "Invalid count value");
+            return self.throwError("RangeError", "String.prototype.repeat argument must be greater than or equal to 0 and not be Infinity");
         if (count_integer == 0) return Value.str("");
         if (string.asStringCell().utf16Len() == 0) return string;
         if (count_integer == 1) return string;
@@ -19053,7 +19053,7 @@ pub const Interpreter = struct {
             else if (eq(form, "NFKD"))
                 .nfkd
             else
-                return self.throwError("RangeError", "The normalization form should be one of NFC, NFD, NFKC, NFKD");
+                return self.throwError("RangeError", "argument does not match any normalization form");
             return try Value.strAlloc(self.arena, try unicode_normalize.normalize(self.arena, s, nf));
         }
         if (eq(name, "search")) {
@@ -19522,7 +19522,7 @@ pub const Interpreter = struct {
             return switch (op) {
                 .neg => try negateBigIntObject(self, nv.asObj()),
                 .bit_not => try bitNotBigIntObject(self, nv.asObj()),
-                .pos => self.throwError("TypeError", "Cannot convert a BigInt value to a number"),
+                .pos => self.throwError("TypeError", "Conversion from 'BigInt' to 'number' is not allowed."),
                 else => unreachable,
             };
         }
@@ -19618,7 +19618,7 @@ pub const Interpreter = struct {
             v = self.tempRoot(input_root, input);
             o = v.asObj();
             if (!exotic.isUndefined() and !exotic.isNull()) {
-                if (!exotic.isCallable()) return self.throwError("TypeError", "@@toPrimitive value is not callable");
+                if (!exotic.isCallable()) return self.throwError("TypeError", "Symbol.toPrimitive is not a function, undefined, or null");
                 const method_root = try self.pushTempRoot(exotic);
                 defer self.restoreTempRoots(method_root);
                 const hint_str: []const u8 = switch (hint) {
@@ -19629,7 +19629,7 @@ pub const Interpreter = struct {
                 const hint_value = try Value.strAlloc(self.arena, hint_str);
                 const res = try self.callValueWithThis(self.tempRoot(method_root, exotic), &.{hint_value}, self.tempRoot(input_root, input));
                 if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) return res;
-                return self.throwError("TypeError", "Cannot convert object to primitive value");
+                return self.throwError("TypeError", "No default value");
             }
         }
         if (o.hostClassHooks()) |hooks| if (hooks.convert) |convert| {
@@ -19724,8 +19724,8 @@ pub const Interpreter = struct {
         o = v.asObj();
         // Both `toString` and `valueOf` were user-defined and each returned an
         // object — there's no built-in to fall back to, so this is the spec's
-        // "Cannot convert object to primitive value" TypeError.
-        if (user_tried == 2) return self.throwError("TypeError", "Cannot convert object to primitive value");
+        // "No default value" TypeError.
+        if (user_tried == 2) return self.throwError("TypeError", "No default value");
         // A callable object with no user-defined valueOf/toString stringifies via
         // Function.prototype.toString (its source text / native syntax). `valueOf`
         // returns the object itself, so `toString` always wins regardless of hint.
@@ -19740,7 +19740,7 @@ pub const Interpreter = struct {
                 if (builtin_to_string_method) |m| return try self.callValueWithThis(m, &.{}, v);
                 return try Value.strAlloc(self.arena, try p.toString(self.arena));
             }
-            return self.throwError("TypeError", "Cannot convert object to primitive value");
+            return self.throwError("TypeError", "No default value");
         }
         // A Date with no @@toPrimitive falls back to ordinary conversion: string
         // hints use toString, while number/default hints use the time value.
@@ -19758,13 +19758,13 @@ pub const Interpreter = struct {
         // primitive value" TypeError.
         const own_ts = o.getOwn("toString");
         const ts_shadowed = (own_ts != null and !own_ts.?.isCallable()) or userMethodOf(o, "toString") != null;
-        if (ts_shadowed) return self.throwError("TypeError", "Cannot convert object to primitive value");
-        if (!builtin_to_string) return self.throwError("TypeError", "Cannot convert object to primitive value");
+        if (ts_shadowed) return self.throwError("TypeError", "No default value");
+        if (!builtin_to_string) return self.throwError("TypeError", "No default value");
         if (builtin_to_string_method) |m| {
             const res = try self.callValueWithThis(m, &.{}, v);
             if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) return res;
         }
-        return self.throwError("TypeError", "Cannot convert object to primitive value");
+        return self.throwError("TypeError", "No default value");
     }
 
     /// A *user-defined* `name` method on `o`'s own properties or prototype chain
@@ -19829,14 +19829,14 @@ pub const Interpreter = struct {
                 l = try self.toPrimitive(if (roots_mark) |mark| self.tempRoot(mark, l) else l, .number);
                 if (roots_mark) |mark| self.setTempRoot(mark, l);
                 if (l.isObject() and l.asObj().is_symbol)
-                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+                    return self.throwError("TypeError", "Cannot convert a symbol to a number");
                 r = try self.toPrimitive(if (roots_mark) |mark| self.tempRoot(mark + 1, r) else r, .number);
                 if (roots_mark) |mark| {
                     self.setTempRoot(mark + 1, r);
                     l = self.tempRoot(mark, l);
                 }
                 if (r.isObject() and r.asObj().is_symbol)
-                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+                    return self.throwError("TypeError", "Cannot convert a symbol to a number");
             },
             .eq, .neq => {
                 // Abstract equality (IsLooselyEqual): when one operand is an
@@ -19872,7 +19872,7 @@ pub const Interpreter = struct {
             switch (op) {
                 .add => if (l.isString() or r.isString()) {} else return self.bigIntBinary(op, l, r, l_big, r_big),
                 .sub, .mul, .div, .mod, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr => return self.bigIntBinary(op, l, r, l_big, r_big),
-                .ushr => return self.throwError("TypeError", "BigInts have no unsigned right shift, use >> instead"),
+                .ushr => return self.throwError("TypeError", "BigInt does not support >>> operator"),
                 // A null order is the spec's "undefined" comparison result (a
                 // NaN Number operand or a non-BigInt-shaped String) — every
                 // relational operator then yields false.
@@ -19897,9 +19897,9 @@ pub const Interpreter = struct {
                 // hint) above; ToNumeric(lhs) then ToNumeric(rhs) follow in order,
                 // each throwing on a Symbol operand.
                 if (l.isObject() and l.asObj().is_symbol)
-                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+                    return self.throwError("TypeError", "Cannot convert a symbol to a number");
                 if (r.isObject() and r.asObj().is_symbol)
-                    return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+                    return self.throwError("TypeError", "Cannot convert a symbol to a number");
                 break :blk Value.num(l.toNumber() + r.toNumber());
             },
             .sub => Value.num(l.toNumber() - r.toNumber()),
@@ -19944,9 +19944,29 @@ pub const Interpreter = struct {
         };
     }
 
+    /// JavaScriptCore names the operation that mixed a BigInt with a non-BigInt
+    /// rather than raising one message for every operator.
+    fn bigIntMixName(op: ast.BinaryOp) []const u8 {
+        return switch (op) {
+            .add => "addition",
+            .sub => "subtraction",
+            .mul => "multiplication",
+            .div => "division",
+            .mod => "remainder",
+            .pow => "exponentiation",
+            .bit_and => "bitwise 'and' operation",
+            .bit_or => "bitwise 'or' operation",
+            .bit_xor => "bitwise 'xor' operation",
+            .shl => "left shift operation",
+            .shr => "signed right shift operation",
+            else => "operation",
+        };
+    }
+
     /// A BigInt binary op (both operands must be BigInt — mixing is a TypeError).
     fn bigIntBinary(self: *Interpreter, op: ast.BinaryOp, l: Value, r: Value, l_big: bool, r_big: bool) EvalError!Value {
-        if (!l_big or !r_big) return self.throwError("TypeError", "Cannot mix BigInt and other types, use explicit conversions");
+        if (!l_big or !r_big)
+            return self.throwErrorFmt("TypeError", "Invalid mix of BigInt and other type in {s}.", .{bigIntMixName(op)});
         const lo = l.asObj();
         const ro = r.asObj();
         // `**` and the shifts can produce results far past i128, and a
@@ -21912,7 +21932,7 @@ fn dateSymbolToPrimitiveFn(ctx: *anyopaque, this: Value, args: []const Value) va
             if (!res.isObject() or res.asObj().is_symbol or res.asObj().is_bigint) return res;
         }
     }
-    return self.throwError("TypeError", "Cannot convert object to primitive value");
+    return self.throwError("TypeError", "No default value");
 }
 
 fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -23188,11 +23208,14 @@ fn bigIntAsIntNFn(comptime signed: bool) value.NativeFn {
 /// ToIndex(v): ToIntegerOrInfinity, then RangeError outside [0, 2^53-1]. The
 /// Number coercion runs valueOf/toString (so a Symbol/BigInt throws), matching
 /// the spec's argument-coercion order.
-fn toIndexArg(self: *Interpreter, v: Value) EvalError!u64 {
+fn toIndexArg(self: *Interpreter, v: Value, comptime subject: []const u8) EvalError!u64 {
     if (v.isUndefined()) return 0;
     const n = try self.toNumberV(v);
     const i = if (std.math.isNan(n)) 0 else @trunc(n);
-    if (i < 0 or i > 9007199254740991.0) return self.throwError("RangeError", "index out of range");
+    // JavaScriptCore names the argument in both directions rather than raising
+    // one opaque "index out of range" for every ToIndex caller.
+    if (i < 0) return self.throwError("RangeError", subject ++ " cannot be negative");
+    if (i > 9007199254740991.0) return self.throwError("RangeError", subject ++ " larger than (2 ** 53) - 1");
     return @intFromFloat(i);
 }
 
@@ -23229,18 +23252,18 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const buf_v = if (args.len > 0) args[0] else Value.undef();
     if (!buf_v.isObject() or buf_v.asObj().arrayBuffer() == null) return self.throwError("TypeError", "First argument to DataView must be an ArrayBuffer");
     const ab = buf_v.asObj().arrayBuffer().?;
-    const offset = try toIndexArg(self, if (args.len > 1) args[1] else Value.undef());
+    const offset = try toIndexArg(self, if (args.len > 1) args[1] else Value.undef(), "byteOffset");
     ab.lockBuffer();
     const initial_detached = ab.isDetached();
     const buf_len = if (initial_detached) 0 else ab.bytes().len;
     ab.unlockBuffer();
     if (initial_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
-    if (offset > @as(u64, @intCast(buf_len))) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
+    if (offset > @as(u64, @intCast(buf_len))) return self.throwError("RangeError", "byteOffset exceeds source ArrayBuffer byteLength");
     var view_len: usize = buf_len - @as(usize, @intCast(offset));
     // Omitting byteLength on a resizable buffer makes the view length-tracking.
     const track = (args.len <= 2 or args[2].isUndefined()) and ab.max_byte_length != null;
     if (args.len > 2 and !args[2].isUndefined()) {
-        const vl = try toIndexArg(self, args[2]);
+        const vl = try toIndexArg(self, args[2], "byteLength");
         ab.lockBuffer();
         const length_detached = ab.isDetached();
         const length_buf_len = if (length_detached) 0 else ab.bytes().len;
@@ -23260,7 +23283,7 @@ fn dataViewConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const live_len = if (final_detached) 0 else ab.bytes().len;
     ab.unlockBuffer();
     if (final_detached) return self.throwError("TypeError", "ArrayBuffer is detached");
-    if (offset > @as(u64, @intCast(live_len))) return self.throwError("RangeError", "Start offset is outside the bounds of the buffer");
+    if (offset > @as(u64, @intCast(live_len))) return self.throwError("RangeError", "byteOffset exceeds source ArrayBuffer byteLength");
     if (!track and offset + @as(u64, @intCast(view_len)) > @as(u64, @intCast(live_len)))
         return self.throwError("RangeError", "Invalid DataView length");
     const dv = try (try o.dataViewAllocator(self.arena)).create(value.DataViewData);
@@ -23276,7 +23299,7 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject() or this.asObj().dataView() == null) return throwDataViewTypeError(self, "DataView.prototype.get" ++ t.name ++ " requires a DataView receiver");
             const dv = this.asObj().dataView().?;
-            const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
+            const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef(), "byteOffset");
             const little = if (args.len > 1) args[1].toBoolean() else false;
             const ab = dv.buffer.arrayBuffer().?;
             const locked = ab.needsElementLock();
@@ -23334,7 +23357,7 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             const dv = this.asObj().dataView().?;
             // SetViewValue checks IsImmutableBuffer before coercing the index/value.
             if (dv.buffer.arrayBuffer().?.immutable) return throwDataViewTypeError(self, "Cannot modify a DataView backed by an immutable ArrayBuffer");
-            const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
+            const get_index = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef(), "byteOffset");
             const val = if (args.len > 1) args[1] else Value.undef();
             // Coerce the value (ToBigInt for the Big types, else ToNumber) before
             // the bounds/detach check, per SetViewValue.
@@ -25797,7 +25820,7 @@ fn newTypedArray(self: *Interpreter, kind: value.TAKind, len: usize) EvalError!*
 fn newTypedArrayWithInitialization(self: *Interpreter, kind: value.TAKind, len: usize, zero_fill: bool) EvalError!*value.Object {
     const element_size = kind.byteSize();
     if (len > @min(std.math.maxInt(usize) / element_size, max_typed_array_bytes / element_size))
-        return self.throwError("RangeError", "invalid typed array length");
+        return self.throwError("RangeError", "Length out of range of buffer");
     const o = (try self.newObject()).asObj();
     const ta = try (try o.typedArrayAllocator(self.arena)).create(value.TypedArrayData);
     var ta_installed = false;
@@ -26166,7 +26189,17 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
     }
     if (eq(name, "set")) {
         const src = if (args.len > 0) args[0] else Value.undef();
-        const offset_u64 = if (args.len > 1) try toIndexArg(self, args[1]) else 0;
+        // ToIndex inlined because `set`'s offset is the one caller JSC words as
+        // a sentence rather than "<subject> cannot be negative" — and the
+        // coercion may run a user `valueOf`, so it must happen exactly once.
+        const offset_u64: u64 = blk: {
+            if (args.len < 2 or args[1].isUndefined()) break :blk 0;
+            const raw = try self.toNumberV(args[1]);
+            const truncated = if (std.math.isNan(raw)) 0 else @trunc(raw);
+            if (truncated < 0) return self.throwError("RangeError", "Offset should not be negative");
+            if (truncated > 9007199254740991.0) return self.throwError("RangeError", "offset larger than (2 ** 53) - 1");
+            break :blk @intFromFloat(truncated);
+        };
         if (offset_u64 > std.math.maxInt(usize)) return self.throwError("RangeError", "offset is out of bounds");
         const offset: usize = @intCast(offset_u64);
         // The offset's ToInteger can run user code (a valueOf) that detaches or
@@ -26917,14 +26950,14 @@ fn arrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor ArrayBuffer requires 'new'");
-    const len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
+    const len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef(), "length");
     // The optional `maxByteLength` option makes the buffer resizable.
     var max: ?usize = null;
     if (args.len > 1 and args[1].isObject()) {
         const mv = try self.getProperty(args[1], "maxByteLength");
         if (!mv.isUndefined()) {
-            const m = try toIndexArg(self, mv);
-            if (m > 0x7fffffff or m < len) return self.throwError("RangeError", "Invalid maxByteLength");
+            const m = try toIndexArg(self, mv, "maxByteLength");
+            if (m > 0x7fffffff or m < len) return self.throwError("RangeError", "ArrayBuffer length exceeds maxByteLength option");
             max = @intCast(m);
         }
     }
@@ -26969,7 +27002,7 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
     const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "transferToImmutable cannot be called on a SharedArrayBuffer");
     if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be transferred");
-    const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
+    const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0], "newLength")) else ab.bytes().len;
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     if (ab.immutable) return self.throwError("TypeError", "ArrayBuffer is already immutable");
     const out = try self.makeArrayBuffer(new_len); // alloc before the lock (may GC)
@@ -27025,7 +27058,7 @@ fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.resize called on a SharedArrayBuffer");
     if (ab.max_byte_length == null) return self.throwError("TypeError", "ArrayBuffer is not resizable");
-    const new_len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
+    const new_len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef(), "newLength");
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     if (new_len > ab.max_byte_length.?) return self.throwError("RangeError", "resize exceeds maxByteLength");
     const nl: usize = @intCast(new_len);
@@ -27066,7 +27099,7 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             const ab = this.asObj().arrayBuffer().?;
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
             if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be transferred");
-            const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
+            const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0], "newLength")) else ab.bytes().len;
             if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
             if (ab.immutable) return self.throwError("TypeError", "an immutable ArrayBuffer cannot be transferred");
             const out = try self.makeArrayBuffer(new_len); // alloc before the lock (may GC)
@@ -30058,7 +30091,7 @@ fn dtfBuildOutput(self: *Interpreter, this: Value, args: []const Value, output: 
                 0
             else
                 try self.toNumberV(args[0]);
-            if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid time value");
+            if (std.math.isNan(ms) or @abs(ms) > 8.64e15) return self.throwError("RangeError", "Invalid Date");
             const day_ms: i64 = 86_400_000;
             const total_ms: i64 = @intFromFloat(@trunc(ms + @as(f64, @floatFromInt(dtfTimeZoneOffsetMs(this, ms)))));
             const epoch_days = @divFloor(total_ms, day_ms);
@@ -33380,10 +33413,10 @@ const SegmenterInput = struct {
 /// segment-data record can reference the single coercion result.
 fn segmenterToStringValue(self: *Interpreter, input: Value) EvalError!Value {
     if (input.isObject() and input.asObj().is_symbol)
-        return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+        return self.throwError("TypeError", "Cannot convert a symbol to a string");
     const primitive = if (input.isObject()) try self.toPrimitive(input, .string) else input;
     if (primitive.isObject() and primitive.asObj().is_symbol)
-        return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+        return self.throwError("TypeError", "Cannot convert a symbol to a string");
     if (primitive.isString()) return primitive;
     return try Value.strAlloc(self.arena, try primitive.toString(self.arena));
 }
@@ -34753,13 +34786,13 @@ fn sharedArrayBufferConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor SharedArrayBuffer requires 'new'");
-    const len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
+    const len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef(), "length");
     var max: ?usize = null;
     if (args.len > 1 and args[1].isObject()) {
         const mv = try self.getProperty(args[1], "maxByteLength");
         if (!mv.isUndefined()) {
-            const m = try toIndexArg(self, mv);
-            if (m > 0x7fffffff or m < len) return self.throwError("RangeError", "Invalid maxByteLength");
+            const m = try toIndexArg(self, mv, "maxByteLength");
+            if (m > 0x7fffffff or m < len) return self.throwError("RangeError", "ArrayBuffer length exceeds maxByteLength option");
             max = @intCast(m);
         }
     }
@@ -34802,7 +34835,7 @@ fn sabGrowFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
         return self.throwError("TypeError", "SharedArrayBuffer.prototype.grow called on a non-SharedArrayBuffer");
     const ab = this.asObj().arrayBuffer().?;
     if (ab.max_byte_length == null) return self.throwError("TypeError", "SharedArrayBuffer is not growable");
-    const new_len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef());
+    const new_len = try toIndexArg(self, if (args.len > 0) args[0] else Value.undef(), "newLength");
     const storage = ab.shared orelse return self.throwError("TypeError", "SharedArrayBuffer is not growable");
     storage.grow(@intCast(new_len)) catch |err| return switch (err) {
         error.NotGrowable => self.throwError("TypeError", "SharedArrayBuffer is not growable"),
@@ -35096,7 +35129,7 @@ fn atomicsValidate(self: *Interpreter, ta_v: Value, idx_v: Value, write: bool, o
     // ValidateAtomicAccess bounds-checks against that *current* length, not the
     // cached one: a grown buffer exposes the new indices, and a length-tracking
     // view that shrank rejects a now-past-the-end index with a RangeError.
-    const i = try toIndexArg(self, idx_v);
+    const i = try toIndexArg(self, idx_v, "index");
     if (i >= cur_len) return self.throwError("RangeError", "Access index out of bounds for atomic access.");
     return .{ .ta = ta, .i = @intCast(i) };
 }
@@ -53326,7 +53359,7 @@ fn lessThan(self: *Interpreter, a: Value, b: Value) EvalError!bool {
         return compareStringsUtf16(a, b) == .lt;
     }
     if ((a.isObject() and a.asObj().is_symbol) or (b.isObject() and b.asObj().is_symbol))
-        return self.throwError("TypeError", "Cannot convert a Symbol value to a number");
+        return self.throwError("TypeError", "Cannot convert a symbol to a number");
     const x = a.toNumber();
     const y = b.toNumber();
     if (std.math.isNan(x) or std.math.isNan(y)) return false;
