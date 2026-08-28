@@ -28018,6 +28018,98 @@ test "Proxy metadata preserves descriptor ordering and own publication" {
     }
 }
 
+test "class key conversion completes before the next element name" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "methods", .source = "(function(){var log='',key={toString(){log+='a';return 'a';}};class C{[key](){}[(log+='b','b')](){}}return log==='ab';})()" },
+            .{ .name = "static_methods", .source = "(function(){var log='',key={toString(){log+='a';return 'a';}};class C{static [key](){}static [(log+='b','b')](){}}return log==='ab';})()" },
+            .{ .name = "fields", .source = "(function(){var log='',key={toString(){log+='a';return 'a';}};class C{[key]=1;[(log+='b','b')]=2;}var c=new C();return log==='ab'&&c.a===1&&c.b===2;})()" },
+            .{ .name = "static_fields", .source = "(function(){var log='',key={toString(){log+='a';return 'a';}};class C{static [key]=(log+='i',1);static [(log+='b','b')]=(log+='j',2);}return log==='abij'&&C.a===1&&C.b===2;})()" },
+            .{ .name = "accessors", .source = "(function(){var log='',key={toString(){log+='a';return 'a';}};class C{get [key](){return 7;}set [(log+='b','a')](v){this.saved=v;}}var c=new C();c.a=9;return log==='ab'&&c.a===7&&c.saved===9;})()" },
+            .{ .name = "abrupt", .source = "(function(){var effects=0,key={toString(){throw 37;}};try{class C{[key](){}[(++effects,'b')](){}static value=++effects;}}catch(e){return e===37&&effects===0;}return false;})()" },
+            .{ .name = "nonprimitive", .source = "(function(){var effects=0,key={[Symbol.toPrimitive](hint){if(hint!=='string')throw 99;return {};}};try{class C{[key](){}[(++effects,'b')](){}}}catch(e){return e instanceof TypeError&&effects===0;}return false;})()" },
+            .{ .name = "symbol_once", .source = "(function(){var log='',s=Symbol('method'),key={[Symbol.toPrimitive](hint){if(hint!=='string')throw 99;log+='a';return s;}};class C{[key](){}[(log+='b','b')](){}}return log==='ab'&&C.prototype[s].name==='[method]';})()" },
+            .{ .name = "string_hint_fallback", .source = "(function(){var log='',key={toString(){log+='s';return {};},valueOf(){log+='v';return 'a';}};class C{[key](){}[(log+='b','b')](){}}return log==='svb';})()" },
+            .{ .name = "heritage_before_conversion", .source = "(function(){var log='',key={toString(){log+='k';return 'a';}};var Base=new Proxy(function(){},{get(t,k){if(k==='prototype')log+='h';return t[k];}});class C extends Base{[key](){}[(log+='b','b')](){}}return log==='hkb';})()" },
+            .{ .name = "suspended_names", .source = "(function(){var log='',key={toString(){log+='a';return 'a';}};function* make(){return class{[yield 1](){}[yield 2](){}static seen=log;};}var g=make();if(g.next().value!==1||g.next(key).value!==2||log!=='a')return false;var end=g.next('b');return end.done&&end.value.seen==='a';})()" },
+            .{ .name = "abrupt_before_next_yield", .source = "(function(){var effects=0,key={toString(){throw 37;}};function* make(){return class{[yield 1](){}[yield (++effects,2)](){}};}var g=make();if(g.next().value!==1)return false;try{g.next(key);}catch(e){return e===37&&effects===0&&g.next().done;}return false;})()" },
+        }) |case| {
+            errdefer std.debug.print("class key conversion {s} ({s})\n", .{ case.name, @tagName(mode) });
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "class key conversion retains canonical keys through a moving later name" {
+    try expectProxyMetadataMoving("var log='',key={toString(){log+='a';return 'member'+37;}};", "(function(){class C extends Object{[key](){return 7;}[(proxyMovingLoop(20000),log+='b','later')](){}}return log==='ab'&&(new C()).member37()===7;})()");
+}
+
+test "class key conversion retains a Symbol through a moving later name" {
+    try expectProxyMetadataMoving("var log='',symbol=Symbol('member'),key={[Symbol.toPrimitive](){log+='a';return symbol;}};", "(function(){class C{[key](){return 7;}[(proxyMovingLoop(20000),log+='b','later')](){}}return log==='ab'&&C.prototype[symbol].name==='[member]'&&(new C())[symbol]()===7;})()");
+}
+
+test "class key conversion precedes a later awaited name" {
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\var classKeyLog='',classKeyDone=false;
+            \\var classKeyObject={toString(){classKeyLog+='a';return 'a';}};
+            \\async function classKeyAwait(){return class{[await classKeyObject](){}[(classKeyLog+='b',await 'b')](){}static seen=classKeyLog;};}
+            \\classKeyAwait().then(function(C){classKeyDone=C.seen==='ab'&&classKeyLog==='ab';});
+        );
+        try std.testing.expect((try ctx.evaluate("classKeyDone")).toBoolean());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "class key conversion isolates shared no-GIL callback state" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\function classKeyLane(seed){
+            \\  if($vm.useThreadGIL()!==false)throw 99;
+            \\  for(var i=0;i<32;i++){
+            \\    var log='',name='key'+seed+'_'+i;
+            \\    var key={toString(){log+='a';return name;}};
+            \\    class C{[key](){return 7;}[(log+='b','later')](){}}
+            \\    if(log!=='ab'||C.prototype[name].name!==name)throw 98;
+            \\  }
+            \\  return 32;
+            \\}
+            \\var lanes=[],total=0;
+            \\for(var i=0;i<4;i++)lanes.push(new Thread(classKeyLane,i));
+            \\for(var i=0;i<4;i++)total+=lanes[i].join();
+            \\total
+        );
+        try std.testing.expectEqual(@as(f64, 128), result.asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
 test "class naming precedes static effects across exact execution tiers" {
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{

@@ -5995,6 +5995,10 @@ pub const Compiler = struct {
             if (m.static_block != null) continue;
             if (m.key_expr) |ke| {
                 try self.compileExpr(ke);
+                // ClassElementName evaluation includes ToPropertyKey. Its user
+                // effects (or abrupt completion) precede the next element name,
+                // even when that later expression suspends the activation.
+                _ = try self.chunk.emit(.to_property_key, 0);
                 count += 1;
             }
         }
@@ -7896,6 +7900,30 @@ test "compiler deferred class capture plans unwind every allocation failure" {
                 },
                 .rejected => return error.TestUnexpectedResult,
             }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "class key conversion lowering survives compiler allocation failures" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer ast_arena.deinit();
+            var parser = try @import("parser.zig").Parser.init(ast_arena.allocator(), "function make(first,second){return class{[first()](){}[second()](){}};}");
+            const program = try parser.parseProgram();
+            var replay = CompilerAllocationReplay{ .backing = backing };
+            var arena = std.heap.ArenaAllocator.init(replay.allocator());
+            defer arena.deinit();
+            const compiled = try Compiler.compilePlainFunction(arena.allocator(), program.program[0].func_decl);
+            var conversions: usize = 0;
+            for (compiled.chunk.code.items, 0..) |instruction, index| {
+                if (instruction.op != .to_property_key) continue;
+                conversions += 1;
+                try std.testing.expect(index > 0);
+                try std.testing.expectEqual(bc.Op.call, compiled.chunk.code.items[index - 1].op);
+            }
+            try std.testing.expectEqual(@as(usize, 2), conversions);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
