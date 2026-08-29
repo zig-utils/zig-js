@@ -3566,6 +3566,12 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.pop, 0);
             }
         }
+        // ForBodyEvaluation step 2: CreatePerIterationEnvironment runs ONCE
+        // before the first test, not only on the update edge (step 3.e). Without
+        // it a closure built in the head — `for (let x = 'outside', _ = f = () =>
+        // x; ...)` — captures the same record the body then assigns into, so it
+        // observed 'inside'. The tree walker has always taken this initial copy.
+        if (captured_head) try self.emitRenewEnvironmentLexicalNode(init_node.?);
         const loop = try self.pushLoop();
         const cond_at = self.chunk.here();
         var to_end: ?usize = null;
