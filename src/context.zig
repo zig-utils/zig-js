@@ -28417,6 +28417,22 @@ test "constructor prototype functions and Temporal survive moving getters" {
     try expectProxyMetadataMoving("var other=$262.createRealm().global,P=other.Temporal.PlainDate.prototype;var N=new Proxy(other.eval('(function(){})'),{get(t,k,r){if(k==='prototype'){proxyMovingLoop(20000);return 1n;}return Reflect.get(t,k,r);}});other.Temporal={};", "(function(){var d=Reflect.construct(Temporal.PlainDate,[2020,1,2],N);return Object.getPrototypeOf(d)===P&&d.year===2020;})()");
 }
 
+test "Intl locale diagnostics canonicalize physical string storage" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\(function(){
+        \\  var inputs=['en-ß',['en-ß'],[{toString:function(){return 'en-ß';}}]];
+        \\  for(var input of inputs){
+        \\    try{Intl.NumberFormat.supportedLocalesOf(input);return false;}
+        \\    catch(e){if(!(e instanceof RangeError)||e.message!=='invalid language tag: en-ß')return false;}
+        \\  }
+        \\  return true;
+        \\})()
+    );
+    try std.testing.expect(result.toBoolean());
+}
+
 test "realm array intrinsics preserve identities and species across execution tiers" {
     const cases = [_]struct { name: []const u8, source: []const u8 }{
         .{ .name = "aggregate_array_replaced", .source = "(function(){var E=AggregateError,p=Array.prototype;globalThis.Array=function Fake(){};return Object.getPrototypeOf(E([1]).errors)===p;})()" },

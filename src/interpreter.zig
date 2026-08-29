@@ -28113,7 +28113,9 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
     // [[Locale]] slot is used; toString is not observed).
     const locale_tag = intlLocaleTag(v);
     if (v.isString() or locale_tag != null) {
-        const s = if (v.isString()) v.asStr() else locale_tag.?;
+        // Structural validation and RangeError formatting consume WTF-8, not a
+        // StringCell's optional one-byte-per-code-unit Latin-1 representation.
+        const s = if (v.isString()) try v.asWtf8(self.arena) else locale_tag.?;
         var canonical_arena = std.heap.ArenaAllocator.init(scratch);
         defer canonical_arena.deinit();
         const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
@@ -28149,7 +28151,7 @@ fn canonicalizeLocaleList(self: *Interpreter, v: Value) EvalError!*value.Object 
         if (!ev.isString() and !ev.isObject()) return self.throwError("TypeError", "Intl: locale must be a string or object");
         // An Intl.Locale element contributes its [[Locale]] slot directly (its
         // toString must not be observed).
-        const s = intlLocaleTag(ev) orelse try self.toStringV(ev);
+        const s = intlLocaleTag(ev) orelse try self.toStringWtf8(ev);
         _ = canonical_arena.reset(.retain_capacity);
         const c = try canonicalizeLocaleTagForIntl(self, canonical_arena.allocator(), s);
         var duplicate = if (locale_index) |*index|
