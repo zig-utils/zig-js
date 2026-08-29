@@ -9553,6 +9553,7 @@ fn runChunk(
                 try vm.notifyDebuggerException(false);
                 return error.Throw;
             },
+            .throw_not_a_reference => return vm.throwNotAReference(@enumFromInt(inst.a)),
             .push_handler, .push_handler_catch, .push_handler_outer => {
                 const outer = inst.op == .push_handler_outer;
                 if (outer and (exec.environment_depth == 0 or vm.env.parent == null)) return error.OutOfMemory;

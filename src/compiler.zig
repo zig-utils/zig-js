@@ -3625,7 +3625,14 @@ pub const Compiler = struct {
     /// identifier (fast path) or a destructuring pattern / member target (via
     /// `bind_pattern`, reusing the tree-walker's destructuring). `for-in` uses
     /// an engine-owned candidate array that is never exposed to user iterators.
-    fn compileLoopBind(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, force_environment: bool, native_pattern: bool) CompileError!void {
+    fn compileLoopBind(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, force_environment: bool, native_pattern: bool, shape: bc.NotAReference) CompileError!void {
+        if (decl_kind == null and target.* == .call) {
+            // The iteration value has already been produced (and, for for-of,
+            // the close-protected region entered), matching the tree walker's
+            // order: value first, then the target reference, then the throw.
+            _ = try self.chunk.emit(.pop, 0);
+            return self.emitCallTargetRejection(target, shape, false);
+        }
         if (target.* == .identifier) {
             if (decl_kind != null) {
                 if (force_environment) {
@@ -3743,7 +3750,7 @@ pub const Compiler = struct {
 
         if (var_init) |ini| {
             try self.compileExpr(ini);
-            try self.compileLoopBind(decl_kind, target, environment_binding, keys_first);
+            try self.compileLoopBind(decl_kind, target, environment_binding, keys_first, .assignment);
         }
         try self.compileExpr(iterable);
         if (keys_first) {
@@ -3812,7 +3819,7 @@ pub const Compiler = struct {
         // Bind the already-read value to the loop target. Abrupt target
         // resolution/destructuring is inside the close-protected region.
         const native_pattern = target.* == .arr_pattern or target.* == .obj_pattern;
-        try self.compileLoopBind(decl_kind, target, environment_binding, native_pattern);
+        try self.compileLoopBind(decl_kind, target, environment_binding, native_pattern, .for_of);
         try self.compileRepeatedBody(body);
         const continue_target = self.chunk.here();
         _ = try self.chunk.emit(.load_true, 0);
@@ -3886,7 +3893,7 @@ pub const Compiler = struct {
             else
                 try self.emitFreshEnvironmentLexicalPattern(target, decl_kind.? == .@"const");
         }
-        try self.compileLoopBind(decl_kind, target, environment_binding, true);
+        try self.compileLoopBind(decl_kind, target, environment_binding, true, .for_in);
         try self.compileRepeatedBody(body);
 
         const continue_target = self.chunk.here();
@@ -5038,6 +5045,7 @@ pub const Compiler = struct {
                     }
                 },
                 .super_member => try self.compileSuperAssign(a),
+                .call => try self.emitCallTargetRejection(a.target, .assignment, true),
                 // Destructuring assignment `[a,b] = v` / `{x} = v`. Keep the
                 // complete operation in bytecode: frame-mode functions must
                 // write their statically resolved slots, while resumable and
@@ -5078,6 +5086,7 @@ pub const Compiler = struct {
                 },
                 .member => try self.compileMemberCompoundAssign(oa),
                 .super_member => try self.compileSuperCompoundAssign(oa),
+                .call => try self.emitCallTargetRejection(oa.target, .assignment, true),
                 else => return error.Unsupported,
             },
             .conditional => |c| {
@@ -5398,6 +5407,7 @@ pub const Compiler = struct {
             },
             .member => try self.compileMemberUpdate(inc, prefix, target),
             .super_member => try self.compileSuperUpdate(inc, prefix, target),
+            .call => try self.emitCallTargetRejection(target, bc.NotAReference.update(inc, prefix), true),
             else => return error.Unsupported,
         }
     }
@@ -6287,6 +6297,17 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.pop, 0);
             _ = try self.chunk.emit(.pop, 0);
         }
+    }
+
+    /// Annex B: a call expression in assignment-target position is evaluated
+    /// for its effects, then rejected. The call's value is dropped and the
+    /// ReferenceError carries the shape's wording; the trailing `load_undefined`
+    /// is unreachable and only keeps an expression's stack shape regular.
+    fn emitCallTargetRejection(self: *Compiler, call: *Node, shape: bc.NotAReference, as_expression: bool) CompileError!void {
+        try self.compileExpr(call);
+        _ = try self.chunk.emit(.pop, 0);
+        _ = try self.chunk.emit(.throw_not_a_reference, @intFromEnum(shape));
+        if (as_expression) _ = try self.chunk.emit(.load_undefined, 0);
     }
 
     fn pushLoop(self: *Compiler) CompileError!*Loop {

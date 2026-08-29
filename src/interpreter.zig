@@ -4906,6 +4906,16 @@ pub const Interpreter = struct {
         return self.throwError(name, try std.fmt.allocPrint(self.arena, fmt, fmt_args));
     }
 
+    /// Annex B (sec-runtime-errors-for-function-call-assignment-targets): a
+    /// call-expression assignment target is evaluated and then rejected with
+    /// a wording chosen by the syntactic shape. Shared with the compiler, which
+    /// encodes the shape as the `throw_not_a_reference` operand.
+    pub const NotAReference = bc.NotAReference;
+
+    pub fn throwNotAReference(self: *Interpreter, shape: NotAReference) EvalError {
+        return self.throwError("ReferenceError", shape.message());
+    }
+
     /// GetValue/PutValue on an unresolvable Reference. JavaScriptCore words this
     /// "Can't find variable: x"; the name is the only thing a caller can act on.
     pub fn throwNotDefined(self: *Interpreter, name: []const u8) EvalError {
@@ -5165,7 +5175,7 @@ pub const Interpreter = struct {
                 }
                 if (a.target.* == .call) {
                     _ = try self.eval(a.target);
-                    return self.throwError("ReferenceError", "invalid assignment target");
+                    return self.throwNotAReference(.assignment);
                 }
                 if (a.target.* == .member or a.target.* == .super_member)
                     break :blk try self.evalPropertyAssignment(a.target, a.value, .assign);
@@ -5227,7 +5237,7 @@ pub const Interpreter = struct {
                     else => {
                         if (oa.target.* == .call) {
                             _ = try self.eval(oa.target);
-                            return self.throwError("ReferenceError", "invalid assignment target");
+                            return self.throwNotAReference(.assignment);
                         }
                         const old = try self.eval(oa.target);
                         const result_root = try self.pushTempRoot(old);
@@ -5827,7 +5837,7 @@ pub const Interpreter = struct {
         const outer_env = self.env;
         if (var_init) |ini| {
             const init_value = try self.eval(ini);
-            try self.bindLoopTarget(decl_kind, target, init_value);
+            try self.bindLoopTarget(decl_kind, target, init_value, .assignment);
         }
         // Head evaluation: per spec the loop bindings are declared (in their TDZ)
         // in a fresh environment while the iterable expression runs, so a closure
@@ -5892,7 +5902,7 @@ pub const Interpreter = struct {
                 // before the error propagates. (IteratorValue itself — the
                 // `.value` get — does NOT close, so it stays outside the catch.)
                 const next_value = try self.getProperty(res, "value");
-                self.bindLoopTarget(decl_kind, target, next_value) catch |e| {
+                self.bindLoopTarget(decl_kind, target, next_value, .for_of) catch |e| {
                     if (is_await) self.asyncIteratorCloseKeepingThrow(iter_obj) else self.iteratorCloseKeepingThrow(iter_obj);
                     return e;
                 };
@@ -5960,7 +5970,7 @@ pub const Interpreter = struct {
                         // for-in has no per-iteration `using` resource, so the
                         // binding env is always reusable while uncaptured.
                         if (lexical) self.env = try self.iterBindingEnv(&ienv, saved_env, true);
-                        try self.bindLoopTarget(decl_kind, target, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
+                        try self.bindLoopTarget(decl_kind, target, try Value.strAlloc(self.arena, value.decodeStringKey(k)), .for_in);
                         last = try self.eval(body);
                         if (self.loopSignal(my_labels)) |stop| if (stop) break;
                     }
@@ -6088,7 +6098,13 @@ pub const Interpreter = struct {
     /// Bind one iteration's value to the loop target: a declaration declares
     /// (identifier or destructuring pattern), an assignment form assigns to an
     /// existing identifier / member / pattern.
-    fn bindLoopTarget(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, v: Value) EvalError!void {
+    fn bindLoopTarget(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, v: Value, shape: NotAReference) EvalError!void {
+        // A call-expression target is evaluated (Annex B) and then rejected with
+        // the loop's own wording; the iteration value has already been read.
+        if (decl_kind == null and target.* == .call) {
+            _ = try self.eval(target);
+            return self.throwNotAReference(shape);
+        }
         if (decl_kind) |k| {
             if (k == .@"var") return self.assignTo(target, v);
             const saved = self.binding_const;
@@ -6755,7 +6771,7 @@ pub const Interpreter = struct {
         }
         if (target.* == .call) {
             _ = try self.eval(target);
-            return self.throwError("ReferenceError", "invalid assignment target");
+            return self.throwNotAReference(NotAReference.update(inc, prefix));
         }
         const update = try self.prepareNumericUpdate(try self.eval(target), inc);
         defer update.deinit(self);
@@ -15492,7 +15508,7 @@ pub const Interpreter = struct {
             },
             .call => {
                 _ = try self.eval(target);
-                return self.throwError("ReferenceError", "invalid assignment target");
+                return self.throwNotAReference(.assignment);
             },
             // Assignment destructuring: `[a, b] = x` / `({a} = o)`.
             .obj_pattern, .arr_pattern => try self.bindPattern(target, v, false),

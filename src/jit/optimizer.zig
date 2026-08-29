@@ -581,6 +581,9 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .def_var, .def_lex, .bind_pattern, .enter_with, .register_disposable, .iter_close => .{ .required = 1, .removed = 1, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler, .abrupt_break, .abrupt_continue, .enter_block, .exit_block, .exit_with, .init_local_lexical, .resolve_binding_ref, .clear_binding_ref => .{ .required = 0, .removed = 0, .added = 0 },
+        // Not in `supports`: a chunk that reaches this Annex-B throw stays off
+        // the optimizer. Listed here only so the depth walk never trips.
+        .throw_not_a_reference => .{ .required = 0, .removed = 0, .added = 0 },
         .load_binding_ref => .{
             .required = 0,
             .removed = 0,

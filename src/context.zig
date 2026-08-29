@@ -29100,6 +29100,41 @@ test "literal function metadata preserves shared methods without the GIL" {
     }
 }
 
+test "a call expression as an assignment target is evaluated then rejected" {
+    // Annex B runtime errors for function-call assignment targets: the call
+    // runs, nothing on the right-hand side (or the loop value's coercions) is
+    // touched, and the ReferenceError names the syntactic shape the way
+    // JavaScriptCore does. The bytecode tier used to reject these programs
+    // outright (`error.Unsupported`), so it never reached the tree walker's
+    // ordering; both tiers now share `NotAReference`.
+    const prelude = "var fc=0,vo=0,gc=0;function f(){fc++;return {valueOf(){vo++;return 1;}};}function g(){gc++;return 1;}function run(k){try{k();return 'nothrow';}catch(e){return e.constructor.name+': '+e.message;}}";
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "assign", .source = "run(function(){f() = g();})==='ReferenceError: Left side of assignment is not a reference.'&&fc===1&&vo===0&&gc===0" },
+            .{ .name = "compound", .source = "run(function(){f() += g();})==='ReferenceError: Left side of assignment is not a reference.'&&fc===1&&vo===0&&gc===0" },
+            .{ .name = "postfix_inc", .source = "run(function(){f()++;})==='ReferenceError: Postfix ++ operator applied to value that is not a reference.'&&fc===1&&vo===0" },
+            .{ .name = "postfix_dec", .source = "run(function(){f()--;})==='ReferenceError: Postfix -- operator applied to value that is not a reference.'&&fc===1&&vo===0" },
+            .{ .name = "prefix_inc", .source = "run(function(){++f();})==='ReferenceError: Prefix ++ operator applied to value that is not a reference.'&&fc===1&&vo===0" },
+            .{ .name = "prefix_dec", .source = "run(function(){--f();})==='ReferenceError: Prefix -- operator applied to value that is not a reference.'&&fc===1&&vo===0" },
+            .{ .name = "for_in", .source = "run(function(){for (f() in [1]) {}})==='ReferenceError: Left side of for-in statement is not a reference.'&&fc===1&&vo===0" },
+            .{ .name = "for_of_closes", .source = "var rc=0;var it={[Symbol.iterator](){return{next(){return{value:1,done:false};},return(){rc++;return{};}};}};run(function(){for (f() of it) {}})==='ReferenceError: Left side of for-of statement is not a reference.'&&fc===1&&vo===0&&rc===1" },
+        }) |case| {
+            errdefer std.debug.print("call target {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            const source = try std.mem.concat(std.testing.allocator, u8, &.{ prelude, case.source });
+            defer std.testing.allocator.free(source);
+            try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
 test "break and continue unwind exactly the handlers they exit" {
     // A `break`/`continue` that crosses a `finally` pops the handlers pushed
     // since its target was entered — running each finally among them — and no

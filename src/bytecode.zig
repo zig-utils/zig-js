@@ -485,6 +485,7 @@ pub const Op = enum(u8) {
     template_object, // operand a: template-site AST index; push the cached, frozen GetTemplateObject strings array for that tagged-template site
 
     throw_op, // pop -> set as the in-flight exception and unwind (error.Throw)
+    throw_not_a_reference, // operand a: interp.NotAReference shape; throw the Annex-B ReferenceError for a call-expression assignment target (the call itself was already evaluated and popped)
 
     // --- exception handling (generator VM) ---
     push_handler, // operand a: catch-block PC (or u32 max = none), b: finally-block PC (or none)
@@ -502,6 +503,37 @@ pub const Op = enum(u8) {
 /// A single instruction. `a` is the primary operand (const/name/fn index, jump
 /// target, or argc); `b` is a secondary operand for operations such as
 /// `call_method` (name + argument count) and `delete_prop` (name + strictness).
+/// Annex B (sec-runtime-errors-for-function-call-assignment-targets): in
+/// sloppy code a call expression is accepted as an assignment target at parse
+/// time and rejected when evaluated — the call runs, then a ReferenceError is
+/// thrown before the right-hand side (or the loop value) is touched.
+/// JavaScriptCore words the error by the syntactic shape; both tiers use this.
+pub const NotAReference = enum(u8) {
+    assignment,
+    prefix_inc,
+    prefix_dec,
+    postfix_inc,
+    postfix_dec,
+    for_in,
+    for_of,
+
+    pub fn message(self: NotAReference) []const u8 {
+        return switch (self) {
+            .assignment => "Left side of assignment is not a reference.",
+            .prefix_inc => "Prefix ++ operator applied to value that is not a reference.",
+            .prefix_dec => "Prefix -- operator applied to value that is not a reference.",
+            .postfix_inc => "Postfix ++ operator applied to value that is not a reference.",
+            .postfix_dec => "Postfix -- operator applied to value that is not a reference.",
+            .for_in => "Left side of for-in statement is not a reference.",
+            .for_of => "Left side of for-of statement is not a reference.",
+        };
+    }
+
+    pub fn update(inc: bool, prefix: bool) NotAReference {
+        return if (prefix) (if (inc) .prefix_inc else .prefix_dec) else (if (inc) .postfix_inc else .postfix_dec);
+    }
+};
+
 pub const Inst = struct {
     op: Op,
     a: u32 = 0,
