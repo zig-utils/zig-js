@@ -17186,6 +17186,13 @@ pub const Interpreter = struct {
         return false;
     }
 
+    fn arrayResultIsPlainDense(result: Value) bool {
+        if (!result.isObject()) return false;
+        const object = result.asObj();
+        return object.is_array and object.accessorsMap() == null and object.attrsMap() == null and
+            object.proxyHandler() == null and !object.proxy_revoked;
+    }
+
     /// Methods that read an array-like through live short-circuiting [[Get]]
     /// (returning as soon as a match is found, or only touching the tail) — so
     /// they accept a huge-length array-like without iterating it to exhaustion.
@@ -17291,25 +17298,28 @@ pub const Interpreter = struct {
     /// Array uses its sparse `length`, an array-like reads ToLength(.length).
     /// A pathological 2**53-style length throws (instead of OOM-crashing).
     fn concatSpreadInto(self: *Interpreter, dst: Value, src: *value.Object, n: *usize) EvalError!void {
-        const slen: usize = if (src.is_array and !src.is_arguments) src.arrayLength() else blk: {
-            break :blk toArrayLikeLen((try self.toPrimitive(try self.getProperty(Value.obj(src), "length"), .number)).toNumber());
+        const source = Value.obj(src);
+        const roots = try self.pushTempRootSlice(&.{ dst, source });
+        defer self.restoreTempRoots(roots);
+        const live_source = self.tempRoot(roots + 1, source).asObj();
+        const slen: usize = if (live_source.is_array and !live_source.is_arguments) live_source.arrayLength() else blk: {
+            break :blk toArrayLikeLen((try self.toPrimitive(try self.getProperty(self.tempRoot(roots + 1, source), "length"), .number)).toNumber());
         };
         const max_safe_len: usize = 9007199254740991;
         if (slen > max_safe_len - n.*) return self.throwError("TypeError", "Invalid array length");
-        // A plain dense Array result preserves holes (append + markHole); a
-        // species/exotic result leaves a hole as an absent index (CreateDataProperty
-        // only for present elements).
-        const dense = dst.isObject() and dst.asObj().is_array and dst.asObj().accessorsMap() == null and
-            dst.asObj().attrsMap() == null and dst.asObj().proxyHandler() == null and !dst.asObj().proxy_revoked;
         var j: usize = 0;
         while (j < slen) : (j += 1) {
             if (j > (1 << 22)) return self.throwError("TypeError", "Invalid array length");
-            if (try self.arrIndexPresent(src, j)) {
-                try self.arrayResultPush(dst, n.*, try self.arrIndexGet(src, j));
-            } else if (dense) {
-                const base = dst.asObj().elementsLen();
-                try dst.asObj().appendElement(self.arena, Value.undef());
-                try dst.asObj().markHole(self.arena, base);
+            if (try self.arrIndexPresent(self.tempRoot(roots + 1, source).asObj(), j)) {
+                const element = try self.arrIndexGet(self.tempRoot(roots + 1, source).asObj(), j);
+                try self.arrayResultPush(self.tempRoot(roots, dst), n.*, element);
+            } else if (arrayResultIsPlainDense(self.tempRoot(roots, dst))) {
+                // A plain dense Array result preserves holes (append + markHole);
+                // an exotic result leaves the index absent.
+                const result = self.tempRoot(roots, dst).asObj();
+                const base = result.elementsLen();
+                try result.appendElement(self.arena, Value.undef());
+                try result.markHole(self.arena, base);
             }
             n.* += 1;
         }
@@ -17320,19 +17330,21 @@ pub const Interpreter = struct {
     /// CreateDataProperty it whole at the running result index `n`. `ck` is the
     /// cached `Symbol.isConcatSpreadable` property key.
     fn concatProcessOne(self: *Interpreter, dst: Value, v: Value, ck: ?[]const u8, n: *usize) EvalError!void {
+        const roots = try self.pushTempRootSlice(&.{ dst, v });
+        defer self.restoreTempRoots(roots);
         var spread: bool = false;
-        if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint) {
+        if (self.tempRoot(roots + 1, v).isObject() and !self.tempRoot(roots + 1, v).asObj().is_symbol and !self.tempRoot(roots + 1, v).asObj().is_bigint) {
             if (ck) |k| {
-                const flag = try self.getProperty(v, k);
-                spread = if (!flag.isUndefined()) flag.toBoolean() else try objectToStringIsArray(self, v.asObj());
+                const flag = try self.getProperty(self.tempRoot(roots + 1, v), k);
+                spread = if (!flag.isUndefined()) flag.toBoolean() else try objectToStringIsArray(self, self.tempRoot(roots + 1, v).asObj());
             } else {
-                spread = try objectToStringIsArray(self, v.asObj());
+                spread = try objectToStringIsArray(self, self.tempRoot(roots + 1, v).asObj());
             }
         }
         if (spread) {
-            try self.concatSpreadInto(dst, v.asObj(), n);
+            try self.concatSpreadInto(self.tempRoot(roots, dst), self.tempRoot(roots + 1, v).asObj(), n);
         } else {
-            try self.arrayResultPush(dst, n.*, v);
+            try self.arrayResultPush(self.tempRoot(roots, dst), n.*, self.tempRoot(roots + 1, v));
             n.* += 1;
         }
     }
@@ -17470,8 +17482,32 @@ pub const Interpreter = struct {
         return false;
     }
 
+    fn arrayMethodRetainsOperands(name: []const u8) bool {
+        inline for (.{ "slice", "concat", "flat", "splice" }) |candidate|
+            if (eq(name, candidate)) return true;
+        return false;
+    }
+
     inline fn arrayMethodOperand(self: *Interpreter, roots: ?usize, offset: usize, fallback: Value) Value {
         return if (roots) |mark| self.tempRoot(mark + offset, fallback) else fallback;
+    }
+
+    fn pushArrayMethodOperands(self: *Interpreter, receiver: Value, args: []const Value) EvalError!usize {
+        const roots = try self.pushTempRoot(receiver);
+        errdefer self.restoreTempRoots(roots);
+        for (args) |argument| _ = try self.pushTempRoot(argument);
+        return roots;
+    }
+
+    inline fn arrayMethodArgument(self: *Interpreter, roots: usize, args: []const Value, index: usize) Value {
+        if (index >= args.len) return Value.undef();
+        return self.tempRoot(roots + 1 + index, arg(args, index));
+    }
+
+    inline fn arrayMethodReceiver(self: *Interpreter, callback_roots: ?usize, operand_roots: ?usize, fallback: Value) Value {
+        if (callback_roots) |roots| return self.tempRoot(roots, fallback);
+        if (operand_roots) |roots| return self.tempRoot(roots, fallback);
+        return fallback;
     }
 
     fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
@@ -17479,6 +17515,11 @@ pub const Interpreter = struct {
         const receiver = Value.obj(o);
         const callback = arg0(args);
         const callback_this = arg(args, 1);
+        const operand_roots: ?usize = if (arrayMethodRetainsOperands(name))
+            try self.pushArrayMethodOperands(receiver, args)
+        else
+            null;
+        defer if (operand_roots) |roots| self.restoreTempRoots(roots);
         const callback_roots: ?usize = if (arrayMethodUsesCallback(name))
             try self.pushTempRootSlice(&.{ receiver, callback, callback_this })
         else
@@ -17508,7 +17549,7 @@ pub const Interpreter = struct {
             // ArrayCreate rejects a length above 2^32-1 with a RangeError. Check
             // the unclamped ToLength, since `toArrayLikeLen` caps at 2^53-1.
             const real_len: f64 = if (std.math.isNan(lenf) or lenf <= 0) 0 else @min(@trunc(lenf), 9007199254740991.0);
-            const species_array = try objectToStringIsArray(self, self.arrayMethodOperand(callback_roots, 0, receiver).asObj());
+            const species_array = try objectToStringIsArray(self, self.arrayMethodReceiver(callback_roots, operand_roots, receiver).asObj());
             if (real_len > 4294967295 and arrayCreatesResult(name) and !species_array)
                 return self.throwError("RangeError", "Length exceeded the maximum array length");
             array_like_len = toArrayLikeLen(lenf);
@@ -17532,7 +17573,7 @@ pub const Interpreter = struct {
         }
         // The logical length for index iteration: a real array's includes any
         // sparse tail (`array_len`); an array-like uses its materialized slice.
-        const observed_o = self.arrayMethodOperand(callback_roots, 0, receiver).asObj();
+        const observed_o = self.arrayMethodReceiver(callback_roots, operand_roots, receiver).asObj();
         const ilen: usize = if (observed_o.is_arguments)
             toArrayLikeLen(try self.toNumberV(try self.getProperty(Value.obj(observed_o), "length")))
         else if (observed_o.is_array)
@@ -17735,38 +17776,44 @@ pub const Interpreter = struct {
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "slice")) {
-            const start = try relIndex(self, arg0(args), ilen, 0);
-            const end = try relIndex(self, arg(args, 1), ilen, @floatFromInt(ilen));
+            const roots = operand_roots.?;
+            const start = try relIndex(self, self.arrayMethodArgument(roots, args, 0), ilen, 0);
+            const end = try relIndex(self, self.arrayMethodArgument(roots, args, 1), ilen, @floatFromInt(ilen));
             const count = if (end > start) end - start else 0;
             if (count > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
             if (count > (1 << 22)) return null;
-            const result = try self.arraySpeciesCreate(Value.obj(o), count);
-            const dense = result.asObj().is_array and result.asObj().accessorsMap() == null and result.asObj().attrsMap() == null and result.asObj().proxyHandler() == null;
+            const result = try self.arraySpeciesCreate(self.tempRoot(roots, receiver), count);
+            const result_root = try self.pushTempRoot(result);
             var i = start;
             var k: usize = 0; // result index, for hole preservation
             while (i < end) : (i += 1) {
-                if (try self.arrIndexPresent(o, i)) {
-                    try self.arrayResultPush(result, k, try self.arrIndexGet(o, i)); // CreateDataPropertyOrThrow
-                } else if (dense) { // slice preserves holes on a plain dense result
-                    try result.asObj().appendElement(self.arena, Value.undef());
-                    try result.asObj().markHole(self.arena, k);
+                if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i)) {
+                    const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
+                    try self.arrayResultPush(self.tempRoot(result_root, result), k, element); // CreateDataPropertyOrThrow
+                } else if (arrayResultIsPlainDense(self.tempRoot(result_root, result))) { // slice preserves holes on a plain dense result
+                    try self.tempRoot(result_root, result).asObj().appendElement(self.arena, Value.undef());
+                    try self.tempRoot(result_root, result).asObj().markHole(self.arena, k);
                 }
                 k += 1;
             }
-            if (!dense) try self.setMember(result, "length", Value.num(@floatFromInt(k)));
-            return result;
+            if (!arrayResultIsPlainDense(self.tempRoot(result_root, result)))
+                try self.setMember(self.tempRoot(result_root, result), "length", Value.num(@floatFromInt(k)));
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "concat")) {
-            const result = try self.arraySpeciesCreate(Value.obj(o), 0);
+            const roots = operand_roots.?;
+            const result = try self.arraySpeciesCreate(self.tempRoot(roots, receiver), 0);
+            const result_root = try self.pushTempRoot(result);
             const ck = self.wellKnownSymbolKey("isConcatSpreadable");
             var n: usize = 0;
-            try self.concatProcessOne(result, Value.obj(o), ck, &n);
-            for (args) |a| try self.concatProcessOne(result, a, ck, &n);
+            try self.concatProcessOne(self.tempRoot(result_root, result), self.tempRoot(roots, receiver), ck, &n);
+            for (args, 0..) |_, index|
+                try self.concatProcessOne(self.tempRoot(result_root, result), self.arrayMethodArgument(roots, args, index), ck, &n);
             // Set the result length (so trailing holes are reflected) when the
             // species result isn't a plain dense array that already tracks it.
-            if (!(result.isObject() and result.asObj().is_array and result.asObj().accessorsMap() == null and result.asObj().attrsMap() == null))
-                try self.setMember(result, "length", Value.num(@floatFromInt(n)));
-            return result;
+            if (!arrayResultIsPlainDense(self.tempRoot(result_root, result)))
+                try self.setMember(self.tempRoot(result_root, result), "length", Value.num(@floatFromInt(n)));
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "reverse")) {
             // Dense fast path: a plain array with no holes, no accessors, and no
@@ -18168,12 +18215,15 @@ pub const Interpreter = struct {
             return Value.obj(o);
         }
         if (eq(name, "flat")) {
+            const roots = operand_roots.?;
             // ToIntegerOrInfinity(depthArg) — runs valueOf, throws for a Symbol.
-            const depth_raw: f64 = if (args.len > 0 and !args[0].isUndefined()) try self.toNumberV(arg0(args)) else 1;
+            const depth_arg = self.arrayMethodArgument(roots, args, 0);
+            const depth_raw: f64 = if (args.len > 0 and !depth_arg.isUndefined()) try self.toNumberV(depth_arg) else 1;
             const depth: f64 = if (std.math.isNan(depth_raw)) 0 else @trunc(depth_raw);
-            const result = try self.arraySpeciesCreate(Value.obj(o), 0);
-            _ = try self.flattenIntoLen(result, o, ilen, depth, 0);
-            return result;
+            const result = try self.arraySpeciesCreate(self.tempRoot(roots, receiver), 0);
+            const result_root = try self.pushTempRoot(result);
+            _ = try self.flattenIntoLen(self.tempRoot(result_root, result), self.tempRoot(roots, receiver).asObj(), ilen, depth, 0);
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "sort")) {
             const cmp = arg0(args);
@@ -18214,10 +18264,11 @@ pub const Interpreter = struct {
             return Value.obj(o);
         }
         if (eq(name, "splice")) {
+            const roots = operand_roots.?;
             const len = ilen;
-            const start = try relIndex(self, arg0(args), len, 0);
+            const start = try relIndex(self, self.arrayMethodArgument(roots, args, 0), len, 0);
             const del: usize = if (args.len == 0) 0 else if (args.len == 1) len - start else blk: {
-                const d = try self.toNumberV(arg(args, 1));
+                const d = try self.toNumberV(self.arrayMethodArgument(roots, args, 1));
                 if (std.math.isNan(d) or d <= 0) break :blk 0;
                 const du: usize = if (d > @as(f64, @floatFromInt(len))) len else @intFromFloat(@trunc(d));
                 break :blk if (start + du > len) len - start else du;
@@ -18225,28 +18276,30 @@ pub const Interpreter = struct {
             const item_count = if (args.len > 2) args.len - 2 else 0;
             if (item_count > del and len > 9007199254740991 - (item_count - del))
                 return self.throwError("TypeError", "Invalid array length");
-            const removed = try self.arraySpeciesCreate(Value.obj(o), del);
-            // A plain dense Array `removed` preserves holes; a custom-species
-            // result is CreateDataProperty'd per present index.
-            const rdense = removed.asObj().is_array and removed.asObj().accessorsMap() == null and removed.asObj().attrsMap() == null and removed.asObj().proxyHandler() == null;
+            const removed = try self.arraySpeciesCreate(self.tempRoot(roots, receiver), del);
+            const removed_root = try self.pushTempRoot(removed);
             var i: usize = 0;
             while (i < del) : (i += 1) {
-                if (try self.arrIndexPresent(o, start + i)) {
-                    try self.arrayResultPush(removed, i, try self.arrIndexGet(o, start + i)); // CreateDataPropertyOrThrow
-                } else if (rdense) { // preserve a hole in the removed array
-                    try removed.asObj().appendElement(self.arena, Value.undef());
-                    try removed.asObj().markHole(self.arena, i);
+                if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), start + i)) {
+                    const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), start + i);
+                    try self.arrayResultPush(self.tempRoot(removed_root, removed), i, element); // CreateDataPropertyOrThrow
+                } else if (arrayResultIsPlainDense(self.tempRoot(removed_root, removed))) { // preserve a hole in the removed array
+                    try self.tempRoot(removed_root, removed).asObj().appendElement(self.arena, Value.undef());
+                    try self.tempRoot(removed_root, removed).asObj().markHole(self.arena, i);
                 }
             }
-            try self.arraySetLengthThrowing(removed.asObj(), del);
-            const inserts: []const Value = if (args.len > 2) args[2..] else &.{};
+            try self.arraySetLengthThrowing(self.tempRoot(removed_root, removed).asObj(), del);
+            const dense_inserts = try self.arena.alloc(Value, item_count);
+            for (dense_inserts, 0..) |*insert, index|
+                insert.* = self.arrayMethodArgument(roots, args, index + 2);
             // Dense fast path: an ordinary array with no holes/accessors/sparse
             // tail can splice its contiguous value store directly.
-            if (o.is_array and arrayLenWritable(o) and o.accessorsMap() == null and o.attrsMap() == null and
-                !o.has_indexed_property.load(.monotonic) and self.arrayProtoChainCleanForIndexedSet(o) and
-                try o.splicePackedDenseElements(self.arena, start, del, inserts))
+            const dense_receiver = self.tempRoot(roots, receiver).asObj();
+            if (dense_receiver.is_array and arrayLenWritable(dense_receiver) and dense_receiver.accessorsMap() == null and dense_receiver.attrsMap() == null and
+                !dense_receiver.has_indexed_property.load(.monotonic) and self.arrayProtoChainCleanForIndexedSet(dense_receiver) and
+                try dense_receiver.splicePackedDenseElements(self.arena, start, del, dense_inserts))
             {
-                return removed;
+                return self.tempRoot(removed_root, removed);
             }
             // Generic Array.prototype.splice: shift the tail through [[Get]]/[[Set]]/
             // [[Delete]] (so holes move and an array-like `this` is updated), then
@@ -18254,27 +18307,38 @@ pub const Interpreter = struct {
             if (item_count < del) {
                 var k = start;
                 while (k < len - del) : (k += 1) {
-                    if (try self.arrIndexPresent(o, k + del))
-                        try self.arrIndexSetOrThrow(o, k + item_count, try self.arrIndexGet(o, k + del))
-                    else
-                        try self.arrIndexDeleteOrThrow(o, k + item_count);
+                    if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), k + del)) {
+                        const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), k + del);
+                        try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), k + item_count, element);
+                    } else {
+                        try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), k + item_count);
+                    }
                 }
                 var k2 = len;
-                while (k2 > len - del + item_count) : (k2 -= 1) try self.arrIndexDeleteOrThrow(o, k2 - 1);
+                while (k2 > len - del + item_count) : (k2 -= 1)
+                    try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), k2 - 1);
             } else if (item_count > del) {
                 var k = len - del;
                 while (k > start) : (k -= 1) {
-                    if (try self.arrIndexPresent(o, k + del - 1))
-                        try self.arrIndexSetOrThrow(o, k + item_count - 1, try self.arrIndexGet(o, k + del - 1))
-                    else
-                        try self.arrIndexDeleteOrThrow(o, k + item_count - 1);
+                    if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), k + del - 1)) {
+                        const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), k + del - 1);
+                        try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), k + item_count - 1, element);
+                    } else {
+                        try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), k + item_count - 1);
+                    }
                 }
             }
-            for (inserts, 0..) |it, off| try self.arrIndexSetOrThrow(o, start + off, it);
+            var insert_index: usize = 0;
+            while (insert_index < item_count) : (insert_index += 1)
+                try self.arrIndexSetOrThrow(
+                    self.tempRoot(roots, receiver).asObj(),
+                    start + insert_index,
+                    self.arrayMethodArgument(roots, args, insert_index + 2),
+                );
             const new_len: f64 = @floatFromInt(len - del + item_count);
-            if (!try self.setMemberResult(Value.obj(o), "length", Value.num(new_len), Value.obj(o)))
+            if (!try self.setMemberResult(self.tempRoot(roots, receiver), "length", Value.num(new_len), self.tempRoot(roots, receiver)))
                 return self.throwError("TypeError", "Cannot set length");
-            return removed;
+            return self.tempRoot(removed_root, removed);
         }
         if (eq(name, "copyWithin")) {
             const len = ilen;

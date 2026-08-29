@@ -28562,6 +28562,23 @@ test "array callback methods retain receiver callback values and results while m
     }
 }
 
+test "array species methods retain operands and results while moving" {
+    const cases = [_]struct { name: []const u8, setup: []const u8, expression: []const u8 }{
+        .{ .name = "slice length", .setup = "var input={get length(){proxyMovingLoop(20000);return 1;},0:proxySubject};", .expression = "Array.prototype.slice.call(input,0,1)[0]===proxySubject" },
+        .{ .name = "slice get/result", .setup = "var target=[],output=new Proxy(target,{defineProperty(t,k,d){return Reflect.defineProperty(t,k,d);}}),input=[proxySubject];input.constructor={[Symbol.species]:function(){return output;}};Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return proxySubject;}});", .expression = "(function(){var out=input.slice(0,1);return out===output&&target[0]===proxySubject;})()" },
+        .{ .name = "concat spreadability", .setup = "var input=[proxySubject],spread={get [Symbol.isConcatSpreadable](){proxyMovingLoop(20000);return true;},length:1,0:proxySubject};", .expression = "(function(){var out=input.concat(spread,proxySubject);return out[0]===proxySubject&&out[1]===proxySubject&&out[2]===proxySubject;})()" },
+        .{ .name = "concat length", .setup = "var input=[proxySubject],spread={[Symbol.isConcatSpreadable]:true,get length(){proxyMovingLoop(20000);return 1;},0:proxySubject};", .expression = "(function(){var out=input.concat(spread,proxySubject);return out[0]===proxySubject&&out[1]===proxySubject&&out[2]===proxySubject;})()" },
+        .{ .name = "flat depth", .setup = "var input=[[proxySubject]],depth={valueOf(){proxyMovingLoop(20000);return 1;}};", .expression = "input.flat(depth)[0]===proxySubject" },
+        .{ .name = "flat get", .setup = "var inner=[proxySubject];Object.defineProperty(inner,'0',{get(){proxyMovingLoop(20000);return proxySubject;}});var input=[inner];", .expression = "input.flat(1)[0]===proxySubject" },
+        .{ .name = "splice coercion", .setup = "var input=[proxySubject,7],start={valueOf(){proxyMovingLoop(20000);return 0;}},insert={held:proxySubject};", .expression = "(function(){var removed=input.splice(start,1,insert);return removed[0]===proxySubject&&input[0]===insert&&input[1]===7&&insert.held===proxySubject;})()" },
+        .{ .name = "splice get/result", .setup = "var target=[],output=new Proxy(target,{defineProperty(t,k,d){return Reflect.defineProperty(t,k,d);}}),input=[proxySubject,7];input.constructor={[Symbol.species]:function(){return output;}};Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return proxySubject;},configurable:true});", .expression = "(function(){var removed=input.splice(0,2);return removed===output&&target[0]===proxySubject&&target[1]===7&&input.length===0;})()" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving array species {s}\n", .{case.name});
+        try expectProxyMetadataMoving(case.setup, case.expression);
+    }
+}
+
 test "realm array intrinsics isolate shared no-GIL construction" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
