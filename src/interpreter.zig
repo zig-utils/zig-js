@@ -17483,7 +17483,10 @@ pub const Interpreter = struct {
     }
 
     fn arrayMethodRetainsOperands(name: []const u8) bool {
-        inline for (.{ "slice", "concat", "flat", "splice" }) |candidate|
+        inline for (.{
+            "slice", "concat",    "flat", "splice",     "reverse", "toReversed",
+            "with",  "toSpliced", "fill", "copyWithin",
+        }) |candidate|
             if (eq(name, candidate)) return true;
         return false;
     }
@@ -17816,10 +17819,12 @@ pub const Interpreter = struct {
             return self.tempRoot(result_root, result);
         }
         if (eq(name, "reverse")) {
+            const roots = operand_roots.?;
             // Dense fast path: a plain array with no holes, no accessors, and no
             // sparse tail is a contiguous value slice — swap in place.
-            if (o.is_array and o.accessorsMap() == null and o.attrsMap() == null and o.reversePackedDenseElements()) {
-                return Value.obj(o);
+            const dense_receiver = self.tempRoot(roots, receiver).asObj();
+            if (dense_receiver.is_array and dense_receiver.accessorsMap() == null and dense_receiver.attrsMap() == null and dense_receiver.reversePackedDenseElements()) {
+                return self.tempRoot(roots, receiver);
             }
             // Generic Array.prototype.reverse: Get/Set/HasProperty/Delete keyed by
             // index, so it works on an array-like `this`, honours holes (deleting
@@ -17829,22 +17834,26 @@ pub const Interpreter = struct {
             while (lower != middle) : (lower += 1) {
                 if (lower > (1 << 22)) return null;
                 const upper = ilen - lower - 1;
-                const lower_exists = try self.arrIndexPresent(o, lower);
-                const lower_val: Value = if (lower_exists) try self.arrIndexGet(o, lower) else Value.undef();
-                const upper_exists = try self.arrIndexPresent(o, upper);
-                const upper_val: Value = if (upper_exists) try self.arrIndexGet(o, upper) else Value.undef();
+                const lower_exists = try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), lower);
+                const lower_val: Value = if (lower_exists) try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), lower) else Value.undef();
+                const lower_root = try self.pushTempRoot(lower_val);
+                defer self.restoreTempRoots(lower_root);
+                const upper_exists = try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), upper);
+                const upper_val: Value = if (upper_exists) try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), upper) else Value.undef();
+                const upper_root = try self.pushTempRoot(upper_val);
+                defer self.restoreTempRoots(upper_root);
                 if (lower_exists and upper_exists) {
-                    try self.arrIndexSetOrThrow(o, lower, upper_val);
-                    try self.arrIndexSetOrThrow(o, upper, lower_val);
+                    try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), lower, self.tempRoot(upper_root, upper_val));
+                    try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), upper, self.tempRoot(lower_root, lower_val));
                 } else if (upper_exists) {
-                    try self.arrIndexSetOrThrow(o, lower, upper_val);
-                    try self.arrIndexDeleteOrThrow(o, upper);
+                    try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), lower, self.tempRoot(upper_root, upper_val));
+                    try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), upper);
                 } else if (lower_exists) {
-                    try self.arrIndexDeleteOrThrow(o, lower);
-                    try self.arrIndexSetOrThrow(o, upper, lower_val);
+                    try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), lower);
+                    try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), upper, self.tempRoot(lower_root, lower_val));
                 }
             }
-            return Value.obj(o);
+            return self.tempRoot(roots, receiver);
         }
         // ES2023 "change array by copy": return a new array, leaving `this`
         // untouched.
@@ -17856,11 +17865,18 @@ pub const Interpreter = struct {
         // order, and never read a discarded/replaced index. (`return null` on a
         // pathological length mirrors the materialization OOM guard.)
         if (eq(name, "toReversed")) {
+            const roots = operand_roots.?;
             if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
+            const result_root = try self.pushTempRoot(result);
             var k: usize = 0;
-            while (k < ilen) : (k += 1) try result.asObj().appendElement(self.arena, try self.arrIndexGet(o, ilen - 1 - k));
-            return result;
+            while (k < ilen) : (k += 1) {
+                const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), ilen - 1 - k);
+                const element_root = try self.pushTempRoot(element);
+                defer self.restoreTempRoots(element_root);
+                try self.tempRoot(result_root, result).asObj().appendElement(self.arena, self.tempRoot(element_root, element));
+            }
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "toSorted")) {
             const cmp = arg0(args);
@@ -17880,26 +17896,34 @@ pub const Interpreter = struct {
             return result;
         }
         if (eq(name, "with")) {
+            const roots = operand_roots.?;
             const len = ilen;
-            const raw = try self.toNumberV(arg0(args));
+            const raw = try self.toNumberV(self.arrayMethodArgument(roots, args, 0));
             const rel: f64 = if (std.math.isNan(raw)) 0 else @trunc(raw);
             const actual_f: f64 = if (rel < 0) @as(f64, @floatFromInt(len)) + rel else rel;
             if (actual_f < 0 or actual_f >= @as(f64, @floatFromInt(len))) return self.throwError("RangeError", "Invalid index");
             if (len > (1 << 22)) return null;
             const actual: usize = @intFromFloat(actual_f);
             const result = try self.newArray();
+            const result_root = try self.pushTempRoot(result);
             var k: usize = 0;
             while (k < len) : (k += 1) {
-                const v = if (k == actual) arg(args, 1) else try self.arrIndexGet(o, k);
-                try result.asObj().appendElement(self.arena, v);
+                const element = if (k == actual)
+                    self.arrayMethodArgument(roots, args, 1)
+                else
+                    try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), k);
+                const element_root = try self.pushTempRoot(element);
+                defer self.restoreTempRoots(element_root);
+                try self.tempRoot(result_root, result).asObj().appendElement(self.arena, self.tempRoot(element_root, element));
             }
-            return result;
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "toSpliced")) {
+            const roots = operand_roots.?;
             const len = ilen;
-            const start = try relIndex(self, arg0(args), len, 0);
+            const start = try relIndex(self, self.arrayMethodArgument(roots, args, 0), len, 0);
             const del: usize = if (args.len == 0) 0 else if (args.len == 1) len - start else blk: {
-                const d = try self.toNumberV(arg(args, 1));
+                const d = try self.toNumberV(self.arrayMethodArgument(roots, args, 1));
                 if (std.math.isNan(d) or d <= 0) break :blk 0;
                 const du: usize = if (d > @as(f64, @floatFromInt(len))) len else @intFromFloat(@trunc(d));
                 break :blk if (start + du > len) len - start else du;
@@ -17911,13 +17935,28 @@ pub const Interpreter = struct {
             if (new_len > 4294967295) return self.throwError("RangeError", "Length exceeded the maximum array length");
             if (new_len > (1 << 22)) return null;
             const result = try self.newArray();
-            const ra = result.asObj();
+            const result_root = try self.pushTempRoot(result);
             var i: usize = 0;
-            while (i < start) : (i += 1) try ra.appendElement(self.arena, try self.arrIndexGet(o, i));
-            if (args.len > 2) for (args[2..]) |v| try ra.appendElement(self.arena, v);
+            while (i < start) : (i += 1) {
+                const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
+                const element_root = try self.pushTempRoot(element);
+                defer self.restoreTempRoots(element_root);
+                try self.tempRoot(result_root, result).asObj().appendElement(self.arena, self.tempRoot(element_root, element));
+            }
+            var insert_index: usize = 0;
+            while (insert_index < insert_count) : (insert_index += 1)
+                try self.tempRoot(result_root, result).asObj().appendElement(
+                    self.arena,
+                    self.arrayMethodArgument(roots, args, insert_index + 2),
+                );
             i = start + del;
-            while (i < len) : (i += 1) try ra.appendElement(self.arena, try self.arrIndexGet(o, i));
-            return result;
+            while (i < len) : (i += 1) {
+                const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
+                const element_root = try self.pushTempRoot(element);
+                defer self.restoreTempRoots(element_root);
+                try self.tempRoot(result_root, result).asObj().appendElement(self.arena, self.tempRoot(element_root, element));
+            }
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "filter")) {
             const cb = callback;
@@ -18199,20 +18238,21 @@ pub const Interpreter = struct {
             return Value.num(-1);
         }
         if (eq(name, "fill")) {
-            const v = arg0(args);
-            const start = try relIndex(self, arg(args, 1), ilen, 0);
-            const end = try relIndex(self, arg(args, 2), ilen, @floatFromInt(ilen));
+            const roots = operand_roots.?;
+            const start = try relIndex(self, self.arrayMethodArgument(roots, args, 1), ilen, 0);
+            const end = try relIndex(self, self.arrayMethodArgument(roots, args, 2), ilen, @floatFromInt(ilen));
             if (end > start and end - start > (1 << 22)) {
-                if (!o.is_array) try self.arrIndexSetOrThrow(o, start, v);
+                if (!self.tempRoot(roots, receiver).asObj().is_array)
+                    try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), start, self.arrayMethodArgument(roots, args, 0));
                 return null;
             }
             // fill writes through [[Set]] over the full length, so it also fills
             // holes (and creates indexed properties on an array-like `this`).
             var i = start;
             while (i < end) : (i += 1) {
-                try self.arrIndexSetOrThrow(o, i, v);
+                try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), i, self.arrayMethodArgument(roots, args, 0));
             }
-            return Value.obj(o);
+            return self.tempRoot(roots, receiver);
         }
         if (eq(name, "flat")) {
             const roots = operand_roots.?;
@@ -18341,10 +18381,11 @@ pub const Interpreter = struct {
             return self.tempRoot(removed_root, removed);
         }
         if (eq(name, "copyWithin")) {
+            const roots = operand_roots.?;
             const len = ilen;
-            const target = try relIndex(self, arg0(args), len, 0);
-            const start = try relIndex(self, arg(args, 1), len, 0);
-            const end = try relIndex(self, arg(args, 2), len, @floatFromInt(len));
+            const target = try relIndex(self, self.arrayMethodArgument(roots, args, 0), len, 0);
+            const start = try relIndex(self, self.arrayMethodArgument(roots, args, 1), len, 0);
+            const end = try relIndex(self, self.arrayMethodArgument(roots, args, 2), len, @floatFromInt(len));
             var count = @min(if (end > start) end - start else 0, len - target);
             if (count > (1 << 22)) return null;
             // Copy through [[Get]]/[[Set]] over the full length; a hole at the
@@ -18359,10 +18400,14 @@ pub const Interpreter = struct {
                 to += count - 1;
             }
             while (count > 0) {
-                if (try self.arrIndexPresent(o, from))
-                    try self.arrIndexSetOrThrow(o, to, try self.arrIndexGet(o, from))
-                else
-                    try self.arrIndexDeleteOrThrow(o, to);
+                if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), from)) {
+                    const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), from);
+                    const element_root = try self.pushTempRoot(element);
+                    defer self.restoreTempRoots(element_root);
+                    try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), to, self.tempRoot(element_root, element));
+                } else {
+                    try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), to);
+                }
                 count -= 1;
                 if (count == 0) break;
                 if (backward) {
@@ -18373,7 +18418,7 @@ pub const Interpreter = struct {
                     to += 1;
                 }
             }
-            return Value.obj(o);
+            return self.tempRoot(roots, receiver);
         }
         if (eq(name, "flatMap")) {
             const cb = callback; // callability checked up front (cb_methods)

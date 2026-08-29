@@ -28579,6 +28579,22 @@ test "array species methods retain operands and results while moving" {
     }
 }
 
+test "array copying methods retain operands and results while moving" {
+    const cases = [_]struct { name: []const u8, setup: []const u8, expression: []const u8 }{
+        .{ .name = "reverse get", .setup = "var input=[proxySubject,7];Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return proxySubject;},set(v){Object.defineProperty(input,'0',{value:v,writable:true,configurable:true});},configurable:true});", .expression = "(function(){var out=input.reverse();return out===input&&input[0]===7&&input[1]===proxySubject;})()" },
+        .{ .name = "toReversed get/result", .setup = "var input=[proxySubject,7];Object.defineProperty(input,'1',{get(){proxyMovingLoop(20000);return 7;}});", .expression = "(function(){var out=input.toReversed();return out[0]===7&&out[1]===proxySubject&&input[0]===proxySubject;})()" },
+        .{ .name = "with coercion", .setup = "var input=[7,8],index={valueOf(){proxyMovingLoop(20000);return 1;}},replacement={held:proxySubject};", .expression = "(function(){var out=input.with(index,replacement);return out[0]===7&&out[1]===replacement&&replacement.held===proxySubject;})()" },
+        .{ .name = "toSpliced coercion", .setup = "var input=[proxySubject,7],start={valueOf(){proxyMovingLoop(20000);return 1;}},insert={held:proxySubject};", .expression = "(function(){var out=input.toSpliced(start,0,insert);return out[0]===proxySubject&&out[1]===insert&&out[2]===7&&insert.held===proxySubject;})()" },
+        .{ .name = "toSpliced get/result", .setup = "var input=[proxySubject,7];Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return proxySubject;}});", .expression = "(function(){var out=input.toSpliced(1,0);return out[0]===proxySubject&&out[1]===7;})()" },
+        .{ .name = "fill set", .setup = "var target=[0,0],input=new Proxy(target,{set(t,k,v,r){if(k==='0')proxyMovingLoop(20000);return Reflect.set(t,k,v,r);}});", .expression = "(function(){var out=input.fill(proxySubject,0,2);return out===input&&target[0]===proxySubject&&target[1]===proxySubject;})()" },
+        .{ .name = "copyWithin get", .setup = "var input=[0,proxySubject];Object.defineProperty(input,'1',{get(){proxyMovingLoop(20000);return proxySubject;},configurable:true});", .expression = "(function(){var out=input.copyWithin(0,1,2);return out===input&&input[0]===proxySubject&&input[1]===proxySubject;})()" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving array copying {s}\n", .{case.name});
+        try expectProxyMetadataMoving(case.setup, case.expression);
+    }
+}
+
 test "realm array intrinsics isolate shared no-GIL construction" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
