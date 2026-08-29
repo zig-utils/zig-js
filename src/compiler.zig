@@ -2225,7 +2225,15 @@ pub const Compiler = struct {
         const resolved = self.resolve(name);
         const direct_eval_frame_depth: ?u32 = switch (resolved) {
             .local => |binding| if (binding.parameter_with_eval_boundary) 0 else null,
-            .upval => |upvalue| if (upvalue.binding.parameter_with_eval_boundary) upvalue.depth else null,
+            // A parameter that acquires a nearer body binding names the frame
+            // that DEFINES it; a name shadowed by this function's own sloppy
+            // direct eval lands in THIS activation, hence depth 0.
+            .upval => |upvalue| if (upvalue.binding.parameter_with_eval_boundary)
+                upvalue.depth
+            else if (self.scope != null and self.scope.?.may_extend_environment)
+                0
+            else
+                null,
             .environment, .global => null,
         };
         const fallback: bc.BindingReferenceFallback = switch (resolved) {
@@ -2301,6 +2309,19 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.clear_binding_ref, index);
     }
 
+    /// A sloppy direct eval in this function's own body can create a `var` that
+    /// shadows a binding this read would otherwise resolve in an ENCLOSING
+    /// frame. The new binding lands in this activation's lazily materialized
+    /// direct-eval variable record, which a statically resolved upvalue load
+    /// never consults — so `var z = 1; (function(){ eval("var z = 7;"); return z; })()`
+    /// read the outer 1 instead of the eval-created 7. Such reads take a
+    /// binding reference whose `direct_eval_frame_depth` is this frame.
+    fn readMayObserveOwnDirectEvalVar(self: *Compiler, resolved: anytype) bool {
+        const scope = self.scope orelse return false;
+        if (!scope.may_extend_environment) return false;
+        return resolved == .upval;
+    }
+
     fn dynamicBindingReferencePlan(self: *Compiler, name: []const u8) CompileError!?u32 {
         const resolved = self.resolve(name);
         const has_direct_eval_boundary = switch (resolved) {
@@ -2308,7 +2329,9 @@ pub const Compiler = struct {
             .upval => |upvalue| upvalue.binding.parameter_with_eval_boundary,
             .environment, .global => false,
         };
-        if (self.withDepthToResolution(name) == 0 and !has_direct_eval_boundary) return null;
+        if (self.withDepthToResolution(name) == 0 and
+            !has_direct_eval_boundary and
+            !self.readMayObserveOwnDirectEvalVar(resolved)) return null;
         return try self.bindingReferencePlan(name);
     }
 
