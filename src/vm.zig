@@ -7221,6 +7221,15 @@ fn loadOrCompileOptimizer(
     // cannot compile still reach the optimizer normally.
     if (prefer_managed_baseline)
         if (chunk.tier.loadCode()) |baseline| if (baseline.manages_steps) return null;
+    // A destructuring formal is initialized by a bytecode ENTRY PROLOGUE that
+    // reads a hidden raw-input slot; an array pattern's prologue also opens an
+    // IteratorClose handler before the first branch. Entering an optimizer
+    // artifact at that prologue mis-binds it — `([a, b]) => a + b` threw
+    // "undefined is not an object" on its 8th call (this threshold) while the
+    // tree walker returned the sum. `tryRunNativeDirectCall` already refuses
+    // the same shape for the same reason; refuse it here too until the entry
+    // prologue is modeled, so the chunk keeps running as bytecode.
+    if (chunk.destructuring_parameter_indices.len != 0) return null;
     var artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode);
     if (artifact == null) if (owner.claimOptimizerCompilation(
         &chunk.optimizer_tier,
