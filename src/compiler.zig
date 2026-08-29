@@ -141,6 +141,11 @@ const Loop = struct {
     /// Activation-local environment depth at the target. A jump from a deeper
     /// repeated-body/block environment unwinds to this depth before resuming.
     environment_depth: u32 = 0,
+    /// For a `for-of`/`for-await-of`: the temp holding "this iterator still
+    /// needs closing". A `continue` targeting the loop must NOT close it, and
+    /// the plain-jump path stores true here before jumping. An `abrupt_continue`
+    /// reaches the loop's own close handler first, so it has to store there too.
+    iterator_done_temp: ?[]const u8 = null,
 };
 
 const SlotBinding = struct {
@@ -3223,6 +3228,16 @@ pub const Compiler = struct {
                     .jump_env
                 else
                     .jump;
+                // ForIn/OfBodyEvaluation performs IteratorClose for break, return
+                // and throw — never for a continue that targets the loop itself.
+                // The plain-jump path stores the flag at the continue target, but
+                // an `abrupt_continue` unwinds through this loop's own close
+                // handler on the way there, so disarm it here too.
+                if (op == .abrupt_continue) if (loop.iterator_done_temp) |done_temp| {
+                    _ = try self.chunk.emit(.load_true, 0);
+                    try self.emitStore(done_temp);
+                    _ = try self.chunk.emit(.pop, 0);
+                };
                 const j = try self.chunk.emitAB(op, 0, loop.environment_depth);
                 try loop.continues.append(self.arena, j);
             },
@@ -3763,6 +3778,7 @@ pub const Compiler = struct {
         // or an outer-targeted break unwinds to the close handler.
         self.finally_depth += 1;
         const loop = try self.pushLoop();
+        loop.iterator_done_temp = done_name;
         const top = self.chunk.here();
         // r = it.next()  (for-await: r = await it.next()) — the cached `next`,
         // invoked with this=it via call_with_this (no second property lookup).
