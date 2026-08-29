@@ -28595,6 +28595,20 @@ test "array copying methods retain operands and results while moving" {
     }
 }
 
+test "array sorting methods retain operands and buffers while moving" {
+    const cases = [_]struct { name: []const u8, setup: []const u8, expression: []const u8 }{
+        .{ .name = "sort get/write", .setup = "var a={rank:2,held:proxySubject},b={rank:1,held:proxySubject},input=[a,b],cmp=function(x,y){return x.rank-y.rank;};Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return a;},set(v){Object.defineProperty(input,'0',{value:v,writable:true,configurable:true});},configurable:true});", .expression = "(function(){var out=input.sort(cmp);return out===input&&input[0]===b&&input[1]===a&&a.held===proxySubject&&b.held===proxySubject;})()" },
+        .{ .name = "sort comparator", .setup = "var a={rank:3,held:proxySubject},b={rank:1,held:proxySubject},c={rank:2,held:proxySubject},input=[a,b,c],cmp=function(x,y){proxyMovingLoop(20000);return x.rank-y.rank;};", .expression = "(function(){var out=input.sort(cmp);return out===input&&input[0]===b&&input[1]===c&&input[2]===a&&a.held===proxySubject&&b.held===proxySubject&&c.held===proxySubject;})()" },
+        .{ .name = "sort default strings", .setup = "var a={held:proxySubject,toString(){proxyMovingLoop(20000);return 'b';}},b={held:proxySubject,toString(){return 'a';}},input=[a,b];", .expression = "(function(){var out=input.sort();return out===input&&input[0]===b&&input[1]===a&&a.held===proxySubject&&b.held===proxySubject;})()" },
+        .{ .name = "toSorted get/result", .setup = "var a={rank:2,held:proxySubject},b={rank:1,held:proxySubject},input=[a,b],cmp=function(x,y){return x.rank-y.rank;};Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return a;}});", .expression = "(function(){var out=input.toSorted(cmp);return out!==input&&out[0]===b&&out[1]===a&&input[1]===b&&a.held===proxySubject;})()" },
+        .{ .name = "toSorted comparator", .setup = "var a={rank:3,held:proxySubject},b={rank:1,held:proxySubject},c={rank:2,held:proxySubject},input=[a,b,c],cmp=function(x,y){proxyMovingLoop(20000);return x.rank-y.rank;};", .expression = "(function(){var out=input.toSorted(cmp);return out[0]===b&&out[1]===c&&out[2]===a&&input[0]===a&&a.held===proxySubject&&b.held===proxySubject&&c.held===proxySubject;})()" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving array sorting {s}\n", .{case.name});
+        try expectProxyMetadataMoving(case.setup, case.expression);
+    }
+}
+
 test "realm array intrinsics isolate shared no-GIL construction" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {

@@ -17485,7 +17485,7 @@ pub const Interpreter = struct {
     fn arrayMethodRetainsOperands(name: []const u8) bool {
         inline for (.{
             "slice", "concat",    "flat", "splice",     "reverse", "toReversed",
-            "with",  "toSpliced", "fill", "copyWithin",
+            "with",  "toSpliced", "fill", "copyWithin", "sort",    "toSorted",
         }) |candidate|
             if (eq(name, candidate)) return true;
         return false;
@@ -17879,21 +17879,35 @@ pub const Interpreter = struct {
             return self.tempRoot(result_root, result);
         }
         if (eq(name, "toSorted")) {
-            const cmp = arg0(args);
+            const roots = operand_roots.?;
+            const cmp = self.arrayMethodArgument(roots, args, 0);
             if (!cmp.isUndefined() and !cmp.isCallable())
                 return self.throwError("TypeError", "Array.prototype.toSorted requires the comparator argument to be a function or undefined");
             if (ilen > (1 << 22)) return null;
             const result = try self.newArray();
+            const result_root = try self.pushTempRoot(result);
+            const cmp_root = try self.pushTempRoot(cmp);
+            defer self.restoreTempRoots(cmp_root);
+            const value_roots = try self.pushTempRootSlice(&.{});
+            defer self.restoreTempRoots(value_roots);
             var k: usize = 0;
             var items: std.ArrayListUnmanaged(Value) = .empty;
-            while (k < ilen) : (k += 1) try items.append(self.arena, try self.arrIndexGet(o, k));
-            const ri = items.items;
-            if (ri.len > 1) {
-                const temp = try self.arena.alloc(Value, ri.len);
-                try self.mergeSortValues(ri, temp, cmp, sortCompareSpec);
+            while (k < ilen) : (k += 1) {
+                const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), k);
+                try items.append(self.arena, element);
+                _ = try self.pushTempRoot(element);
             }
-            try result.asObj().replaceDenseElementsAndSetLength(self.arena, ri, ri.len);
-            return result;
+            const order = try self.arena.alloc(usize, items.items.len);
+            for (order, 0..) |*index, item_index| index.* = item_index;
+            if (order.len > 1) {
+                const temp = try self.arena.alloc(usize, order.len);
+                try self.mergeSortRootIndices(order, temp, value_roots, items.items, cmp_root, cmp);
+            }
+            const sorted = try self.arena.alloc(Value, order.len);
+            for (sorted, order) |*element, item_index|
+                element.* = self.tempRoot(value_roots + item_index, items.items[item_index]);
+            try self.tempRoot(result_root, result).asObj().replaceDenseElementsAndSetLength(self.arena, sorted, sorted.len);
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "with")) {
             const roots = operand_roots.?;
@@ -18266,42 +18280,63 @@ pub const Interpreter = struct {
             return self.tempRoot(result_root, result);
         }
         if (eq(name, "sort")) {
-            const cmp = arg0(args);
+            const roots = operand_roots.?;
+            const cmp = self.arrayMethodArgument(roots, args, 0);
             if (!cmp.isUndefined() and !cmp.isCallable())
                 return self.throwError("TypeError", "Array.prototype.sort requires the comparator argument to be a function or undefined");
             // Gather the *present* elements (holes excluded), sort them — with
             // `undefined` ordered last and never passed to the comparator — then
             // write them back, leaving holes at the tail.
             var present: std.ArrayListUnmanaged(Value) = .empty;
+            const cmp_root = try self.pushTempRoot(cmp);
+            defer self.restoreTempRoots(cmp_root);
+            const value_roots = try self.pushTempRootSlice(&.{});
+            defer self.restoreTempRoots(value_roots);
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (try self.arrIndexPresent(o, i)) try present.append(self.arena, try self.arrIndexGet(o, i));
+                if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i)) {
+                    const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
+                    try present.append(self.arena, element);
+                    _ = try self.pushTempRoot(element);
+                }
             }
-            const ps = present.items;
-            if (ps.len > 1) {
-                const temp = try self.arena.alloc(Value, ps.len);
-                try self.mergeSortValues(ps, temp, cmp, sortCompareSpec);
+            const order = try self.arena.alloc(usize, present.items.len);
+            for (order, 0..) |*index, item_index| index.* = item_index;
+            if (order.len > 1) {
+                const temp = try self.arena.alloc(usize, order.len);
+                try self.mergeSortRootIndices(order, temp, value_roots, present.items, cmp_root, cmp);
             }
-            const dense_plain_array = o.is_array and
-                o.accessorsMap() == null and
-                o.attrsMap() == null and
-                o.proxyHandler() == null and
-                o.packedDenseElementsCoverLength();
+            const sorted_receiver = self.tempRoot(roots, receiver).asObj();
+            const dense_plain_array = sorted_receiver.is_array and
+                sorted_receiver.accessorsMap() == null and
+                sorted_receiver.attrsMap() == null and
+                sorted_receiver.proxyHandler() == null and
+                sorted_receiver.packedDenseElementsCoverLength();
             if (dense_plain_array) {
-                // Drop any sparse named-index props (their values are in `ps`).
-                for (try o.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena)) |k| if (value.canonicalIndex(k) != null) {
-                    _ = try self.deleteOwn(o, k);
+                // Drop any sparse named-index props (their values are rooted).
+                for (try sorted_receiver.ownKeysWithScratch(self.arena, self.scratch_allocator orelse self.arena)) |key| if (value.canonicalIndex(key) != null) {
+                    _ = try self.deleteOwn(self.tempRoot(roots, receiver).asObj(), key);
                 };
-                try o.replaceDenseElementsAndSetLength(self.arena, ps, ilen); // indices past the sorted run read as holes
+                const sorted = try self.arena.alloc(Value, order.len);
+                for (sorted, order) |*element, item_index|
+                    element.* = self.tempRoot(value_roots + item_index, present.items[item_index]);
+                try self.tempRoot(roots, receiver).asObj().replaceDenseElementsAndSetLength(self.arena, sorted, ilen); // indices past the sorted run read as holes
             } else {
                 // Per SortIndexedProperties: write the sorted run back with [[Set]]
                 // (running accessor setters) and DeleteProperty the trailing slots.
                 var k: usize = 0;
                 while (k < ilen) : (k += 1) {
-                    if (k < ps.len) try self.arrIndexSetOrThrow(o, k, ps[k]) else try self.arrIndexDeleteOrThrow(o, k);
+                    if (k < order.len)
+                        try self.arrIndexSetOrThrow(
+                            self.tempRoot(roots, receiver).asObj(),
+                            k,
+                            self.tempRoot(value_roots + order[k], present.items[order[k]]),
+                        )
+                    else
+                        try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), k);
                 }
             }
-            return Value.obj(o);
+            return self.tempRoot(roots, receiver);
         }
         if (eq(name, "splice")) {
             const roots = operand_roots.?;
@@ -18527,52 +18562,67 @@ pub const Interpreter = struct {
 
     /// Comparator for Array.prototype.sort: >0 if `a` sorts after `b`.
     fn sortCompare(self: *Interpreter, a: Value, b: Value, cmp: Value) EvalError!f64 {
-        if (cmp.isObject() and cmp.asObj().isCallableObject()) {
-            const r = try self.callValue(cmp, &.{ a, b });
-            const n = try self.toNumberV(r);
+        const roots = try self.pushTempRootSlice(&.{ a, b, cmp });
+        defer self.restoreTempRoots(roots);
+        const rooted_cmp = self.tempRoot(roots + 2, cmp);
+        if (rooted_cmp.isObject() and rooted_cmp.asObj().isCallableObject()) {
+            const result = try self.callValue(rooted_cmp, &.{ self.tempRoot(roots, a), self.tempRoot(roots + 1, b) });
+            const result_root = try self.pushTempRoot(result);
+            defer self.restoreTempRoots(result_root);
+            const n = try self.toNumberV(self.tempRoot(result_root, result));
             return if (std.math.isNan(n)) 0 else n;
         }
         // CompareArrayElements steps 5–8: ToString x before y, then compare the
         // resulting UTF-16 code-unit sequences rather than their byte encoding.
-        const as = try self.toStringValue(a);
-        const bs = try self.toStringValue(b);
-        return switch (compareStringsUtf16(as, bs)) {
+        const as = try self.toStringValue(self.tempRoot(roots, a));
+        const as_root = try self.pushTempRoot(as);
+        defer self.restoreTempRoots(as_root);
+        const bs = try self.toStringValue(self.tempRoot(roots + 1, b));
+        const bs_root = try self.pushTempRoot(bs);
+        defer self.restoreTempRoots(bs_root);
+        return switch (compareStringsUtf16(self.tempRoot(as_root, as), self.tempRoot(bs_root, bs))) {
             .lt => -1,
             .eq => 0,
             .gt => 1,
         };
     }
 
-    /// Stable O(n log n) bottom-up merge sort of `buf` using a fallible JS
-    /// comparator (`compareFn` may run user code, throw, and re-enter — it works
-    /// on this local copy). `temp` is scratch of the same length. Replaces the
-    /// former insertion sort used by Array.prototype.sort/toSorted.
-    fn mergeSortValues(
+    /// Stable merge sort for Array.prototype.sort/toSorted. The mutable scratch
+    /// contains only indices; every JavaScript value stays in its relocatable
+    /// temporary-root slot while getters, ToString, or compareFn execute.
+    fn mergeSortRootIndices(
         self: *Interpreter,
-        buf: []Value,
-        temp: []Value,
+        order: []usize,
+        temp: []usize,
+        value_roots: usize,
+        fallbacks: []const Value,
+        cmp_root: usize,
         cmp: Value,
-        comptime compareFn: fn (*Interpreter, Value, Value, Value) EvalError!f64,
     ) EvalError!void {
-        if (buf.len < 2) return;
-        var from = buf;
+        if (order.len < 2) return;
+        var from = order;
         var to = temp;
         var width: usize = 1;
-        while (width < buf.len) : (width *= 2) {
+        while (width < order.len) : (width *= 2) {
             var start: usize = 0;
-            while (start < buf.len) : (start += width * 2) {
-                const mid = @min(start + width, buf.len);
-                const end = @min(start + width * 2, buf.len);
+            while (start < order.len) : (start += width * 2) {
+                const mid = @min(start + width, order.len);
+                const end = @min(start + width * 2, order.len);
                 var i = start;
                 var j = mid;
                 var k = start;
-                // Stable: take the left run on a tie (compareFn <= 0).
                 while (i < mid and j < end) : (k += 1) {
-                    if ((try compareFn(self, from[i], from[j], cmp)) <= 0) {
-                        to[k] = from[i];
+                    const left = from[i];
+                    const right = from[j];
+                    if ((try self.sortCompareSpec(
+                        self.tempRoot(value_roots + left, fallbacks[left]),
+                        self.tempRoot(value_roots + right, fallbacks[right]),
+                        self.tempRoot(cmp_root, cmp),
+                    )) <= 0) {
+                        to[k] = left;
                         i += 1;
                     } else {
-                        to[k] = from[j];
+                        to[k] = right;
                         j += 1;
                     }
                 }
@@ -18589,7 +18639,7 @@ pub const Interpreter = struct {
             from = to;
             to = swap;
         }
-        if (from.ptr != buf.ptr) @memcpy(buf, from);
+        if (from.ptr != order.ptr) @memcpy(order, from);
     }
 
     fn numberMethod(self: *Interpreter, n: f64, name: []const u8, args: []const Value) EvalError!?Value {
