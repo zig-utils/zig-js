@@ -17462,8 +17462,28 @@ pub const Interpreter = struct {
         return self.tempRoot(result_root, result);
     }
 
+    fn arrayMethodUsesCallback(name: []const u8) bool {
+        inline for (.{
+            "forEach",  "filter",        "some",   "every",       "find",    "findIndex",
+            "findLast", "findLastIndex", "reduce", "reduceRight", "flatMap",
+        }) |candidate| if (eq(name, candidate)) return true;
+        return false;
+    }
+
+    inline fn arrayMethodOperand(self: *Interpreter, roots: ?usize, offset: usize, fallback: Value) Value {
+        return if (roots) |mark| self.tempRoot(mark + offset, fallback) else fallback;
+    }
+
     fn arrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
         if (eq(name, "map")) return try self.arrayMap(o, args);
+        const receiver = Value.obj(o);
+        const callback = arg0(args);
+        const callback_this = arg(args, 1);
+        const callback_roots: ?usize = if (arrayMethodUsesCallback(name))
+            try self.pushTempRootSlice(&.{ receiver, callback, callback_this })
+        else
+            null;
+        defer if (callback_roots) |roots| self.restoreTempRoots(roots);
         // sort/toSorted validate comparefn before LengthOfArrayLike(this), so a
         // borrowed call with a poisoned `length` still reports the comparator
         // TypeError first.
@@ -17488,7 +17508,7 @@ pub const Interpreter = struct {
             // ArrayCreate rejects a length above 2^32-1 with a RangeError. Check
             // the unclamped ToLength, since `toArrayLikeLen` caps at 2^53-1.
             const real_len: f64 = if (std.math.isNan(lenf) or lenf <= 0) 0 else @min(@trunc(lenf), 9007199254740991.0);
-            const species_array = try objectToStringIsArray(self, o);
+            const species_array = try objectToStringIsArray(self, self.arrayMethodOperand(callback_roots, 0, receiver).asObj());
             if (real_len > 4294967295 and arrayCreatesResult(name) and !species_array)
                 return self.throwError("RangeError", "Length exceeded the maximum array length");
             array_like_len = toArrayLikeLen(lenf);
@@ -17499,7 +17519,7 @@ pub const Interpreter = struct {
         // The optional `thisArg` (2nd argument) bound as `this` inside the
         // callback of map/filter/forEach/some/every/find*/flatMap. reduce/
         // reduceRight take an initial value here instead and ignore it.
-        const cb_this = arg(args, 1);
+        const cb_this = callback_this;
         // The callback-driven methods require a callable first argument, checked
         // up front (so `[].map(undefined)` throws even on an empty array).
         const cb_methods = [_][]const u8{
@@ -17512,10 +17532,11 @@ pub const Interpreter = struct {
         }
         // The logical length for index iteration: a real array's includes any
         // sparse tail (`array_len`); an array-like uses its materialized slice.
-        const ilen: usize = if (o.is_arguments)
-            toArrayLikeLen(try self.toNumberV(try self.getProperty(Value.obj(o), "length")))
-        else if (o.is_array)
-            o.arrayLength()
+        const observed_o = self.arrayMethodOperand(callback_roots, 0, receiver).asObj();
+        const ilen: usize = if (observed_o.is_arguments)
+            toArrayLikeLen(try self.toNumberV(try self.getProperty(Value.obj(observed_o), "length")))
+        else if (observed_o.is_array)
+            observed_o.arrayLength()
         else
             array_like_len;
         if (eq(name, "push")) {
@@ -17852,160 +17873,213 @@ pub const Interpreter = struct {
             return result;
         }
         if (eq(name, "filter")) {
-            const cb = arg0(args);
-            const result = try self.arraySpeciesCreate(Value.obj(o), 0);
-            if (!o.is_array and ilen > (1 << 22)) {
-                const sparse = try self.arrSparseIndices(o, 0, ilen);
+            const cb = callback;
+            const result = try self.arraySpeciesCreate(self.arrayMethodOperand(callback_roots, 0, receiver), 0);
+            const result_root = try self.pushTempRoot(result);
+            if (!self.arrayMethodOperand(callback_roots, 0, receiver).asObj().is_array and ilen > (1 << 22)) {
+                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen);
                 var ridx: usize = 0;
                 for (sparse) |idx| {
-                    if (!(try self.arrIndexPresent(o, idx))) continue;
-                    const el = try self.arrIndexGet(o, idx);
-                    if ((try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(idx)), Value.obj(o) }, cb_this)).toBoolean()) {
-                        try self.arrayResultPush(result, ridx, el);
+                    if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx))) continue;
+                    const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx);
+                    const element_root = try self.pushTempRoot(el);
+                    defer self.restoreTempRoots(element_root);
+                    if ((try self.callValueWithThis(
+                        self.arrayMethodOperand(callback_roots, 1, cb),
+                        &.{ self.tempRoot(element_root, el), Value.num(@floatFromInt(idx)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                        self.arrayMethodOperand(callback_roots, 2, cb_this),
+                    )).toBoolean()) {
+                        try self.arrayResultPush(self.tempRoot(result_root, result), ridx, self.tempRoot(element_root, el));
                         ridx += 1;
                     }
                 }
-                return result;
+                return self.tempRoot(result_root, result);
             }
             var i: usize = 0;
             var ridx: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!(try self.arrIndexPresent(o, i))) continue; // skip holes (filter packs)
-                const el = try self.arrIndexGet(o, i);
-                if ((try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this)).toBoolean()) {
-                    try self.arrayResultPush(result, ridx, el); // CreateDataPropertyOrThrow
+                if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i))) continue; // skip holes (filter packs)
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                const element_root = try self.pushTempRoot(el);
+                defer self.restoreTempRoots(element_root);
+                if ((try self.callValueWithThis(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ self.tempRoot(element_root, el), Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    self.arrayMethodOperand(callback_roots, 2, cb_this),
+                )).toBoolean()) {
+                    try self.arrayResultPush(self.tempRoot(result_root, result), ridx, self.tempRoot(element_root, el)); // CreateDataPropertyOrThrow
                     ridx += 1;
                 }
             }
-            return result;
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "forEach")) {
-            const cb = arg0(args);
-            if (!o.is_array and ilen > (1 << 22)) {
-                const sparse = try self.arrSparseIndices(o, 0, ilen);
+            const cb = callback;
+            if (!self.arrayMethodOperand(callback_roots, 0, receiver).asObj().is_array and ilen > (1 << 22)) {
+                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen);
                 for (sparse) |idx| {
-                    if (!(try self.arrIndexPresent(o, idx))) continue;
-                    const el = try self.arrIndexGet(o, idx);
-                    _ = try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(idx)), Value.obj(o) }, cb_this);
+                    if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx))) continue;
+                    const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx);
+                    _ = try self.callValueWithThis(
+                        self.arrayMethodOperand(callback_roots, 1, cb),
+                        &.{ el, Value.num(@floatFromInt(idx)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                        self.arrayMethodOperand(callback_roots, 2, cb_this),
+                    );
                 }
                 return Value.undef();
             }
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!(try self.arrIndexPresent(o, i))) continue; // skip holes
-                const el = try self.arrIndexGet(o, i);
-                _ = try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this);
+                if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i))) continue; // skip holes
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                _ = try self.callValueWithThis(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ el, Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    self.arrayMethodOperand(callback_roots, 2, cb_this),
+                );
             }
             return Value.undef();
         }
         if (eq(name, "some")) {
-            const cb = arg0(args);
+            const cb = callback;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!(try self.arrIndexPresent(o, i))) continue;
-                const el = try self.arrIndexGet(o, i);
-                if ((try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this)).toBoolean())
+                if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i))) continue;
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                if ((try self.callValueWithThis(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ el, Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    self.arrayMethodOperand(callback_roots, 2, cb_this),
+                )).toBoolean())
                     return Value.boolVal(true);
             }
             return Value.boolVal(false);
         }
         if (eq(name, "every")) {
-            const cb = arg0(args);
+            const cb = callback;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!(try self.arrIndexPresent(o, i))) continue;
-                const el = try self.arrIndexGet(o, i);
-                if (!(try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this)).toBoolean())
+                if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i))) continue;
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                if (!(try self.callValueWithThis(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ el, Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    self.arrayMethodOperand(callback_roots, 2, cb_this),
+                )).toBoolean())
                     return Value.boolVal(false);
             }
             return Value.boolVal(true);
         }
         if (eq(name, "find")) {
-            const cb = arg0(args);
+            const cb = callback;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 // `find` visits holes (value undefined), unlike forEach/map.
-                const el = try self.arrIndexGet(o, i);
-                if ((try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this)).toBoolean()) return el;
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                const element_root = try self.pushTempRoot(el);
+                defer self.restoreTempRoots(element_root);
+                if ((try self.callValueWithThis(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ self.tempRoot(element_root, el), Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    self.arrayMethodOperand(callback_roots, 2, cb_this),
+                )).toBoolean()) return self.tempRoot(element_root, el);
             }
             return Value.undef();
         }
         if (eq(name, "reduce")) {
-            const cb = arg0(args);
-            var acc: Value = undefined;
+            const cb = callback;
+            const initial = if (args.len >= 2) callback_this else Value.undef();
+            var acc = initial;
+            const acc_root = try self.pushTempRoot(initial);
             var i: usize = 0;
-            if (!o.is_array and ilen > (1 << 22)) {
-                const sparse = try self.arrSparseIndices(o, 0, ilen);
+            if (!self.arrayMethodOperand(callback_roots, 0, receiver).asObj().is_array and ilen > (1 << 22)) {
+                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen);
                 var seeded = args.len >= 2;
-                if (seeded) acc = args[1];
                 for (sparse) |idx| {
-                    if (!(try self.arrIndexPresent(o, idx))) continue;
-                    const el = try self.arrIndexGet(o, idx);
+                    if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx))) continue;
+                    const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx);
                     if (!seeded) {
                         acc = el;
+                        self.setTempRoot(acc_root, el);
                         seeded = true;
                         continue;
                     }
-                    acc = try self.callValue(cb, &.{ acc, el, Value.num(@floatFromInt(idx)), Value.obj(o) });
+                    acc = try self.callValue(
+                        self.arrayMethodOperand(callback_roots, 1, cb),
+                        &.{ self.tempRoot(acc_root, acc), el, Value.num(@floatFromInt(idx)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    );
+                    self.setTempRoot(acc_root, acc);
                 }
                 if (!seeded) return self.throwErrorFmt("TypeError", "{s} of empty array with no initial value", .{name});
-                return acc;
+                return self.tempRoot(acc_root, acc);
             }
-            if (args.len >= 2) {
-                acc = args[1];
-            } else {
+            if (args.len < 2) {
                 // Seed with the first *present* element; empty (all-hole) → throw.
-                while (i < ilen and !(try self.arrIndexPresent(o, i))) i += 1;
+                while (i < ilen and !(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i))) i += 1;
                 if (i >= ilen) return self.throwErrorFmt("TypeError", "{s} of empty array with no initial value", .{name});
-                acc = try self.arrIndexGet(o, i);
+                acc = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                self.setTempRoot(acc_root, acc);
                 i += 1;
             }
             while (i < ilen) : (i += 1) {
-                if (!(try self.arrIndexPresent(o, i))) continue; // skip holes
-                const el = try self.arrIndexGet(o, i);
-                acc = try self.callValue(cb, &.{ acc, el, Value.num(@floatFromInt(i)), Value.obj(o) });
+                if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i))) continue; // skip holes
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                acc = try self.callValue(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ self.tempRoot(acc_root, acc), el, Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                );
+                self.setTempRoot(acc_root, acc);
             }
-            return acc;
+            return self.tempRoot(acc_root, acc);
         }
         if (eq(name, "reduceRight")) {
-            const cb = arg0(args);
-            var acc: Value = undefined;
-            if (!o.is_array and ilen > (1 << 22)) {
-                const sparse = try self.arrSparseIndices(o, 0, ilen);
+            const cb = callback;
+            const initial = if (args.len >= 2) callback_this else Value.undef();
+            var acc = initial;
+            const acc_root = try self.pushTempRoot(initial);
+            if (!self.arrayMethodOperand(callback_roots, 0, receiver).asObj().is_array and ilen > (1 << 22)) {
+                const sparse = try self.arrSparseIndices(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), 0, ilen);
                 var seeded = args.len >= 2;
-                if (seeded) acc = args[1];
                 var si = sparse.len;
                 while (si > 0) {
                     si -= 1;
                     const idx = sparse[si];
-                    if (!(try self.arrIndexPresent(o, idx))) continue;
-                    const el = try self.arrIndexGet(o, idx);
+                    if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx))) continue;
+                    const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), idx);
                     if (!seeded) {
                         acc = el;
+                        self.setTempRoot(acc_root, el);
                         seeded = true;
                         continue;
                     }
-                    acc = try self.callValue(cb, &.{ acc, el, Value.num(@floatFromInt(idx)), Value.obj(o) });
+                    acc = try self.callValue(
+                        self.arrayMethodOperand(callback_roots, 1, cb),
+                        &.{ self.tempRoot(acc_root, acc), el, Value.num(@floatFromInt(idx)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    );
+                    self.setTempRoot(acc_root, acc);
                 }
                 if (!seeded) return self.throwErrorFmt("TypeError", "{s} of empty array with no initial value", .{name});
-                return acc;
+                return self.tempRoot(acc_root, acc);
             }
             var i: usize = ilen;
-            if (args.len >= 2) {
-                acc = args[1];
-            } else {
-                while (i > 0 and !(try self.arrIndexPresent(o, i - 1))) i -= 1;
+            if (args.len < 2) {
+                while (i > 0 and !(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i - 1))) i -= 1;
                 if (i == 0) return self.throwErrorFmt("TypeError", "{s} of empty array with no initial value", .{name});
                 i -= 1;
-                acc = try self.arrIndexGet(o, i);
+                acc = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                self.setTempRoot(acc_root, acc);
             }
             while (i > 0) {
                 i -= 1;
-                if (!(try self.arrIndexPresent(o, i))) continue;
-                const el = try self.arrIndexGet(o, i);
-                acc = try self.callValue(cb, &.{ acc, el, Value.num(@floatFromInt(i)), Value.obj(o) });
+                if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i))) continue;
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                acc = try self.callValue(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ self.tempRoot(acc_root, acc), el, Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                );
+                self.setTempRoot(acc_root, acc);
             }
-            return acc;
+            return self.tempRoot(acc_root, acc);
         }
         if (eq(name, "at")) {
             const n = try self.toNumberV(arg0(args));
@@ -18064,11 +18138,15 @@ pub const Interpreter = struct {
             return Value.num(-1);
         }
         if (eq(name, "findIndex")) {
-            const cb = arg0(args);
+            const cb = callback;
             var i: usize = 0;
             while (i < ilen) : (i += 1) { // findIndex visits holes (value undefined)
-                const el = try self.arrIndexGet(o, i);
-                if ((try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this)).toBoolean())
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                if ((try self.callValueWithThis(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ el, Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    self.arrayMethodOperand(callback_roots, 2, cb_this),
+                )).toBoolean())
                     return Value.num(@floatFromInt(i));
             }
             return Value.num(-1);
@@ -18234,34 +18312,47 @@ pub const Interpreter = struct {
             return Value.obj(o);
         }
         if (eq(name, "flatMap")) {
-            const cb = arg0(args); // callability checked up front (cb_methods)
-            const result = try self.arraySpeciesCreate(Value.obj(o), 0);
+            const cb = callback; // callability checked up front (cb_methods)
+            const result = try self.arraySpeciesCreate(self.arrayMethodOperand(callback_roots, 0, receiver), 0);
+            const result_root = try self.pushTempRoot(result);
             var target_index: usize = 0;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (!(try self.arrIndexPresent(o, i))) continue; // skip holes
-                const el = try self.arrIndexGet(o, i);
-                const m = try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this);
+                if (!(try self.arrIndexPresent(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i))) continue; // skip holes
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i);
+                const m = try self.callValueWithThis(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ el, Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    self.arrayMethodOperand(callback_roots, 2, cb_this),
+                );
+                const mapped_root = try self.pushTempRoot(m);
+                defer self.restoreTempRoots(mapped_root);
                 // FlattenIntoArray with depth 1: a mapped array (including a
                 // Proxy for an array) is spread one level.
-                if (m.isObject() and try objectToStringIsArray(self, m.asObj())) {
-                    target_index = try self.flattenInto(result, m.asObj(), 0, target_index);
+                if (m.isObject() and try objectToStringIsArray(self, self.tempRoot(mapped_root, m).asObj())) {
+                    target_index = try self.flattenInto(self.tempRoot(result_root, result), self.tempRoot(mapped_root, m).asObj(), 0, target_index);
                 } else {
-                    try self.arrayResultPush(result, target_index, m);
+                    try self.arrayResultPush(self.tempRoot(result_root, result), target_index, self.tempRoot(mapped_root, m));
                     target_index += 1;
                 }
             }
-            return result;
+            return self.tempRoot(result_root, result);
         }
         if (eq(name, "findLast") or eq(name, "findLastIndex")) {
             const want_index = eq(name, "findLastIndex");
-            const cb = arg0(args);
+            const cb = callback;
             var i: usize = ilen;
             while (i > 0) {
                 i -= 1;
-                const el = try self.arrIndexGet(o, i); // visits holes (undefined)
-                if ((try self.callValueWithThis(cb, &.{ el, Value.num(@floatFromInt(i)), Value.obj(o) }, cb_this)).toBoolean())
-                    return if (want_index) Value.num(@floatFromInt(i)) else el;
+                const el = try self.arrIndexGet(self.arrayMethodOperand(callback_roots, 0, receiver).asObj(), i); // visits holes (undefined)
+                const element_root = try self.pushTempRoot(el);
+                defer self.restoreTempRoots(element_root);
+                if ((try self.callValueWithThis(
+                    self.arrayMethodOperand(callback_roots, 1, cb),
+                    &.{ self.tempRoot(element_root, el), Value.num(@floatFromInt(i)), self.arrayMethodOperand(callback_roots, 0, receiver) },
+                    self.arrayMethodOperand(callback_roots, 2, cb_this),
+                )).toBoolean())
+                    return if (want_index) Value.num(@floatFromInt(i)) else self.tempRoot(element_root, el);
             }
             return if (want_index) Value.num(-1) else Value.undef();
         }
@@ -18284,23 +18375,32 @@ pub const Interpreter = struct {
     /// (HasProperty) and recursing into nested arrays up to `depth`. The result
     /// is packed — flat does not preserve holes.
     fn flattenInto(self: *Interpreter, dst: Value, src: *value.Object, depth: f64, start: usize) EvalError!usize {
-        const len: usize = if (src.is_array) src.arrayLength() else blk: {
-            const lv = try self.toPrimitive(try self.getProperty(Value.obj(src), "length"), .number);
+        const source = Value.obj(src);
+        const roots = try self.pushTempRootSlice(&.{ dst, source });
+        defer self.restoreTempRoots(roots);
+        const live_source = self.tempRoot(roots + 1, source).asObj();
+        const len: usize = if (live_source.is_array) live_source.arrayLength() else blk: {
+            const lv = try self.toPrimitive(try self.getProperty(self.tempRoot(roots + 1, source), "length"), .number);
             break :blk toLen(lv.toNumber());
         };
-        return self.flattenIntoLen(dst, src, len, depth, start);
+        return self.flattenIntoLen(self.tempRoot(roots, dst), self.tempRoot(roots + 1, source).asObj(), len, depth, start);
     }
 
     fn flattenIntoLen(self: *Interpreter, dst: Value, src: *value.Object, len: usize, depth: f64, start: usize) EvalError!usize {
+        const source = Value.obj(src);
+        const roots = try self.pushTempRootSlice(&.{ dst, source });
+        defer self.restoreTempRoots(roots);
         var target_index = start;
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            if (!(try self.arrIndexPresent(src, i))) continue; // flat skips holes
-            const el = try self.arrIndexGet(src, i);
-            if (depth > 0 and el.isObject() and try objectToStringIsArray(self, el.asObj())) {
-                target_index = try self.flattenInto(dst, el.asObj(), depth - 1, target_index);
+            if (!(try self.arrIndexPresent(self.tempRoot(roots + 1, source).asObj(), i))) continue; // flat skips holes
+            const el = try self.arrIndexGet(self.tempRoot(roots + 1, source).asObj(), i);
+            const element_root = try self.pushTempRoot(el);
+            defer self.restoreTempRoots(element_root);
+            if (depth > 0 and el.isObject() and try objectToStringIsArray(self, self.tempRoot(element_root, el).asObj())) {
+                target_index = try self.flattenInto(self.tempRoot(roots, dst), self.tempRoot(element_root, el).asObj(), depth - 1, target_index);
             } else {
-                try self.arrayResultPush(dst, target_index, el); // CreateDataPropertyOrThrow
+                try self.arrayResultPush(self.tempRoot(roots, dst), target_index, self.tempRoot(element_root, el)); // CreateDataPropertyOrThrow
                 target_index += 1;
             }
         }

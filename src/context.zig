@@ -28534,6 +28534,26 @@ test "realm array intrinsics preserve moving map operands at each observable ste
     }
 }
 
+test "array callback methods retain receiver callback values and results while moving" {
+    const cases = [_]struct { name: []const u8, expression: []const u8 }{
+        .{ .name = "filter", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var out=input.filter(function(x,i,o){if(i===0)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;return true;},proxySubject);return seen===2&&out[0]===proxySubject&&out[1]===proxySubject;})()" },
+        .{ .name = "forEach", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;input.forEach(function(x,i,o){if(i===0)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;},proxySubject);return seen===2;})()" },
+        .{ .name = "some", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var yes=input.some(function(x,i,o){if(i===0)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;return i===1;},proxySubject);return yes&&seen===2;})()" },
+        .{ .name = "every", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var yes=input.every(function(x,i,o){if(i===0)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;return true;},proxySubject);return yes&&seen===2;})()" },
+        .{ .name = "find", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var found=input.find(function(x,i,o){if(i===0)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;return i===1;},proxySubject);return found===proxySubject&&seen===2;})()" },
+        .{ .name = "findIndex", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var found=input.findIndex(function(x,i,o){if(i===0)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;return i===1;},proxySubject);return found===1&&seen===2;})()" },
+        .{ .name = "findLast", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var found=input.findLast(function(x,i,o){if(i===1)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;return i===0;},proxySubject);return found===proxySubject&&seen===2;})()" },
+        .{ .name = "findLastIndex", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var found=input.findLastIndex(function(x,i,o){if(i===1)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;return i===0;},proxySubject);return found===0&&seen===2;})()" },
+        .{ .name = "reduce", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var out=input.reduce(function(acc,x,i,o){if(i===0)proxyMovingLoop(20000);if(acc!==proxySubject||x!==proxySubject||o!==input)throw 99;seen++;return acc;},proxySubject);return out===proxySubject&&seen===2;})()" },
+        .{ .name = "reduceRight", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var out=input.reduceRight(function(acc,x,i,o){if(i===1)proxyMovingLoop(20000);if(acc!==proxySubject||x!==proxySubject||o!==input)throw 99;seen++;return acc;},proxySubject);return out===proxySubject&&seen===2;})()" },
+        .{ .name = "flatMap", .expression = "(function(){var input=[proxySubject,proxySubject],seen=0;var out=input.flatMap(function(x,i,o){if(i===0)proxyMovingLoop(20000);if(x!==proxySubject||o!==input||this!==proxySubject)throw 99;seen++;return [x];},proxySubject);return seen===2&&out[0]===proxySubject&&out[1]===proxySubject;})()" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving array callback {s}\n", .{case.name});
+        try expectProxyMetadataMoving("", case.expression);
+    }
+}
+
 test "realm array intrinsics isolate shared no-GIL construction" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
