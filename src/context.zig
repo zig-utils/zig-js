@@ -29100,6 +29100,31 @@ test "literal function metadata preserves shared methods without the GIL" {
     }
 }
 
+test "a var loop binding is resolved like an assignment" {
+    // ForIn/OfBodyEvaluation step 6.d: a `var` ForBinding is ResolveBinding +
+    // PutValue, so it writes whatever `x` names at the loop — the catch
+    // parameter that Annex B.3.4 lets it redeclare, or a `with` object that
+    // provides `x` — never the hoisted `var` directly.
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "catch_param_for_in", .source = "var b,d,a;try{throw 'ex';}catch(err){b=err;for(var err in {p:null}){d=err;}a=err;}b==='ex'&&d==='p'&&a==='p'&&typeof err==='undefined'" },
+            .{ .name = "catch_param_for_of", .source = "var b,d,a;try{throw 'ex';}catch(err){b=err;for(var err of [2]){d=err;}a=err;}b==='ex'&&d===2&&a===2&&typeof err==='undefined'" },
+            .{ .name = "catch_param_for_var_init_in", .source = "var b,d,a;try{throw 'ex';}catch(err){b=err;for(var err=7 in {p:null}){d=err;}a=err;}b==='ex'&&d==='p'&&a==='p'&&typeof err==='undefined'" },
+            .{ .name = "with_object_for_in", .source = "var o={x:0},d;with(o){for(var x in {p:null}){d=x;}}d==='p'&&o.x==='p'&&typeof x==='undefined'" },
+            .{ .name = "plain_for_in", .source = "for(var k in {p:null});k==='p'" },
+        }) |case| {
+            errdefer std.debug.print("var loop binding {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+        }
+    }
+}
+
 test "a call expression as an assignment target is evaluated then rejected" {
     // Annex B runtime errors for function-call assignment targets: the call
     // runs, nothing on the right-hand side (or the loop value's coercions) is

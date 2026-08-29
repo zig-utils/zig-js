@@ -3634,14 +3634,20 @@ pub const Compiler = struct {
             return self.emitCallTargetRejection(target, shape, false);
         }
         if (target.* == .identifier) {
-            if (decl_kind != null) {
-                if (force_environment) {
-                    _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(target.identifier), if (decl_kind.? == .@"const") 2 else 1);
-                } else try self.emitDefine(target.identifier);
-            } else {
+            // ForIn/OfBodyEvaluation step 6.d: a `var` ForBinding is resolved
+            // like an assignment — ResolveBinding then PutValue — so it writes
+            // whatever binding `x` names at the loop, not the hoisted `var`
+            // itself. The two differ inside `catch (x) { for (var x in o) … }`
+            // (Annex B.3.4 permits the redeclaration): the catch parameter is
+            // nearer and receives the keys, which a `def_var` on the variable
+            // scope silently bypassed. let/const still initialize their fresh
+            // per-iteration binding.
+            if (decl_kind == null or decl_kind.? == .@"var") {
                 try self.emitStore(target.identifier);
                 _ = try self.chunk.emit(.pop, 0);
-            }
+            } else if (force_environment) {
+                _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(target.identifier), if (decl_kind.? == .@"const") 2 else 1);
+            } else try self.emitDefine(target.identifier);
             return;
         }
         if (native_pattern and decl_kind == null and (target.* == .member or target.* == .super_member)) {
