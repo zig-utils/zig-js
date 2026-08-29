@@ -7,7 +7,7 @@ pub const usage =
     \\
     \\  --help
     \\  --diag <subtree> [path-substring]
-    \\  --eval <file>
+    \\  --eval <file> [tree|vm]
     \\  --vm-witness <test.js> [test.js ...]
     \\  --vm-witness-subtree <subtree> [path-substring]
     \\  --list-skips
@@ -17,13 +17,19 @@ pub const usage =
     \\
 ;
 
+/// Which tier `--eval` forces. `automatic` is the engine's own admission
+/// policy; `tree` and `vm` pin the tree walker and required bytecode, which is
+/// how a tier divergence found by `--vm-witness-subtree` gets reduced to a
+/// minimal script.
+pub const EvalMode = enum { automatic, tree, vm };
+
 pub const Command = union(enum) {
     parent,
     help,
     worker: struct { subtree: []const u8, start: usize, limit: usize },
     drive_subtree: []const u8,
     diag: struct { subtree: []const u8, filter: ?[]const u8 },
-    eval: []const u8,
+    eval: struct { path: []const u8, mode: EvalMode },
     vm_witness: []const []const u8,
     vm_witness_subtree: struct { subtree: []const u8, filter: ?[]const u8 },
     list_skips,
@@ -49,8 +55,19 @@ pub fn parse(args: []const []const u8) error{InvalidArguments}!Command {
         if (args.len != 2 and args.len != 3) return error.InvalidArguments;
         return .{ .diag = .{ .subtree = args[1], .filter = if (args.len == 3) args[2] else null } };
     }
-    if (std.mem.eql(u8, mode, "--eval"))
-        return if (args.len == 2) .{ .eval = args[1] } else error.InvalidArguments;
+    if (std.mem.eql(u8, mode, "--eval")) {
+        if (args.len == 2) return .{ .eval = .{ .path = args[1], .mode = .automatic } };
+        if (args.len == 3) {
+            const forced: EvalMode = if (std.mem.eql(u8, args[2], "tree"))
+                .tree
+            else if (std.mem.eql(u8, args[2], "vm"))
+                .vm
+            else
+                return error.InvalidArguments;
+            return .{ .eval = .{ .path = args[1], .mode = forced } };
+        }
+        return error.InvalidArguments;
+    }
     if (std.mem.eql(u8, mode, "--vm-witness-subtree")) {
         if (args.len != 2 and args.len != 3) return error.InvalidArguments;
         return .{ .vm_witness_subtree = .{ .subtree = args[1], .filter = if (args.len == 3) args[2] else null } };
@@ -83,6 +100,9 @@ test "test262 CLI recognizes every exact mode contract" {
     try std.testing.expectEqualStrings("class", diagnostic.filter.?);
     try std.testing.expect((try parse(&.{ "--diag", "test/language" })).diag.filter == null);
     try expectTag(.eval, &.{ "--eval", "probe.js" });
+    try std.testing.expectEqual(EvalMode.automatic, (try parse(&.{ "--eval", "probe.js" })).eval.mode);
+    try std.testing.expectEqual(EvalMode.tree, (try parse(&.{ "--eval", "probe.js", "tree" })).eval.mode);
+    try std.testing.expectEqual(EvalMode.vm, (try parse(&.{ "--eval", "probe.js", "vm" })).eval.mode);
     const witnesses = (try parse(&.{ "--vm-witness", "one.js", "two.js" })).vm_witness;
     try std.testing.expectEqual(@as(usize, 2), witnesses.len);
     try expectTag(.vm_witness_subtree, &.{ "--vm-witness-subtree", "test/language" });
@@ -116,7 +136,8 @@ test "test262 CLI rejects unknown incomplete malformed and trailing arguments" {
         &.{"--diag"},
         &.{ "--diag", "test/language", "filter", "extra" },
         &.{"--eval"},
-        &.{ "--eval", "probe.js", "extra" },
+        &.{ "--eval", "probe.js", "bogus-mode" },
+        &.{ "--eval", "probe.js", "vm", "extra" },
         &.{"--vm-witness"},
         &.{"--vm-witness-subtree"},
         &.{ "--vm-witness-subtree", "test/language", "for", "extra" },

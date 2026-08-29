@@ -556,14 +556,21 @@ fn harnessIncludeOverride(abs_path: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// `--eval <file>`: evaluate a raw JS file (no harness) and print `OK <value>`
+/// `--eval <file> [tree|vm]`: evaluate a raw JS file (no harness) and print `OK <value>`
 /// or `<ErrName>: <message>` / `<ParseError>` — a quick probe during development.
-fn runEval(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+fn runEval(gpa: std.mem.Allocator, io: std.Io, path: []const u8, mode: cli.EvalMode) !void {
     const out = std.Io.File.stdout();
     const src = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_test_source_bytes)) catch return;
     defer gpa.free(src);
     const ctx = js.Context.create(gpa) catch return;
     defer ctx.destroy();
+    // Pinning the tier turns a `--vm-witness-subtree` hit into a reducible
+    // script: run the same source both ways and read the two messages.
+    switch (mode) {
+        .automatic => {},
+        .tree => ctx.setBytecodeExecutionModeForTesting(.tree_walker),
+        .vm => ctx.setBytecodeExecutionModeForTesting(.required),
+    }
     // Written in three pieces rather than through a fixed buffer: a probe that
     // returns more than a few kilobytes (a batched case table, say) used to
     // overflow `bufPrint` and fall back to a bare "OK", which reads as an empty
@@ -1239,7 +1246,7 @@ pub fn main(init: std.process.Init) !void {
         .worker => |worker| runWorker(gpa, io, root, worker.subtree, worker.start, worker.limit),
         .drive_subtree => |subtree| runSubtreeDriver(gpa, io, root, subtree),
         .diag => |diagnostic| runDiag(gpa, io, root, diagnostic.subtree, diagnostic.filter),
-        .eval => |path| runEval(gpa, io, path),
+        .eval => |e| runEval(gpa, io, e.path, e.mode),
         .vm_witness => |paths| for (paths) |path| try runVmWitness(gpa, io, root, path),
         .vm_witness_subtree => |w| runVmWitnessSubtree(gpa, io, root, w.subtree, w.filter),
         .list_skips => runListSkips(gpa, io, root),
