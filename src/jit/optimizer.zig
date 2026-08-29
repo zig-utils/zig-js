@@ -585,7 +585,8 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         // the optimizer. Listed here only so the depth walk never trips.
         .throw_not_a_reference => .{ .required = 0, .removed = 0, .added = 0 },
         // Reads the [value, kind] completion in place; likewise not in `supports`.
-        .dispose_scope_completion => .{ .required = 2, .removed = 0, .added = 0 },
+        .dispose_scope_completion, .dispose_seed_completion => .{ .required = 2, .removed = 0, .added = 0 },
+        .dispose_record_error => .{ .required = 1, .removed = 1, .added = 0 },
         .load_binding_ref => .{
             .required = 0,
             .removed = 0,
@@ -617,8 +618,9 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .async_iter_close => .{ .required = 1, .removed = 1, .added = 2 },
         .async_iter_close_completion => .{ .required = 3, .removed = 1, .added = 2 },
         .eval_class => .{ .required = inst.b, .removed = inst.b, .added = 1 },
+        // An async step pushes [awaitable, needs_await].
         .dispose_scope => if (inst.a == 1)
-            .{ .required = 0, .removed = 0, .added = 1 }
+            .{ .required = 0, .removed = 0, .added = 2 }
         else
             .{ .required = 0, .removed = 0, .added = 0 },
         else => unreachable,

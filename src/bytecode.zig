@@ -408,6 +408,8 @@ pub const Op = enum(u8) {
     exit_block, // pop that Environment; a: block_environment_class restores class strictness
     dispose_scope, // DisposeResources for the current Environment Record
     dispose_scope_completion, // DisposeResources for the current scope with the [value, kind] completion on the stack: a throw completion is threaded as the pending error, and a disposal error replaces the record with a throw completion
+    dispose_seed_completion, // async DisposeResources, step 1: move a throw completion's value into the scope's pending error and rewrite the record to a normal completion; other completions are left in place
+    dispose_record_error, // async DisposeResources: pop a thrown value (a rejected [Symbol.asyncDispose] await, or the sync tail's throw) and fold it into the scope's pending error (SuppressedError chaining)
     enter_with, // pop object; push an object Environment Record (with_object = ToObject(it)) onto vm.env
     exit_with, // pop the innermost with/block environment off vm.env (restore its parent)
     make_regex, // operands a: pattern name index, b: flags name index; push a fresh RegExp object

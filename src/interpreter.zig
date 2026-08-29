@@ -4494,10 +4494,19 @@ pub const Interpreter = struct {
             const d = env.disposables.items[idx];
             env.disposables.shrinkRetainingCapacity(idx);
             var dispose_err: ?Value = null;
+            // The caller awaits the returned value and resumes with another
+            // step; the error accumulated so far must already be back on the
+            // record, or a body throw seeded before an async resource is lost.
             if (d.method.isUndefined()) {
-                if (d.is_async and d.await_result) return Value.undef();
+                if (d.is_async and d.await_result) {
+                    env.dispose_pending = pending;
+                    return Value.undef();
+                }
             } else if (self.callValueWithThis(d.method, &.{}, d.value)) |rv| {
-                if (d.is_async and d.await_result) return rv;
+                if (d.is_async and d.await_result) {
+                    env.dispose_pending = pending;
+                    return rv;
+                }
             } else |e| {
                 if (e != error.Throw) return e;
                 dispose_err = self.exception;

@@ -8766,15 +8766,15 @@ fn runChunk(
             },
             .dispose_scope => {
                 if (inst.a == 1) {
-                    if (vm.env.disposables.items.len > 0) {
-                        if (try vm.disposeScopeAsyncStep(vm.env)) |awaited| {
-                            try stack.append(stack_alloc, awaited);
-                        } else {
-                            try stack.append(stack_alloc, Value.undef());
-                        }
-                    } else {
-                        try stack.append(stack_alloc, Value.undef());
-                    }
+                    // One async step: dispose down to the next [Symbol.asyncDispose]
+                    // result and push it with `true`, or `undefined` with `false`
+                    // when nothing is left to await — an `await using` whose
+                    // declaration never ran must not cost a microtask turn.
+                    var awaitable: ?Value = null;
+                    if (vm.env.disposables.items.len > 0) awaitable = try vm.disposeScopeAsyncStep(vm.env);
+                    try stack.ensureTotalCapacity(stack_alloc, stack.items.len + 2);
+                    stack.appendAssumeCapacity(awaitable orelse Value.undef());
+                    stack.appendAssumeCapacity(Value.boolVal(awaitable != null));
                 } else if (vm.env.disposables.items.len > 0 or vm.env.dispose_pending != null) {
                     if (try vm.disposeScope(vm.env, null)) |err| {
                         vm.exception = err;
@@ -8797,6 +8797,31 @@ fn runChunk(
                         stack.items[kind_index] = Value.num(@floatFromInt(@backingInt(Completion.throw)));
                     }
                 }
+            },
+            .dispose_seed_completion => {
+                // Async disposal cannot thread the completion through one call:
+                // each [Symbol.asyncDispose] result is awaited by the bytecode.
+                // Park a throw completion's value as the scope's pending error —
+                // exactly what DisposeResources' first "completion" argument is —
+                // and let the record fall through as normal; `dispose_scope 0`
+                // throws the accumulated error at the end.
+                const kind_index = stack.items.len - 1;
+                const kind: Completion = @fromBackingInt(@intCast(@as(u8, @intFromFloat(stack.items[kind_index].asNum()))));
+                if (kind == .throw) {
+                    vm.env.dispose_pending = stack.items[kind_index - 1];
+                    stack.items[kind_index - 1] = Value.undef();
+                    stack.items[kind_index] = Value.num(@floatFromInt(@backingInt(Completion.normal)));
+                }
+            },
+            .dispose_record_error => {
+                // A disposal step threw (a rejected await, or the step's own
+                // throw): chain it into the pending error the way DisposeResources
+                // does — the newer error wraps the older one in a SuppressedError.
+                const this_err = stack.pop().?;
+                vm.env.dispose_pending = if (vm.env.dispose_pending) |prev|
+                    (vm.makeErrorWithArgs("SuppressedError", &.{ this_err, prev }) catch this_err)
+                else
+                    this_err;
             },
             .enter_with => {
                 // `with (obj)`: push an object Environment Record. ToObject(obj)

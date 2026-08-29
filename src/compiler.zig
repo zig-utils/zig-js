@@ -3226,13 +3226,7 @@ pub const Compiler = struct {
                 // carries what `register_disposable` appends).
                 const disposable_scope = stmtListHasDisposableDecl(stmts);
                 const await_using_count = if (disposable_scope and self.in_async) stmtListAwaitUsingDeclCount(stmts) else 0;
-                if (disposable_scope) {
-                    // Async disposal is still lowered for normal completion only;
-                    // an abrupt exit that must `await` each [Symbol.asyncDispose]
-                    // stays on the tree walker.
-                    if (await_using_count != 0 and stmtListCanEscapeAbruptly(stmts)) return error.Unsupported;
-                    try self.emitEnterEnvironment();
-                }
+                if (disposable_scope) try self.emitEnterEnvironment();
                 if (captured_environment and !disposable_scope) {
                     try self.emitEnterEnvironment();
                 }
@@ -3250,7 +3244,7 @@ pub const Compiler = struct {
                 // through it.
                 const none = std.math.maxInt(u32);
                 var dispose_handler: ?usize = null;
-                if (disposable_scope and await_using_count == 0) {
+                if (disposable_scope) {
                     dispose_handler = try self.emitPushHandler(.push_handler, none, none);
                     self.finally_depth += 1;
                 }
@@ -3260,22 +3254,15 @@ pub const Compiler = struct {
                     try self.emitPopHandler();
                     _ = try self.chunk.emit(.push_completion, 0);
                     self.chunk.code.items[handler].b = @intCast(self.chunk.here());
-                    _ = try self.chunk.emit(.dispose_scope_completion, 0);
+                    if (await_using_count == 0) {
+                        _ = try self.chunk.emit(.dispose_scope_completion, 0);
+                    } else {
+                        try self.emitAsyncDisposeRegion(await_using_count);
+                    }
                     _ = try self.chunk.emit(.end_finally, 0);
                 }
                 if (captured_environment and !disposable_scope) try self.emitExitEnvironment();
-                if (disposable_scope) {
-                    if (await_using_count != 0) {
-                        var i: usize = 0;
-                        while (i < await_using_count) : (i += 1) {
-                            _ = try self.chunk.emit(.dispose_scope, 1);
-                            _ = try self.chunk.emit(.await_op, 0);
-                            _ = try self.chunk.emit(.pop, 0);
-                        }
-                        _ = try self.chunk.emit(.dispose_scope, 0);
-                    }
-                    try self.emitExitEnvironment();
-                }
+                if (disposable_scope) try self.emitExitEnvironment();
             },
             .decl_group => |stmts| try self.compileStmtList(stmts),
             .if_stmt => |s| try self.compileIf(s.cond, s.consequent, s.alternate),
@@ -6368,6 +6355,37 @@ pub const Compiler = struct {
     }
 
     // ---- loop bookkeeping -------------------------------------------------
+
+    /// The finally region of a scope holding `await using` resources. Async
+    /// DisposeResources awaits each [Symbol.asyncDispose] result in turn, so it
+    /// cannot run inside one opcode: a throw completion is parked as the
+    /// scope's pending error, then each of the `count` async resources is
+    /// stepped and awaited under its own catch so a rejection folds into the
+    /// SuppressedError chain instead of escaping, and the synchronous tail
+    /// throws whatever accumulated. `dispose_scope 1` itself only throws once
+    /// the scope is empty, which the same catch collects.
+    fn emitAsyncDisposeRegion(self: *Compiler, count: usize) CompileError!void {
+        const none = std.math.maxInt(u32);
+        _ = try self.chunk.emit(.dispose_seed_completion, 0);
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const guard = try self.emitPushHandler(.push_handler, none, none);
+            // [awaitable, needs_await]: await only when a resource actually
+            // produced something to await, so an `await using` whose declaration
+            // never executed does not add a microtask turn.
+            _ = try self.chunk.emit(.dispose_scope, 1);
+            const no_await = try self.chunk.emit(.jump_if_false, 0);
+            _ = try self.chunk.emit(.await_op, 0);
+            self.chunk.patchToHere(no_await);
+            _ = try self.chunk.emit(.pop, 0);
+            try self.emitPopHandler();
+            const done = try self.chunk.emit(.jump, 0);
+            self.chunk.code.items[guard].a = @intCast(self.chunk.here());
+            _ = try self.chunk.emit(.dispose_record_error, 0);
+            self.chunk.patchToHere(done);
+        }
+        _ = try self.chunk.emit(.dispose_scope, 0);
+    }
 
     /// Every handler push/pop goes through these so `handler_depth` mirrors the
     /// runtime handler stack. `push_handler_catch` records the depth below the
