@@ -16793,32 +16793,38 @@ pub const Interpreter = struct {
     }
 
     fn makeCursorIteratorWithKind(self: *Interpreter, src: Value, kind: u8) EvalError!Value {
+        const src_root = try self.pushTempRoot(src);
+        defer self.restoreTempRoots(src_root);
         const it = try gc_mod.allocObj(self.arena);
         it.* = .{};
-        const is_strong_collection = src.isObject() and
-            (src.asObj().is_map or src.asObj().is_set) and !src.asObj().is_weak;
+        const iterator = Value.obj(it);
+        const iterator_root = try self.pushTempRoot(iterator);
+        defer self.restoreTempRoots(iterator_root);
+        const rooted_src = self.tempRoot(src_root, src);
+        const is_strong_collection = rooted_src.isObject() and
+            (rooted_src.asObj().is_map or rooted_src.asObj().is_set) and !rooted_src.asObj().is_weak;
         if (is_strong_collection) {
-            try it.initCollectionIterator(self.arena, src, kind);
+            try self.tempRoot(iterator_root, iterator).asObj().initCollectionIterator(self.arena, self.tempRoot(src_root, src), kind);
         } else {
-            try self.setProp(it, "__src", src);
-            try self.setProp(it, "__i", Value.num(0));
-            try self.setProp(it, "__kind", Value.num(@floatFromInt(kind)));
+            try self.setProp(self.tempRoot(iterator_root, iterator).asObj(), "__src", self.tempRoot(src_root, src));
+            try self.setProp(self.tempRoot(iterator_root, iterator).asObj(), "__i", Value.num(0));
+            try self.setProp(self.tempRoot(iterator_root, iterator).asObj(), "__kind", Value.num(@floatFromInt(kind)));
         }
         // Inherit the per-kind built-in iterator prototype (%ArrayIteratorPrototype%
         // etc.) — which carries `next`, the @@toStringTag, and (via
         // %IteratorPrototype%) the iterator-helper methods.
-        const proto_key: []const u8 = switch (src.kind()) {
+        const proto_key: []const u8 = switch (self.tempRoot(src_root, src).kind()) {
             .string => "\x00StrIterProto",
-            .object => if (src.asObj().is_map) "\x00MapIterProto" else if (src.asObj().is_set) "\x00SetIterProto" else "\x00ArrIterProto",
+            .object => if (self.tempRoot(src_root, src).asObj().is_map) "\x00MapIterProto" else if (self.tempRoot(src_root, src).asObj().is_set) "\x00SetIterProto" else "\x00ArrIterProto",
             else => "\x00ArrIterProto",
         };
         if (self.env.get(proto_key)) |p| {
-            if (p.isObject()) it.setProtoAtomic(p.asObj());
+            if (p.isObject()) self.tempRoot(iterator_root, iterator).asObj().setProtoAtomic(p.asObj());
         } else {
             // Before %IteratorPrototype% exists (early bootstrap): a plain `next`.
-            try setNative(self.arena, self.root_shape, it, "next", 0, cursorIterNext);
+            try setNative(self.arena, self.root_shape, self.tempRoot(iterator_root, iterator).asObj(), "next", 0, cursorIterNext);
         }
-        return Value.obj(it);
+        return self.tempRoot(iterator_root, iterator);
     }
 
     /// A fresh `{ value, done }` IteratorResult object.
@@ -17484,8 +17490,11 @@ pub const Interpreter = struct {
 
     fn arrayMethodRetainsOperands(name: []const u8) bool {
         inline for (.{
-            "slice", "concat",    "flat", "splice",     "reverse", "toReversed",
-            "with",  "toSpliced", "fill", "copyWithin", "sort",    "toSorted",
+            "slice",   "concat",         "flat",  "splice",      "reverse", "toReversed",
+            "with",    "toSpliced",      "fill",  "copyWithin",  "sort",    "toSorted",
+            "push",    "pop",            "shift", "unshift",     "indexOf", "includes",
+            "join",    "toLocaleString", "at",    "lastIndexOf", "values",  "keys",
+            "entries", "toString",
         }) |candidate|
             if (eq(name, candidate)) return true;
         return false;
@@ -17528,6 +17537,22 @@ pub const Interpreter = struct {
         else
             null;
         defer if (callback_roots) |roots| self.restoreTempRoots(roots);
+        if (eq(name, "values") or eq(name, "keys") or eq(name, "entries")) {
+            const roots = operand_roots.?;
+            const kind: u8 = if (eq(name, "keys")) 1 else if (eq(name, "entries")) 2 else 0;
+            return try self.makeCursorIteratorWithKind(self.tempRoot(roots, receiver), kind);
+        }
+        if (eq(name, "toString")) {
+            // Array.prototype.toString gets `join` directly; creating an Array
+            // iterator or stringifying an array must not eagerly read `length`.
+            const roots = operand_roots.?;
+            const join = try self.getProperty(self.tempRoot(roots, receiver), "join");
+            const join_root = try self.pushTempRoot(join);
+            defer self.restoreTempRoots(join_root);
+            if (self.tempRoot(join_root, join).isCallable())
+                return try self.callValueWithThis(self.tempRoot(join_root, join), &.{}, self.tempRoot(roots, receiver));
+            return try objectProtoToStringFn(@ptrCast(self), self.tempRoot(roots, receiver), &.{});
+        }
         // sort/toSorted validate comparefn before LengthOfArrayLike(this), so a
         // borrowed call with a poisoned `length` still reports the comparator
         // TypeError first.
@@ -17584,15 +17609,20 @@ pub const Interpreter = struct {
         else
             array_like_len;
         if (eq(name, "push")) {
+            const roots = operand_roots.?;
             const len = ilen;
             // The new length may not exceed 2**53-1 — checked (in f64, exact near
             // the limit) BEFORE any element is set.
             if (@as(f64, @floatFromInt(len)) + @as(f64, @floatFromInt(args.len)) > 9007199254740991.0)
                 return self.throwError("TypeError", "push cannot produce an array of length larger than (2 ** 53) - 1");
-            if (o.is_array and !o.is_arguments and o.accessorsMap() == null and o.attrsMap() == null and
-                !o.has_indexed_property.load(.monotonic) and o.isExtensible() and self.arrayProtoChainCleanForDenseAppend(o))
+            const dense_receiver = self.tempRoot(roots, receiver).asObj();
+            if (dense_receiver.is_array and !dense_receiver.is_arguments and dense_receiver.accessorsMap() == null and dense_receiver.attrsMap() == null and
+                !dense_receiver.has_indexed_property.load(.monotonic) and dense_receiver.isExtensible() and self.arrayProtoChainCleanForDenseAppend(dense_receiver))
             {
-                if (try o.appendPackedDenseElements(self.arena, args)) |new_len|
+                const dense_args = try self.arena.alloc(Value, args.len);
+                for (dense_args, 0..) |*argument, index|
+                    argument.* = self.arrayMethodArgument(roots, args, index);
+                if (try self.tempRoot(roots, receiver).asObj().appendPackedDenseElements(self.arena, dense_args)) |new_len|
                     return Value.num(@floatFromInt(new_len));
             }
             // Set(O, ToString(len+k), E, true) for each argument (fires an
@@ -17600,15 +17630,16 @@ pub const Interpreter = struct {
             // Set(O, "length", newLen, true).
             var k: usize = 0;
             while (k < args.len) : (k += 1) {
-                try self.arraySetIndexThrowing(o, len + k, args[k]);
+                try self.arraySetIndexThrowing(self.tempRoot(roots, receiver).asObj(), len + k, self.arrayMethodArgument(roots, args, k));
             }
             const new_len = len + args.len;
-            try self.arraySetLengthThrowing(o, new_len);
+            try self.arraySetLengthThrowing(self.tempRoot(roots, receiver).asObj(), new_len);
             return Value.num(@floatFromInt(new_len));
         }
         if (eq(name, "pop")) {
+            const roots = operand_roots.?;
             if (ilen == 0) {
-                try self.arraySetLengthThrowing(o, 0);
+                try self.arraySetLengthThrowing(self.tempRoot(roots, receiver).asObj(), 0);
                 return Value.undef();
             }
             const last = ilen - 1;
@@ -17616,45 +17647,57 @@ pub const Interpreter = struct {
             const idx = borrowedIndexKey(&key_storage, last);
             // [[Get]] the last element first (fires an inherited accessor when the
             // slot is a hole — that is how the spec's order is observed).
-            const element = try self.getProperty(Value.obj(o), idx);
-            if (o.is_array) {
-                if (arrayElemNonConfigurable(o, last)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
-                if (!arrayLenWritable(o)) return self.throwError("TypeError", "Array length is not writable");
-                try o.truncateDenseElementsAndSetLength(self.arena, last);
-                return element;
+            const element = try self.getProperty(self.tempRoot(roots, receiver), idx);
+            const element_root = try self.pushTempRoot(element);
+            defer self.restoreTempRoots(element_root);
+            const live_receiver = self.tempRoot(roots, receiver).asObj();
+            if (live_receiver.is_array) {
+                if (arrayElemNonConfigurable(live_receiver, last)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+                if (!arrayLenWritable(live_receiver)) return self.throwError("TypeError", "Array length is not writable");
+                try live_receiver.truncateDenseElementsAndSetLength(self.arena, last);
+                return self.tempRoot(element_root, element);
             }
-            if (!try self.deleteOwn(o, idx)) return self.throwError("TypeError", "Unable to delete property.");
-            try self.setMember(Value.obj(o), "length", Value.num(@floatFromInt(last)));
-            return element;
+            if (!try self.deleteOwn(self.tempRoot(roots, receiver).asObj(), idx)) return self.throwError("TypeError", "Unable to delete property.");
+            try self.setMember(self.tempRoot(roots, receiver), "length", Value.num(@floatFromInt(last)));
+            return self.tempRoot(element_root, element);
         }
         if (eq(name, "shift")) {
+            const roots = operand_roots.?;
             if (ilen == 0) {
-                try self.arraySetLengthThrowing(o, 0);
+                try self.arraySetLengthThrowing(self.tempRoot(roots, receiver).asObj(), 0);
                 return Value.undef();
             }
-            const first = try self.getProperty(Value.obj(o), "0"); // fires accessor on a hole
-            if (o.is_array) {
-                if (arrayElemNonConfigurable(o, 0)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
-                if (!arrayLenWritable(o)) return self.throwError("TypeError", "Array length is not writable");
+            const first = try self.getProperty(self.tempRoot(roots, receiver), "0"); // fires accessor on a hole
+            const first_root = try self.pushTempRoot(first);
+            defer self.restoreTempRoots(first_root);
+            const live_receiver = self.tempRoot(roots, receiver).asObj();
+            if (live_receiver.is_array) {
+                if (arrayElemNonConfigurable(live_receiver, 0)) return self.throwError("TypeError", "Cannot delete a non-configurable array element");
+                if (!arrayLenWritable(live_receiver)) return self.throwError("TypeError", "Array length is not writable");
             }
             // Move each element down, delete the tail, set length.
             var k: usize = 1;
             while (k < ilen) : (k += 1) {
-                if (try self.arrIndexPresent(o, k))
-                    try self.arrIndexSetOrThrow(o, k - 1, try self.arrIndexGet(o, k))
-                else
-                    try self.arrIndexDeleteOrThrow(o, k - 1);
+                if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), k)) {
+                    const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), k);
+                    const element_root = try self.pushTempRoot(element);
+                    defer self.restoreTempRoots(element_root);
+                    try self.arrIndexSetOrThrow(self.tempRoot(roots, receiver).asObj(), k - 1, self.tempRoot(element_root, element));
+                } else {
+                    try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), k - 1);
+                }
             }
-            try self.arrIndexDeleteOrThrow(o, ilen - 1);
-            if (o.is_array) {
-                if (!try self.setArrayLength(o, ilen - 1))
+            try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), ilen - 1);
+            if (self.tempRoot(roots, receiver).asObj().is_array) {
+                if (!try self.setArrayLength(self.tempRoot(roots, receiver).asObj(), ilen - 1))
                     return self.throwError("TypeError", "Cannot delete a non-configurable array element");
             } else {
-                try self.arraySetLengthThrowing(o, ilen - 1);
+                try self.arraySetLengthThrowing(self.tempRoot(roots, receiver).asObj(), ilen - 1);
             }
-            return first;
+            return self.tempRoot(first_root, first);
         }
         if (eq(name, "unshift")) {
+            const roots = operand_roots.?;
             const max_safe_len: usize = 9007199254740991;
             const len = ilen;
             if (args.len > 0 and len > max_safe_len - args.len)
@@ -17668,113 +17711,140 @@ pub const Interpreter = struct {
                 while (k > 0) : (k -= 1) {
                     if (moved > (1 << 22)) return null;
                     const to = k - 1 + args.len;
-                    if (try self.arrIndexPresent(o, k - 1))
-                        try self.arraySetIndexThrowing(o, to, try self.arrIndexGet(o, k - 1))
-                    else
-                        try self.arrIndexDeleteOrThrow(o, to);
+                    if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), k - 1)) {
+                        const element = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), k - 1);
+                        const element_root = try self.pushTempRoot(element);
+                        defer self.restoreTempRoots(element_root);
+                        try self.arraySetIndexThrowing(self.tempRoot(roots, receiver).asObj(), to, self.tempRoot(element_root, element));
+                    } else {
+                        try self.arrIndexDeleteOrThrow(self.tempRoot(roots, receiver).asObj(), to);
+                    }
                     moved += 1;
                 }
-                for (args, 0..) |a, j| try self.arraySetIndexThrowing(o, j, a);
+                for (args, 0..) |_, j|
+                    try self.arraySetIndexThrowing(self.tempRoot(roots, receiver).asObj(), j, self.arrayMethodArgument(roots, args, j));
             }
             // Set(O, "length", len + argCount, true), even when argCount is 0.
-            try self.arraySetLengthThrowing(o, len + args.len);
+            try self.arraySetLengthThrowing(self.tempRoot(roots, receiver).asObj(), len + args.len);
             return Value.num(@floatFromInt(len + args.len));
         }
         if (eq(name, "indexOf")) {
-            const target = arg0(args);
+            const roots = operand_roots.?;
             if (ilen == 0) return Value.num(-1);
             // `fromIndex` (2nd arg): a clamped start index. Beyond it (e.g.
             // +Infinity on a 2**32-length array) means no iterations — which is
             // also what keeps a huge sparse array from being walked element by
             // element.
-            const k = if (args.len > 1) try self.fromIndexForward(args[1], ilen) else 0;
-            if ((!o.is_array or self.arrayProtoMayAffectIndexedHas(o)) and ilen <= (1 << 22)) {
+            const k = if (args.len > 1) try self.fromIndexForward(self.arrayMethodArgument(roots, args, 1), ilen) else 0;
+            const live_receiver = self.tempRoot(roots, receiver).asObj();
+            if ((!live_receiver.is_array or self.arrayProtoMayAffectIndexedHas(live_receiver)) and ilen <= (1 << 22)) {
                 var i = k;
                 while (i < ilen) : (i += 1) {
-                    if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                    if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i) and value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0)))
                         return Value.num(@floatFromInt(i));
                 }
                 return Value.num(-1);
             }
             // Dense scan: indexOf skips holes (HasProperty check).
-            const dense_hi = o.denseElementLimit(ilen);
+            const dense_hi = self.tempRoot(roots, receiver).asObj().denseElementLimit(ilen);
             var i = k;
             while (i < dense_hi) : (i += 1) {
-                if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i) and value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0)))
                     return Value.num(@floatFromInt(i));
             }
             // Sparse scan: named integer-index properties in ascending order, so
             // the first (lowest) match wins — without touching the hole tail.
-            const sparse = try self.arrSparseIndices(o, @max(k, dense_hi), ilen);
+            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), @max(k, dense_hi), ilen);
             for (sparse) |idx| {
-                if (value.strictEquals(try self.arrIndexGet(o, idx), target))
+                if (value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), idx), self.arrayMethodArgument(roots, args, 0)))
                     return Value.num(@floatFromInt(idx));
             }
             return Value.num(-1);
         }
         if (eq(name, "includes")) {
-            const target = arg0(args);
+            const roots = operand_roots.?;
             if (ilen == 0) return Value.boolVal(false);
-            const k = if (args.len > 1) try self.fromIndexForward(args[1], ilen) else 0;
-            if (!o.is_array and ilen <= (1 << 22)) {
+            const k = if (args.len > 1) try self.fromIndexForward(self.arrayMethodArgument(roots, args, 1), ilen) else 0;
+            if (!self.tempRoot(roots, receiver).asObj().is_array and ilen <= (1 << 22)) {
                 var i = k;
                 while (i < ilen) : (i += 1) {
-                    if (value.sameValueZero(try self.arrIndexGet(o, i), target)) return Value.boolVal(true);
+                    if (value.sameValueZero(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0))) return Value.boolVal(true);
                 }
                 return Value.boolVal(false);
             }
             // includes treats holes as `undefined` and uses SameValueZero (so
             // NaN matches NaN). Dense scan visits every in-range index.
-            const dense_hi = o.denseElementLimit(ilen);
+            const dense_hi = self.tempRoot(roots, receiver).asObj().denseElementLimit(ilen);
             var i = k;
             while (i < dense_hi) : (i += 1) {
-                if (value.sameValueZero(try self.arrIndexGet(o, i), target)) return Value.boolVal(true);
+                if (value.sameValueZero(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0))) return Value.boolVal(true);
             }
             // Tail [max(k,dense_hi), ilen): named sparse indices checked
             // directly; the remaining indices are pure holes reading as
             // undefined, so a `target` of undefined matches if any such hole
             // exists (rather than iterating billions of them).
             const tail_lo = @max(k, dense_hi);
-            const sparse = try self.arrSparseIndices(o, tail_lo, ilen);
+            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), tail_lo, ilen);
             for (sparse) |idx| {
-                if (value.sameValueZero(try self.arrIndexGet(o, idx), target)) return Value.boolVal(true);
+                if (value.sameValueZero(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), idx), self.arrayMethodArgument(roots, args, 0))) return Value.boolVal(true);
             }
-            if (target.isUndefined() and (ilen - tail_lo) > sparse.len) return Value.boolVal(true);
+            if (self.arrayMethodArgument(roots, args, 0).isUndefined() and (ilen - tail_lo) > sparse.len) return Value.boolVal(true);
             return Value.boolVal(false);
         }
         if (eq(name, "join")) {
+            const roots = operand_roots.?;
             // The separator and each element coerce via ToString (which runs a
             // custom toString/valueOf), not raw formatting.
-            const sep = if (args.len > 0 and !args[0].isUndefined()) try self.toStringWtf8(args[0]) else ",";
+            const sep = if (args.len > 0 and !self.arrayMethodArgument(roots, args, 0).isUndefined())
+                try self.toStringValue(self.arrayMethodArgument(roots, args, 0))
+            else
+                Value.str(",");
+            const sep_root = try self.pushTempRoot(sep);
+            defer self.restoreTempRoots(sep_root);
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             // Walk the logical length: a hole reads as `undefined` (via [[Get]])
             // and — like `undefined`/`null` — renders as the empty string.
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
-                if (i != 0) try buf.appendSlice(self.arena, sep);
-                const el = try self.arrIndexGet(o, i);
-                switch (el.kind()) {
+                if (i != 0) try buf.appendSlice(self.arena, try self.tempRoot(sep_root, sep).asWtf8(self.arena));
+                const el = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
+                const element_root = try self.pushTempRoot(el);
+                defer self.restoreTempRoots(element_root);
+                switch (self.tempRoot(element_root, el).kind()) {
                     .undefined, .null => {},
-                    else => try buf.appendSlice(self.arena, try self.toStringWtf8(el)),
+                    else => {
+                        const string = try self.toStringValue(self.tempRoot(element_root, el));
+                        const string_root = try self.pushTempRoot(string);
+                        defer self.restoreTempRoots(string_root);
+                        try buf.appendSlice(self.arena, try self.tempRoot(string_root, string).asWtf8(self.arena));
+                    },
                 }
             }
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "toLocaleString")) {
+            const roots = operand_roots.?;
             // Like join(","), but each present element is rendered via
             // ToString(? Invoke(element, "toLocaleString", « locales, options »)).
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             var i: usize = 0;
             while (i < ilen) : (i += 1) {
                 if (i != 0) try buf.append(self.arena, ',');
-                const el = try self.arrIndexGet(o, i);
-                if (el.isUndefined() or el.isNull()) continue;
+                const el = try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i);
+                const element_root = try self.pushTempRoot(el);
+                defer self.restoreTempRoots(element_root);
+                if (self.tempRoot(element_root, el).isUndefined() or self.tempRoot(element_root, el).isNull()) continue;
                 const forwarded = [_]Value{
-                    if (args.len > 0) args[0] else Value.undef(),
-                    if (args.len > 1) args[1] else Value.undef(),
+                    self.arrayMethodArgument(roots, args, 0),
+                    self.arrayMethodArgument(roots, args, 1),
                 };
-                const r = try self.callMethod(el, "toLocaleString", &forwarded);
-                try buf.appendSlice(self.arena, try self.toStringWtf8(r));
+                const result = try self.callMethod(self.tempRoot(element_root, el), "toLocaleString", &forwarded);
+                const result_root = try self.pushTempRoot(result);
+                defer self.restoreTempRoots(result_root);
+                const string = try self.toStringValue(self.tempRoot(result_root, result));
+                const string_root = try self.pushTempRoot(string);
+                defer self.restoreTempRoots(string_root);
+                try buf.appendSlice(self.arena, try self.tempRoot(string_root, string).asWtf8(self.arena));
             }
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
@@ -18182,23 +18252,24 @@ pub const Interpreter = struct {
             return self.tempRoot(acc_root, acc);
         }
         if (eq(name, "at")) {
-            const n = try self.toNumberV(arg0(args));
+            const roots = operand_roots.?;
+            const n = try self.toNumberV(self.arrayMethodArgument(roots, args, 0));
             const fl = if (std.math.isNan(n)) 0 else @trunc(n);
             if (std.math.isInf(fl)) return Value.undef();
             const ilen_f: f64 = @floatFromInt(ilen);
             if (fl < -ilen_f or fl >= ilen_f) return Value.undef();
             const idx: i64 = if (fl < 0) @as(i64, @intCast(ilen)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
             if (idx < 0 or idx >= ilen) return Value.undef();
-            return try self.arrIndexGet(o, @intCast(idx)); // a hole reads as undefined
+            return try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), @intCast(idx)); // a hole reads as undefined
         }
         if (eq(name, "lastIndexOf")) {
-            const target = arg0(args);
+            const roots = operand_roots.?;
             if (ilen == 0) return Value.num(-1);
             // `fromIndex` (2nd arg): the highest index to search, default len-1.
             // Negative counts from the end; below 0 means no search.
             var start: usize = ilen - 1;
             if (args.len > 1) {
-                const n = try self.toNumberV(args[1]);
+                const n = try self.toNumberV(self.arrayMethodArgument(roots, args, 1));
                 const fl = if (std.math.isNan(n)) 0 else @trunc(n);
                 if (fl < 0) {
                     const s = @as(f64, @floatFromInt(ilen)) + fl;
@@ -18209,30 +18280,31 @@ pub const Interpreter = struct {
                     start = if (fl > flen_1) ilen - 1 else @intFromFloat(fl);
                 }
             }
-            if ((!o.is_array or self.arrayProtoMayAffectIndexedHas(o)) and ilen <= (1 << 22)) {
+            const live_receiver = self.tempRoot(roots, receiver).asObj();
+            if ((!live_receiver.is_array or self.arrayProtoMayAffectIndexedHas(live_receiver)) and ilen <= (1 << 22)) {
                 var i = start + 1;
                 while (i > 0) {
                     i -= 1;
-                    if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                    if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i) and value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0)))
                         return Value.num(@floatFromInt(i));
                 }
                 return Value.num(-1);
             }
-            const dense_hi = o.denseElementLimit(ilen);
+            const dense_hi = self.tempRoot(roots, receiver).asObj().denseElementLimit(ilen);
             // Sparse indices (above the dense store) are the highest, so search
             // them first, descending — the first match is the answer.
-            const sparse = try self.arrSparseIndices(o, dense_hi, start + 1);
+            const sparse = try self.arrSparseIndices(self.tempRoot(roots, receiver).asObj(), dense_hi, start + 1);
             var si = sparse.len;
             while (si > 0) {
                 si -= 1;
-                if (value.strictEquals(try self.arrIndexGet(o, sparse[si]), target))
+                if (value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), sparse[si]), self.arrayMethodArgument(roots, args, 0)))
                     return Value.num(@floatFromInt(sparse[si]));
             }
             // Dense scan descending; lastIndexOf skips holes.
             var i = @min(start + 1, dense_hi);
             while (i > 0) {
                 i -= 1;
-                if (try self.arrIndexPresent(o, i) and value.strictEquals(try self.arrIndexGet(o, i), target))
+                if (try self.arrIndexPresent(self.tempRoot(roots, receiver).asObj(), i) and value.strictEquals(try self.arrIndexGet(self.tempRoot(roots, receiver).asObj(), i), self.arrayMethodArgument(roots, args, 0)))
                     return Value.num(@floatFromInt(i));
             }
             return Value.num(-1);
@@ -18499,18 +18571,6 @@ pub const Interpreter = struct {
                     return if (want_index) Value.num(@floatFromInt(i)) else self.tempRoot(element_root, el);
             }
             return if (want_index) Value.num(-1) else Value.undef();
-        }
-        if (eq(name, "values")) return try self.makeCursorIteratorWithKind(Value.obj(o), 0);
-        if (eq(name, "keys")) return try self.makeCursorIteratorWithKind(Value.obj(o), 1);
-        if (eq(name, "entries")) return try self.makeCursorIteratorWithKind(Value.obj(o), 2);
-        if (eq(name, "toString")) {
-            // Array.prototype.toString does a dynamic Get(O, "join") and calls
-            // it when callable. Typed arrays share this function object, so this
-            // must reach %TypedArray%.prototype.join and its ValidateTypedArray.
-            const recv = Value.obj(o);
-            const join = try self.getProperty(recv, "join");
-            if (join.isCallable()) return try self.callValueWithThis(join, &.{}, recv);
-            return try objectProtoToStringFn(@ptrCast(self), recv, &.{});
         }
         return null;
     }

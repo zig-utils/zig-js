@@ -28609,6 +28609,33 @@ test "array sorting methods retain operands and buffers while moving" {
     }
 }
 
+test "remaining array methods retain operands while moving" {
+    const cases = [_]struct { name: []const u8, setup: []const u8, expression: []const u8 }{
+        .{ .name = "push set", .setup = "var target={length:0},input=new Proxy(target,{set(t,k,v,r){if(k==='0')proxyMovingLoop(20000);return Reflect.set(t,k,v,r);}}),later={held:proxySubject};", .expression = "Array.prototype.push.call(input,proxySubject,later)===2&&target[0]===proxySubject&&target[1]===later&&later.held===proxySubject" },
+        .{ .name = "pop get", .setup = "var input=[proxySubject];Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return proxySubject;},configurable:true});", .expression = "(function(){var out=input.pop();return out===proxySubject&&input.length===0;})()" },
+        .{ .name = "shift get", .setup = "var input=[proxySubject,7];Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return proxySubject;},set(v){Object.defineProperty(input,'0',{value:v,writable:true,configurable:true});},configurable:true});", .expression = "(function(){var out=input.shift();return out===proxySubject&&input.length===1&&input[0]===7;})()" },
+        .{ .name = "unshift get", .setup = "var input=[proxySubject],insert={held:proxySubject};Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return proxySubject;},set(v){Object.defineProperty(input,'0',{value:v,writable:true,configurable:true});},configurable:true});", .expression = "input.unshift(insert)===2&&input[0]===insert&&input[1]===proxySubject&&insert.held===proxySubject" },
+        .{ .name = "indexOf coercion", .setup = "var input=[proxySubject],from={valueOf(){proxyMovingLoop(20000);return 0;}};", .expression = "input.indexOf(proxySubject,from)===0" },
+        .{ .name = "includes coercion", .setup = "var input=[proxySubject],from={valueOf(){proxyMovingLoop(20000);return 0;}};", .expression = "input.includes(proxySubject,from)" },
+        .{ .name = "at coercion", .setup = "var input=[proxySubject],index={valueOf(){proxyMovingLoop(20000);return 0;}};", .expression = "input.at(index)===proxySubject" },
+        .{ .name = "lastIndexOf coercion", .setup = "var input=[proxySubject],from={valueOf(){proxyMovingLoop(20000);return 0;}};", .expression = "input.lastIndexOf(proxySubject,from)===0" },
+        .{ .name = "join get/separator", .setup = "var sep={toString(){return '-';}},input=[0,'b'];Object.defineProperty(input,'0',{get(){proxyMovingLoop(20000);return 'a';}});", .expression = "input.join(sep)==='a-b'&&proxySubject.marker===37" },
+        .{ .name = "toLocaleString result", .setup = "var locales={held:proxySubject},options={held:proxySubject},input=[{toLocaleString(l,o){if(l!==locales||o!==options)throw new Error('forwarding');return {toString(){proxyMovingLoop(20000);return 'ok';}};}}];", .expression = "input.toLocaleString(locales,options)==='ok'&&locales.held===proxySubject&&options.held===proxySubject" },
+        .{ .name = "toString join getter", .setup = "var input=[proxySubject];Object.defineProperty(input,'join',{get(){proxyMovingLoop(20000);return function(){return this===input&&this[0]===proxySubject?'ok':'bad';}}});", .expression = "input.toString()==='ok'" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving remaining array method {s}\n", .{case.name});
+        try expectProxyMetadataMoving(case.setup, case.expression);
+    }
+}
+
+test "array iterator creation and toString do not read length eagerly" {
+    try expectEvalStr(
+        "0|ok|0|function",
+        "var reads=0,input={get length(){reads++;throw new Error('eager length');},join(){return 'ok';}};var iterator=Array.prototype.values.call(input);reads+'|'+Array.prototype.toString.call(input)+'|'+reads+'|'+typeof iterator.next",
+    );
+}
+
 test "realm array intrinsics isolate shared no-GIL construction" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
