@@ -29100,6 +29100,30 @@ test "literal function metadata preserves shared methods without the GIL" {
     }
 }
 
+test "a var initializer that deletes its own eval binding re-creates it" {
+    // 9.1.1.1.5 SetMutableBinding step 1: the Reference was resolved to the
+    // declarative record before the initializer ran, and a sloppy direct
+    // eval's var is deletable, so `var x = delete x` deletes the binding and
+    // then writes it back as a fresh mutable, deletable one instead of
+    // throwing. Strict code keeps the ReferenceError.
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "sloppy_eval_var_delete_self", .source = "(function(){ eval('var x = delete x'); return x === true; })()" },
+            .{ .name = "sloppy_eval_var_delete_self_comma", .source = "(function(){ eval('var x = (delete x, 5)'); return x === 5; })()" },
+            .{ .name = "recreated_binding_is_deletable", .source = "(function(){ eval('var x = delete x'); return eval('delete x') && typeof x === 'undefined'; })()" },
+        }) |case| {
+            errdefer std.debug.print("eval var delete {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+        }
+    }
+}
+
 test "a sealed object whose properties are all accessors is frozen" {
     // TestIntegrityLevel only consults [[Writable]] on data descriptors.
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });

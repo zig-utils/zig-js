@@ -15468,7 +15468,17 @@ pub const Interpreter = struct {
                         if (self.strict) return self.throwError("TypeError", "Attempted to assign to readonly property.");
                         return;
                     },
-                    .missing => return self.throwNotDefined(name),
+                    // SetMutableBinding on a declarative record that no longer
+                    // holds the binding (its own initializer deleted it —
+                    // `eval("var x = delete x")`, a sloppy eval var is deletable):
+                    // strict throws, sloppy re-creates it as a mutable, deletable
+                    // binding and initializes it (9.1.1.1.5 step 1).
+                    .missing => {
+                        if (self.strict) return self.throwNotDefined(name);
+                        try environment.put(name, self.tempRoot(value_root, v));
+                        try environment.markDeletable(name);
+                        return;
+                    },
                     .mutable => {},
                 }
 
