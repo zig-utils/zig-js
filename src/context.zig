@@ -29189,6 +29189,42 @@ test "await using loop heads dispose per iteration in both tiers" {
     }
 }
 
+test "a member loop target in a function body lowers natively in both tiers" {
+    // `for (o.p of …)` / `for (o[k] in …)` inside a function: the target's
+    // base and key are evaluated once per iteration, after the value is
+    // produced, and a failed put (throwing setter, frozen receiver in strict
+    // code) closes the iterator and propagates. The bytecode tier used to
+    // reject the whole function because `bind_pattern` needs an environment
+    // to write through and a slot-allocated body has none.
+    const prelude =
+        \\var L=[];
+        \\function it(n){return {[Symbol.iterator]:function(){var i=0;return {next:function(){L.push('next');return i<n?{done:false,value:i++}:{done:true};},return:function(){L.push('ret');return {};}};}};}
+    ;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
+            .{ .name = "member_of", .source = "(function(){ var o={}; for (o.a of it(2)) { L.push('b'+o.a); } L.push('end:'+o.a); })();", .expected = "next,b0,next,b1,next,end:1" },
+            .{ .name = "computed_member_order", .source = "(function(){ var o={}; function k(){L.push('key');return 'z';} function base(){L.push('base');return o;} for (base()[k()] of it(1)) { L.push('b'+o.z); } })();", .expected = "next,base,key,b0,next" },
+            .{ .name = "setter_throw_closes", .source = "(function(){ var o={set a(v){throw new RangeError('put'+v);}}; try { for (o.a of it(2)) { L.push('no'); } } catch (e) { L.push(e.constructor.name+':'+e.message); } })();", .expected = "next,ret,RangeError:put0" },
+            .{ .name = "strict_frozen_put_closes", .source = "(function(){ 'use strict'; var o=Object.freeze({a:0}); try { for (o.a of it(2)) { L.push('no'); } } catch (e) { L.push(e.constructor.name); } })();", .expected = "next,ret,TypeError" },
+            .{ .name = "super_member_of", .source = "class B { set p(v){ L.push('set'+v); } } class C extends B { m(){ for (super.p of it(2)) { L.push('b'); } } } new C().m();", .expected = "next,set0,b,next,set1,b,next" },
+            .{ .name = "computed_member_in", .source = "(function(){ var o={}; for (o['x'+1] in {p:1,q:2}) { L.push('in:'+o.x1); } })();", .expected = "in:p,in:q" },
+        }) |case| {
+            errdefer std.debug.print("member loop target {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            const source = try std.mem.concat(std.testing.allocator, u8, &.{ prelude, case.source, "L.join()" });
+            defer std.testing.allocator.free(source);
+            const result = try ctx.evaluate(source);
+            const text = try result.toString(ctx.arena());
+            try std.testing.expectEqualStrings(case.expected, text);
+        }
+    }
+}
+
 test "a var initializer that deletes its own eval binding re-creates it" {
     // 9.1.1.1.5 SetMutableBinding step 1: the Reference was resolved to the
     // declarative record before the initializer ran, and a sloppy direct

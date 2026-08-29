@@ -3850,7 +3850,12 @@ pub const Compiler = struct {
         }
         // Bind the already-read value to the loop target. Abrupt target
         // resolution/destructuring is inside the close-protected region.
-        const native_pattern = target.* == .arr_pattern or target.* == .obj_pattern;
+        // A member/super assignment target lowers natively too (the one-shot
+        // base/key Reference after the iteration value, then the put): a
+        // slot-allocated function body has no environment for `bind_pattern`
+        // to write through, so the fallback path used to reject it.
+        const native_pattern = target.* == .arr_pattern or target.* == .obj_pattern or
+            (decl_kind == null and (target.* == .member or target.* == .super_member));
         if (head_using) _ = try self.chunk.emit(.dup, 0);
         try self.compileLoopBind(decl_kind, target, environment_binding, native_pattern, .for_of);
         // `for (using x of …)`: the bound value is this iteration's resource,
