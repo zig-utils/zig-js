@@ -29100,6 +29100,20 @@ test "literal function metadata preserves shared methods without the GIL" {
     }
 }
 
+test "a sealed object whose properties are all accessors is frozen" {
+    // TestIntegrityLevel only consults [[Writable]] on data descriptors.
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    try std.testing.expect((try ctx.evaluate(
+        \\var o = { get foo() { return 17; } };
+        \\Object.seal(o);
+        \\var mixed = { get a() { return 1; }, b: 2 };
+        \\Object.seal(mixed);
+        \\Object.isSealed(o) && Object.isFrozen(o) && Object.isSealed(mixed) && !Object.isFrozen(mixed) &&
+        \\  (Object.freeze(mixed), Object.isFrozen(mixed))
+    )).toBoolean());
+}
+
 test "a direct native call installs the callee's closure environment" {
     // The optimizer's direct-call fast path skips building an activation. A
     // closure created inside a generator (or async body) keeps its captured

@@ -2437,7 +2437,10 @@ fn isLocked(self: *Interpreter, ov: Value, frozen: bool) HostError!bool {
         if (value.isPrivateKey(key)) continue;
         const attr = o.getAttr(key);
         if (attr.configurable) return false;
-        if (frozen and attr.writable) return false;
+        // TestIntegrityLevel step 9.b.ii: only a DATA descriptor's [[Writable]]
+        // matters; an accessor has none, so a sealed object whose properties are
+        // all accessors is frozen. The stored attribute defaults to writable.
+        if (frozen and attr.writable and o.getAccessor(key) == null) return false;
     }
     return true;
 }
