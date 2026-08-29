@@ -575,7 +575,12 @@ fn runEval(gpa: std.mem.Allocator, io: std.Io, path: []const u8, mode: cli.EvalM
     // returns more than a few kilobytes (a batched case table, say) used to
     // overflow `bufPrint` and fall back to a bare "OK", which reads as an empty
     // result rather than as truncation.
-    if (ctx.evaluate(src)) |v| {
+    const result = ctx.evaluate(src);
+    // `print` lands in the context's buffer (the corpus runner reads `$DONE`'s
+    // sentinel from it), and `evaluate` drains microtasks before returning, so
+    // flushing it here is what makes an async probe's `.then(print)` visible.
+    out.writeStreamingAll(io, ctx.print_buffer.items) catch {};
+    if (result) |v| {
         const s = v.toString(ctx.arena()) catch "?";
         out.writeStreamingAll(io, "OK ") catch {};
         out.writeStreamingAll(io, s) catch {};

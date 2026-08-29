@@ -29123,7 +29123,7 @@ test "using declarations dispose on every block exit in both tiers" {
             // records, disposed once when the loop completes — on break too.
             .{ .name = "for_head_break", .source = "(function(){ var i=0; for (using a=res(1); i<5; i++) { L.push('b'+i); if (i===1) break; } L.push('after'); })(); L.join()==='b0,b1,d1,after'" },
             .{ .name = "for_head_captured_copies", .source = "(function(){ var fs=[]; var i=0; for (using a=res(1); i<2; i++) { fs.push(function(){ return a; }); } L.push(fs[0]()===fs[1]()?'same':'distinct'); })(); L.join()==='d1,same'" },
-            .{ .name = "for_head_return", .source = "function f(){ for (using a=res(1), i=0; ; i++) { return 'r'; } } L.push(f()); L.join()==='d1,r'" },
+            .{ .name = "for_head_return", .source = "function f(){ var i=0; for (using a=res(1); ; i++) { return 'r'; } } L.push(f()); L.join()==='d1,r'" },
             .{ .name = "for_head_later_initializer_throws", .source = "function bad(){ throw 'init'; } function f(){ for (using a=res(1), b=bad(); ; ) {} } try{ f(); }catch(e){ L.push('c:'+e); } L.join()==='d1,c:init'" },
             // `for (using x of …)`: each iteration's resource is disposed before
             // the next `next()`, and before IteratorClose on an abrupt exit.
@@ -29143,6 +29143,48 @@ test "using declarations dispose on every block exit in both tiers" {
             try std.testing.expect((try ctx.evaluate(source)).toBoolean());
             if (mode == .required)
                 try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
+test "await using loop heads dispose per iteration in both tiers" {
+    // `for (await using x = …;;)` disposes its head resources once, after the
+    // loop, and `for (await using x of …)` / `for await (await using x of …)`
+    // dispose each iteration's resource before the next `next()` (and before
+    // IteratorClose on an abrupt exit) — awaiting every [Symbol.asyncDispose]
+    // result and folding a rejection into a SuppressedError. The bytecode
+    // tier previously rejected both heads. `evaluate` drains microtasks, so
+    // the async body has settled by the time the second evaluation reads `got`.
+    const prelude =
+        \\var L=[];var got='pending';
+        \\function res(n,rej){return {n:n,[Symbol.asyncDispose](){L.push('d'+n);if(rej)return Promise.reject(new Error('rej'+n));return Promise.resolve().then(function(){L.push('a'+n);});}};}
+        \\function sres(n){return {n:n,[Symbol.dispose](){L.push('s'+n);}};}
+        \\function settle(p){p.then(function(){got=L.join();},function(e){got='ERR '+e;});}
+    ;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8, expected: []const u8 }{
+            .{ .name = "for_head_break_lifo_awaited", .source = "settle((async function(){ for (await using a=res(1), b=res(2); ; ) { L.push('body'); break; } L.push('after'); })());", .expected = "body,d2,a2,d1,a1,after" },
+            .{ .name = "for_head_return", .source = "settle((async function(){ for (await using a=res(9), b=sres(10); ; ) { return; } })().then(function(){ L.push('r'); }));", .expected = "s10,d9,a9,r" },
+            .{ .name = "for_head_throw", .source = "settle((async function(){ try { for (await using x=res(13); ; ) { throw new Error('t'); } } catch (e) { L.push('c:'+e.message); } })());", .expected = "d13,a13,c:t" },
+            .{ .name = "for_of_head_continue_and_break", .source = "settle((async function(){ for (await using x of [res(3), res(4), res(5)]) { if (x.n===4) continue; L.push('b'+x.n); if (x.n===5) break; } L.push('after'); })());", .expected = "b3,d3,a3,d4,a4,b5,d5,a5,after" },
+            .{ .name = "for_of_head_suppressed_error", .source = "settle((async function(){ try { for (await using x of [res(6,true)]) { throw new Error('body'); } } catch (e) { L.push(e.constructor.name+':'+e.error.message+':'+e.suppressed.message); } })());", .expected = "d6,SuppressedError:rej6:body" },
+            .{ .name = "for_await_of_head_break_disposes_then_closes", .source = "var it={[Symbol.asyncIterator](){var i=0;return{next(){i++;return Promise.resolve({value:res(6+i),done:i>2});},return(){L.push('ret');return Promise.resolve({done:true});}};}}; settle((async function(){ for await (await using x of it) { L.push('b'+x.n); if (x.n===8) break; } L.push('after'); })());", .expected = "b7,d7,a7,b8,d8,a8,ret,after" },
+            .{ .name = "nested_heads", .source = "settle((async function(){ for (await using x of [res(11)]) { for (await using y=res(12); ; ) { break; } L.push('inner'); } })());", .expected = "d12,a12,inner,d11,a11" },
+            .{ .name = "labeled_continue_from_inner_loop", .source = "settle((async function(){ o: for (await using x of [res(14), res(15)]) { for (;;) { continue o; } } L.push('after'); })());", .expected = "d14,a14,d15,a15,after" },
+        }) |case| {
+            errdefer std.debug.print("await using loop head {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            const source = try std.mem.concat(std.testing.allocator, u8, &.{ prelude, case.source });
+            defer std.testing.allocator.free(source);
+            _ = try ctx.evaluate(source);
+            const result = try ctx.evaluate("got");
+            const text = try result.toString(ctx.arena());
+            try std.testing.expectEqualStrings(case.expected, text);
         }
     }
 }

@@ -1437,51 +1437,8 @@ fn stmtContainsDisposableDeclDeep(node: *const ast.Node) bool {
     };
 }
 
-/// An `await using` in a `for` initializer or a `for (await using x of …)`
-/// head: their disposal must `await` each resource, which the loop lowerings
-/// do not model yet. Synchronous `using` heads lower.
-fn stmtContainsLoopHeadDisposableDeep(node: *const ast.Node) bool {
-    return switch (node.*) {
-        .block, .decl_group, .program => |stmts| for (stmts) |s| {
-            if (stmtContainsLoopHeadDisposableDeep(s)) break true;
-        } else false,
-        .if_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.consequent) or
-            (if (s.alternate) |alt| stmtContainsLoopHeadDisposableDeep(alt) else false),
-        .while_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
-        .do_while_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
-        .for_stmt => |s| (if (s.init) |init| stmtHasAwaitUsingDecl(init) or stmtContainsLoopHeadDisposableDeep(init) else false) or
-            stmtContainsLoopHeadDisposableDeep(s.body),
-        .for_in => |s| s.dispose == 2 or
-            (if (s.var_init) |init| stmtContainsLoopHeadDisposableDeep(init) else false) or
-            stmtContainsLoopHeadDisposableDeep(s.body),
-        .switch_stmt => |s| blk: {
-            for (s.cases) |case| for (case.body) |st| if (stmtContainsLoopHeadDisposableDeep(st)) break :blk true;
-            break :blk false;
-        },
-        .try_stmt => |t| stmtContainsLoopHeadDisposableDeep(t.block) or
-            (if (t.catch_block) |c| stmtContainsLoopHeadDisposableDeep(c) else false) or
-            (if (t.finally_block) |f| stmtContainsLoopHeadDisposableDeep(f) else false),
-        .labeled_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
-        .with_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
-        else => false,
-    };
-}
-
 fn stmtListContainsDisposableDeclDeep(stmts: []*Node) bool {
     for (stmts) |s| if (stmtContainsDisposableDeclDeep(s)) return true;
-    return false;
-}
-
-fn stmtHasAwaitUsingDecl(node: *const ast.Node) bool {
-    return switch (node.*) {
-        .var_decl => |d| d.dispose == 2,
-        .decl_group => |stmts| stmtListHasAwaitUsingDecl(stmts),
-        else => false,
-    };
-}
-
-fn stmtListHasAwaitUsingDecl(stmts: []*Node) bool {
-    for (stmts) |s| if (stmtHasAwaitUsingDecl(s)) return true;
     return false;
 }
 
@@ -2009,6 +1966,8 @@ pub const Compiler = struct {
     /// inventories persist the tag names across compiler implementation changes.
     pub const PlainFunctionRejection = enum {
         generator_or_async,
+        // Retired: every `using` / `await using` shape now lowers. Kept so the
+        // persisted attribution key stays stable (it reports 0).
         function_scope_disposal,
         block_nested_function_declaration,
         lexical_shadowing,
@@ -2134,12 +2093,6 @@ pub const Compiler = struct {
     fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, hash_state: *CompileHashState, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
-        // A `using` in a statement list — the function body included — lowers
-        // as a block-owned resource scope with finally-style disposal. Only a
-        // `using` in a `for`/`for-of` HEAD (per-iteration disposal) still keeps
-        // the body on the tree walker.
-        if (!fnode.is_expr_body and stmtContainsLoopHeadDisposableDeep(fnode.body))
-            return rejectPlainFunction(rejection, .function_scope_disposal);
         // Shadowed lexicals receive distinct slots below. Conservatively check
         // every lexical in such a function until the TDZ scan itself is keyed by
         // binding identity rather than spelling.
@@ -3300,9 +3253,8 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.throw_op, 0);
             },
             .for_in => |f| {
-                if (f.is_await and !self.in_async) return error.Unsupported;
-                if (f.dispose == 2) return error.Unsupported; // `for (await using x of …)` → tree-walk
-                try self.compileForOf(f.decl_kind, f.target, f.var_init, f.iterable, f.body, !f.is_of, f.is_await, f.dispose != 0);
+                if ((f.is_await or f.dispose == 2) and !self.in_async) return error.Unsupported;
+                try self.compileForOf(f.decl_kind, f.target, f.var_init, f.iterable, f.body, !f.is_of, f.is_await, f.dispose);
             },
             .try_stmt => |t| try self.compileTry(t),
             .labeled_stmt => |l| {
@@ -3605,9 +3557,12 @@ pub const Compiler = struct {
         // once, after ForBodyEvaluation, with the loop's completion — a finally
         // around the whole statement. The per-iteration copies replace the
         // lexical head record, so the resource is registered one record down,
-        // in a scope entered before the head. `await using` heads stay on the
-        // tree walker.
-        if (init_node) |ini| if (stmtHasAwaitUsingDecl(ini)) return error.Unsupported;
+        // in a scope entered before the head. An `await using` head disposes
+        // through the awaiting region instead; it only parses in an async body,
+        // so a non-async activation seeing one is a context the compiler does
+        // not model and tree-walks.
+        const head_await_using_count = if (init_node) |ini| stmtAwaitUsingDeclCount(ini) else 0;
+        if (head_await_using_count != 0 and !self.in_async) return error.Unsupported;
         const head_using = if (init_node) |ini| stmtHasDisposableDecl(ini) else false;
         const none = std.math.maxInt(u32);
         var head_dispose_handler: ?usize = null;
@@ -3678,7 +3633,11 @@ pub const Compiler = struct {
             try self.emitPopHandler();
             _ = try self.chunk.emit(.push_completion, 0);
             self.chunk.code.items[handler].b = @intCast(self.chunk.here());
-            _ = try self.chunk.emit(.dispose_scope_completion, 0);
+            if (head_await_using_count == 0) {
+                _ = try self.chunk.emit(.dispose_scope_completion, 0);
+            } else {
+                try self.emitAsyncDisposeRegion(head_await_using_count);
+            }
             _ = try self.chunk.emit(.end_finally, 0);
             try self.emitExitEnvironment();
         }
@@ -3768,7 +3727,9 @@ pub const Compiler = struct {
         _ = try self.chunk.emitAB(.bind_pattern, pi, mode);
     }
 
-    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool, head_using: bool) CompileError!void {
+    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool, head_dispose: u8) CompileError!void {
+        // 0: plain head; 1: `for (using x of …)`; 2: `for (await using x of …)`.
+        const head_using = head_dispose != 0;
         // A captured simple lexical target uses a fresh declarative Environment
         // Record for every iterator result. That is the ForIn/OfBodyEvaluation
         // binding cell the closure captures; an uncaptured identifier stays in a
@@ -3900,7 +3861,7 @@ pub const Compiler = struct {
         // disposing, and it is popped before the close handler runs.
         var iteration_dispose_handler: ?usize = null;
         if (head_using) {
-            _ = try self.chunk.emitAB(.register_disposable, 0, 0);
+            _ = try self.chunk.emitAB(.register_disposable, if (head_dispose == 2) 1 else 0, 0);
             iteration_dispose_handler = try self.emitPushHandler(.push_handler, none, none);
             self.finally_depth += 1;
         }
@@ -3910,7 +3871,12 @@ pub const Compiler = struct {
             try self.emitPopHandler();
             _ = try self.chunk.emit(.push_completion, 0);
             self.chunk.code.items[handler].b = @intCast(self.chunk.here());
-            _ = try self.chunk.emit(.dispose_scope_completion, 0);
+            // One resource per iteration; an `await using` head awaits it.
+            if (head_dispose == 2) {
+                try self.emitAsyncDisposeRegion(1);
+            } else {
+                _ = try self.chunk.emit(.dispose_scope_completion, 0);
+            }
             _ = try self.chunk.emit(.end_finally, 0);
         }
         const continue_target = self.chunk.here();
@@ -6208,7 +6174,6 @@ pub const Compiler = struct {
         // A `using` in the body's statement lists lowers as a resource scope
         // (see the `.block` arm); only a `for`/`for-of` HEAD `using` still keeps
         // a frame-mode body on the tree walker, as in compilePlainFunctionInner.
-        if (!fnode.is_generator and !fnode.is_async and stmtContainsLoopHeadDisposableDeep(fnode.body)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
@@ -7316,7 +7281,6 @@ test "compiler reports stable plain-function admission reasons" {
         expected: Compiler.PlainFunctionRejection,
     }{
         .{ .source = "function* f(){}", .expected = .generator_or_async },
-        .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
         .{ .source = "function f(value = function(){ using resource = source; }){}", .expected = .parameter_prologue },
     };
 
