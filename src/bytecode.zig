@@ -407,6 +407,7 @@ pub const Op = enum(u8) {
     enter_block, // push a declarative Environment; a: block_environment_* flags
     exit_block, // pop that Environment; a: block_environment_class restores class strictness
     dispose_scope, // DisposeResources for the current Environment Record
+    dispose_scope_completion, // DisposeResources for the current scope with the [value, kind] completion on the stack: a throw completion is threaded as the pending error, and a disposal error replaces the record with a throw completion
     enter_with, // pop object; push an object Environment Record (with_object = ToObject(it)) onto vm.env
     exit_with, // pop the innermost with/block environment off vm.env (restore its parent)
     make_regex, // operands a: pattern name index, b: flags name index; push a fresh RegExp object

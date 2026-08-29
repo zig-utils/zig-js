@@ -1437,6 +1437,35 @@ fn stmtContainsDisposableDeclDeep(node: *const ast.Node) bool {
     };
 }
 
+/// A `using` in a `for` initializer or a `for (using x of …)` head: the
+/// per-iteration disposal those need is not lowered yet.
+fn stmtContainsLoopHeadDisposableDeep(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .block, .decl_group, .program => |stmts| for (stmts) |s| {
+            if (stmtContainsLoopHeadDisposableDeep(s)) break true;
+        } else false,
+        .if_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.consequent) or
+            (if (s.alternate) |alt| stmtContainsLoopHeadDisposableDeep(alt) else false),
+        .while_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
+        .do_while_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
+        .for_stmt => |s| (if (s.init) |init| stmtHasDisposableDecl(init) or stmtContainsLoopHeadDisposableDeep(init) else false) or
+            stmtContainsLoopHeadDisposableDeep(s.body),
+        .for_in => |s| s.dispose != 0 or
+            (if (s.var_init) |init| stmtContainsLoopHeadDisposableDeep(init) else false) or
+            stmtContainsLoopHeadDisposableDeep(s.body),
+        .switch_stmt => |s| blk: {
+            for (s.cases) |case| for (case.body) |st| if (stmtContainsLoopHeadDisposableDeep(st)) break :blk true;
+            break :blk false;
+        },
+        .try_stmt => |t| stmtContainsLoopHeadDisposableDeep(t.block) or
+            (if (t.catch_block) |c| stmtContainsLoopHeadDisposableDeep(c) else false) or
+            (if (t.finally_block) |f| stmtContainsLoopHeadDisposableDeep(f) else false),
+        .labeled_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
+        .with_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
+        else => false,
+    };
+}
+
 fn stmtListContainsDisposableDeclDeep(stmts: []*Node) bool {
     for (stmts) |s| if (stmtContainsDisposableDeclDeep(s)) return true;
     return false;
@@ -2097,10 +2126,11 @@ pub const Compiler = struct {
     fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, hash_state: *CompileHashState, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async)
             return rejectPlainFunction(rejection, .generator_or_async);
-        // Function-scope `using` resources are disposed at function exit. The
-        // frame-mode VM only emits block-level DisposeResources today, so keep
-        // these bodies on the tree-walker until function-exit disposal is lowered.
-        if (!fnode.is_expr_body and stmtContainsDisposableDeclDeep(fnode.body))
+        // A `using` in a statement list — the function body included — lowers
+        // as a block-owned resource scope with finally-style disposal. Only a
+        // `using` in a `for`/`for-of` HEAD (per-iteration disposal) still keeps
+        // the body on the tree walker.
+        if (!fnode.is_expr_body and stmtContainsLoopHeadDisposableDeep(fnode.body))
             return rejectPlainFunction(rejection, .function_scope_disposal);
         // Shadowed lexicals receive distinct slots below. Conservatively check
         // every lexical in such a function until the TDZ scan itself is keyed by
@@ -3180,12 +3210,17 @@ pub const Compiler = struct {
                     else
                         try self.predeclareLexicalNode(statement);
                 }
-                const disposable_scope = self.scope == null and stmtListHasDisposableDecl(stmts);
+                // A block with `using` declarations owns a declarative Environment
+                // Record for its resources in both env mode and frame mode (a
+                // frame-mode block's own lexicals stay in slots; the record only
+                // carries what `register_disposable` appends).
+                const disposable_scope = stmtListHasDisposableDecl(stmts);
+                const await_using_count = if (disposable_scope and self.in_async) stmtListAwaitUsingDeclCount(stmts) else 0;
                 if (disposable_scope) {
-                    // This first VM block-disposal slice handles normal completion.
-                    // Abrupt exits stay on the tree-walker until they can unwind
-                    // block resources like `finally`.
-                    if (stmtListCanEscapeAbruptly(stmts)) return error.Unsupported;
+                    // Async disposal is still lowered for normal completion only;
+                    // an abrupt exit that must `await` each [Symbol.asyncDispose]
+                    // stays on the tree walker.
+                    if (await_using_count != 0 and stmtListCanEscapeAbruptly(stmts)) return error.Unsupported;
                     try self.emitEnterEnvironment();
                 }
                 if (captured_environment and !disposable_scope) {
@@ -3195,13 +3230,32 @@ pub const Compiler = struct {
                     try self.emitEnvironmentLexicals(stmts);
                 } else if (captured_environment) try self.emitDeclareRepeatedBodyList(stmts, repeated_captures.?);
                 try self.emitLexicalInitializersForList(stmts);
+                // DisposeResources runs on EVERY exit of the block — normal,
+                // break/continue/return, or throw — with the block's completion
+                // threaded through so a disposal error can wrap it in a
+                // SuppressedError. That is a finally: the body runs under a
+                // handler whose finally region disposes and then re-dispatches
+                // the pending completion, and `finally_depth` is raised so
+                // break/continue/return inside lower as `abrupt_*` and unwind
+                // through it.
+                const none = std.math.maxInt(u32);
+                var dispose_handler: ?usize = null;
+                if (disposable_scope and await_using_count == 0) {
+                    dispose_handler = try self.emitPushHandler(.push_handler, none, none);
+                    self.finally_depth += 1;
+                }
                 try self.compileStmtList(stmts);
+                if (dispose_handler) |handler| {
+                    self.finally_depth -= 1;
+                    try self.emitPopHandler();
+                    _ = try self.chunk.emit(.push_completion, 0);
+                    self.chunk.code.items[handler].b = @intCast(self.chunk.here());
+                    _ = try self.chunk.emit(.dispose_scope_completion, 0);
+                    _ = try self.chunk.emit(.end_finally, 0);
+                }
                 if (captured_environment and !disposable_scope) try self.emitExitEnvironment();
                 if (disposable_scope) {
-                    const await_using_count = if (self.in_async) stmtListAwaitUsingDeclCount(stmts) else 0;
-                    if (await_using_count == 0) {
-                        _ = try self.chunk.emit(.dispose_scope, 0);
-                    } else {
+                    if (await_using_count != 0) {
                         var i: usize = 0;
                         while (i < await_using_count) : (i += 1) {
                             _ = try self.chunk.emit(.dispose_scope, 1);
@@ -6119,7 +6173,10 @@ pub const Compiler = struct {
             );
             break :blk plan;
         } else null;
-        if (!fnode.is_generator and !fnode.is_async and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
+        // A `using` in the body's statement lists lowers as a resource scope
+        // (see the `.block` arm); only a `for`/`for-of` HEAD `using` still keeps
+        // a frame-mode body on the tree walker, as in compilePlainFunctionInner.
+        if (!fnode.is_generator and !fnode.is_async and stmtContainsLoopHeadDisposableDeep(fnode.body)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.

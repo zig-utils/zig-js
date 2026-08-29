@@ -8782,6 +8782,22 @@ fn runChunk(
                     }
                 }
             },
+            .dispose_scope_completion => {
+                // The block's completion sits on the stack as [value, kind]. A
+                // throw completion's value is the pending error DisposeResources
+                // threads through (a disposal error wraps it in a SuppressedError);
+                // any other completion is replaced by a throw only when disposal
+                // itself throws. `end_finally` then re-dispatches the record.
+                const kind_index = stack.items.len - 1;
+                const kind: Completion = @fromBackingInt(@intCast(@as(u8, @intFromFloat(stack.items[kind_index].asNum()))));
+                const body_err: ?Value = if (kind == .throw) stack.items[kind_index - 1] else null;
+                if (vm.env.disposables.items.len > 0 or vm.env.dispose_pending != null or body_err != null) {
+                    if (try vm.disposeScope(vm.env, body_err)) |err| {
+                        stack.items[kind_index - 1] = err;
+                        stack.items[kind_index] = Value.num(@floatFromInt(@backingInt(Completion.throw)));
+                    }
+                }
+            },
             .enter_with => {
                 // `with (obj)`: push an object Environment Record. ToObject(obj)
                 // boxes a primitive; null/undefined throw (only those, not every

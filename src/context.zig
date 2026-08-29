@@ -29100,6 +29100,42 @@ test "literal function metadata preserves shared methods without the GIL" {
     }
 }
 
+test "using declarations dispose on every block exit in both tiers" {
+    // DisposeResources is a finally: it runs for normal completion, break,
+    // continue, return and throw, in reverse declaration order, threading a
+    // throw completion so a disposal error becomes a SuppressedError. The
+    // bytecode tier previously lowered only normal completion and rejected
+    // any function whose body declared `using` at all.
+    const prelude = "var L=[];function res(n){return {[Symbol.dispose](){L.push('d'+n);}};}";
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "normal_lifo", .source = "(function(){ { using a=res(1); using b=res(2); L.push('body'); } L.push('after'); })(); L.join()==='body,d2,d1,after'" },
+            .{ .name = "continue_and_break", .source = "(function(){ for(var i=0;i<2;i++){ using a=res(i); L.push('b'+i); if(i==0) continue; break; } L.push('after'); })(); L.join()==='b0,d0,b1,d1,after'" },
+            .{ .name = "return", .source = "function f(){ { using a=res(1); L.push('body'); return 'r'; } } L.push(f()); L.join()==='body,d1,r'" },
+            .{ .name = "throw", .source = "function f(){ { using a=res(1); throw 'boom'; } } try{ f(); }catch(e){ L.push('c:'+e); } L.join()==='d1,c:boom'" },
+            .{ .name = "function_body_return", .source = "function f(){ using a=res(1); L.push('body'); return 'r'; } L.push(f()); L.join()==='body,d1,r'" },
+            .{ .name = "labeled_break_two_scopes", .source = "(function(){ o: { using a=res(1); { using b=res(2); break o; } L.push('no'); } L.push('after'); })(); L.join()==='d2,d1,after'" },
+            .{ .name = "disposal_error_replaces_normal", .source = "var r={[Symbol.dispose](){throw 'dz';}};function f(){ using a=r; return 'r'; } var got='none';try{ f(); }catch(e){ got=e; } got==='dz'" },
+            .{ .name = "suppressed_error", .source = "var r={[Symbol.dispose](){throw 'dz';}};function f(){ using a=r; throw 'body'; } var got='none';try{ f(); }catch(e){ got=e.constructor.name+':'+e.error+':'+e.suppressed; } got==='SuppressedError:dz:body'" },
+            .{ .name = "generator_return_disposes", .source = "function* g(){ { using a=res(1); yield 1; L.push('no'); } } var it=g(); it.next(); it.return(5); L.join()==='d1'" },
+            .{ .name = "null_and_bad_resource", .source = "var ok=(function(){ using a=null; using b=undefined; return true; })(); var bad=(function(){ try{ using c={}; return false; }catch(e){ return e instanceof TypeError; } })(); ok&&bad" },
+        }) |case| {
+            errdefer std.debug.print("using disposal {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            const source = try std.mem.concat(std.testing.allocator, u8, &.{ prelude, case.source });
+            defer std.testing.allocator.free(source);
+            try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
 test "a var initializer that deletes its own eval binding re-creates it" {
     // 9.1.1.1.5 SetMutableBinding step 1: the Reference was resolved to the
     // declarative record before the initializer ran, and a sloppy direct

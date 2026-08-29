@@ -584,6 +584,8 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         // Not in `supports`: a chunk that reaches this Annex-B throw stays off
         // the optimizer. Listed here only so the depth walk never trips.
         .throw_not_a_reference => .{ .required = 0, .removed = 0, .added = 0 },
+        // Reads the [value, kind] completion in place; likewise not in `supports`.
+        .dispose_scope_completion => .{ .required = 2, .removed = 0, .added = 0 },
         .load_binding_ref => .{
             .required = 0,
             .removed = 0,
