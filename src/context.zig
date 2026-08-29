@@ -29100,6 +29100,46 @@ test "literal function metadata preserves shared methods without the GIL" {
     }
 }
 
+test "break and continue unwind exactly the handlers they exit" {
+    // A `break`/`continue` that crosses a `finally` pops the handlers pushed
+    // since its target was entered — running each finally among them — and no
+    // more. Unbounded unwinding entered the target loop's own for-in/for-of
+    // close handler (a for-in's close consumes its three-word operand-stack
+    // state, which then crashed `enum_next`), popped enclosing catch handlers,
+    // and ran a try/finally that lexically encloses the loop once per iteration.
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "forin_finally_continue", .source = "(function(){var x,i=0;for(x in [1,2,3]){try{i++;}finally{continue;}}return i===3;})()" },
+            .{ .name = "forin_try_continue", .source = "(function(){var x,i=0,f=0;for(x in [1,2,3]){try{i++;continue;}finally{f++;}}return i===3&&f===3;})()" },
+            .{ .name = "forin_catch_break_finally_continue", .source = "(function(){var x,c=0,f=0;for(x in [1,2,3]){try{c++;break;}catch(e){}finally{f++;continue;}c=-1;}return c===3&&f===3;})()" },
+            .{ .name = "outer_finally_continue", .source = "(function(){var L=[];try{for(var n=0;n<2;n++){try{}finally{L.push('f'+n);continue;}}L.push('a');}finally{L.push('o');}return L.join()==='f0,f1,a,o';})()" },
+            .{ .name = "outer_finally_break", .source = "(function(){var L=[];try{for(var n=0;n<2;n++){try{}finally{L.push('f'+n);break;}}L.push('a');}finally{L.push('o');}return L.join()==='f0,a,o';})()" },
+            .{ .name = "outer_finally_try_continue", .source = "(function(){var L=[];try{for(var n=0;n<2;n++){try{L.push('t'+n);continue;}finally{L.push('f'+n);}}L.push('a');}finally{L.push('o');}return L.join()==='t0,f0,t1,f1,a,o';})()" },
+            .{ .name = "outer_finally_while_continue", .source = "(function(){var L=[],n=0;try{while(n<2){n++;try{}finally{L.push('f'+n);continue;}}L.push('a');}finally{L.push('o');}return L.join()==='f1,f2,a,o';})()" },
+            .{ .name = "switch_break_in_finally", .source = "(function(){var L=[];try{switch(1){case 1:try{}finally{L.push('f');break;}L.push('n');}L.push('a');}finally{L.push('o');}return L.join()==='f,a,o';})()" },
+            .{ .name = "labeled_block_break_in_finally", .source = "(function(){var L=[];try{b:{try{}finally{L.push('f');break b;}L.push('n');}L.push('a');}finally{L.push('o');}return L.join()==='f,a,o';})()" },
+            .{ .name = "nested_active_finallys", .source = "(function(){var L=[];for(var n=0;n<2;n++){try{}finally{try{}finally{L.push('i'+n);continue;}}}return L.join()==='i0,i1';})()" },
+            .{ .name = "forof_continue_keeps_outer_catch", .source = "(function(){var r='none';try{for(var x of [1,2]){try{}finally{continue;}}throw 'z';}catch(e){r=e;}return r==='z';})()" },
+            .{ .name = "forof_continue_keeps_close_handler", .source = "(function(){var rc=0,r='';var o={[Symbol.iterator](){var n=0;return{next(){return n<3?{value:n++,done:false}:{done:true};},return(){rc++;return{done:true};}};}};try{for(var x of o){try{}finally{if(x===0)continue;}if(x===1)throw 'boom';}}catch(e){r=e;}return r==='boom'&&rc===1;})()" },
+            .{ .name = "forof_generator_continue_from_finally", .source = "(function(){function* g(){yield 1;yield 1;}var i=0;for(var x of g()){try{throw 1;}catch(e){}finally{i++;continue;}}return i===2;})()" },
+            .{ .name = "continue_pops_catch_handler", .source = "(function(){var r='none';try{for(var n=0;n<2;n++){try{if(n===0)continue;}catch(e){r='stale';}if(n===1)throw 'boom';}}catch(e){r=e;}return r==='boom';})()" },
+            .{ .name = "labeled_break_through_catch_and_finally", .source = "(function(){var L=[],r='none';try{o:for(var a in {p:1,q:2}){try{try{break o;}catch(e){L.push('c');}}finally{L.push('f');}}throw 'z';}catch(e){r=e;}return L.join()==='f'&&r==='z';})()" },
+            .{ .name = "break_and_return_still_close", .source = "(function(){var rc=0;var o={[Symbol.iterator](){var n=0;return{next(){return n<9?{value:n++,done:false}:{done:true};},return(){rc++;return{done:true};}};}};L:for(var x of o){try{break L;}finally{}}(function(){for(var y of o){try{return 1;}finally{}}})();return rc===2;})()" },
+        }) |case| {
+            errdefer std.debug.print("abrupt jump {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+            if (mode == .required)
+                try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+        }
+    }
+}
+
 test "internal descriptors preserve specification record boundaries" {
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         for ([_]struct { name: []const u8, source: []const u8 }{

@@ -419,6 +419,48 @@ fn unwindToFinally(vm: *Interpreter, gen: ?*Generator, exec: *Exec, cval: Value,
     return null;
 }
 
+/// The bounded form for `break`/`continue`. A jump out of a loop exits exactly
+/// the handlers pushed since the loop was entered — the compiler counts them —
+/// and must not touch the loop's own for-in/for-of close handler or a
+/// try/finally that lexically encloses the loop. Pops `remaining` handlers,
+/// running the finally of each that has one; the count still to pop rides in
+/// the completion value's high bits (see `abruptJumpTarget`) so `end_finally`
+/// can resume the same bounded unwind. Returns the finally's PC, or null once
+/// every counted handler is gone.
+fn unwindHandlersBounded(vm: *Interpreter, gen: ?*Generator, exec: *Exec, target_pc: u32, kind: Completion, remaining_in: u32) !?u32 {
+    const stack_alloc = generatorStackAllocator(vm, gen);
+    var remaining = remaining_in;
+    while (remaining > 0 and exec.handlers.items.len > 0) {
+        const h = exec.handlers.pop().?;
+        remaining -= 1;
+        restoreHandlerEnvironment(vm, gen, exec, h);
+        if (h.finally_pc != Handler.none) {
+            exec.stack.shrinkRetainingCapacity(h.stack_depth);
+            try exec.stack.append(stack_alloc, abruptJumpCompletionValue(target_pc, remaining));
+            try exec.stack.append(stack_alloc, Value.num(@floatFromInt(@backingInt(kind))));
+            return h.finally_pc;
+        }
+    }
+    return null;
+}
+
+/// A break/continue completion value packs the jump target with the number of
+/// handlers the unwind still has to pop: `target + remaining * 2^32`, exact in
+/// an f64 for any chunk. `end_finally` decodes it with `abruptJumpTarget`.
+const abrupt_jump_remaining_scale: f64 = 4294967296.0;
+
+fn abruptJumpCompletionValue(target_pc: u32, remaining: u32) Value {
+    return Value.num(@as(f64, @floatFromInt(target_pc)) + @as(f64, @floatFromInt(remaining)) * abrupt_jump_remaining_scale);
+}
+
+fn abruptJumpTarget(cval: Value) struct { pc: u32, remaining: u32 } {
+    const raw = cval.asNum();
+    return .{
+        .pc = @intFromFloat(@mod(raw, abrupt_jump_remaining_scale)),
+        .remaining = @intFromFloat(@floor(raw / abrupt_jump_remaining_scale)),
+    };
+}
+
 /// A suspended `function*` activation: its compiled body, persistent execution
 /// state, and the `Environment` its body resolves names against (a child of the
 /// closure, holding the params/locals across yields). Driven by `genNext`.
@@ -9281,21 +9323,18 @@ fn runChunk(
                 }
             },
             .abrupt_break, .abrupt_continue => {
-                // A break/continue that crosses a `finally`: run the enclosing
-                // finally(s) first, then jump to the (patched) loop target. The
-                // target PC rides through as the completion value.
+                // A break/continue that exits at least one handler: pop exactly
+                // the handlers pushed since the target was entered (operand b's
+                // high half), running each finally among them first, then jump to
+                // the (patched) target. Any completion record of a finally body
+                // the jump is issued from has already been discarded by the
+                // compiler, so the operand stack is the target's on arrival.
                 const kind: Completion = if (inst.op == .abrupt_break) .break_ else .continue_;
-                const target: Value = Value.num(@floatFromInt(inst.a));
-                exec.abrupt_environment_depth = inst.b;
-                if (try unwindToFinally(vm, gen, exec, target, kind)) |fpc| {
+                const to_pop: u32 = inst.b >> 16;
+                exec.abrupt_environment_depth = inst.b & 0xffff;
+                if (try unwindHandlersBounded(vm, gen, exec, inst.a, kind, to_pop)) |fpc| {
                     ip = fpc;
                 } else {
-                    // A break/continue *inside* a finally overrides that
-                    // finally's active completion. With no outer finally to
-                    // re-enter, discard the current [value, kind] record before
-                    // jumping to the loop/label target.
-                    if (stack.items.len >= 2 and looksLikeCompletionKind(stack.items[stack.items.len - 1]))
-                        stack.shrinkRetainingCapacity(stack.items.len - 2);
                     unwindEnvironmentToDepth(vm, gen, exec, exec.abrupt_environment_depth);
                     ip = inst.a;
                 }
@@ -9558,11 +9597,14 @@ fn runChunk(
                         }
                     },
                     .break_, .continue_ => {
-                        if (try unwindToFinally(vm, gen, exec, cval, kind)) |fpc|
+                        // Resume the bounded unwind: only the handlers the jump
+                        // still owes (packed into cval) may run their finally.
+                        const jump = abruptJumpTarget(cval);
+                        if (try unwindHandlersBounded(vm, gen, exec, jump.pc, kind, jump.remaining)) |fpc|
                             ip = fpc
                         else {
                             unwindEnvironmentToDepth(vm, gen, exec, exec.abrupt_environment_depth);
-                            ip = @intFromFloat(cval.asNum());
+                            ip = jump.pc;
                         }
                     },
                 }

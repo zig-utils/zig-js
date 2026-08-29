@@ -493,8 +493,8 @@ pub const Op = enum(u8) {
     pop_handler, // discard the topmost handler (on normal exit from a try block)
     push_completion, // operand a: completion kind (0 = normal); push [undefined, kind] for a finally block
     end_finally, // pop a completion [value, kind] left by a finally: rethrow (1) / return (2) / break (3) / continue (4) / fall-through (0)
-    abrupt_break, // operands a: break target PC, b: target environment depth; run enclosing finally(s) first
-    abrupt_continue, // operands a: continue target PC, b: target environment depth; run enclosing finally(s) first
+    abrupt_break, // operands a: break target PC, b: target environment depth (low 16) | handlers to pop (high 16); pops exactly those, running each finally among them, then jumps
+    abrupt_continue, // operands a: continue target PC, b: as abrupt_break
 
     halt, // end program; result is the accumulator
 };

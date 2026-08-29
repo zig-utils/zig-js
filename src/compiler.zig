@@ -141,10 +141,19 @@ const Loop = struct {
     /// Activation-local environment depth at the target. A jump from a deeper
     /// repeated-body/block environment unwinds to this depth before resuming.
     environment_depth: u32 = 0,
+    /// Runtime handler-stack depth at the target: how many `push_handler`s are
+    /// live when control is at the loop/label/switch. A `break`/`continue` pops
+    /// exactly `current - this` handlers — running the finally of each that has
+    /// one — and no more, so it never enters the target's own for-in/for-of
+    /// close handler or a try/finally that lexically encloses the target.
+    handler_depth: u32 = 0,
+    /// `active_finally` at the target. A break/continue issued from inside
+    /// `current - this` finally bodies leaves that many [value, kind] completion
+    /// records on the operand stack, which it discards before jumping.
+    active_finally: u32 = 0,
     /// For a `for-of`/`for-await-of`: the temp holding "this iterator still
-    /// needs closing". A `continue` targeting the loop must NOT close it, and
-    /// the plain-jump path stores true here before jumping. An `abrupt_continue`
-    /// reaches the loop's own close handler first, so it has to store there too.
+    /// needs closing". The plain-jump continue path stores true here before
+    /// jumping so the handler does not close on a later abrupt exit.
     iterator_done_temp: ?[]const u8 = null,
 };
 
@@ -1501,6 +1510,11 @@ pub const Compiler = struct {
     /// >0 while compiling inside a `try` that has a `finally`. A `return`/`break`/
     /// `continue` crossing it is lowered as `abrupt_*` so the finally still runs.
     finally_depth: u32 = 0,
+    /// Number of `push_handler`s emitted minus `pop_handler`s along the
+    /// current lexical path — the runtime handler-stack depth at this point of
+    /// straight-line code. A catch or finally body runs with its own try's
+    /// handler already popped, which the structured emission mirrors.
+    handler_depth: u32 = 0,
     /// How many `finally` BLOCKS we are currently compiling the body of (nested).
     /// A `return` in a finally body does not cross THAT finally (it is already
     /// running), only enclosing ones — so a return is a tail-call candidate when
@@ -3204,42 +3218,30 @@ pub const Compiler = struct {
             .while_stmt => |s| try self.compileWhile(s.cond, s.body),
             .do_while_stmt => |s| try self.compileDoWhile(s.body, s.cond),
             .for_stmt => |f| try self.compileFor(f.init, f.cond, f.update, f.body),
-            .break_stmt => |label| {
-                const loop = self.currentBreakTarget(label) orelse return error.Unsupported;
-                // Across a finally, the finally must run before the jump:
-                // `abrupt_break` unwinds the handler stack running each enclosing
-                // finally, then jumps to the (patched) break target. A direct jump
+            .break_stmt, .continue_stmt => |label| {
+                const is_break = node.* == .break_stmt;
+                const loop = (if (is_break) self.currentBreakTarget(label) else self.currentContinueTarget(label)) orelse
+                    return error.Unsupported;
+                // Every handler pushed since the target was entered belongs to a
+                // construct this jump exits, so it is popped, and each one that
+                // carries a finally runs first: `abrupt_*` unwinds exactly that
+                // many handlers, then jumps to the (patched) target. The bound is
+                // what keeps it out of the target's own for-in/for-of close
+                // handler and out of a try/finally that lexically encloses the
+                // target. With no handler to pop, a direct jump suffices; one
                 // crossing a repeated-body environment unwinds to the target's
                 // activation-local environment depth first.
-                const op: bc.Op = if (self.finally_depth > loop.finally_depth)
-                    .abrupt_break
+                try self.emitDiscardActiveFinallyRecords(loop);
+                const to_pop = self.handler_depth - loop.handler_depth;
+                const op: bc.Op = if (to_pop > 0)
+                    (if (is_break) .abrupt_break else .abrupt_continue)
                 else if (self.environment_depth > loop.environment_depth)
                     .jump_env
                 else
                     .jump;
-                const j = try self.chunk.emitAB(op, 0, loop.environment_depth);
-                try loop.breaks.append(self.arena, j);
-            },
-            .continue_stmt => |label| {
-                const loop = self.currentContinueTarget(label) orelse return error.Unsupported;
-                const op: bc.Op = if (self.finally_depth > loop.finally_depth)
-                    .abrupt_continue
-                else if (self.environment_depth > loop.environment_depth)
-                    .jump_env
-                else
-                    .jump;
-                // ForIn/OfBodyEvaluation performs IteratorClose for break, return
-                // and throw — never for a continue that targets the loop itself.
-                // The plain-jump path stores the flag at the continue target, but
-                // an `abrupt_continue` unwinds through this loop's own close
-                // handler on the way there, so disarm it here too.
-                if (op == .abrupt_continue) if (loop.iterator_done_temp) |done_temp| {
-                    _ = try self.chunk.emit(.load_true, 0);
-                    try self.emitStore(done_temp);
-                    _ = try self.chunk.emit(.pop, 0);
-                };
-                const j = try self.chunk.emitAB(op, 0, loop.environment_depth);
-                try loop.continues.append(self.arena, j);
+                const operand = if (to_pop > 0) try self.abruptJumpOperand(loop) else loop.environment_depth;
+                const j = try self.chunk.emitAB(op, 0, operand);
+                try (if (is_break) &loop.breaks else &loop.continues).append(self.arena, j);
             },
             .switch_stmt => |sw| try self.compileSwitch(sw.disc, sw.cases),
             .throw_stmt => |e| {
@@ -3335,11 +3337,11 @@ pub const Compiler = struct {
         if (t.finally_block == null) {
             // try/catch (no finally) — handler with a catch arm only.
             const catch_block = t.catch_block orelse return error.Unsupported;
-            const ph = try self.chunk.emitAB(.push_handler, none, none);
+            const ph = try self.emitPushHandler(.push_handler, none, none);
             self.try_depth += 1;
             try self.compileStmt(t.block);
             self.try_depth -= 1;
-            _ = try self.chunk.emit(.pop_handler, 0);
+            try self.emitPopHandler();
             const skip = try self.chunk.emit(.jump, 0);
             self.chunk.code.items[ph].a = @intCast(self.chunk.here());
             {
@@ -3364,9 +3366,9 @@ pub const Compiler = struct {
         self.finally_depth += 1;
         defer self.finally_depth -= 1;
 
-        const ph = try self.chunk.emitAB(.push_handler, none, none); // catch/finally patched below
+        const ph = try self.emitPushHandler(.push_handler, none, none); // catch/finally patched below
         try self.compileStmt(t.block);
-        _ = try self.chunk.emit(.pop_handler, 0);
+        try self.emitPopHandler();
         _ = try self.chunk.emit(.push_completion, 0); // normal completion of the try body
         const to_fin_normal = try self.chunk.emit(.jump, 0);
 
@@ -3383,17 +3385,17 @@ pub const Compiler = struct {
                 // records the depth below the incoming exception, which the
                 // binding consumes, so every abrupt completion resumes the
                 // finally with a clean operand stack.
-                ph2 = try self.chunk.emitAB(.push_handler_catch, none, none);
+                ph2 = try self.emitPushHandler(.push_handler_catch, none, none);
                 catch_environment = try self.prepareCatchPattern(p, cb);
                 try self.compileCatchPattern(p, catch_environment);
                 try self.compileStmt(cb);
-                _ = try self.chunk.emit(.pop_handler, 0);
+                try self.emitPopHandler();
                 if (catch_environment) try self.emitExitEnvironment();
             } else {
                 _ = try self.chunk.emit(.pop, 0);
-                ph2 = try self.chunk.emitAB(.push_handler, none, none);
+                ph2 = try self.emitPushHandler(.push_handler, none, none);
                 try self.compileStmt(cb);
-                _ = try self.chunk.emit(.pop_handler, 0);
+                try self.emitPopHandler();
             }
             _ = try self.chunk.emit(.push_completion, 0); // normal completion of the catch body
         }
@@ -3769,7 +3771,7 @@ pub const Compiler = struct {
         try self.emitDefine(done_name);
 
         const none = std.math.maxInt(u32);
-        const ph = try self.chunk.emitAB(.push_handler, none, none);
+        const ph = try self.emitPushHandler(.push_handler, none, none);
         // A `return` (or a labeled break/continue) crossing this for-of must run
         // IteratorClose — the handler's finally_pc. Route it through abrupt_return
         // like a finally by raising finally_depth. Bump BEFORE pushLoop so the loop
@@ -3845,7 +3847,7 @@ pub const Compiler = struct {
         }
         self.popLoop();
         self.finally_depth -= 1;
-        _ = try self.chunk.emit(.pop_handler, 0);
+        try self.emitPopHandler();
 
         const after_finally = try self.chunk.emit(.jump, 0);
         self.chunk.code.items[ph].b = @intCast(self.chunk.here());
@@ -3869,7 +3871,7 @@ pub const Compiler = struct {
     fn compileForInKeys(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, body: *Node, environment_binding: bool) CompileError!void {
         _ = try self.chunk.emit(.enum_keys, 0);
         const none = std.math.maxInt(u32);
-        const handler = try self.chunk.emitAB(.push_handler, none, none);
+        const handler = try self.emitPushHandler(.push_handler, none, none);
         self.finally_depth += 1;
         const loop = try self.pushLoop();
         const top = self.chunk.here();
@@ -3905,7 +3907,7 @@ pub const Compiler = struct {
         for (loop.breaks.items) |jump| self.chunk.patchTo(jump, cleanup);
         self.popLoop();
         self.finally_depth -= 1;
-        _ = try self.chunk.emit(.pop_handler, 0);
+        try self.emitPopHandler();
         for (0..3) |_| _ = try self.chunk.emit(.pop, 0);
 
         const after_finally = try self.chunk.emit(.jump, 0);
@@ -4107,9 +4109,9 @@ pub const Compiler = struct {
         // Wrap the element/rest processing in a finally handler so any abrupt
         // completion (return/throw injected at an embedded yield) still closes
         // the iterator before propagating.
-        const ph = try self.chunk.emitAB(.push_handler, none, none);
+        const ph = try self.emitPushHandler(.push_handler, none, none);
         try self.compileArrayPatternBody(elems, rest, it, next_method, done, mode);
-        _ = try self.chunk.emit(.pop_handler, 0);
+        try self.emitPopHandler();
         _ = try self.chunk.emit(.push_completion, 0); // normal completion
         // The normal path falls straight into the finally body (which the abrupt
         // path also jumps to via finally_pc); `end_finally` then resumes the
@@ -6249,9 +6251,52 @@ pub const Compiler = struct {
 
     // ---- loop bookkeeping -------------------------------------------------
 
+    /// Every handler push/pop goes through these so `handler_depth` mirrors the
+    /// runtime handler stack. `push_handler_catch` records the depth below the
+    /// incoming exception; it is still one handler.
+    fn emitPushHandler(self: *Compiler, op: bc.Op, catch_pc: u32, finally_pc: u32) CompileError!usize {
+        const at = try self.chunk.emitAB(op, catch_pc, finally_pc);
+        self.handler_depth += 1;
+        return at;
+    }
+
+    fn emitPopHandler(self: *Compiler) CompileError!void {
+        std.debug.assert(self.handler_depth > 0);
+        _ = try self.chunk.emit(.pop_handler, 0);
+        self.handler_depth -= 1;
+    }
+
+    /// The operand of an `abrupt_break`/`abrupt_continue`: the target's
+    /// environment depth in the low half and the number of handlers to pop in
+    /// the high half. Both are activation-local nesting counts, far below the
+    /// split; a program that somehow exceeds it tree-walks instead.
+    fn abruptJumpOperand(self: *Compiler, loop: *const Loop) CompileError!u32 {
+        const to_pop = self.handler_depth - loop.handler_depth;
+        if (to_pop > std.math.maxInt(u16) or loop.environment_depth > std.math.maxInt(u16)) return error.Unsupported;
+        return loop.environment_depth | (to_pop << 16);
+    }
+
+    /// A break/continue issued from inside a finally body overrides that
+    /// finally's in-flight completion. Each such body between the site and the
+    /// target left a two-word [value, kind] record on the operand stack that
+    /// `end_finally` will now never consume; drop them so the target sees the
+    /// operand stack it expects (a for-in's three-word state, for instance).
+    fn emitDiscardActiveFinallyRecords(self: *Compiler, loop: *const Loop) CompileError!void {
+        var remaining = self.active_finally - loop.active_finally;
+        while (remaining > 0) : (remaining -= 1) {
+            _ = try self.chunk.emit(.pop, 0);
+            _ = try self.chunk.emit(.pop, 0);
+        }
+    }
+
     fn pushLoop(self: *Compiler) CompileError!*Loop {
         const loop = try self.arena.create(Loop);
-        loop.* = .{ .finally_depth = self.finally_depth, .environment_depth = self.environment_depth };
+        loop.* = .{
+            .finally_depth = self.finally_depth,
+            .environment_depth = self.environment_depth,
+            .handler_depth = self.handler_depth,
+            .active_finally = self.active_finally,
+        };
         try self.loops.append(self.arena, loop);
         return loop;
     }
@@ -6264,6 +6309,8 @@ pub const Compiler = struct {
             .labels_iteration = labels_iteration,
             .finally_depth = self.finally_depth,
             .environment_depth = self.environment_depth,
+            .handler_depth = self.handler_depth,
+            .active_finally = self.active_finally,
         };
         try self.loops.append(self.arena, target);
         return target;
