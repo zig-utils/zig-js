@@ -1437,8 +1437,9 @@ fn stmtContainsDisposableDeclDeep(node: *const ast.Node) bool {
     };
 }
 
-/// A `using` in a `for` initializer or a `for (using x of …)` head: the
-/// per-iteration disposal those need is not lowered yet.
+/// An `await using` in a `for` initializer or a `for (await using x of …)`
+/// head: their disposal must `await` each resource, which the loop lowerings
+/// do not model yet. Synchronous `using` heads lower.
 fn stmtContainsLoopHeadDisposableDeep(node: *const ast.Node) bool {
     return switch (node.*) {
         .block, .decl_group, .program => |stmts| for (stmts) |s| {
@@ -1448,9 +1449,9 @@ fn stmtContainsLoopHeadDisposableDeep(node: *const ast.Node) bool {
             (if (s.alternate) |alt| stmtContainsLoopHeadDisposableDeep(alt) else false),
         .while_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
         .do_while_stmt => |s| stmtContainsLoopHeadDisposableDeep(s.body),
-        .for_stmt => |s| (if (s.init) |init| stmtHasDisposableDecl(init) or stmtContainsLoopHeadDisposableDeep(init) else false) or
+        .for_stmt => |s| (if (s.init) |init| stmtHasAwaitUsingDecl(init) or stmtContainsLoopHeadDisposableDeep(init) else false) or
             stmtContainsLoopHeadDisposableDeep(s.body),
-        .for_in => |s| s.dispose != 0 or
+        .for_in => |s| s.dispose == 2 or
             (if (s.var_init) |init| stmtContainsLoopHeadDisposableDeep(init) else false) or
             stmtContainsLoopHeadDisposableDeep(s.body),
         .switch_stmt => |s| blk: {
@@ -1544,6 +1545,13 @@ pub const Compiler = struct {
     /// straight-line code. A catch or finally body runs with its own try's
     /// handler already popped, which the structured emission mirrors.
     handler_depth: u32 = 0,
+    /// How many Environment Records above the current one a `using`
+    /// declaration registers its resource in. Zero everywhere except while a
+    /// `for` head runs under a captured lexical head environment, whose record
+    /// the per-iteration copies replace: the resource must live in the loop's
+    /// own scope beneath it (ForStatement's loopEnv), which is disposed once
+    /// when the loop completes.
+    disposable_register_depth: u32 = 0,
     /// How many `finally` BLOCKS we are currently compiling the body of (nested).
     /// A `return` in a finally body does not cross THAT finally (it is already
     /// running), only enclosing ones — so a return is a tail-call candidate when
@@ -3091,7 +3099,9 @@ pub const Compiler = struct {
                     try self.emitStoreBindingReference(reference)
                 else
                     try self.emitDefineKind(d.name, d.kind, d.init != null);
-                if (d.dispose != 0) _ = try self.chunk.emit(.register_disposable, if (d.dispose == 2) 1 else 0);
+                // A `for (using x = …;;)` head registers into the loop's resource
+                // scope beneath its lexical head environment (see compileFor).
+                if (d.dispose != 0) _ = try self.chunk.emitAB(.register_disposable, if (d.dispose == 2) 1 else 0, self.disposable_register_depth);
             },
             .destructure_decl => |d| {
                 const environment_pattern = d.kind != .@"var" and
@@ -3304,8 +3314,8 @@ pub const Compiler = struct {
             },
             .for_in => |f| {
                 if (f.is_await and !self.in_async) return error.Unsupported;
-                if (f.dispose != 0) return error.Unsupported; // `for (using x of …)` disposal → tree-walk
-                try self.compileForOf(f.decl_kind, f.target, f.var_init, f.iterable, f.body, !f.is_of, f.is_await);
+                if (f.dispose == 2) return error.Unsupported; // `for (await using x of …)` → tree-walk
+                try self.compileForOf(f.decl_kind, f.target, f.var_init, f.iterable, f.body, !f.is_of, f.is_await, f.dispose != 0);
             },
             .try_stmt => |t| try self.compileTry(t),
             .labeled_stmt => |l| {
@@ -3604,7 +3614,21 @@ pub const Compiler = struct {
         // value-copied record per CreatePerIterationEnvironment. Uncaptured heads
         // retain O(1) frame slots. Environment-backed patterns lower their
         // defaults and computed keys as bytecode in the active binding scope.
-        if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
+        // `for (using x = …;;)`: ForLoopEvaluation disposes loopEnv's resources
+        // once, after ForBodyEvaluation, with the loop's completion — a finally
+        // around the whole statement. The per-iteration copies replace the
+        // lexical head record, so the resource is registered one record down,
+        // in a scope entered before the head. `await using` heads stay on the
+        // tree walker.
+        if (init_node) |ini| if (stmtHasAwaitUsingDecl(ini)) return error.Unsupported;
+        const head_using = if (init_node) |ini| stmtHasDisposableDecl(ini) else false;
+        const none = std.math.maxInt(u32);
+        var head_dispose_handler: ?usize = null;
+        if (head_using) {
+            try self.emitEnterEnvironment();
+            head_dispose_handler = try self.emitPushHandler(.push_handler, none, none);
+            self.finally_depth += 1;
+        }
         const captured_head = if (init_node) |ini|
             if (self.scope == null) nodeDeclaresLexical(ini) else try forLoopCapturesLexical(self.arena, self.hash_state, ini, cond, update, body)
         else
@@ -3620,17 +3644,15 @@ pub const Compiler = struct {
                 try self.predeclareLexicalNode(init_node.?);
         }
         defer if (lexical_scope) self.popLexicalScope();
-        const disposable_scope = self.scope == null and init_node != null and stmtHasDisposableDecl(init_node.?);
-        if (disposable_scope) {
-            if (stmtCanEscapeAbruptly(body)) return error.Unsupported;
-            try self.emitEnterEnvironment();
-        }
         if (captured_head) try self.emitEnterEnvironmentLexicalNode(init_node.?);
         if (init_node) |ini| {
             if (!captured_head) try self.emitLexicalInitializersForNode(ini);
             // The init clause is a declaration statement (var_decl, or a group of
             // them for multiple declarators) or a bare expression.
             if (ini.* == .var_decl or ini.* == .destructure_decl or ini.* == .block or ini.* == .decl_group) {
+                const saved_register_depth = self.disposable_register_depth;
+                self.disposable_register_depth = if (head_using and captured_head) 1 else 0;
+                defer self.disposable_register_depth = saved_register_depth;
                 try self.compileStmt(ini);
             } else {
                 try self.compileExpr(ini);
@@ -3664,13 +3686,13 @@ pub const Compiler = struct {
         for (loop.breaks.items) |j| self.chunk.patchToHere(j);
         self.popLoop();
         if (captured_head) try self.emitExitEnvironment();
-        if (disposable_scope) {
-            _ = try self.chunk.emit(.dispose_scope, 0);
-            if (self.in_async and init_node != null and stmtHasAwaitUsingDecl(init_node.?)) {
-                _ = try self.chunk.emit(.load_undefined, 0);
-                _ = try self.chunk.emit(.await_op, 0);
-                _ = try self.chunk.emit(.pop, 0);
-            }
+        if (head_dispose_handler) |handler| {
+            self.finally_depth -= 1;
+            try self.emitPopHandler();
+            _ = try self.chunk.emit(.push_completion, 0);
+            self.chunk.code.items[handler].b = @intCast(self.chunk.here());
+            _ = try self.chunk.emit(.dispose_scope_completion, 0);
+            _ = try self.chunk.emit(.end_finally, 0);
             try self.emitExitEnvironment();
         }
     }
@@ -3759,7 +3781,7 @@ pub const Compiler = struct {
         _ = try self.chunk.emitAB(.bind_pattern, pi, mode);
     }
 
-    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool) CompileError!void {
+    fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool, head_using: bool) CompileError!void {
         // A captured simple lexical target uses a fresh declarative Environment
         // Record for every iterator result. That is the ForIn/OfBodyEvaluation
         // binding cell the closure captures; an uncaptured identifier stays in a
@@ -3770,7 +3792,9 @@ pub const Compiler = struct {
         else
             false;
         const program_lexical_binding = self.scope == null and if (decl_kind) |kind| kind != .@"var" else false;
-        const environment_binding = captured_binding or program_lexical_binding;
+        // `for (using x of …)` registers each iteration's resource in that
+        // iteration's own Environment Record, so the head always gets one.
+        const environment_binding = captured_binding or program_lexical_binding or head_using;
         if (environment_binding and !patternSupportsEnvironment(target)) return error.Unsupported;
         const lexical_scope = self.scope != null and if (decl_kind) |kind|
             kind != .@"var" and (target.* == .identifier or target.* == .arr_pattern or target.* == .obj_pattern)
@@ -3879,8 +3903,29 @@ pub const Compiler = struct {
         // Bind the already-read value to the loop target. Abrupt target
         // resolution/destructuring is inside the close-protected region.
         const native_pattern = target.* == .arr_pattern or target.* == .obj_pattern;
+        if (head_using) _ = try self.chunk.emit(.dup, 0);
         try self.compileLoopBind(decl_kind, target, environment_binding, native_pattern, .for_of);
+        // `for (using x of …)`: the bound value is this iteration's resource,
+        // disposed at the END of the iteration — before the next `next()` — and
+        // on any abrupt exit of the body, before IteratorClose. That is a
+        // finally around the body: its handler is pushed after the iteration
+        // environment exists, so an unwind restores exactly that record before
+        // disposing, and it is popped before the close handler runs.
+        var iteration_dispose_handler: ?usize = null;
+        if (head_using) {
+            _ = try self.chunk.emitAB(.register_disposable, 0, 0);
+            iteration_dispose_handler = try self.emitPushHandler(.push_handler, none, none);
+            self.finally_depth += 1;
+        }
         try self.compileRepeatedBody(body);
+        if (iteration_dispose_handler) |handler| {
+            self.finally_depth -= 1;
+            try self.emitPopHandler();
+            _ = try self.chunk.emit(.push_completion, 0);
+            self.chunk.code.items[handler].b = @intCast(self.chunk.here());
+            _ = try self.chunk.emit(.dispose_scope_completion, 0);
+            _ = try self.chunk.emit(.end_finally, 0);
+        }
         const continue_target = self.chunk.here();
         _ = try self.chunk.emit(.load_true, 0);
         try self.emitStore(done_name);

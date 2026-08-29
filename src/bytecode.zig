@@ -411,7 +411,7 @@ pub const Op = enum(u8) {
     enter_with, // pop object; push an object Environment Record (with_object = ToObject(it)) onto vm.env
     exit_with, // pop the innermost with/block environment off vm.env (restore its parent)
     make_regex, // operands a: pattern name index, b: flags name index; push a fresh RegExp object
-    register_disposable, // operand a: 0 = `using`, 1 = `await using`; pop value, register it for DisposeResources at body exit
+    register_disposable, // pop the resource and register it for DisposeResources: a = 1 for `await using`; b = how many Environment Records above the current one hold the scope (a `for (using …;;)` head registers beneath its per-iteration lexical record)
     array_append_hole, // append an array-literal elision (a hole that reads as absent) to the array on the stack top
     call_eval, // operand a: argc; a bare `eval(args)` — marks direct-eval so a real eval runs in the current scope
     call_eval_with_this, // operand a: argc; explicit WithBaseObject, direct only for the eval intrinsic

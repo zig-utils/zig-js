@@ -8825,8 +8825,22 @@ fn runChunk(
             .register_disposable => {
                 // `using x = v;` / `await using x = v;` — register `v` for disposal
                 // at the end of the current variable scope (run by the body-exit
-                // DisposeResources pass). `a == 1` selects [Symbol.asyncDispose].
-                try vm.addDisposable(stack.pop().?, inst.a == 1);
+                // DisposeResources pass). `a == 1` selects [Symbol.asyncDispose];
+                // `b` walks up that many records first (a `for (using …;;)` head
+                // registers in the loop scope beneath its per-iteration record).
+                const resource = stack.pop().?;
+                if (inst.b == 0) {
+                    try vm.addDisposable(resource, inst.a == 1);
+                } else {
+                    const current = vm.env;
+                    var target = vm.env;
+                    var levels = inst.b;
+                    while (levels > 0) : (levels -= 1) target = target.parent orelse
+                        return vm.throwError("InternalError", "using registration scope is unavailable");
+                    vm.env = target;
+                    defer vm.env = current;
+                    try vm.addDisposable(resource, inst.a == 1);
+                }
             },
             .set_prop => {
                 var v = stack.pop().?;

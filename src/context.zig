@@ -29119,6 +29119,17 @@ test "using declarations dispose on every block exit in both tiers" {
             .{ .name = "suppressed_error", .source = "var r={[Symbol.dispose](){throw 'dz';}};function f(){ using a=r; throw 'body'; } var got='none';try{ f(); }catch(e){ got=e.constructor.name+':'+e.error+':'+e.suppressed; } got==='SuppressedError:dz:body'" },
             .{ .name = "generator_return_disposes", .source = "function* g(){ { using a=res(1); yield 1; L.push('no'); } } var it=g(); it.next(); it.return(5); L.join()==='d1'" },
             .{ .name = "null_and_bad_resource", .source = "var ok=(function(){ using a=null; using b=undefined; return true; })(); var bad=(function(){ try{ using c={}; return false; }catch(e){ return e instanceof TypeError; } })(); ok&&bad" },
+            // `for (using x = …;;)`: one resource scope beneath the per-iteration
+            // records, disposed once when the loop completes — on break too.
+            .{ .name = "for_head_break", .source = "(function(){ var i=0; for (using a=res(1); i<5; i++) { L.push('b'+i); if (i===1) break; } L.push('after'); })(); L.join()==='b0,b1,d1,after'" },
+            .{ .name = "for_head_captured_copies", .source = "(function(){ var fs=[]; var i=0; for (using a=res(1); i<2; i++) { fs.push(function(){ return a; }); } L.push(fs[0]()===fs[1]()?'same':'distinct'); })(); L.join()==='d1,same'" },
+            .{ .name = "for_head_return", .source = "function f(){ for (using a=res(1), i=0; ; i++) { return 'r'; } } L.push(f()); L.join()==='d1,r'" },
+            .{ .name = "for_head_later_initializer_throws", .source = "function bad(){ throw 'init'; } function f(){ for (using a=res(1), b=bad(); ; ) {} } try{ f(); }catch(e){ L.push('c:'+e); } L.join()==='d1,c:init'" },
+            // `for (using x of …)`: each iteration's resource is disposed before
+            // the next `next()`, and before IteratorClose on an abrupt exit.
+            .{ .name = "for_of_head_per_iteration", .source = "(function(){ for (using x of [res(1), res(2)]) { L.push('b'); } })(); L.join()==='b,d1,b,d2'" },
+            .{ .name = "for_of_head_break_disposes_then_closes", .source = "var it={[Symbol.iterator](){var n=0;return{next(){return n<3?{value:res(n++),done:false}:{done:true};},return(){L.push('close');return{};}};}}; (function(){ for (using x of it) { L.push('b'); break; } })(); L.join()==='b,d0,close'" },
+            .{ .name = "for_of_head_throw_disposes_then_closes", .source = "var it={[Symbol.iterator](){var n=0;return{next(){return n<3?{value:res(n++),done:false}:{done:true};},return(){L.push('close');return{};}};}}; function f(){ for (using x of it) { throw 'boom'; } } try{ f(); }catch(e){ L.push('c:'+e); } L.join()==='d0,close,c:boom'" },
         }) |case| {
             errdefer std.debug.print("using disposal {s} ({s})\n", .{ case.name, @tagName(mode) });
             const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
