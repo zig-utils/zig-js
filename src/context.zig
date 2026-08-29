@@ -28636,6 +28636,25 @@ test "array iterator creation and toString do not read length eagerly" {
     );
 }
 
+test "native realm wrappers restore callers while moving" {
+    const cases = [_]struct {
+        name: []const u8,
+        setup: []const u8,
+        expression: []const u8,
+        expect_abrupt: bool = false,
+    }{
+        .{ .name = "Function.prototype.call", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.proxyCaptureEnv=proxyCaptureEnv;caller.global.callFn=target.global.Function.prototype.call;var run=caller.evalScript(\"(function(){return function(){function f(){proxyMovingLoop(20000);return proxySubject;}proxyCaptureEnv();var value=Reflect.apply(callFn,f,[null]);return proxyCaptureEnv()&&value===proxySubject&&proxySubject.marker===37;};})()\");", .expression = "run()" },
+        .{ .name = "Function.prototype.apply", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.proxyCaptureEnv=proxyCaptureEnv;caller.global.applyFn=target.global.Function.prototype.apply;var run=caller.evalScript(\"(function(){return function(){function f(value){proxyMovingLoop(20000);return value;}proxyCaptureEnv();var value=Reflect.apply(applyFn,f,[null,[proxySubject]]);return proxyCaptureEnv()&&value===proxySubject&&proxySubject.marker===37;};})()\");", .expression = "run()" },
+        .{ .name = "evalScript", .setup = "var realm=$262.createRealm();realm.global.proxyMovingLoop=proxyMovingLoop;realm.global.proxySubject=proxySubject;var run=(function(){return function(){proxyCaptureEnv();var value=realm.evalScript(\"proxyMovingLoop(20000);proxySubject\");return proxyCaptureEnv()&&value===proxySubject&&globalThis.proxySubject===proxySubject;};})();", .expression = "run()" },
+        .{ .name = "Function.prototype.call abrupt", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxyCaptureEnv=proxyCaptureEnv;caller.global.callFn=target.global.Function.prototype.call;var run=caller.evalScript(\"(function(){return function(){function f(){proxyMovingLoop(20000);throw new Error('expected');}proxyCaptureEnv();try{return Reflect.apply(callFn,f,[null]);}finally{proxyCaptureEnv();}};})()\");", .expression = "run()", .expect_abrupt = true },
+        .{ .name = "evalScript abrupt", .setup = "var realm=$262.createRealm();realm.global.proxyMovingLoop=proxyMovingLoop;var run=(function(){return function(){proxyCaptureEnv();try{return realm.evalScript(\"proxyMovingLoop(20000);throw new Error('expected')\");}finally{proxyCaptureEnv();}};})();", .expression = "run()", .expect_abrupt = true },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving native realm wrapper {s}\n", .{case.name});
+        try expectProxyMetadataMovingOutcome(case.setup, case.expression, case.expect_abrupt);
+    }
+}
+
 test "realm array intrinsics isolate shared no-GIL construction" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
@@ -29589,7 +29608,16 @@ test "Object reflection shared no-GIL callers retain invocation-local operands" 
 }
 
 fn expectProxyMetadataMoving(setup: []const u8, expression: []const u8) !void {
+    return expectProxyMetadataMovingOutcome(setup, expression, false);
+}
+
+fn expectProxyMetadataMovingOutcome(setup: []const u8, expression: []const u8, expect_abrupt: bool) !void {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const EnvProbe = struct {
+        before: ?*interp.Environment = null,
+        root: ?usize = null,
+        matched: ?bool = null,
+    };
     const Host = struct {
         fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
             const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
@@ -29598,11 +29626,30 @@ fn expectProxyMetadataMoving(setup: []const u8, expression: []const u8) !void {
             ctx.gc_moving_checkpoint_requested.store(true, .release);
             return Value.undef();
         }
+
+        fn captureEnv(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const native = machine.active_native orelse return Value.boolVal(false);
+            const probe: *EnvProbe = @ptrCast(@alignCast(native.private_data orelse return Value.boolVal(false)));
+            if (probe.root) |root| {
+                const before = probe.before orelse return Value.boolVal(false);
+                const restored = machine.tempEnvRoot(root, before) == machine.env;
+                machine.restoreTempEnvRoots(root);
+                probe.before = null;
+                probe.root = null;
+                probe.matched = restored;
+                return Value.boolVal(restored);
+            }
+            probe.before = machine.env;
+            probe.root = try machine.pushTempEnvRoot(machine.env);
+            return Value.boolVal(false);
+        }
     };
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         errdefer std.debug.print("Proxy metadata mode {s}\n", .{@tagName(mode)});
         const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
         defer ctx.destroy();
+        var env_probe: EnvProbe = .{};
         {
             const saved = gc_mod.setActiveContext(ctx);
             defer gc_mod.restoreActiveContext(saved);
@@ -29610,6 +29657,10 @@ fn expectProxyMetadataMoving(setup: []const u8, expression: []const u8) !void {
             arm.* = .{ .native = Host.arm };
             try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "proxyArm", Value.obj(arm));
             try ctx.env.put("proxyArm", Value.obj(arm));
+            const capture_env = try gc_mod.allocObj(ctx.arena());
+            capture_env.* = .{ .native = Host.captureEnv, .private_data = @ptrCast(&env_probe) };
+            try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "proxyCaptureEnv", Value.obj(capture_env));
+            try ctx.env.put("proxyCaptureEnv", Value.obj(capture_env));
         }
         _ = try ctx.evaluate(
             \\function proxyMovingLoop(n){var total=0,i=0;while(i<n){total=total+i;i=i+1;}return total;}
@@ -29627,14 +29678,25 @@ fn expectProxyMetadataMoving(setup: []const u8, expression: []const u8) !void {
         const moving_before = ctx.gc.?.accounting().moving_minor_collections;
         const source = try std.fmt.allocPrint(std.testing.allocator, "proxyArm();{s}", .{expression});
         defer std.testing.allocator.free(source);
-        const result = ctx.evaluate(source) catch |err| {
-            if (ctx.exception) |exception| if (exception.isObject()) {
-                const message = exception.asObj().getOwn("message") orelse Value.undef();
-                if (message.isString()) std.debug.print("{s}: {s}\n", .{ exception.asObj().errorName(), message.asStr() });
+        if (expect_abrupt) {
+            if (ctx.evaluate(source)) |_| {
+                return error.TestUnexpectedResult;
+            } else |err| {
+                if (err != error.Throw) return err;
+            }
+            try std.testing.expect(env_probe.matched orelse false);
+            const resumed = try ctx.evaluate("proxySubject.marker===37&&globalThis.proxySubject===proxySubject");
+            try std.testing.expect(resumed.toBoolean());
+        } else {
+            const result = ctx.evaluate(source) catch |err| {
+                if (ctx.exception) |exception| if (exception.isObject()) {
+                    const message = exception.asObj().getOwn("message") orelse Value.undef();
+                    if (message.isString()) std.debug.print("{s}: {s}\n", .{ exception.asObj().errorName(), message.asStr() });
+                };
+                return err;
             };
-            return err;
-        };
-        try std.testing.expect(result.toBoolean());
+            try std.testing.expect(result.toBoolean());
+        }
         try std.testing.expectEqual(moving_before + 1, ctx.gc.?.accounting().moving_minor_collections);
         try std.testing.expect(before != ctx.global_object.getOwn("proxySubject").?.asObj());
         try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));

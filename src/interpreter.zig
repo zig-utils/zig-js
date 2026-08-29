@@ -23081,6 +23081,8 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return Value.undef();
     const genv: *Environment = @ptrCast(@alignCast(fnobj.private_data orelse return Value.undef()));
+    const target_env_root = try self.pushTempEnvRoot(genv);
+    defer self.restoreTempEnvRoots(target_env_root);
     if (args.len == 0 or !args[0].isString()) return if (args.len > 0) args[0] else Value.undef();
     // evalScript-created functions may escape into the target realm.
     const src = try args[0].asWtf8Owned(self.arena);
@@ -23090,21 +23092,27 @@ fn host262EvalScriptFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     parser.useRealmHashKeys(self.root_shape);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("evalScript", src, &parser, err);
     const prog_strict = parser.strict;
-    const gobj = functionRealmGlobal(genv, null);
+    const gobj = functionRealmGlobal(self.tempEnvRoot(target_env_root, genv), null);
     const s_env = self.env;
+    const saved_env_root = try self.pushTempEnvRoot(s_env);
+    defer self.restoreTempEnvRoots(saved_env_root);
     const s_this = self.this_value;
     const s_glob = self.global_object;
+    const saved_global = if (s_glob) |global| Value.obj(global) else Value.undef();
+    const saved_values_root = try self.pushTempRootSlice(&.{ s_this, saved_global });
+    defer self.restoreTempRoots(saved_values_root);
     const s_strict = self.strict;
-    self.env = genv;
+    self.env = self.tempEnvRoot(target_env_root, genv);
     self.strict = prog_strict;
     if (gobj) |go| {
         self.this_value = Value.obj(go);
         self.global_object = go;
     }
     defer {
-        self.env = s_env;
-        self.this_value = s_this;
-        self.global_object = s_glob;
+        self.env = self.tempEnvRoot(saved_env_root, s_env);
+        self.this_value = self.tempRoot(saved_values_root, s_this);
+        const restored_global = self.tempRoot(saved_values_root + 1, saved_global);
+        self.global_object = if (restored_global.isObject()) restored_global.asObj() else null;
         self.strict = s_strict;
     }
     return self.eval(prog);
@@ -37856,10 +37864,12 @@ fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const saved_env = self.env;
+            const saved_env_root = try self.pushTempEnvRoot(saved_env);
+            defer self.restoreTempEnvRoots(saved_env_root);
             if (self.active_native) |callee| {
                 if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
             }
-            defer self.env = saved_env;
+            defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
             if (!(this.isObject() and this.asObj().isCallableObject()))
                 return self.throwError("TypeError", if (eq(name, "bind"))
                     "|this| is not a function inside Function.prototype.bind"
