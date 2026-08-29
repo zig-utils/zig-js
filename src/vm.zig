@@ -11565,6 +11565,25 @@ fn constructSuper(vm: *Interpreter, super_constructor: Value, args: []const Valu
     return result;
 }
 
+/// [[Construct]] (ECMA-262 10.2.2) removes the callee context and restores the
+/// caller's BEFORE it inspects a derived constructor's result (steps 11-12), so
+/// the TypeError for a non-object return and the ReferenceError for an
+/// uninitialized `this` belong to the CALLER's realm — `new C()` on a class
+/// from another realm must throw that realm's `TypeError`, not C's. The
+/// activation still has the callee environment installed here; the caller's
+/// was saved at entry. The tree walker does the same swap before it throws.
+fn throwInCallerRealm(vm: *Interpreter, exec: *Exec, name: []const u8, message: []const u8) EvalError {
+    const callee_env = vm.env;
+    const callee_global = vm.global_object;
+    if (exec.saved_env) |env| vm.env = env;
+    if (exec.saved_global) |global| vm.global_object = global;
+    defer {
+        vm.env = callee_env;
+        vm.global_object = callee_global;
+    }
+    return vm.throwError(name, message);
+}
+
 /// Apply the DerivedClass constructor return rules after the body has completed.
 /// Any generated JS error is outside the constructor body's lexical handlers;
 /// clear stale handler records before propagating it to the caller activation.
@@ -11574,17 +11593,19 @@ fn finishDerivedConstructor(vm: *Interpreter, exec: *Exec, result: Value) EvalEr
         exec.handlers.clearRetainingCapacity();
         // JSC names the class when it has one; `activeFunction` is the running
         // constructor, which is what the tree-walker reports here too.
-        if (activeFunction(vm)) |func| if (func.name.len != 0)
-            return vm.throwErrorFmt("TypeError", "Cannot return a non-object type in the constructor of a derived class {s}.", .{func.name});
-        return vm.throwError("TypeError", "Cannot return a non-object type in the constructor of a derived class.");
+        if (activeFunction(vm)) |func| if (func.name.len != 0) {
+            const message = try std.fmt.allocPrint(vm.arena, "Cannot return a non-object type in the constructor of a derived class {s}.", .{func.name});
+            return throwInCallerRealm(vm, exec, "TypeError", message);
+        };
+        return throwInCallerRealm(vm, exec, "TypeError", "Cannot return a non-object type in the constructor of a derived class.");
     }
     const cell = vm.this_cell orelse {
         exec.handlers.clearRetainingCapacity();
-        return vm.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
+        return throwInCallerRealm(vm, exec, "ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
     };
     if (!cell.isInitialized()) {
         exec.handlers.clearRetainingCapacity();
-        return vm.throwError("ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
+        return throwInCallerRealm(vm, exec, "ReferenceError", "'super()' must be called in derived constructor before accessing |this| or returning non-object.");
     }
     return cell.value();
 }
