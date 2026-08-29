@@ -29100,6 +29100,34 @@ test "literal function metadata preserves shared methods without the GIL" {
     }
 }
 
+test "a direct native call installs the callee's closure environment" {
+    // The optimizer's direct-call fast path skips building an activation. A
+    // closure created inside a generator (or async body) keeps its captured
+    // bindings in an Environment Record, not in frame slots, so its
+    // `load_var`s resolve through `vm.env` — which must be the closure's
+    // defining scope, not the caller's. The 8th plain call of the yielded
+    // function used to throw "Can't find variable: i"; method calls, `.call`
+    // and arrows never took the fast path and hid the defect.
+    for ([_]interp.BytecodeExecutionMode{ .automatic, .required }) |mode| {
+        for ([_]struct { name: []const u8, source: []const u8 }{
+            .{ .name = "plain_call_of_generator_closure", .source = "function* gen(n){for(var i=0;i<n;i++){yield function(){return i;};}} var s=0;for(var f of gen(20))s+=f();s===190" },
+            .{ .name = "closure_over_generator_parameter", .source = "function* gen(n){for(var i=0;i<n;i++){yield function(){return n;};}} var s=0;for(var f of gen(20))s+=f();s===400" },
+            .{ .name = "called_through_helper", .source = "function* gen(n){for(var i=0;i<n;i++){yield function(){return i;};}} function callIt(g){return g();} var s=0;for(var f of gen(20))s+=callIt(f);s===190" },
+            .{ .name = "collected_then_called", .source = "function* gen(n){for(var i=0;i<n;i++){yield function(){return i;};}} var fs=[];var it=gen(20),r;while(!(r=it.next()).done)fs.push(r.value);var s=0;for(var f of fs)s+=f();s===400" },
+            .{ .name = "detached_during_argument_coercion", .source = "function* mk(n){for(var i=0;i<n;i++){var ta=new Int32Array(1);var b=ta.buffer;yield {ta:ta,detach:function(){b.transfer();}};}} var thrown=0;for(var o of mk(12)){var start={valueOf:function(){o.detach();return 0;}};var f=function(){return o.ta.slice(start,1);};var r=0;try{f();}catch(e){r=e instanceof TypeError?1:0;}thrown+=r;} thrown===12" },
+        }) |case| {
+            errdefer std.debug.print("direct native call {s} ({s})\n", .{ case.name, @tagName(mode) });
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_gc = true,
+                .enable_jit = true,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+            try std.testing.expect((try ctx.evaluate(case.source)).toBoolean());
+        }
+    }
+}
+
 test "a var loop binding is resolved like an assignment" {
     // ForIn/OfBodyEvaluation step 6.d: a `var` ForBinding is ResolveBinding +
     // PutValue, so it writes whatever `x` names at the loop — the catch

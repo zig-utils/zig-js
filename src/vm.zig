@@ -7575,6 +7575,29 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     const copy_count = @min(args.len, parameter_count);
     @memcpy(slots[0..copy_count], args[0..copy_count]);
 
+    // Skipping the activation must not skip PrepareForOrdinaryCall's scope
+    // switch: a leaf's free variables (`load_var`/`store_var`) resolve through
+    // `vm.env`, and for a closure whose defining scope is an Environment Record
+    // rather than a frame — anything created inside a generator or async body
+    // — that is the only place its captured bindings live. Without this, the
+    // 8th call of `function () { return i; }` yielded from a generator resolved
+    // `i` against the CALLER's scope and threw "Can't find variable: i".
+    // Strictness travels with the function for the same reason (an
+    // unresolvable `store_var`). `this`, `arguments` and upvalues are excluded
+    // from leaf chunks by construction, so nothing else from the activation is
+    // observable here.
+    const caller_env = vm.env;
+    const caller_global = vm.global_object;
+    const caller_strict = vm.strict;
+    vm.env = func.closure;
+    if (func.realm_global) |global| vm.global_object = global;
+    vm.strict = func.is_strict;
+    defer {
+        vm.env = caller_env;
+        vm.global_object = caller_global;
+        vm.strict = caller_strict;
+    }
+
     const optimizer_artifact = loadOrCompileOptimizer(
         vm,
         owner,
