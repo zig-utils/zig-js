@@ -9729,9 +9729,7 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
                 break :set_proto;
             }
         }
-        if (vm.env.get("\x00GenProto")) |p| if (p.isObject()) {
-            obj.proto = p.asObj();
-        };
+        if (func.obj) |fobj| obj.proto = try vm.functionRealmIntrinsicObject(fobj, "\x00GenProto");
     }
     return Value.obj(obj);
 }
@@ -10501,9 +10499,7 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
                 break :set_proto;
             }
         }
-        if (vm.env.get("\x00AsyncGenProto")) |p| if (p.isObject()) {
-            obj.proto = p.asObj();
-        };
+        if (func.obj) |fobj| obj.proto = try vm.functionRealmIntrinsicObject(fobj, "\x00AsyncGenProto");
     }
     return Value.obj(obj);
 }

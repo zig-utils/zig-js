@@ -2352,6 +2352,10 @@ pub const KeyOrderEntry = struct {
 };
 
 pub const ObjectColdState = struct {
+    /// Built-in [[Realm]], separate from opaque host/native private_data.
+    /// Published once before exposing the function; only the stopped collector
+    /// rewrites it afterwards. Non-functions do not allocate a sidecar for it.
+    native_realm: std.atomic.Value(?*anyopaque) = .init(null),
     /// One-time publication tag for `rare`. Exotic state is initialized while
     /// `Object.backing_lock` is held, then this tag is released. Unlocked
     /// no-GIL probes acquire it before touching the stable union payload, so a
@@ -2944,6 +2948,18 @@ pub const Object = struct {
     pub inline fn coldState(self: *const Object) ?*ObjectColdState {
         const storage = self.storageState() orelse return null;
         return storage.cold.load(.acquire);
+    }
+
+    pub inline fn nativeRealm(self: *const Object) ?*anyopaque {
+        const cold = self.coldState() orelse return null;
+        return cold.native_realm.load(.acquire);
+    }
+
+    pub fn setNativeRealm(self: *Object, fallback: std.mem.Allocator, realm: *anyopaque) std.mem.Allocator.Error!void {
+        const cold = try self.ensureCold(fallback);
+        gc_runtime.barrierFrom(@ptrCast(self), realm);
+        std.debug.assert(cold.native_realm.load(.acquire) == null);
+        cold.native_realm.store(realm, .release);
     }
 
     /// Install the collection-only state under the same publication lock as the

@@ -842,9 +842,32 @@ pub const ErrorIntrinsics = struct {
 /// One allocation per realm, not per activation. Identity slots are published
 /// under the root Environment's binding lock and visited by its GC hooks.
 pub const RealmIntrinsics = struct {
+    // Bootstrap-only names; runtime lookup reads these identity slots, never
+    // the writable global object or a constructor's mutable public properties.
+    pub const names = [_][]const u8{
+        "Object",               "Function",               "Boolean",                  "Number",                  "String",                   "Date",                    "RegExp",
+        "Map",                  "Set",                    "WeakMap",                  "WeakSet",                 "ArrayBuffer",              "SharedArrayBuffer",       "DataView",
+        "Int8Array",            "Uint8Array",             "Uint8ClampedArray",        "Int16Array",              "Uint16Array",              "Int32Array",              "Uint32Array",
+        "Float16Array",         "Float32Array",           "Float64Array",             "BigInt64Array",           "BigUint64Array",           "Promise",                 "Iterator",
+        "AsyncIterator",        "WeakRef",                "FinalizationRegistry",     "DisposableStack",         "AsyncDisposableStack",     "Intl.Locale",             "Intl.NumberFormat",
+        "Intl.DateTimeFormat",  "Intl.Collator",          "Intl.PluralRules",         "Intl.RelativeTimeFormat", "Intl.ListFormat",          "Intl.DisplayNames",       "Intl.Segmenter",
+        "Intl.DurationFormat",  "Temporal.Duration",      "Temporal.PlainDate",       "Temporal.PlainTime",      "Temporal.PlainDateTime",   "Temporal.PlainYearMonth", "Temporal.PlainMonthDay",
+        "Temporal.Instant",     "Temporal.ZonedDateTime", "WebAssembly.Module",       "WebAssembly.Instance",    "WebAssembly.Memory",       "WebAssembly.Table",       "WebAssembly.Global",
+        "WebAssembly.Tag",      "WebAssembly.Exception",  "WebAssembly.CompileError", "WebAssembly.LinkError",   "WebAssembly.RuntimeError", "\x00GenProto",            "\x00AsyncGenProto",
+        "\x00GenFuncProto",     "\x00AsyncFuncProto",     "\x00AsyncGenFuncProto",    "\x00T.Duration",          "\x00T.PlainDate",          "\x00T.PlainTime",         "\x00T.PlainDateTime",
+        "\x00T.PlainYearMonth", "\x00T.PlainMonthDay",    "\x00T.Instant",            "\x00T.ZonedDateTime",
+    };
+    pub const Entry = struct { object: ?*value.Object = null, prototype: ?*value.Object = null };
     errors: ErrorIntrinsics = .{},
     array_constructor: ?*value.Object = null,
     array_prototype: ?*value.Object = null,
+    named: [names.len]Entry = @splat(.{}),
+
+    pub fn index(name: []const u8) ?usize {
+        inline for (names, 0..) |candidate, i|
+            if (std.mem.eql(u8, name, candidate)) return i;
+        return null;
+    }
 };
 
 pub const Environment = struct {
@@ -1628,6 +1651,64 @@ pub const Environment = struct {
         defer realm.unlockBindingsForRead(locked);
         const intrinsics = realm.realm_intrinsics orelse return null;
         return if (prototype) intrinsics.array_prototype else intrinsics.array_constructor;
+    }
+
+    fn namedIntrinsic(self: *Environment, name: []const u8, prototype: bool) ?*value.Object {
+        const index = RealmIntrinsics.index(name) orelse return null;
+        const realm = rootEnv(self);
+        const locked = realm.lockBindingsForRead();
+        defer realm.unlockBindingsForRead(locked);
+        const intrinsics = realm.realm_intrinsics orelse return null;
+        const entry = intrinsics.named[index];
+        return if (prototype) entry.prototype else entry.object;
+    }
+
+    /// The realm is not yet exposed to JavaScript. Snapshot the installed
+    /// intrinsics now, not lazily on their first use after user mutation.
+    fn captureRealmIntrinsics(self: *Environment) !void {
+        var globals = self.vars.valueIterator();
+        while (globals.next()) |slot| {
+            if (slot.isObject() and (slot.asObj().native_ctor or slot.asObj().errorCtor() != null) and slot.asObj().nativeRealm() == null)
+                try slot.asObj().setNativeRealm(self.arena, @ptrCast(self));
+        }
+        for (RealmIntrinsics.names, 0..) |name, index| {
+            const installed = blk: {
+                if (name[0] != 0) {
+                    if (std.mem.indexOfScalar(u8, name, '.')) |dot| {
+                        const ns = self.get(name[0..dot]) orelse break :blk null;
+                        break :blk if (ns.isObject()) ns.asObj().getOwn(name[dot + 1 ..]) else null;
+                    }
+                }
+                break :blk self.get(name);
+            };
+            if (installed) |slot| if (slot.isObject()) {
+                const object = slot.asObj();
+                if ((object.native_ctor or object.errorCtor() != null) and object.nativeRealm() == null)
+                    try object.setNativeRealm(self.arena, @ptrCast(self));
+                // Hidden function-kind prototypes own otherwise-unbound native
+                // constructors. Their [[Realm]] must survive a replaced backlink.
+                if (name[0] == 0) {
+                    if (object.getOwn("constructor")) |ctor| if (ctor.isObject() and ctor.asObj().native_ctor and ctor.asObj().nativeRealm() == null)
+                        try ctor.asObj().setNativeRealm(self.arena, @ptrCast(self));
+                }
+                const proto = if (object.getOwn("prototype")) |p| (if (p.isObject()) p.asObj() else null) else null;
+                gc_mod.barrierCellFrom(self, @ptrCast(object));
+                if (proto) |p| gc_mod.barrierCellFrom(self, @ptrCast(p));
+                const locked = self.lockBindingsForWrite();
+                self.realm_intrinsics.?.named[index] = .{ .object = object, .prototype = proto };
+                self.unlockBindingsForWrite(locked);
+            };
+        }
+        // %TypedArray% is abstract and reachable through concrete constructors.
+        if (self.namedIntrinsic("Uint8Array", false)) |ctor| if (ctor.protoAtomic()) |abstract| {
+            if (abstract.native_ctor and abstract.nativeRealm() == null)
+                try abstract.setNativeRealm(self.arena, @ptrCast(self));
+        };
+        const proto = self.namedIntrinsic("Object", true).?;
+        gc_mod.barrierCellFrom(self, @ptrCast(proto));
+        const locked = self.lockBindingsForWrite();
+        defer self.unlockBindingsForWrite(locked);
+        self.object_proto_intrinsic = proto;
     }
 
     fn initRealmIntrinsics(self: *Environment) !void {
@@ -10003,37 +10084,20 @@ pub const Interpreter = struct {
     /// closure root environment), so cross-realm `Reflect.construct` derives the
     /// proto from the NewTarget's realm. Falls back to the current realm.
     pub fn ctorRealmProto(self: *Interpreter, ctor: *value.Object, service: []const u8) EvalError!*value.Object {
-        const p = try self.getProperty(Value.obj(ctor), "prototype");
-        if (p.isObject() and !p.asObj().is_symbol) return p.asObj();
-        if (try self.functionRealmIntlProto(ctor, service)) |proto| return proto;
-        return try self.protoObject(ctor);
+        const target = Value.obj(ctor);
+        const root = try self.pushTempRoot(target);
+        defer self.restoreTempRoots(root);
+        const p = try self.getProperty(target, "prototype");
+        if (p.isObject() and !p.asObj().is_symbol and !p.asObj().is_bigint) return p.asObj();
+        const live_target = self.tempRoot(root, target).asObj();
+        if (try self.functionRealmIntlProto(live_target, service)) |proto| return proto;
+        unreachable; // Every installed Intl service has a realm-owned prototype.
     }
 
     fn envIntlServiceProto(env: *Environment, service: []const u8) ?*value.Object {
-        if (env.get("globalThis")) |gt| {
-            if (gt.isObject()) {
-                if (gt.asObj().getOwn("Intl")) |intl| {
-                    if (intl.isObject()) {
-                        if (intl.asObj().getOwn(service)) |svc_v| {
-                            if (svc_v.isObject()) {
-                                if (svc_v.asObj().getOwn("prototype")) |proto_v| {
-                                    if (proto_v.isObject()) return proto_v.asObj();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (env.get("Intl")) |intl| {
-            if (intl.isObject()) {
-                if (intl.asObj().getOwn(service)) |svc_v| {
-                    if (svc_v.isObject()) {
-                        if (svc_v.asObj().getOwn("prototype")) |proto_v| {
-                            if (proto_v.isObject()) return proto_v.asObj();
-                        }
-                    }
-                }
+        inline for (RealmIntrinsics.names) |name| {
+            if (comptime std.mem.startsWith(u8, name, "Intl.")) {
+                if (std.mem.eql(u8, service, name[5..])) return env.namedIntrinsic(name, true);
             }
         }
         return null;
@@ -10042,109 +10106,50 @@ pub const Interpreter = struct {
     fn envIntrinsicProto(env: *Environment, intrinsic: []const u8) ?*value.Object {
         if (ErrorIntrinsics.index(intrinsic) != null) return env.errorIntrinsic(intrinsic, true);
         if (std.mem.eql(u8, intrinsic, "Array")) return env.arrayIntrinsic(true);
-        if (env.get("globalThis")) |gt| {
-            if (gt.isObject()) {
-                if (gt.asObj().getOwn(intrinsic)) |ctor_v| {
-                    if (ctor_v.isObject()) {
-                        if (ctor_v.asObj().getOwn("prototype")) |proto_v| {
-                            if (proto_v.isObject()) return proto_v.asObj();
-                        }
-                    }
-                }
-            }
-        }
-        if (env.get(intrinsic)) |ctor_v| {
-            if (ctor_v.isObject()) {
-                if (ctor_v.asObj().getOwn("prototype")) |proto_v| {
-                    if (proto_v.isObject()) return proto_v.asObj();
-                }
-            }
-        }
-        return null;
+        return env.namedIntrinsic(intrinsic, true);
     }
 
     fn envIntrinsicObject(env: *Environment, intrinsic: []const u8) ?*value.Object {
         if (ErrorIntrinsics.index(intrinsic) != null) return env.errorIntrinsic(intrinsic, false);
         if (std.mem.eql(u8, intrinsic, "Array")) return env.arrayIntrinsic(false);
-        if (env.get(intrinsic)) |v| {
-            if (v.isObject()) return v.asObj();
+        return env.namedIntrinsic(intrinsic, false);
+    }
+
+    /// ECMA-262 GetFunctionRealm. Opaque host private_data is never an
+    /// Environment. Iteration also avoids native-stack growth for bound/proxy
+    /// chains; these immutable target edges cannot form a cycle.
+    fn functionRealm(self: *Interpreter, ctor: *value.Object) EvalError!*Environment {
+        var current = ctor;
+        while (true) {
+            if (current.nativeRealm()) |realm| return @ptrCast(@alignCast(realm));
+            if (current.jsFunction()) |jf| {
+                const function: *Function = @ptrCast(@alignCast(jf));
+                return rootEnv(function.closure);
+            }
+            if (current.boundFunction()) |erased| {
+                const bound: *BoundFn = @ptrCast(@alignCast(erased));
+                current = bound.target.asObj();
+                continue;
+            }
+            if (current.proxyHandler() != null or current.proxy_revoked) {
+                current = current.proxyTarget() orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
+                continue;
+            }
+            // Step 4: non-standard function exotics without [[Realm]].
+            return rootEnv(self.env);
         }
-        return null;
     }
 
     fn functionRealmIntrinsicProto(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!?*value.Object {
-        if (ctor.proxyHandler() != null or ctor.proxy_revoked) {
-            const target = ctor.proxyTarget() orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
-            return try self.functionRealmIntrinsicProto(target, intrinsic);
-        }
-        if ((ctor.native_ctor or ctor.errorCtor() != null) and ctor.private_data != null) {
-            const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
-            if (envIntrinsicProto(env, intrinsic)) |proto| return proto;
-        }
-        if (ctor.jsFunction()) |jf| {
-            const fnp: *Function = @ptrCast(@alignCast(jf));
-            var env: ?*Environment = fnp.closure;
-            while (env) |e| {
-                if (envIntrinsicProto(e, intrinsic)) |proto| return proto;
-                if (e.parent == null) break;
-                env = e.parent;
-            }
-        }
-        if (ctor.boundFunction()) |erased| {
-            const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            if (bf.target.isObject()) return try self.functionRealmIntrinsicProto(bf.target.asObj(), intrinsic);
-        }
-        return null;
+        return envIntrinsicProto(try self.functionRealm(ctor), intrinsic);
     }
 
     fn functionRealmIntlProto(self: *Interpreter, ctor: *value.Object, service: []const u8) EvalError!?*value.Object {
-        if (ctor.proxyHandler() != null or ctor.proxy_revoked) {
-            const target = ctor.proxyTarget() orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
-            return try self.functionRealmIntlProto(target, service);
-        }
-        if ((ctor.native_ctor or ctor.errorCtor() != null) and ctor.private_data != null) {
-            const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
-            if (envIntlServiceProto(env, service)) |proto| return proto;
-        }
-        if (ctor.jsFunction()) |jf| {
-            const fnp: *Function = @ptrCast(@alignCast(jf));
-            var env: ?*Environment = fnp.closure;
-            while (env) |e| {
-                if (envIntlServiceProto(e, service)) |proto| return proto;
-                if (e.parent == null) break;
-                env = e.parent;
-            }
-        }
-        if (ctor.boundFunction()) |erased| {
-            const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            if (bf.target.isObject()) return try self.functionRealmIntlProto(bf.target.asObj(), service);
-        }
-        return null;
+        return envIntlServiceProto(try self.functionRealm(ctor), service);
     }
 
-    fn functionRealmIntrinsicObject(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!?*value.Object {
-        if (ctor.proxyHandler() != null or ctor.proxy_revoked) {
-            const target = ctor.proxyTarget() orelse return self.throwError("TypeError", "Cannot get function realm from a revoked proxy");
-            return try self.functionRealmIntrinsicObject(target, intrinsic);
-        }
-        if ((ctor.native_ctor or ctor.errorCtor() != null) and ctor.private_data != null) {
-            const env: *Environment = @ptrCast(@alignCast(ctor.private_data.?));
-            if (envIntrinsicObject(env, intrinsic)) |obj| return obj;
-        }
-        if (ctor.jsFunction()) |jf| {
-            const fnp: *Function = @ptrCast(@alignCast(jf));
-            var env: ?*Environment = fnp.closure;
-            while (env) |e| {
-                if (envIntrinsicObject(e, intrinsic)) |obj| return obj;
-                if (e.parent == null) break;
-                env = e.parent;
-            }
-        }
-        if (ctor.boundFunction()) |erased| {
-            const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            if (bf.target.isObject()) return try self.functionRealmIntrinsicObject(bf.target.asObj(), intrinsic);
-        }
-        return null;
+    pub fn functionRealmIntrinsicObject(self: *Interpreter, ctor: *value.Object, intrinsic: []const u8) EvalError!?*value.Object {
+        return envIntrinsicObject(try self.functionRealm(ctor), intrinsic);
     }
 
     /// GetPrototypeFromConstructor for global intrinsics such as
@@ -10155,11 +10160,12 @@ pub const Interpreter = struct {
         const target_root = try self.pushTempRoot(target);
         defer self.restoreTempRoots(target_root);
         const p = try self.getProperty(target, "prototype");
-        if (p.isObject() and !p.asObj().is_symbol) return self.preparePrototypeUse(p.asObj());
+        // GetPrototypeFromConstructor tests ECMAScript Type, not the internal
+        // cell tag shared by Objects, Symbol primitives, and BigInt primitives.
+        if (p.isObject() and !p.asObj().is_symbol and !p.asObj().is_bigint) return self.preparePrototypeUse(p.asObj());
         const live_target = self.tempRoot(target_root, target).asObj();
         if (try self.functionRealmIntrinsicProto(live_target, intrinsic)) |proto| return proto;
-        if (envIntrinsicProto(self.env, intrinsic)) |proto| return proto;
-        return try self.protoObject(live_target);
+        unreachable; // A named default is installed before its constructor runs.
     }
 
     /// GetPrototypeFromConstructor(newTarget, %ctor_name.prototype%): read
@@ -11081,11 +11087,16 @@ pub const Interpreter = struct {
     }
 
     /// Create an instance for `new ctor(...)`: a fresh object whose prototype is
-    /// the constructor's `.prototype`.
+    /// GetPrototypeFromConstructor(ctor, %Object.prototype%), not the lazy
+    /// prototype installer (which would overwrite a primitive own prototype).
     pub fn newInstance(self: *Interpreter, ctor: *value.Object) EvalError!Value {
+        const target = Value.obj(ctor);
+        const root = try self.pushTempRoot(target);
+        defer self.restoreTempRoots(root);
+        const proto = try self.ctorRealmIntrinsicProto(ctor, "Object");
         const obj = try gc_mod.allocObj(self.arena);
-        obj.* = .{ .proto = try self.protoObject(ctor) };
-        try obj.setCtorRef(self.arena, ctor);
+        obj.* = .{ .proto = proto };
+        try obj.setCtorRef(self.arena, self.tempRoot(root, target).asObj());
         return Value.obj(obj);
     }
 
@@ -24674,11 +24685,12 @@ fn iteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Iterator requires 'new'");
     // Abstract: cannot be constructed unless subclassed (new.target !== Iterator).
     if (self.new_target.isObject()) {
-        if (self.env.get("Iterator")) |ic| if (ic.isObject() and self.new_target.asObj() == ic.asObj())
+        if (self.active_native) |callee| if (self.new_target.asObj() == callee)
             return self.throwError("TypeError", "Abstract class Iterator not directly constructable");
     }
+    const proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Iterator");
     const o = (try self.newObject()).asObj();
-    o.setProtoAtomic(try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "Iterator"));
+    o.setProtoAtomic(proto);
     return Value.obj(o);
 }
 
@@ -25236,11 +25248,13 @@ fn asyncIteratorConstructorFn(ctx: *anyopaque, this: Value, args: []const Value)
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor AsyncIterator requires 'new'");
     if (self.new_target.isObject()) {
-        if (self.env.get("AsyncIterator")) |ic| if (ic.isObject() and self.new_target.asObj() == ic.asObj())
+        if (self.active_native) |callee| if (self.new_target.asObj() == callee)
             return self.throwError("TypeError", "Abstract class AsyncIterator not directly constructable");
     }
+    // Async Iterator Helpers 2.1.2.1.1: OrdinaryCreateFromConstructor.
+    const proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), "AsyncIterator");
     const o = (try self.newObject()).asObj();
-    o.setProtoAtomic(try self.protoObject(self.new_target.asObj()));
+    o.setProtoAtomic(proto);
     return Value.obj(o);
 }
 
@@ -25355,34 +25369,33 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             _ = this;
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            const roots = try self.pushTempRootSlice(args);
+            defer self.restoreTempRoots(roots);
+            const target = self.new_target;
+            const target_root = try self.pushTempRoot(target);
+            const saved_env = self.env;
+            const saved_env_root = try self.pushTempEnvRoot(saved_env);
+            defer self.restoreTempEnvRoots(saved_env_root);
+            defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
             var params: std.ArrayListUnmanaged(u8) = .empty;
             var body: []const u8 = "";
             if (args.len > 0) {
                 var i: usize = 0;
                 while (i + 1 < args.len) : (i += 1) {
                     if (i != 0) try params.append(self.arena, ',');
-                    try params.appendSlice(self.arena, try self.toStringWtf8(args[i]));
+                    try params.appendSlice(self.arena, try self.toStringWtf8(self.tempRoot(roots + i, args[i])));
                 }
-                body = try self.toStringWtf8(args[args.len - 1]);
+                body = try self.toStringWtf8(self.tempRoot(roots + args.len - 1, args[args.len - 1]));
             }
             // CreateDynamicFunction parses in the constructor's realm, so
             // SyntaxError instances are from that realm too.
-            const nt = self.new_target;
-            const saved_env = self.env;
             // CreateDynamicFunction does not close over the caller's private names.
             const saved_private_map = self.current_private_map;
             self.current_private_map = null;
             defer self.current_private_map = saved_private_map;
-            var swapped = false;
             if (self.active_native) |callee| {
-                if (callee.private_data) |pd| {
-                    self.env = @ptrCast(@alignCast(pd));
-                    swapped = true;
-                }
+                if (callee.nativeRealm()) |realm| self.env = @ptrCast(@alignCast(realm));
             }
-            defer if (swapped) {
-                self.env = saved_env;
-            };
             if (kind == .generator or kind == .async_generator) {
                 const has_yield = dynamicGeneratorParamsContainYield(self.arena, params.items) catch
                     return self.throwError("SyntaxError", "Function: invalid parameters or body");
@@ -25415,21 +25428,22 @@ fn dynamicFunctionFn(comptime kind: DynFnKind) value.NativeFn {
                 .async_generator => "AsyncGeneratorFunction",
             };
             try self.registerParsedDynamicDebugScript(source, fallback_url, 1, &parser);
-            const fnval = try self.eval(prog);
+            var fnval = try self.eval(prog);
+            const function_root = try self.pushTempRoot(fnval);
             // GetPrototypeFromConstructor: a real new.target subclass overrides
             // the function object's [[Prototype]] (the default kind-prototype is
             // already installed by makeFunction).
+            const nt = self.tempRoot(target_root, target);
             if (nt.isObject() and fnval.isObject()) {
                 const p = try self.getProperty(nt, "prototype");
-                if (p.isObject() and !p.asObj().is_symbol) {
+                fnval = self.tempRoot(function_root, fnval);
+                if (p.isObject() and !p.asObj().is_symbol and !p.asObj().is_bigint) {
                     fnval.asObj().proto = p.asObj();
                 } else {
                     const key = dynamicFunctionPrototypeKey(kind);
-                    if (try self.functionRealmIntrinsicObject(nt.asObj(), key)) |proto| {
+                    if (try self.functionRealmIntrinsicObject(self.tempRoot(target_root, target).asObj(), key)) |proto| {
                         fnval.asObj().proto = proto;
-                    } else if (Interpreter.envIntrinsicObject(self.env, key)) |proto| {
-                        fnval.asObj().proto = proto;
-                    }
+                    } else unreachable;
                 }
             }
             return fnval;
@@ -36582,6 +36596,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // The WebAssembly JS API (issue #141, part 1): the WebAssembly namespace,
     // its CompileError/LinkError/RuntimeError constructors, and Module.
     try wasm_api.installWebAssembly(env, root_shape);
+    try env.captureRealmIntrinsics();
 }
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the
@@ -38972,16 +38987,29 @@ fn makeTemporal(self: *Interpreter, kind: value.TemporalData.Kind, proto_key: []
     t.* = .{ .kind = kind };
     try o.setTemporalData(self.arena, t);
     installed = true;
-    if (self.env.get(proto_key)) |p| if (p.isObject()) {
-        o.setProtoAtomic(p.asObj());
-    };
+    if (self.env.namedIntrinsic(proto_key, false)) |proto| o.setProtoAtomic(proto);
     return o;
 }
 
-fn applyTemporalNewTargetProto(self: *Interpreter, o: *value.Object) EvalError!void {
-    if (!self.new_target.isObject()) return;
-    const p = try self.getProperty(self.new_target, "prototype");
-    if (p.isObject() and !p.asObj().is_symbol) o.setProtoAtomic(p.asObj());
+fn applyTemporalNewTargetProto(self: *Interpreter, o: *value.Object) EvalError!Value {
+    const object = Value.obj(o);
+    if (!self.new_target.isObject()) return object;
+    const root = try self.pushTempRoot(object);
+    defer self.restoreTempRoots(root);
+    const intrinsic = switch (o.temporalData().?.kind) {
+        .duration => "Temporal.Duration",
+        .plain_date => "Temporal.PlainDate",
+        .plain_time => "Temporal.PlainTime",
+        .plain_date_time => "Temporal.PlainDateTime",
+        .plain_year_month => "Temporal.PlainYearMonth",
+        .plain_month_day => "Temporal.PlainMonthDay",
+        .instant => "Temporal.Instant",
+        .zoned_date_time => "Temporal.ZonedDateTime",
+    };
+    const proto = try self.ctorRealmIntrinsicProto(self.new_target.asObj(), intrinsic);
+    const live = self.tempRoot(root, object);
+    live.asObj().setProtoAtomic(proto);
+    return live;
 }
 
 /// ToIntegerWithTruncation, rejecting non-finite.
@@ -39068,11 +39096,7 @@ fn temporalDurationConstructorFn(ctx: *anyopaque, this: Value, args: []const Val
         }
     }
     const out = try makeDuration(self, dur);
-    if (self.new_target.isObject()) {
-        const p = try self.getProperty(self.new_target, "prototype");
-        if (p.isObject() and !p.asObj().is_symbol) out.asObj().proto = p.asObj();
-    }
-    return out;
+    return applyTemporalNewTargetProto(self, out.asObj());
 }
 
 fn durationSign(t: *const value.TemporalData) f64 {
@@ -39575,8 +39599,7 @@ fn temporalPlainDateConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     o.temporalData().?.month = cd.m;
     o.temporalData().?.day = cd.d;
     o.temporalData().?.calendar = cal;
-    try applyTemporalNewTargetProto(self, o);
-    return Value.obj(o);
+    return applyTemporalNewTargetProto(self, o);
 }
 
 const PlainDateField = enum { year, month, day, day_of_week, day_of_year, days_in_month, days_in_year, months_in_year, days_in_week, week_of_year, in_leap_year };
@@ -41792,8 +41815,7 @@ fn temporalPlainTimeConstructorFn(ctx: *anyopaque, this: Value, args: []const Va
     }
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
     setTimeFields(o.temporalData().?, vals);
-    try applyTemporalNewTargetProto(self, o);
-    return Value.obj(o);
+    return applyTemporalNewTargetProto(self, o);
 }
 
 fn setTimeFields(t: *value.TemporalData, vals: [6]f64) void {
@@ -41880,8 +41902,7 @@ fn temporalPlainDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporalData().?.calendar = cal;
     setTimeFields(o.temporalData().?, vals);
     try checkPlainDateTimeNs(self, dateTimeToNs(o.temporalData().?));
-    try applyTemporalNewTargetProto(self, o);
-    return Value.obj(o);
+    return applyTemporalNewTargetProto(self, o);
 }
 
 fn temporalPlainDateTimeToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -42215,8 +42236,7 @@ fn temporalPlainYearMonthConstructorFn(ctx: *anyopaque, this: Value, args: []con
     o.temporalData().?.month = cd.m;
     o.temporalData().?.day = cd.d;
     o.temporalData().?.calendar = cal;
-    try applyTemporalNewTargetProto(self, o);
-    return Value.obj(o);
+    return applyTemporalNewTargetProto(self, o);
 }
 
 const YearMonthField = enum { year, month, days_in_month, days_in_year, months_in_year, in_leap_year };
@@ -42689,8 +42709,7 @@ fn temporalPlainMonthDayConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporalData().?.month = @intFromFloat(m);
     o.temporalData().?.day = @intFromFloat(d);
     o.temporalData().?.calendar = cal;
-    try applyTemporalNewTargetProto(self, o);
-    return Value.obj(o);
+    return applyTemporalNewTargetProto(self, o);
 }
 
 const MonthDayField = enum { month_code, day };
@@ -44906,8 +44925,7 @@ fn temporalInstantConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Constructor Temporal.Instant requires 'new'");
     const ns = try checkedEpochNsFromBigInt(self, if (args.len > 0) args[0] else Value.undef());
     const o = try makeInstantFromEpochNs(self, ns);
-    try applyTemporalNewTargetProto(self, o);
-    return Value.obj(o);
+    return applyTemporalNewTargetProto(self, o);
 }
 
 fn temporalInstantEpochGetter(comptime ms: bool) value.NativeFn {
@@ -46287,8 +46305,7 @@ fn temporalZonedDateTimeConstructorFn(ctx: *anyopaque, this: Value, args: []cons
     o.temporalData().?.tz_name = tz.name;
     o.temporalData().?.tz_offset_ns = tz.offset_ns;
     o.temporalData().?.calendar = cal;
-    try applyTemporalNewTargetProto(self, o);
-    return Value.obj(o);
+    return applyTemporalNewTargetProto(self, o);
 }
 
 const ZdtField = enum {
@@ -56377,6 +56394,36 @@ test "realm error intrinsics own storage and error construction through OOM" {
     const previous_heap = gc_mod.setActiveHeap(null);
     defer _ = gc_mod.setActiveHeap(previous_heap);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, probe, .{});
+}
+
+test "constructor prototype native realm publication survives allocation failure" {
+    const probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            var root = Environment{ .arena = arena.allocator(), .bindings_allocator = backing, .fn_scope = true };
+            defer root.finalizeOwnedBindingStorage();
+            try root.initRealmIntrinsics();
+            var ctor = value.Object{};
+            try ctor.setNativeRealm(arena.allocator(), &root);
+            try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&root)), ctor.nativeRealm().?);
+            try std.testing.expect(ctor.private_data == null);
+        }
+    }.run;
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, probe, .{});
+}
+
+test "constructor prototype host exotics never reinterpret private data as a realm" {
+    var root = Environment{ .arena = std.testing.allocator };
+    var child = Environment{ .arena = std.testing.allocator, .parent = &root };
+    var opaque_byte: u8 = 0;
+    var ctor = value.Object{ .native_ctor = true, .private_data = &opaque_byte };
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    var machine = Interpreter{ .arena = shape_arena.allocator(), .env = &child, .root_shape = try Shape.createRoot(shape_arena.allocator()) };
+    try std.testing.expectEqual(&root, try machine.functionRealm(&ctor));
 }
 
 test "realm array intrinsics own storage and construction through OOM" {

@@ -28272,6 +28272,151 @@ test "Thread restriction guards forwarded targets holders and write receivers" {
     }
 }
 
+test "constructor prototype primitives preserve object types and NewTarget realms" {
+    const constructors = .{
+        .{ "Object", "[]" },             .{ "Array", "[]" },                      .{ "Boolean", "[]" },
+        .{ "Number", "[]" },             .{ "String", "[]" },                     .{ "Date", "[]" },
+        .{ "RegExp", "[]" },             .{ "Map", "[]" },                        .{ "Set", "[]" },
+        .{ "WeakMap", "[]" },            .{ "WeakSet", "[]" },                    .{ "ArrayBuffer", "[8]" },
+        .{ "SharedArrayBuffer", "[8]" }, .{ "DataView", "[new ArrayBuffer(8)]" }, .{ "Uint8Array", "[8]" },
+        .{ "Error", "[]" },              .{ "TypeError", "[]" },                  .{ "AggregateError", "[[]]" },
+        .{ "SuppressedError", "[1,2]" }, .{ "Promise", "[function(){}]" },        .{ "Function", "['return 1']" },
+        .{ "Intl.NumberFormat", "[]" },  .{ "Intl.DateTimeFormat", "[]" },        .{ "Intl.Collator", "[]" },
+        .{ "Intl.PluralRules", "[]" },   .{ "Intl.RelativeTimeFormat", "[]" },    .{ "Intl.ListFormat", "[]" },
+        .{ "Intl.Segmenter", "[]" },
+    };
+    const extra = [_][]const u8{
+        "(function(){var C=Object.getPrototypeOf(function*(){}).constructor;function N(){}N.prototype=1n;return Object.getPrototypeOf(Reflect.construct(C,[],N))===C.prototype&&N.prototype===1n;})()",
+        "(function(){var C=Object.getPrototypeOf(async function(){}).constructor;function N(){}N.prototype=1n;return Object.getPrototypeOf(Reflect.construct(C,[],N))===C.prototype&&N.prototype===1n;})()",
+        "(function(){var C=Object.getPrototypeOf(async function*(){}).constructor;function N(){}N.prototype=1n;return Object.getPrototypeOf(Reflect.construct(C,[],N))===C.prototype&&N.prototype===1n;})()",
+        "(function(){function N(){}N.prototype=1n;return Object.getPrototypeOf(new N())===Object.prototype&&N.prototype===1n;})()",
+        "(function(){var prototypes=[undefined,null,true,1,'text',Symbol('p'),1n];for(var i=0;i<prototypes.length;i++){function N(){}N.prototype=prototypes[i];if(Object.getPrototypeOf(new N())!==Object.prototype||N.prototype!==prototypes[i])return false;}return true;})()",
+        "(function(){var r=$262.createRealm().global,N=r.Function('');N.prototype=1n;return Object.getPrototypeOf(new N())===r.Object.prototype&&N.prototype===1n;})()",
+        "(function(){function N(){}N.prototype=1n;var B=N.bind(null);return Object.getPrototypeOf(new B())===Object.prototype&&N.prototype===1n;})()",
+        "(function(){function N(){}N.prototype=1n;var P=new Proxy(N,{});return Object.getPrototypeOf(new P())===Object.prototype&&N.prototype===1n;})()",
+        "(function(){var count=0;function N(){}var P=new Proxy(N,{get(t,k,r){if(k==='prototype'){count++;return 1n;}return Reflect.get(t,k,r);}});return Object.getPrototypeOf(Reflect.construct(Error,[],P))===Error.prototype&&count===1;})()",
+        "(function(){function N(){}var P=Proxy.revocable(N,{get(t,k,r){if(k==='prototype'){P.revoke();return 1n;}return Reflect.get(t,k,r);}});try{Reflect.construct(Error,[],P.proxy);}catch(e){return e instanceof TypeError;}return false;})()",
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+        inline for (constructors) |spec| {
+            const sources = .{
+                "(function(){var C=" ++ spec[0] ++ ";function N(){}N.prototype=1n;var o=Reflect.construct(C," ++ spec[1] ++ ",N);return Object.getPrototypeOf(o)===C.prototype&&N.prototype===1n;})()",
+                "(function(){var C=" ++ spec[0] ++ ",p=Object(1n);function N(){}N.prototype=p;return Object.getPrototypeOf(Reflect.construct(C," ++ spec[1] ++ ",N))===p;})()",
+                "(function(){var C=" ++ spec[0] ++ ",r=$262.createRealm().global,N=r.eval('(function N(){})');N.prototype=1n;return Object.getPrototypeOf(Reflect.construct(C," ++ spec[1] ++ ",N))===r." ++ spec[0] ++ ".prototype&&N.prototype===1n;})()",
+            };
+            inline for (sources, 0..) |source, index| {
+                errdefer std.debug.print("prototype type {s} case {d} mode {s}\n", .{ spec[0], index, @tagName(mode) });
+                try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+            }
+        }
+        for (extra, 0..) |source, index| {
+            errdefer std.debug.print("prototype type extra case {d} mode {s}\n", .{ index, @tagName(mode) });
+            try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+        }
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "constructor prototype realms retain private identities and native ownership" {
+    const sources = [_][]const u8{
+        \\(function(){var names=['Object','Array','Function','Boolean','Number','String','Date','RegExp','Map','Set','WeakMap','WeakSet','ArrayBuffer','SharedArrayBuffer','DataView','Uint8Array','Error','TypeError','Promise','WeakRef','FinalizationRegistry','DisposableStack','AsyncDisposableStack','Proxy','BigInt','Symbol'];var r=$262.createRealm().global,p=r.Object.prototype;for(var name of names){var N=r[name].bind(null);Object.defineProperty(N,'prototype',{value:1n});if(Object.getPrototypeOf(Reflect.construct(Object,[],N))!==p)throw new Error(name);}return true;})()
+        ,
+        \\(function(){var names=['Locale','NumberFormat','DateTimeFormat','Collator','PluralRules','RelativeTimeFormat','ListFormat','DisplayNames','Segmenter','DurationFormat'];var r=$262.createRealm().global,p=r.Object.prototype;for(var name of names){var N=r.Intl[name].bind(null);Object.defineProperty(N,'prototype',{value:1n});if(Object.getPrototypeOf(Reflect.construct(Object,[],new Proxy(N,{})))!==p)throw new Error(name);}return true;})()
+        ,
+        \\(function(){var cases=[['Object',[]],['Function',[]],['Boolean',[]],['Number',[]],['String',[]],['Date',[]],['RegExp',[]],['Map',[]],['Set',[]],['WeakMap',[]],['WeakSet',[]],['ArrayBuffer',[8]],['SharedArrayBuffer',[8]],['DataView',[new ArrayBuffer(8)]],['Uint8Array',[8]],['Promise',[function(){}]],['WeakRef',[{}]],['FinalizationRegistry',[function(){}]],['DisposableStack',[]],['AsyncDisposableStack',[]]];for(var entry of cases){var name=entry[0],r=$262.createRealm().global,C=globalThis[name],p=r[name].prototype,N=r.eval('(function(){})');N.prototype=1n;r[name]=function Fake(){};r.globalThis={};if(Object.getPrototypeOf(Reflect.construct(C,entry[1],N))!==p)throw new Error(name);}return true;})()
+        ,
+        \\(function(){var cases=[['Locale',['en']],['NumberFormat',[]],['DateTimeFormat',[]],['Collator',[]],['PluralRules',[]],['RelativeTimeFormat',[]],['ListFormat',[]],['DisplayNames',['en',{type:'language'}]],['Segmenter',[]],['DurationFormat',[]]];for(var entry of cases){var name=entry[0],r=$262.createRealm().global,C=Intl[name],p=r.Intl[name].prototype,N=r.eval('(function(){})');N.prototype=1n;r.Intl[name]=function Fake(){};r.Intl={};r.globalThis={};if(Object.getPrototypeOf(Reflect.construct(C,entry[1],N))!==p)throw new Error(name);}return true;})()
+        ,
+        \\(function(){var r=$262.createRealm().global;var functions=[r.eval('(function*(){})'),r.eval('(async function(){})'),r.eval('(async function*(){})')];for(var fn of functions){var C=Object.getPrototypeOf(fn).constructor,p=r.Object.prototype,N=C.bind(null);Object.defineProperty(N,'prototype',{value:1n});if(Object.getPrototypeOf(Reflect.construct(Object,[],N))!==p)return false;}return true;})()
+        ,
+        \\(function(){var r=$262.createRealm().global,N=r.Uint8Array.bind(null),p=r.Object.prototype;r.Object=function Fake(){};r.globalThis={};for(var i=0;i<300;i++)N=new Proxy(N.bind(null),{});Object.defineProperty(N,'prototype',{value:1n});return Object.getPrototypeOf(Reflect.construct(Object,[],N))===p;})()
+        ,
+    };
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false, .bytecode_execution_mode = mode });
+        defer ctx.destroy();
+        for (sources, 0..) |source, index| {
+            errdefer std.debug.print("prototype realm case {d} mode {s}\n", .{ index, @tagName(mode) });
+            try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+        }
+        if (mode == .required) try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "constructor prototype Temporal realms reject primitives and retain identities" {
+    const source =
+        \\(function(){var cases=[['Duration',[]],['PlainDate',[2020,1,2]],['PlainTime',[]],['PlainDateTime',[2020,1,2]],['PlainYearMonth',[2020,1]],['PlainMonthDay',[1,2]],['Instant',[0n]],['ZonedDateTime',[0n,'UTC']]];for(var entry of cases){var name=entry[0],C=Temporal[name],r=$262.createRealm().global,p=r.Temporal[name].prototype,N=r.eval('(function(){})');N.prototype=1n;r.Temporal[name]=function Fake(){};r.Temporal={};r.globalThis={};if(Object.getPrototypeOf(Reflect.construct(C,entry[1],N))!==p)throw new Error(name+' realm');var boxed=Object(1n);N.prototype=boxed;if(Object.getPrototypeOf(Reflect.construct(C,entry[1],N))!==boxed)throw new Error(name+' boxed');var B=C.bind(null);Object.defineProperty(B,'prototype',{value:1n});if(Object.getPrototypeOf(Reflect.construct(C,entry[1],B))!==C.prototype)throw new Error(name+' bound');var reads=0,P=new Proxy(N,{get(t,k,r){if(k==='prototype'){reads++;return Symbol();}return Reflect.get(t,k,r);}});if(Object.getPrototypeOf(Reflect.construct(C,entry[1],P))!==p||reads!==1)throw new Error(name+' getter');}return true;})()
+    ;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false, .bytecode_execution_mode = mode });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+        if (mode == .required) try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "constructor prototype iterators use private realms and active constructors" {
+    const source =
+        \\(function(){for(var name of ['Iterator','AsyncIterator']){var r=$262.createRealm().global,C=r[name],p=C.prototype,N=r.eval('(function(){})');N.prototype=1n;r[name]=function Fake(){};if(Object.getPrototypeOf(Reflect.construct(C,[],N))!==p||N.prototype!==1n)throw 1;var threw=false;try{new C();}catch(e){threw=e.name==='TypeError';}if(!threw)throw 2;var count=0,P=new Proxy(N,{get(t,k,r){if(k==='prototype'){count++;return Object(1n);}return Reflect.get(t,k,r);}});if(typeof Object.getPrototypeOf(Reflect.construct(C,[],P)).valueOf()!=='bigint'||count!==1)throw 3;}return true;})()
+    ;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false, .bytecode_execution_mode = mode });
+        defer ctx.destroy();
+        try std.testing.expect((try ctx.evaluate(source)).toBoolean());
+        try std.testing.expect((try ctx.evaluate("(function(){var r=$262.createRealm().global,g=r.eval('(function*(){})'),p=Object.getPrototypeOf(g.prototype);g.prototype=1n;return Object.getPrototypeOf(g())===p;})()")).toBoolean());
+        try std.testing.expect((try ctx.evaluate("(function(){var r=$262.createRealm().global,g=r.eval('(async function*(){})'),p=Object.getPrototypeOf(g.prototype);g.prototype=1n;return Object.getPrototypeOf(g())===p;})()")).toBoolean());
+        if (mode == .required) try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "constructor prototype native realms retain identities with no GIL" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false, .enable_threads = true, .gil = false });
+    defer ctx.destroy();
+    ctx.setBytecodeExecutionModeForTesting(.required);
+    const result = try ctx.evaluate(
+        \\var nativeRealmGlobal=$262.createRealm().global;
+        \\var nativeRealmProto=nativeRealmGlobal.Object.prototype;
+        \\var nativeRealmTarget=nativeRealmGlobal.Intl.NumberFormat.bind(null);
+        \\Object.defineProperty(nativeRealmTarget,'prototype',{value:1n});
+        \\nativeRealmGlobal.Object=function Fake(){};
+        \\nativeRealmGlobal.Intl={};
+        \\function nativeRealmLane(){for(var i=0;i<64;i++){if(Object.getPrototypeOf(Reflect.construct(Object,[],nativeRealmTarget))!==nativeRealmProto)throw 99;}return 37;}
+        \\var nativeRealmWorkers=[new Thread(nativeRealmLane),new Thread(nativeRealmLane),new Thread(nativeRealmLane)];
+        \\nativeRealmLane()===37&&nativeRealmWorkers.every(function(t){return t.join()===37;});
+    );
+    try std.testing.expect(result.toBoolean());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
+test "constructor prototype realms retain private identities through collection" {
+    for ([_]bool{ false, true }) |gc_enabled| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = gc_enabled, .enable_jit = false });
+        defer ctx.destroy();
+        _ = try ctx.evaluate("var keptNativeTarget=Intl.NumberFormat.bind(null);Object.defineProperty(keptNativeTarget,'prototype',{value:1n});globalThis.Object=undefined;globalThis.Intl=undefined;globalThis.Temporal=undefined;");
+        ctx.collectGarbage();
+        _ = ctx.compactGarbage();
+        const intrinsics = ctx.env.realm_intrinsics.?;
+        for (intrinsics.named) |entry| {
+            const object = entry.object orelse return error.TestUnexpectedResult;
+            if (entry.prototype) |proto| try std.testing.expectEqual(proto, object.getOwn("prototype").?.asObj());
+            if (object.native_ctor) try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&ctx.env)), object.nativeRealm().?);
+        }
+    }
+}
+
+test "constructor prototype functions and Temporal survive moving getters" {
+    try expectProxyMetadataMoving("var N=new Proxy(function(){},{get(t,k,r){if(k==='prototype'){proxyMovingLoop(20000);return proxySubject;}return Reflect.get(t,k,r);}});", "(function(){var f=Reflect.construct(Function,['return 37'],N);return Object.getPrototypeOf(f)===proxySubject&&f()===37;})()");
+    try expectProxyMetadataMoving("var C=Object.getPrototypeOf(function*(){}).constructor;var other=$262.createRealm().global,P=other.eval('Object.getPrototypeOf(function*(){})');var N=new Proxy(other.eval('(function(){})'),{get(t,k,r){if(k==='prototype'){proxyMovingLoop(20000);return 1n;}return Reflect.get(t,k,r);}});", "Object.getPrototypeOf(Reflect.construct(C,[],N))===P");
+    try expectProxyMetadataMoving("var other=$262.createRealm().global,P=other.Temporal.PlainDate.prototype;var N=new Proxy(other.eval('(function(){})'),{get(t,k,r){if(k==='prototype'){proxyMovingLoop(20000);return 1n;}return Reflect.get(t,k,r);}});other.Temporal={};", "(function(){var d=Reflect.construct(Temporal.PlainDate,[2020,1,2],N);return Object.getPrototypeOf(d)===P&&d.year===2020;})()");
+}
+
 test "realm array intrinsics preserve identities and species across execution tiers" {
     const cases = [_]struct { name: []const u8, source: []const u8 }{
         .{ .name = "aggregate_array_replaced", .source = "(function(){var E=AggregateError,p=Array.prototype;globalThis.Array=function Fake(){};return Object.getPrototypeOf(E([1]).errors)===p;})()" },

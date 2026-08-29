@@ -114,38 +114,33 @@ pub fn booleanFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
+    const roots = try self.pushTempRootSlice(args);
+    defer self.restoreTempRoots(roots);
+    const target = self.new_target;
+    const target_root = try self.pushTempRoot(target);
+    const saved_env = self.env;
+    const saved_env_root = try self.pushTempEnvRoot(saved_env);
+    defer self.restoreTempEnvRoots(saved_env_root);
+    defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
     var params: std.ArrayListUnmanaged(u8) = .empty;
     var body: []const u8 = "";
     if (args.len > 0) {
         var i: usize = 0;
         while (i + 1 < args.len) : (i += 1) {
             if (i != 0) try params.append(self.arena, ',');
-            try params.appendSlice(self.arena, try self.toStringWtf8(args[i]));
+            try params.appendSlice(self.arena, try self.toStringWtf8(self.tempRoot(roots + i, args[i])));
         }
-        body = try self.toStringWtf8(args[args.len - 1]);
+        body = try self.toStringWtf8(self.tempRoot(roots + args.len - 1, args[args.len - 1]));
     }
     // CreateDynamicFunction uses the constructor's realm for parsing and for
     // any SyntaxError it creates, not the caller's current realm.
-    const nt = self.new_target;
-    const saved_env = self.env;
     // CreateDynamicFunction never captures the caller's PrivateEnvironment.
     const saved_private_map = self.current_private_map;
     self.current_private_map = null;
     defer self.current_private_map = saved_private_map;
-    var swapped = false;
     if (self.active_native) |callee| {
-        if (callee.private_data) |pd| {
-            self.env = @ptrCast(@alignCast(pd));
-            swapped = true;
-        }
+        if (callee.nativeRealm()) |realm| self.env = @ptrCast(@alignCast(realm));
     }
-    if (!swapped and nt.isObject() and nt.asObj().native_ctor and nt.asObj().private_data != null) {
-        self.env = @ptrCast(@alignCast(nt.asObj().private_data.?));
-        swapped = true;
-    }
-    defer if (swapped) {
-        self.env = saved_env;
-    };
     // The `)` goes on its OWN line (matching the assembled source below): a
     // trailing Annex B HTML-open-comment param (`Function("<!--", "")`) comments
     // out to end-of-line, so without the newline it would swallow the `)`.
@@ -166,14 +161,20 @@ pub fn functionConstructor(ctx: *anyopaque, this: Value, args: []const Value) Ho
     try self.registerParsedDynamicDebugScript(source, "Function", 1, &parser);
     // Create the function in the Function constructor's own realm (so its
     // closure — and thus [[Realm]] — is that realm).
-    const fn_v = try self.eval(prog);
+    var fn_v = try self.eval(prog);
+    const function_root = try self.pushTempRoot(fn_v);
     if (fn_v.isObject() and fn_v.asObj().jsFunction() != null) {
         try fn_v.asObj().setOwnWithAttr(self.arena, self.root_shape, "name", Value.str("anonymous"), .{ .writable = false, .enumerable = false, .configurable = true });
         if (Interpreter.funcOf(fn_v)) |f| {
             f.name = "anonymous";
             f.source = try std.fmt.allocPrint(self.arena, "function anonymous({s}\n) {{\n{s}\n}}", .{ params.items, body });
         }
-        if (nt.isObject()) fn_v.asObj().proto = try self.ctorRealmIntrinsicProto(nt.asObj(), "Function");
+        const nt = self.tempRoot(target_root, target);
+        if (nt.isObject()) {
+            const proto = try self.ctorRealmIntrinsicProto(nt.asObj(), "Function");
+            fn_v = self.tempRoot(function_root, fn_v);
+            fn_v.asObj().setProtoAtomic(proto);
+        }
         _ = try self.protoObject(fn_v.asObj());
         try fn_v.asObj().setAttr(self.arena, "prototype", .{ .writable = true, .enumerable = false, .configurable = false });
     }

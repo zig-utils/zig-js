@@ -288,6 +288,8 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (cold.module_ns) |p| v.mark(@as(*interp.ModuleNs, @ptrCast(@alignCast(p))));
     if (cold.arg_map_env) |p| v.mark(@as(*interp.Environment, @ptrCast(@alignCast(p))));
     if (cold.cold) |state| {
+        if (state.native_realm.load(.acquire)) |realm|
+            markManaged(v, @as(*Environment, @ptrCast(@alignCast(realm))));
         // Once an arguments index is severed, the exotic object no longer owns
         // that cell edge. A live VM frame deliberately overlaps all of its cells
         // so concurrent severing cannot fall between the two root scans.
@@ -371,6 +373,15 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
     if (o.private_data_tag == .promise)
         gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
     const cold = o.coldState() orelse return;
+    if (cold.native_realm.load(.acquire)) |realm| {
+        const environment: *Environment = @ptrCast(@alignCast(realm));
+        if (environment.gc_managed) {
+            // Older built-ins also carry their defining environment as callback
+            // data. Rewrite only that exact alias, never an opaque host payload.
+            if (o.private_data == realm) gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
+            gc_relocation.rewriteAtomicPointerSlot(v, &cold.native_realm);
+        }
+    }
     gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.arg_map_env);
     for (cold.arg_map_values, 0..) |*cell, index|
         if (index < cold.arg_map_severed.len and !cold.arg_map_severed[index].load(.acquire))
@@ -1163,6 +1174,10 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
         for (intrinsics.errors.prototypes) |slot| if (slot) |o| v.mark(o);
         if (intrinsics.array_constructor) |o| v.mark(o);
         if (intrinsics.array_prototype) |o| v.mark(o);
+        for (intrinsics.named) |entry| {
+            if (entry.object) |o| v.mark(o);
+            if (entry.prototype) |o| v.mark(o);
+        }
     }
     if (e.parent) |p| markManaged(v, p);
     if (e.with_object) |o| v.mark(o);
@@ -1198,6 +1213,10 @@ pub fn relocateEnv(e: *Environment, v: anytype) void {
         for (&intrinsics.errors.prototypes) |*slot| gc_relocation.rewriteOptionalSlot(v, Object, slot);
         gc_relocation.rewriteOptionalSlot(v, Object, &intrinsics.array_constructor);
         gc_relocation.rewriteOptionalSlot(v, Object, &intrinsics.array_prototype);
+        for (&intrinsics.named) |*entry| {
+            gc_relocation.rewriteOptionalSlot(v, Object, &entry.object);
+            gc_relocation.rewriteOptionalSlot(v, Object, &entry.prototype);
+        }
     }
     gc_relocation.rewriteOptionalSlot(v, Environment, &e.parent);
     gc_relocation.rewriteOptionalSlot(v, Object, &e.with_object);
@@ -1246,6 +1265,93 @@ test "realm error intrinsics trace and relocate every private identity" {
         try std.testing.expectEqual(&new_objects[index], realm_intrinsics.errors.constructors[index].?);
         try std.testing.expectEqual(&new_objects[count + index], realm_intrinsics.errors.prototypes[index].?);
     }
+}
+
+test "constructor prototype realms trace and relocate all named identities" {
+    const count = interp.RealmIntrinsics.names.len;
+    var old_objects: [count * 2]Object = undefined;
+    var new_objects: [count * 2]Object = undefined;
+    var intrinsics = interp.RealmIntrinsics{};
+    for (&intrinsics.named, 0..) |*entry, i|
+        entry.* = .{ .object = &old_objects[i], .prototype = &old_objects[count + i] };
+    var environment = Environment{ .arena = std.testing.allocator, .realm_intrinsics = &intrinsics };
+    const Visitor = struct {
+        old: *[count * 2]Object,
+        new: *[count * 2]Object,
+        seen: [count * 2]bool = @splat(false),
+        pub fn concurrent(_: *@This()) bool {
+            return false;
+        }
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected pointer"),
+            };
+            for (self.old, 0..) |*object, i| if (@intFromPtr(cell) == @intFromPtr(object)) {
+                self.seen[i] = true;
+            };
+        }
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            for (self.old, 0..) |*object, i| if (old == @as(*anyopaque, @ptrCast(object))) return @ptrCast(&self.new[i]);
+            return old;
+        }
+    };
+    var visitor = Visitor{ .old = &old_objects, .new = &new_objects };
+    traceEnv(&environment, &visitor);
+    for (visitor.seen) |seen| try std.testing.expect(seen);
+    relocateEnv(&environment, &visitor);
+    for (intrinsics.named, 0..) |entry, i| {
+        try std.testing.expectEqual(&new_objects[i], entry.object.?);
+        try std.testing.expectEqual(&new_objects[count + i], entry.prototype.?);
+    }
+}
+
+test "constructor prototype realms trace only managed native environments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var old = Environment{ .arena = arena.allocator(), .gc_managed = true };
+    var replacement = Environment{ .arena = arena.allocator(), .gc_managed = true };
+    var host_data: u8 = 0;
+    var ctor = Object{ .native_ctor = true, .private_data = &host_data };
+    try ctor.setNativeRealm(arena.allocator(), &old);
+    const Visitor = struct {
+        old: *Environment,
+        new: *Environment,
+        marked: bool = false,
+        pub fn concurrent(_: *@This()) bool {
+            return false;
+        }
+        pub fn markWeak(_: *@This(), _: *?*anyopaque) void {}
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected pointer"),
+            };
+            if (@intFromPtr(cell) == @intFromPtr(self.old)) self.marked = true;
+        }
+        pub fn resolve(self: *@This(), cell: *anyopaque) *anyopaque {
+            return if (cell == @as(*anyopaque, @ptrCast(self.old))) @ptrCast(self.new) else cell;
+        }
+    };
+    var visitor = Visitor{ .old = &old, .new = &replacement };
+    traceObject(&ctor, &visitor);
+    try std.testing.expect(visitor.marked);
+    relocateObjectRareStrong(&ctor, &visitor);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&replacement)), ctor.nativeRealm().?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&host_data)), ctor.private_data.?);
+    ctor.coldState().?.native_realm.store(&old, .release);
+    ctor.private_data = &old;
+    relocateObjectRareStrong(&ctor, &visitor);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&replacement)), ctor.private_data.?);
+    old.gc_managed = false;
+    ctor.coldState().?.native_realm.store(&old, .release);
+    visitor.marked = false;
+    traceObject(&ctor, &visitor);
+    relocateObjectRareStrong(&ctor, &visitor);
+    try std.testing.expect(!visitor.marked);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&old)), ctor.nativeRealm().?);
 }
 
 test "realm array intrinsics trace and relocate both private identities" {
