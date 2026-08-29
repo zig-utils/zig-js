@@ -13,3 +13,4 @@ pantry.lock
 .claude/settings.local.json
 .claude/worktrees
 /.zig-global-cache
+.codex/worktrees
