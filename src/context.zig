@@ -28509,6 +28509,14 @@ test "realm array intrinsics preserve moving foreign NewTarget fallback" {
     try expectProxyMetadataMoving("var other=$262.createRealm(),P=other.global.Array.prototype;var N=new Proxy(other.evalScript('(function N(){})'),{get(t,k,r){if(k==='prototype'){proxyMovingLoop(20000);return null;}return Reflect.get(t,k,r);}});other.global.Array=function Fake(){};", "(function(){var a=Reflect.construct(Array,[proxySubject],N);return Object.getPrototypeOf(a)===P&&a[0]===proxySubject;})()");
 }
 
+test "Array.of restores a moving native realm" {
+    try expectProxyMetadataMoving("var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.of=target.global.Array.of;var run=caller.evalScript(\"(function(){function N(len){proxyMovingLoop(20000);this.seenLength=len;this.held=proxySubject;}N.of=of;return function(){var a=N.of(proxySubject);return a.seenLength===1&&a.held===proxySubject&&a[0]===proxySubject&&proxySubject.marker===37;};})()\");", "run()");
+}
+
+test "Array.from restores a moving native realm" {
+    try expectProxyMetadataMoving("var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.from=target.global.Array.from;var run=caller.evalScript(\"(function(){var items={[Symbol.iterator](){var done=false;return {next(){if(done)return {done:true};done=true;proxyMovingLoop(20000);return {done:false,value:proxySubject};}};}};var holder={from:from};return function(){var a=holder.from(items);return a.length===1&&a[0]===proxySubject&&proxySubject.marker===37;};})()\");", "run()");
+}
+
 test "realm array intrinsics preserve moving AggregateError cause and iterator" {
     try expectProxyMetadataMoving("var other=$262.createRealm().global,E=other.AggregateError,P=other.Array.prototype;other.Array=function Fake(){};var options={get cause(){proxyMovingLoop(20000);return proxySubject;}};", "(function(){function N(){}var e=Reflect.construct(E,[[proxySubject],'message',options],N);return Object.getPrototypeOf(e)===N.prototype&&Object.getPrototypeOf(e.errors)===P&&e.errors[0]===proxySubject&&e.cause===proxySubject;})()");
     try expectProxyMetadataMoving("var other=$262.createRealm().global,E=other.AggregateError,P=other.Array.prototype;other.Array=function Fake(){};var items={[Symbol.iterator](){var done=false;return {next(){if(done)return {done:true};done=true;proxyMovingLoop(20000);return {done:false,value:proxySubject};}};}};", "(function(){var e=E(items);return Object.getPrototypeOf(e.errors)===P&&e.errors[0]===proxySubject;})()");
