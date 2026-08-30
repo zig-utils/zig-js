@@ -21,15 +21,24 @@ fn interp(ctx: *anyopaque) *Interpreter {
     return @ptrCast(@alignCast(ctx));
 }
 
-fn enterActiveNativeRealm(self: *Interpreter) ?*interpreter.Environment {
-    const saved = self.env;
-    if (self.active_native) |callee| {
-        if (callee.private_data) |pd| {
-            self.env = @ptrCast(@alignCast(pd));
-            return saved;
-        }
-    }
-    return null;
+const ActiveNativeRealm = struct {
+    saved_env: *interpreter.Environment,
+    saved_env_root: usize,
+};
+
+fn enterActiveNativeRealm(self: *Interpreter) HostError!?ActiveNativeRealm {
+    const callee = self.active_native orelse return null;
+    const pd = callee.private_data orelse return null;
+    const saved_env = self.env;
+    const saved_env_root = try self.pushTempEnvRoot(saved_env);
+    self.env = @ptrCast(@alignCast(pd));
+    return .{ .saved_env = saved_env, .saved_env_root = saved_env_root };
+}
+
+fn leaveActiveNativeRealm(self: *Interpreter, scope: ?ActiveNativeRealm) void {
+    const entered = scope orelse return;
+    self.env = self.tempEnvRoot(entered.saved_env_root, entered.saved_env);
+    self.restoreTempEnvRoots(entered.saved_env_root);
 }
 
 fn arg(args: []const Value, i: usize) Value {
@@ -1033,17 +1042,8 @@ pub fn objectFromEntries(ctx: *anyopaque, this: Value, args: []const Value) Host
 
 pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     const self = interp(ctx);
-    const saved_env = self.env;
-    var swapped_env = false;
-    if (self.active_native) |callee| {
-        if (callee.private_data) |pd| {
-            self.env = @ptrCast(@alignCast(pd));
-            swapped_env = true;
-        }
-    }
-    defer if (swapped_env) {
-        self.env = saved_env;
-    };
+    const realm = try enterActiveNativeRealm(self);
+    defer leaveActiveNativeRealm(self, realm);
     // Array.of uses `this` as a constructor when it is one (so a subclass's
     // Array.of produces a subclass instance), via Construct(C, « len »).
     const len = args.len;
@@ -1066,11 +1066,8 @@ pub fn arrayOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Valu
 pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const saved_env = self.env;
-    const env_root = try self.pushTempEnvRoot(saved_env);
-    defer self.restoreTempEnvRoots(env_root);
-    _ = enterActiveNativeRealm(self);
-    defer self.env = self.tempEnvRoot(env_root, saved_env);
+    const realm = try enterActiveNativeRealm(self);
+    defer leaveActiveNativeRealm(self, realm);
     const args_root = try self.pushTempRootSlice(args);
     defer self.restoreTempRoots(args_root);
     // Array [[Call]] uses the active constructor as NewTarget. Resolve its
@@ -1097,17 +1094,8 @@ pub fn arrayConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostE
 pub fn objectConstructor(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const saved_env = self.env;
-    var swapped_env = false;
-    if (self.active_native) |callee| {
-        if (callee.private_data) |pd| {
-            self.env = @ptrCast(@alignCast(pd));
-            swapped_env = true;
-        }
-    }
-    defer if (swapped_env) {
-        self.env = saved_env;
-    };
+    const realm = try enterActiveNativeRealm(self);
+    defer leaveActiveNativeRealm(self, realm);
     if (self.new_target.isObject()) {
         if (self.active_native) |callee| {
             if (self.new_target.asObj() != callee) {
@@ -1150,11 +1138,8 @@ fn setLengthOrThrow(self: *Interpreter, target: Value, len: usize) HostError!voi
 
 pub fn arrayFrom(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     const self = interp(ctx);
-    const saved_env = self.env;
-    const saved_env_root = try self.pushTempEnvRoot(saved_env);
-    defer self.restoreTempEnvRoots(saved_env_root);
-    _ = enterActiveNativeRealm(self);
-    defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
+    const realm = try enterActiveNativeRealm(self);
+    defer leaveActiveNativeRealm(self, realm);
     const C = this; // the receiver: a constructor when called as Array.from / subclass.use_ctor below
     const items = arg(args, 0);
     const map_fn = arg(args, 1);
@@ -2466,10 +2451,8 @@ fn sameValue(a: Value, b: Value) bool {
 pub fn objectSetPrototypeOf(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const saved_env = enterActiveNativeRealm(self);
-    defer if (saved_env) |env| {
-        self.env = env;
-    };
+    const realm = try enterActiveNativeRealm(self);
+    defer leaveActiveNativeRealm(self, realm);
     const o = arg(args, 0);
     // RequireObjectCoercible; the new prototype must be an Object or null.
     if (o.isNull() or o.isUndefined())
@@ -2885,10 +2868,8 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
 pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const saved_env = enterActiveNativeRealm(self);
-    defer if (saved_env) |env| {
-        self.env = env;
-    };
+    const realm = try enterActiveNativeRealm(self);
+    defer leaveActiveNativeRealm(self, realm);
     const a = self.arena;
     const temporary_allocator = gc_mod.temporaryAllocator(a);
     var st = Stringifier{
@@ -3397,10 +3378,8 @@ fn writeJsonValueString(a: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
 pub fn jsonRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const saved_env = enterActiveNativeRealm(self);
-    defer if (saved_env) |env| {
-        self.env = env;
-    };
+    const realm = try enterActiveNativeRealm(self);
+    defer leaveActiveNativeRealm(self, realm);
     const s = try self.toStringWtf8(arg(args, 0));
     const isJsonWs = struct {
         fn f(c: u8) bool {
@@ -3441,10 +3420,8 @@ pub fn jsonIsRawJSON(ctx: *anyopaque, this: Value, args: []const Value) HostErro
 pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const saved_env = enterActiveNativeRealm(self);
-    defer if (saved_env) |env| {
-        self.env = env;
-    };
+    const realm = try enterActiveNativeRealm(self);
+    defer leaveActiveNativeRealm(self, realm);
     // ToString(text) — a value object's @@toPrimitive/toString/valueOf runs (and
     // a Symbol throws) before parsing. Read as WTF-8 so a flat-latin1 input cell
     // is tokenized as canonical WTF-8 (parsed keys/values then store correctly).

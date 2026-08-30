@@ -5020,15 +5020,19 @@ pub const Interpreter = struct {
 
     pub fn throwParserSyntaxErrorInRealm(self: *Interpreter, realm: *Environment, context: []const u8, source: []const u8, parser: ?*const Parser, err: anyerror) EvalError {
         const saved_env = self.env;
+        const saved_env_root = try self.pushTempEnvRoot(saved_env);
+        defer self.restoreTempEnvRoots(saved_env_root);
         self.env = realm;
-        defer self.env = saved_env;
+        defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
         return self.throwParserSyntaxError(context, source, parser, err);
     }
 
     pub fn throwParserSyntaxErrorAtInRealm(self: *Interpreter, realm: *Environment, context: []const u8, loc: parser_mod.SourceLocation, err: anyerror) EvalError {
         const saved_env = self.env;
+        const saved_env_root = try self.pushTempEnvRoot(saved_env);
+        defer self.restoreTempEnvRoots(saved_env_root);
         self.env = realm;
-        defer self.env = saved_env;
+        defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
         return self.throwParserSyntaxErrorAt(context, loc, err);
     }
 
@@ -21021,8 +21025,13 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     };
 
     const saved_env = self.env;
+    const saved_env_root = try self.pushTempEnvRoot(saved_env);
+    defer self.restoreTempEnvRoots(saved_env_root);
     const saved_this = self.this_value;
     const saved_glob = self.global_object;
+    const saved_glob_value = if (saved_glob) |global| Value.obj(global) else Value.undef();
+    const saved_values_root = try self.pushTempRootSlice(&.{ saved_this, saved_glob_value });
+    defer self.restoreTempRoots(saved_values_root);
     const saved_private_map = self.current_private_map;
     const saved_field_initializer = self.in_field_initializer;
     defer {
@@ -21066,9 +21075,10 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
     const saved_strict = self.strict;
     self.strict = parser.strict;
     defer {
-        self.env = saved_env;
-        self.this_value = saved_this;
-        self.global_object = saved_glob;
+        self.env = self.tempEnvRoot(saved_env_root, saved_env);
+        self.this_value = self.tempRoot(saved_values_root, saved_this);
+        const restored_global = self.tempRoot(saved_values_root + 1, saved_glob_value);
+        self.global_object = if (restored_global.isObject()) restored_global.asObj() else null;
         self.eval_decl_deletable = saved_deletable;
         self.strict = saved_strict;
     }
@@ -21625,6 +21635,11 @@ inline fn tracePrivateValue(v: anytype, val: Value) void {
 /// hook keeps type-erased side records from hiding GC-managed Values/Objects.
 pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
     const pd = o.private_data orelse return;
+    if (o.private_data_tag == .native_realm) {
+        const realm: *Environment = @ptrCast(@alignCast(pd));
+        if (realm.gc_managed) v.mark(realm);
+        return;
+    }
     // Retained constructors and Array methods keep their defining realm alive
     // through this otherwise-opaque slot, including after public replacement.
     if (o.behavior.is_shadow_realm or o.errorCtor() != null or isArrayRealmNative(o.native)) {
@@ -21683,6 +21698,11 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
 
 pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
     const pd = o.private_data orelse return;
+    if (o.private_data_tag == .native_realm) {
+        const realm: *Environment = @ptrCast(@alignCast(pd));
+        if (realm.gc_managed) gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
+        return;
+    }
     if (o.behavior.is_shadow_realm or o.errorCtor() != null or isArrayRealmNative(o.native)) {
         const realm: *Environment = @ptrCast(@alignCast(pd));
         if (realm.gc_managed) gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
@@ -21732,6 +21752,35 @@ pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
         gc_relocation.rewriteValueSlot(v, &capture.resolve);
         gc_relocation.rewriteValueSlot(v, &capture.reject);
     }
+}
+
+test "native realm private data is traced and relocated by ownership tag" {
+    var old_realm = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var new_realm = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var closure = value.Object{ .private_data = &old_realm, .private_data_tag = .native_realm };
+    const Visitor = struct {
+        old: *Environment,
+        new: *Environment,
+        marked: bool = false,
+
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected cell pointer"),
+            };
+            if (@intFromPtr(cell) == @intFromPtr(self.old)) self.marked = true;
+        }
+
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            return if (old == @as(*anyopaque, @ptrCast(self.old))) @ptrCast(self.new) else old;
+        }
+    };
+    var visitor = Visitor{ .old = &old_realm, .new = &new_realm };
+    traceNativePrivateData(&closure, &visitor);
+    try std.testing.expect(visitor.marked);
+    relocateNativePrivateData(&closure, &visitor);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_realm)), closure.private_data.?);
 }
 
 test "interpreter native private relocation mirrors every traced payload" {
@@ -23220,8 +23269,10 @@ fn shadowRealmNativeRealm(self: *Interpreter) ?*Environment {
 
 fn throwErrorInRealm(self: *Interpreter, realm: *Environment, name: []const u8, message: []const u8) EvalError {
     const saved_env = self.env;
+    const saved_env_root = try self.pushTempEnvRoot(saved_env);
+    defer self.restoreTempEnvRoots(saved_env_root);
     self.env = realm;
-    defer self.env = saved_env;
+    defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
     return self.throwError(name, message);
 }
 
@@ -23269,8 +23320,10 @@ fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environme
     if (o.is_bigint) return v;
     if (o.isCallableObject()) {
         const saved_env = self.env;
+        const saved_env_root = try self.pushTempEnvRoot(saved_env);
+        defer self.restoreTempEnvRoots(saved_env_root);
         self.env = wrap_env;
-        defer self.env = saved_env;
+        defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
         const w = (try self.newObject()).asObj();
         w.native = srWrappedCallFn;
         const data = try self.arena.create(SrWrappedData);
@@ -23337,8 +23390,10 @@ fn shadowRealmConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) v
     const ctor_env = shadowRealmNativeRealm(self) orelse self.env;
     if (self.new_target.isUndefined()) return throwErrorInRealm(self, ctor_env, "TypeError", "Constructor ShadowRealm requires 'new'");
     const saved_env = self.env;
+    const saved_env_root = try self.pushTempEnvRoot(saved_env);
+    defer self.restoreTempEnvRoots(saved_env_root);
     self.env = ctor_env;
-    defer self.env = saved_env;
+    defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
     const genv = try makeChildRealm(self);
     const o = (try self.newObject()).asObj();
     o.behavior.is_shadow_realm = true;
@@ -23405,10 +23460,14 @@ fn shadowRealmImportValueFn(ctx: *anyopaque, this: Value, args: []const Value) v
 fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const caller_env = shadowRealmNativeRealm(self) orelse self.env;
+    const caller_env_root = try self.pushTempEnvRoot(caller_env);
+    defer self.restoreTempEnvRoots(caller_env_root);
     if (!this.isObject() or !this.asObj().behavior.is_shadow_realm) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm");
     const src = if (args.len > 0) args[0] else Value.undef();
     if (!src.isString()) return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate expects a string");
     const genv: *Environment = @ptrCast(@alignCast(this.asObj().private_data orelse return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm has no realm")));
+    const genv_root = try self.pushTempEnvRoot(genv);
+    defer self.restoreTempEnvRoots(genv_root);
     // A wrapped callable returned from this realm retains its parsed AST.
     const source = try src.asWtf8Owned(self.arena);
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
@@ -23417,22 +23476,28 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     parser.useRealmHashKeys(self.root_shape);
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxErrorInRealm(caller_env, "ShadowRealm.evaluate", source, &parser, err);
     const prog_strict = parser.strict;
-    const gobj = functionRealmGlobal(genv, null);
+    const gobj = functionRealmGlobal(self.tempEnvRoot(genv_root, genv), null);
     const s_env = self.env;
+    const saved_env_root = try self.pushTempEnvRoot(s_env);
+    defer self.restoreTempEnvRoots(saved_env_root);
     const s_this = self.this_value;
     const s_glob = self.global_object;
+    const saved_global = if (s_glob) |global| Value.obj(global) else Value.undef();
+    const saved_values_root = try self.pushTempRootSlice(&.{ s_this, saved_global });
+    defer self.restoreTempRoots(saved_values_root);
     const s_strict = self.strict;
     const s_deletable = self.eval_decl_deletable;
     const eval_env = try gc_mod.allocEnv(self.arena);
-    self.initEnvironment(eval_env, genv, prog_strict);
+    self.initEnvironment(eval_env, self.tempEnvRoot(genv_root, genv), prog_strict);
     eval_env.fn_body = !prog_strict;
     self.env = eval_env;
     self.strict = prog_strict;
     self.eval_decl_deletable = !prog_strict;
     errdefer {
-        self.env = s_env;
-        self.this_value = s_this;
-        self.global_object = s_glob;
+        self.env = self.tempEnvRoot(saved_env_root, s_env);
+        self.this_value = self.tempRoot(saved_values_root, s_this);
+        const restored_global = self.tempRoot(saved_values_root + 1, saved_global);
+        self.global_object = if (restored_global.isObject()) restored_global.asObj() else null;
         self.strict = s_strict;
         self.eval_decl_deletable = s_deletable;
     }
@@ -23449,20 +23514,24 @@ fn shadowRealmEvaluateFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     // Restore the CALLER realm before converting an abrupt completion / wrapping
     // the result, so a boundary TypeError is created with the caller's %TypeError%
     // (and the result value is wrapped from the caller's perspective).
-    self.env = s_env;
-    self.this_value = s_this;
-    self.global_object = s_glob;
+    self.env = self.tempEnvRoot(saved_env_root, s_env);
+    self.this_value = self.tempRoot(saved_values_root, s_this);
+    const restored_global = self.tempRoot(saved_values_root + 1, saved_global);
+    self.global_object = if (restored_global.isObject()) restored_global.asObj() else null;
     self.strict = s_strict;
     self.eval_decl_deletable = s_deletable;
     const result = eval_result catch |e| {
         // A throw inside the child realm surfaces as a TypeError in the caller
         // (the thrown value can't cross the boundary).
         if (e == error.Throw) {
-            return throwErrorInRealm(self, caller_env, "TypeError", "ShadowRealm.prototype.evaluate: the evaluated code threw");
+            return throwErrorInRealm(self, self.tempEnvRoot(caller_env_root, caller_env), "TypeError", "ShadowRealm.prototype.evaluate: the evaluated code threw");
         }
         return e;
     };
-    return srWrapValue(self, caller_env, caller_env, result);
+    const result_root = try self.pushTempRoot(result);
+    defer self.restoreTempRoots(result_root);
+    const current_caller_env = self.tempEnvRoot(caller_env_root, caller_env);
+    return srWrapValue(self, current_caller_env, current_caller_env, self.tempRoot(result_root, result));
 }
 
 /// Install the test262 `$262` host object into `env` (its `global` is wired up
@@ -23592,17 +23661,8 @@ fn canonicalStringToBigInt(arena: std.mem.Allocator, s: []const u8) error{OutOfM
 fn bigIntFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const saved_env = self.env;
-    var swapped_env = false;
-    if (self.active_native) |callee| {
-        if (callee.private_data) |pd| {
-            self.env = @ptrCast(@alignCast(pd));
-            swapped_env = true;
-        }
-    }
-    defer if (swapped_env) {
-        self.env = saved_env;
-    };
+    const realm = try enterNativeMethodRealm(self);
+    defer leaveNativeMethodRealm(self, realm);
     if (!self.new_target.isUndefined()) return self.throwError("TypeError", "BigInt is not a constructor");
     return self.toBigIntValueImpl(if (args.len > 0) args[0] else Value.undef(), true);
 }
@@ -24584,24 +24644,32 @@ fn iterDropFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
 
 // --- the eager helper methods (consume `this`) -----------------------
 
-fn enterNativeMethodRealm(self: *Interpreter) ?*Environment {
-    const saved = self.env;
-    if (self.active_native) |callee| {
-        if (callee.private_data) |pd| {
-            self.env = @ptrCast(@alignCast(pd));
-            return saved;
-        }
-    }
-    return null;
+const NativeMethodRealm = struct {
+    saved_env: *Environment,
+    saved_env_root: usize,
+};
+
+fn enterNativeMethodRealm(self: *Interpreter) EvalError!?NativeMethodRealm {
+    const callee = self.active_native orelse return null;
+    const pd = callee.private_data orelse return null;
+    std.debug.assert(callee.private_data_tag == .native_realm or callee.nativeRealm() != null or callee.errorCtor() != null);
+    const saved_env = self.env;
+    const saved_env_root = try self.pushTempEnvRoot(saved_env);
+    self.env = @ptrCast(@alignCast(pd));
+    return .{ .saved_env = saved_env, .saved_env_root = saved_env_root };
+}
+
+fn leaveNativeMethodRealm(self: *Interpreter, scope: ?NativeMethodRealm) void {
+    const entered = scope orelse return;
+    self.env = self.tempEnvRoot(entered.saved_env_root, entered.saved_env);
+    self.restoreTempEnvRoots(entered.saved_env_root);
 }
 
 fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const saved_env = enterNativeMethodRealm(self);
-    defer if (saved_env) |env| {
-        self.env = env;
-    };
+    const realm = try enterNativeMethodRealm(self);
+    defer leaveNativeMethodRealm(self, realm);
     if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.toArray called on a non-object");
     // GetIteratorDirect captures `next` once (a `next` accessor runs a single time).
     const next_method = try self.getProperty(this, "next");
@@ -24615,10 +24683,8 @@ fn iterToArrayFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 }
 fn iterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const saved_env = enterNativeMethodRealm(self);
-    defer if (saved_env) |env| {
-        self.env = env;
-    };
+    const realm = try enterNativeMethodRealm(self);
+    defer leaveNativeMethodRealm(self, realm);
     if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.forEach called on a non-object");
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
@@ -24639,10 +24705,8 @@ fn iterForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
 }
 fn iterReduceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const saved_env = enterNativeMethodRealm(self);
-    defer if (saved_env) |env| {
-        self.env = env;
-    };
+    const realm = try enterNativeMethodRealm(self);
+    defer leaveNativeMethodRealm(self, realm);
     if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype.reduce called on a non-object");
     const f = if (args.len > 0) args[0] else Value.undef();
     if (!f.isCallable()) {
@@ -24674,10 +24738,8 @@ fn iterSomeEveryFindFn(comptime which: enum { some, every, find }) value.NativeF
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const saved_env = enterNativeMethodRealm(self);
-            defer if (saved_env) |env| {
-                self.env = env;
-            };
+            const realm = try enterNativeMethodRealm(self);
+            defer leaveNativeMethodRealm(self, realm);
             if (!this.isObject()) return self.throwError("TypeError", "Iterator.prototype method called on a non-object");
             const f = if (args.len > 0) args[0] else Value.undef();
             if (!f.isCallable()) {
@@ -25179,11 +25241,11 @@ fn installIterator(env: *Environment, rs: *Shape, object_proto: *value.Object) E
         .{ "take", iterTakeFn },       .{ "drop", iterDropFn },
         .{ "flatMap", iterFlatMapFn }, .{ "reduce", iterReduceFn },
         .{ "forEach", iterForEachFn },
-    }) |m| try setNativeWithData(a, rs, iter_proto, m[0], 1, m[1], @ptrCast(env));
-    try setNativeWithData(a, rs, iter_proto, "toArray", 0, iterToArrayFn, @ptrCast(env)); // toArray() takes no args
-    try setNativeWithData(a, rs, iter_proto, "some", 1, iterSomeEveryFindFn(.some), @ptrCast(env));
-    try setNativeWithData(a, rs, iter_proto, "every", 1, iterSomeEveryFindFn(.every), @ptrCast(env));
-    try setNativeWithData(a, rs, iter_proto, "find", 1, iterSomeEveryFindFn(.find), @ptrCast(env));
+    }) |m| try setRealmNativeWithData(a, rs, iter_proto, m[0], 1, m[1], env);
+    try setRealmNativeWithData(a, rs, iter_proto, "toArray", 0, iterToArrayFn, env); // toArray() takes no args
+    try setRealmNativeWithData(a, rs, iter_proto, "some", 1, iterSomeEveryFindFn(.some), env);
+    try setRealmNativeWithData(a, rs, iter_proto, "every", 1, iterSomeEveryFindFn(.every), env);
+    try setRealmNativeWithData(a, rs, iter_proto, "find", 1, iterSomeEveryFindFn(.find), env);
     try env.put("\x00IterProto", Value.obj(iter_proto));
 
     // %GeneratorPrototype% (proto %IteratorPrototype%): the shared prototype of
@@ -26354,8 +26416,8 @@ fn installDataView(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     const proto = try gc_mod.allocObj(a);
     proto.* = .{ .proto = object_proto };
     inline for (dv_types) |t| {
-        try setNativeWithData(a, rs, proto, "get" ++ t.name, 1, dataViewGetFn(t), @ptrCast(env));
-        try setNativeWithData(a, rs, proto, "set" ++ t.name, 2, dataViewSetFn(t), @ptrCast(env));
+        try setRealmNativeWithData(a, rs, proto, "get" ++ t.name, 1, dataViewGetFn(t), env);
+        try setRealmNativeWithData(a, rs, proto, "set" ++ t.name, 2, dataViewSetFn(t), env);
     }
     try setNativeGetterWithData(a, rs, proto, "buffer", dataViewBufferGetter, @ptrCast(env));
     try setNativeGetterWithData(a, rs, proto, "byteLength", dataViewByteLengthGetter, @ptrCast(env));
@@ -36221,7 +36283,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // Global functions.
     try defineGlobalFn(env, root_shape, "eval", 1, evalFn);
     if (env.get("eval")) |ev| {
-        if (ev.isObject()) ev.asObj().private_data = @ptrCast(env);
+        if (ev.isObject()) {
+            ev.asObj().private_data = @ptrCast(env);
+            ev.asObj().private_data_tag = .native_realm;
+        }
         try env.put("\x00evalIntrinsic", ev);
     }
     try defineGlobalFn(env, root_shape, "parseInt", 2, builtins.parseIntFn);
@@ -36354,10 +36419,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // JSON namespace.
     const json_ns = try gc_mod.allocObj(a);
     json_ns.* = .{};
-    try setNativeWithData(a, root_shape, json_ns, "stringify", 3, builtins.jsonStringify, @ptrCast(env));
-    try setNativeWithData(a, root_shape, json_ns, "parse", 2, builtins.jsonParse, @ptrCast(env));
-    try setNativeWithData(a, root_shape, json_ns, "rawJSON", 1, builtins.jsonRawJSON, @ptrCast(env));
-    try setNativeWithData(a, root_shape, json_ns, "isRawJSON", 1, builtins.jsonIsRawJSON, @ptrCast(env));
+    try setRealmNativeWithData(a, root_shape, json_ns, "stringify", 3, builtins.jsonStringify, env);
+    try setRealmNativeWithData(a, root_shape, json_ns, "parse", 2, builtins.jsonParse, env);
+    try setRealmNativeWithData(a, root_shape, json_ns, "rawJSON", 1, builtins.jsonRawJSON, env);
+    try setRealmNativeWithData(a, root_shape, json_ns, "isRawJSON", 1, builtins.jsonIsRawJSON, env);
     try env.put("JSON", Value.obj(json_ns));
 
     // Math namespace.
@@ -36429,7 +36494,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try setNative(a, root_shape, object_ns, "getOwnPropertyNames", 1, builtins.objectGetOwnPropertyNames);
     try setNative(a, root_shape, object_ns, "getOwnPropertySymbols", 1, builtins.objectGetOwnPropertySymbols);
     try setNative(a, root_shape, object_ns, "is", 2, builtins.objectIs);
-    try setNativeWithData(a, root_shape, object_ns, "setPrototypeOf", 2, builtins.objectSetPrototypeOf, @ptrCast(env));
+    try setRealmNativeWithData(a, root_shape, object_ns, "setPrototypeOf", 2, builtins.objectSetPrototypeOf, env);
     try setNative(a, root_shape, object_ns, "preventExtensions", 1, builtins.objectPreventExtensions);
     try setNative(a, root_shape, object_ns, "isExtensible", 1, builtins.objectIsExtensible);
     try setNative(a, root_shape, object_ns, "seal", 1, builtins.objectSeal);
@@ -36447,9 +36512,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     array_ns.* = .{ .native = builtins.arrayConstructor, .native_ctor = true, .private_data = @ptrCast(env) };
     try installNativeProps(a, root_shape, array_ns, "Array", 1);
     try setNative(a, root_shape, array_ns, "isArray", 1, builtins.arrayIsArray);
-    try setNativeWithData(a, root_shape, array_ns, "of", 0, builtins.arrayOf, @ptrCast(env));
-    try setNativeWithData(a, root_shape, array_ns, "from", 1, builtins.arrayFrom, @ptrCast(env));
-    try setNativeWithData(a, root_shape, array_ns, "fromAsync", 1, builtins.arrayFromAsync, @ptrCast(env));
+    try setRealmNativeWithData(a, root_shape, array_ns, "of", 0, builtins.arrayOf, env);
+    try setRealmNativeWithData(a, root_shape, array_ns, "from", 1, builtins.arrayFrom, env);
+    try setRealmNativeWithData(a, root_shape, array_ns, "fromAsync", 1, builtins.arrayFromAsync, env);
     try env.put("Array", Value.obj(array_ns));
 
     // ---- Real prototype objects ----------------------------------------
@@ -36551,7 +36616,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     if (error_ctor_obj) |eo| eo.setProtoAtomic(func_proto);
     inline for (.{
         .{ "call", 1 }, .{ "apply", 2 }, .{ "bind", 1 }, .{ "toString", 0 },
-    }) |s| try setNativeWithData(a, root_shape, func_proto, s[0], s[1], funcProtoMethod(s[0]), @ptrCast(env));
+    }) |s| try setRealmNativeWithData(a, root_shape, func_proto, s[0], s[1], funcProtoMethod(s[0]), env);
     // `Function.prototype` is itself callable-shaped, with own `length` 0 and
     // `name` "" — both { !writable, !enumerable, configurable }.
     try func_proto.setOwn(a, root_shape, "length", Value.num(0));
@@ -36565,7 +36630,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     // chain to here and throws (the "restricted properties").
     {
         const tte = try gc_mod.allocObj(a);
-        tte.* = .{ .native = throwTypeErrorFn, .private_data = @ptrCast(env) };
+        tte.* = .{ .native = throwTypeErrorFn, .private_data = @ptrCast(env), .private_data_tag = .native_realm };
         try installFunctionProps(a, root_shape, tte, &.{}, "");
         tte.setExtensible(false);
         // %ThrowTypeError% is itself frozen: length/name non-writable & non-configurable.
@@ -36661,8 +36726,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         try string_proto.setAttr(a, "trimRight", .{ .enumerable = false, .configurable = true, .writable = true });
     }
     // `toString`/`valueOf` brand-check (a String primitive or wrapper), not ToString.
-    try setNativeWithData(a, root_shape, string_proto, "toString", 0, stringValueMethod, @ptrCast(env));
-    try setNativeWithData(a, root_shape, string_proto, "valueOf", 0, stringValueMethod, @ptrCast(env));
+    try setRealmNativeWithData(a, root_shape, string_proto, "toString", 0, stringValueMethod, env);
+    try setRealmNativeWithData(a, root_shape, string_proto, "valueOf", 0, stringValueMethod, env);
     try string_ns.setOwn(a, root_shape, "prototype", Value.obj(string_proto));
     try string_ns.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, root_shape, string_proto, string_ns);
@@ -37700,6 +37765,13 @@ fn setNativeWithData(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Objec
     try obj.setOwnWithAttr(a, root_shape, name, Value.obj(m), .{ .enumerable = false, .configurable = true, .writable = true });
 }
 
+fn setRealmNativeWithData(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn, env: *Environment) EvalError!void {
+    const m = try gc_mod.allocObj(a);
+    m.* = .{ .native = f, .private_data = @ptrCast(env), .private_data_tag = .native_realm };
+    try installNativeProps(a, root_shape, m, name, len);
+    try obj.setOwnWithAttr(a, root_shape, name, Value.obj(m), .{ .enumerable = false, .configurable = true, .writable = true });
+}
+
 pub fn setNative(a: std.mem.Allocator, root_shape: *Shape, obj: *value.Object, name: []const u8, len: usize, f: value.NativeFn) EvalError!void {
     return setNativeWithData(a, root_shape, obj, name, len, f, null);
 }
@@ -37757,20 +37829,15 @@ fn isArrayRealmNative(native: ?value.NativeFn) bool {
 }
 
 fn setArrayProtoMethods(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, env: *Environment, comptime specs: anytype) EvalError!void {
-    inline for (specs) |s| try setNativeWithData(a, rs, proto, s[0], s[1], arrayProtoMethod(s[0]), @ptrCast(env));
+    inline for (specs) |s| try setRealmNativeWithData(a, rs, proto, s[0], s[1], arrayProtoMethod(s[0]), env);
 }
 
 fn arrayProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const saved_env = self.env;
-            const env_root = try self.pushTempEnvRoot(saved_env);
-            defer self.restoreTempEnvRoots(env_root);
-            if (self.active_native) |callee| {
-                if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
-            }
-            defer self.env = self.tempEnvRoot(env_root, saved_env);
+            const realm = try enterNativeMethodRealm(self);
+            defer leaveNativeMethodRealm(self, realm);
             if (this.isNull() or this.isUndefined())
                 return self.throwError("TypeError", "Array.prototype." ++ name ++ " requires that |this| not be null or undefined");
             const o = try self.toObject(this);
@@ -37798,11 +37865,8 @@ fn throwTypeErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const saved_env = self.env;
-    if (self.active_native) |callee| {
-        if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
-    }
-    defer self.env = saved_env;
+    const realm = try enterNativeMethodRealm(self);
+    defer leaveNativeMethodRealm(self, realm);
     return self.throwError("TypeError", "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
 }
 
@@ -37863,13 +37927,8 @@ fn funcProtoMethod(comptime name: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
-            const saved_env = self.env;
-            const saved_env_root = try self.pushTempEnvRoot(saved_env);
-            defer self.restoreTempEnvRoots(saved_env_root);
-            if (self.active_native) |callee| {
-                if (callee.private_data) |pd| self.env = @ptrCast(@alignCast(pd));
-            }
-            defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
+            const realm = try enterNativeMethodRealm(self);
+            defer leaveNativeMethodRealm(self, realm);
             if (!(this.isObject() and this.asObj().isCallableObject()))
                 return self.throwError("TypeError", if (eq(name, "bind"))
                     "|this| is not a function inside Function.prototype.bind"
@@ -38630,8 +38689,8 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     {
         const proto = try gc_mod.allocObj(a);
         proto.* = .{ .proto = object_proto };
-        try setNativeWithData(a, rs, proto, "evaluate", 1, shadowRealmEvaluateFn, @ptrCast(env));
-        try setNativeWithData(a, rs, proto, "importValue", 2, shadowRealmImportValueFn, @ptrCast(env));
+        try setRealmNativeWithData(a, rs, proto, "evaluate", 1, shadowRealmEvaluateFn, env);
+        try setRealmNativeWithData(a, rs, proto, "importValue", 2, shadowRealmImportValueFn, env);
         if (env.get("Symbol")) |sym| if (sym.isObject()) {
             if (sym.asObj().getOwn("toStringTag")) |tt| if (tt.isObject() and tt.asObj().is_symbol) {
                 try proto.setOwn(a, rs, tt.asObj().symbolKey(), Value.str("ShadowRealm"));

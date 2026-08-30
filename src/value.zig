@@ -2533,6 +2533,9 @@ pub const ObjectPrivateDataTag = enum(u8) {
     /// Independently ref-counted FetchHeaders record. It contains only native
     /// byte storage, so GC tracing and relocation deliberately ignore it.
     fetch_headers,
+    /// A built-in closure's defining Environment. Unlike arbitrary host data,
+    /// this is a strong GC edge and must be rewritten by moving collections.
+    native_realm,
 };
 
 /// Type-erased bridge installed only on genuine engine-created AbortSignals.
