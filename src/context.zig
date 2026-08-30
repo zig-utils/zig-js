@@ -28513,6 +28513,64 @@ test "Array.of restores a moving native realm" {
     try expectProxyMetadataMoving("var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.of=target.global.Array.of;var run=caller.evalScript(\"(function(){function N(len){proxyMovingLoop(20000);this.seenLength=len;this.held=proxySubject;}N.of=of;return function(){var a=N.of(proxySubject);return a.seenLength===1&&a.held===proxySubject&&a[0]===proxySubject&&proxySubject.marker===37;};})()\");", "run()");
 }
 
+test "retained native releases a dropped moving child realm" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        errdefer std.debug.print("retained native teardown mode {s}\n", .{@tagName(mode)});
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = true });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(
+            \\function retainedNativeMovingLoop(n){var total=0,i=0;while(i<n){total=total+i;i=i+1;}return total;}
+            \\for(var warm=0;warm<10;warm=warm+1)retainedNativeMovingLoop(4096);
+        );
+        const loop: *interp.Function = @ptrCast(@alignCast(ctx.global_object.getOwn("retainedNativeMovingLoop").?.asObj().jsFunction().?));
+        try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+        try std.testing.expect(loop.chunk.?.tier.loadCode().?.manages_steps);
+        ctx.setBytecodeExecutionModeForTesting(mode);
+        _ = try ctx.evaluate(
+            \\var retainedNativeRealm=$262.createRealm();
+            \\var retainedArrayOf=retainedNativeRealm.global.Array.of;
+            \\retainedNativeRealm=null;
+            \\function RetainedNativeCtor(length){retainedNativeMovingLoop(20000);this.seenLength=length;this.held=retainedNativeSubject;}
+            \\RetainedNativeCtor.of=retainedArrayOf;
+            \\function invokeRetainedNative(){var result=RetainedNativeCtor.of(retainedNativeSubject);return result.seenLength===1&&result.held===retainedNativeSubject&&result[0]===retainedNativeSubject&&retainedNativeSubject.marker===37;}
+        );
+
+        // Reclaim the dropped realm wrapper before the first call. The retained
+        // native is now the sole strong edge to its defining Environment.
+        ctx.collectGarbage();
+        const full_before = ctx.gc.?.accounting().full_collections;
+        for (0..4) |_| {
+            _ = try ctx.evaluate("globalThis.retainedNativeSubject={marker:37};");
+            const subject_before = ctx.global_object.getOwn("retainedNativeSubject").?.asObj();
+            const moving_before = ctx.gc.?.accounting().moving_minor_collections;
+            ctx.gc.?.nursery_threshold_bytes = 1;
+            ctx.gc_moving_checkpoint_requested.store(true, .release);
+            try std.testing.expect((try ctx.evaluate("invokeRetainedNative()")).toBoolean());
+            try std.testing.expectEqual(moving_before + 1, ctx.gc.?.accounting().moving_minor_collections);
+            try std.testing.expect(subject_before != ctx.global_object.getOwn("retainedNativeSubject").?.asObj());
+            ctx.collectGarbage();
+            const compacted = ctx.compactGarbage();
+            try std.testing.expect(compacted.status == .compacted or compacted.status == .no_candidates);
+            try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+        }
+        try std.testing.expect(ctx.gc.?.accounting().full_collections >= full_before + 4);
+
+        // Release the last native edge, then collect/compact twice. Repeating the
+        // terminal cycle catches both missed finalization and double-finalization;
+        // the testing allocator reports any surviving external metadata at exit.
+        _ = try ctx.evaluate("retainedArrayOf=null;RetainedNativeCtor=null;invokeRetainedNative=null;retainedNativeSubject=null;");
+        for (0..2) |_| {
+            ctx.collectGarbage();
+            const compacted = ctx.compactGarbage();
+            try std.testing.expect(compacted.status == .compacted or compacted.status == .no_candidates);
+        }
+        try std.testing.expectEqual(@as(f64, 37), (try ctx.evaluate("37")).asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
 test "Array.from restores a moving native realm" {
     try expectProxyMetadataMoving("var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.from=target.global.Array.from;var run=caller.evalScript(\"(function(){var items={[Symbol.iterator](){var done=false;return {next(){if(done)return {done:true};done=true;proxyMovingLoop(20000);return {done:false,value:proxySubject};}};}};var holder={from:from};return function(){var a=holder.from(items);return a.length===1&&a[0]===proxySubject&&proxySubject.marker===37;};})()\");", "run()");
 }
