@@ -24227,14 +24227,14 @@ test "bytecode admission inventory retains exact runtime reasons" {
         \\globalThis.generatorUpdate = function* generatorUpdate() { var holder = { value: 1 }; return holder[yield "key"]++; };
         \\globalThis.generatorTagged = function* generatorTagged(holder) { return holder[yield "key"]`a${yield "value"}b`; };
         \\globalThis.generatorHeritage = function* generatorHeritage() { return class extends Base {}; };
-        \\globalThis.generatorRejected = function* generatorRejected() { for (using x of []) break; };
+        \\globalThis.generatorDisposal = function* generatorDisposal() { for (using x of []) break; };
         \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
         \\globalThis.asyncLogical = async function asyncLogical() { var holder = {}; return holder.value ??= 1; };
         \\globalThis.asyncCompound = async function asyncCompound() { var holder = { value: 1 }; return holder.value += 1; };
         \\globalThis.asyncUpdate = async function asyncUpdate() { var holder = { value: 1 }; return ++holder[await Promise.resolve("value")]; };
         \\globalThis.asyncTagged = async function asyncTagged(holder) { return holder[await Promise.resolve("tag")]`a${await Promise.resolve(1)}b`; };
         \\globalThis.asyncHeritage = async function asyncHeritage() { return class extends Base {}; };
-        \\globalThis.asyncRejected = async function asyncRejected() { for (using x of []) break; };
+        \\globalThis.asyncDisposal = async function asyncDisposal() { for (using x of []) break; };
     );
     _ = try ctx.evaluate(
         \\globalThis.templateDefault = function templateDefault(value = 1) { return value; };
@@ -24255,14 +24255,14 @@ test "bytecode admission inventory retains exact runtime reasons" {
         .{ .name = "generatorUpdate", .reason = .generator_compiled },
         .{ .name = "generatorTagged", .reason = .generator_compiled },
         .{ .name = "generatorHeritage", .reason = .generator_compiled },
-        .{ .name = "generatorRejected", .reason = .generator_rejected_unsupported_lowering },
+        .{ .name = "generatorDisposal", .reason = .generator_compiled },
         .{ .name = "asyncCompiled", .reason = .async_compiled },
         .{ .name = "asyncLogical", .reason = .async_compiled },
         .{ .name = "asyncCompound", .reason = .async_compiled },
         .{ .name = "asyncUpdate", .reason = .async_compiled },
         .{ .name = "asyncTagged", .reason = .async_compiled },
         .{ .name = "asyncHeritage", .reason = .async_compiled },
-        .{ .name = "asyncRejected", .reason = .async_rejected_unsupported_lowering },
+        .{ .name = "asyncDisposal", .reason = .async_compiled },
     };
     for (expected) |entry| {
         const function_value = ctx.global_object.getOwn(entry.name) orelse return error.TestUnexpectedResult;
@@ -24285,8 +24285,8 @@ test "bytecode admission inventory retains exact runtime reasons" {
     try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
     try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
     try std.testing.expectEqual(before.count(.plain_compiled) + 4, after.count(.plain_compiled));
-    try std.testing.expectEqual(before.count(.generator_compiled) + 6, after.count(.generator_compiled));
-    try std.testing.expectEqual(before.count(.async_compiled) + 6, after.count(.async_compiled));
+    try std.testing.expectEqual(before.count(.generator_compiled) + 7, after.count(.generator_compiled));
+    try std.testing.expectEqual(before.count(.async_compiled) + 7, after.count(.async_compiled));
     for (expected) |entry| {
         if (entry.reason == .plain_compiled or entry.reason == .generator_compiled or entry.reason == .async_compiled) continue;
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
@@ -30906,26 +30906,24 @@ test "moving GC relocates live severed and recycled mapped arguments cells" {
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
 }
 
-test "required bytecode rejects unsupported nested parameter lowering without fallback coverage" {
+test "required bytecode lowers nested disposal in parameter initializers" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_jit = false,
         .bytecode_execution_mode = .required,
     });
     defer ctx.destroy();
 
-    try std.testing.expectError(error.Throw, ctx.evaluate(
-        \\function needsParameterPrologue(value = function(){ using resource = source; }) { return value; }
-        \\needsParameterPrologue();
-    ));
-    const exception = ctx.exception orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("InternalError", exception.asObj().errorName());
-    try std.testing.expectEqualStrings(
-        "required bytecode plain function 'needsParameterPrologue' has no compiled chunk (template_plain_rejected_parameter_prologue)",
-        exception.asObj().getOwn("message").?.asStr(),
+    const result = try ctx.evaluate(
+        \\globalThis.disposals = 0;
+        \\var source = { [Symbol.dispose]() { disposals++; } };
+        \\function needsParameterPrologue(value = function(){ using resource = source; return 37; }) { return value(); }
+        \\needsParameterPrologue() + ":" + disposals;
     );
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("37:1", result.asStr());
     const inventory = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
-    try std.testing.expectEqual(@as(u64, 1), inventory.count(.template_plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_rejected_parameter_prologue));
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
 }
 

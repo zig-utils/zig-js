@@ -7286,7 +7286,6 @@ test "compiler reports stable plain-function admission reasons" {
         expected: Compiler.PlainFunctionRejection,
     }{
         .{ .source = "function* f(){}", .expected = .generator_or_async },
-        .{ .source = "function f(value = function(){ using resource = source; }){}", .expected = .parameter_prologue },
     };
 
     for (cases) |case| {
@@ -7333,6 +7332,7 @@ test "compiler reports stable plain-function admission reasons" {
         "function f(first, value = new first(outer)){}",
         "function f(value = value + 1){}",
         "function f(value = later + 1, later){}",
+        "function f(value = function(){ using resource = source; }){}",
         "function f(arguments = arguments){}",
         "function f(first, value = first + outer){}",
         "function f(value = side()){}",
@@ -9319,18 +9319,22 @@ test "compiler reports stable program admission reasons" {
         try std.testing.expect(stores > 0 and loads > 0);
     }
 
-    // Explicit disposal remains a tree-walk-only boundary.
-    const unsupported_sources = [_][]const u8{
-        "for (using x of []) break;",
+    // Explicit disposal is admitted only with both registration and
+    // completion-preserving cleanup in the published bytecode.
+    var disposal_parser = try @import("parser.zig").Parser.init(arena.allocator(), "for (using x of []) break;");
+    const disposal_program = try disposal_parser.parseProgram();
+    const disposal_chunk = switch (try Compiler.admitProgram(arena.allocator(), disposal_program)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
     };
-    for (unsupported_sources) |source| {
-        var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
-        const unsupported_program = try unsupported_parser.parseProgram();
-        switch (try Compiler.admitProgram(arena.allocator(), unsupported_program)) {
-            .compiled => return error.TestUnexpectedResult,
-            .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.unsupported_lowering, reason),
-        }
-    }
+    var registers_disposable = false;
+    var disposes_completion = false;
+    for (disposal_chunk.code.items) |instruction| switch (instruction.op) {
+        .register_disposable => registers_disposable = true,
+        .dispose_scope_completion => disposes_completion = true,
+        else => {},
+    };
+    try std.testing.expect(registers_disposable and disposes_completion);
 
     var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "null ?? 1;");
     const compiled_program = try compiled_parser.parseProgram();
@@ -9353,12 +9357,20 @@ test "compiler reports stable generator admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.expression_body, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ for (using x of []) break; }");
-    const unsupported_program = try unsupported_parser.parseProgram();
-    switch (try Compiler.admitGenerator(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.unsupported_lowering, reason),
-    }
+    var disposal_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* disposal(){ for (using x of []) break; }");
+    const disposal_program = try disposal_parser.parseProgram();
+    const disposal_chunk = switch (try Compiler.admitGenerator(arena.allocator(), disposal_program.program[0].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var registers_disposable = false;
+    var disposes_completion = false;
+    for (disposal_chunk.code.items) |instruction| switch (instruction.op) {
+        .register_disposable => registers_disposable = true,
+        .dispose_scope_completion => disposes_completion = true,
+        else => {},
+    };
+    try std.testing.expect(registers_disposable and disposes_completion);
 
     var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* compiled(){ var holder = { value: 1 }; return holder[yield \"key\"]++; }");
     const compiled_program = try compiled_parser.parseProgram();
@@ -9379,12 +9391,20 @@ test "compiler reports stable async admission reasons" {
         .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.async_generator, reason),
     }
 
-    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ for (using x of []) break; }");
-    const unsupported_program = try unsupported_parser.parseProgram();
-    switch (try Compiler.admitAsync(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.unsupported_lowering, reason),
-    }
+    var disposal_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function disposal(){ for (using x of []) break; }");
+    const disposal_program = try disposal_parser.parseProgram();
+    const disposal_chunk = switch (try Compiler.admitAsync(arena.allocator(), disposal_program.program[0].func_decl, true)) {
+        .compiled => |chunk| chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var registers_disposable = false;
+    var disposes_completion = false;
+    for (disposal_chunk.code.items) |instruction| switch (instruction.op) {
+        .register_disposable => registers_disposable = true,
+        .dispose_scope_completion => disposes_completion = true,
+        else => {},
+    };
+    try std.testing.expect(registers_disposable and disposes_completion);
 
     var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function compiled(){ var holder = { value: 1 }; return ++holder[await Promise.resolve(\"value\")]; }");
     const compiled_program = try compiled_parser.parseProgram();
