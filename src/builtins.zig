@@ -3422,12 +3422,27 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     const self = interp(ctx);
     const realm = try enterActiveNativeRealm(self);
     defer leaveActiveNativeRealm(self, realm);
+    const roots_mark = self.gc_temp_roots.items.len;
+    defer self.restoreTempRoots(roots_mark);
+    // ToString(text) can invoke user code. Retain the later reviver across that
+    // callback before inspecting whether it is callable, and retain the final
+    // String value because parse-record source slices may borrow its bytes until
+    // the last reviver callback returns.
+    const reviver_fallback = arg(args, 1);
+    const reviver_root = try self.pushTempRoot(reviver_fallback);
     // ToString(text) — a value object's @@toPrimitive/toString/valueOf runs (and
     // a Symbol throws) before parsing. Read as WTF-8 so a flat-latin1 input cell
     // is tokenized as canonical WTF-8 (parsed keys/values then store correctly).
-    const text = try self.toStringWtf8(arg(args, 0));
-    const reviver = arg(args, 1);
+    const text_value = try self.toStringValue(arg(args, 0));
+    const text_root = try self.pushTempRoot(text_value);
+    const text = try self.tempRoot(text_root, text_value).asWtf8(self.arena);
+    const reviver = self.tempRoot(reviver_root, reviver_fallback);
     const has_reviver = reviver.isObject() and reviver.asObj().isCallableObject();
+    // A reviver makes both parsing source records and the later recursive walk
+    // callback-live. Give every moving record value a stable relocation slot as
+    // it is created, and keep the reviver in the same call-scoped root set.
+    // JsonParseRecord is arena-owned (and therefore does not move); its root
+    // index is the explicit bridge from that native record to the moving heap.
     var p = JsonParser{ .s = text, .i = 0, .interp = self, .track_records = has_reviver };
     p.skipWs();
     const parsed = p.parseValue() catch |err| switch (err) {
@@ -3444,10 +3459,17 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
     // the reviver returns undefined) each property by the reviver's return.
     if (has_reviver) {
         const holder = (try self.newObject()).asObj();
+        const holder_root = try self.pushTempRoot(Value.obj(holder));
         // CreateDataPropertyOrThrow(holder, "", v) — not [[Set]], so an inherited
         // Object.prototype[""] setter is not invoked.
         try holder.setOwn(self.arena, self.root_shape, "", v);
-        return internalizeJson(self, Value.obj(holder), "", reviver, parsed.record);
+        return internalizeJson(
+            self,
+            self.tempRoot(holder_root, Value.obj(holder)),
+            "",
+            self.tempRoot(reviver_root, reviver),
+            parsed.record,
+        );
     }
     return v;
 }
@@ -3462,55 +3484,84 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
     defer self.depth -= 1;
     try self.stackGuard();
     const a = self.arena;
-    const val = try self.getProperty(holder, key);
+    const roots_mark = self.gc_temp_roots.items.len;
+    defer self.restoreTempRoots(roots_mark);
+    const holder_root = try self.pushTempRoot(holder);
+    const reviver_root = try self.pushTempRoot(reviver);
+    const val = try self.getProperty(self.tempRoot(holder_root, holder), key);
+    const val_root = try self.pushTempRoot(val);
     // ECMA-262 25.5.2.4: a mutation keeps its parse record only when the
     // current value is SameValue with the value initially parsed at this exact
     // tree position. In particular, +0 and -0 differ, and moving a parsed
     // object into a sibling must not move its source metadata with it.
     const record = if (parse_record) |candidate|
-        if (value.sameValue(candidate.value, val)) candidate else null
+        if (value.sameValue(candidate.rootedValue(self), self.tempRoot(val_root, val))) candidate else null
     else
         null;
     const context = (try self.newObject()).asObj();
+    const context_root = try self.pushTempRoot(Value.obj(context));
     if (record) |matched| {
         if (matched.source) |source|
             try context.setOwn(a, self.root_shape, "source", try Value.strAlloc(a, source));
     }
-    if (val.isObject()) {
-        const o = val.asObj();
-        if (try interpreter.objectToStringIsArray(self, o)) {
+    if (self.tempRoot(val_root, val).isObject()) {
+        if (try interpreter.objectToStringIsArray(self, self.tempRoot(val_root, val).asObj())) {
             var i: usize = 0;
             // LengthOfArrayLike: Get(val, "length") — observable, and propagates a
             // throw if the reviver replaced `length` with a throwing accessor.
-            const len = interpreter.toLen(try self.toNumberV(try self.getProperty(val, "length")));
+            const len = interpreter.toLen(try self.toNumberV(try self.getProperty(self.tempRoot(val_root, val), "length")));
             while (i < len) : (i += 1) {
                 const k = try std.fmt.allocPrint(a, "{d}", .{i});
                 const child_record = if (record) |matched| switch (matched.children) {
                     .elements => |elements| if (i < elements.items.len) elements.items[i] else null,
                     else => null,
                 } else null;
-                const nv = try internalizeJson(self, val, k, reviver, child_record);
-                try internalizeStore(self, o, val, k, nv);
+                const nv = try internalizeJson(
+                    self,
+                    self.tempRoot(val_root, val),
+                    k,
+                    self.tempRoot(reviver_root, reviver),
+                    child_record,
+                );
+                const nv_root = try self.pushTempRoot(nv);
+                defer self.restoreTempRoots(nv_root);
+                try internalizeStore(self, self.tempRoot(val_root, val), k, self.tempRoot(nv_root, nv));
             }
         } else {
-            for (try ownEnumerableKeys(self, o)) |k| {
+            for (try ownEnumerableKeys(self, self.tempRoot(val_root, val).asObj())) |k| {
                 const child_record = if (record) |matched| switch (matched.children) {
                     .entries => |entries| entries.get(k),
                     else => null,
                 } else null;
-                const nv = try internalizeJson(self, val, k, reviver, child_record);
-                try internalizeStore(self, o, val, k, nv);
+                const nv = try internalizeJson(
+                    self,
+                    self.tempRoot(val_root, val),
+                    k,
+                    self.tempRoot(reviver_root, reviver),
+                    child_record,
+                );
+                const nv_root = try self.pushTempRoot(nv);
+                defer self.restoreTempRoots(nv_root);
+                try internalizeStore(self, self.tempRoot(val_root, val), k, self.tempRoot(nv_root, nv));
             }
         }
     }
-    return self.callValueWithThis(reviver, &.{ try Value.strAlloc(a, value.decodeStringKey(key)), val, Value.obj(context) }, holder);
+    return self.callValueWithThis(
+        self.tempRoot(reviver_root, reviver),
+        &.{
+            try Value.strAlloc(a, value.decodeStringKey(key)),
+            self.tempRoot(val_root, val),
+            self.tempRoot(context_root, Value.obj(context)),
+        },
+        self.tempRoot(holder_root, holder),
+    );
 }
 
 /// InternalizeJSONProperty's store step: `undefined` ⇒ DeletePropertyOrThrow,
 /// else CreateDataProperty. On a Proxy these route through the deleteProperty /
 /// defineProperty traps (so a throwing trap propagates).
-fn internalizeStore(self: *Interpreter, o: *value.Object, val: Value, key: []const u8, nv: Value) HostError!void {
-    _ = val;
+fn internalizeStore(self: *Interpreter, val: Value, key: []const u8, nv: Value) HostError!void {
+    const o = val.asObj();
     // InternalizeJSONProperty: a removed value is [[Delete]]'d, otherwise the
     // result is CreateDataProperty'd. Both use the plain internal method whose
     // boolean result is IGNORED (a non-configurable property is left as-is, no
@@ -3542,6 +3593,12 @@ const JsonParseRecord = struct {
     value: Value,
     source: ?[]const u8 = null,
     children: JsonParseChildren = .none,
+    value_root: ?usize = null,
+
+    fn rootedValue(record: *const @This(), self: *Interpreter) Value {
+        const root = record.value_root orelse return record.value;
+        return self.tempRoot(root, record.value);
+    }
 };
 
 const JsonStringHashContext = struct {
@@ -3616,10 +3673,23 @@ const JsonParser = struct {
         return context;
     }
 
-    fn parsed(p: *JsonParser, val: Value, source: ?[]const u8, children: JsonParseChildren) std.mem.Allocator.Error!JsonParsed {
+    fn parsed(p: *JsonParser, val: Value, source: ?[]const u8, children: JsonParseChildren) HostError!JsonParsed {
         if (!p.track_records) return .{ .value = val };
         const record = try p.interp.arena.create(JsonParseRecord);
-        record.* = .{ .value = val, .source = source, .children = children };
+        // Numbers, booleans and null carry no relocatable payload. Static or
+        // arena-owned strings are likewise stable; only moving heap identities
+        // need a slot, keeping numeric-heavy reviver parses compact.
+        const value_root = if (val.isObject() or
+            (val.isString() and val.asStringCell().isGcManaged()))
+            try p.interp.pushTempRoot(val)
+        else
+            null;
+        record.* = .{
+            .value = val,
+            .source = source,
+            .children = children,
+            .value_root = value_root,
+        };
         return .{ .value = val, .record = record };
     }
 
@@ -3978,6 +4048,42 @@ test "JSON parse record indexes install exact seeded contexts failure atomically
     // placement, so the same attacker-controlled bytes cannot target one fixed
     // process-default hash image across parses.
     try std.testing.expect(first_context.hash(&wide_key) != second_context.hash(&wide_key));
+}
+
+test "JSON reviver traversal roots unwind on every allocation failure" {
+    const Probe = struct {
+        fn run(backing: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(backing);
+            defer arena.deinit();
+            const Context = @import("context.zig").Context;
+            const context = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+            defer context.destroy();
+            const reviver = try context.evaluate("(function(key, value, context) { return value; })");
+            const saved_gc = gc_mod.setActiveContext(context);
+            defer gc_mod.restoreActiveContext(saved_gc);
+            var machine = context.interpreter();
+            machine.arena = arena.allocator();
+            machine.scratch_allocator = backing;
+            machine.gc_safepoint_fn = null;
+            defer {
+                std.debug.assert(machine.gc_temp_roots.items.len == 0);
+                std.debug.assert(machine.gc_env_roots.items.len == 0);
+                std.debug.assert(machine.gc_tree_call_roots == null);
+                std.debug.assert(machine.depth == 0);
+                std.debug.assert(machine.env == &context.env);
+            }
+            const parsed = try jsonParse(
+                &machine,
+                Value.undef(),
+                &.{ Value.str("{\"object\":{\"string\":\"value\"},\"number\":1}"), reviver },
+            );
+            try std.testing.expectEqualStrings("value", parsed.asObj().getOwn("object").?.asObj().getOwn("string").?.asStr());
+            try std.testing.expectEqual(@as(f64, 1), parsed.asObj().getOwn("number").?.asNum());
+        }
+    };
+    const previous_heap = gc_mod.setActiveHeap(null);
+    defer _ = gc_mod.setActiveHeap(previous_heap);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "JSON active cycle index promotes atomically and preserves path semantics" {

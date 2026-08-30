@@ -28658,6 +28658,31 @@ test "native realm wrappers restore callers while moving" {
     }
 }
 
+test "JSON reviver traversal retains native state while moving" {
+    const cases = [_]struct { name: []const u8, expression: []const u8 }{
+        .{
+            .name = "normal nested traversal",
+            .expression = "(function(){var visits=[];function revive(k,v,c){visits.push(k+':'+(c.source===undefined?'missing':c.source));if(k==='trigger'){var replacement={held:proxySubject};proxyMovingLoop(20000);return replacement;}return v;}proxyCaptureEnv();var result=JSON.parse('{\"trigger\":1,\"later\":{\"deep\":\"text\"},\"tail\":3}',revive);return proxyCaptureEnv()&&result.trigger.held===proxySubject&&result.later.deep==='text'&&result.tail===3&&visits.join('|')==='trigger:1|deep:\"text\"|later:missing|tail:3|:missing';})()",
+        },
+        .{
+            .name = "abrupt nested traversal",
+            .expression = "(function(){var calls=0,caught;proxyCaptureEnv();try{JSON.parse('{\"a\":1,\"b\":2}',function(k,v,c){calls++;if(k==='a'){proxyMovingLoop(20000);throw proxySubject;}return v;});}catch(e){caught=e;}if(!proxyCaptureEnv())throw new Error('stale environment');if(caught!==proxySubject)throw new Error('stale thrown value');if(calls!==1)throw new Error('unexpected callback count '+calls);return true;})()",
+        },
+        .{
+            .name = "array traversal",
+            .expression = "(function(){var visits=[];proxyCaptureEnv();var result=JSON.parse('[1,{\"deep\":2}]',function(k,v,c){visits.push(k+':'+(c.source===undefined?'missing':c.source));if(k==='0'){var replacement={held:proxySubject};proxyMovingLoop(20000);return replacement;}return v;});return proxyCaptureEnv()&&result[0].held===proxySubject&&result[1].deep===2&&visits.join('|')==='0:1|deep:2|1:missing|:missing';})()",
+        },
+        .{
+            .name = "text coercion",
+            .expression = "(function(){var revive=function(k,v,c){return v;},text={toString(){proxyMovingLoop(20000);return '{\"value\":37}';}};proxyCaptureEnv();var result=JSON.parse(text,revive);return proxyCaptureEnv()&&result.value===37;})()",
+        },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving JSON reviver {s}\n", .{case.name});
+        try expectProxyMetadataMoving("", case.expression);
+    }
+}
+
 test "try catch and finally retain environments and completions while moving" {
     const cases = [_]struct { name: []const u8, expression: []const u8 }{
         .{ .name = "catch without binding", .expression = "(function(){proxyCaptureEnv();try{proxyMovingLoop(20000);throw 1;}catch{return proxyCaptureEnv()&&proxySubject.marker===37;}})()" },
