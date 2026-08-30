@@ -28672,6 +28672,26 @@ test "try catch and finally retain environments and completions while moving" {
     }
 }
 
+test "lexical scope restores survive moving evaluation" {
+    const cases = [_]struct { name: []const u8, expression: []const u8 }{
+        .{ .name = "with normal", .expression = "(function(){proxyCaptureEnv();with({}){proxyMovingLoop(20000);}return proxyCaptureEnv()&&proxySubject.marker===37;})()" },
+        .{ .name = "with abrupt", .expression = "(function(){var caught;proxyCaptureEnv();try{with({}){proxyMovingLoop(20000);throw proxySubject;}}catch(e){caught=e;}return proxyCaptureEnv()&&caught===proxySubject;})()" },
+        .{ .name = "debugger evaluation", .expression = "(function(){proxyCaptureEnv();var value=proxyDebuggerEval('proxyMovingLoop(20000);37');return proxyCaptureEnv()&&value===37;})()" },
+        .{ .name = "debugger evaluation abrupt", .expression = "(function(){var caught;proxyCaptureEnv();try{proxyDebuggerEval('proxyMovingLoop(20000);throw proxySubject');}catch(e){caught=e;}return proxyCaptureEnv()&&caught===proxySubject;})()" },
+        .{ .name = "for-of disposal", .expression = "(function(){var disposed=0,resource={[Symbol.dispose](){disposed++;}};proxyCaptureEnv();for(using value of [resource]){proxyMovingLoop(20000);}return proxyCaptureEnv()&&disposed===1;})()" },
+        .{ .name = "for-of abrupt", .expression = "(function(){var caught;proxyCaptureEnv();try{for(let value of [proxySubject]){proxyMovingLoop(20000);throw value;}}catch(e){caught=e;}return proxyCaptureEnv()&&caught===proxySubject;})()" },
+        .{ .name = "for-in reuse", .expression = "(function(){var object={a:1,b:2},sum=0;proxyCaptureEnv();for(let key in object){proxyMovingLoop(20000);sum+=object[key];}return proxyCaptureEnv()&&sum===3;})()" },
+        .{ .name = "classic for lexical", .expression = "(function(){var seen=0;proxyCaptureEnv();for(let i=0;i<1;i++){proxyMovingLoop(20000);seen=i+1;}return proxyCaptureEnv()&&seen===1;})()" },
+        .{ .name = "switch lexical", .expression = "(function(){var seen=0;proxyCaptureEnv();switch(0){case (proxyMovingLoop(20000),0):let value=37;seen=value;break;}return proxyCaptureEnv()&&seen===37;})()" },
+        .{ .name = "switch abrupt", .expression = "(function(){var caught;proxyCaptureEnv();try{switch(0){case (proxyMovingLoop(20000),0):let value=proxySubject;throw value;}}catch(e){caught=e;}return proxyCaptureEnv()&&caught===proxySubject;})()" },
+        .{ .name = "Annex B bare declaration", .expression = "(function(){proxyCaptureEnv();if(true)function legacy(){return proxySubject;}proxyMovingLoop(20000);return proxyCaptureEnv()&&legacy()===proxySubject;})()" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving lexical scope restore {s}\n", .{case.name});
+        try expectProxyMetadataMoving("", case.expression);
+    }
+}
+
 test "realm array intrinsics isolate shared no-GIL construction" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
@@ -29665,6 +29685,13 @@ fn expectProxyMetadataMovingOutcome(setup: []const u8, expression: []const u8, e
             probe.before_id = current_id;
             return Value.boolVal(false);
         }
+
+        fn debuggerEval(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            if (args.len == 0 or !args[0].isString())
+                return machine.throwError("TypeError", "proxyDebuggerEval expects a string");
+            return machine.evaluateForDebugger(args[0].asStr(), machine.env, machine.this_value, machine.strict);
+        }
     };
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
         errdefer std.debug.print("Proxy metadata mode {s}\n", .{@tagName(mode)});
@@ -29682,6 +29709,10 @@ fn expectProxyMetadataMovingOutcome(setup: []const u8, expression: []const u8, e
             capture_env.* = .{ .native = Host.captureEnv, .private_data = @ptrCast(&env_probe) };
             try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "proxyCaptureEnv", Value.obj(capture_env));
             try ctx.env.put("proxyCaptureEnv", Value.obj(capture_env));
+            const debugger_eval = try gc_mod.allocObj(ctx.arena());
+            debugger_eval.* = .{ .native = Host.debuggerEval };
+            try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "proxyDebuggerEval", Value.obj(debugger_eval));
+            try ctx.env.put("proxyDebuggerEval", Value.obj(debugger_eval));
         }
         _ = try ctx.evaluate(
             \\function proxyMovingLoop(n){var total=0,i=0;while(i<n){total=total+i;i=i+1;}return total;}

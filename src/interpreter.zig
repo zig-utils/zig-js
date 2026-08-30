@@ -5538,10 +5538,15 @@ pub const Interpreter = struct {
                 const block_env = try gc_mod.allocEnv(self.arena);
                 self.initEnvironment(block_env, self.env, false);
                 const saved_env = self.env;
+                const saved_env_root = try self.pushTempEnvRoot(saved_env);
+                defer self.restoreTempEnvRoots(saved_env_root);
+                const block_env_root = try self.pushTempEnvRoot(block_env);
+                defer self.restoreTempEnvRoots(block_env_root);
                 self.env = block_env;
-                defer self.env = saved_env;
-                const fnv = try self.makeFunction(fnode, block_env);
-                try block_env.put(fnode.name, fnv);
+                defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
+                const current_block_env = self.tempEnvRoot(block_env_root, block_env);
+                const fnv = try self.makeFunction(fnode, current_block_env);
+                try self.tempEnvRoot(block_env_root, block_env).put(fnode.name, fnv);
                 if (self.annexb_legacy_nodes) |set| {
                     if (set.contains(node)) try self.globalDefineDeletable(fnode.name, fnv);
                 }
@@ -5685,8 +5690,10 @@ pub const Interpreter = struct {
                 self.initEnvironment(wenv, self.env, false);
                 wenv.with_object = obj;
                 const saved_env = self.env;
+                const saved_env_root = try self.pushTempEnvRoot(saved_env);
+                defer self.restoreTempEnvRoots(saved_env_root);
                 self.env = wenv;
-                defer self.env = saved_env;
+                defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
                 break :blk try self.eval(w.body);
             },
             .while_stmt => |s| try self.evalWhile(s.cond, s.body),
@@ -5809,11 +5816,17 @@ pub const Interpreter = struct {
         const program = parser.parseProgram() catch |err| return self.throwParserSyntaxError("debugger evaluation", owned_source, &parser, err);
 
         const saved_env = self.env;
+        const saved_env_root = try self.pushTempEnvRoot(saved_env);
+        defer self.restoreTempEnvRoots(saved_env_root);
         const saved_this = self.this_value;
+        const saved_this_root = try self.pushTempRoot(saved_this);
+        defer self.restoreTempRoots(saved_this_root);
         const saved_strict = self.strict;
         const saved_signal = self.signal;
         const saved_signal_label = self.signal_label;
         const saved_ret = self.ret_value;
+        const saved_ret_root = try self.pushTempRoot(saved_ret);
+        defer self.restoreTempRoots(saved_ret_root);
         const saved_statement_hook = self.debug_statement_hook;
         const saved_exception_hook = self.debug_exception_hook;
         self.env = environment;
@@ -5825,12 +5838,12 @@ pub const Interpreter = struct {
         self.debug_statement_hook = null;
         self.debug_exception_hook = null;
         defer {
-            self.env = saved_env;
-            self.this_value = saved_this;
+            self.env = self.tempEnvRoot(saved_env_root, saved_env);
+            self.this_value = self.tempRoot(saved_this_root, saved_this);
             self.strict = saved_strict;
             self.signal = saved_signal;
             self.signal_label = saved_signal_label;
-            self.ret_value = saved_ret;
+            self.ret_value = self.tempRoot(saved_ret_root, saved_ret);
             self.debug_statement_hook = saved_statement_hook;
             self.debug_exception_hook = saved_exception_hook;
         }
@@ -5848,6 +5861,8 @@ pub const Interpreter = struct {
         // iteration's binding (`var` is function-scoped, so it doesn't).
         const lexical = decl_kind != null and decl_kind.? != .@"var";
         const outer_env = self.env;
+        const outer_env_root = try self.pushTempEnvRoot(outer_env);
+        defer self.restoreTempEnvRoots(outer_env_root);
         if (var_init) |ini| {
             const init_value = try self.eval(ini);
             try self.bindLoopTarget(decl_kind, target, init_value, .assignment);
@@ -5858,9 +5873,9 @@ pub const Interpreter = struct {
         var iter: Value = undefined;
         if (lexical and self.tdz_marker != null) {
             const head_env = try gc_mod.allocEnv(self.arena);
-            self.initEnvironment(head_env, outer_env, false);
+            self.initEnvironment(head_env, self.tempEnvRoot(outer_env_root, outer_env), false);
             self.env = head_env;
-            defer self.env = outer_env;
+            defer self.env = self.tempEnvRoot(outer_env_root, outer_env);
             try self.tdzBindPattern(target, self.tdzVal());
             iter = try self.eval(iterable);
         } else {
@@ -5897,17 +5912,20 @@ pub const Interpreter = struct {
                 // or BigInt is object-tagged here but is not an Object per Type()).
                 if (!builtins.isRealObject(res)) return self.throwError("TypeError", "Iterator result interface is not an object");
                 if ((try self.getProperty(res, "done")).toBoolean()) break; // exhausted — no close
-                const saved_env = self.env;
-                defer self.env = saved_env;
+                const saved_env = self.tempEnvRoot(outer_env_root, outer_env);
+                defer self.env = self.tempEnvRoot(outer_env_root, outer_env);
                 // The per-iteration env also holds a `for (using x of …)` resource,
                 // disposed (DisposeResources) at the END of each iteration — so a
                 // `using` loop (`dispose != 0`) must get a fresh env each iteration
                 // (no reuse); otherwise the env is reused in place while uncaptured.
                 var iter_env: ?*Environment = null;
+                var iter_env_root: ?usize = null;
+                defer if (iter_env_root) |root| self.restoreTempEnvRoots(root);
                 if (lexical) {
                     const e = try self.iterBindingEnv(&ienv, saved_env, dispose == 0);
                     self.env = e;
                     iter_env = e;
+                    iter_env_root = try self.pushTempEnvRoot(e);
                 }
                 // Binding/assigning the loop target is also an abrupt-completion
                 // close site: if PutValue or a destructuring assignment throws
@@ -5930,7 +5948,8 @@ pub const Interpreter = struct {
                 // original thrown value is preserved (iteratorClose can overwrite
                 // `self.exception` via a throwing `return`/get-method).
                 last = self.eval(body) catch |e| {
-                    if (e == error.Throw) if (iter_env) |ie| if (ie.disposables.items.len > 0) {
+                    if (e == error.Throw) if (iter_env) |ie_fallback| if (self.tempEnvRoot(iter_env_root.?, ie_fallback).disposables.items.len > 0) {
+                        const ie = self.tempEnvRoot(iter_env_root.?, ie_fallback);
                         const body_err = self.exception;
                         if (self.disposeScope(ie, body_err) catch null) |de| self.exception = de;
                     };
@@ -5939,7 +5958,8 @@ pub const Interpreter = struct {
                 };
                 // DisposeResources at the end of a normal iteration; a disposal error
                 // is a throw completion that also closes the iterator.
-                if (iter_env) |ie| if (ie.disposables.items.len > 0) {
+                if (iter_env) |ie_fallback| if (self.tempEnvRoot(iter_env_root.?, ie_fallback).disposables.items.len > 0) {
+                    const ie = self.tempEnvRoot(iter_env_root.?, ie_fallback);
                     if (try self.disposeScope(ie, null)) |de| {
                         self.exception = de;
                         if (is_await) self.asyncIteratorCloseKeepingThrow(iter_obj) else self.iteratorCloseKeepingThrow(iter_obj);
@@ -5978,8 +5998,8 @@ pub const Interpreter = struct {
                         // reached must not be visited: the key list is a snapshot,
                         // so re-check the property still exists on the chain.
                         if (!try self.hasPropertyResult(o, k)) continue;
-                        const saved_env = self.env;
-                        defer self.env = saved_env;
+                        const saved_env = self.tempEnvRoot(outer_env_root, outer_env);
+                        defer self.env = self.tempEnvRoot(outer_env_root, outer_env);
                         // for-in has no per-iteration `using` resource, so the
                         // binding env is always reusable while uncaptured.
                         if (lexical) self.env = try self.iterBindingEnv(&ienv, saved_env, true);
@@ -6145,13 +6165,17 @@ pub const Interpreter = struct {
             break;
         };
         const saved_env = self.env;
-        defer self.env = saved_env;
+        const saved_env_root = try self.pushTempEnvRoot(saved_env);
+        defer self.restoreTempEnvRoots(saved_env_root);
+        defer self.env = self.tempEnvRoot(saved_env_root, saved_env);
         var block_env: ?*Environment = null;
+        var block_env_root: ?usize = null;
         if (switch_needs_env) {
             const be = try gc_mod.allocEnv(self.arena);
             self.initEnvironment(be, self.env, false);
             self.env = be;
             block_env = be;
+            block_env_root = try self.pushTempEnvRoot(be);
             // Instantiate the CaseBlock's lexical declarations (across all cases):
             // function declarations are block-scoped (with the Annex B B.3.3 legacy
             // copy), and let/const/class get the temporal-dead-zone sentinel.
@@ -6212,7 +6236,8 @@ pub const Interpreter = struct {
             // enclosing loop and must keep propagating.
             if (self.signal == .brk and self.signal_label == null) self.signal = .none;
         }
-        if (block_env) |be| if (be.disposables.items.len != 0) {
+        if (block_env) |be_fallback| if (self.tempEnvRoot(block_env_root.?, be_fallback).disposables.items.len != 0) {
+            const be = self.tempEnvRoot(block_env_root.?, be_fallback);
             if (try self.disposeScope(be, null)) |err| {
                 self.exception = err;
                 return error.Throw;
@@ -6244,11 +6269,13 @@ pub const Interpreter = struct {
         const lexical = names.items.len > 0;
 
         const outer = self.env;
+        const outer_root = try self.pushTempEnvRoot(outer);
+        defer self.restoreTempEnvRoots(outer_root);
         const env_root_mark = self.gc_env_roots.items.len;
         var loop_env_rooted = false;
         defer if (loop_env_rooted) self.gc_env_roots.shrinkRetainingCapacity(env_root_mark);
         defer if (lexical) {
-            self.env = outer;
+            self.env = self.tempEnvRoot(outer_root, outer);
         };
         // The for-head's lexical environment, which holds any `using`/`await using`
         // resource declared in the init — disposed at the END of the ForStatement.
@@ -6257,7 +6284,7 @@ pub const Interpreter = struct {
             if (lexical) {
                 // The loop's lexical declaration lives in its own environment.
                 const le = try gc_mod.allocEnv(self.arena);
-                self.initEnvironment(le, outer, false);
+                self.initEnvironment(le, self.tempEnvRoot(outer_root, outer), false);
                 self.env = le;
                 loop_env = le;
                 // ForDeclarationBindingInstantiation creates every head binding
@@ -6282,7 +6309,7 @@ pub const Interpreter = struct {
         // evaluation captured the head environment. Reuse an uncaptured head in
         // place instead of allocating a redundant second environment before its
         // condition.
-        if (lexical and self.env.captured.load(.acquire)) self.env = try self.perIterEnv(outer, names.items, self.env);
+        if (lexical and self.env.captured.load(.acquire)) self.env = try self.perIterEnv(self.tempEnvRoot(outer_root, outer), names.items, self.env);
         if (loop_env) |le| {
             if (le.disposables.items.len == 0) {
                 loop_env = null;
@@ -6292,15 +6319,17 @@ pub const Interpreter = struct {
             }
         }
 
-        const last = self.runForBody(cond, update, body, my_labels, lexical, outer, names.items) catch |e| {
+        const last = self.runForBody(cond, update, body, my_labels, lexical, self.tempEnvRoot(outer_root, outer), names.items) catch |e| {
             // DisposeResources runs on an abrupt completion too, threading the error.
-            if (loop_env) |le| if (le.disposables.items.len > 0 and e == error.Throw) {
+            if (loop_env) |le_fallback| if (self.tempEnvRoot(env_root_mark, le_fallback).disposables.items.len > 0 and e == error.Throw) {
+                const le = self.tempEnvRoot(env_root_mark, le_fallback);
                 const body_err = self.exception;
                 if (try self.disposeScope(le, body_err)) |err| self.exception = err;
             };
             return e;
         };
-        if (loop_env) |le| if (le.disposables.items.len > 0) {
+        if (loop_env) |le_fallback| if (self.tempEnvRoot(env_root_mark, le_fallback).disposables.items.len > 0) {
+            const le = self.tempEnvRoot(env_root_mark, le_fallback);
             if (try self.disposeScope(le, null)) |err| {
                 self.exception = err;
                 return error.Throw;
@@ -6312,6 +6341,8 @@ pub const Interpreter = struct {
     /// The `for` loop's iteration, factored out so `evalFor` can run DisposeResources
     /// for a for-head `using` on both normal and abrupt completion.
     fn runForBody(self: *Interpreter, cond: ?*Node, update: ?*Node, body: *Node, my_labels: []const []const u8, lexical: bool, outer: *Environment, names: []const []const u8) EvalError!Value {
+        const outer_root = try self.pushTempEnvRoot(outer);
+        defer self.restoreTempEnvRoots(outer_root);
         var last: Value = Value.undef();
         while (true) {
             if (cond) |c| {
@@ -6327,7 +6358,7 @@ pub const Interpreter = struct {
             // it, skipping a GC-cell allocation per iteration (the tight-loop
             // fast path). If it was captured, allocate the fresh copy so the
             // captured binding keeps its value.
-            if (lexical and self.env.captured.load(.acquire)) self.env = try self.perIterEnv(outer, names, self.env);
+            if (lexical and self.env.captured.load(.acquire)) self.env = try self.perIterEnv(self.tempEnvRoot(outer_root, outer), names, self.env);
             if (update) |u| _ = try self.eval(u);
         }
         return last;
@@ -6355,6 +6386,7 @@ pub const Interpreter = struct {
     const IterEnvState = struct {
         /// The env being reused in place (rooted once in `gc_env_roots`), or null.
         reuse: ?*Environment = null,
+        reuse_root: ?usize = null,
         /// Once any iteration's env is captured we stop reusing for the rest of the
         /// loop, so a captured binding is never re-bound and its closure keeps that
         /// iteration's value.
@@ -6373,14 +6405,18 @@ pub const Interpreter = struct {
     /// a per-iteration `using` resource must get its own env to dispose).
     fn iterBindingEnv(self: *Interpreter, state: *IterEnvState, outer: *Environment, allow_reuse: bool) EvalError!*Environment {
         if (state.reuse) |r| {
-            if (!r.captured.load(.acquire)) return r; // reuse in place — no allocation
+            const current = if (state.reuse_root) |root| self.tempEnvRoot(root, r) else r;
+            state.reuse = current;
+            if (!current.captured.load(.acquire)) return current; // reuse in place — no allocation
             state.reuse = null; // captured: abandon it (kept alive by its closure) and stop reusing
+            state.reuse_root = null;
             state.disabled = true;
         }
         const e = try gc_mod.allocEnv(self.arena);
         self.initEnvironment(e, outer, false);
         if (allow_reuse and !state.disabled) {
             state.reuse = e;
+            state.reuse_root = self.gc_env_roots.items.len;
             try self.gc_env_roots.append(self.arena, e); // root across iterations (shrunk at loop exit)
         }
         return e;
