@@ -20011,7 +20011,11 @@ pub const Interpreter = struct {
     /// environment for every completion, including a default/computed-key throw.
     fn evalCatchClause(self: *Interpreter, parameter: ?*Node, block: *Node, exception: Value, reserved_environment: ?*Environment) EvalError!Value {
         const saved_environment = self.env;
-        defer self.env = saved_environment;
+        const saved_environment_root = try self.pushTempEnvRoot(saved_environment);
+        defer self.restoreTempEnvRoots(saved_environment_root);
+        defer self.env = self.tempEnvRoot(saved_environment_root, saved_environment);
+        const exception_root = try self.pushTempRoot(exception);
+        defer self.restoreTempRoots(exception_root);
         if (parameter) |pattern| {
             const catch_environment = reserved_environment orelse blk: {
                 const environment = try gc_mod.allocEnv(self.arena);
@@ -20020,7 +20024,7 @@ pub const Interpreter = struct {
             };
             self.env = catch_environment;
             if (pattern.* == .identifier) catch_environment.is_catch_param = true;
-            try self.bindPattern(pattern, exception, true);
+            try self.bindPattern(pattern, self.tempRoot(exception_root, exception), true);
         }
         return self.eval(block);
     }
@@ -20030,12 +20034,18 @@ pub const Interpreter = struct {
         // completion — a value, a pending signal (break/continue/return), or a
         // held error — so finally can run with a clean slate and override it.
         var result: Value = Value.undef();
+        const result_root = try self.pushTempRoot(result);
+        defer self.restoreTempRoots(result_root);
         var held_err: ?EvalError = null;
         // The pending exception *value* lives in `self.exception`; a finally
         // block that internally throws-and-catches clobbers it, so hold it
         // alongside `held_err` and restore it if the held throw resumes.
         var held_exc: Value = Value.undef();
+        const held_exc_root = try self.pushTempRoot(held_exc);
+        defer self.restoreTempRoots(held_exc_root);
         const try_env = self.env;
+        const try_env_root = try self.pushTempEnvRoot(try_env);
+        defer self.restoreTempEnvRoots(try_env_root);
         // A heap-limit OOM can be converted into a JS throw using the reserved
         // OutOfMemoryError object, but `catch (e)` still needs a declarative
         // catch environment. Reserve the simple catch-binding environment before
@@ -20057,6 +20067,7 @@ pub const Interpreter = struct {
         };
         if (self.eval(t.block)) |v| {
             result = v;
+            self.setTempRoot(result_root, result);
         } else |err| {
             const abrupt = self.catchableOutOfMemory(err);
             if (abrupt == error.Throw and t.catch_block != null) {
@@ -20064,25 +20075,32 @@ pub const Interpreter = struct {
                 const exc = self.exception;
                 self.exception = Value.undef();
                 self.debug_exception_origin_notified = false;
-                self.env = try_env;
+                self.env = self.tempEnvRoot(try_env_root, try_env);
                 // CatchClauseEvaluation includes parameter BindingInitialization.
                 // Its defaults/computed keys can throw; that abrupt completion is
                 // held exactly like a catch-body throw so an enclosing finally
                 // still runs before it propagates.
-                const catch_result = self.evalCatchClause(t.catch_param, t.catch_block.?, exc, reserved_catch_env);
+                const current_reserved_catch_env = if (reserved_catch_env) |fallback|
+                    self.tempEnvRoot(reserved_catch_env_root_mark, fallback)
+                else
+                    null;
+                const catch_result = self.evalCatchClause(t.catch_param, t.catch_block.?, exc, current_reserved_catch_env);
                 if (catch_result) |v| {
                     result = v;
+                    self.setTempRoot(result_root, result);
                 } else |cerr| {
                     held_err = self.catchableOutOfMemory(cerr);
                     held_exc = self.exception;
+                    self.setTempRoot(held_exc_root, held_exc);
                 }
             } else {
                 held_err = abrupt;
                 held_exc = self.exception;
+                self.setTempRoot(held_exc_root, held_exc);
             }
         }
         if (t.finally_block) |fb| {
-            self.env = try_env;
+            self.env = self.tempEnvRoot(try_env_root, try_env);
             // The try/catch completion may have left an abrupt signal pending; a
             // statement list short-circuits on it, so clear it before running
             // finally and hold it aside. If finally completes normally the held
@@ -20092,20 +20110,22 @@ pub const Interpreter = struct {
             const saved_signal = self.signal;
             const saved_label = self.signal_label;
             const saved_ret = self.ret_value;
+            const saved_ret_root = try self.pushTempRoot(saved_ret);
+            defer self.restoreTempRoots(saved_ret_root);
             self.signal = .none;
             self.signal_label = null;
             if (self.eval(fb)) |fval| {
                 if (self.signal == .none) {
                     self.signal = saved_signal;
                     self.signal_label = saved_label;
-                    self.ret_value = saved_ret;
+                    self.ret_value = self.tempRoot(saved_ret_root, saved_ret);
                     if (held_err) |e| {
                         // Restore the held exception value: finally may have run
                         // its own throw-and-catch, leaving `self.exception` stale.
-                        self.exception = held_exc;
+                        self.exception = self.tempRoot(held_exc_root, held_exc);
                         return e;
                     }
-                    return result;
+                    return self.tempRoot(result_root, result);
                 }
                 // finally produced its own abrupt completion: it wins, and any
                 // held throw is swallowed.
@@ -20116,7 +20136,7 @@ pub const Interpreter = struct {
             }
         }
         if (held_err) |e| return e;
-        return result;
+        return self.tempRoot(result_root, result);
     }
 
     fn evalUnary(self: *Interpreter, op: ast.UnaryOp, operand: *Node) EvalError!Value {

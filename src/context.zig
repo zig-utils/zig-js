@@ -28658,6 +28658,20 @@ test "native realm wrappers restore callers while moving" {
     }
 }
 
+test "try catch and finally retain environments and completions while moving" {
+    const cases = [_]struct { name: []const u8, expression: []const u8 }{
+        .{ .name = "catch without binding", .expression = "(function(){proxyCaptureEnv();try{proxyMovingLoop(20000);throw 1;}catch{return proxyCaptureEnv()&&proxySubject.marker===37;}})()" },
+        .{ .name = "catch destructuring", .expression = "(function(){try{proxyMovingLoop(20000);throw proxySubject;}catch({marker}){return marker===37;}})()" },
+        .{ .name = "return through finally", .expression = "(function(){proxyCaptureEnv();try{return proxySubject;}finally{proxyMovingLoop(20000);if(!proxyCaptureEnv())return null;}})()===proxySubject" },
+        .{ .name = "throw through finally", .expression = "(function(){try{proxyCaptureEnv();try{proxyMovingLoop(20000);throw proxySubject;}finally{if(!proxyCaptureEnv())throw new Error('stale environment');}}catch(e){return e===proxySubject;}})()" },
+        .{ .name = "continue through finally", .expression = "(function(){var hits=0;for(var i=0;i<1;i++){proxyCaptureEnv();try{proxyMovingLoop(20000);continue;}finally{if(!proxyCaptureEnv())return false;hits++;}}return hits===1;})()" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("moving try completion {s}\n", .{case.name});
+        try expectProxyMetadataMoving("", case.expression);
+    }
+}
+
 test "realm array intrinsics isolate shared no-GIL construction" {
     if (builtin.single_threaded) return error.SkipZigTest;
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
