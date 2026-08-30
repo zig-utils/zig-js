@@ -28643,11 +28643,11 @@ test "native realm wrappers restore callers while moving" {
         expression: []const u8,
         expect_abrupt: bool = false,
     }{
-        .{ .name = "Function.prototype.call", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.proxyCaptureEnv=proxyCaptureEnv;caller.global.callFn=target.global.Function.prototype.call;var run=caller.evalScript(\"(function(){return function(){function f(){proxyMovingLoop(20000);return proxySubject;}proxyCaptureEnv();var value=Reflect.apply(callFn,f,[null]);return proxyCaptureEnv()&&value===proxySubject&&proxySubject.marker===37;};})()\");", .expression = "run()" },
-        .{ .name = "Function.prototype.apply", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.proxyCaptureEnv=proxyCaptureEnv;caller.global.applyFn=target.global.Function.prototype.apply;var run=caller.evalScript(\"(function(){return function(){function f(value){proxyMovingLoop(20000);return value;}proxyCaptureEnv();var value=Reflect.apply(applyFn,f,[null,[proxySubject]]);return proxyCaptureEnv()&&value===proxySubject&&proxySubject.marker===37;};})()\");", .expression = "run()" },
-        .{ .name = "evalScript", .setup = "var realm=$262.createRealm();realm.global.proxyMovingLoop=proxyMovingLoop;realm.global.proxySubject=proxySubject;var run=(function(){return function(){proxyCaptureEnv();var value=realm.evalScript(\"proxyMovingLoop(20000);proxySubject\");return proxyCaptureEnv()&&value===proxySubject&&globalThis.proxySubject===proxySubject;};})();", .expression = "run()" },
-        .{ .name = "Function.prototype.call abrupt", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxyCaptureEnv=proxyCaptureEnv;caller.global.callFn=target.global.Function.prototype.call;var run=caller.evalScript(\"(function(){return function(){function f(){proxyMovingLoop(20000);throw new Error('expected');}proxyCaptureEnv();try{return Reflect.apply(callFn,f,[null]);}finally{proxyCaptureEnv();}};})()\");", .expression = "run()", .expect_abrupt = true },
-        .{ .name = "evalScript abrupt", .setup = "var realm=$262.createRealm();realm.global.proxyMovingLoop=proxyMovingLoop;var run=(function(){return function(){proxyCaptureEnv();try{return realm.evalScript(\"proxyMovingLoop(20000);throw new Error('expected')\");}finally{proxyCaptureEnv();}};})();", .expression = "run()", .expect_abrupt = true },
+        .{ .name = "Function.prototype.call", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.proxyCheckEnvAcross=proxyCheckEnvAcross;caller.global.callFn=target.global.Function.prototype.call;var run=caller.evalScript(\"(function(){return function(){var sentinel=proxySubject;function f(){proxyMovingLoop(20000);return proxySubject;}var value=proxyCheckEnvAcross(function(){return Reflect.apply(callFn,f,[null]);});return value===proxySubject&&sentinel===proxySubject&&sentinel.marker===37;};})()\");", .expression = "run()" },
+        .{ .name = "Function.prototype.apply", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxySubject=proxySubject;caller.global.proxyCheckEnvAcross=proxyCheckEnvAcross;caller.global.applyFn=target.global.Function.prototype.apply;var run=caller.evalScript(\"(function(){return function(){var sentinel=proxySubject;function f(value){proxyMovingLoop(20000);return value;}var value=proxyCheckEnvAcross(function(){return Reflect.apply(applyFn,f,[null,[proxySubject]]);});return value===proxySubject&&sentinel===proxySubject&&sentinel.marker===37;};})()\");", .expression = "run()" },
+        .{ .name = "evalScript", .setup = "var realm=$262.createRealm();realm.global.proxyMovingLoop=proxyMovingLoop;realm.global.proxySubject=proxySubject;var run=(function(){return function(){var sentinel=proxySubject;var value=proxyCheckEnvAcross(function(){return realm.evalScript(\"proxyMovingLoop(20000);proxySubject\");});return value===proxySubject&&sentinel===proxySubject&&globalThis.proxySubject===proxySubject;};})();", .expression = "run()" },
+        .{ .name = "Function.prototype.call abrupt", .setup = "var caller=$262.createRealm(),target=$262.createRealm();caller.global.proxyMovingLoop=proxyMovingLoop;caller.global.proxyCheckEnvAcross=proxyCheckEnvAcross;caller.global.callFn=target.global.Function.prototype.call;var run=caller.evalScript(\"(function(){return function(){function f(){proxyMovingLoop(20000);throw new Error('expected');}return proxyCheckEnvAcross(function(){return Reflect.apply(callFn,f,[null]);});};})()\");", .expression = "run()", .expect_abrupt = true },
+        .{ .name = "evalScript abrupt", .setup = "var realm=$262.createRealm();realm.global.proxyMovingLoop=proxyMovingLoop;var run=(function(){return function(){return proxyCheckEnvAcross(function(){return realm.evalScript(\"proxyMovingLoop(20000);throw new Error('expected')\");});};})();", .expression = "run()", .expect_abrupt = true },
     };
     for (cases) |case| {
         errdefer std.debug.print("moving native realm wrapper {s}\n", .{case.name});
@@ -29613,11 +29613,10 @@ fn expectProxyMetadataMoving(setup: []const u8, expression: []const u8) !void {
 
 fn expectProxyMetadataMovingOutcome(setup: []const u8, expression: []const u8, expect_abrupt: bool) !void {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
-    const EnvProbe = struct {
-        before: ?*interp.Environment = null,
-        root: ?usize = null,
-        matched: ?bool = null,
-    };
+    // Records whether the interpreter's `env` came back intact across a moving
+    // collection. One field, written once per run: the probe below owns the
+    // whole window rather than being called at each end of it.
+    const EnvProbe = struct { matched: ?bool = null };
     const Host = struct {
         fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
             const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
@@ -29627,22 +29626,40 @@ fn expectProxyMetadataMovingOutcome(setup: []const u8, expression: []const u8, e
             return Value.undef();
         }
 
-        fn captureEnv(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+        /// Run `args[0]` and report whether the caller's `env` survived it.
+        ///
+        /// The root lives for exactly this frame. An earlier version captured
+        /// on one call and compared on a second, which cannot work against a
+        /// LIFO root stack: by the time the second call arrived, the frames
+        /// between them had already shrunk the stack past the first call's
+        /// mark, so the index either held someone else's environment or —
+        /// when the second call landed inside a `finally` — popped a mark
+        /// `evalTry` was still holding, and its own `defer` tripped
+        /// `assert(new_len <= self.items.len)`.
+        ///
+        /// Wrapping the operation instead of bracketing it makes the push and
+        /// the pop the same frame's business, which is the only shape this
+        /// stack supports. The window is unchanged: the collection still
+        /// happens inside, because the thunk runs inside.
+        fn checkEnvAcross(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
             const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
             const native = machine.active_native orelse return Value.boolVal(false);
             const probe: *EnvProbe = @ptrCast(@alignCast(native.private_data orelse return Value.boolVal(false)));
-            if (probe.root) |root| {
-                const before = probe.before orelse return Value.boolVal(false);
-                const restored = machine.tempEnvRoot(root, before) == machine.env;
-                machine.restoreTempEnvRoots(root);
-                probe.before = null;
-                probe.root = null;
-                probe.matched = restored;
-                return Value.boolVal(restored);
+            if (args.len == 0) return Value.boolVal(false);
+
+            const before = machine.env;
+            const root = try machine.pushTempEnvRoot(before);
+            defer machine.restoreTempEnvRoots(root);
+
+            // Recorded on both paths: an abrupt completion has to restore the
+            // caller too, and that is half of what this test is for.
+            if (machine.callValueWithThis(args[0], &.{}, Value.undef())) |result| {
+                probe.matched = machine.tempEnvRoot(root, before) == machine.env;
+                return result;
+            } else |err| {
+                probe.matched = machine.tempEnvRoot(root, before) == machine.env;
+                return err;
             }
-            probe.before = machine.env;
-            probe.root = try machine.pushTempEnvRoot(machine.env);
-            return Value.boolVal(false);
         }
     };
     for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
@@ -29657,10 +29674,10 @@ fn expectProxyMetadataMovingOutcome(setup: []const u8, expression: []const u8, e
             arm.* = .{ .native = Host.arm };
             try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "proxyArm", Value.obj(arm));
             try ctx.env.put("proxyArm", Value.obj(arm));
-            const capture_env = try gc_mod.allocObj(ctx.arena());
-            capture_env.* = .{ .native = Host.captureEnv, .private_data = @ptrCast(&env_probe) };
-            try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "proxyCaptureEnv", Value.obj(capture_env));
-            try ctx.env.put("proxyCaptureEnv", Value.obj(capture_env));
+            const check_env = try gc_mod.allocObj(ctx.arena());
+            check_env.* = .{ .native = Host.checkEnvAcross, .private_data = @ptrCast(&env_probe) };
+            try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "proxyCheckEnvAcross", Value.obj(check_env));
+            try ctx.env.put("proxyCheckEnvAcross", Value.obj(check_env));
         }
         _ = try ctx.evaluate(
             \\function proxyMovingLoop(n){var total=0,i=0;while(i<n){total=total+i;i=i+1;}return total;}
