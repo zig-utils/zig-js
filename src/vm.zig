@@ -7245,7 +7245,7 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     // Follow the live, GC-updated chain; cleanup requires no saved raw pointer
     // or allocation. Suspended/function activations own their separate unwind.
     defer unwindEnvironmentToDepth(vm, null, &exec, 0);
-    return execLoop(vm, &exec, chunk, frame, null);
+    return execLoop(vm, &exec, chunk, frame, null, false);
 }
 
 fn loadOrCompileOptimizer(
@@ -7668,7 +7668,7 @@ fn ensureBindingReferenceStorage(vm: *Interpreter, exec: *Exec, chunk: *const Ch
     exec.binding_references = references;
 }
 
-fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator, exec_rooted: bool) EvalError!Value {
     const saved_private_map = vm.current_private_map;
     const saved_field_initializer = vm.in_field_initializer;
     if (gen) |activation| {
@@ -7744,8 +7744,14 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     // mid-script collection at a step checkpoint traces its live `Value`s (the
     // operand stack is arena-backed, invisible to the conservative native-stack
     // scan). No-op when the GC is off.
+    // Root-list growth itself can trigger allocation recovery. Reserve before
+    // exposing this activation, then publish without allocating so every later
+    // preparation failure still has precise frame/chunk ownership.
+    if (!exec_rooted) try vm.reserveExecRoot();
     exec.frame = frame; // so a mid-script collection roots this activation's slots
     exec.chunk = chunk; // and the chunk's managed constant pool
+    if (!exec_rooted) vm.publishExecRoot(exec);
+    defer if (!exec_rooted) vm.popExecRoot(exec);
     // Program chunks declare their scratch demand up front (#706). Allocate
     // once per activation: a generator resuming through this path keeps its
     // existing array, and a fresh Exec (recursive/nested/parallel program run)
@@ -7756,8 +7762,6 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         exec.scratch = scratch;
     }
     try ensureBindingReferenceStorage(vm, exec, chunk);
-    vm.pushExecRoot(exec);
-    defer vm.popExecRoot(exec);
     if (try tryRunNative(vm, exec, chunk, frame, gen)) |result| {
         optimizer_delta.observeValue(optimizerProfileKind(result));
         return result;
@@ -10016,7 +10020,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     vm.depth += 1;
     defer vm.depth -= 1;
 
-    const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
+    const v = execLoop(vm, &g.exec, g.chunk, null, g, false) catch |e| {
         g.done = true; // a thrown generator is finished
         // DisposeResources for the body's `using` resources, threading the thrown value.
         if (e == error.Throw and g.env.disposables.items.len > 0) {
@@ -10471,7 +10475,7 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     vm.depth += 1;
     defer vm.depth -= 1;
 
-    const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
+    const v = execLoop(vm, &g.exec, g.chunk, null, g, false) catch |e| {
         if (e != error.Throw) return e;
         g.done = true;
         const reason = vm.exception;
@@ -10754,7 +10758,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     vm.depth += 1;
     defer vm.depth -= 1;
 
-    const v = execLoop(vm, &g.exec, g.chunk, null, g) catch |e| {
+    const v = execLoop(vm, &g.exec, g.chunk, null, g, false) catch |e| {
         if (e != error.Throw) return e;
         var reason = vm.exception;
         vm.exception = Value.undef();
@@ -11856,16 +11860,29 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
     return act;
 }
 
+/// Abandon a prepared activation that owns one precise-root registration and
+/// has installed its callee state. Restoration must precede recycling because
+/// `popActivation` reads the saved caller fields from the activation.
+fn discardActivation(vm: *Interpreter, act: *Activation) void {
+    vm.popExecRoot(&act.exec);
+    popActivation(vm, act);
+    releaseActivation(vm, act);
+}
+
 /// Allocate a callee activation (frame + slots from `args`), capture the caller
-/// VM state into it, and install the callee's VM state. Does not run anything.
-/// On a throw from `bindThisForCall` the caller state is restored before
-/// propagating, so the caller is never left with the callee's state.
+/// VM state into it, publish it as a precise root, and install the callee's VM
+/// state. Does not run anything. Every returned activation owns exactly one
+/// root registration; every preparation failure restores the caller first.
 fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!*Activation {
     // ECMA-262 10.2.1 [[Call]], step 4 rejects a class before parameter,
     // field or body evaluation, creating its TypeError in the callee realm.
     // Direct VM entries must enforce the same contract as callFunctionNT.
     if (new_target.isUndefined() and func.is_class_constructor)
         return interp.throwClassConstructorCallError(vm, func);
+    // This may allocate and trigger recovery, so do it while all input values
+    // still belong to the caller's established roots. Publication below is then
+    // infallible for the lifetime of this provisional activation.
+    try vm.reserveExecRoot();
     const act = try acquireActivation(vm, func.local_count);
     var exec = act.exec;
     ensureBindingReferenceStorage(vm, &exec, fchunk) catch |err| {
@@ -11988,11 +12005,15 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     act.exec.saved_active_function = vm.active_function;
     act.exec.saved_home_object = vm.home_object;
     act.exec.saved_super_ctor = vm.super_ctor;
+    act.exec.frame = frame;
+    act.exec.chunk = fchunk;
     frame.* = .{
         .slots = slots,
         .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
         .closure_environment = func.closure,
     };
+    vm.publishExecRoot(&act.exec);
+    errdefer discardActivation(vm, act);
     vm.current_private_map = func.private_map; // PrepareForOrdinaryCall's lexical [[PrivateEnvironment]]
     vm.strict = func.is_strict;
     vm.home_object = func.home_object;
@@ -12022,11 +12043,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     vm.active_function = func.obj;
     vm.pending_field_inits = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor)) func.field_inits else &.{};
     vm.pending_brand_names = if (func.is_derived_constructor or (func.is_arrow and func.arrow_in_derived_ctor)) func.private_brand_names else &.{};
-    vm.this_value = bindThisForCall(vm, func, this_val) catch |e| {
-        popActivation(vm, act);
-        releaseActivation(vm, act);
-        return e;
-    };
+    vm.this_value = try bindThisForCall(vm, func, this_val);
     if (func.is_arrow) {
         vm.this_cell = func.this_cell;
         if (func.this_cell) |cell| {
@@ -12034,11 +12051,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             vm.this_initialized = cell.isInitialized();
         }
     } else if (func.is_derived_constructor) {
-        const cell = vm.arena.create(interp.ThisCell) catch |e| {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
-            return e;
-        };
+        const cell = try vm.arena.create(interp.ThisCell);
         cell.* = interp.ThisCell.init(vm.this_value, false);
         vm.this_cell = cell;
         vm.this_initialized = false;
@@ -12051,26 +12064,9 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     // retain their policy barrier; this is the complete remaining base case.
     if (func.is_class_constructor and !func.is_derived_constructor and vm.this_value.isObject()) {
         for (func.private_brand_names) |brand| {
-            vm.addPrivateMethodOrAccessorChecked(vm.this_value.asObj(), func.home_object, brand) catch |e| {
-                popActivation(vm, act);
-                releaseActivation(vm, act);
-                return e;
-            };
+            try vm.addPrivateMethodOrAccessorChecked(vm.this_value.asObj(), func.home_object, brand);
         }
     }
-    // A rest call adds an allocation after arguments-object creation but before
-    // the activation reaches execLoop's registered frame roots. Reserve a
-    // precise temporary root first so a recovery collection cannot reclaim or
-    // relocate the arguments exotic in that window.
-    const arguments_root: ?usize = if (rest_layout != null and fchunk.arguments_slot != null)
-        vm.pushTempRoot(Value.undef()) catch |e| {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
-            return e;
-        }
-    else
-        null;
-    defer if (arguments_root) |root| vm.restoreTempRoots(root);
     if (fchunk.arguments_slot) |slot| {
         // FunctionDeclarationInstantiation creates the arguments exotic after
         // base-instance initialization and before body evaluation. Strict
@@ -12088,20 +12084,13 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             (slot < fchunk.mapped_parameter_indices.len and
                 fchunk.mapped_parameter_indices[slot] != std.math.maxInt(u32)))
         {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
             return vm.throwError("InternalError", "invalid bytecode arguments slot");
         }
         const arguments_value = (if (func.is_strict or non_simple_parameters)
             vm.createArgumentsObject(func, args, func.closure)
         else
-            vm.createFrameArgumentsObject(func, args, slots, fchunk.mapped_parameter_indices)) catch |e| {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
-            return e;
-        };
+            vm.createFrameArgumentsObject(func, args, slots, fchunk.mapped_parameter_indices)) catch |e| return e;
         slots[slot] = arguments_value;
-        if (arguments_root) |root| vm.setTempRoot(root, arguments_value);
         if (!func.is_strict and fchunk.mapped_parameter_indices.len != 0) {
             frame.mapped_arguments = arguments_value.asObj();
             frame.mapped_parameter_indices = fchunk.mapped_parameter_indices;
@@ -12109,67 +12098,34 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     }
     const deferred_rest = rest_layout != null and (pattern_indices.len != 0 or default_indices.len != 0);
     if (rest_layout) |layout| if (!deferred_rest) {
-        // Allocate the root slot before the Array itself. Element growth may
-        // invoke allocation-recovery collection, so every subsequent access
-        // reloads the possibly relocated Value from the registered root.
-        const rest_root = vm.pushTempRoot(Value.undef()) catch |e| {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
-            return e;
-        };
-        defer vm.restoreTempRoots(rest_root);
-        const rest = vm.newArray() catch |e| {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
-            return e;
-        };
-        vm.setTempRoot(rest_root, rest);
+        // Publish the Array in the already-registered frame before growing its
+        // element storage. Allocation recovery can then trace it without a
+        // second temporary-root container.
+        const rest = try vm.newArray();
+        slots[layout.slot] = rest;
         const argument_count = args.len - @min(layout.index, args.len);
         if (argument_count != 0) {
-            const rooted_rest = vm.tempRoot(rest_root, rest).asObj();
-            const elements = rooted_rest.ensureElementsList(vm.arena) catch |e| {
-                popActivation(vm, act);
-                releaseActivation(vm, act);
-                return e;
-            };
-            elements.ensureTotalCapacity(rooted_rest.elementsAllocator(vm.arena), argument_count) catch |e| {
-                popActivation(vm, act);
-                releaseActivation(vm, act);
-                return e;
-            };
+            const rooted_rest = slots[layout.slot].asObj();
+            const elements = try rooted_rest.ensureElementsList(vm.arena);
+            try elements.ensureTotalCapacity(rooted_rest.elementsAllocator(vm.arena), argument_count);
         }
         var argument_index = layout.index;
         while (argument_index < args.len) : (argument_index += 1) {
-            vm.tempRoot(rest_root, rest).asObj().appendElement(vm.arena, args[argument_index]) catch |e| {
-                popActivation(vm, act);
-                releaseActivation(vm, act);
-                return e;
-            };
+            try slots[layout.slot].asObj().appendElement(vm.arena, args[argument_index]);
         }
-        slots[layout.slot] = vm.tempRoot(rest_root, rest);
     };
     if (fchunk.parameter_direct_eval_plan) |plan_index| {
         if (plan_index >= fchunk.direct_eval_plans.items.len) {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
             return vm.throwError("InternalError", "invalid parameter direct-eval plan");
         }
         const plan = &fchunk.direct_eval_plans.items[plan_index];
         const declaration_scope = directEvalDeclarationScope(plan) orelse {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
             return vm.throwError("InternalError", "parameter direct-eval plan has no declaration target");
         };
         if (declaration_scope.kind != .parameter or declaration_scope.frame_depth != 0) {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
             return vm.throwError("InternalError", "invalid parameter direct-eval declaration target");
         }
-        _ = materializeDirectEvalEnvironment(vm, frame, plan) catch |err| {
-            popActivation(vm, act);
-            releaseActivation(vm, act);
-            return err;
-        };
+        _ = try materializeDirectEvalEnvironment(vm, frame, plan);
     }
     if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
         const debug_environment = try gc_mod.allocEnv(vm.arena);
@@ -12202,11 +12158,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         const argument_start = @min(layout.index, args.len);
         const argument_count = args.len - argument_start;
         if (act.rest_argument_storage.len < argument_count) {
-            act.rest_argument_storage = vm.arena.alloc(Value, argument_count) catch |err| {
-                popActivation(vm, act);
-                releaseActivation(vm, act);
-                return err;
-            };
+            act.rest_argument_storage = try vm.arena.alloc(Value, argument_count);
         }
         const retained = act.rest_argument_storage[0..argument_count];
         @memcpy(retained, args[argument_start..]);
@@ -12313,13 +12265,10 @@ fn runInlineFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []
     const act = try buildActivation(vm, func, fchunk, args, this_val, new_target);
     vm.stack_trace_call_frame = &act.stack_trace_call_frame;
     if (act.exec.debug_environment != null) vm.debug_call_frame = &act.debug_call_frame;
-    defer {
-        popActivation(vm, act);
-        releaseActivation(vm, act);
-    }
+    defer discardActivation(vm, act);
     vm.vm_inline_call_depth += 1;
     defer vm.vm_inline_call_depth -= 1;
-    return execLoop(vm, &act.exec, fchunk, act.frame, null);
+    return execLoop(vm, &act.exec, fchunk, act.frame, null, true);
 }
 
 fn callValueWithInlineCallsDisabled(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
@@ -12367,10 +12316,8 @@ fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) Eva
             }
             return true;
         }
-        vm.popExecRoot(&cur.exec);
-        popActivation(vm, cur);
         _ = acts.pop();
-        releaseActivation(vm, cur);
+        discardActivation(vm, cur);
         if (acts.items.len == 0) return false; // uncaught; initial depth owned by runFunction
         vm.depth -= 1; // a nested activation was discarded
     }
@@ -12382,6 +12329,31 @@ fn activationStackHasHandler(acts: *const std.ArrayListUnmanaged(*Activation)) b
         if (act.exec.handlers.items.len > 0) return true;
     }
     return false;
+}
+
+fn discardActivationStack(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) void {
+    while (acts.items.len > 0) {
+        const act = acts.pop().?;
+        discardActivation(vm, act);
+        // `runFunction` owns the initial activation's logical depth. Each item
+        // still below the one just removed proves that the removed item was a
+        // nested activation whose depth was acquired by this driver.
+        if (acts.items.len > 0) vm.depth -= 1;
+    }
+}
+
+fn runActivationStep(vm: *Interpreter, act: *Activation) EvalError!Value {
+    vm.stack_trace_call_frame = &act.stack_trace_call_frame;
+    if (act.exec.debug_environment != null) {
+        vm.debug_call_frame = &act.debug_call_frame;
+        try syncDebugEnvironmentFromFrame(act);
+    }
+    if (try tryRunNative(vm, &act.exec, act.chunk, act.frame, null)) |native_result| {
+        act.optimizer_delta.observeValue(optimizerProfileKind(native_result));
+        return native_result;
+    }
+    activateExecStrict(vm, &act.exec, null);
+    return runChunk(vm, &act.exec, act.chunk, act.frame, null, &act.optimizer_delta);
 }
 
 /// Drive an explicit stack of JS-chunk activations for `initial` and any nested
@@ -12399,17 +12371,14 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
 
     var acts: std.ArrayListUnmanaged(*Activation) = .empty;
     defer acts.deinit(vm.arena);
-    initial.exec.frame = initial.frame;
-    vm.pushExecRoot(&initial.exec);
     acts.append(vm.arena, initial) catch |err| {
         // buildActivation already installed callee state. The driver's own
         // first bookkeeping allocation is still before execution, so failure
         // must unregister/recycle the activation and restore the caller.
-        vm.popExecRoot(&initial.exec);
-        popActivation(vm, initial);
-        releaseActivation(vm, initial);
+        discardActivation(vm, initial);
         return err;
     };
+    defer discardActivationStack(vm, &acts);
 
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
@@ -12418,33 +12387,11 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
             cur.chunk.optimizer_profile.observeEntry();
             cur.optimizer_profile_active = true;
         }
-        vm.stack_trace_call_frame = &cur.stack_trace_call_frame;
-        if (cur.exec.debug_environment != null) {
-            vm.debug_call_frame = &cur.debug_call_frame;
-            try syncDebugEnvironmentFromFrame(cur);
-        }
-        const outcome: EvalError!Value = if (try tryRunNative(vm, &cur.exec, cur.chunk, cur.frame, null)) |native_result| result: {
-            cur.optimizer_delta.observeValue(optimizerProfileKind(native_result));
-            break :result native_result;
-        } else run: {
-            activateExecStrict(vm, &cur.exec, null);
-            break :run runChunk(vm, &cur.exec, cur.chunk, cur.frame, null, &cur.optimizer_delta);
-        };
+        const outcome = runActivationStep(vm, cur);
         if (cur.exec.debug_environment != null) syncFrameFromDebugEnvironment(cur);
         const rv = outcome catch |e| {
             const abrupt = if (activationStackHasHandler(&acts)) vm.catchableOutOfMemory(e) else e;
-            if (abrupt != error.Throw) {
-                // OOM / OptShortCircuit: tear down all activations and propagate.
-                while (acts.items.len > 0) {
-                    const a = acts.items[acts.items.len - 1];
-                    vm.popExecRoot(&a.exec);
-                    popActivation(vm, a);
-                    _ = acts.pop();
-                    releaseActivation(vm, a);
-                    if (acts.items.len > 0) vm.depth -= 1;
-                }
-                return abrupt;
-            }
+            if (abrupt != error.Throw) return abrupt;
             if (try unwindThrow(vm, &acts)) continue; // resumed at a handler
             return error.Throw; // uncaught → propagate to the native caller
         };
@@ -12458,27 +12405,26 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
                 const current = acts.items[acts.items.len - 1];
                 inheritCallerState(callee, current);
                 vm.popExecRoot(&current.exec);
-                _ = acts.pop();
                 releaseActivation(vm, current);
+                acts.items[acts.items.len - 1] = callee;
             } else {
                 if (vm.depth >= interp.max_call_depth) {
-                    releaseActivation(vm, callee);
+                    discardActivation(vm, callee);
                     _ = vm.throwError("RangeError", "Maximum call stack size exceeded.") catch {};
                     if (try unwindThrow(vm, &acts)) continue;
                     return error.Throw;
                 }
+                acts.append(vm.arena, callee) catch |err| {
+                    discardActivation(vm, callee);
+                    return err;
+                };
                 vm.depth += 1;
             }
-            callee.exec.frame = callee.frame;
-            vm.pushExecRoot(&callee.exec);
-            try acts.append(vm.arena, callee);
             continue;
         }
         // A real return with value `rv`.
-        vm.popExecRoot(&cur.exec);
-        popActivation(vm, cur);
         _ = acts.pop();
-        releaseActivation(vm, cur);
+        discardActivation(vm, cur);
         if (acts.items.len == 0) return rv; // initial returned; runFunction owns its depth
         vm.depth -= 1; // a nested activation completed
         const caller = acts.items[acts.items.len - 1];
@@ -12544,6 +12490,207 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     tdz_marker.* = .{};
     var machine = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape, .tdz_marker = tdz_marker };
     return run(&machine, chunk, null);
+}
+
+fn expectActivationDriverClean(machine: *Interpreter, caller_environment: *Environment, saved_this: Value, saved_new_target: Value) !void {
+    try std.testing.expectEqual(caller_environment, machine.env);
+    try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+    try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+    try std.testing.expectEqual(@as(u32, 0), machine.depth);
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_execs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+    try std.testing.expect(machine.pending_activation == null);
+    try std.testing.expect(!machine.pending_tail_call);
+    try std.testing.expect(!machine.driver_active);
+    try std.testing.expectEqual(@as(usize, 0), machine.jit_execution_depth);
+    try std.testing.expect(machine.current_private_map == null);
+    try std.testing.expect(machine.debug_call_frame == null);
+    try std.testing.expect(machine.stack_trace_call_frame == null);
+
+    var free_count: usize = 0;
+    var next = machine.vm_activation_free;
+    while (next) |raw| {
+        const activation: *Activation = @ptrCast(@alignCast(raw));
+        free_count += 1;
+        next = activation.next_free;
+    }
+    try std.testing.expectEqual(machine.vm_activation_allocations, free_count);
+}
+
+test "vm: precise exec root admission fails before bytecode execution" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const saved_active_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_active_context);
+
+    var parser = try Parser.init(ctx.arena(), "globalThis.activationRootEffect=37;activationRootEffect");
+    const chunk = try Compiler.compileProgram(ctx.arena(), try parser.parseProgram());
+    var machine = ctx.interpreter();
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_execs.items.len);
+    try std.testing.expect(ctx.global_object.getOwn("activationRootEffect") == null);
+
+    var failing: std.testing.FailingAllocator = .init(ctx.arena(), .{
+        .fail_index = 0,
+        .resize_fail_index = 0,
+    });
+    machine.arena = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, run(&machine, chunk, null));
+    machine.arena = ctx.arena();
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_execs.items.len);
+    try std.testing.expect(ctx.global_object.getOwn("activationRootEffect") == null);
+
+    try std.testing.expectEqual(@as(f64, 37), (try run(&machine, chunk, null)).asNum());
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_execs.items.len);
+    try std.testing.expectEqual(@as(f64, 37), ctx.global_object.getOwn("activationRootEffect").?.asNum());
+}
+
+test "vm: activation driver allocation failures restore exact ownership" {
+    const Context = @import("context.zig").Context;
+    const DebugHost = struct {
+        fn statement(_: *anyopaque, _: *Interpreter, _: interp.DebugStatementLocation) EvalError!void {}
+    };
+    const Entry = enum { initial, inline_, nested, tail, handler, debugger };
+    const Case = struct {
+        entry: Entry,
+        name: []const u8,
+        argument: f64,
+        expected: f64,
+    };
+    const cases = [_]Case{
+        .{ .entry = .initial, .name = "activationLeaf", .argument = 1, .expected = 2 },
+        .{ .entry = .inline_, .name = "activationLeaf", .argument = 1, .expected = 2 },
+        .{ .entry = .nested, .name = "activationNestedA", .argument = 16, .expected = 17 },
+        .{ .entry = .tail, .name = "activationTail", .argument = 1, .expected = 2 },
+        .{ .entry = .handler, .name = "activationCatch", .argument = 0, .expected = 8 },
+        .{ .entry = .debugger, .name = "activationDebug", .argument = 1, .expected = 2 },
+    };
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\function activationLeaf(v){return v+1;}
+        \\function activationNestedA(v){if(v===0)return 1;return activationNestedB(v-1)+1;}
+        \\function activationNestedB(v){return activationNestedA(v);}
+        \\function activationTail(v){return activationLeaf(v);}
+        \\function activationThrow(){throw 7;}
+        \\function activationCatch(){try{return activationThrow();}catch(e){return e+1;}}
+        \\function activationDebug(local){let nested=local+1;return nested;}
+    );
+    const saved_active_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_active_context);
+
+    for (cases) |case| {
+        const function_value = ctx.global_object.getOwn(case.name) orelse return error.TestUnexpectedResult;
+        const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+        const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+        var completed = false;
+        var induced_failures: usize = 0;
+        for (0..512) |fail_index| {
+            var machine = ctx.interpreter();
+            machine.vm_inline_calls_disabled = true;
+            const saved_this = Value.num(91);
+            const saved_new_target = Value.num(92);
+            machine.this_value = saved_this;
+            machine.new_target = saved_new_target;
+            var debug_token: usize = 0;
+            if (case.entry == .debugger) {
+                machine.debug_statement_ctx = &debug_token;
+                machine.debug_statement_hook = DebugHost.statement;
+            }
+            var failing: std.testing.FailingAllocator = .init(ctx.arena(), .{
+                .fail_index = fail_index,
+                .resize_fail_index = fail_index,
+            });
+            machine.arena = failing.allocator();
+            const arguments = [_]Value{Value.num(case.argument)};
+            const result = if (case.entry == .inline_)
+                runInlineFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef())
+            else
+                runFunction(&machine, function, function_chunk, &arguments, Value.undef(), Value.undef());
+            machine.arena = ctx.arena();
+
+            try expectActivationDriverClean(&machine, &ctx.env, saved_this, saved_new_target);
+            if (failing.has_induced_failure) {
+                induced_failures += 1;
+                if (result) |_| {} else |err| {
+                    switch (err) {
+                        error.OutOfMemory, error.Throw => {},
+                        else => return err,
+                    }
+                }
+                continue;
+            }
+            try std.testing.expectEqual(case.expected, (try result).asNum());
+            completed = true;
+            break;
+        }
+        try std.testing.expect(completed);
+        try std.testing.expect(induced_failures > 0);
+    }
+}
+
+test "vm: prepared activation survives a moving collection before execution" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\function activationMovingTarget(subject,...rest){return subject.marker+rest.length;}
+    );
+    // Tenure the function and bootstrap graph, then create one young argument
+    // whose address must change at the exact provisional-activation boundary.
+    ctx.collectGarbage();
+    _ = try ctx.evaluate("globalThis.activationMovingSubject={marker:37};");
+    const subject_before = ctx.global_object.getOwn("activationMovingSubject").?.asObj();
+    const function_value = ctx.global_object.getOwn("activationMovingTarget") orelse return error.TestUnexpectedResult;
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_active_context = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_active_context);
+    const arguments = [_]Value{ Value.obj(subject_before), Value.num(4), Value.num(5) };
+    const activation = try buildActivation(
+        &machine,
+        function,
+        function_chunk,
+        &arguments,
+        Value.undef(),
+        Value.undef(),
+    );
+    try std.testing.expectEqual(@as(usize, 1), machine.gc_execs.items.len);
+
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = 1;
+    const moving_before = heap.accounting().moving_minor_collections;
+    machine.gc_precise_safepoint = true;
+    machine.gc_moving_safepoint = true;
+    machine.gc_safepoint_fn.?(machine.gc_safepoint_ctx.?, &machine);
+    machine.gc_moving_safepoint = false;
+    machine.gc_precise_safepoint = false;
+
+    try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+    try std.testing.expect(subject_before != ctx.global_object.getOwn("activationMovingSubject").?.asObj());
+    try std.testing.expectEqual(@as(f64, 39), (try runDriver(&machine, activation)).asNum());
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_execs.items.len);
+    try std.testing.expectEqual(@as(u32, 0), machine.depth);
 }
 
 test "vm: mixed destructuring rest executes deferred empty-tail defaults" {
@@ -18274,7 +18421,7 @@ test "vm: optimizer fused region enters an exact outer nested loop" {
     ));
     try std.testing.expect(machine.steps > fused_start and machine.steps < 1024);
     try std.testing.expect(fused_exec.ip != artifact.osr.?.entries[0].entry_ip);
-    try std.testing.expectError(error.Throw, execLoop(&machine, &fused_exec, function_chunk, &fused_frame, null));
+    try std.testing.expectError(error.Throw, execLoop(&machine, &fused_exec, function_chunk, &fused_frame, null, false));
     try std.testing.expectEqual(@as(u64, 1024), machine.steps);
     try std.testing.expect(stop_requested.load(.acquire));
 }

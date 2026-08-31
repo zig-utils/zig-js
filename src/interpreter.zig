@@ -10544,13 +10544,27 @@ pub const Interpreter = struct {
         f(ctx);
     }
 
-    /// Register a running VM `Exec` as a precise GC root for the duration of its
-    /// instruction loop. No-op when the GC is off (the common path), so the VM
-    /// pays only a null check. The list is arena-backed; symmetric `popExecRoot`
-    /// keeps it bounded by the live call-nesting depth.
-    pub fn pushExecRoot(self: *Interpreter, exec: *vm.Exec) void {
+    /// Reserve precise-root storage before preparing an activation. Allocation
+    /// recovery may collect, so callers must do this before publishing callee
+    /// state that is not already reachable through an existing root.
+    pub fn reserveExecRoot(self: *Interpreter) EvalError!void {
         if (self.gc == null) return;
-        self.gc_execs.append(self.arena, exec) catch {};
+        try self.gc_execs.ensureUnusedCapacity(self.arena, 1);
+    }
+
+    /// Publish a prepared VM `Exec` without allocating. `reserveExecRoot` must
+    /// have succeeded on the same interpreter first.
+    pub fn publishExecRoot(self: *Interpreter, exec: *vm.Exec) void {
+        if (self.gc == null) return;
+        self.gc_execs.appendAssumeCapacity(exec);
+    }
+
+    /// Register a running VM `Exec` as a precise GC root for the duration of its
+    /// instruction loop. No-op when the GC is off (the common path). The list is
+    /// arena-backed; symmetric `popExecRoot` keeps it bounded by live call depth.
+    pub fn pushExecRoot(self: *Interpreter, exec: *vm.Exec) EvalError!void {
+        try self.reserveExecRoot();
+        self.publishExecRoot(exec);
     }
 
     pub fn popExecRoot(self: *Interpreter, exec: *vm.Exec) void {
