@@ -1812,7 +1812,7 @@ inline fn quickGlobalBindingValue(chunk: *Chunk, instruction: usize, vm: *Interp
     };
 }
 
-fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8) ?QuickGlobalBinding {
+fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8, allow_unbound_global_object: bool) ?QuickGlobalBinding {
     const start = vm.env;
     // Evaluated scripts may put a transparent declarative environment between
     // a function closure and the realm root. Cache the exact environment record
@@ -1835,7 +1835,15 @@ fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8) ?QuickGlobalBin
         if (alias) return null;
         if (found) {
             if (root_global_data) {
-                const object = vm.global_object orelse return null;
+                const object = vm.global_object orelse {
+                    // Standalone VM harnesses have no realm object; their root
+                    // Environment cell is the authoritative binding. Use it as
+                    // a one-operation native proof, but never publish the
+                    // environment-only assumption into the reusable cache.
+                    if (allow_unbound_global_object)
+                        return .{ .environment = .{ .start = start, .binding = env, .name = name } };
+                    return null;
+                };
                 if (object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null) return null;
                 const shape = object.shape orelse return null;
                 const slot = shape.lookup(name) orelse return null;
@@ -1845,7 +1853,18 @@ fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8) ?QuickGlobalBin
             return .{ .environment = .{ .start = start, .binding = env, .name = name } };
         }
     }
-    return null;
+    if (!allow_unbound_global_object) return null;
+    // Native dispatch uses this result only as a current-operation proof.
+    // Built-in globals can live directly on the realm object without a
+    // parallel Environment binding. An own data slot is equally exact: the
+    // operation still resolves the live value, while a proxy, accessor,
+    // deletion, or inherited lookup remains on the canonical path.
+    const object = vm.global_object orelse return null;
+    if (object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null) return null;
+    const shape = object.shape orelse return null;
+    const slot = shape.lookup(name) orelse return null;
+    if (slot >= object.slotsItems().len) return null;
+    return .{ .object = .{ .env = start, .object = object, .shape = shape, .slot = slot } };
 }
 
 fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter, name: []const u8) void {
@@ -1855,7 +1874,7 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
         chunk.quick_global_bindings = caches;
     }
     if (instruction >= chunk.quick_global_bindings.len) return;
-    const resolved = resolveQuickGlobalBinding(vm, name) orelse {
+    const resolved = resolveQuickGlobalBinding(vm, name, false) orelse {
         chunk.quick_global_bindings[instruction] = null;
         return;
     };
@@ -5863,6 +5882,195 @@ fn tryLinkedNativeCall(
     return result;
 }
 
+fn nativeDirectNamedReadIsData(
+    cache: ?*const jit.NativePropertyCache,
+    object_value: Value,
+    name: []const u8,
+) bool {
+    if (!object_value.isObject()) return false;
+    const object = object_value.asObj();
+    if (object.is_array or object.is_arguments or object.is_symbol or object.is_bigint or
+        object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null)
+        return false;
+    if (object.shape) |shape| if (shape.lookup(name)) |slot| {
+        if (slot < object.slotsItems().len) return true;
+    };
+    if (nativePropertyCacheSlot(cache, object) != null) return true;
+    return nativeInheritedPropertyCacheValue(cache, object, name) != null;
+}
+
+fn nativeDirectNamedWriteIsData(cache: ?*const jit.NativePropertyCache, object_value: Value, name: []const u8) bool {
+    if (!object_value.isObject()) return false;
+    const object = object_value.asObj();
+    if (object.is_array or object.is_arguments or object.is_symbol or object.is_bigint or
+        object.proxyHandler() != null or object.proxy_revoked or object.accessorsMap() != null or
+        object.attrsMap() != null)
+        return false;
+    if (object.shape) |shape| if (shape.lookup(name)) |slot| {
+        if (slot < object.slotsItems().len) return true;
+    };
+    return nativePropertyCacheSlot(cache, object) != null;
+}
+
+fn chunkDirectlyObservesLegacyFrame(chunk: *const Chunk) bool {
+    for (chunk.code.items) |instruction| switch (instruction.op) {
+        .get_prop => {
+            if (instruction.a >= chunk.names.items.len) return true;
+            const name = chunk.names.items[instruction.a];
+            if (std.mem.eql(u8, name, "arguments") or std.mem.eql(u8, name, "caller")) return true;
+        },
+        // A computed key can produce either legacy name after arbitrary
+        // ToPropertyKey effects; keep the caller activation in that case.
+        .get_index => return true,
+        .call,
+        .call_eval,
+        .call_eval_with_this,
+        .call_eval_activation,
+        .call_eval_activation_with_this,
+        .call_method,
+        .tail_call,
+        .tail_call_eval,
+        .tail_call_eval_with_this,
+        .tail_call_eval_activation,
+        .tail_call_eval_activation_with_this,
+        .tail_call_method,
+        .tail_call_with_this,
+        .new_call,
+        .super_construct,
+        .super_construct_spread,
+        .super_construct_default,
+        .call_spread,
+        .call_eval_spread,
+        .call_eval_with_this_spread,
+        .call_eval_activation_spread,
+        .call_eval_activation_with_this_spread,
+        .tail_call_eval_activation_spread,
+        .tail_call_eval_activation_with_this_spread,
+        .call_with_this_spread,
+        .tail_call_spread,
+        .tail_call_with_this_spread,
+        .new_spread,
+        .call_with_this,
+        => return true,
+        else => {},
+    };
+    return false;
+}
+
+fn nativeDirectCalleeIsLegacySafe(callee: Value, args: []const Value, this_value: ?Value) bool {
+    const function = jsChunkFn(callee) orelse return false;
+    const chunk = function.chunk orelse return false;
+    if (function.uses_arguments or chunkDirectlyObservesLegacyFrame(chunk)) return false;
+    const plan = switch (compileQuickLeafPlan(chunk)) {
+        .numeric => |plan| plan,
+        .unsupported => return false,
+    };
+    for (args) |argument| if (!argument.isNumber()) return false;
+    if (plan.receiver_property_instruction) |instruction_index| {
+        const receiver = this_value orelse return false;
+        if (instruction_index >= chunk.code.items.len) return false;
+        const instruction = chunk.code.items[instruction_index];
+        if (instruction.op != .get_prop or instruction.a >= chunk.names.items.len) return false;
+        if (!nativeDirectNamedReadIsData(
+            null,
+            receiver,
+            chunk.names.items[instruction.a],
+        )) return false;
+    }
+    return true;
+}
+
+fn nativeOperationCanElideLegacyFrame(
+    vm: *Interpreter,
+    metadata: *const jit.NativeOperationMetadata,
+    operation_id: u32,
+    descriptor: jit.NativeOperationDescriptor,
+    inputs: []const u64,
+) bool {
+    const op: bc.Op = @fromBackingInt(@intCast(@as(u8, @intCast(descriptor.bytecode_op))));
+    const values: []const Value = @ptrCast(inputs);
+    switch (op) {
+        .not, .typeof_op => return values.len == 1,
+        .to_numeric,
+        .neg,
+        .pos,
+        .inc,
+        .dec,
+        .bit_not,
+        .to_string,
+        .to_property_key,
+        => return values.len == 1 and !values[0].isObject(),
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        .eq,
+        .neq,
+        .eq_strict,
+        .neq_strict,
+        .pow,
+        .bit_and,
+        .bit_or,
+        .bit_xor,
+        .shl,
+        .shr,
+        .ushr,
+        => return values.len == 2 and !values[0].isObject() and !values[1].isObject(),
+        .load_var => {
+            const name = metadata.nameFor(operation_id) orelse return false;
+            // Identifier resolution may consult a `with` object or a global
+            // accessor. Reuse the quick-binding proof so the native call only
+            // elides its activation for a direct Environment binding or an
+            // own data property guarded by the exact global shape.
+            return resolveQuickGlobalBinding(vm, name, true) != null;
+        },
+        .get_prop => {
+            const name = metadata.nameFor(operation_id) orelse return false;
+            return values.len == 1 and nativeDirectNamedReadIsData(metadata.propertyCacheFor(operation_id), values[0], name);
+        },
+        .get_index => {
+            if (values.len != 2 or !values[1].isString()) return false;
+            return nativeDirectNamedReadIsData(metadata.propertyCacheFor(operation_id), values[0], values[1].asStr());
+        },
+        .set_prop => {
+            const name = metadata.nameFor(operation_id) orelse return false;
+            return values.len == 2 and nativeDirectNamedWriteIsData(metadata.propertyCacheFor(operation_id), values[0], name);
+        },
+        .set_index => {
+            if (values.len != 3 or !values[1].isString()) return false;
+            return nativeDirectNamedWriteIsData(metadata.propertyCacheFor(operation_id), values[0], values[1].asStr());
+        },
+        .new_object, .new_array, .init_prop, .array_append, .array_append_hole => return true,
+        .call, .tail_call, .new_call => return values.len >= 1 and nativeDirectCalleeIsLegacySafe(values[0], values[1..], null),
+        .call_with_this, .tail_call_with_this => return values.len >= 2 and nativeDirectCalleeIsLegacySafe(values[0], values[2..], values[1]),
+        else => return false,
+    }
+}
+
+fn chunkHasTailCall(chunk: *const Chunk) bool {
+    for (chunk.code.items) |instruction| switch (instruction.op) {
+        .tail_call,
+        .tail_call_eval,
+        .tail_call_eval_with_this,
+        .tail_call_eval_activation,
+        .tail_call_eval_activation_with_this,
+        .tail_call_method,
+        .tail_call_with_this,
+        .tail_call_eval_activation_spread,
+        .tail_call_eval_activation_with_this_spread,
+        .tail_call_spread,
+        .tail_call_with_this_spread,
+        => return true,
+        else => {},
+    };
+    return false;
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @backingInt(jit.NativeOperationStatus.host_trap)));
@@ -5881,6 +6089,14 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     if (first > jit.numeric_scratch_capacity or count > jit.numeric_scratch_capacity - first)
         return @backingInt(jit.NativeOperationStatus.host_trap);
     const inputs = frame.scratch.?[first .. first + count];
+    // A direct native call has no ordinary activation to expose. Reject a
+    // possibly re-entrant operation before it performs any effect; the caller
+    // then reruns through bytecode, whose normal buildActivation path publishes
+    // exact caller/arguments state. Proven primitive/data-only operations and
+    // leaf callees retain the native fast path.
+    if (vm.native_legacy_direct_depth != 0 and
+        !nativeOperationCanElideLegacyFrame(vm, metadata, operation_id, descriptor, inputs))
+        return @backingInt(jit.NativeOperationStatus.invalidated);
     vm.recordExecutionTier(.runtime_operation_calls);
     if (descriptor.bytecode_op == @backingInt(bc.Op.to_numeric) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, vm.toNumericValue(Value.fromRawBits(inputs[0])));
@@ -7610,6 +7826,29 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     if (optimizer_artifact == null and baseline_artifact == null) return null;
     if (optimizer_artifact) |artifact| if (artifact.has_side_exits) return null;
 
+    const legacy_allowed = interp.Interpreter.legacyCallerArgumentsAllowed(func);
+    const restricted_tail = !func.is_arrow and !legacy_allowed and chunkHasTailCall(chunk);
+    const guard_reentry = legacy_allowed or restricted_tail;
+    if (guard_reentry) vm.native_legacy_direct_depth += 1;
+    defer {
+        if (guard_reentry) vm.native_legacy_direct_depth -= 1;
+    }
+
+    // A restricted ordinary function can retain the native fast path through
+    // arbitrary callbacks: its lightweight frame is enough to stop Annex B's
+    // caller walk and it owns no mapped arguments. Tail calls use the guarded
+    // path above because the restricted frame must disappear before the callee.
+    const saved_active_call_frame = vm.active_call_frame;
+    var restricted_call_frame: interp.LegacyCallFrame = undefined;
+    const publish_restricted = !func.is_arrow and !legacy_allowed and !restricted_tail and func.obj != null;
+    if (publish_restricted) {
+        restricted_call_frame = .{ .func_obj = func.obj.?, .caller = saved_active_call_frame };
+        vm.active_call_frame = &restricted_call_frame;
+    }
+    defer {
+        if (publish_restricted) vm.active_call_frame = saved_active_call_frame;
+    }
+
     try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
@@ -8122,6 +8361,14 @@ fn runChunk(
             },
             .load_local => {
                 const cf = frame.?;
+                // A legacy `fn.arguments` read can install a parameter map
+                // after this chunk was compiled with ordinary local opcodes.
+                // Once active, bypass every raw-slot quick path and route the
+                // access through the object-owned cells.
+                if (cf.mapped_arguments != null) {
+                    try stack.append(stack_alloc, cf.readSlot(inst.a, parallel_sync));
+                    continue;
+                }
                 const start = ip - 1;
                 const quick_loop_candidates = if (start < chunk.quick_loop_candidates.len)
                     chunk.quick_loop_candidates[start]
@@ -8260,9 +8507,13 @@ fn runChunk(
             .store_local => {
                 const cf = frame.?;
                 const v = stack.items[stack.items.len - 1]; // leaves value on the stack
-                const held = cf.lockSlots(parallel_sync);
-                cf.slots[inst.a] = v;
-                cf.unlockSlots(held);
+                if (cf.mapped_arguments != null) {
+                    cf.writeSlot(inst.a, v, parallel_sync);
+                } else {
+                    const held = cf.lockSlots(parallel_sync);
+                    cf.slots[inst.a] = v;
+                    cf.unlockSlots(held);
+                }
             },
             .store_local_mapped => {
                 const cf = frame.?;
@@ -8282,9 +8533,13 @@ fn runChunk(
                 var f = frame.?;
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
-                const held = f.lockSlots(parallel_sync);
-                const v = f.slots[inst.b];
-                f.unlockSlots(held);
+                const v = if (f.mapped_arguments != null) mapped: {
+                    break :mapped f.readSlot(inst.b, parallel_sync);
+                } else direct: {
+                    const held = f.lockSlots(parallel_sync);
+                    defer f.unlockSlots(held);
+                    break :direct f.slots[inst.b];
+                };
                 try stack.append(stack_alloc, v);
             },
             .load_upval_mapped => {
@@ -8309,9 +8564,13 @@ fn runChunk(
                 var d = inst.a;
                 while (d > 0) : (d -= 1) f = f.parent.?;
                 const v = stack.items[stack.items.len - 1]; // leaves value on the stack
-                const held = f.lockSlots(parallel_sync);
-                f.slots[inst.b] = v;
-                f.unlockSlots(held);
+                if (f.mapped_arguments != null) {
+                    f.writeSlot(inst.b, v, parallel_sync);
+                } else {
+                    const held = f.lockSlots(parallel_sync);
+                    f.slots[inst.b] = v;
+                    f.unlockSlots(held);
+                }
             },
             .store_upval_mapped => {
                 var f = frame.?;
@@ -11738,6 +11997,14 @@ const Activation = struct {
     /// Reusable backing for `exec.parameter_rest_arguments`. It is separate
     /// from frame slots because the call-tail length is invocation-dependent.
     rest_argument_storage: []Value = &.{},
+    /// Common calls retain their lazy Annex B snapshot inline, so preserving
+    /// `fn.arguments` does not add allocator/GC pressure to every sloppy call.
+    /// Larger calls reuse an arena backing after their first invocation. The
+    /// active legacy frame publishes whichever live prefix is selected.
+    legacy_inline_arguments: [8]Value = @splat(Value.undef()),
+    legacy_argument_storage: []Value = &.{},
+    legacy_call_frame: interp.LegacyCallFrame = undefined,
+    legacy_call_frame_active: bool = false,
     next_free: ?*Activation = null,
     // The operand-stack index in the *caller* where this call's result lands
     // (callee + args were popped off before the call ran). Unused for the
@@ -11749,6 +12016,7 @@ const Activation = struct {
     saved_eval_nt: bool,
     saved_bytecode_execution_mode: interp.BytecodeExecutionMode,
     saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
+    saved_active_call_frame: ?*interp.LegacyCallFrame,
     saved_debug_call_frame: ?*interp.DebugCallFrame,
     saved_stack_trace_call_frame: ?*interp.StackTraceCallFrame,
     saved_field_initializer: bool,
@@ -11778,6 +12046,9 @@ fn releaseActivation(vm: *Interpreter, act: *Activation) void {
     }
     if (act.exec.parameter_rest_arguments) |arguments| @memset(arguments, Value.undef());
     act.exec.parameter_rest_arguments = null;
+    @memset(&act.legacy_inline_arguments, Value.undef());
+    @memset(act.legacy_argument_storage, Value.undef());
+    act.legacy_call_frame_active = false;
     if (act.frame.escaped.load(.monotonic)) return;
     act.exec.stack.clearRetainingCapacity();
     act.exec.handlers.clearRetainingCapacity();
@@ -11838,11 +12109,16 @@ fn acquireActivation(vm: *Interpreter, local_count: usize) EvalError!*Activation
         .chunk = undefined,
         .frame = frame,
         .slot_storage = slots,
+        .legacy_inline_arguments = @splat(Value.undef()),
+        .legacy_argument_storage = &.{},
+        .legacy_call_frame = undefined,
+        .legacy_call_frame_active = false,
         .saved_strict = undefined,
         .saved_cur_module = undefined,
         .saved_eval_nt = undefined,
         .saved_bytecode_execution_mode = undefined,
         .saved_pm = undefined,
+        .saved_active_call_frame = undefined,
         .saved_debug_call_frame = undefined,
         .saved_stack_trace_call_frame = undefined,
         .saved_field_initializer = undefined,
@@ -11892,6 +12168,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     const frame = act.frame;
     const slot_storage = act.slot_storage;
     const rest_argument_storage = act.rest_argument_storage;
+    const legacy_argument_storage = act.legacy_argument_storage;
     const slots = frame.slots;
     const pattern_indices = fchunk.destructuring_parameter_indices;
     const default_indices = fchunk.default_parameter_indices;
@@ -11974,6 +12251,10 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .frame = frame,
         .slot_storage = slot_storage,
         .rest_argument_storage = rest_argument_storage,
+        .legacy_inline_arguments = @splat(Value.undef()),
+        .legacy_argument_storage = legacy_argument_storage,
+        .legacy_call_frame = undefined,
+        .legacy_call_frame_active = false,
         .next_free = null,
         .optimizer_delta = .{},
         .optimizer_profile_active = false,
@@ -11982,6 +12263,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_eval_nt = vm.direct_eval_new_target_allowed,
         .saved_bytecode_execution_mode = vm.bytecode_execution_mode,
         .saved_pm = vm.current_private_map,
+        .saved_active_call_frame = vm.active_call_frame,
         .saved_debug_call_frame = vm.debug_call_frame,
         .saved_stack_trace_call_frame = vm.stack_trace_call_frame,
         .saved_field_initializer = vm.in_field_initializer,
@@ -12014,6 +12296,29 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     };
     vm.publishExecRoot(&act.exec);
     errdefer discardActivation(vm, act);
+    if (!func.is_arrow) if (func.obj) |function_object| {
+        act.legacy_call_frame = .{
+            .func_obj = function_object,
+            .caller = vm.active_call_frame,
+        };
+        act.legacy_call_frame_active = true;
+        if (interp.Interpreter.legacyCallerArgumentsAllowed(func) and fchunk.arguments_slot == null) {
+            const retained = if (args.len <= act.legacy_inline_arguments.len)
+                act.legacy_inline_arguments[0..args.len]
+            else retained: {
+                if (act.legacy_argument_storage.len < args.len)
+                    act.legacy_argument_storage = try vm.arena.alloc(Value, args.len);
+                break :retained act.legacy_argument_storage[0..args.len];
+            };
+            @memcpy(retained, args);
+            act.legacy_call_frame.lazy_func = func;
+            act.legacy_call_frame.lazy_args = retained;
+            act.legacy_call_frame.lazy_env = func.closure;
+            act.legacy_call_frame.lazy_vm_frame = frame;
+            act.legacy_call_frame.lazy_vm_mapped_parameter_indices = fchunk.mapped_parameter_indices;
+        }
+        vm.active_call_frame = &act.legacy_call_frame;
+    };
     vm.current_private_map = func.private_map; // PrepareForOrdinaryCall's lexical [[PrivateEnvironment]]
     vm.strict = func.is_strict;
     vm.home_object = func.home_object;
@@ -12067,20 +12372,23 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
             try vm.addPrivateMethodOrAccessorChecked(vm.this_value.asObj(), func.home_object, brand);
         }
     }
+    const non_simple_parameters = fchunk.has_non_simple_parameters;
+    const mapped_arguments_observable = fchunk.arguments_slot != null or
+        interp.Interpreter.legacyCallerArgumentsAllowed(func);
+    const mapped_layout_valid = if (func.is_arrow or func.is_strict or non_simple_parameters or
+        !mapped_arguments_observable or func.params.len == 0)
+        fchunk.mapped_parameter_indices.len == 0
+    else
+        fchunk.mapped_parameter_indices.len == slots.len;
+    if (!mapped_layout_valid)
+        return vm.throwError("InternalError", "invalid bytecode mapped parameter layout");
     if (fchunk.arguments_slot) |slot| {
         // FunctionDeclarationInstantiation creates the arguments exotic after
         // base-instance initialization and before body evaluation. Strict
         // functions retain an unmapped object; sloppy simple functions publish
         // their exact frame-slot map into object-owned atomic cells.
-        const non_simple_parameters = fchunk.has_non_simple_parameters;
-        const mapped_layout_valid = if (func.is_strict or non_simple_parameters)
-            fchunk.mapped_parameter_indices.len == 0
-        else if (func.params.len == 0)
-            fchunk.mapped_parameter_indices.len == 0
-        else
-            fchunk.mapped_parameter_indices.len == slots.len;
         if (func.is_arrow or (!func.uses_arguments and !func.uses_direct_eval) or
-            slot >= slots.len or !mapped_layout_valid or
+            slot >= slots.len or
             (slot < fchunk.mapped_parameter_indices.len and
                 fchunk.mapped_parameter_indices[slot] != std.math.maxInt(u32)))
         {
@@ -12091,6 +12399,7 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         else
             vm.createFrameArgumentsObject(func, args, slots, fchunk.mapped_parameter_indices)) catch |e| return e;
         slots[slot] = arguments_value;
+        if (act.legacy_call_frame_active) act.legacy_call_frame.arguments = arguments_value;
         if (!func.is_strict and fchunk.mapped_parameter_indices.len != 0) {
             frame.mapped_arguments = arguments_value.asObj();
             frame.mapped_parameter_indices = fchunk.mapped_parameter_indices;
@@ -12182,6 +12491,7 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.direct_eval_new_target_allowed = act.saved_eval_nt;
     vm.bytecode_execution_mode = act.saved_bytecode_execution_mode;
     vm.current_private_map = act.saved_pm;
+    vm.active_call_frame = act.saved_active_call_frame;
     vm.debug_call_frame = act.saved_debug_call_frame;
     vm.stack_trace_call_frame = act.saved_stack_trace_call_frame;
     vm.in_field_initializer = act.saved_field_initializer;
@@ -12216,6 +12526,9 @@ fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_eval_nt = src.saved_eval_nt;
     dst.saved_bytecode_execution_mode = src.saved_bytecode_execution_mode;
     dst.saved_pm = src.saved_pm;
+    dst.saved_active_call_frame = src.saved_active_call_frame;
+    if (dst.legacy_call_frame_active)
+        dst.legacy_call_frame.caller = src.saved_active_call_frame;
     dst.saved_debug_call_frame = src.saved_debug_call_frame;
     dst.saved_stack_trace_call_frame = src.saved_stack_trace_call_frame;
     dst.saved_field_initializer = src.saved_field_initializer;
@@ -12404,6 +12717,10 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
             if (tail_call) {
                 const current = acts.items[acts.items.len - 1];
                 inheritCallerState(callee, current);
+                vm.active_call_frame = if (callee.legacy_call_frame_active)
+                    &callee.legacy_call_frame
+                else
+                    callee.saved_active_call_frame;
                 vm.popExecRoot(&current.exec);
                 releaseActivation(vm, current);
                 acts.items[acts.items.len - 1] = callee;
@@ -12505,6 +12822,7 @@ fn expectActivationDriverClean(machine: *Interpreter, caller_environment: *Envir
     try std.testing.expect(!machine.driver_active);
     try std.testing.expectEqual(@as(usize, 0), machine.jit_execution_depth);
     try std.testing.expect(machine.current_private_map == null);
+    try std.testing.expect(machine.active_call_frame == null);
     try std.testing.expect(machine.debug_call_frame == null);
     try std.testing.expect(machine.stack_trace_call_frame == null);
 
@@ -12565,7 +12883,9 @@ test "vm: activation driver allocation failures restore exact ownership" {
     };
     const cases = [_]Case{
         .{ .entry = .initial, .name = "activationLeaf", .argument = 1, .expected = 2 },
+        .{ .entry = .initial, .name = "activationLegacy", .argument = 3, .expected = 3 },
         .{ .entry = .inline_, .name = "activationLeaf", .argument = 1, .expected = 2 },
+        .{ .entry = .inline_, .name = "activationLegacy", .argument = 4, .expected = 4 },
         .{ .entry = .nested, .name = "activationNestedA", .argument = 16, .expected = 17 },
         .{ .entry = .tail, .name = "activationTail", .argument = 1, .expected = 2 },
         .{ .entry = .handler, .name = "activationCatch", .argument = 0, .expected = 8 },
@@ -12580,6 +12900,7 @@ test "vm: activation driver allocation failures restore exact ownership" {
     defer ctx.destroy();
     _ = try ctx.evaluate(
         \\function activationLeaf(v){return v+1;}
+        \\function activationLegacy(v){return activationLegacy.arguments[0];}
         \\function activationNestedA(v){if(v===0)return 1;return activationNestedB(v-1)+1;}
         \\function activationNestedB(v){return activationNestedA(v);}
         \\function activationTail(v){return activationLeaf(v);}
@@ -12650,7 +12971,7 @@ test "vm: prepared activation survives a moving collection before execution" {
     });
     defer ctx.destroy();
     _ = try ctx.evaluate(
-        \\function activationMovingTarget(subject,...rest){return subject.marker+rest.length;}
+        \\function activationMovingTarget(subject,...rest){return activationMovingTarget.arguments[0].marker+rest.length;}
     );
     // Tenure the function and bootstrap graph, then create one young argument
     // whose address must change at the exact provisional-activation boundary.
@@ -15173,7 +15494,11 @@ test "vm: optimizer native construction resumes a constructor parameter" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    // A dynamic constructor can inspect its caller. Keep this fixture strict so
+    // it isolates native construction resumption; sloppy callers deliberately
+    // retain an activation before executing an unproven constructor.
     const source =
+        \\"use strict";
         \\function Box(x) { this.value = x; }
         \\function make(C, x) { const y = new C(x); return y; }
         \\make(Box, 0); make(Box, 1); make(Box, 2); make(Box, 3); make(Box, 4);
@@ -16542,7 +16867,11 @@ test "vm: optimizer native computed read resumes caught lookup exceptions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    // ToPropertyKey below executes user code. Strict mode removes the Annex B
+    // caller-frame obligation so this test can continue isolating one-shot
+    // native exception resumption.
     const source =
+        \\"use strict";
         \\let calls = 0;
         \\function read(o, k) { try { return o[k]; } catch { return calls; } }
         \\function keyString() { calls = calls + 1; return "x"; }
@@ -16593,7 +16922,11 @@ test "vm: optimizer native computed key resumes an exact catch once" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    // The final computed key runs user code. Strict mode makes the fixture
+    // eligible for native effect execution while the sloppy path correctly
+    // falls back before any observable effect.
     const source =
+        \\"use strict";
         \\let calls = 0;
         \\function read(o, k) { try { const y = o[k]; return y; } catch (e) { return e + calls; } }
         \\function keyString() { calls = calls + 1; throw 91; }

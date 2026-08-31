@@ -24306,7 +24306,7 @@ test "vm trampoline: safe sloppy functions can use heap-bounded recursion" {
     try std.testing.expectEqual(@as(f64, 2000), r.result);
 }
 
-test "vm admission: safe sloppy loops and strict dynamic calls tier safely" {
+test "vm admission: safe sloppy loops and dynamic calls tier safely" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = true });
     defer ctx.destroy();
 
@@ -24325,13 +24325,14 @@ test "vm admission: safe sloppy loops and strict dynamic calls tier safely" {
     try std.testing.expectEqual(@as(f64, 9), (try ctx.evaluate("indexedSum([1, 2], 6)")).asNum());
 
     const caller = try ctx.evaluate(
-        \\function indexedCall(a) { return String /* keep call detection conservative */ (a[0]); }
+        \\function indexedCall(a) { return String(a[0]); }
         \\try { var marker = 1; } catch (e) {}
         \\indexedCall
     );
     const caller_raw = caller.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const caller_func: *interp.Function = @ptrCast(@alignCast(caller_raw));
-    try std.testing.expect(caller_func.chunk == null);
+    try std.testing.expect(caller_func.chunk != null);
+    try std.testing.expectEqualStrings("3", (try ctx.evaluate("indexedCall([3])")).asStr());
 
     const dynamic = try ctx.evaluate(
         \\globalThis.dynamicTarget = function (x) { return x + 1; };
@@ -27485,6 +27486,203 @@ test "forced tree-walker and required bytecode preserve strict arguments objects
     try std.testing.expectEqual(@as(u64, 2), automatic_inventory.count(.plain_compiled));
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_rejected_unsupported_lowering));
     try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_arguments));
+}
+
+test "compiled ordinary functions publish exact active legacy arguments" {
+    const source =
+        \\function legacyRead(value) { return legacyRead.arguments[0]; }
+        \\function legacyIdentity(value) { return legacyIdentity.arguments === arguments; }
+        \\function legacyMapped(first, second) {
+        \\  var reflected = legacyMapped.arguments;
+        \\  first = 11;
+        \\  reflected[1] = 22;
+        \\  return (reflected === legacyMapped.arguments) + ":" + reflected[0] + ":" + second + ":" + reflected.length + ":" + reflected[2];
+        \\}
+        \\function legacyWide(a, b, c, d, e, f, g, h, i, j) {
+        \\  var reflected = legacyWide.arguments;
+        \\  a = 41;
+        \\  reflected[9] = 42;
+        \\  return reflected[0] + ":" + j + ":" + reflected.length;
+        \\}
+        \\function legacyDuplicate(value, value) {
+        \\  var reflected = legacyDuplicate.arguments;
+        \\  value = 9;
+        \\  return reflected[0] + ":" + reflected[1];
+        \\}
+        \\function legacyUnmapped(value = 3) {
+        \\  var reflected = legacyUnmapped.arguments;
+        \\  value = 8;
+        \\  return reflected[0] + ":" + value;
+        \\}
+        \\function legacyLeaf(value) { return (legacyLeaf.caller === legacyBridge) + ":" + legacyLeaf.arguments[0]; }
+        \\function legacyBridge(value) { return legacyLeaf(value); }
+        \\function legacyRecursive(depth) {
+        \\  var active = legacyRecursive.arguments[0];
+        \\  if (depth === 0) return active + ":" + (legacyRecursive.caller === legacyRecursive);
+        \\  return active + ":" + legacyRecursive(depth - 1);
+        \\}
+        \\function legacyTail(value) { return (legacyTail.caller === null) + ":" + legacyTail.arguments[0]; }
+        \\function strictTail(value) { "use strict"; return legacyTail(value); }
+        \\function strictActive() { "use strict"; try { return strictActive.arguments; } catch (error) { return error.name; } }
+        \\var legacyHolder = { method() { try { return legacyHolder.method.arguments; } catch (error) { return error.name; } } };
+        \\var legacyArrow = () => 1;
+        \\function* legacyGenerator() { yield 1; }
+        \\async function legacyAsync() { return 1; }
+        \\class LegacyClass {}
+        \\function restrictedName(value) { try { return value.arguments; } catch (error) { return error.name; } }
+        \\var strictConstructed = Function('"use strict"; try { return strictConstructed.arguments; } catch (error) { return error.name; }');
+        \\var sloppyConstructed = Function("value", "return arguments.callee.arguments[0]");
+        \\function legacyMoving(value) { $vm.gc(); return legacyMoving.arguments[0] === value; }
+        \\var legacyRealm = $262.createRealm();
+        \\var foreignLegacyObserver = legacyRealm.evalScript("(function (fn, expectedPrototype, value) { var reflected = fn.arguments; var local = []; return reflected[0] === value && Object.getPrototypeOf(reflected) === expectedPrototype && Object.getPrototypeOf(local) === Array.prototype; })");
+        \\function legacyCrossRealm(value) { return foreignLegacyObserver(legacyCrossRealm, Object.prototype, value); }
+        \\[
+        \\  legacyRead(37),
+        \\  legacyIdentity(4),
+        \\  legacyMapped(1, 2, 3),
+        \\  legacyWide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        \\  legacyDuplicate(1, 2),
+        \\  legacyUnmapped(4),
+        \\  legacyBridge(5),
+        \\  legacyRecursive(3),
+        \\  strictTail(6),
+        \\  strictActive(),
+        \\  legacyHolder.method(),
+        \\  restrictedName(legacyArrow),
+        \\  restrictedName(legacyGenerator),
+        \\  restrictedName(legacyAsync),
+        \\  restrictedName(LegacyClass),
+        \\  strictConstructed(),
+        \\  sloppyConstructed(7),
+        \\  legacyMoving({ marker: 8 }),
+        \\  legacyCrossRealm({ marker: 9 }),
+        \\  legacyRead.arguments === null,
+        \\  legacyRead.caller === null
+        \\].join("|");
+    ;
+    const expected = "37|true|true:11:22:3:3|41:42:10|1:9|4:8|true:5|3:2:1:0:true|true:6|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|TypeError|7|true|true|true|true";
+    const Profile = struct { mode: interp.BytecodeExecutionMode, enable_gc: bool };
+    const profiles = [_]Profile{
+        .{ .mode = .tree_walker, .enable_gc = false },
+        .{ .mode = .required, .enable_gc = false },
+        .{ .mode = .tree_walker, .enable_gc = true },
+        .{ .mode = .required, .enable_gc = true },
+    };
+    var actual: [profiles.len][]const u8 = undefined;
+    var actual_len: usize = 0;
+    defer for (actual[0..actual_len]) |entry| std.testing.allocator.free(entry);
+
+    for (profiles, 0..) |profile, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = profile.enable_gc,
+            .enable_jit = false,
+            .bytecode_execution_mode = profile.mode,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(source);
+        try std.testing.expect(result.isString());
+        actual[index] = try std.testing.allocator.dupe(u8, result.asStr());
+        actual_len += 1;
+        if (profile.mode == .required) {
+            const inventory = ctx.bytecodeAdmissionSnapshot();
+            try std.testing.expect(inventory.count(.template_plain_compiled) >= 12);
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.plain_policy_legacy_call_frame));
+            try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+        }
+    }
+    for (actual) |entry| try std.testing.expectEqualStrings(expected, entry);
+
+    const automatic = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .automatic,
+    });
+    defer automatic.destroy();
+    try std.testing.expectEqual(@as(f64, 19), (try automatic.evaluate(
+        \\let legacyPolicyWitness = 0;
+        \\function automaticLegacy(value) { return automaticLegacy.arguments[0]; }
+        \\automaticLegacy(19);
+    )).asNum());
+    const automatic_inventory = automatic.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), automatic_inventory.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), automatic_inventory.count(.plain_policy_legacy_call_frame));
+}
+
+test "native direct-call gate retains compiled legacy call frames" {
+    if (!jit.supported) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function nativeLegacyLeaf(value) { return nativeLegacyLeaf.arguments[0] === value && nativeLegacyLeaf.caller === nativeLegacyCaller; }
+        \\function nativeLegacyCaller(value) { return nativeLegacyLeaf(value); }
+        \\function nativeLegacyBarrierProbe() { return nativeLegacyBarrierProbe.caller === null; }
+        \\function nativeStrictBarrier() { "use strict"; var result = nativeLegacyBarrierProbe(); return result; }
+        \\function nativeSloppyOuter() { var result = nativeStrictBarrier(); return result; }
+        \\function nativeLegacyTailProbe() { return nativeLegacyTailProbe.caller === nativeTailOuter; }
+        \\function nativeStrictTail() { "use strict"; return nativeLegacyTailProbe(); }
+        \\function nativeTailOuter() { var result = nativeStrictTail(); return result; }
+        \\var nativeLegacyGetterCalls = 0;
+        \\Object.defineProperty(globalThis, "nativeLegacyGlobal", { configurable: true, get: function () {
+        \\  nativeLegacyGetterCalls++;
+        \\  return nativeLegacyGlobalCaller.arguments[0] === nativeLegacyGetterCalls;
+        \\} });
+        \\function nativeLegacyGlobalCaller(value) { return nativeLegacyGlobal; }
+        \\var nativeLegacyFailures = "";
+        \\for (var warm = 0; warm < 64; warm++) {
+        \\  if (!nativeLegacyCaller(warm)) nativeLegacyFailures += "caller:" + warm + ";";
+        \\  if (!nativeSloppyOuter()) nativeLegacyFailures += "strict:" + warm + ";";
+        \\  if (!nativeTailOuter()) nativeLegacyFailures += "tail:" + warm + ";";
+        \\  if (!nativeLegacyGlobalCaller(warm + 1)) nativeLegacyFailures += "global:" + warm + ";";
+        \\}
+        \\if (nativeLegacyGetterCalls !== 64) nativeLegacyFailures += "replay:" + nativeLegacyGetterCalls + ";";
+        \\nativeLegacyFailures;
+    );
+    try std.testing.expectEqualStrings("", result.asStr());
+    const caller: *interp.Function = @ptrCast(@alignCast(ctx.global_object.getOwn("nativeLegacyCaller").?.asObj().jsFunction().?));
+    try std.testing.expect(caller.chunk.?.tier.loadState() != .cold);
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
+test "parallel_js compiled legacy arguments remain invocation-local" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_threads = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\function legacyLaneProbe(seed, index) {
+        \\  var reflected = legacyLaneProbe.arguments;
+        \\  var expectedSeed = seed + 1;
+        \\  var expectedIndex = index + 1;
+        \\  seed = expectedSeed;
+        \\  reflected[1] = expectedIndex;
+        \\  return reflected[0] === expectedSeed && index === expectedIndex &&
+        \\    reflected === legacyLaneProbe.arguments && legacyLaneProbe.caller === legacyLane;
+        \\}
+        \\function legacyLane(seed) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error("GIL held");
+        \\  for (var index = 0; index < 64; index++) {
+        \\    if (!legacyLaneProbe(seed, index)) return 0;
+        \\  }
+        \\  return legacyLane.arguments[0] === seed ? 1 : 0;
+        \\}
+        \\var legacyWorkers = [];
+        \\for (var lane = 0; lane < 4; lane++) legacyWorkers.push(new Thread(legacyLane, lane));
+        \\var legacyTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) legacyTotal += legacyWorkers[lane].join();
+        \\legacyTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 4), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 
 test "forced tree-walker and required bytecode preserve named rest parameters" {

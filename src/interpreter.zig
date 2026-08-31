@@ -2783,7 +2783,7 @@ pub const Function = struct {
     with_stack: []*value.Object = &.{},
 };
 
-const LegacyCallFrame = struct {
+pub const LegacyCallFrame = struct {
     func_obj: *value.Object,
     arguments: ?Value = null,
     caller: ?*LegacyCallFrame = null,
@@ -2795,6 +2795,12 @@ const LegacyCallFrame = struct {
     lazy_args: []const Value = &.{},
     lazy_env: ?*Environment = null,
     lazy_args_root: ?usize = null,
+    /// VM activations retain their argument snapshot in activation-owned arena
+    /// storage and publish the live frame separately. Lazy materialization then
+    /// installs the same object-owned mapped cells used by an eager `arguments`
+    /// binding, so later parameter reads/writes preserve aliasing exactly.
+    lazy_vm_frame: ?*vm.Frame = null,
+    lazy_vm_mapped_parameter_indices: []const u32 = &.{},
 };
 
 /// A synchronous tree-walker call owns these slots until its Zig frame exits.
@@ -3232,6 +3238,11 @@ pub const Interpreter = struct {
     /// `.arguments`. Direct eval does not push a frame, so those lookups skip eval
     /// frames naturally.
     active_call_frame: ?*LegacyCallFrame = null,
+    /// Nesting depth of native direct calls that deliberately elide an ordinary
+    /// activation. Runtime-backed optimizer operations use this to reject a
+    /// potentially re-entrant effect before it runs, then replay through the VM
+    /// with the exact Annex B call frame installed.
+    native_legacy_direct_depth: usize = 0,
     /// Context-owned buffer the global `print` appends to (the async harness's
     /// `$DONE` reports completion through `print`).
     print_buffer: ?*std.ArrayListUnmanaged(u8) = null,
@@ -7272,63 +7283,6 @@ pub const Interpreter = struct {
         return std.mem.indexOf(u8, source, "return") != null and std.mem.indexOfScalar(u8, source, '(') != null;
     }
 
-    fn sourceMayObserveLegacyCallFrame(source: []const u8) bool {
-        return std.mem.indexOf(u8, source, "caller") != null or
-            std.mem.indexOf(u8, source, ".arguments") != null;
-    }
-
-    fn sourceIdentifierByte(c: u8) bool {
-        return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
-    }
-
-    fn sourceBodyMayCallOtherThan(source: []const u8, allowed_name: []const u8, second_allowed_name: []const u8) bool {
-        // A traditional function's own parameter list is not a body call. The
-        // old whole-source scan therefore rejected every sloppy function before
-        // the named-property and self-recursion exceptions below could apply.
-        // Starting after the opening brace, distinguish control/grouping
-        // parentheses from call syntax. This remains deliberately conservative:
-        // a computed/parenthesized callee or any non-self identifier call keeps
-        // the body on the tree-walker for legacy caller/arguments observability.
-        const body_start = if (std.mem.indexOfScalar(u8, source, '{')) |brace|
-            brace + 1
-        else
-            0;
-        var search = body_start;
-        while (std.mem.indexOfScalarPos(u8, source, search, '(')) |paren| {
-            var end = paren;
-            while (end > body_start and std.ascii.isWhitespace(source[end - 1])) end -= 1;
-            if (end == body_start) {
-                search = paren + 1;
-                continue;
-            }
-            const preceding = source[end - 1];
-            if (preceding == ')' or preceding == ']' or preceding == '.') return true;
-            // A comment can separate an identifier callee from `(`, and a
-            // non-ASCII byte can be part of an identifier. The source-level
-            // classifier intentionally rejects both ambiguous forms rather
-            // than admitting a real call by mistake.
-            if (preceding == '/' or preceding >= 0x80) return true;
-            if (!sourceIdentifierByte(preceding)) {
-                search = paren + 1;
-                continue;
-            }
-            var start = end - 1;
-            while (start > body_start and sourceIdentifierByte(source[start - 1])) start -= 1;
-            const token = source[start..end];
-            const control = std.mem.eql(u8, token, "if") or
-                std.mem.eql(u8, token, "for") or
-                std.mem.eql(u8, token, "while") or
-                std.mem.eql(u8, token, "switch") or
-                std.mem.eql(u8, token, "catch") or
-                std.mem.eql(u8, token, "with");
-            const allowed = (allowed_name.len != 0 and std.mem.eql(u8, token, allowed_name)) or
-                (second_allowed_name.len != 0 and std.mem.eql(u8, token, second_allowed_name));
-            if (!control and !allowed) return true;
-            search = paren + 1;
-        }
-        return false;
-    }
-
     fn sourceHasNamedSelfCall(source: []const u8, name: []const u8) bool {
         if (name.len == 0) return false;
         var search: usize = 0;
@@ -7359,11 +7313,6 @@ pub const Interpreter = struct {
         // arguments binding. Arrows nested in compiled owners are lowered with
         // that parent FnScope by Compiler.compileFunction instead.
         if (fnode.is_arrow and fnode.uses_arguments) return .plain_policy_arguments;
-        // Sloppy caller/callee reflection observes the interpreter's dynamic
-        // call-frame chain, not merely the arguments exotic. Keep this more
-        // specific boundary ahead of mapped-arguments admission.
-        if (!fnode.is_strict and sourceMayObserveLegacyCallFrame(fnode.source))
-            return .plain_policy_legacy_call_frame;
         if (fnode.uses_arguments) return null;
         if (fnode.requires_tree_walk_class_constructor) return .plain_policy_class_constructor_semantics;
         if (fnode.is_derived_class_constructor) return null;
@@ -7373,16 +7322,6 @@ pub const Interpreter = struct {
         else
             .plain_policy_not_candidate;
         const named_self_recursion = sourceHasNamedSelfCall(fnode.source, fnode.name);
-        // The compiler/runtime direct-eval admission is itself fail-closed on
-        // incomplete activation contexts. Exempt only the syntactic eval callee
-        // from the legacy dynamic-call policy; any additional call still keeps
-        // a sloppy function on the tree walker.
-        if (sourceBodyMayCallOtherThan(
-            fnode.source,
-            if (named_self_recursion) fnode.name else "",
-            if (fnode.uses_direct_eval) "eval" else "",
-        ))
-            return .plain_policy_dynamic_call;
         if (!named_self_recursion and !fnode.uses_direct_eval and
             std.mem.indexOfScalar(u8, fnode.source, '.') == null and
             std.mem.indexOfScalar(u8, fnode.source, '[') == null)
@@ -7397,7 +7336,7 @@ pub const Interpreter = struct {
         return null;
     }
 
-    fn legacyCallerArgumentsAllowed(f: *const Function) bool {
+    pub fn legacyCallerArgumentsAllowed(f: *const Function) bool {
         return !f.is_strict and !f.is_arrow and !f.is_generator and !f.is_async and !f.is_method and !f.is_class_constructor;
     }
 
@@ -7416,6 +7355,56 @@ pub const Interpreter = struct {
             }
         }
         return Value.nul();
+    }
+
+    fn materializeLegacyArguments(self: *Interpreter, frame: *LegacyCallFrame) EvalError!Value {
+        if (frame.lazy_func == null) return Value.nul();
+
+        // The property read may happen in a nested foreign-realm caller. Build
+        // the exotic with the observed function's intrinsics/environment, while
+        // rooting the currently executing realm so allocation recovery or a
+        // moving checkpoint can restore it from rewritten slots.
+        const caller_environment = self.env;
+        const caller_environment_root = try self.pushTempEnvRoot(caller_environment);
+        defer {
+            self.env = self.tempEnvRoot(caller_environment_root, caller_environment);
+            self.restoreTempEnvRoots(caller_environment_root);
+        }
+        const caller_global = self.global_object;
+        const caller_global_root = try self.pushTempRoot(if (caller_global) |global| Value.obj(global) else Value.undef());
+        defer {
+            const restored = self.tempRoot(caller_global_root, Value.undef());
+            self.global_object = if (caller_global != null and restored.isObject()) restored.asObj() else null;
+            self.restoreTempRoots(caller_global_root);
+        }
+        // Root-vector growth above may run allocation recovery. Re-read the
+        // precise frame edge after it has been relocated instead of retaining a
+        // raw Function pointer across those allocations.
+        const func = frame.lazy_func.?;
+        const args = if (frame.lazy_args_root) |root|
+            self.gc_temp_roots.items[root..][0..frame.lazy_args.len]
+        else
+            frame.lazy_args;
+        self.env = frame.lazy_env orelse func.closure;
+        if (func.realm_global) |global| self.global_object = global;
+
+        const object = if (frame.lazy_vm_frame) |activation_frame|
+            try self.createFrameArgumentsObject(
+                func,
+                args,
+                activation_frame.slots,
+                frame.lazy_vm_mapped_parameter_indices,
+            )
+        else
+            try self.createArgumentsObject(func, args, frame.lazy_env.?);
+        frame.arguments = object;
+        if (frame.lazy_vm_frame) |activation_frame| {
+            if (frame.lazy_vm_mapped_parameter_indices.len != 0) {
+                activation_frame.mapped_arguments = object.asObj();
+                activation_frame.mapped_parameter_indices = frame.lazy_vm_mapped_parameter_indices;
+            }
+        }
+        return object;
     }
 
     pub fn jsFunctionHasOwnPrototypeSlot(o: *value.Object) bool {
@@ -14697,15 +14686,7 @@ pub const Interpreter = struct {
                             if (frame.arguments) |a| return a;
                             // Legacy-only case: build the exotic object on demand
                             // (deferred from the call) and cache it for repeat reads.
-                            if (frame.lazy_func) |lf| {
-                                const args = if (frame.lazy_args_root) |root|
-                                    self.gc_temp_roots.items[root..][0..frame.lazy_args.len]
-                                else
-                                    frame.lazy_args;
-                                const obj = try self.createArgumentsObject(lf, args, frame.lazy_env.?);
-                                frame.arguments = obj;
-                                return obj;
-                            }
+                            if (frame.lazy_func != null) return self.materializeLegacyArguments(frame);
                             return Value.nul();
                         }
                     }

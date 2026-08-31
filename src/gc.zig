@@ -2888,6 +2888,10 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (fr.arguments) |args| markValue(v, args);
         if (fr.lazy_func) |function| v.mark(function);
         if (fr.lazy_env) |env| markManaged(v, env);
+        // Tree-walker frames read their snapshot from `gc_temp_roots`; VM
+        // frames own a stable activation-local copy that must be traced here.
+        if (fr.lazy_args_root == null)
+            for (fr.lazy_args) |argument| markValue(v, argument);
     }
     // Inspector frames point at the real lexical environments and `this`
     // values used by suspended execution. Keep every caller scope alive during
@@ -3024,6 +3028,9 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         gc_relocation.rewriteOptionalValueSlot(v, &frame.arguments);
         gc_relocation.rewriteOptionalSlot(v, interp.Function, &frame.lazy_func);
         gc_relocation.rewriteOptionalSlot(v, Environment, &frame.lazy_env);
+        if (frame.lazy_args_root == null)
+            for (@constCast(frame.lazy_args)) |*argument|
+                gc_relocation.rewriteValueSlot(v, argument);
     }
     var debug_frame = machine.debug_call_frame;
     while (debug_frame) |frame| : (debug_frame = frame.caller) {

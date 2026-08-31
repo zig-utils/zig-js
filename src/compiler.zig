@@ -631,13 +631,19 @@ fn configurePlainParameters(
 /// index. ECMA-262 CreateMappedArgumentsObject scans formals right-to-left: an
 /// earlier duplicate remains an ordinary arguments element and only the last
 /// occurrence aliases the single parameter binding.
+fn functionSupportsLegacyArguments(fnode: *const ast.FunctionNode) bool {
+    return !fnode.is_strict and !fnode.is_arrow and !fnode.is_generator and
+        !fnode.is_async and !fnode.is_method;
+}
+
 fn configureMappedParameters(
     arena: std.mem.Allocator,
     scope: *FnScope,
     fnode: *const ast.FunctionNode,
-    arguments_slot: ?u32,
+    arguments_observable: bool,
+    emit_mapped_access: bool,
 ) CompileError![]const u32 {
-    if (fnode.is_arrow or fnode.is_strict or arguments_slot == null or fnode.params.len == 0) return &.{};
+    if (fnode.is_arrow or fnode.is_strict or !arguments_observable or fnode.params.len == 0) return &.{};
     // ECMA-262 creates an unmapped arguments object for every non-simple
     // parameter list. Rest/default/pattern formals therefore never publish
     // frame-slot aliases, even when the surrounding function is sloppy.
@@ -656,7 +662,7 @@ fn configureMappedParameters(
         if (seen.contains(param.name)) continue;
         try seen.put(arena, param.name, {});
         const binding = scope.names.getPtr(param.name) orelse return error.Unsupported;
-        binding.mapped_parameter = true;
+        binding.mapped_parameter = emit_mapped_access;
         indices[binding.slot] = @intCast(index);
     }
     return indices;
@@ -2105,7 +2111,13 @@ pub const Compiler = struct {
         };
         const arguments_slot = try addArgumentsSlot(arena, scope, fnode);
         try planFunctionDeclarations(arena, scope, fnode, arguments_slot != null);
-        const mapped_parameter_indices = try configureMappedParameters(arena, scope, fnode, arguments_slot);
+        const mapped_parameter_indices = try configureMappedParameters(
+            arena,
+            scope,
+            fnode,
+            arguments_slot != null or functionSupportsLegacyArguments(fnode),
+            arguments_slot != null,
+        );
 
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
@@ -6227,7 +6239,13 @@ pub const Compiler = struct {
             };
             const arguments_slot = try addArgumentsSlot(self.arena, scope, fnode);
             try planFunctionDeclarations(self.arena, scope, fnode, arguments_slot != null);
-            const mapped_parameter_indices = try configureMappedParameters(self.arena, scope, fnode, arguments_slot);
+            const mapped_parameter_indices = try configureMappedParameters(
+                self.arena,
+                scope,
+                fnode,
+                arguments_slot != null or functionSupportsLegacyArguments(fnode),
+                arguments_slot != null,
+            );
 
             compiled.param_count = @intCast(fnode.params.len);
             compiled.parameter_slots = parameter_layout.slots;
@@ -8855,7 +8873,7 @@ test "compiler gives arguments owners precise frame slots" {
     defer arena.deinit();
     var parser = try @import("parser.zig").Parser.init(
         arena.allocator(),
-        "function own(value){ \"use strict\"; return arguments[0] + arguments.length; } function outer(value){ \"use strict\"; var ownLength = arguments.length; var arrow = () => arguments[0]; function inner(other){ \"use strict\"; return arguments[0]; } return ownLength + arrow() + inner(value); } var holder = { method(value){ \"use strict\"; return arguments[0]; } }; function Constructor(value){ \"use strict\"; this.value = arguments[0]; } function sloppy(value){ value = arguments[0] + 1; arguments[0] = value + 1; return value + arguments[0]; } function sloppyOuter(value){ var arrow = () => { value = value + 1; return value + arguments[0]; }; return arrow(); } function parameterArguments(arguments){ arguments = arguments + 1; return arguments; } function evalOwner(){ \"use strict\"; return eval(\"arguments[0]\"); } function evalReference(){ \"use strict\"; return eval; }",
+        "function own(value){ \"use strict\"; return arguments[0] + arguments.length; } function outer(value){ \"use strict\"; var ownLength = arguments.length; var arrow = () => arguments[0]; function inner(other){ \"use strict\"; return arguments[0]; } return ownLength + arrow() + inner(value); } var holder = { method(value){ \"use strict\"; return arguments[0]; } }; function Constructor(value){ \"use strict\"; this.value = arguments[0]; } function sloppy(value){ value = arguments[0] + 1; arguments[0] = value + 1; return value + arguments[0]; } function legacyOnly(value){ return value + 1; } function sloppyOuter(value){ var arrow = () => { value = value + 1; return value + arguments[0]; }; return arrow(); } function parameterArguments(arguments){ arguments = arguments + 1; return arguments; } function evalOwner(){ \"use strict\"; return eval(\"arguments[0]\"); } function evalReference(){ \"use strict\"; return eval; }",
     );
     const program = try parser.parseProgram();
     const chunk = switch (try Compiler.admitProgram(arena.allocator(), program)) {
@@ -8924,6 +8942,23 @@ test "compiler gives arguments owners precise frame slots" {
     };
     try std.testing.expect(saw_mapped_load and saw_mapped_store);
 
+    // Annex B may materialize this function's arguments through
+    // `legacyOnly.arguments` in a nested observer even though its own body does
+    // not mention `arguments`. Retain the map metadata without making every
+    // ordinary parameter access pay the eager mapped-object opcode cost.
+    const legacy_only = Helper.named(chunk, "legacyOnly") orelse return error.TestUnexpectedResult;
+    const legacy_only_chunk = legacy_only.chunk orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u32, null), legacy_only_chunk.arguments_slot);
+    try std.testing.expectEqual(legacy_only_chunk.local_count, legacy_only_chunk.mapped_parameter_indices.len);
+    try std.testing.expectEqual(@as(u32, 0), legacy_only_chunk.mapped_parameter_indices[0]);
+    var saw_plain_parameter_load = false;
+    for (legacy_only_chunk.code.items) |instruction| switch (instruction.op) {
+        .load_local => saw_plain_parameter_load = saw_plain_parameter_load or instruction.a == 0,
+        .load_local_mapped, .store_local_mapped => return error.TestUnexpectedResult,
+        else => {},
+    };
+    try std.testing.expect(saw_plain_parameter_load);
+
     const sloppy_outer = Helper.named(chunk, "sloppyOuter") orelse return error.TestUnexpectedResult;
     const sloppy_outer_chunk = sloppy_outer.chunk orelse return error.TestUnexpectedResult;
     var sloppy_arrow: ?*bc.FnTemplate = null;
@@ -8944,7 +8979,11 @@ test "compiler gives arguments owners precise frame slots" {
     const parameter_arguments = Helper.named(chunk, "parameterArguments") orelse return error.TestUnexpectedResult;
     const parameter_arguments_chunk = parameter_arguments.chunk orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(?u32, null), parameter_arguments_chunk.arguments_slot);
-    try std.testing.expectEqual(@as(usize, 0), parameter_arguments_chunk.mapped_parameter_indices.len);
+    try std.testing.expectEqual(parameter_arguments_chunk.local_count, parameter_arguments_chunk.mapped_parameter_indices.len);
+    try std.testing.expectEqual(@as(u32, 0), parameter_arguments_chunk.mapped_parameter_indices[0]);
+    for (parameter_arguments_chunk.code.items) |instruction|
+        if (instruction.op == .load_local_mapped or instruction.op == .store_local_mapped)
+            return error.TestUnexpectedResult;
 
     const eval_owner = Helper.named(chunk, "evalOwner") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(bc.FnTemplateAdmission.plain_compiled, eval_owner.admission);
