@@ -336,17 +336,16 @@ pub const BudgetAllocator = struct {
     limit: usize,
     used: std.atomic.Value(usize) = .init(0),
     peak: std.atomic.Value(usize) = .init(0),
-    /// One-time bounded headroom granted after a full recovery collection that
-    /// still could not satisfy a request (#722). At a hard cap that state means
-    /// the collector cannot prove dead the bytes the mutator's own conservative
-    /// stack scan pins — recently dead storm garbage survives because stale
-    /// words persist in the allocating thread's scanned range until its frames
-    /// unwind and overwrite them. The grace lets such a retry succeed so
-    /// unwinding can proceed; later collections reclaim the slack once the pins
-    /// clear. Zero disables the escape hatch entirely (unit fixtures).
-    grace_bytes: usize = 0,
-    grace_granted: std.atomic.Value(bool) = .init(false),
-    extra: std.atomic.Value(usize) = .init(0),
+    /// Precharged, one-shot recovery storage (#722). It is allocated through
+    /// this wrapper, so it consumes part of `limit` from Context creation onward.
+    /// If a full recovery collection cannot satisfy a request because the
+    /// mutator's conservative stack still pins recently-dead storm garbage, the
+    /// reserve is freed and the request retries inside the unchanged hard cap.
+    recovery_reserve: []u8 = &.{},
+    /// 0 = unavailable, 1 = held, 2 = being released, 3 = released. Multiple
+    /// no-GIL mutators can miss the cap together; exactly one frees the reserve
+    /// and peers wait only for that infallible allocator release to publish.
+    recovery_reserve_state: std.atomic.Value(u8) = .init(0),
     recover_ctx: ?*anyopaque = null,
     recover_fn: ?RecoveryFn = null,
     /// A quota miss under an allocator/GC lock cannot collect synchronously.
@@ -368,10 +367,9 @@ pub const BudgetAllocator = struct {
     }
 
     fn reserve(self: *BudgetAllocator, amount: usize) ?usize {
-        const ceiling = self.limit + self.extra.load(.monotonic);
         var current = self.used.load(.monotonic);
         while (true) {
-            if (amount > ceiling -| current) return null;
+            if (amount > self.limit -| current) return null;
             const next = current + amount;
             if (self.used.cmpxchgWeak(current, next, .acq_rel, .monotonic)) |observed| {
                 current = observed;
@@ -400,22 +398,61 @@ pub const BudgetAllocator = struct {
         if (self.reserve(amount)) |next| return next;
         if (!self.tryRecover()) return null;
         if (self.reserve(amount)) |next| return next;
-        // A full collection ran and the retry still missed (#722): the retained
-        // bytes cannot be proven dead — conservative self-stack pinning. Grant
-        // the single bounded grace so the mutator can unwind past its stale
-        // pins; ordinary enforcement resumes against the raised ceiling, and
-        // later collections reclaim the slack once it drains.
-        if (self.grace_bytes != 0 and self.extra.load(.monotonic) == 0 and
-            self.grace_granted.cmpxchgStrong(false, true, .acq_rel, .monotonic) == null)
-        {
-            _ = self.extra.store(self.grace_bytes, .release);
-            return self.reserve(amount);
-        }
+        // A full collection ran and the retry still missed (#722): release the
+        // precharged reserve so the mutator can unwind past conservative stale
+        // roots without ever raising or exceeding the configured hard limit.
+        if (self.releaseRecoveryReserve()) return self.reserve(amount);
         return null;
     }
 
     fn release(self: *BudgetAllocator, amount: usize) void {
-        _ = self.used.fetchSub(amount, .acq_rel);
+        const previous = self.used.fetchSub(amount, .acq_rel);
+        std.debug.assert(previous >= amount);
+    }
+
+    fn installRecoveryReserve(self: *BudgetAllocator, amount: usize) !void {
+        if (amount == 0) return;
+        std.debug.assert(self.recovery_reserve_state.load(.monotonic) == 0);
+        self.recovery_reserve = try self.allocator().alloc(u8, amount);
+        self.recovery_reserve_state.store(1, .release);
+    }
+
+    fn releaseRecoveryReserve(self: *BudgetAllocator) bool {
+        var state = self.recovery_reserve_state.load(.acquire);
+        var spins: usize = 0;
+        while (true) switch (state) {
+            0 => return false,
+            1 => {
+                if (self.recovery_reserve_state.cmpxchgWeak(1, 2, .acq_rel, .acquire)) |observed| {
+                    state = observed;
+                    continue;
+                }
+                const memory = self.recovery_reserve;
+                self.inner.free(memory);
+                self.release(memory.len);
+                self.recovery_reserve_state.store(3, .release);
+                return true;
+            },
+            2 => {
+                while (self.recovery_reserve_state.load(.acquire) == 2) : (spins += 1) {
+                    if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+                }
+                state = self.recovery_reserve_state.load(.acquire);
+            },
+            3 => return true,
+            else => unreachable,
+        };
+    }
+
+    fn deinit(self: *BudgetAllocator) void {
+        const state = self.recovery_reserve_state.load(.acquire);
+        std.debug.assert(state != 2);
+        if (state == 1) {
+            self.inner.free(self.recovery_reserve);
+            self.release(self.recovery_reserve.len);
+        }
+        self.recovery_reserve = &.{};
+        self.recovery_reserve_state.store(0, .release);
     }
 
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
@@ -477,13 +514,14 @@ pub const BudgetAllocator = struct {
 
     pub fn stats(self: *const BudgetAllocator) Context.HeapBudgetStats {
         const used = @constCast(self).used.load(.acquire);
-        const extra = self.extra.load(.acquire);
+        const reserve_state = self.recovery_reserve_state.load(.acquire);
         return .{
             .limit_bytes = self.limit,
             .used_bytes = used,
             .peak_bytes = @constCast(self).peak.load(.acquire),
-            .remaining_bytes = self.limit + extra -| used,
-            .grace_granted_bytes = if (self.grace_granted.load(.acquire)) self.grace_bytes else 0,
+            .remaining_bytes = self.limit -| used,
+            .recovery_reserve_bytes = self.recovery_reserve.len,
+            .recovery_reserve_released_bytes = if (reserve_state == 3) self.recovery_reserve.len else 0,
         };
     }
 };
@@ -1028,6 +1066,100 @@ test "BudgetAllocator retries once after recovery frees budget" {
     try std.testing.expectEqual(@as(usize, 32), budget.used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 48), budget.peak.load(.acquire));
     a.free(second);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
+test "BudgetAllocator recovery reserve stays inside the hard limit" {
+    var budget = BudgetAllocator{ .inner = std.testing.allocator, .limit = 64 };
+    defer budget.deinit();
+    try budget.installRecoveryReserve(16);
+    const a = budget.allocator();
+
+    const State = struct {
+        calls: usize = 0,
+
+        fn recover(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return true;
+        }
+    };
+
+    var state = State{};
+    budget.setRecovery(&state, State.recover);
+
+    const held = try a.alloc(u8, 48);
+    try std.testing.expectEqual(@as(usize, 64), budget.used.load(.acquire));
+    const retry = try a.alloc(u8, 8);
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expectEqual(@as(usize, 56), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 64), budget.peak.load(.acquire));
+    const stats = budget.stats();
+    try std.testing.expectEqual(@as(usize, 16), stats.recovery_reserve_bytes);
+    try std.testing.expectEqual(@as(usize, 16), stats.recovery_reserve_released_bytes);
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
+
+    // The reserve is one-shot: a later miss still fails against the original
+    // ceiling instead of manufacturing a second recovery allowance.
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 9));
+    try std.testing.expectEqual(@as(usize, 2), state.calls);
+    a.free(retry);
+    a.free(held);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
+test "BudgetAllocator publishes one recovery reserve release to concurrent allocators" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var serialized = SerializedAllocator{ .inner = std.testing.allocator };
+    var budget = BudgetAllocator{ .inner = serialized.allocator(), .limit = 1024 };
+    defer budget.deinit();
+    try budget.installRecoveryReserve(256);
+    const a = budget.allocator();
+
+    const State = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn recover(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return true;
+        }
+    };
+    const Worker = struct {
+        allocator: std.mem.Allocator,
+        go: *std.atomic.Value(bool),
+        result: *?[]u8,
+
+        fn run(self: *@This()) void {
+            while (!self.go.load(.acquire)) std.atomic.spinLoopHint();
+            self.result.* = self.allocator.alloc(u8, 64) catch null;
+        }
+    };
+
+    var state = State{};
+    budget.setRecovery(&state, State.recover);
+    const held = try a.alloc(u8, 768);
+    var go = std.atomic.Value(bool).init(false);
+    var results: [4]?[]u8 = @splat(null);
+    var workers: [results.len]Worker = undefined;
+    var threads: [results.len]std.Thread = undefined;
+    for (&workers, 0..) |*worker, i| {
+        worker.* = .{ .allocator = a, .go = &go, .result = &results[i] };
+        threads[i] = try std.Thread.spawn(.{}, Worker.run, .{worker});
+    }
+    go.store(true, .release);
+    for (&threads) |*thread| thread.join();
+
+    try std.testing.expect(state.calls.load(.monotonic) >= 1);
+    try std.testing.expectEqual(@as(u8, 3), budget.recovery_reserve_state.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1024), budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1024), budget.peak.load(.acquire));
+    for (results) |result| {
+        const memory = result orelse return error.TestUnexpectedResult;
+        a.free(memory);
+    }
+    a.free(held);
     try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
 }
 
@@ -4113,11 +4245,12 @@ pub const Context = struct {
         used_bytes: usize,
         peak_bytes: usize,
         remaining_bytes: usize,
-        /// #722: the one-time bounded conservative-pin grace. Zero until a full
-        /// recovery collection still could not satisfy a request; `peak_bytes`
-        /// may legitimately reach `limit_bytes + grace_granted_bytes` before
-        /// enforcement resumes failing closed against the raised ceiling.
-        grace_granted_bytes: usize = 0,
+        /// Storage charged against `limit_bytes` at Context creation so one
+        /// post-collection retry can unwind conservative stale roots without
+        /// exceeding the cap. `released` becomes equal to `reserve` once that
+        /// one-shot headroom has been consumed.
+        recovery_reserve_bytes: usize = 0,
+        recovery_reserve_released_bytes: usize = 0,
     };
 
     /// Read-only evidence for the abort-safe parallel collector. The corpus
@@ -4786,12 +4919,17 @@ pub const Context = struct {
         } else gpa;
 
         var budget_allocator: ?*BudgetAllocator = null;
-        errdefer if (budget_allocator) |ba| gpa.destroy(ba);
+        errdefer if (budget_allocator) |ba| {
+            ba.deinit();
+            gpa.destroy(ba);
+        };
         const limited_gpa = if (options.heap_limit_bytes) |limit| blk: {
             const ba = try gpa.create(BudgetAllocator);
-            // #722: proportional conservative-pin grace (see BudgetAllocator).
-            ba.* = .{ .inner = serialized_gpa, .limit = limit, .grace_bytes = @min(limit / 64, 1024 * 1024) };
+            ba.* = .{ .inner = serialized_gpa, .limit = limit };
             budget_allocator = ba;
+            // #722: reserve proportional emergency headroom inside, rather than
+            // above, the public hard cap. A too-small cap fails at creation.
+            try ba.installRecoveryReserve(@min(limit / 64, 1024 * 1024));
             break :blk ba.allocator();
         } else serialized_gpa;
         var runtime_attribution_profiler: ?*RuntimeAttributionProfiler = null;
@@ -5575,7 +5713,10 @@ pub const Context = struct {
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
         if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
-        if (budget_allocator) |ba| host_gpa.destroy(ba);
+        if (budget_allocator) |ba| {
+            ba.deinit();
+            host_gpa.destroy(ba);
+        }
         if (host_allocator_lock) |lock| host_gpa.destroy(lock);
     }
 
@@ -5703,7 +5844,10 @@ pub const Context = struct {
         context_gpa.destroy(self.arena_state);
         context_gpa.destroy(self);
         if (runtime_attribution_profiler) |profile| host_gpa.destroy(profile);
-        if (budget_allocator) |ba| host_gpa.destroy(ba);
+        if (budget_allocator) |ba| {
+            ba.deinit();
+            host_gpa.destroy(ba);
+        }
         if (host_allocator_lock) |lock| host_gpa.destroy(lock);
     }
 
@@ -20939,10 +21083,7 @@ test "Context heap_limit_bytes object side-store pressure fails closed" {
         \\})();
     ));
     const stats = ctx.heapBudgetStats().?;
-    // #722: enforcement still fails closed, but the single bounded
-    // conservative-pin grace may legitimately carry `peak` up to
-    // `limit + grace_granted_bytes` before the hard failure.
-    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes + stats.grace_granted_bytes);
+    try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }
 
 test "Context heapBudgetStats is absent without heap_limit_bytes" {
