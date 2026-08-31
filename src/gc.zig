@@ -2835,7 +2835,9 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     }
     if (machine.current_microtask) |mt| traceMicrotask(mt, v);
     for (machine.current_microtask_batch) |mt| traceMicrotask(mt, v);
-    for (machine.current_hold_jobs) |job| jsthread.traceHoldJobRoot(job, v);
+    var hold_job_roots = machine.current_hold_job_roots;
+    while (hold_job_roots) |roots| : (hold_job_roots = roots.parent)
+        for (roots.jobs) |job| jsthread.traceHoldJobRoot(job, v);
     if (machine.async_waiters) |waiters| {
         machine.lockRealm();
         defer machine.unlockRealm();
@@ -2981,7 +2983,9 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         for (@constCast(queue.pendingItems())) |*task| relocateMicrotask(task, v);
     if (machine.current_microtask) |*task| relocateMicrotask(task, v);
     for (@constCast(machine.current_microtask_batch)) |*task| relocateMicrotask(task, v);
-    for (machine.current_hold_jobs) |job| jsthread.relocateHoldJobRoot(job, v);
+    var hold_job_roots = machine.current_hold_job_roots;
+    while (hold_job_roots) |roots| : (hold_job_roots = roots.parent)
+        for (roots.jobs) |job| jsthread.relocateHoldJobRoot(job, v);
     if (machine.async_waiters) |waiters|
         for (waiters.items) |*waiter| gc_relocation.rewriteValueSlot(v, &waiter.promise);
     for (machine.gc_env_roots.items) |*environment| {

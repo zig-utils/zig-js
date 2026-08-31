@@ -37494,6 +37494,32 @@ test "parallel_js: await joined asyncHold promise without releasing absent GIL" 
     try std.testing.expectEqual(@as(f64, 37), result.asNum());
 }
 
+test "parallel_js: spawned completion does not wait on its joining host task" {
+    // A realm-host task may synchronously join a child. The child's evaluation
+    // tail must publish its own completion without treating that host-owned
+    // task as work it must first drain: the task cannot finish until join does.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const script_result = try ctx.evaluate(
+        \\globalThis.__hostTaskJoinScore = 0;
+        \\const hostTaskJoinLock = new Lock();
+        \\hostTaskJoinLock.asyncHold(() => {
+        \\  const child = new Thread(() => 37);
+        \\  globalThis.__hostTaskJoinScore = child.join();
+        \\});
+        \\0;
+    );
+    try std.testing.expectEqual(@as(f64, 0), script_result.asNum());
+    try std.testing.expectEqual(@as(f64, 37), (try ctx.evaluate("globalThis.__hostTaskJoinScore")).asNum());
+}
+
 test "parallel_js: evaluate roots async completion through Thread keepalive GC" {
     // Once the top-level VM returns this Promise, evaluateWithThis waits for the
     // child records and drains their settlement jobs. A child-elected nursery

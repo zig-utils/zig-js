@@ -512,6 +512,13 @@ pub fn currentThreadId() u64 {
     return if (t_current) |rec| rec.id else 0;
 }
 
+/// Only the realm host owns whole-run-loop quiescence and Context teardown.
+/// A spawned Thread must publish its own completion without waiting for an
+/// unrelated peer-owned task: that peer may be synchronously joining it.
+pub fn isRealmHostThread() bool {
+    return t_current == null;
+}
+
 test "jsthread contention stats reset and snapshot" {
     disableContentionStats();
     bumpContention("lock_contentions");
@@ -4036,8 +4043,16 @@ pub fn pumpTasks(self: *Interpreter) void {
         const n = g.dequeueTaskBurst(&burst);
         if (n == 0) break;
         {
+            const parent_roots = self.current_hold_job_roots;
+            var roots = interp.HoldJobRootFrame{
+                .jobs = burst[0..n],
+                .parent = parent_roots,
+            };
+            self.current_hold_job_roots = &roots;
+            // Finish the globally in-flight count before removing this frame's
+            // ownership. A nested pump restores its parent in the same order.
+            defer self.current_hold_job_roots = parent_roots;
             defer g.finishTaskBurst(n);
-            self.current_hold_jobs = burst[0..n];
             for (burst[0..n]) |r| {
                 bumpContention("task_pump_jobs");
                 const job: *HoldJob = @ptrCast(@alignCast(r));
@@ -4050,7 +4065,6 @@ pub fn pumpTasks(self: *Interpreter) void {
                 if (microtaskEnqueueGeneration(self) != microtask_gen)
                     self.drainMicrotasks() catch {};
             }
-            self.current_hold_jobs = &.{};
         }
     }
 }
@@ -4074,7 +4088,7 @@ pub fn waitForTaskStateChange(self: *Interpreter) void {
     const released_gil = self.use_thread_gil;
     if (released_gil) g.release();
     defer if (released_gil) g.acquire();
-    g.waitForTaskStateChange(self.current_hold_jobs.len);
+    g.waitForTaskStateChange(self.ownedHoldJobCount());
 }
 
 /// Pump-then-park tick: serve pending run-loop tasks, poll the termination

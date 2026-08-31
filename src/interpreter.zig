@@ -2845,6 +2845,11 @@ pub const InheritedPropertyObservation = struct {
     slot: u32,
 };
 
+pub const HoldJobRootFrame = struct {
+    jobs: []const *anyopaque,
+    parent: ?*const HoldJobRootFrame,
+};
+
 /// Tree-walking evaluator. Evaluating a program/block returns the completion
 /// value of the last statement, which is what `JSEvaluateScript` hands back.
 pub const Interpreter = struct {
@@ -2967,11 +2972,12 @@ pub const Interpreter = struct {
     /// They are no longer present in `microtasks`, so GC must trace them while
     /// callbacks run and may trigger collection.
     current_microtask_batch: []promise.Microtask = &.{},
-    /// Run-loop `HoldJob`s currently popped from `Gil.tasks` for a bounded
-    /// burst. They are no longer present in the realm task queue, so GC must
-    /// trace them separately while callbacks/release promises can run JS and hit
-    /// safepoints.
-    current_hold_jobs: []const *anyopaque = &.{},
+    /// One dynamically nested run-loop task-pump burst. A delivered HoldJob can
+    /// re-enter the run loop (including through join/await), so a single slice
+    /// would forget the outer burst while it is still globally in flight. The
+    /// native-stack frames remain live for the dynamic pump scope; this chain
+    /// keeps every such job visible to GC and to quiescence ownership checks.
+    current_hold_job_roots: ?*const HoldJobRootFrame = null,
     /// The realm's SharedArrayBuffer storage references (Context-owned, like
     /// `microtasks`; agent realms own their own). Every SAB wrapper created in
     /// this realm tracks one reference here so the realm's teardown releases
@@ -10714,6 +10720,30 @@ pub const Interpreter = struct {
         f(ctx, self);
     }
 
+    pub fn holdJobRootCount(roots: ?*const HoldJobRootFrame) usize {
+        var count: usize = 0;
+        var frame = roots;
+        while (frame) |current| : (frame = current.parent) count += current.jobs.len;
+        return count;
+    }
+
+    pub fn ownedHoldJobCount(self: *const Interpreter) usize {
+        return holdJobRootCount(self.current_hold_job_roots);
+    }
+
+    test "nested hold-job root frames preserve outer ownership" {
+        var first: u8 = 1;
+        var second: u8 = 2;
+        var third: u8 = 3;
+        const outer_jobs = [_]*anyopaque{ @ptrCast(&first), @ptrCast(&second) };
+        const inner_jobs = [_]*anyopaque{@ptrCast(&third)};
+        const outer = HoldJobRootFrame{ .jobs = &outer_jobs, .parent = null };
+        const inner = HoldJobRootFrame{ .jobs = &inner_jobs, .parent = &outer };
+
+        try std.testing.expectEqual(@as(usize, 2), holdJobRootCount(&outer));
+        try std.testing.expectEqual(@as(usize, 3), holdJobRootCount(&inner));
+    }
+
     /// Join a realm-exclusive operation only from a boundary that contains no
     /// partially evaluated JavaScript expression. The request load is the hot
     /// no-op; the callback is entered only while another mutator owns a stop.
@@ -10800,7 +10830,9 @@ pub const Interpreter = struct {
                 self.unlockMicrotasks();
                 const tasks_empty = g.tasks_queued.load(.acquire) == 0;
                 if (q_empty and tasks_empty) {
-                    if (g.inFlightTaskCount() > self.current_hold_jobs.len) {
+                    if (jsthread.isRealmHostThread() and
+                        g.inFlightTaskCount() > self.ownedHoldJobCount())
+                    {
                         jsthread.waitForTaskStateChange(self);
                         continue;
                     }
@@ -22506,7 +22538,10 @@ fn drainRunLoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         const after = if (self.microtasks) |q| q.pendingLen() else 0;
         self.unlockMicrotasks();
         const tasks_queued = if (self.gil) |g| g.tasks_queued.load(.acquire) != 0 else false;
-        const tasks_in_flight = if (self.gil) |g| g.inFlightTaskCount() > self.current_hold_jobs.len else false;
+        const tasks_in_flight = if (self.gil) |g|
+            jsthread.isRealmHostThread() and g.inFlightTaskCount() > self.ownedHoldJobCount()
+        else
+            false;
         if (before == 0 and after == 0 and !tasks_queued and !tasks_in_flight) break;
         if (!tasks_queued and tasks_in_flight) jsthread.waitForTaskStateChange(self);
     }
