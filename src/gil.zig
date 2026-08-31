@@ -36,6 +36,16 @@ pub const Gil = struct {
     /// queue remains `tasks` under `api_lock`; this lets sync waiters skip the
     /// lock entirely when no task has been enqueued.
     tasks_queued: std.atomic.Value(usize) = .init(0),
+    /// Tasks removed from `tasks` by a peer pump but not yet completed. Queue
+    /// emptiness alone is not run-loop quiescence: teardown must not overtake a
+    /// condition reacquire or asyncHold delivery after another thread owns it.
+    tasks_in_flight: std.atomic.Value(usize) = .init(0),
+    /// Sleepable task-lifecycle edge. `api_lock` still protects the queue; this
+    /// independent mutex/condition lets a quiescence observer wait for an
+    /// already-dequeued peer task without polling or holding any queue lock.
+    task_state_mutex: std.Io.Mutex = .init,
+    task_state_cond: std.Io.Condition = .init,
+    task_state_generation: u64 = 0,
     /// Property-mode `Atomics.wait` waiters for this realm. Entries are
     /// type-erased `*jsthread.PropTicket` and are page-allocator owned for the
     /// duration of the blocking wait.
@@ -131,6 +141,7 @@ pub const Gil = struct {
         try g.ensureTaskCapacityLocked(a, 1);
         g.tasks.appendAssumeCapacity(task);
         g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
+        g.publishTaskStateChange();
     }
 
     pub fn enqueueTaskBurst(g: *Gil, a: std.mem.Allocator, tasks: []const *anyopaque) !void {
@@ -140,6 +151,7 @@ pub const Gil = struct {
         try g.ensureTaskCapacityLocked(a, tasks.len);
         g.tasks.appendSliceAssumeCapacity(tasks);
         g.tasks_queued.store(g.queuedTaskCountLocked(), .release);
+        g.publishTaskStateChange();
     }
 
     fn ensureTaskCapacityLocked(g: *Gil, a: std.mem.Allocator, additional: usize) !void {
@@ -163,6 +175,7 @@ pub const Gil = struct {
         }
 
         const item = g.tasks.items[g.tasks_head];
+        g.beginTaskBurst(1);
         g.tasks.items[g.tasks_head] = undefined;
         g.tasks_head += 1;
         if (g.tasks_head == g.tasks.items.len) {
@@ -187,6 +200,7 @@ pub const Gil = struct {
 
         const available = g.tasks.items.len - g.tasks_head;
         const n = @min(out.len, available);
+        g.beginTaskBurst(n);
         @memcpy(out[0..n], g.tasks.items[g.tasks_head..][0..n]);
         @memset(g.tasks.items[g.tasks_head..][0..n], undefined);
         g.tasks_head += n;
@@ -201,6 +215,58 @@ pub const Gil = struct {
     fn queuedTaskCountLocked(g: *const Gil) usize {
         if (g.tasks_head >= g.tasks.items.len) return 0;
         return g.tasks.items.len - g.tasks_head;
+    }
+
+    fn publishTaskStateChange(g: *Gil) void {
+        const io = agent.engineIo();
+        g.task_state_mutex.lockUncancelable(io);
+        g.task_state_generation +%= 1;
+        g.task_state_cond.broadcast(io);
+        g.task_state_mutex.unlock(io);
+    }
+
+    fn beginTaskBurst(g: *Gil, count: usize) void {
+        if (count == 0) return;
+        const io = agent.engineIo();
+        g.task_state_mutex.lockUncancelable(io);
+        _ = g.tasks_in_flight.fetchAdd(count, .release);
+        g.task_state_generation +%= 1;
+        g.task_state_mutex.unlock(io);
+    }
+
+    pub fn finishTaskBurst(g: *Gil, count: usize) void {
+        if (count == 0) return;
+        const io = agent.engineIo();
+        g.task_state_mutex.lockUncancelable(io);
+        const previous = g.tasks_in_flight.fetchSub(count, .acq_rel);
+        std.debug.assert(previous >= count);
+        g.task_state_generation +%= 1;
+        g.task_state_cond.broadcast(io);
+        g.task_state_mutex.unlock(io);
+    }
+
+    pub fn hasInFlightTasks(g: *const Gil) bool {
+        return g.inFlightTaskCount() != 0;
+    }
+
+    pub fn inFlightTaskCount(g: *const Gil) usize {
+        return @constCast(g).tasks_in_flight.load(.acquire);
+    }
+
+    /// Wait for either an owned task to complete or a nested task to become
+    /// queue-visible. The caller re-runs its normal pump/quiescence predicate
+    /// after wake; no timeout or periodic polling participates in progress.
+    pub fn waitForTaskStateChange(g: *Gil, owned_count: usize) void {
+        const io = agent.engineIo();
+        g.task_state_mutex.lockUncancelable(io);
+        const observed = g.task_state_generation;
+        while (g.task_state_generation == observed and
+            g.tasks_in_flight.load(.acquire) > owned_count and
+            g.tasks_queued.load(.acquire) == 0)
+        {
+            g.task_state_cond.waitUncancelable(io, &g.task_state_mutex);
+        }
+        g.task_state_mutex.unlock(io);
     }
 
     /// Lock/unlock the property-mode Atomics waiter table. The collector takes
@@ -246,10 +312,13 @@ pub const Gil = struct {
         var out: [4]*anyopaque = undefined;
         const n = g.dequeueTaskBurst(&out);
         try std.testing.expectEqual(@as(usize, 3), n);
+        try std.testing.expectEqual(@as(usize, 3), g.inFlightTaskCount());
         try std.testing.expectEqual(@intFromPtr(&one), @intFromPtr(out[0]));
         try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(out[1]));
         try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(out[2]));
         try std.testing.expectEqual(@as(usize, 0), g.tasks_queued.load(.acquire));
+        g.finishTaskBurst(n);
+        try std.testing.expectEqual(@as(usize, 0), g.inFlightTaskCount());
     }
 
     /// Register this thread's park record. Call under the GIL once per thread
@@ -512,13 +581,18 @@ test "gil: task queue is FIFO without front shifts" {
     try std.testing.expectEqual(@as(usize, 3), g.tasks.items.len);
 
     try std.testing.expectEqual(@intFromPtr(&one), @intFromPtr(g.dequeueTask().?));
+    try std.testing.expectEqual(@as(usize, 1), g.inFlightTaskCount());
+    g.finishTaskBurst(1);
     try std.testing.expectEqual(@as(usize, 2), g.tasks_queued.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), g.tasks_head);
     try std.testing.expectEqual(@as(usize, 3), g.tasks.items.len);
 
     try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(g.dequeueTask().?));
+    g.finishTaskBurst(1);
     try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(g.dequeueTask().?));
+    g.finishTaskBurst(1);
     try std.testing.expectEqual(@as(usize, 0), g.tasks_queued.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), g.inFlightTaskCount());
     try std.testing.expectEqual(@as(usize, 0), g.tasks_head);
     try std.testing.expectEqual(@as(usize, 0), g.tasks.items.len);
     try std.testing.expectEqual(@as(?*anyopaque, null), g.dequeueTask());
@@ -532,9 +606,14 @@ test "gil: task queue is FIFO without front shifts" {
     try std.testing.expectEqual(@intFromPtr(&one), @intFromPtr(burst[0]));
     try std.testing.expectEqual(@intFromPtr(&two), @intFromPtr(burst[1]));
     try std.testing.expectEqual(@as(usize, 1), g.tasks_queued.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), g.inFlightTaskCount());
+    g.finishTaskBurst(2);
     try std.testing.expectEqual(@as(usize, 1), g.dequeueTaskBurst(&burst));
     try std.testing.expectEqual(@intFromPtr(&three), @intFromPtr(burst[0]));
+    try std.testing.expectEqual(@as(usize, 1), g.inFlightTaskCount());
+    g.finishTaskBurst(1);
     try std.testing.expectEqual(@as(usize, 0), g.tasks_queued.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), g.inFlightTaskCount());
     try std.testing.expectEqual(@as(usize, 0), g.tasks_head);
     try std.testing.expectEqual(@as(usize, 0), g.tasks.items.len);
     try std.testing.expectEqual(@as(usize, 0), g.dequeueTaskBurst(&burst));

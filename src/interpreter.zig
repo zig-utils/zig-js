@@ -10797,6 +10797,10 @@ pub const Interpreter = struct {
                 self.unlockMicrotasks();
                 const tasks_empty = g.tasks_queued.load(.acquire) == 0;
                 if (q_empty and tasks_empty) {
+                    if (g.inFlightTaskCount() > self.current_hold_jobs.len) {
+                        jsthread.waitForTaskStateChange(self);
+                        continue;
+                    }
                     if (jsthread.nextPropAsyncDeadline(self)) |deadline| {
                         const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
                         if (deadline > now) {
@@ -22506,7 +22510,10 @@ fn drainRunLoopFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
         self.lockMicrotasks();
         const after = if (self.microtasks) |q| q.pendingLen() else 0;
         self.unlockMicrotasks();
-        if (before == 0 and after == 0) break;
+        const tasks_queued = if (self.gil) |g| g.tasks_queued.load(.acquire) != 0 else false;
+        const tasks_in_flight = if (self.gil) |g| g.inFlightTaskCount() > self.current_hold_jobs.len else false;
+        if (before == 0 and after == 0 and !tasks_queued and !tasks_in_flight) break;
+        if (!tasks_queued and tasks_in_flight) jsthread.waitForTaskStateChange(self);
     }
     return Value.undef();
 }

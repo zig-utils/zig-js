@@ -4035,21 +4035,46 @@ pub fn pumpTasks(self: *Interpreter) void {
         // delivery from taking the shared API lock once per queued grant.
         const n = g.dequeueTaskBurst(&burst);
         if (n == 0) break;
-        self.current_hold_jobs = burst[0..n];
-        for (burst[0..n]) |r| {
-            bumpContention("task_pump_jobs");
-            const job: *HoldJob = @ptrCast(@alignCast(r));
-            if (job.condition_async_reacquire)
-                bumpContention("task_pump_condition_jobs")
-            else
-                bumpContention("task_pump_async_hold_jobs");
-            const microtask_gen = microtaskEnqueueGeneration(self);
-            runHoldJob(self, job) catch {};
-            if (microtaskEnqueueGeneration(self) != microtask_gen)
-                self.drainMicrotasks() catch {};
+        {
+            defer g.finishTaskBurst(n);
+            self.current_hold_jobs = burst[0..n];
+            for (burst[0..n]) |r| {
+                bumpContention("task_pump_jobs");
+                const job: *HoldJob = @ptrCast(@alignCast(r));
+                if (job.condition_async_reacquire)
+                    bumpContention("task_pump_condition_jobs")
+                else
+                    bumpContention("task_pump_async_hold_jobs");
+                const microtask_gen = microtaskEnqueueGeneration(self);
+                runHoldJob(self, job) catch {};
+                if (microtaskEnqueueGeneration(self) != microtask_gen)
+                    self.drainMicrotasks() catch {};
+            }
+            self.current_hold_jobs = &.{};
         }
-        self.current_hold_jobs = &.{};
     }
+}
+
+/// Park until a peer-owned realm task completes or publishes follow-up work.
+/// The active interpreter's roots are frozen for the collector across the
+/// native condition wait, matching the join/lock park handshake without a
+/// timeout-driven polling loop.
+pub fn waitForTaskStateChange(self: *Interpreter) void {
+    const g = self.gil orelse return;
+    self.serviceMutatorStopSafepoint();
+    self.serviceGcSafepoint();
+    stack_scan.beginPark();
+    self.gc_parked.store(true, .release);
+    defer {
+        self.lockGcRoots();
+        self.gc_parked.store(false, .release);
+        self.unlockGcRoots();
+        stack_scan.endPark();
+    }
+    const released_gil = self.use_thread_gil;
+    if (released_gil) g.release();
+    defer if (released_gil) g.acquire();
+    g.waitForTaskStateChange(self.current_hold_jobs.len);
 }
 
 /// Pump-then-park tick: serve pending run-loop tasks, poll the termination

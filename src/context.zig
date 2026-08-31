@@ -5407,7 +5407,8 @@ pub const Context = struct {
         if (has_active_interpreters) return false;
         if (self.gil) |g| {
             g.lockApi();
-            const has_live_thread_or_task = g.tasks_queued.load(.acquire) != 0 or threads: {
+            const has_live_thread_or_task = g.tasks_queued.load(.acquire) != 0 or
+                g.hasInFlightTasks() or threads: {
                 const io = agent.engineIo();
                 for (self.js_threads.items) |record| {
                     record.join_mutex.lockUncancelable(io);
