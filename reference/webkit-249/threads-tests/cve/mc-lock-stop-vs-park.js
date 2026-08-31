@@ -65,6 +65,11 @@ const stopper = new Thread(() => {
     let seen = 0;
     while (Atomics.load(gate, "stop") === 0) {
         const r = Atomics.load(gate, "req");
+        // The conductor publishes stop before the wake-up sentinel. Recheck
+        // after acquiring req so a worker that entered this iteration before
+        // stop publication cannot count the sentinel as a 401st stop round.
+        if (Atomics.load(gate, "stop") !== 0)
+            break;
         if (r === seen) {
             Atomics.wait(gate, "req", seen, 1);
             continue;

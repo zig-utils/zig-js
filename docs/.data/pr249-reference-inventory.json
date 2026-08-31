@@ -2159,7 +2159,7 @@
       "sha256": "37bcb417929a33097439654bbc9978de22dbf933d444d868a56c4917bb55eb3b"
     },
     {
-      "bytes": 4478,
+      "bytes": 4775,
       "case": "cve/mc-lock-stop-vs-park.js",
       "execution_modes": [
         "parallel-js",
@@ -2172,7 +2172,7 @@
         "global:load",
         "option:--useJSThreads=1"
       ],
-      "sha256": "909776eedf9583db2f6e3123a6dbdf59de525abd4a2c5b5bb5616b60202e4c50"
+      "sha256": "d8ad5ed57fd07dc28c6d259e9a867c100f698941db4d204298ff35809ba86b9b"
     },
     {
       "bytes": 4650,
