@@ -1561,7 +1561,7 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     }
     if (flags.key_order) {
         if (o.keyOrder()) |ord| {
-            for (ord.items) |entry| a.free(entry.key);
+            for (ord.items) |entry| if (entry.owned) a.free(entry.key);
             ord.deinit(a);
             a.destroy(ord);
             o.coldState().?.key_order.store(null, .monotonic);

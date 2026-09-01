@@ -2349,6 +2349,10 @@ pub const ObjectCollectionState = struct {
 pub const KeyOrderEntry = struct {
     key: []const u8,
     deleted: bool = false,
+    /// Shape names live in the Context arena and can be borrowed until Context
+    /// teardown. Accessor/native names may not, so those entries retain the
+    /// historical self-owned copy and release it with the side store.
+    owned: bool = true,
 };
 
 pub const ObjectColdState = struct {
@@ -5377,7 +5381,7 @@ pub const Object = struct {
     fn deinitKeyOrderUnlocked(self: *Object) void {
         if (self.keyOrder()) |ord| {
             if (self.activeBackingAllocator("key_order")) |a| {
-                for (ord.items) |entry| a.free(entry.key);
+                for (ord.items) |entry| if (entry.owned) a.free(entry.key);
                 ord.deinit(a);
                 a.destroy(ord);
                 self.deactivateBacking("key_order");
@@ -5411,7 +5415,7 @@ pub const Object = struct {
         const ko = try alloc.create(std.ArrayListUnmanaged(KeyOrderEntry));
         ko.* = .empty;
         errdefer {
-            for (ko.items) |entry| alloc.free(entry.key);
+            for (ko.items) |entry| if (entry.owned) alloc.free(entry.key);
             ko.deinit(alloc);
             alloc.destroy(ko);
         }
@@ -5419,7 +5423,7 @@ pub const Object = struct {
         if (old_key_order) |ord| {
             if (old_uses_backing) {
                 const a = old_backing_allocator.?;
-                for (ord.items) |entry| a.free(entry.key);
+                for (ord.items) |entry| if (entry.owned) a.free(entry.key);
                 ord.deinit(a);
                 a.destroy(ord);
             }
@@ -5876,7 +5880,7 @@ pub const Object = struct {
         const ko = try alloc.create(std.ArrayListUnmanaged(KeyOrderEntry));
         ko.* = .empty;
         errdefer {
-            for (ko.items) |entry| alloc.free(entry.key);
+            for (ko.items) |entry| if (entry.owned) alloc.free(entry.key);
             ko.deinit(alloc);
             alloc.destroy(ko);
         }
@@ -5893,7 +5897,7 @@ pub const Object = struct {
             s = sh.parent;
         }
         std.mem.reverse([]const u8, seed.items); // newest-first → insertion order
-        for (seed.items) |n| try appendOwnedKeyOrder(ko, alloc, n, false);
+        for (seed.items) |n| try appendBorrowedKeyOrder(ko, alloc, n, false);
         cold.key_order.store(ko, .monotonic);
     }
 
@@ -6109,20 +6113,21 @@ pub const Object = struct {
             .absent, .deleted => {},
         }
         const child = try base.transitionFromState(name, state);
-        var pending_order_key: ?[]u8 = null;
-        var pending_order_allocator: ?std.mem.Allocator = null;
-        errdefer if (pending_order_key) |owned| pending_order_allocator.?.free(owned);
+        var pending_order_key: ?[]const u8 = null;
         if (self.keyOrder()) |order| {
             const should_append = keyOrderNeedsAdd(order, name);
             if (should_append) {
                 const alloc = try self.keyOrderAllocator(arena);
-                const owned = try alloc.dupe(u8, name);
-                order.ensureUnusedCapacity(alloc, 1) catch |err| {
-                    alloc.free(owned);
-                    return err;
-                };
-                pending_order_key = owned;
-                pending_order_allocator = alloc;
+                try order.ensureUnusedCapacity(alloc, 1);
+                // `transitionFromState` either returns a child whose immutable
+                // arena-owned operation name is `name`, or undoes an immediate
+                // delete and returns its parent. In that undo case `base` is
+                // the matching delete operation. Either slice outlives Object.
+                pending_order_key = if (child.name) |stable|
+                    if (std.mem.eql(u8, stable, name)) stable else base.name.?
+                else
+                    base.name.?;
+                std.debug.assert(std.mem.eql(u8, pending_order_key.?, name));
             }
         }
         const target_slot = switch (state) {
@@ -6143,8 +6148,8 @@ pub const Object = struct {
         // A new data key on an accessor-bearing object records its creation order
         // (a data↔accessor conversion keeps its position; an explicit delete
         // operation makes a genuinely re-added key land at the end).
-        if (pending_order_key) |owned| {
-            self.keyOrder().?.appendAssumeCapacity(.{ .key = owned });
+        if (pending_order_key) |stable| {
+            self.keyOrder().?.appendAssumeCapacity(.{ .key = stable, .owned = false });
             pending_order_key = null;
         }
         self.maybeCompactKeyOrderUnlocked(arena);
@@ -6326,21 +6331,21 @@ pub const Object = struct {
         // deletes retain historical entries and ownKeys selects the last live
         // occurrence without rebuilding the list per deletion.
         try self.ensureKeyOrderUnlocked(arena);
-        var pending_order_key: ?[]u8 = null;
-        var pending_order_allocator: ?std.mem.Allocator = null;
-        errdefer if (pending_order_key) |owned| pending_order_allocator.?.free(owned);
+        var pending_order_key: ?[]const u8 = null;
+        const next = (try current.deleteTransition(key)) orelse return true;
         if (!preserve_order) {
             const order = self.keyOrder().?;
             const alloc = try self.keyOrderAllocator(arena);
-            const owned = try alloc.dupe(u8, key);
-            order.ensureUnusedCapacity(alloc, 1) catch |err| {
-                alloc.free(owned);
-                return err;
-            };
-            pending_order_key = owned;
-            pending_order_allocator = alloc;
+            try order.ensureUnusedCapacity(alloc, 1);
+            // Deleting the latest operation returns its parent, so borrow the
+            // current add name. Other deletes create/cache an immutable delete
+            // child whose operation name is the requested key.
+            pending_order_key = if (current.name) |stable|
+                if (std.mem.eql(u8, stable, key)) stable else next.name.?
+            else
+                next.name.?;
+            std.debug.assert(std.mem.eql(u8, pending_order_key.?, key));
         }
-        const next = (try current.deleteTransition(key)) orelse return true;
 
         self.slotsItems()[slot] = Value.undef();
         if (next.count < current.count) {
@@ -6348,8 +6353,8 @@ pub const Object = struct {
         }
         self.publishShapeUnlocked(next);
         self.deleteAttrUnlocked(key);
-        if (pending_order_key) |owned| {
-            self.keyOrder().?.appendAssumeCapacity(.{ .key = owned, .deleted = true });
+        if (pending_order_key) |stable| {
+            self.keyOrder().?.appendAssumeCapacity(.{ .key = stable, .deleted = true, .owned = false });
             pending_order_key = null;
         }
         self.maybeCompactNamedDataUnlocked(arena, root);
@@ -6479,6 +6484,15 @@ fn appendOwnedKeyOrder(
         allocator.free(owned);
         return err;
     };
+}
+
+fn appendBorrowedKeyOrder(
+    list: *std.ArrayListUnmanaged(KeyOrderEntry),
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    deleted: bool,
+) std.mem.Allocator.Error!void {
+    try list.append(allocator, .{ .key = name, .deleted = deleted, .owned = false });
 }
 
 /// An accessor property: getter and/or setter functions. The private JSC ABI
@@ -7749,7 +7763,7 @@ fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
     defer if (object.storageState()) |storage| allocator.destroy(storage);
     defer if (object.coldState()) |cold| allocator.destroy(cold);
     defer if (object.keyOrder()) |order| {
-        for (order.items) |entry| allocator.free(entry.key);
+        for (order.items) |entry| if (entry.owned) allocator.free(entry.key);
         order.deinit(allocator);
         allocator.destroy(order);
     };
@@ -7761,6 +7775,10 @@ fn exerciseKeyOrderOomRollback(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 4), order.items.len);
     try std.testing.expectEqualStrings("alpha", order.items[0].key);
     try std.testing.expectEqualStrings("delta", order.items[3].key);
+    try std.testing.expect(!order.items[0].owned);
+    try std.testing.expect(!order.items[1].owned);
+    try std.testing.expect(!order.items[2].owned);
+    try std.testing.expect(order.items[3].owned);
 }
 
 test "object key-order construction rolls back every allocation failure" {
