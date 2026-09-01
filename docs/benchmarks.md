@@ -46,6 +46,30 @@ and hardware-counter guards. The profile is a measurement contract, not a
 published speedup. A dated raw artifact from a declared quiet reference host is
 still required before #479 can claim a lifecycle improvement.
 
+### Realm transition-key exact-parent result
+
+Issue [#662](https://github.com/zig-utils/zig-js/issues/662) replaces one secure
+entropy request per Shape transition map with one fail-closed root-Shape secret
+and domain-separated per-map keys. The seven-pair quiet-reference
+[cold lifecycle report](.data/exact-parent-context-transition-keys-2026-08-20.md)
+([raw](.data/exact-parent-context-transition-keys-2026-08-20.json)) compares
+candidate `cb0200bc` directly with parent `b815b3e7`: no-evaluation Context
+create/exact-destroy wall time is 883.977 → 702.634 ms (`0.795x`), retired
+instructions are `0.8866x`, cycles `0.7960x`, and process energy `0.8427x`.
+Peak and retained RSS are each `0.9980x`; checksums and all finalizer counts are
+exact, with nominal thermal state and no discarded samples.
+
+The separate seven-pair [warmed Shape-fanout report](.data/exact-parent-shape-transition-fanout-2026-09-01.md)
+([raw](.data/exact-parent-shape-transition-fanout-2026-09-01.json)) executes
+100,000 transitions over keys prepared outside the timed boundary. It passes
+the control gate at 337.674 → 346.949 ms (`1.027x`), with instructions
+`1.0021x`, cycles `1.0190x`, and process energy `1.0153x`; every efficiency
+series is stable, thermal state remains nominal, and the exact checksum is
+`5,000,150,000`. These bounded increases are below the frozen 10% material-
+regression threshold. The warm mixed-tier row does not assert allocation
+equivalence; the cold lifecycle artifact remains the finalizer and retained-RSS
+evidence boundary.
+
 ## Required-bytecode/no-JIT arithmetic profile
 
 V20 added, and V23 retains, four zig-js-only non-scored rows from
