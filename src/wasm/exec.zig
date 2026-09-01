@@ -3383,26 +3383,43 @@ fn publishStoredException(exception: *js_value.WasmException) void {
     exception.published = true;
 }
 
+/// Exception root order is not observable. Sorting exact Value encodings gives
+/// deterministic O(n log n) worst-case deduplication without exposing this
+/// error path to attacker-chosen fixed-seed hash probes.
+fn collectExceptionExternrefs(
+    scratch: Allocator,
+    owner: Allocator,
+    payload: []const WasmSlot,
+) error{OutOfMemory}![]js_value.Value {
+    var roots: std.ArrayListUnmanaged(js_value.Value) = .empty;
+    defer roots.deinit(scratch);
+    for (payload) |slot| switch (slot) {
+        .externref, .hostref => |root| try roots.append(scratch, root),
+        .exnref => |nested| if (nested) |exception|
+            try roots.appendSlice(scratch, exception.externrefs),
+        .numeric, .vector, .funcref, .i31ref, .gcref, .externalized_gcref, .externalized_i31 => {},
+    };
+    std.mem.sort(js_value.Value, roots.items, {}, struct {
+        fn lessThan(_: void, left: js_value.Value, right: js_value.Value) bool {
+            return left.bits < right.bits;
+        }
+    }.lessThan);
+    var unique_len: usize = 0;
+    for (roots.items) |root| {
+        if (unique_len != 0 and roots.items[unique_len - 1].bits == root.bits) continue;
+        roots.items[unique_len] = root;
+        unique_len += 1;
+    }
+    return owner.dupe(js_value.Value, roots.items[0..unique_len]);
+}
+
 fn publishExceptionReference(s: *State, active: *ActiveException) ExecError!*js_value.WasmException {
     if (active.reference) |reference| return reference;
     const owner = active.owner;
     const payload = try owner.gpa.dupe(WasmSlot, active.payload);
     errdefer owner.gpa.free(payload);
-    var externref_set: std.AutoHashMapUnmanaged(u64, void) = .empty;
-    defer externref_set.deinit(s.alloc);
-    for (payload) |slot| switch (slot) {
-        .externref, .hostref => |root| try externref_set.put(s.alloc, root.bits, {}),
-        .exnref => |nested| if (nested) |exception| {
-            for (exception.externrefs) |root| try externref_set.put(s.alloc, root.bits, {});
-        },
-        .numeric, .vector, .funcref, .i31ref, .gcref, .externalized_gcref, .externalized_i31 => {},
-    };
-    const externrefs = try owner.gpa.alloc(js_value.Value, externref_set.count());
+    const externrefs = try collectExceptionExternrefs(s.alloc, owner.gpa, payload);
     errdefer owner.gpa.free(externrefs);
-    var externref_index: usize = 0;
-    var externref_iterator = externref_set.keyIterator();
-    while (externref_iterator.next()) |bits| : (externref_index += 1)
-        externrefs[externref_index] = .{ .bits = bits.* };
     const exception = owner.gpa.create(js_value.WasmException) catch |err| {
         return err;
     };
@@ -7195,6 +7212,75 @@ test "wasm.exec exception payloads preserve bits references and rethrow identity
     defer destroyInstance(talloc, null_ref_inst);
     try std.testing.expectError(error.Trap, invoke(null_ref_inst, 0, &.{}, &.{}, &diag));
     try std.testing.expectEqualStrings("null exception reference", diag.message());
+}
+
+test "wasm.exec exception externref roots bound chosen default-hash collisions" {
+    const target_mask: u64 = 1023;
+    const collision_count: usize = 32;
+    var values: [collision_count]js_value.Value = undefined;
+    var found: usize = 0;
+    var candidate: u64 = 0;
+    while (found != values.len) : (candidate += 1) {
+        const root = js_value.Value.num(@floatFromInt(candidate));
+        const bits = root.bits;
+        if ((std.hash.Wyhash.hash(0, std.mem.asBytes(&bits)) & target_mask) != 0) continue;
+        values[found] = root;
+        found += 1;
+    }
+
+    var owner_token: u8 = 0;
+    const nested_roots = [_]js_value.Value{ values[0], values[1], values[0] };
+    var nested = js_value.WasmException{
+        .tag = @ptrCast(&owner_token),
+        .payload = &.{},
+        .externrefs = &nested_roots,
+        .owner = @ptrCast(&owner_token),
+    };
+    var payload: [collision_count + 3]WasmSlot = undefined;
+    for (values, 0..) |root, index| payload[index] = .{ .externref = root };
+    payload[collision_count] = .{ .externref = values[0] };
+    payload[collision_count + 1] = .{ .hostref = values[1] };
+    payload[collision_count + 2] = .{ .exnref = &nested };
+
+    const roots = try collectExceptionExternrefs(std.testing.allocator, std.testing.allocator, &payload);
+    defer std.testing.allocator.free(roots);
+    try std.testing.expectEqual(collision_count, roots.len);
+    for (roots[1..], 1..) |root, index| try std.testing.expect(roots[index - 1].bits < root.bits);
+    for (values) |expected| {
+        const bits = expected.bits;
+        try std.testing.expectEqual(@as(u64, 0), std.hash.Wyhash.hash(0, std.mem.asBytes(&bits)) & target_mask);
+        var present = false;
+        for (roots) |root| {
+            if (root.bits == expected.bits) {
+                present = true;
+                break;
+            }
+        }
+        try std.testing.expect(present);
+    }
+
+    const empty = try collectExceptionExternrefs(std.testing.allocator, std.testing.allocator, &.{});
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+fn collectExceptionExternrefsWithFailingAllocator(allocator: std.mem.Allocator) !void {
+    const roots_in = [_]WasmSlot{
+        .{ .externref = js_value.Value.num(3) },
+        .{ .hostref = js_value.Value.num(5) },
+        .{ .externref = js_value.Value.num(3) },
+    };
+    const roots = try collectExceptionExternrefs(allocator, allocator, &roots_in);
+    defer allocator.free(roots);
+    try std.testing.expectEqual(@as(usize, 2), roots.len);
+}
+
+test "wasm.exec exception externref root deduplication is allocation-failure atomic" {
+    try std.testing.checkAllAllocationFailures(
+        talloc,
+        collectExceptionExternrefsWithFailingAllocator,
+        .{},
+    );
 }
 
 fn executeExceptionReferenceWithFailingAllocator(gpa: std.mem.Allocator) !void {
