@@ -2259,6 +2259,34 @@ const ErrorStack = struct {
     frames: []const ErrorStackFrame,
 };
 
+pub const SparseArrayIndexHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), index: usize) u64 {
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&index));
+    }
+
+    pub fn eql(_: @This(), left: usize, right: usize) bool {
+        return left == right;
+    }
+};
+
+pub const SparseArrayHoleIndex = std.HashMapUnmanaged(
+    usize,
+    void,
+    SparseArrayIndexHashContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+/// Hole membership and its unpredictable bucket-placement context share the
+/// already-cold per-Array allocation. The exact integer key remains the
+/// equality authority; the seed only makes script-selected probe chains
+/// unpredictable.
+pub const SparseArrayHoleState = struct {
+    index: SparseArrayHoleIndex = .empty,
+    hash_context: SparseArrayIndexHashContext,
+};
+
 pub const ObjectRareState = union(ObjectRareTag) {
     none: void,
     primitive: ObjectPrimitiveState,
@@ -2318,7 +2346,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     temporal: struct { ptr: ?*TemporalData = null },
     promise: struct { ptr: ?*anyopaque = null },
     constructor: struct { ptr: ?*Object = null },
-    sparse_array: struct { holes: ?*std.AutoHashMapUnmanaged(usize, void) = null },
+    sparse_array: struct { holes: ?*SparseArrayHoleState = null },
     js_function: struct { ptr: ?*anyopaque = null },
     regex: ObjectRegexState,
     // WebAssembly JS API (issue #141). Native payloads are type-erased module,
@@ -4114,7 +4142,7 @@ pub const Object = struct {
         state.ptr = ctor;
     }
 
-    pub inline fn holesMap(self: *const Object) ?*std.AutoHashMapUnmanaged(usize, void) {
+    pub inline fn holesMap(self: *const Object) ?*SparseArrayHoleState {
         const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.sparse_array)) return null;
         return cold.rare.sparse_array.holes;
@@ -4122,6 +4150,17 @@ pub const Object = struct {
 
     fn sparseArrayState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "sparse_array") {
         return self.ensureRare(fallback, .sparse_array, .{});
+    }
+
+    fn deriveSparseArrayHashContext(self: *const Object) std.mem.Allocator.Error!SparseArrayIndexHashContext {
+        // The shape pointer is release-published and every Shape is immutable.
+        // Hole mutation holds elements_lock, not property_lock, so use an
+        // atomic snapshot rather than introducing the reverse lock order.
+        if (@atomicLoad(?*Shape, &self.shape, .acquire)) |shape|
+            return .{ .seed = try shape.deriveSecureHashSeed() };
+        var bytes: [@sizeOf(u64)]u8 = undefined;
+        agent.engineIo().randomSecure(&bytes) catch return error.OutOfMemory;
+        return .{ .seed = std.mem.readInt(u64, &bytes, .little) };
     }
 
     pub fn clearHolesMap(self: *Object) void {
@@ -5278,21 +5317,27 @@ pub const Object = struct {
 
     fn isHoleUnlocked(self: *const Object, i: usize) bool {
         const h = self.holesMap() orelse return false;
-        return h.contains(i);
+        return h.index.containsContext(i, h.hash_context);
     }
 
     fn markHoleUnlocked(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
         const state = try self.sparseArrayState(arena);
         const a = try self.holesAllocator(arena);
         if (state.holes == null) {
-            state.holes = try a.create(std.AutoHashMapUnmanaged(usize, void));
-            state.holes.?.* = .{};
+            const hash_context = try self.deriveSparseArrayHashContext();
+            const holes = try a.create(SparseArrayHoleState);
+            holes.* = .{ .hash_context = hash_context };
+            errdefer a.destroy(holes);
+            try holes.index.putContext(a, i, {}, hash_context);
+            state.holes = holes;
+            return;
         }
-        try state.holes.?.put(a, i, {});
+        const holes = state.holes.?;
+        try holes.index.putContext(a, i, {}, holes.hash_context);
     }
 
     fn clearHoleUnlocked(self: *Object, i: usize) void {
-        if (self.holesMap()) |h| _ = h.remove(i);
+        if (self.holesMap()) |h| _ = h.index.removeContext(i, h.hash_context);
     }
 
     pub fn denseElementInBounds(self: *const Object, i: usize) bool {
@@ -5458,7 +5503,7 @@ pub const Object = struct {
         const elements = try self.ensureElementsList(arena);
         elements.clearRetainingCapacity();
         try elements.appendSlice(self.elementsAllocator(arena), values);
-        if (self.holesMap()) |h| h.clearRetainingCapacity();
+        if (self.holesMap()) |h| h.index.clearRetainingCapacity();
         try self.setArrayLengthFloorUnlocked(arena, new_len);
     }
 
@@ -7724,6 +7769,70 @@ test "ordinary named descriptor snapshots are coherent across representations" {
     }
     try std.testing.expectEqual(@as(u64, 0), object_profile.snapshot().object_property_lock_acquires);
     try std.testing.expect(object.namedOwnPropertySnapshot("missing") == .absent);
+}
+
+test "sparse Array hole index disperses chosen default-seed collisions exactly" {
+    const target_mask: usize = 1023;
+    const collision_count: usize = 32;
+    var indices: [collision_count]usize = undefined;
+    var found: usize = 0;
+    var candidate: usize = 0;
+    while (found != indices.len) : (candidate += 1) {
+        if ((std.hash.Wyhash.hash(0, std.mem.asBytes(&candidate)) & target_mask) != 0) continue;
+        indices[found] = candidate;
+        found += 1;
+    }
+
+    const keyed_context = SparseArrayIndexHashContext{ .seed = 0x4152_5241_595f_0001 };
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    var index: SparseArrayHoleIndex = .empty;
+    defer index.deinit(std.testing.allocator);
+    for (indices) |chosen| {
+        try std.testing.expectEqual(@as(u64, 0), std.hash.Wyhash.hash(0, std.mem.asBytes(&chosen)) & target_mask);
+        const bucket: usize = @intCast(keyed_context.hash(chosen) & target_mask);
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        try index.putContext(std.testing.allocator, chosen, {}, keyed_context);
+    }
+    try std.testing.expect(occupied_count > collision_count / 2);
+    try std.testing.expectEqual(collision_count, index.count());
+    for (indices) |chosen| try std.testing.expect(index.containsContext(chosen, keyed_context));
+    try std.testing.expect(!index.containsContext(std.math.maxInt(usize), keyed_context));
+}
+
+test "sparse Array hole index publication is failure atomic and retryable" {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root = try Shape.createRoot(shape_arena.allocator());
+    var observed_failures: usize = 0;
+    var observed_success = false;
+
+    for (0..16) |fail_index| {
+        var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer scratch.deinit();
+        var failing: std.testing.FailingAllocator = .init(scratch.allocator(), .{ .fail_index = fail_index });
+        var object = Object{ .shape = root };
+        object.markHole(failing.allocator(), 17) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(object.holesMap() == null);
+            observed_failures += 1;
+
+            failing.fail_index = std.math.maxInt(usize);
+            try object.markHole(failing.allocator(), 17);
+            try std.testing.expect(object.isHole(17));
+            object.clearHole(17);
+            try std.testing.expect(!object.isHole(17));
+            continue;
+        };
+        try std.testing.expect(object.isHole(17));
+        observed_success = true;
+        break;
+    }
+    try std.testing.expect(observed_failures >= 4);
+    try std.testing.expect(observed_success);
 }
 
 test "initialized data descriptors publish with one lock and preserve low-level state" {

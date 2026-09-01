@@ -11712,6 +11712,46 @@ test "parallel_js generic Array index keys remain invocation local" {
     try std.testing.expectEqual(@as(f64, 264192), result.asNum());
 }
 
+test "parallel_js: sparse Array hole index serializes disjoint deletion and fill" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+        .enable_threads = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\globalThis.sharedHoleArray = [];
+        \\for (var i = 0; i < 256; i++) sharedHoleArray.push(i);
+        \\function sharedHoleLane(lane) {
+        \\  var checksum = 0;
+        \\  for (var round = 0; round < 32; round++) {
+        \\    for (var i = lane; i < sharedHoleArray.length; i += 4) {
+        \\      if (!delete sharedHoleArray[i]) throw new Error("delete failed");
+        \\      if (i in sharedHoleArray) throw new Error("deleted index remained present");
+        \\      sharedHoleArray[i] = i + round;
+        \\      if (!(i in sharedHoleArray) || sharedHoleArray[i] !== i + round)
+        \\        throw new Error("filled index was not published");
+        \\      checksum += sharedHoleArray[i];
+        \\    }
+        \\  }
+        \\  return checksum;
+        \\}
+        \\var sharedHoleThreads = [];
+        \\for (var lane = 0; lane < 4; lane++) sharedHoleThreads.push(new Thread(sharedHoleLane, lane));
+        \\var sharedHoleTotal = 0;
+        \\for (var lane = 0; lane < 4; lane++) sharedHoleTotal += sharedHoleThreads[lane].join();
+        \\for (var i = 0; i < 256; i++) {
+        \\  if (!(i in sharedHoleArray) || sharedHoleArray[i] !== i + 31)
+        \\    throw new Error("final dense value mismatch");
+        \\}
+        \\sharedHoleTotal;
+    );
+    try std.testing.expectEqual(@as(f64, 1_171_456), result.asNum());
+}
+
 test "array instances inherit from Array.prototype (incl. holes)" {
     try std.testing.expect((try evalIn("Object.getPrototypeOf([]) === Array.prototype")).asBool());
     try std.testing.expect((try evalIn("[].map === Array.prototype.map")).asBool());

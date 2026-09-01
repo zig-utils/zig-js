@@ -369,7 +369,7 @@ const Serializer = struct {
         @memcpy(elements, o.elementsItems());
         const hole_map = o.holesMap();
         for (elements, 0..) |el, i| {
-            const hole = hole_map != null and hole_map.?.contains(i);
+            const hole = if (hole_map) |h| h.index.containsContext(i, h.hash_context) else false;
             holes[i] = hole;
             if (!hole) try s.rootSnapshotValue(el);
         }

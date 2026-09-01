@@ -1579,7 +1579,7 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     }
     if (flags.holes) {
         if (o.holesMap()) |holes| {
-            holes.deinit(a);
+            holes.index.deinit(a);
             a.destroy(holes);
             o.clearHolesMap();
         }
