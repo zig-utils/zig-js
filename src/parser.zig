@@ -124,6 +124,21 @@ const SecureStringHashContext = struct {
     }
 };
 
+/// Cover-grammar facts are keyed by arena-node identity. Hash the exact address
+/// representation with the parse-root secret instead of treating allocator
+/// placement or ASLR as a collision-resistance mechanism.
+const SecureIdentityHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), identity: usize) u64 {
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&identity));
+    }
+
+    pub fn eql(_: @This(), left: usize, right: usize) bool {
+        return left == right;
+    }
+};
+
 /// One lazy keyed-hash context belongs to the complete parse, including nested
 /// template-substitution parsers. Production callers attach the realm's Shape
 /// key source; standalone parser users fall back to the engine entropy provider.
@@ -195,6 +210,54 @@ fn SecureStringMapUnmanaged(comptime Value: type) type {
 
         fn iterator(self: *const Self) Index.Iterator {
             return self.index.iterator();
+        }
+
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.index.deinit(allocator);
+        }
+    };
+}
+
+fn SecureIdentityMapUnmanaged(comptime Value: type) type {
+    const Index = std.HashMapUnmanaged(
+        usize,
+        Value,
+        SecureIdentityHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        const Self = @This();
+
+        index: Index = .empty,
+
+        fn put(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            state: *SecureHashState,
+            identity: usize,
+            value: Value,
+        ) std.mem.Allocator.Error!void {
+            const root_context = try state.candidate();
+            const context = SecureIdentityHashContext{ .seed = root_context.seed };
+            try self.index.putContext(allocator, identity, value, context);
+            // Failed first insertion publishes neither a table nor the shared
+            // parse-root seed, so a caller can recover and retry exactly.
+            if (state.context == null) state.context = root_context;
+        }
+
+        fn contains(self: *const Self, state: *const SecureHashState, identity: usize) bool {
+            const root_context = state.context orelse return false;
+            return self.index.containsContext(identity, .{ .seed = root_context.seed });
+        }
+
+        fn remove(self: *Self, state: *const SecureHashState, identity: usize) bool {
+            const root_context = state.context orelse return false;
+            return self.index.removeContext(identity, .{ .seed = root_context.seed });
+        }
+
+        fn count(self: *const Self) usize {
+            return self.index.count();
         }
 
         fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -323,25 +386,25 @@ pub const Parser = struct {
     /// but not in the destructuring refinement, so `litToPattern` rejects them.
     /// Keyed by node pointer; only consulted during pattern conversion, so a
     /// stale entry for an array used as a plain literal is simply never checked.
-    rest_trailing_comma_arrays: std.AutoHashMapUnmanaged(*Node, void) = .empty,
+    rest_trailing_comma_arrays: SecureIdentityMapUnmanaged(void) = .{},
     /// Object literals carrying a CoverInitializedName (`{ a = 1 }`), which is
     /// valid ONLY when the object is later refined to an assignment pattern.
     /// `litToPattern` removes an entry on conversion; any left when the
     /// Script/Module finishes parsing was used as a real object literal — an
     /// early SyntaxError (`({ a = 1 })`, `f({ a = 1 })`).
-    pending_cover_inits: std.AutoHashMapUnmanaged(*Node, void) = .empty,
+    pending_cover_inits: SecureIdentityMapUnmanaged(void) = .{},
     /// Object literals with two or more `__proto__: value` colon properties,
     /// which is an early error for a real object literal but legal when the object
     /// is refined to a pattern (where `__proto__` is just a property key).
     /// Same lifecycle as `pending_cover_inits`.
-    pending_proto_dup: std.AutoHashMapUnmanaged(*Node, void) = .empty,
+    pending_proto_dup: SecureIdentityMapUnmanaged(void) = .{},
     /// Expression nodes that were wrapped in parentheses, keyed by node address
     /// so the mark is true pointer identity rather than any structural hashing.
     /// A parenthesized
     /// array/object literal is not a valid destructuring assignment target
     /// (`({}) = 1`, `([a]) = b`), so `litToPattern` rejects one; a parenthesized
     /// identifier/member stays a valid target and is routed around litToPattern.
-    paren_wrapped: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    paren_wrapped: SecureIdentityMapUnmanaged(void) = .{},
     /// Identifier name for the just-parsed parenthesized target in `(... ) =`.
     /// This feeds NamedEvaluation, where `(f) = function(){}` must not name the
     /// anonymous function even though the parenthesized identifier remains a valid
@@ -689,11 +752,11 @@ pub const Parser = struct {
     }
 
     fn markParenWrapped(self: *Parser, node: *Node) ParseError!void {
-        try self.paren_wrapped.put(self.arena, @intFromPtr(node), {});
+        try self.paren_wrapped.put(self.arena, self.secureHashState(), @intFromPtr(node), {});
     }
 
     fn isParenWrapped(self: *Parser, node: *Node) bool {
-        return self.paren_wrapped.contains(@intFromPtr(node));
+        return self.paren_wrapped.contains(self.secureHashState(), @intFromPtr(node));
     }
 
     fn parenWrappedIdentifierBefore(self: *Parser, pos: usize, name: []const u8) bool {
@@ -1713,7 +1776,7 @@ pub const Parser = struct {
             .array_lit => |elems| {
                 // `[...x,]` — a trailing comma after the rest element is invalid in
                 // an array assignment pattern.
-                if (self.rest_trailing_comma_arrays.contains(node)) return ParseError.InvalidAssignmentTarget;
+                if (self.rest_trailing_comma_arrays.contains(self.secureHashState(), @intFromPtr(node))) return ParseError.InvalidAssignmentTarget;
                 var out: std.ArrayListUnmanaged(ast.ArrPatElem) = .empty;
                 var rest: ?*Node = null;
                 for (elems) |e| {
@@ -1737,8 +1800,8 @@ pub const Parser = struct {
                 // This object is being refined to a pattern, so a
                 // CoverInitializedName it carries is legal (it becomes a default),
                 // and duplicate `__proto__` keys are legal (just property names).
-                _ = self.pending_cover_inits.remove(node);
-                _ = self.pending_proto_dup.remove(node);
+                _ = self.pending_cover_inits.remove(self.secureHashState(), @intFromPtr(node));
+                _ = self.pending_proto_dup.remove(self.secureHashState(), @intFromPtr(node));
                 var out: std.ArrayListUnmanaged(ast.ObjPatProp) = .empty;
                 var rest_target: ?*ast.Node = null;
                 var seen_spread = false;
@@ -3755,8 +3818,8 @@ pub const Parser = struct {
         try self.expect(.rbrace);
         for (props.items) |p| try self.checkMethodNoSuperCall(p.value);
         const node = try self.alloc(.{ .object_lit = props.items });
-        if (has_cover_init) try self.pending_cover_inits.put(self.arena, node, {});
-        if (proto_colon_count >= 2) try self.pending_proto_dup.put(self.arena, node, {});
+        if (has_cover_init) try self.pending_cover_inits.put(self.arena, self.secureHashState(), @intFromPtr(node), {});
+        if (proto_colon_count >= 2) try self.pending_proto_dup.put(self.arena, self.secureHashState(), @intFromPtr(node), {});
         return node;
     }
 
@@ -4618,7 +4681,7 @@ pub const Parser = struct {
         }
         try self.expect(.rbracket);
         const node = try self.alloc(.{ .array_lit = elems.items });
-        if (rest_trailing_comma) try self.rest_trailing_comma_arrays.put(self.arena, node, {});
+        if (rest_trailing_comma) try self.rest_trailing_comma_arrays.put(self.arena, self.secureHashState(), @intFromPtr(node), {});
         return node;
     }
 
@@ -5229,6 +5292,118 @@ test "parser source-name indexes share one lazy secure parse-root context" {
     try wide_index.put(std.testing.allocator, &wide_name, {});
     try std.testing.expect(wide_index.contains(&wide_name));
     try std.testing.expectEqual(@as(usize, 1), wide_index.count());
+}
+
+test "parser cover grammar identity indexes are keyed lazy and failure atomic" {
+    var empty_state: SecureHashState = .{};
+    var empty: SecureIdentityMapUnmanaged(void) = .{};
+    defer empty.deinit(std.testing.allocator);
+    try std.testing.expect(!empty.contains(&empty_state, 0x101));
+    try std.testing.expect(!empty.remove(&empty_state, 0x101));
+    try std.testing.expect(empty_state.context == null);
+
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, empty.put(unavailable.allocator(), &empty_state, 0x101, {}));
+    try std.testing.expect(empty_state.context == null);
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
+    try std.testing.expectEqual(@as(usize, 0), empty.index.capacity());
+    try empty.put(std.testing.allocator, &empty_state, 0x101, {});
+    try std.testing.expect(empty_state.context != null);
+    try std.testing.expect(empty.contains(&empty_state, 0x101));
+
+    const target_mask: u64 = 1023;
+    var collision_identities: [32]usize = undefined;
+    var collision_count: usize = 0;
+    var candidate: usize = 1;
+    while (collision_count < collision_identities.len) : (candidate += 1) {
+        if ((SecureIdentityHashContext{ .seed = 0 }).hash(candidate) & target_mask != 0) continue;
+        collision_identities[collision_count] = candidate;
+        collision_count += 1;
+    }
+
+    var keyed_state = SecureHashState{ .context = .{ .seed = 0xC0_5645_5247_5241_4D } };
+    var keyed: SecureIdentityMapUnmanaged(void) = .{};
+    defer keyed.deinit(std.testing.allocator);
+    var keyed_buckets: [target_mask + 1]bool = @splat(false);
+    var distinct_keyed_buckets: usize = 0;
+    for (collision_identities) |identity| {
+        try std.testing.expectEqual(@as(u64, 0), (SecureIdentityHashContext{ .seed = 0 }).hash(identity) & target_mask);
+        const bucket = (SecureIdentityHashContext{ .seed = keyed_state.context.?.seed }).hash(identity) & target_mask;
+        if (!keyed_buckets[bucket]) {
+            keyed_buckets[bucket] = true;
+            distinct_keyed_buckets += 1;
+        }
+        try keyed.put(std.testing.allocator, &keyed_state, identity, {});
+    }
+    try std.testing.expect(distinct_keyed_buckets >= 24);
+    try std.testing.expectEqual(collision_identities.len, keyed.count());
+    for (collision_identities) |identity| try std.testing.expect(keyed.contains(&keyed_state, identity));
+    for (collision_identities[0..16]) |identity| try std.testing.expect(keyed.remove(&keyed_state, identity));
+    for (collision_identities[0..16]) |identity| try std.testing.expect(!keyed.contains(&keyed_state, identity));
+    for (collision_identities[16..]) |identity| try std.testing.expect(keyed.contains(&keyed_state, identity));
+}
+
+test "parser preserves cover grammar facts with keyed node identity" {
+    const AllocationProbe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var failure_arena = std.heap.ArenaAllocator.init(allocator);
+            defer failure_arena.deinit();
+            var parser = try Parser.init(failure_arena.allocator(),
+                \\(value);
+                \\([...rest,]);
+                \\({ value = fallback, __proto__: left, __proto__: right } = source);
+            );
+            // Allocation replay must not depend on an entropy source or a
+            // realm's separately allocated Shape.
+            parser.secure_hash_state.context = .{ .seed = 0xC0_5645_5247_4F4F_4D };
+            _ = try parser.parseProgram();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationProbe.run, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+
+    var empty = try Parser.init(allocator, "value;");
+    empty.useRealmHashKeys(root_shape);
+    _ = try empty.parseProgram();
+    try std.testing.expect(empty.secure_hash_state.context == null);
+
+    var parenthesized = try Parser.init(allocator, "(value);");
+    parenthesized.useRealmHashKeys(root_shape);
+    _ = try parenthesized.parseProgram();
+    try std.testing.expect(parenthesized.secure_hash_state.context != null);
+    try std.testing.expectEqual(@as(usize, 1), parenthesized.paren_wrapped.count());
+
+    var nested = try Parser.init(allocator, "`${(value)}`;");
+    nested.useRealmHashKeys(root_shape);
+    _ = try nested.parseProgram();
+    // The substitution parser owns its identity index but installs the key in
+    // the enclosing parse root, just like source-name indexes.
+    try std.testing.expect(nested.secure_hash_state.context != null);
+
+    var array_rest = try Parser.init(allocator, "[...rest,] = source;");
+    array_rest.useRealmHashKeys(root_shape);
+    try std.testing.expectError(ParseError.InvalidAssignmentTarget, array_rest.parseProgram());
+    try std.testing.expectEqual(@as(usize, 1), array_rest.rest_trailing_comma_arrays.count());
+
+    var refined = try Parser.init(allocator, "({ value = fallback, __proto__: left, __proto__: right } = source);");
+    refined.useRealmHashKeys(root_shape);
+    _ = try refined.parseProgram();
+    try std.testing.expectEqual(@as(usize, 0), refined.pending_cover_inits.count());
+    try std.testing.expectEqual(@as(usize, 0), refined.pending_proto_dup.count());
+
+    var cover_literal = try Parser.init(allocator, "({ value = fallback });");
+    cover_literal.useRealmHashKeys(root_shape);
+    try std.testing.expectError(ParseError.UnexpectedToken, cover_literal.parseProgram());
+    try std.testing.expectEqual(@as(usize, 1), cover_literal.pending_cover_inits.count());
+
+    var duplicate_proto = try Parser.init(allocator, "({ __proto__: left, __proto__: right });");
+    duplicate_proto.useRealmHashKeys(root_shape);
+    try std.testing.expectError(ParseError.UnexpectedToken, duplicate_proto.parseProgram());
+    try std.testing.expectEqual(@as(usize, 1), duplicate_proto.pending_proto_dup.count());
 }
 
 test "parser builds precedence-correct tree" {
