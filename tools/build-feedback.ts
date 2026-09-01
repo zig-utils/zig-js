@@ -108,11 +108,39 @@ function requireNoCompetingEvidenceProcess(phase: string): void {
   );
 }
 
+function isShortCachedScenario(scenario: ScenarioName): boolean {
+  return scenario === "incremental_library" ||
+    scenario === "focused_engine_cached" ||
+    scenario === "focused_test_cached";
+}
+
+function requireCachedBuildBoundary(sample: Sample): void {
+  const summary = sample.build_summary.join("\n"), marker = sample.scenario === "incremental_library"
+    ? "install generated to libzig-js.a cached"
+    : sample.scenario === "focused_engine_cached"
+    ? "compile exe focused-engine-tests Debug native cached"
+    : "compile test Debug native cached";
+  requireValue(
+    summary.includes(marker),
+    `${sample.scenario}: missing exact cached build boundary: ${marker}`,
+  );
+}
+
 function requireSampleQuality(sample: Sample): void {
   requireValue(
     sample.process_cpu_occupancy !== undefined &&
       Number.isFinite(sample.process_cpu_occupancy) &&
-      sample.process_cpu_occupancy >= MINIMUM_PROCESS_CPU_OCCUPANCY,
+      sample.process_cpu_occupancy >= 0 && sample.process_cpu_occupancy <= 1,
+    `${sample.scenario}: invalid process CPU occupancy`,
+  );
+  // macOS /usr/bin/time exposes CPU time at centisecond resolution. That is a
+  // useful occupancy gate for the build and suite phases, but not for the
+  // intentionally subsecond cache-hit paths: one rounding quantum can move a
+  // valid row across the threshold. Prove those boundaries from Zig's exact
+  // cached step inventory instead; the before/after process audits still apply.
+  if (isShortCachedScenario(sample.scenario)) return requireCachedBuildBoundary(sample);
+  requireValue(
+    sample.process_cpu_occupancy >= MINIMUM_PROCESS_CPU_OCCUPANCY,
     `${sample.scenario}: process CPU occupancy ${((sample.process_cpu_occupancy || 0) * 100).toFixed(1)}% is below ${(MINIMUM_PROCESS_CPU_OCCUPANCY * 100).toFixed(0)}%; transient competing work overlapped the scenario`,
   );
 }
@@ -422,7 +450,7 @@ export function render(artifact: Artifact, rawName: string): string {
     ...(artifact.schema === "zig-js-build-feedback-v2"
       ? [
         "- cache boundary: library, focused-engine, combined-unit, focused-engine TSan, and combined-unit TSan groups are isolated; only adjacent phases with the same named group reuse cache state",
-        `- process quality: every complete build used at least ${(MINIMUM_PROCESS_CPU_OCCUPANCY * 100).toFixed(0)}% CPU occupancy; before/after snapshots reject persistent competing build and test jobs`,
+        `- process quality: every CPU-bound build or suite used at least ${(MINIMUM_PROCESS_CPU_OCCUPANCY * 100).toFixed(0)}% CPU occupancy; the intentionally subsecond cache-hit paths require exact Zig cached-step summaries because macOS reports process CPU at centisecond resolution; before/after snapshots reject persistent competing build and test jobs for every phase`,
       ]
       : []),
     "",
@@ -529,7 +557,16 @@ export function selfTest(): void {
         timed_out: false,
         ...parsed,
         process_cpu_occupancy: 1,
-        build_summary: ["Build Summary: 2/2 steps succeeded"],
+        build_summary: [
+          "Build Summary: 2/2 steps succeeded",
+          ...(entry.name === "incremental_library"
+            ? ["install generated to libzig-js.a cached"]
+            : entry.name === "focused_engine_cached"
+            ? ["compile exe focused-engine-tests Debug native cached"]
+            : entry.name === "focused_test_cached"
+            ? ["compile test Debug native cached"]
+            : []),
+        ],
         stdout: output,
         stderr: "",
         unit_plan: entry.name.startsWith("full_unit_") ? "shard\testimated_ms\tname\n0\t1\tfixture\n" : null,
@@ -576,6 +613,13 @@ export function selfTest(): void {
   requireValue(processCpuOccupancy(2.5, 3, 1.25) === 1, "process CPU occupancy clamp drift");
   const lowOccupancy = { ...v2Samples[0], process_cpu_occupancy: 0.59 };
   expectFailure(() => requireSampleQuality(lowOccupancy), "transient competing work overlapped the scenario");
+  const lowOccupancyCached = {
+    ...v2Samples.find((row) => row.scenario === "focused_test_cached")!,
+    process_cpu_occupancy: 0.1,
+  };
+  requireSampleQuality(lowOccupancyCached);
+  const missingCachedBoundary = { ...lowOccupancyCached, build_summary: ["Build Summary: 2/2 steps succeeded"] };
+  expectFailure(() => requireSampleQuality(missingCachedBoundary), "missing exact cached build boundary");
   console.log("build-feedback self-test: ok");
 }
 

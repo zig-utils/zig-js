@@ -1278,7 +1278,13 @@ compiler/build-driver process outside the collector's own ancestor chain. A
 competitor that appears while a command is running therefore leaves that row
 only in an incomplete artifact. Any command, process-boundary, or
 final-validation failure preserves the collected rows rather than publishing a
-partial report.
+partial report. CPU-bound build and suite phases additionally require at least
+60% process CPU occupancy. The intentionally subsecond incremental-library and
+cached focused-filter phases instead require Zig's exact cached-step summary:
+macOS `/usr/bin/time` reports CPU at centisecond resolution, so applying the
+same occupancy threshold there can move a valid row across the boundary by one
+rounding quantum. Their measured occupancy remains in the raw artifact, and
+the before/after competing-process audits still cover every phase.
 
 ```sh
 zig build build-feedback-test
