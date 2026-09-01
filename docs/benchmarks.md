@@ -896,6 +896,27 @@ From 1,024 → 4,096 frame slots, normalized parent instructions grow `14.9477x`
 small bounded allocation increase. The report makes no wall-time, throughput,
 latency, cycle, energy, RSS, thermal, or full-efficiency claim.
 
+The seven-pair [repeated-body capture report](.data/algorithmic-growth-repeated-body-clear-2026-09-01.md)
+([raw](.data/algorithmic-growth-repeated-body-clear-2026-09-01.json)) compares
+issue [#618](https://github.com/zig-utils/zig-js/issues/618) candidate
+`14ca5cd4` directly with benchmark-first parent `3fcd7f02`. Each 1,024, 2,048,
+and 4,096-width row executes ten production parse plus plain-function
+admission/compile jobs over the frozen closure-free repeated-body source, after
+two untimed one-job warmups. Source construction, process startup, hardware
+snapshots, and the identical-work allocation replay are outside the scored
+boundary.
+
+From 1,024 → 4,096 body bindings, normalized parent instructions grow
+`14.6568x` (exponent `1.937`) while candidate instructions grow `4.0318x`
+(exponent `1.006`). Candidate/parent instruction ratios are `0.1188x`,
+`0.0635x`, and `0.0327x`, with every per-variant instruction RSD below
+`0.10%`. Allocation requests per job are parent/candidate 3,224/3,233,
+6,314/6,324, and 12,474/12,485; allocated bytes per job are
+2,530,094/2,603,894, 5,644,262/5,791,814, and 9,689,038/9,984,070.
+These exact deterministic replays expose the candidate's bounded allocation
+increase. The report makes no wall-time, throughput, latency, cycle, energy,
+RSS, thermal, or full-efficiency claim.
+
 Collect every ordinary row first, then aggregate the complete artifacts from a
 clean tracked worktree:
 
