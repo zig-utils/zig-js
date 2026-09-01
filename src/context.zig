@@ -36189,8 +36189,9 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
     // worker record is registered, so both workers rendezvous before allocating:
     // the first cannot finish its otherwise-untracked churn while the main
     // interpreter is still constructing the second Thread. The two released
-    // lanes then create more than 512 KiB of 128-byte Object-class cells by
-    // themselves, independent of scheduler placement and block Environments.
+    // lanes then each create more than 512 KiB of 128-byte Object-class cells.
+    // Either lane therefore crosses the unchanged production tranche while
+    // the peer remains registered, independent of scheduler placement.
     ctx.gc_cooperative_tranche_bytes = 512 * 1024;
     try std.testing.expect(ctx.beginCooperativeGcProfile());
 
@@ -36201,7 +36202,7 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
         \\  while (Atomics.load(cooperativeChurnGate, 0) !== 2) {}
         \\  const ring = [];
         \\  for (let i = 0; i < 64; i++) ring.push({ value: i, lane: lane, prior: 0 });
-        \\  for (let i = 0; i < 2400; i++) {
+        \\  for (let i = 0; i < 4800; i++) {
         \\    const index = i & 63;
         \\    const old = ring[index];
         \\    ring[index] = { value: old.value + i + lane, lane: lane, prior: old.value };

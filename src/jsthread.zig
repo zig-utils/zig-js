@@ -1099,7 +1099,10 @@ fn finishThreadJoinSettlement(rec: *ThreadRecord) void {
 }
 
 fn threadJoinReadyLocked(rec: *const ThreadRecord) bool {
-    return rec.done and rec.joins_settled;
+    // Synchronous join is a thread-lifetime boundary, not merely a result
+    // publication boundary. In particular, Context collection must not run
+    // while the worker still owns an active interpreter or native stack.
+    return rec.done and rec.joins_settled and rec.exited;
 }
 
 fn appendPendingJoinLocked(rec: *ThreadRecord, arena: std.mem.Allocator, pending: PendingJoin) !void {
@@ -1156,6 +1159,8 @@ test "Thread asyncJoin pending growth and synchronous join settlement gate" {
     try std.testing.expectEqual(@as(usize, 0), rec.pending_joins.items.len);
     finishThreadJoinSettlement(&rec);
     try std.testing.expect(rec.joins_settled);
+    try std.testing.expect(!threadJoinReadyLocked(&rec));
+    rec.exited = true;
     try std.testing.expect(threadJoinReadyLocked(&rec));
     try std.testing.expectEqual(@as(usize, 0), rec.settling_joins.items.len);
 }
@@ -1169,8 +1174,8 @@ fn markThreadExited(rec: *ThreadRecord) void {
 }
 
 /// `Thread.prototype.join()` — park (GIL released) until the thread's fn has
-/// returned and its queues drained; return its value or rethrow its
-/// exception object.
+/// returned, its queues have drained, and its interpreter/native stack have
+/// left the realm; return its value or rethrow its exception object.
 fn threadJoinFn(ctx_ptr: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx_ptr));
