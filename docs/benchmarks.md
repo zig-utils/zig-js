@@ -845,13 +845,17 @@ gate behavior without executing reference-host measurements.
 
 ## Exact algorithmic-growth evidence
 
-The additive
-[`algorithmic-growth-schema-v1.json`](.data/algorithmic-growth-schema-v1.json)
-owns compiler-classifier changes whose optimized timed boundary is too short
-for stable wall, cycle, or energy measurement while the exact parent grows
-superlinearly. It does not relax or replace the ordinary exact-parent profile.
-Each input remains a complete `exact_parent_ab` artifact with every wall, CPU,
-RSS, allocation, instruction, cycle, energy, thermal, quality, power, and
+The additive algorithmic-growth profile began with the immutable
+[`algorithmic-growth-schema-v1.json`](.data/algorithmic-growth-schema-v1.json).
+New collections use
+[`algorithmic-growth-schema-v3.json`](.data/algorithmic-growth-schema-v3.json),
+which additionally attests byte-identical one-commit measurement overlays for
+the exact logical engine revisions. The profile owns compiler-classifier
+changes whose optimized timed boundary is too short for stable wall, cycle, or
+energy measurement while the exact parent grows superlinearly. It does not
+relax or replace the ordinary exact-parent profile. Each input remains a
+complete `exact_parent_ab` artifact with every wall, CPU, RSS, allocation,
+instruction, cycle, energy, thermal, quality, power, binary-provenance, and
 full-efficiency decision preserved.
 
 The growth artifact scores only retired instructions per identical logical job
@@ -870,6 +874,27 @@ energy, or full-efficiency claim, even when their raw values look favorable.
 An ordinary exact-parent artifact rejected for noisy energy therefore stays
 rejected by the ordinary profile while still being eligible to contribute
 stable instruction evidence to this separate claim boundary.
+
+The seven-pair [deferred-class frame scan report](.data/algorithmic-growth-class-frame-global-2026-09-01.md)
+([raw](.data/algorithmic-growth-class-frame-global-2026-09-01.json)) compares
+issue [#619](https://github.com/zig-utils/zig-js/issues/619) candidate
+`8bbbf402` directly with benchmark-first parent `be27ecd4`. Each 1,024, 2,048,
+and 4,096-width row executes ten production parse plus plain-function
+admission/compile jobs over the frozen global-only deferred-class source, after
+two untimed one-job warmups. Source construction, process startup, hardware
+snapshots, and the identical-work allocation replay are outside the scored
+boundary.
+
+From 1,024 → 4,096 frame slots, normalized parent instructions grow `14.9477x`
+(exponent `1.951`) while candidate instructions grow `4.1586x` (exponent
+`1.028`). Candidate/parent instruction ratios are `0.0927x`, `0.0496x`, and
+`0.0258x` at the three widths, with every per-variant instruction RSD below
+`0.06%`. Allocation requests per job are parent/candidate 9,381/9,390,
+18,617/18,627, and 37,067/37,078; allocated bytes per job are
+5,004,418/5,074,130, 11,871,578/12,010,946, and
+21,319,562/21,598,218. These exact deterministic replays expose the candidate's
+small bounded allocation increase. The report makes no wall-time, throughput,
+latency, cycle, energy, RSS, thermal, or full-efficiency claim.
 
 Collect every ordinary row first, then aggregate the complete artifacts from a
 clean tracked worktree:
