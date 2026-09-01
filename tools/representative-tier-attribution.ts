@@ -33,6 +33,7 @@ export type TierSnapshot = {
   admissions: CounterMap;
   synchronization: CounterMap;
   debug_registry: CounterMap;
+  shape: CounterMap;
   allocation: CounterMap;
   cell_slab_lock: CounterMap;
   gc_pauses: GcPauseSamples;
@@ -55,6 +56,7 @@ export type TierDelta = {
   admissions: CounterMap;
   synchronization: CounterMap;
   debug_registry: CounterMap;
+  shape: CounterMap;
   allocation: CounterMap;
   cell_slab_lock: CounterMap;
   gc_pauses: GcPauseSamples;
@@ -260,6 +262,12 @@ const debugRegistryMetrics = [
   "lock_acquires",
   "lock_contentions",
   "lock_spins",
+];
+const shapeMetrics = [
+  "transition_requests",
+  "transition_hits",
+  "transition_misses",
+  "transition_lock_yields",
 ];
 const nativeCodeMetrics = [
   "live_artifacts",
@@ -509,6 +517,7 @@ function emptySnapshot(row: TierSnapshot): TierSnapshot {
     debug_registry: Object.fromEntries(
       debugRegistryMetrics.map((name) => [name, 0]),
     ),
+    shape: Object.fromEntries(shapeMetrics.map((name) => [name, 0])),
     allocation: Object.fromEntries(allocationMetrics.map((name) => [name, 0])),
     cell_slab_lock: Object.fromEntries(cellSlabLockMetrics.map((name) => [name, 0])),
     gc_pauses: { minor_ns: [], minor_overflow: 0, full_ns: [], full_overflow: 0 },
@@ -545,6 +554,7 @@ export function deltas(rows: TierSnapshot[]): TierDelta[] {
         admissions: subtractMap(row.admissions, before.admissions),
         synchronization: subtractSynchronization(row.synchronization, before.synchronization),
         debug_registry: subtractMap(row.debug_registry, before.debug_registry),
+        shape: subtractMap(row.shape, before.shape),
         allocation: subtractAllocation(row.allocation, before.allocation),
         cell_slab_lock: subtractMap(row.cell_slab_lock, before.cell_slab_lock),
         gc_pauses: subtractPauses(row.gc_pauses, before.gc_pauses),
@@ -617,6 +627,7 @@ function validateRows(
           Object.values(row.admissions).every(Number.isInteger) &&
           Object.values(row.synchronization).every(Number.isInteger) &&
           Object.values(row.debug_registry).every(Number.isInteger) &&
+          Object.values(row.shape || {}).every(Number.isInteger) &&
           Object.values(row.allocation).every(Number.isInteger) &&
           row.gc_pauses.minor_ns.every(Number.isInteger) &&
           row.gc_pauses.full_ns.every(Number.isInteger) &&
@@ -659,6 +670,16 @@ function validateRows(
         JSON.stringify(Object.keys(row.debug_registry).sort()) ===
           JSON.stringify([...debugRegistryMetrics].sort()),
         `debug registry attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        JSON.stringify(Object.keys(row.shape || {}).sort()) ===
+          JSON.stringify([...shapeMetrics].sort()),
+        `Shape attribution inventory drift for ${workload}`,
+      );
+      requireValue(
+        row.shape.transition_requests ===
+          row.shape.transition_hits + row.shape.transition_misses,
+        `Shape attribution is incoherent for ${workload}`,
       );
       requireValue(
         JSON.stringify(Object.keys(row.allocation).sort()) ===
@@ -1065,6 +1086,34 @@ export function render(
       );
     }
   }
+  rows.push(
+    "",
+    `${heading}${heading} Shared-realm Shape publication`,
+    "",
+    "Requests, exact cache hits/misses, and writer-lock scheduler yields are invocation deltas from the native Shape counter domain. Requests must equal hits plus misses; missing, extra, regressing, or incoherent maps reject the artifact rather than becoming zero.",
+    "",
+    "| family | lanes | base requests | variant requests | base hits | variant hits | base misses | variant misses | base writer yields | variant writer yields |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  );
+  for (const family of manifest.implemented_families) {
+    if (family.shared === false) continue;
+    for (const lanes of manifest.lanes) {
+      const base = sharedByKey[deltaKey(family.base, "shared", lanes)].find((row) => row.phase === "invocation")!,
+        variant = sharedByKey[deltaKey(family.variant, "shared", lanes)].find((row) => row.phase === "invocation")!;
+      rows.push(
+        `| \`${family.family}\` | ${lanes} | ${base.shape.transition_requests} | ${variant.shape.transition_requests} | ${base.shape.transition_hits} | ${variant.shape.transition_hits} | ${base.shape.transition_misses} | ${variant.shape.transition_misses} | ${base.shape.transition_lock_yields} | ${variant.shape.transition_lock_yields} |`,
+      );
+    }
+  }
+  for (const panel of manifest.additional_panels || []) {
+    if (!(panel.modes || []).includes("shared")) continue;
+    for (const lanes of manifest.lanes) {
+      const row = sharedByKey[deltaKey(panel.workload, "shared", lanes)].find((entry) => entry.phase === "invocation")!;
+      rows.push(
+        `| \`${panel.id}\` | ${lanes} | ${row.shape.transition_requests} | n/a | ${row.shape.transition_hits} | n/a | ${row.shape.transition_misses} | n/a | ${row.shape.transition_lock_yields} | n/a |`,
+      );
+    }
+  }
   const dominantCellSlabSize = (row: TierDelta): string => {
     let bestSize = 0, bestContentions = 0, bestAcquires = 0;
     for (const size of cellSlabSizes) {
@@ -1139,7 +1188,7 @@ export function artifact(
   }],
 ): any {
   return {
-    schema_version: 12,
+    schema_version: 13,
     matrix_id: manifest.matrix_id,
     quick,
     complete,
@@ -1167,7 +1216,7 @@ function validateCheckpoint(
   info: Record<string, string>,
   runner: string,
 ): void {
-  requireValue(raw?.schema_version === 12, "checkpoint schema is not version 12");
+  requireValue(raw?.schema_version === 13, "checkpoint schema is not version 13");
   requireValue(raw.matrix_id === manifest.matrix_id, "checkpoint matrix identity drift");
   requireValue(raw.quick === quick, "checkpoint quick/full mode drift");
   requireValue(typeof raw.complete === "boolean", "checkpoint completion state is missing");
@@ -1274,6 +1323,12 @@ function syntheticRows(manifest: any): TierSnapshot[] {
         debug_registry: Object.fromEntries(
           debugRegistryMetrics.map((name) => [name, index]),
         ),
+        shape: {
+          transition_requests: index * 2,
+          transition_hits: index,
+          transition_misses: index,
+          transition_lock_yields: 0,
+        },
         allocation: Object.fromEntries(allocationMetrics.map((name) => {
           if (name === "backing_allocations" || name === "backing_allocation_bytes" ||
               name === "backing_current_bytes" || name === "backing_peak_bytes" ||
@@ -1329,7 +1384,13 @@ export function selfTest(): void {
     entries = workloadEntries(manifest),
     rows = syntheticRows(manifest);
   requireValue(entries.length === 170 && rows.length === 510, "V16 attribution coverage drift");
-  validate(rows, manifest, true);
+  const validated = validate(rows, manifest, true),
+    rendered = render(validated, manifest);
+  requireValue(
+    rendered.includes("## Shared-realm Shape publication") &&
+      rendered.includes("Requests, exact cache hits/misses, and writer-lock scheduler yields"),
+    "Shape attribution report is missing",
+  );
   const mismatch = JSON.parse(JSON.stringify(rows));
   mismatch[4].execution.tree_walker_entries = 1;
   mismatch[5].execution.tree_walker_entries = 1;
@@ -1369,6 +1430,23 @@ export function selfTest(): void {
   const execution = JSON.parse(JSON.stringify(rows));
   delete execution[0].execution.vm_dispatches;
   expectFailure(() => validate(execution, manifest, true), "execution attribution inventory drift");
+  const missingShape = JSON.parse(JSON.stringify(rows));
+  delete missingShape[0].shape.transition_misses;
+  expectFailure(() => validate(missingShape, manifest, true), "Shape attribution inventory drift");
+  const missingShapeMap = JSON.parse(JSON.stringify(rows));
+  delete missingShapeMap[0].shape;
+  expectFailure(() => validate(missingShapeMap, manifest, true), "Shape attribution inventory drift");
+  const extraShape = JSON.parse(JSON.stringify(rows));
+  extraShape[0].shape.unexpected = 0;
+  expectFailure(() => validate(extraShape, manifest, true), "Shape attribution inventory drift");
+  const incoherentShape = JSON.parse(JSON.stringify(rows));
+  incoherentShape[1].shape.transition_requests += 1;
+  expectFailure(() => validate(incoherentShape, manifest, true), "Shape attribution is incoherent");
+  const regressedShape = JSON.parse(JSON.stringify(rows));
+  regressedShape[2].shape.transition_requests = 0;
+  regressedShape[2].shape.transition_hits = 0;
+  regressedShape[2].shape.transition_misses = 0;
+  expectFailure(() => validate(regressedShape, manifest, true), "transition_requests attribution counter regressed");
   const timing = JSON.parse(JSON.stringify(rows));
   delete timing[0].timing.deoptimization_ns;
   expectFailure(() => validate(timing, manifest, true), "tier timing inventory drift");
@@ -1470,7 +1548,7 @@ export function selfTest(): void {
   wasm[wasmIndex * phases.length + 2].execution.wasm_dispatches =
     wasm[wasmIndex * phases.length + 1].execution.wasm_dispatches;
   expectFailure(() => validate(wasm, manifest, true), "recorded no WebAssembly dispatches");
-  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/allocation/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier transitions, and exact checkpoint/resume identity verified");
+  console.log("OK representative tier attribution self-test: phases, checksums, tier/runtime/timing/synchronization/Shape/allocation/process inventory, exact GC pauses, environment parity, native-code lifetime, heap state, CPU, RSS, tier transitions, generated Shape report, and exact checkpoint/resume identity verified");
 }
 
 function main(): void {

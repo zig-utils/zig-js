@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v32.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v33.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 32, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 33, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,13 +49,27 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 32),
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 33),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 33) {
+    requireValue(child.tier_attribution && typeof child.tier_attribution === "object", "v33 must replace the attribution contract");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v33 changes attribution inventory only");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v33 must inherit completed panel inventory unchanged");
+    for (const name of ["exact_parent_integration", "instrumentation_overhead_integration", "context_lifecycle_integration", "no_jit_integration", "string_indexing_integration"])
+      requireValue(child[name] === undefined, `v33 must inherit ${name} unchanged`);
+    const merged = {
+      ...inherited,
+      ...child,
+      tier_attribution: { ...inherited.tier_attribution, ...child.tier_attribution },
+    };
+    if (!deferIntegrationValidation) validate(merged, root);
+    return merged;
   }
   if (child.schema_version === 32) {
     requireValue(child.tier_attribution === undefined, "v32 must inherit the scored attribution contract unchanged");
@@ -225,7 +239,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 32, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 33, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -619,6 +633,7 @@ export function validate(manifest: any, root = ROOT): void {
         "native_code_lifetime_by_state", "heap_live_bytes", "heap_collections", "synchronization_by_path", "worker_lifecycle",
         "context_backing_allocations", "gc_cell_allocations", "gc_pause_samples", "process_cpu_time_by_mode", "peak_rss_bytes", "retained_rss_bytes",
         "tier_up_attempts_and_time", "deoptimization_time",
+        ...(manifest.schema_version >= 33 ? ["shape_transition_publication"] : []),
       ]
       : manifest.schema_version >= 12
       ? [
@@ -655,6 +670,17 @@ export function validate(manifest: any, root = ROOT): void {
         "environment_allocations", "bytecode_admissions_by_reason", "baseline_publications", "optimizer_publications", "generated_code_bytes",
       ];
     requireValue(same(attribution.metrics || [], expectedMetrics), "representative tier metric inventory changed");
+    if (manifest.schema_version >= 33) {
+      requireValue(attribution.artifact_schema_version === 13, "V33 attribution artifact schema drift");
+      requireValue(
+        same(attribution.shape_counters || [], ["transition_requests", "transition_hits", "transition_misses", "transition_lock_yields"]),
+        "V33 Shape attribution counter inventory drift",
+      );
+      requireValue(
+        typeof attribution.shape_invariant === "string" && attribution.shape_invariant.includes("requests = hits + misses"),
+        "V33 Shape attribution invariant is missing",
+      );
+    }
     requireValue(typeof attribution.equivalence === "string" && attribution.equivalence.length > 0, "representative matrix lacks tier equivalence rule");
     requireValue(typeof attribution.timing_isolation === "string" && attribution.timing_isolation.length > 0, "representative matrix lacks timing isolation rule");
     for (const workload of workloads) {

@@ -27,6 +27,9 @@ export function selfTest(): void {
   rejects("shared attribution lanes", value => value.tier_attribution.shared_lanes.pop(), "shared attribution lanes drift");
   rejects("missing attribution coverage", value => { value.tier_attribution.workload_coverage = ""; }, "complete workload coverage");
   rejects("resident source drift", value => { value.tier_attribution.process_resident_source = "mixed APIs"; }, "process resident source drift");
+  rejects("missing Shape attribution metric", value => value.tier_attribution.metrics.pop(), "tier metric inventory changed");
+  rejects("Shape attribution counter drift", value => value.tier_attribution.shape_counters.pop(), "Shape attribution counter inventory drift");
+  rejects("Shape attribution artifact schema drift", value => { value.tier_attribution.artifact_schema_version = 12; }, "attribution artifact schema drift");
   rejects("restored pending panel", value => value.pending_metric_panels.push({ issue: 503 }), "must be empty");
   rejects("missing completed panel", value => { delete value.completed_metric_panels.independent_suite; }, "completed panel inventory drift");
   rejects("efficiency source drift", value => { value.exact_parent_integration.sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.sha256 = "0".repeat(64); }, "changed without a matrix version bump");
@@ -78,8 +81,8 @@ export function selfTest(): void {
   rejects("direct binary provenance drift", value => { value.exact_parent_integration.binary_provenance_profiles.schema_v2 = "unchecked"; value.completed_metric_panels.efficiency_thermal.scored_integration.binary_provenance_profiles.schema_v2 = "unchecked"; }, "binary provenance profile drift");
   rejects("inherited overlay provenance drift", value => { value.exact_parent_integration.shared_measurement_overlay.changed_subset = "any"; value.completed_metric_panels.efficiency_thermal.scored_integration.shared_measurement_overlay.changed_subset = "any"; }, "V31 shared measurement overlay policy drift");
   rejects("frontend native runner drift", value => { value.exact_parent_integration.native_runners[1].sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.native_runners[1].sha256 = "0".repeat(64); }, "changed without a matrix version bump");
-  rejects("unsupported future matrix", value => { value.schema_version = 33; }, "unsupported representative matrix schema");
-  console.log("representative matrix structural tests: 70/70 passed");
+  rejects("unsupported future matrix", value => { value.schema_version = 34; }, "unsupported representative matrix schema");
+  console.log("representative matrix structural tests: 73/73 passed");
 }
 
 if (process.argv[1] === __filename) selfTest();
