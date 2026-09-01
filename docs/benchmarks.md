@@ -917,6 +917,27 @@ These exact deterministic replays expose the candidate's bounded allocation
 increase. The report makes no wall-time, throughput, latency, cycle, energy,
 RSS, thermal, or full-efficiency claim.
 
+The seven-pair [loop-head capture report](.data/algorithmic-growth-loop-capture-clear-2026-09-01.md)
+([raw](.data/algorithmic-growth-loop-capture-clear-2026-09-01.json)) compares
+issue [#616](https://github.com/zig-utils/zig-js/issues/616) candidate
+`0bfd79d0` directly with benchmark-first parent `e6200a82`. Each 1,024, 2,048,
+and 4,096-width row executes ten production parse plus plain-function
+admission/compile jobs over the frozen closure-free lexical loop-head source,
+after two untimed one-job warmups. Source construction, process startup,
+hardware snapshots, and the identical-work allocation replay are outside the
+scored boundary.
+
+From 1,024 → 4,096 loop-head bindings, normalized parent instructions grow
+`14.8145x` (exponent `1.944`) while candidate instructions grow `4.0486x`
+(exponent `1.009`). Candidate/parent instruction ratios are `0.1044x`,
+`0.0556x`, and `0.0285x`, with every per-variant instruction RSD below
+`0.03%`. Allocation requests per job are parent/candidate 2,211/2,220,
+4,279/4,289, and 8,394/8,405; allocated bytes per job are
+2,064,466/2,134,178, 4,627,314/4,766,682, and 8,646,922/8,925,578.
+These exact deterministic replays expose the candidate's bounded allocation
+increase. The report makes no wall-time, throughput, latency, cycle, energy,
+RSS, thermal, or full-efficiency claim.
+
 Collect every ordinary row first, then aggregate the complete artifacts from a
 clean tracked worktree:
 
