@@ -2852,6 +2852,22 @@ pub const HoldJobRootFrame = struct {
 
 /// Tree-walking evaluator. Evaluating a program/block returns the completion
 /// value of the last statement, which is what `JSEvaluateScript` hands back.
+/// Allocation-free publication of active suspendable VM payloads. Type-erased
+/// here so interpreter.zig does not import vm.zig.
+pub const ActiveGeneratorRoot = struct {
+    generator: *anyopaque,
+    /// True only while this interpreter has materialized the activation at an
+    /// exact bytecode safepoint. A native tail may own sequencing and retain a
+    /// passive address/liveness root, but it must not let the concurrent marker
+    /// read VM state outside `execLoop`'s publication interval.
+    trace_owned: std.atomic.Value(bool),
+    /// This interpreter owns the activation's sequencing token and may publish
+    /// its children itself at a safepoint. Unlike `trace_owned`, this includes
+    /// native tails that the collector must not inspect directly.
+    publication_owned: std.atomic.Value(bool),
+    previous: ?*ActiveGeneratorRoot,
+};
+
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     /// Context-owned freeable backing for invocation-local indexes whose keys
@@ -3129,10 +3145,12 @@ pub const Interpreter = struct {
     /// every peer has published the current generation. Atomic for the cross-thread
     /// read; `0` until the first publish.
     gc_published_gen: std.atomic.Value(u64) = .init(0),
-    /// Generator/async activation whose VM state is materialized in `gc_execs`
-    /// at the current bytecode safepoint. Type-erased to keep interpreter.zig
-    /// from importing vm.zig; the GC binding casts it back on the same thread.
-    gc_active_generator: ?*anyopaque = null,
+    /// Generator/async activations whose VM state is materialized in `gc_execs`
+    /// at the current bytecode safepoint. A nested ordinary VM call must retain
+    /// its suspendable caller, and a nested async call may add another owner, so
+    /// this is an allocation-free native-stack chain rather than one slot.
+    /// Type-erased to keep interpreter.zig from importing vm.zig.
+    gc_active_generators: ?*ActiveGeneratorRoot = null,
     /// True only while `gc_parked` was published from a checkpoint that also
     /// declared `gc_precise_safepoint` + `gc_moving_safepoint`. A cooperative
     /// moving collector requires this token from every peer; ordinary native

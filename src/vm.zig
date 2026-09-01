@@ -505,6 +505,17 @@ pub const Generator = struct {
     /// under resume_mutex after all pre/post-body work. This is the JS reentry
     /// guard; collector ownership of resume_mutex alone is not execution.
     native_resume_active: std.atomic.Value(bool) = .init(false),
+    /// Async drivers and request publishers may borrow this payload
+    /// concurrently (an async generator can enqueue a request reentrantly while
+    /// its body is running). Each native tail publishes one address borrow, so
+    /// moving GC retains this cell without serializing otherwise independent
+    /// request publication. `running` separately owns execution state.
+    native_async_borrows: std.atomic.Value(usize) = .init(0),
+    /// Parallel-GC handshake for a live activation. The owner traces this
+    /// generator from its own safepoint and publishes the request generation;
+    /// the collector never reads a native tail merely because it is running.
+    gc_publication_owner_active: std.atomic.Value(bool) = .init(false),
+    gc_published_gen: std.atomic.Value(u64) = .init(0),
     /// Execution/trace ownership. Ordinary generators use native_resume_active
     /// to preserve the re-entrant TypeError; async functions use this atomic as a
     /// release/acquire handoff between promise jobs drained by different
@@ -587,6 +598,16 @@ pub const Generator = struct {
 
     fn releaseAsyncResume(self: *Generator) void {
         self.running.store(false, .release);
+    }
+
+    fn retainAsyncAddress(self: *Generator) void {
+        const previous = self.native_async_borrows.fetchAdd(1, .acquire);
+        std.debug.assert(previous != std.math.maxInt(usize));
+    }
+
+    fn releaseAsyncAddress(self: *Generator) void {
+        const previous = self.native_async_borrows.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
     }
 
     fn backingFor(self: *Generator, fallback: std.mem.Allocator, comptime field: []const u8) std.mem.Allocator {
@@ -767,6 +788,40 @@ test "async function resume ownership is a release acquire handoff" {
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Runner.run, .{ &g, &completed });
     for (&threads) |*thread| thread.join();
     try std.testing.expectEqual(@as(usize, 4000), completed);
+}
+
+test "async resume services parallel publication before ownership handoff" {
+    var generator = Generator{ .chunk = undefined, .env = undefined };
+    var root = interp.ActiveGeneratorRoot{
+        .generator = @ptrCast(&generator),
+        .trace_owned = .init(false),
+        .publication_owned = .init(false),
+        .previous = null,
+    };
+    const State = struct {
+        generator: *Generator,
+        root: *interp.ActiveGeneratorRoot,
+        observed: bool = false,
+
+        fn checkpoint(raw: *anyopaque, _: *anyopaque) void {
+            const state: *@This() = @ptrCast(@alignCast(raw));
+            state.observed = state.generator.running.load(.acquire) and
+                state.generator.gc_publication_owner_active.load(.acquire) and
+                state.root.publication_owned.load(.acquire);
+        }
+    };
+    var state = State{ .generator = &generator, .root = &root };
+    var machine: Interpreter = undefined;
+    machine.gc_safepoint_ctx = &state;
+    machine.gc_safepoint_fn = State.checkpoint;
+
+    claimActiveAsyncResume(&generator, &root);
+    releaseActiveAsyncResume(&machine, &generator, &root);
+
+    try std.testing.expect(state.observed);
+    try std.testing.expect(!generator.running.load(.acquire));
+    try std.testing.expect(!generator.gc_publication_owner_active.load(.acquire));
+    try std.testing.expect(!root.publication_owned.load(.acquire));
 }
 
 /// Property-key string for a computed index: a Symbol uses its unique internal
@@ -7937,9 +7992,18 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     defer vm.strict = saved_execution_strict;
     activateExecStrict(vm, exec, gen);
     vm.recordExecutionTier(.vm_entries);
-    const saved_gc_active_generator = vm.gc_active_generator;
-    vm.gc_active_generator = if (gen) |activation| @ptrCast(activation) else null;
-    defer vm.gc_active_generator = saved_gc_active_generator;
+    const saved_gc_active_generators = vm.gc_active_generators;
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    if (gen) |activation| {
+        active_generator_root = .{
+            .generator = @ptrCast(activation),
+            .trace_owned = .init(true),
+            .publication_owned = .init(true),
+            .previous = saved_gc_active_generators,
+        };
+        vm.gc_active_generators = &active_generator_root;
+    }
+    defer vm.gc_active_generators = saved_gc_active_generators;
     chunk.optimizer_tier.beginProfiling();
     chunk.optimizer_profile.observeEntry();
     var optimizer_delta = jit.OptimizerProfile.Delta{};
@@ -10131,6 +10195,112 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
 /// injects an exception at the suspend point, or a `.return(v)` that completes it.
 const ResumeKind = enum { send, throw_, return_ };
 
+/// Precise roots for interpreter state hidden by a suspendable activation.
+/// Resume drivers replace these fields with the activation's state, so the
+/// caller is no longer reachable through the ordinary interpreter-root scan.
+/// The fallback copies are used only when GC is disabled; with GC enabled every
+/// movable value is restored from its rewritten root slot.
+const ResumeCallerRoots = struct {
+    environment: *Environment,
+    this_value: Value,
+    home_object: ?*value.Object,
+    super_ctor: ?*value.Object,
+    import_meta_slot: ?*interp.ImportMetaSlot,
+    import_meta_obj: ?*value.Object,
+    new_target: Value,
+    direct_eval_new_target_allowed: bool,
+    module_referrer: []const u8,
+    environment_root: usize,
+    value_roots: usize,
+
+    fn capture(vm: *Interpreter) EvalError!ResumeCallerRoots {
+        const environment = vm.env;
+        const this_value = vm.this_value;
+        const home_object = vm.home_object;
+        const super_ctor = vm.super_ctor;
+        const import_meta_obj = vm.import_meta_obj;
+        const new_target = vm.new_target;
+        const environment_root = try vm.pushTempEnvRoot(environment);
+        errdefer vm.restoreTempEnvRoots(environment_root);
+        const value_roots = try vm.pushTempRootSlice(&.{
+            this_value,
+            if (home_object) |object| Value.obj(object) else Value.undef(),
+            if (super_ctor) |object| Value.obj(object) else Value.undef(),
+            if (import_meta_obj) |object| Value.obj(object) else Value.undef(),
+            new_target,
+        });
+        return .{
+            .environment = environment,
+            .this_value = this_value,
+            .home_object = home_object,
+            .super_ctor = super_ctor,
+            .import_meta_slot = vm.import_meta_slot,
+            .import_meta_obj = import_meta_obj,
+            .new_target = new_target,
+            .direct_eval_new_target_allowed = vm.direct_eval_new_target_allowed,
+            .module_referrer = vm.cur_module,
+            .environment_root = environment_root,
+            .value_roots = value_roots,
+        };
+    }
+
+    fn restore(self: ResumeCallerRoots, vm: *Interpreter) void {
+        vm.env = vm.tempEnvRoot(self.environment_root, self.environment);
+        vm.this_value = vm.tempRoot(self.value_roots, self.this_value);
+        vm.home_object = if (self.home_object) |object|
+            vm.tempRoot(self.value_roots + 1, Value.obj(object)).asObj()
+        else
+            null;
+        vm.super_ctor = if (self.super_ctor) |object|
+            vm.tempRoot(self.value_roots + 2, Value.obj(object)).asObj()
+        else
+            null;
+        vm.import_meta_slot = self.import_meta_slot;
+        vm.import_meta_obj = if (self.import_meta_obj) |object|
+            vm.tempRoot(self.value_roots + 3, Value.obj(object)).asObj()
+        else
+            null;
+        vm.new_target = vm.tempRoot(self.value_roots + 4, self.new_target);
+        vm.direct_eval_new_target_allowed = self.direct_eval_new_target_allowed;
+        vm.cur_module = self.module_referrer;
+        vm.restoreTempRoots(self.value_roots);
+        vm.restoreTempEnvRoots(self.environment_root);
+    }
+};
+
+fn publishActiveGenerator(vm: *Interpreter, generator: *Generator, root: *interp.ActiveGeneratorRoot) void {
+    root.* = .{
+        .generator = @ptrCast(generator),
+        .trace_owned = .init(false),
+        .publication_owned = .init(false),
+        .previous = vm.gc_active_generators,
+    };
+    vm.gc_active_generators = root;
+}
+
+fn unpublishActiveGenerator(vm: *Interpreter, root: *interp.ActiveGeneratorRoot) void {
+    std.debug.assert(vm.gc_active_generators == root);
+    vm.gc_active_generators = root.previous;
+}
+
+fn claimActiveAsyncResume(generator: *Generator, root: *interp.ActiveGeneratorRoot) void {
+    std.debug.assert(!root.trace_owned.load(.acquire));
+    generator.claimAsyncResume();
+    generator.gc_publication_owner_active.store(true, .release);
+    root.publication_owned.store(true, .release);
+}
+
+fn releaseActiveAsyncResume(vm: *Interpreter, generator: *Generator, root: *interp.ActiveGeneratorRoot) void {
+    // `execLoop` must have withdrawn its nested exact-safepoint root before the
+    // native tail publishes the execution handoff. Service any open parallel
+    // request while this owner can still trace the activation itself.
+    std.debug.assert(!root.trace_owned.load(.acquire));
+    vm.serviceGcSafepoint();
+    root.publication_owned.store(false, .release);
+    generator.gc_publication_owner_active.store(false, .release);
+    generator.releaseAsyncResume();
+}
+
 /// The numeric tag a delegation resume (`gen_yield_star`) pushes alongside the
 /// resume value, so the desugared `yield*` loop can branch on how it was resumed:
 /// 0 = `.next(v)`, 1 = `.throw(e)`, 2 = `.return(v)`.
@@ -10154,10 +10324,18 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
     // resume still throws while this caller waits for the collector to finish.
     if (g.native_resume_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
         return vm.throwError("TypeError", "Generator is executing");
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, g, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
     g.resume_mutex.lockUncancelable(agent.engineIo());
+    g.gc_publication_owner_active.store(true, .release);
+    active_generator_root.publication_owned.store(true, .release);
     defer {
         // No JavaScript/safepoint runs between releasing the address borrow and
         // unlocking. Clear under the mutex so a later owner cannot lose its pin.
+        vm.serviceGcSafepoint();
+        active_generator_root.publication_owned.store(false, .release);
+        g.gc_publication_owner_active.store(false, .release);
         g.native_resume_active.store(false, .release);
         g.resume_mutex.unlock(agent.engineIo());
     }
@@ -10561,10 +10739,42 @@ fn resultPromise(g: *Generator) *promise.Promise {
 }
 
 const AsyncDisposeCompletion = struct {
+    lock: std.atomic.Mutex = .unlocked,
     gen: *Generator,
+    disposables: []interp.Disposable,
     index: usize,
     pending: ?Value,
     result_value: Value,
+
+    const Values = struct { pending: ?Value, result: Value };
+
+    fn lockState(self: *AsyncDisposeCompletion) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        gc_runtime.enterTraceSensitiveLock();
+    }
+
+    fn unlockState(self: *AsyncDisposeCompletion) void {
+        gc_runtime.leaveTraceSensitiveLock();
+        self.lock.unlock();
+    }
+
+    fn values(self: *AsyncDisposeCompletion) Values {
+        self.lockState();
+        defer self.unlockState();
+        return .{ .pending = self.pending, .result = self.result_value };
+    }
+
+    fn publishValues(self: *AsyncDisposeCompletion, pending: ?Value, result: Value) void {
+        if (pending) |value_v| gc_mod.barrierValue(value_v);
+        gc_mod.barrierValue(result);
+        self.lockState();
+        defer self.unlockState();
+        self.pending = pending;
+        self.result_value = result;
+    }
 };
 
 fn clearDisposables(env: *Environment) void {
@@ -10588,6 +10798,13 @@ fn asyncDisposeResumeFulfilled(ctx: *anyopaque, this: Value, args: []const Value
     _ = args;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const state: *AsyncDisposeCompletion = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    state.gen.retainAsyncAddress();
+    defer state.gen.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, state.gen, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
+    claimActiveAsyncResume(state.gen, &active_generator_root);
+    defer releaseActiveAsyncResume(vm, state.gen, &active_generator_root);
     try continueAsyncDisposal(vm, state, null);
     return Value.undef();
 }
@@ -10596,87 +10813,216 @@ fn asyncDisposeResumeRejected(ctx: *anyopaque, this: Value, args: []const Value)
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const state: *AsyncDisposeCompletion = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    state.gen.retainAsyncAddress();
+    defer state.gen.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, state.gen, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
+    claimActiveAsyncResume(state.gen, &active_generator_root);
+    defer releaseActiveAsyncResume(vm, state.gen, &active_generator_root);
     try continueAsyncDisposal(vm, state, if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
 
 fn scheduleAsyncDisposeContinuation(vm: *Interpreter, state: *AsyncDisposeCompletion, awaited_value: Value) EvalError!void {
-    const wrapped = interp.promiseResolveValue(vm, awaited_value) catch |err| {
+    const snapshot = state.values();
+    const roots = try vm.pushTempRootSlice(&.{
+        awaited_value,
+        snapshot.pending orelse Value.undef(),
+        snapshot.result,
+        Value.undef(),
+        Value.undef(),
+        Value.undef(),
+    });
+    defer vm.restoreTempRoots(roots);
+    const wrapped = interp.promiseResolveValue(vm, vm.tempRoot(roots, awaited_value)) catch |err| {
         if (err != error.Throw) return err;
         const reason = vm.exception;
+        vm.setTempRoot(roots + 3, reason);
         vm.exception = Value.undef();
-        state.pending = try suppressDisposeError(vm, state.pending, reason);
+        const pending = if (snapshot.pending) |value_v| vm.tempRoot(roots + 1, value_v) else null;
+        const combined = try suppressDisposeError(vm, pending, vm.tempRoot(roots + 3, reason));
+        vm.setTempRoot(roots + 1, combined);
+        state.publishValues(combined, vm.tempRoot(roots + 2, snapshot.result));
         try continueAsyncDisposal(vm, state, null);
         return;
     };
+    vm.setTempRoot(roots + 5, wrapped);
+    const current_pending = if (snapshot.pending) |value_v| vm.tempRoot(roots + 1, value_v) else null;
+    const current_result = vm.tempRoot(roots + 2, snapshot.result);
+    state.publishValues(current_pending, current_result);
     const onf = try gc_mod.allocObj(vm.arena);
     onf.* = .{ .native = asyncDisposeResumeFulfilled, .private_data = @ptrCast(state) };
+    vm.setTempRoot(roots + 3, Value.obj(onf));
+    state.publishValues(
+        if (snapshot.pending) |value_v| vm.tempRoot(roots + 1, value_v) else null,
+        vm.tempRoot(roots + 2, snapshot.result),
+    );
     const onr = try gc_mod.allocObj(vm.arena);
     onr.* = .{ .native = asyncDisposeResumeRejected, .private_data = @ptrCast(state) };
-    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
+    vm.setTempRoot(roots + 4, Value.obj(onr));
+    const wrapped_promise: *promise.Promise = @ptrCast(@alignCast(vm.tempRoot(roots + 5, wrapped).asObj().promiseData().?));
+    _ = try promise.then(
+        vm,
+        wrapped_promise,
+        vm.tempRoot(roots + 3, Value.obj(onf)),
+        vm.tempRoot(roots + 4, Value.obj(onr)),
+    );
+}
+
+fn pushAsyncDisposeRoots(vm: *Interpreter, state: *const AsyncDisposeCompletion) EvalError!usize {
+    if (vm.gc == null) return 0;
+    const mark = vm.gc_temp_roots.items.len;
+    try vm.gc_temp_roots.ensureUnusedCapacity(vm.arena, state.disposables.len * 2);
+    for (state.disposables) |disposable| {
+        vm.gc_temp_roots.appendAssumeCapacity(disposable.value);
+        vm.gc_temp_roots.appendAssumeCapacity(disposable.method);
+    }
+    return mark;
+}
+
+fn refreshAsyncDisposeRoots(vm: *Interpreter, state: *AsyncDisposeCompletion, roots: usize) void {
+    state.lockState();
+    defer state.unlockState();
+    for (state.disposables, 0..) |*disposable, index| {
+        disposable.value = vm.tempRoot(roots + index * 2, disposable.value);
+        disposable.method = vm.tempRoot(roots + index * 2 + 1, disposable.method);
+    }
 }
 
 fn continueAsyncDisposal(vm: *Interpreter, state: *AsyncDisposeCompletion, rejected: ?Value) EvalError!void {
-    if (rejected) |reason| state.pending = try suppressDisposeError(vm, state.pending, reason);
-    const env = state.gen.env;
+    const snapshot = state.values();
+    const disposable_count = state.disposables.len;
+    const disposable_roots = try pushAsyncDisposeRoots(vm, state);
+    defer vm.restoreTempRoots(disposable_roots);
+    defer if (state.disposables.len == disposable_count)
+        refreshAsyncDisposeRoots(vm, state, disposable_roots);
+    const roots = try vm.pushTempRootSlice(&.{
+        snapshot.pending orelse Value.undef(),
+        snapshot.result,
+        rejected orelse Value.undef(),
+        Value.undef(),
+        Value.undef(),
+        Value.undef(),
+    });
+    defer vm.restoreTempRoots(roots);
+    var pending_value = snapshot.pending;
+    if (rejected != null) {
+        const pending = if (pending_value) |value_v| vm.tempRoot(roots, value_v) else null;
+        pending_value = try suppressDisposeError(vm, pending, vm.tempRoot(roots + 2, rejected.?));
+        vm.setTempRoot(roots, pending_value.?);
+    }
     while (state.index > 0) {
         state.index -= 1;
-        const d = env.disposables.items[state.index];
+        // Handler unwind may clear or recycle the activation Environment after
+        // this continuation suspends, so the completion record owns the exact
+        // disposal stack instead of borrowing it through `gen.env`.
+        const d = state.disposables[state.index];
+        vm.setTempRoot(roots + 3, vm.tempRoot(disposable_roots + state.index * 2 + 1, d.method));
+        vm.setTempRoot(roots + 4, vm.tempRoot(disposable_roots + state.index * 2, d.value));
         var dispose_err: ?Value = null;
         if (d.method.isUndefined()) {
             if (d.is_async and d.await_result) {
+                pending_value = if (pending_value) |value_v| vm.tempRoot(roots, value_v) else null;
+                const result_value = vm.tempRoot(roots + 1, snapshot.result);
+                state.publishValues(pending_value, result_value);
+                refreshAsyncDisposeRoots(vm, state, disposable_roots);
                 try scheduleAsyncDisposeContinuation(vm, state, Value.undef());
                 return;
             }
-        } else if (vm.callValueWithThis(d.method, &.{}, d.value)) |rv| {
+        } else if (vm.callValueWithThis(
+            vm.tempRoot(roots + 3, d.method),
+            &.{},
+            vm.tempRoot(roots + 4, d.value),
+        )) |rv| {
+            vm.setTempRoot(roots + 5, rv);
             if (d.is_async and d.await_result) {
-                try scheduleAsyncDisposeContinuation(vm, state, rv);
+                pending_value = if (pending_value) |value_v| vm.tempRoot(roots, value_v) else null;
+                const result_value = vm.tempRoot(roots + 1, snapshot.result);
+                state.publishValues(pending_value, result_value);
+                refreshAsyncDisposeRoots(vm, state, disposable_roots);
+                try scheduleAsyncDisposeContinuation(vm, state, vm.tempRoot(roots + 5, rv));
                 return;
             }
         } else |e| {
             if (e != error.Throw) return e;
             dispose_err = vm.exception;
+            vm.setTempRoot(roots + 5, vm.exception);
             vm.exception = Value.undef();
         }
-        if (dispose_err) |this_err| state.pending = try suppressDisposeError(vm, state.pending, this_err);
+        if (dispose_err) |this_err| {
+            const pending = if (pending_value) |value_v| vm.tempRoot(roots, value_v) else null;
+            pending_value = try suppressDisposeError(vm, pending, vm.tempRoot(roots + 5, this_err));
+            vm.setTempRoot(roots, pending_value.?);
+        }
     }
-    clearDisposables(env);
-    if (state.pending) |err| {
+    refreshAsyncDisposeRoots(vm, state, disposable_roots);
+    pending_value = if (pending_value) |value_v| vm.tempRoot(roots, value_v) else null;
+    const result_value = vm.tempRoot(roots + 1, snapshot.result);
+    state.publishValues(pending_value, result_value);
+    if (pending_value) |err| {
         try promise.reject(vm, resultPromise(state.gen), err);
     } else {
-        try promise.resolve(vm, resultPromise(state.gen), state.result_value);
+        try promise.resolve(vm, resultPromise(state.gen), result_value);
     }
 }
 
 fn completeAsyncWithDisposal(vm: *Interpreter, g: *Generator, result_value: Value, pending: ?Value) EvalError!void {
+    const roots = try vm.pushTempRootSlice(&.{
+        result_value,
+        pending orelse Value.undef(),
+        g.env.dispose_pending orelse Value.undef(),
+    });
+    defer vm.restoreTempRoots(roots);
     var combined_pending = pending;
     if (g.env.dispose_pending) |earlier| {
         g.env.dispose_pending = null;
-        if (pending) |this_err|
-            combined_pending = try suppressDisposeError(vm, earlier, this_err)
-        else
-            combined_pending = earlier;
+        if (pending) |this_err| {
+            combined_pending = try suppressDisposeError(
+                vm,
+                vm.tempRoot(roots + 2, earlier),
+                vm.tempRoot(roots + 1, this_err),
+            );
+        } else {
+            combined_pending = vm.tempRoot(roots + 2, earlier);
+        }
+        vm.setTempRoot(roots + 1, combined_pending.?);
     }
+    const disposable_count = g.env.disposables.items.len;
+    const disposables = try vm.arena.alloc(interp.Disposable, disposable_count);
+    std.mem.copyForwards(interp.Disposable, disposables, g.env.disposables.items);
     const state = try vm.arena.create(AsyncDisposeCompletion);
     state.* = .{
         .gen = g,
-        .index = g.env.disposables.items.len,
-        .pending = combined_pending,
-        .result_value = result_value,
+        .disposables = disposables,
+        .index = disposable_count,
+        .pending = if (combined_pending) |value_v| vm.tempRoot(roots + 1, value_v) else null,
+        .result_value = vm.tempRoot(roots, result_value),
     };
+    clearDisposables(g.env);
     try continueAsyncDisposal(vm, state, null);
 }
 
 /// Run the async activation until its next `await` or completion, then settle
 /// its result promise (on return/throw) or wire resume reactions (on await).
 fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!void {
+    // The callback's private_data and the initial call both expose a raw
+    // Generator pointer. Keep that payload stationary through the entire
+    // native tail, including caller restoration and promise reaction wiring.
+    g.retainAsyncAddress();
+    defer g.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, g, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
     // Consecutive awaits may be drained by different shared-realm threads. An
     // already-settled next await can run while the prior drive is in its return
     // tail, so claim the activation with an acquire CAS and publish all state
     // with a release store. The wait is only for that tail handoff: promise
     // reactions are jobs, never inline callbacks into a still-executing await.
-    g.claimAsyncResume();
-    defer g.releaseAsyncResume();
+    claimActiveAsyncResume(g, &active_generator_root);
+    defer releaseActiveAsyncResume(vm, g, &active_generator_root);
+    const caller_roots = try ResumeCallerRoots.capture(vm);
+    defer caller_roots.restore(vm);
     if (g.done) return;
     g.async_suspension_frame = null;
     g.async_parent_promise = null;
@@ -10701,15 +11047,6 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     g.started = true;
     g.suspended = false;
 
-    const s_env = vm.env;
-    const s_this = vm.this_value;
-    const s_home = vm.home_object;
-    const s_super = vm.super_ctor;
-    const s_nt = vm.new_target;
-    const s_eval_nt = vm.direct_eval_new_target_allowed;
-    const s_import_meta_slot = vm.import_meta_slot;
-    const s_import_meta_obj = vm.import_meta_obj;
-    const s_cur_module = vm.cur_module;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
@@ -10719,17 +11056,6 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     vm.import_meta_slot = g.import_meta_slot;
     vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
     vm.cur_module = g.module_referrer;
-    defer {
-        vm.env = s_env;
-        vm.this_value = s_this;
-        vm.home_object = s_home;
-        vm.super_ctor = s_super;
-        vm.new_target = s_nt;
-        vm.direct_eval_new_target_allowed = s_eval_nt;
-        vm.import_meta_slot = s_import_meta_slot;
-        vm.import_meta_obj = s_import_meta_obj;
-        vm.cur_module = s_cur_module;
-    }
     try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
@@ -10900,41 +11226,70 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
 /// `asyncGen.next/return/throw(v)` — enqueue a request and return a promise for
 /// its `{ value, done }`. Pumping starts if no request is already in flight.
 pub fn asyncGenRequest(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Value) EvalError!Value {
-    const g: *Generator = @ptrCast(@alignCast(gen_obj.generator().?));
+    // Root both receiver and argument before the first allocation, then borrow
+    // the resolved Generator address through request publication. The borrow is
+    // reference-counted because a running async generator may legally enqueue
+    // another request reentrantly.
+    const roots = try vm.pushTempRootSlice(&.{ Value.obj(gen_obj), val, Value.undef(), Value.undef() });
+    defer vm.restoreTempRoots(roots);
+    const g: *Generator = @ptrCast(@alignCast(vm.tempRoot(roots, Value.obj(gen_obj)).asObj().generator().?));
+    g.retainAsyncAddress();
+    defer g.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, g, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
     const rp = try promise.newPromise(vm);
+    vm.setTempRoot(roots + 2, Value.obj(rp));
     // Incremental-GC barrier: the request's value + result promise are stored
     // into the live generator cell (which may already be marked).
-    gc_mod.barrierValueFrom(g, val);
-    gc_mod.barrierCellFrom(g, @ptrCast(rp));
-    var start_req: ?AsyncGenRequest = null;
+    gc_mod.barrierValueFrom(g, vm.tempRoot(roots + 1, val));
+    gc_mod.barrierCellFrom(g, @ptrCast(vm.tempRoot(roots + 2, Value.obj(rp)).asObj()));
+    var start_kind: ?ResumeKind = null;
+    var start_value = Value.undef();
     var start_done = false;
     g.lockRequests();
     {
         errdefer g.unlockRequests();
-        try g.appendRequest(vm.arena, .{ .kind = kind, .value = val, .result = rp });
+        try g.appendRequest(vm.arena, .{
+            .kind = kind,
+            .value = vm.tempRoot(roots + 1, val),
+            .result = vm.tempRoot(roots + 2, Value.obj(rp)).asObj(),
+        });
         if (!g.pumping) {
             g.pumping = true;
             if (g.done)
                 start_done = true
-            else
-                start_req = g.frontRequest();
+            else if (g.frontRequest()) |front| {
+                start_kind = front.kind;
+                start_value = front.value;
+                vm.setTempRoot(roots + 3, front.value);
+            }
         }
     }
     g.unlockRequests();
     // A completed generator never resumes: each new request settles immediately
     // (next/return → `{done:true}`, throw → reject) rather than re-running the
     // body from its final instruction pointer.
-    if (start_done)
-        try agDrainDone(vm, g)
-    else if (start_req) |req|
-        try agStep(vm, g, req.kind, req.value);
-    return Value.obj(rp);
+    if (start_done or start_kind != null) {
+        claimActiveAsyncResume(g, &active_generator_root);
+        defer releaseActiveAsyncResume(vm, g, &active_generator_root);
+        if (start_done)
+            try agDrainDone(vm, g)
+        else
+            try agStep(vm, g, start_kind.?, vm.tempRoot(roots + 3, start_value));
+    }
+    return vm.tempRoot(roots + 2, Value.obj(rp));
 }
 
 const AgStep = union(enum) { awaited: Value, yielded: Value, returned: Value, returned_await: Value, threw: Value };
 
 /// Resume the async-generator body once and report why it stopped.
 fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!AgStep {
+    // Reserve the hidden caller roots before changing the request or suspended
+    // activation. OOM therefore leaves the front request resumable, and a
+    // moving safepoint inside the body can rewrite every caller field.
+    const caller_roots = try ResumeCallerRoots.capture(vm);
+    defer caller_roots.restore(vm);
     g.async_suspension_frame = null;
     g.async_parent_promise = null;
     if (g.started and g.delegating) {
@@ -10987,14 +11342,6 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     }
     g.started = true;
     g.suspended = false;
-    const s_env = vm.env;
-    const s_this = vm.this_value;
-    const s_home = vm.home_object;
-    const s_super = vm.super_ctor;
-    const s_import_meta_slot = vm.import_meta_slot;
-    const s_import_meta_obj = vm.import_meta_obj;
-    const s_nt = vm.new_target;
-    const s_eval_nt = vm.direct_eval_new_target_allowed;
     vm.env = g.env;
     vm.this_value = g.this_value;
     vm.home_object = g.home_object;
@@ -11003,16 +11350,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
     vm.import_meta_obj = if (g.import_meta_slot) |slot| slot.load() else null;
     vm.new_target = Value.undef();
     vm.direct_eval_new_target_allowed = true;
-    defer {
-        vm.env = s_env;
-        vm.this_value = s_this;
-        vm.home_object = s_home;
-        vm.super_ctor = s_super;
-        vm.import_meta_slot = s_import_meta_slot;
-        vm.import_meta_obj = s_import_meta_obj;
-        vm.new_target = s_nt;
-        vm.direct_eval_new_target_allowed = s_eval_nt;
-    }
+    vm.cur_module = g.module_referrer;
     try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;
@@ -11069,69 +11407,120 @@ fn agRemoveFrontAndContinue(vm: *Interpreter, g: *Generator) EvalError!void {
 }
 
 fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!void {
+    std.debug.assert(g.running.load(.acquire));
     if (agFront(g) == null) return;
-    const step = try agResume(vm, g, kind, val);
+    // Reserve the entire native tail's Value slots before resuming. The body,
+    // PromiseResolve, iterator-result creation and reaction allocation may each
+    // reach a moving safepoint; no copied request/result pointer is allowed to
+    // survive one in an unrewritable local.
+    const roots = try vm.pushTempRootSlice(&.{ val, Value.undef(), Value.undef(), Value.undef(), Value.undef(), Value.undef() });
+    defer vm.restoreTempRoots(roots);
+    const step = try agResume(vm, g, kind, vm.tempRoot(roots, val));
+    const step_value = switch (step) {
+        .awaited => |value_v| value_v,
+        .yielded => |value_v| value_v,
+        .returned => |value_v| value_v,
+        .returned_await => |value_v| value_v,
+        .threw => |value_v| value_v,
+    };
+    vm.setTempRoot(roots + 1, step_value);
     const front_req = agFront(g) orelse return;
-    const front = front_req.result;
+    vm.setTempRoot(roots + 2, Value.obj(front_req.result));
     switch (step) {
-        .awaited => |awaited| {
-            const wrapped = interp.promiseResolveValue(vm, awaited) catch |err| {
+        .awaited => {
+            const wrapped = interp.promiseResolveValue(vm, vm.tempRoot(roots + 1, step_value)) catch |err| {
                 if (err != error.Throw) return err;
                 const reason = vm.exception;
+                vm.setTempRoot(roots + 3, reason);
                 vm.exception = Value.undef();
-                return agStep(vm, g, .throw_, reason);
+                return agStep(vm, g, .throw_, vm.tempRoot(roots + 3, reason));
             };
-            const awaited_promise: *promise.Promise = @ptrCast(@alignCast(wrapped.asObj().promiseData().?));
-            const parent: *promise.Promise = @ptrCast(@alignCast(front.promiseData().?));
+            vm.setTempRoot(roots + 3, wrapped);
+            const parent_object = vm.tempRoot(roots + 2, Value.obj(front_req.result)).asObj();
+            const parent: *promise.Promise = @ptrCast(@alignCast(parent_object.promiseData().?));
             gc_mod.barrierCellFrom(g, parent);
             g.async_parent_promise = parent;
             const onf = try gc_mod.allocObj(vm.arena);
             onf.* = .{ .native = agOnFulfill, .private_data = @ptrCast(g) };
+            vm.setTempRoot(roots + 4, Value.obj(onf));
             const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agOnReject, .private_data = @ptrCast(g) };
-            _ = try promise.thenRetainingAsyncActivation(vm, awaited_promise, Value.obj(onf), Value.obj(onr), @ptrCast(g));
-            promise.linkAwaitingAsyncActivation(awaited_promise, @ptrCast(g));
+            vm.setTempRoot(roots + 5, Value.obj(onr));
+            const current_awaited: *promise.Promise = @ptrCast(@alignCast(vm.tempRoot(roots + 3, wrapped).asObj().promiseData().?));
+            _ = try promise.thenRetainingAsyncActivation(
+                vm,
+                current_awaited,
+                vm.tempRoot(roots + 4, Value.obj(onf)),
+                vm.tempRoot(roots + 5, Value.obj(onr)),
+                @ptrCast(g),
+            );
+            promise.linkAwaitingAsyncActivation(current_awaited, @ptrCast(g));
         },
-        .yielded => |v| {
-            try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), try makeIterResult(vm, v, false));
+        .yielded => {
+            const result = try makeIterResult(vm, vm.tempRoot(roots + 1, step_value), false);
+            vm.setTempRoot(roots + 3, result);
+            const front = vm.tempRoot(roots + 2, Value.obj(front_req.result)).asObj();
+            try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), vm.tempRoot(roots + 3, result));
             try agRemoveFrontAndContinue(vm, g);
         },
-        .returned => |v| {
+        .returned => {
             g.done = true;
-            try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), try makeIterResult(vm, v, true));
+            const result = try makeIterResult(vm, vm.tempRoot(roots + 1, step_value), true);
+            vm.setTempRoot(roots + 3, result);
+            const front = vm.tempRoot(roots + 2, Value.obj(front_req.result)).asObj();
+            try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), vm.tempRoot(roots + 3, result));
             try agRemoveFrontAndContinue(vm, g);
         },
-        .returned_await => |v| {
+        .returned_await => {
             // AsyncGeneratorAwaitReturn: await the return value, then resolve the
             // request as a done result (the front request stays queued until the
             // await callback settles it).
             const can_resume_abrupt = g.started and !g.done;
-            const wrapped = interp.promiseResolveValue(vm, v) catch |err| {
+            const wrapped = interp.promiseResolveValue(vm, vm.tempRoot(roots + 1, step_value)) catch |err| {
                 if (err != error.Throw) return err;
                 const reason = vm.exception;
+                vm.setTempRoot(roots + 3, reason);
                 vm.exception = Value.undef();
-                if (can_resume_abrupt) return agStep(vm, g, .throw_, reason);
+                if (can_resume_abrupt) return agStep(vm, g, .throw_, vm.tempRoot(roots + 3, reason));
                 g.done = true;
-                try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), reason);
+                const front = vm.tempRoot(roots + 2, Value.obj(front_req.result)).asObj();
+                try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), vm.tempRoot(roots + 3, reason));
                 try agRemoveFrontAndContinue(vm, g);
                 return;
             };
+            vm.setTempRoot(roots + 3, wrapped);
             g.done = true;
             const onf = try gc_mod.allocObj(vm.arena);
             onf.* = .{ .native = agReturnFulfill, .private_data = @ptrCast(g) };
+            vm.setTempRoot(roots + 4, Value.obj(onf));
             const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agReturnReject, .private_data = @ptrCast(g) };
-            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
+            vm.setTempRoot(roots + 5, Value.obj(onr));
+            const wrapped_promise: *promise.Promise = @ptrCast(@alignCast(vm.tempRoot(roots + 3, wrapped).asObj().promiseData().?));
+            _ = try promise.then(
+                vm,
+                wrapped_promise,
+                vm.tempRoot(roots + 4, Value.obj(onf)),
+                vm.tempRoot(roots + 5, Value.obj(onr)),
+            );
         },
-        .threw => |e| {
+        .threw => {
             g.done = true;
-            try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), e);
+            const front = vm.tempRoot(roots + 2, Value.obj(front_req.result)).asObj();
+            try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), vm.tempRoot(roots + 1, step_value));
             try agRemoveFrontAndContinue(vm, g);
         },
     }
 }
 
 fn agPumpNext(vm: *Interpreter, g: *Generator) EvalError!void {
+    g.retainAsyncAddress();
+    defer g.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, g, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
+    claimActiveAsyncResume(g, &active_generator_root);
+    defer releaseActiveAsyncResume(vm, g, &active_generator_root);
     var req: ?AsyncGenRequest = null;
     var drain_done = false;
     g.lockRequests();
@@ -11159,7 +11548,13 @@ fn agDoneReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const result: *value.Object = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try promise.resolve(vm, @ptrCast(@alignCast(result.promiseData().?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
+    const fulfilled = if (args.len > 0) args[0] else Value.undef();
+    const roots = try vm.pushTempRootSlice(&.{ Value.obj(result), fulfilled, Value.undef() });
+    defer vm.restoreTempRoots(roots);
+    const iterator_result = try makeIterResult(vm, vm.tempRoot(roots + 1, fulfilled), true);
+    vm.setTempRoot(roots + 2, iterator_result);
+    const current_result = vm.tempRoot(roots, Value.obj(result)).asObj();
+    try promise.resolve(vm, @ptrCast(@alignCast(current_result.promiseData().?)), vm.tempRoot(roots + 2, iterator_result));
     return Value.undef();
 }
 
@@ -11167,40 +11562,81 @@ fn agDoneReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.H
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const result: *value.Object = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
-    try promise.reject(vm, @ptrCast(@alignCast(result.promiseData().?)), if (args.len > 0) args[0] else Value.undef());
+    const rejected = if (args.len > 0) args[0] else Value.undef();
+    const roots = try vm.pushTempRootSlice(&.{ Value.obj(result), rejected });
+    defer vm.restoreTempRoots(roots);
+    const current_result = vm.tempRoot(roots, Value.obj(result)).asObj();
+    try promise.reject(vm, @ptrCast(@alignCast(current_result.promiseData().?)), vm.tempRoot(roots + 1, rejected));
     return Value.undef();
 }
 
 fn settleAsyncGeneratorDoneReturn(vm: *Interpreter, result: *value.Object, value_v: Value) EvalError!void {
-    const wrapped = interp.promiseResolveValue(vm, value_v) catch |err| {
+    const roots = try vm.pushTempRootSlice(&.{ Value.obj(result), value_v, Value.undef(), Value.undef(), Value.undef() });
+    defer vm.restoreTempRoots(roots);
+    const wrapped = interp.promiseResolveValue(vm, vm.tempRoot(roots + 1, value_v)) catch |err| {
         if (err != error.Throw) return err;
         const reason = vm.exception;
+        vm.setTempRoot(roots + 2, reason);
         vm.exception = Value.undef();
-        try promise.reject(vm, @ptrCast(@alignCast(result.promiseData().?)), reason);
+        const current_result = vm.tempRoot(roots, Value.obj(result)).asObj();
+        try promise.reject(vm, @ptrCast(@alignCast(current_result.promiseData().?)), vm.tempRoot(roots + 2, reason));
         return;
     };
+    vm.setTempRoot(roots + 2, wrapped);
     const onf = try gc_mod.allocObj(vm.arena);
-    onf.* = .{ .native = agDoneReturnFulfill, .private_data = @ptrCast(result) };
+    const current_result = vm.tempRoot(roots, Value.obj(result)).asObj();
+    onf.* = .{ .native = agDoneReturnFulfill, .private_data = @ptrCast(current_result) };
+    vm.setTempRoot(roots + 3, Value.obj(onf));
     const onr = try gc_mod.allocObj(vm.arena);
-    onr.* = .{ .native = agDoneReturnReject, .private_data = @ptrCast(result) };
-    _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
+    onr.* = .{ .native = agDoneReturnReject, .private_data = @ptrCast(vm.tempRoot(roots, Value.obj(result)).asObj()) };
+    vm.setTempRoot(roots + 4, Value.obj(onr));
+    const wrapped_promise: *promise.Promise = @ptrCast(@alignCast(vm.tempRoot(roots + 2, wrapped).asObj().promiseData().?));
+    _ = try promise.then(
+        vm,
+        wrapped_promise,
+        vm.tempRoot(roots + 3, Value.obj(onf)),
+        vm.tempRoot(roots + 4, Value.obj(onr)),
+    );
 }
 
 /// Once the generator is done, settle every still-queued request: a `next`
 /// yields `{ undefined, done:true }`, a `return` its value, a `throw` rejects.
 fn agDrainDone(vm: *Interpreter, g: *Generator) EvalError!void {
+    std.debug.assert(g.running.load(.acquire));
+    const roots = try vm.pushTempRootSlice(&.{ Value.undef(), Value.undef(), Value.undef() });
+    defer vm.restoreTempRoots(roots);
     while (true) {
         g.lockRequests();
-        const req = g.popRequest() orelse {
+        const front = g.frontRequest() orelse {
             g.pumping = false;
             g.unlockRequests();
             break;
         };
+        vm.setTempRoot(roots, front.value);
+        vm.setTempRoot(roots + 1, Value.obj(front.result));
+        const kind = front.kind;
+        const front_value = front.value;
+        const front_result = front.result;
+        _ = g.popRequest();
         g.unlockRequests();
-        switch (req.kind) {
-            .throw_ => try promise.reject(vm, @ptrCast(@alignCast(req.result.promiseData().?)), req.value),
-            .return_ => try settleAsyncGeneratorDoneReturn(vm, req.result, req.value),
-            .send => try promise.resolve(vm, @ptrCast(@alignCast(req.result.promiseData().?)), try makeIterResult(vm, Value.undef(), true)),
+        switch (kind) {
+            .throw_ => {
+                const result = vm.tempRoot(roots + 1, Value.obj(front_result)).asObj();
+                try promise.reject(vm, @ptrCast(@alignCast(result.promiseData().?)), vm.tempRoot(roots, front_value));
+            },
+            .return_ => {
+                try settleAsyncGeneratorDoneReturn(
+                    vm,
+                    vm.tempRoot(roots + 1, Value.obj(front_result)).asObj(),
+                    vm.tempRoot(roots, front_value),
+                );
+            },
+            .send => {
+                const iterator_result = try makeIterResult(vm, Value.undef(), true);
+                vm.setTempRoot(roots + 2, iterator_result);
+                const result = vm.tempRoot(roots + 1, Value.obj(front_result)).asObj();
+                try promise.resolve(vm, @ptrCast(@alignCast(result.promiseData().?)), vm.tempRoot(roots + 2, iterator_result));
+            },
         }
     }
 }
@@ -11211,9 +11647,22 @@ fn agReturnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    g.retainAsyncAddress();
+    defer g.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, g, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
+    claimActiveAsyncResume(g, &active_generator_root);
+    defer releaseActiveAsyncResume(vm, g, &active_generator_root);
+    const fulfilled = if (args.len > 0) args[0] else Value.undef();
+    const roots = try vm.pushTempRootSlice(&.{ fulfilled, Value.undef(), Value.undef() });
+    defer vm.restoreTempRoots(roots);
     const front_req = agFront(g) orelse return Value.undef();
-    const front = front_req.result;
-    try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), try makeIterResult(vm, if (args.len > 0) args[0] else Value.undef(), true));
+    vm.setTempRoot(roots + 1, Value.obj(front_req.result));
+    const result = try makeIterResult(vm, vm.tempRoot(roots, fulfilled), true);
+    vm.setTempRoot(roots + 2, result);
+    const front = vm.tempRoot(roots + 1, Value.obj(front_req.result)).asObj();
+    try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), vm.tempRoot(roots + 2, result));
     g.lockRequests();
     _ = g.popRequest();
     g.unlockRequests();
@@ -11226,9 +11675,20 @@ fn agReturnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    g.retainAsyncAddress();
+    defer g.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, g, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
+    claimActiveAsyncResume(g, &active_generator_root);
+    defer releaseActiveAsyncResume(vm, g, &active_generator_root);
+    const rejected = if (args.len > 0) args[0] else Value.undef();
+    const roots = try vm.pushTempRootSlice(&.{ rejected, Value.undef() });
+    defer vm.restoreTempRoots(roots);
     const front_req = agFront(g) orelse return Value.undef();
-    const front = front_req.result;
-    try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), if (args.len > 0) args[0] else Value.undef());
+    vm.setTempRoot(roots + 1, Value.obj(front_req.result));
+    const front = vm.tempRoot(roots + 1, Value.obj(front_req.result)).asObj();
+    try promise.reject(vm, @ptrCast(@alignCast(front.promiseData().?)), vm.tempRoot(roots, rejected));
     g.lockRequests();
     _ = g.popRequest();
     g.unlockRequests();
@@ -11240,6 +11700,13 @@ fn agOnFulfill(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    g.retainAsyncAddress();
+    defer g.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, g, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
+    claimActiveAsyncResume(g, &active_generator_root);
+    defer releaseActiveAsyncResume(vm, g, &active_generator_root);
     try agStep(vm, g, .send, if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
@@ -11248,6 +11715,13 @@ fn agOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     _ = this;
     const vm: *Interpreter = @ptrCast(@alignCast(ctx));
     const g: *Generator = @ptrCast(@alignCast(vm.active_native.?.private_data.?));
+    g.retainAsyncAddress();
+    defer g.releaseAsyncAddress();
+    var active_generator_root: interp.ActiveGeneratorRoot = undefined;
+    publishActiveGenerator(vm, g, &active_generator_root);
+    defer unpublishActiveGenerator(vm, &active_generator_root);
+    claimActiveAsyncResume(g, &active_generator_root);
+    defer releaseActiveAsyncResume(vm, g, &active_generator_root);
     try agStep(vm, g, .throw_, if (args.len > 0) args[0] else Value.undef());
     return Value.undef();
 }
@@ -11258,6 +11732,20 @@ fn agOnReject(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
 pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
     const nf = o.native orelse return;
     const pd = o.private_data orelse return;
+    if (nf == asyncDisposeResumeFulfilled or nf == asyncDisposeResumeRejected) {
+        const state: *AsyncDisposeCompletion = @ptrCast(@alignCast(pd));
+        const lock_state = v.concurrent();
+        if (lock_state) state.lockState();
+        defer if (lock_state) state.unlockState();
+        v.mark(state.gen);
+        for (state.disposables) |disposable| {
+            gc_mod.markValue(v, disposable.value);
+            gc_mod.markValue(v, disposable.method);
+        }
+        if (state.pending) |pending| gc_mod.markValue(v, pending);
+        gc_mod.markValue(v, state.result_value);
+        return;
+    }
     if (nf == asyncOnFulfill or nf == asyncOnReject or
         nf == agOnFulfill or nf == agOnReject or
         nf == agReturnFulfill or nf == agReturnReject)
@@ -11274,7 +11762,20 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
 
 pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
     const nf = o.native orelse return;
-    if (o.private_data == null) return;
+    const pd = o.private_data orelse return;
+    if (nf == asyncDisposeResumeFulfilled or nf == asyncDisposeResumeRejected) {
+        // The completion record is Context-arena-owned and stationary; rewrite
+        // only the moving GC edges stored inside it.
+        const state: *AsyncDisposeCompletion = @ptrCast(@alignCast(pd));
+        gc_relocation.rewriteRequiredSlot(v, Generator, &state.gen);
+        for (state.disposables) |*disposable| {
+            gc_relocation.rewriteValueSlot(v, &disposable.value);
+            gc_relocation.rewriteValueSlot(v, &disposable.method);
+        }
+        gc_relocation.rewriteOptionalValueSlot(v, &state.pending);
+        gc_relocation.rewriteValueSlot(v, &state.result_value);
+        return;
+    }
     if (nf == asyncOnFulfill or nf == asyncOnReject or
         nf == agOnFulfill or nf == agOnReject or
         nf == agReturnFulfill or nf == agReturnReject or
@@ -11289,8 +11790,21 @@ test "vm native private relocation mirrors async resume tracing" {
     var new_generator: Generator = undefined;
     var old_result: value.Object = undefined;
     var new_result: value.Object = undefined;
+    var disposables = [_]interp.Disposable{.{
+        .value = Value.obj(&old_result),
+        .method = Value.obj(&old_result),
+        .is_async = true,
+    }};
     var resume_object = value.Object{ .native = asyncOnFulfill, .private_data = @ptrCast(&old_generator) };
     var done = value.Object{ .native = agDoneReturnFulfill, .private_data = @ptrCast(&old_result) };
+    var disposal_state = AsyncDisposeCompletion{
+        .gen = &old_generator,
+        .disposables = &disposables,
+        .index = 1,
+        .pending = Value.obj(&old_result),
+        .result_value = Value.obj(&old_result),
+    };
+    var disposal = value.Object{ .native = asyncDisposeResumeFulfilled, .private_data = @ptrCast(&disposal_state) };
 
     const Plan = struct {
         old_generator: *Generator,
@@ -11312,9 +11826,41 @@ test "vm native private relocation mirrors async resume tracing" {
     };
     relocateNativePrivateData(&resume_object, &plan);
     relocateNativePrivateData(&done, &plan);
+    relocateNativePrivateData(&disposal, &plan);
 
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generator)), resume_object.private_data.?);
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_result)), done.private_data.?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&disposal_state)), disposal.private_data.?);
+    try std.testing.expectEqual(&new_generator, disposal_state.gen);
+    try std.testing.expectEqual(&new_result, disposal_state.disposables[0].value.asObj());
+    try std.testing.expectEqual(&new_result, disposal_state.disposables[0].method.asObj());
+    try std.testing.expectEqual(&new_result, disposal_state.pending.?.asObj());
+    try std.testing.expectEqual(&new_result, disposal_state.result_value.asObj());
+}
+
+test "async resume caller root capture is failure atomic" {
+    const Context = @import("context.zig").Context;
+    for ([_]bool{ false, true }) |reserve_environment_root| {
+        const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = .required,
+        });
+        defer context.destroy();
+        var machine = context.interpreter();
+        const allocator = machine.arena;
+        if (reserve_environment_root)
+            try machine.gc_env_roots.ensureTotalCapacityPrecise(allocator, 1);
+        var failing: std.testing.FailingAllocator = .init(allocator, .{
+            .fail_index = 0,
+            .resize_fail_index = 0,
+        });
+        machine.arena = failing.allocator();
+        try std.testing.expectError(error.OutOfMemory, ResumeCallerRoots.capture(&machine));
+        machine.arena = allocator;
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+    }
 }
 
 fn unaryOp(op: bc.Op) ast.UnaryOp {

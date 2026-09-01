@@ -8105,10 +8105,20 @@ pub const Context = struct {
     /// and record the generation. Called from a safepoint (or the park path),
     /// where the interpreter holds no per-structure lock.
     fn publishParallelRoots(self: *Context, machine: *interp.Interpreter) void {
-        const req = self.gc_par_request.load(.acquire);
+        var req = self.gc_par_request.load(.acquire);
+        // The collector arms marking before opening the first publication
+        // generation. A peer leaving a native activation during that narrow
+        // interval must remain at this safepoint until it can publish the
+        // activation's children; otherwise the marker may already have skipped
+        // the owner-held Generator in reliance on the handshake.
+        var spins: usize = 0;
+        while (req == 0 and self.gc_par_collector.load(.acquire) != null) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            req = self.gc_par_request.load(.acquire);
+        }
         if (req == 0) return;
         if (machine.gc_published_gen.load(.acquire) == req) return;
-        gc_mod.publishInterpreterRoots(machine);
+        gc_mod.publishInterpreterRoots(machine, req);
         machine.gc_published_gen.store(req, .release);
         _ = self.gc_par_peer_publications.fetchAdd(1, .monotonic);
     }
@@ -32873,7 +32883,7 @@ test "block functions preserve shared and repeated closures without the GIL" {
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 
-test "block functions survive actual moving GC across a native safepoint" {
+test "block functions and suspendable activations survive actual moving GC across a native safepoint" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,
@@ -32981,6 +32991,125 @@ test "block functions survive actual moving GC across a native safepoint" {
     try std.testing.expect(capture_holder_before != ctx.global_object.getOwn("captureMovingHolder").?.asObj());
     ctx.collectGarbage();
     try std.testing.expectEqual(@as(f64, 13), (try ctx.evaluate("captureMovingRead().next().value")).asNum());
+
+    // An async function hides its native caller while its activation owns the
+    // interpreter fields. Exercise both the initial synchronous drive and a
+    // promise-job resume at actual moving checkpoints, then read the caller's
+    // movable lexical state after the first drive restores it.
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\globalThis.asyncMovingHolder = { value: 20 };
+        \\globalThis.asyncMovingCaller = { marker: 7 };
+        \\async function movingAsyncBody(holder) {
+        \\  requestBlockFunctionMove(); blockMovingLoop(20000);
+        \\  await 0;
+        \\  requestBlockFunctionMove(); blockMovingLoop(20000);
+        \\  return holder.value + 2;
+        \\}
+        \\function invokeMovingAsync(holder) {
+        \\  let caller = asyncMovingCaller;
+        \\  let result = movingAsyncBody(holder);
+        \\  globalThis.asyncMovingCallerRestored = caller === asyncMovingCaller && caller.marker === 7;
+        \\  result.then(function (value) { globalThis.asyncMovingResult = value; });
+        \\}
+    );
+    const async_holder_before = ctx.global_object.getOwn("asyncMovingHolder").?.asObj();
+    const async_moving_before = heap.accounting().moving_minor_collections;
+    _ = try ctx.evaluate("invokeMovingAsync(asyncMovingHolder); drainMicrotasks();");
+    try std.testing.expect((try ctx.evaluate("asyncMovingCallerRestored")).asBool());
+    try std.testing.expectEqual(@as(f64, 22), (try ctx.evaluate("asyncMovingResult")).asNum());
+    try std.testing.expect(heap.accounting().moving_minor_collections >= async_moving_before + 2);
+    try std.testing.expect(async_holder_before != ctx.global_object.getOwn("asyncMovingHolder").?.asObj());
+
+    // Async-disposal completion records are arena-owned native side records.
+    // The second disposer runs in the body-completion tail and suspends; move
+    // the queued record's entire graph before its native callback resumes the
+    // remaining stack.
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\globalThis.asyncDisposeMovingHolder = { value: 24 };
+        \\globalThis.asyncDisposeMovingOrder = [];
+        \\async function movingAsyncDisposal(holder) {
+        \\  await using first = { [Symbol.asyncDispose]() {
+        \\    asyncDisposeMovingOrder.push('first');
+        \\    return 0;
+        \\  } };
+        \\  await using second = { [Symbol.asyncDispose]() {
+        \\    asyncDisposeMovingOrder.push('second');
+        \\    return 0;
+        \\  } };
+        \\  return holder.value + 1;
+        \\}
+        \\movingAsyncDisposal(asyncDisposeMovingHolder).then(function (value) {
+        \\  globalThis.asyncDisposeMovingResult = value;
+        \\});
+    );
+    const async_dispose_holder_before = ctx.global_object.getOwn("asyncDisposeMovingHolder").?.asObj();
+    const async_dispose_moving_before = heap.accounting().moving_minor_collections;
+    const async_dispose_move = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, async_dispose_move.status);
+    try std.testing.expect(async_dispose_move.moved_cells > 0);
+    _ = try ctx.evaluate("drainMicrotasks();");
+    try std.testing.expectEqual(@as(f64, 25), (try ctx.evaluate("asyncDisposeMovingResult")).asNum());
+    try std.testing.expectEqualStrings("second:first", (try ctx.evaluate("asyncDisposeMovingOrder.join(':')")).asStr());
+    try std.testing.expectEqual(async_dispose_moving_before + 1, heap.accounting().moving_minor_collections);
+    try std.testing.expect(async_dispose_holder_before != ctx.global_object.getOwn("asyncDisposeMovingHolder").?.asObj());
+
+    // Async-generator request publication is reentrant by design, so address
+    // ownership is reference-counted rather than a hidden execution lock. The
+    // first request enqueues the second from inside the running body; subsequent
+    // await/throw/return resumes cover every external native driver.
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\globalThis.asyncGeneratorMovingHolder = { value: 30, finalized: false };
+        \\globalThis.asyncGeneratorMovingQueued = false;
+        \\async function* movingAsyncGenerator(holder) {
+        \\  let cell = { value: 2 };
+        \\  if (!asyncGeneratorMovingQueued) {
+        \\    asyncGeneratorMovingQueued = true;
+        \\    globalThis.asyncGeneratorMovingReentrant = asyncGeneratorMovingIterator.next(5);
+        \\  }
+        \\  requestBlockFunctionMove(); blockMovingLoop(20000);
+        \\  yield cell.value + holder.value;
+        \\  await 0;
+        \\  requestBlockFunctionMove(); blockMovingLoop(20000);
+        \\  try { yield cell.value + holder.value + 1; }
+        \\  catch (error) { yield error.message; }
+        \\  finally { holder.finalized = true; }
+        \\  return holder.value + 4;
+        \\}
+        \\globalThis.asyncGeneratorMovingIterator = movingAsyncGenerator(asyncGeneratorMovingHolder);
+    );
+    const async_generator_holder_before = ctx.global_object.getOwn("asyncGeneratorMovingHolder").?.asObj();
+    const async_generator_object_before = ctx.global_object.getOwn("asyncGeneratorMovingIterator").?.asObj();
+    const async_generator_before: *vm.Generator = @ptrCast(@alignCast(async_generator_object_before.generator().?));
+    const async_generator_moving_before = heap.accounting().moving_minor_collections;
+    _ = try ctx.evaluate(
+        \\globalThis.asyncGeneratorMovingFirst = asyncGeneratorMovingIterator.next();
+        \\asyncGeneratorMovingFirst.then(function (result) { globalThis.asyncGeneratorMovingFirstValue = result.value; });
+        \\asyncGeneratorMovingReentrant.then(function (result) { globalThis.asyncGeneratorMovingSecondValue = result.value; });
+        \\drainMicrotasks();
+    );
+    try std.testing.expectEqual(@as(f64, 32), (try ctx.evaluate("asyncGeneratorMovingFirstValue")).asNum());
+    try std.testing.expectEqual(@as(f64, 33), (try ctx.evaluate("asyncGeneratorMovingSecondValue")).asNum());
+    try std.testing.expect(heap.accounting().moving_minor_collections >= async_generator_moving_before + 2);
+    try std.testing.expect(async_generator_holder_before != ctx.global_object.getOwn("asyncGeneratorMovingHolder").?.asObj());
+    const async_generator_object_after = ctx.global_object.getOwn("asyncGeneratorMovingIterator").?.asObj();
+    const async_generator_after: *vm.Generator = @ptrCast(@alignCast(async_generator_object_after.generator().?));
+    try std.testing.expectEqual(async_generator_before, async_generator_after);
+    _ = try ctx.evaluate(
+        \\asyncGeneratorMovingIterator.throw(new Error('moving-throw')).then(function (result) {
+        \\  globalThis.asyncGeneratorMovingThrow = result.value;
+        \\});
+        \\drainMicrotasks();
+        \\asyncGeneratorMovingIterator.return(17).then(function (result) {
+        \\  globalThis.asyncGeneratorMovingReturn = result.value + ':' + result.done;
+        \\});
+        \\drainMicrotasks();
+    );
+    try std.testing.expectEqualStrings("moving-throw", (try ctx.evaluate("asyncGeneratorMovingThrow")).asStr());
+    try std.testing.expectEqualStrings("17:true", (try ctx.evaluate("asyncGeneratorMovingReturn")).asStr());
+    try std.testing.expect((try ctx.evaluate("asyncGeneratorMovingHolder.finalized")).asBool());
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 

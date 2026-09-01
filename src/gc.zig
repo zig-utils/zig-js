@@ -2738,6 +2738,13 @@ fn relocateActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
 pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markManaged(v, machine.env);
     traceEnv(machine.env, v);
+    // Async functions have no JavaScript generator wrapper: during their
+    // initial synchronous drive this exact interpreter publication is the only
+    // owner of the Generator cell itself. `running`/the native borrow pins its
+    // address, while this edge keeps the payload and all of its children live.
+    var active_generator = machine.gc_active_generators;
+    while (active_generator) |root| : (active_generator = root.previous)
+        v.mark(@as(*vm.Generator, @ptrCast(@alignCast(root.generator))));
     var tree_call = machine.gc_tree_call_roots;
     while (tree_call) |call| : (tree_call = call.previous) {
         v.mark(call.function);
@@ -2920,6 +2927,12 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
 pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     gc_relocation.rewriteRequiredSlot(v, Environment, &machine.env);
     relocateEnv(machine.env, v);
+    // The active Generator payload is address-pinned, so it is not part of the
+    // collector's moved-cell relocation dispatch. Its children are still
+    // movable and must be rewritten from this exact stable interpreter root.
+    var active_generator = machine.gc_active_generators;
+    while (active_generator) |root| : (active_generator = root.previous)
+        relocateGenerator(@ptrCast(@alignCast(root.generator)), v);
     var tree_call = machine.gc_tree_call_roots;
     while (tree_call) |call| : (tree_call = call.previous) {
         gc_relocation.rewriteRequiredSlot(v, interp.Function, &call.function);
@@ -3587,8 +3600,26 @@ const RootPublishVisitor = struct {
 /// draining without ever reading this thread's live VM/native stack. Only the
 /// owner can scan its own running stack soundly — this is the per-mutator side
 /// of the parallel-GC root handshake (`src/root_handshake.zig`).
-pub fn publishInterpreterRoots(machine: *interp.Interpreter) void {
+pub fn publishInterpreterRoots(machine: *interp.Interpreter, generation: u64) void {
     var pv = RootPublishVisitor{};
+    // A running peer must publish an activation's transitive children itself.
+    // Merely greying the Generator cell would make the collector encounter live
+    // mutable VM state and permanently defer it, which forbids parallel finish.
+    // The owner is stopped at this exact safepoint; async-generator request
+    // publication remains independently serialized by its queue lock.
+    var active_generator = machine.gc_active_generators;
+    while (active_generator) |root| : (active_generator = root.previous) {
+        if (!root.publication_owned.load(.acquire)) continue;
+        const generator: *vm.Generator = @ptrCast(@alignCast(root.generator));
+        if (generator.gc_published_gen.load(.acquire) == generation) continue;
+        generator.lockTraceRequests();
+        traceGenerator(generator, &pv);
+        generator.unlockTraceRequests();
+        // Publish the complete child shading before handing the Generator cell
+        // to the marker through the barrier buffer.
+        generator.gc_published_gen.store(generation, .release);
+        pv.mark(generator);
+    }
     traceInterpreterRoots(machine, &pv);
 }
 
@@ -3874,7 +3905,9 @@ pub const Binding = struct {
     fn cellAddressIsRelocatable(cell: *anyopaque, kind: Kind) bool {
         if (kind == .generator) {
             const generator: *vm.Generator = @ptrCast(@alignCast(cell));
-            return !generator.native_resume_active.load(.acquire) and !generator.running.load(.acquire);
+            return !generator.native_resume_active.load(.acquire) and
+                generator.native_async_borrows.load(.acquire) == 0 and
+                !generator.running.load(.acquire);
         }
         return true;
     }
@@ -4075,14 +4108,28 @@ pub const Binding = struct {
         // every state mutation through `lockState`, and traceIterHelper takes it.
         if (v.concurrent() and kind == .generator) {
             const generator: *vm.Generator = @ptrCast(@alignCast(cell));
-            const owns_active = if (active_interpreter) |machine|
-                machine.gc_active_generator == cell
-            else
-                false;
+            const owns_active = if (active_interpreter) |machine| owns: {
+                var root = machine.gc_active_generators;
+                while (root) |current| : (root = current.previous)
+                    if (current.generator == cell and
+                        (current.trace_owned.load(.acquire) or current.publication_owned.load(.acquire))) break :owns true;
+                break :owns false;
+            } else false;
             if (owns_active) {
                 generator.lockTraceRequests();
                 defer generator.unlockTraceRequests();
                 traceGenerator(generator, v);
+                return;
+            }
+            const parallel_collection_active = if (active_realm_context) |realm|
+                realm.gc_par_collector.load(.acquire) != null
+            else
+                false;
+            if (parallel_collection_active and generator.gc_publication_owner_active.load(.acquire)) {
+                // A peer owner will shade this activation's children before it
+                // publishes the open generation; the collection cannot finish
+                // until every peer has done so. Do not add a permanently-
+                // blocking deferred entry while that handshake is outstanding.
                 return;
             }
             if (generator.tryLockTrace()) {
