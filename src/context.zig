@@ -750,6 +750,34 @@ pub const RuntimeAttributionProfiler = struct {
         }
     }
 
+    pub fn recordCellAllocationBatch(
+        self: *RuntimeAttributionProfiler,
+        bytes_per_cell: usize,
+        fresh: usize,
+        reused: usize,
+    ) void {
+        const total = std.math.add(usize, fresh, reused) catch @panic("cell allocation attribution count overflow");
+        if (total == 0) return;
+        const total_bytes = std.math.mul(u64, @intCast(bytes_per_cell), @intCast(total)) catch
+            @panic("cell allocation attribution byte overflow");
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
+        _ = self.gc_cell_allocations.fetchAdd(@intCast(total), .monotonic);
+        _ = self.gc_cell_bytes.fetchAdd(total_bytes, .monotonic);
+        _ = self.gc_cell_fresh_allocations.fetchAdd(@intCast(fresh), .monotonic);
+        _ = self.gc_cell_reused_allocations.fetchAdd(@intCast(reused), .monotonic);
+    }
+
+    pub fn recordCellResize(self: *RuntimeAttributionProfiler, old_len: usize, new_len: usize) void {
+        if (old_len == new_len) return;
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
+        if (new_len > old_len)
+            _ = self.gc_cell_bytes.fetchAdd(@intCast(new_len - old_len), .monotonic)
+        else
+            _ = self.gc_cell_freed_bytes.fetchAdd(@intCast(old_len - new_len), .monotonic);
+    }
+
     pub fn recordCellFree(self: *RuntimeAttributionProfiler, bytes: usize) void {
         self.beginCounterMutation();
         defer self.finishCounterMutation();
@@ -2149,12 +2177,24 @@ pub const GcCellBacking = struct {
         if (self.bulk_teardown) return 0;
 
         var allocated: usize = 0;
+        var fresh: usize = 0;
+        var reused: usize = 0;
         while (allocated < out.len) : (allocated += 1) {
-            const ptr = self.takeFreedSlotLocked(idx) orelse self.bumpFreshSlotLocked(idx) orelse break;
+            const ptr = if (self.takeFreedSlotLocked(idx)) |ptr| reused_slot: {
+                reused += 1;
+                break :reused_slot ptr;
+            } else if (self.bumpFreshSlotLocked(idx)) |ptr| fresh_slot: {
+                fresh += 1;
+                break :fresh_slot ptr;
+            } else break;
             out[allocated] = @ptrCast(ptr);
         }
-        if (self.parallel and allocated != 0 and self.parallel_cell_tracking_enabled.load(.monotonic))
-            self.recordParallelCellAllocation(len * allocated);
+        if (allocated != 0) {
+            if (self.parallel and self.parallel_cell_tracking_enabled.load(.monotonic))
+                self.recordParallelCellAllocation(len * allocated);
+            if (self.runtime_attribution_profiler) |profile|
+                profile.recordCellAllocationBatch(bucket_sizes[idx], fresh, reused);
+        }
         return allocated;
     }
 
@@ -2364,7 +2404,10 @@ pub const GcCellBacking = struct {
         }
         self.acquireInner();
         defer self.unlockInner();
-        return self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr);
+        if (!self.inner.vtable.resize(self.inner.ptr, mem, alignment, new_len, ret_addr)) return false;
+        if (self.runtime_attribution_profiler) |profile|
+            profile.recordCellResize(mem.len, new_len);
+        return true;
     }
 
     fn remapFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
@@ -2380,7 +2423,10 @@ pub const GcCellBacking = struct {
         }
         self.acquireInner();
         defer self.unlockInner();
-        return self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr);
+        const ptr = self.inner.vtable.remap(self.inner.ptr, mem, alignment, new_len, ret_addr) orelse return null;
+        if (self.runtime_attribution_profiler) |profile|
+            profile.recordCellResize(mem.len, new_len);
+        return ptr;
     }
 
     fn freeFn(ctx: *anyopaque, mem: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
@@ -2734,6 +2780,35 @@ test "GC cell backing recycles aligned cell slabs and delegates side storage" {
     try std.testing.expectEqual(@as(u64, 4), snapshot.cell_slab_lock.size_2048_acquires);
 }
 
+test "GC cell backing attributes delegated resize and remap byte lifetime" {
+    var buffer: [256]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    var profile = RuntimeAttributionProfiler{ .inner = std.testing.allocator };
+    var backing = GcCellBacking{
+        .inner = fixed.allocator(),
+        .runtime_attribution_profiler = &profile,
+    };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    var memory = try a.alignedAlloc(u8, .@"8", 32);
+    try std.testing.expect(a.resize(memory, 48));
+    memory = memory.ptr[0..48];
+    memory = a.remap(memory, 64) orelse return error.TestUnexpectedResult;
+    memory = a.remap(memory, 8) orelse return error.TestUnexpectedResult;
+
+    const before_free = profile.snapshot().allocation;
+    try std.testing.expectEqual(@as(u64, 1), before_free.gc_cell_allocations);
+    try std.testing.expectEqual(@as(u64, 1), before_free.gc_cell_delegated_allocations);
+    try std.testing.expectEqual(@as(u64, 64), before_free.gc_cell_bytes);
+    try std.testing.expectEqual(@as(u64, 56), before_free.gc_cell_freed_bytes);
+
+    a.free(memory);
+    const after_free = profile.snapshot().allocation;
+    try std.testing.expectEqual(@as(u64, 1), after_free.gc_cell_frees);
+    try std.testing.expectEqual(after_free.gc_cell_bytes, after_free.gc_cell_freed_bytes);
+}
+
 test "GC cell backing adapts its slot-aligned chunk to a bounded heap" {
     // #637: the normal Object-class slab is 64 KiB. Keep the hard 32 KiB
     // Context budget intact and prove the backing publishes a smaller owned
@@ -2801,20 +2876,29 @@ test "GC cell backing lazily bumps fresh chunk slots before using reuse bitmaps"
 }
 
 test "GC cell backing batches reused and fresh slabs under one bucket lock" {
+    var profile = RuntimeAttributionProfiler{ .inner = std.testing.allocator };
     var backing = GcCellBacking{
         .inner = std.testing.allocator,
         .parallel = true,
         .parallel_cell_tracking_enabled = .init(true),
+        .runtime_attribution_profiler = &profile,
     };
     defer backing.deinit();
     const a = backing.allocator();
     const len = 200;
     const idx = GcCellBacking.bucketIndex(len, .@"16").?;
+    const slot_size = GcCellBacking.bucket_sizes[idx];
 
     var cells: [4][]align(16) u8 = undefined;
     for (&cells) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", len);
     a.free(cells[1]);
     a.free(cells[3]);
+    const before_batch = profile.snapshot().allocation;
+    try std.testing.expectEqual(@as(u64, 4), before_batch.gc_cell_allocations);
+    try std.testing.expectEqual(@as(u64, 4), before_batch.gc_cell_fresh_allocations);
+    try std.testing.expectEqual(@as(u64, 0), before_batch.gc_cell_reused_allocations);
+    try std.testing.expectEqual(@as(u64, 4 * slot_size), before_batch.gc_cell_bytes);
+    try std.testing.expectEqual(@as(u64, 2 * slot_size), before_batch.gc_cell_freed_bytes);
 
     var slabs: [4]*anyopaque = undefined;
     const locks_before = backing.bucket_lock_acquisitions_for_testing[idx];
@@ -2829,6 +2913,12 @@ test "GC cell backing batches reused and fresh slabs under one bucket lock" {
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_reused_allocs[idx]);
     try std.testing.expectEqual(@as(usize, 6), backing.bucket_live_counts[idx].items[0]);
     try std.testing.expectEqual(8 * len, backing.parallelCellBytesSinceCollection());
+    const after_batch = profile.snapshot().allocation;
+    try std.testing.expectEqual(@as(u64, 8), after_batch.gc_cell_allocations);
+    try std.testing.expectEqual(@as(u64, 6), after_batch.gc_cell_fresh_allocations);
+    try std.testing.expectEqual(@as(u64, 2), after_batch.gc_cell_reused_allocations);
+    try std.testing.expectEqual(@as(u64, 8 * slot_size), after_batch.gc_cell_bytes);
+    try std.testing.expectEqual(@as(u64, 2 * slot_size), after_batch.gc_cell_freed_bytes);
     const publish_locks_before = backing.bucket_lock_acquisitions_for_testing[idx];
     backing.publishCellAllocationBatch(&slabs, len, 0);
     try std.testing.expectEqual(publish_locks_before + 1, backing.bucket_lock_acquisitions_for_testing[idx]);
@@ -2844,6 +2934,50 @@ test "GC cell backing batches reused and fresh slabs under one bucket lock" {
         const cell: []align(16) u8 = ptr[0..len];
         a.free(cell);
     }
+    const after_free = profile.snapshot().allocation;
+    try std.testing.expectEqual(after_free.gc_cell_bytes, after_free.gc_cell_freed_bytes);
+    try std.testing.expectEqual(@as(u64, 8), after_free.gc_cell_frees);
+}
+
+test "GC cell backing attributes only returned slots from a partial batch" {
+    var profile = RuntimeAttributionProfiler{ .inner = std.testing.allocator };
+    var backing = GcCellBacking{
+        .inner = std.testing.allocator,
+        .runtime_attribution_profiler = &profile,
+    };
+    defer backing.deinit();
+    const a = backing.allocator();
+    const len = 200;
+    const idx = GcCellBacking.bucketIndex(len, .@"16").?;
+    const slot_size = GcCellBacking.bucket_sizes[idx];
+    const slots = GcCellBacking.chunk_bytes / slot_size;
+
+    const cells = try std.testing.allocator.alloc([]align(16) u8, slots - 2);
+    defer std.testing.allocator.free(cells);
+    for (cells) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", len);
+
+    const inner = backing.inner;
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    backing.inner = unavailable.allocator();
+    defer backing.inner = inner;
+
+    var batch: [4]*anyopaque = undefined;
+    try std.testing.expectEqual(@as(usize, 2), backing.allocateCellBatch(len, &batch));
+    const after_batch = profile.snapshot().allocation;
+    try std.testing.expectEqual(@as(u64, slots), after_batch.gc_cell_allocations);
+    try std.testing.expectEqual(@as(u64, slots), after_batch.gc_cell_fresh_allocations);
+    try std.testing.expectEqual(@as(u64, 0), after_batch.gc_cell_reused_allocations);
+    try std.testing.expectEqual(@as(u64, slots * slot_size), after_batch.gc_cell_bytes);
+
+    for (cells) |cell| a.free(cell);
+    for (batch[0..2]) |allocation| {
+        const ptr: [*]align(16) u8 = @ptrCast(@alignCast(allocation));
+        const cell: []align(16) u8 = ptr[0..len];
+        a.free(cell);
+    }
+    const after_free = profile.snapshot().allocation;
+    try std.testing.expectEqual(after_free.gc_cell_bytes, after_free.gc_cell_freed_bytes);
+    try std.testing.expectEqual(@as(u64, slots), after_free.gc_cell_frees);
 }
 
 test "GC cell backing advances reuse cursor across drained chunks" {
