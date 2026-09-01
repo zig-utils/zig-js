@@ -18457,7 +18457,7 @@ fn inspectorProperties(arena: std.mem.Allocator, session: *CInspectorSession, re
                 while (iterator.next()) |entry| try raw_bindings.append(arena, .{
                     .name = entry.key_ptr.*,
                     .value = entry.value_ptr.*,
-                    .writable = !environment.consts.contains(entry.key_ptr.*),
+                    .writable = !environment.consts.contains(environment.bindingHashContext(), entry.key_ptr.*),
                 });
                 var alias_iterator = environment.aliases.iterator();
                 while (alias_iterator.next()) |entry| try aliases.append(arena, .{ .local_name = entry.key_ptr.*, .target = entry.value_ptr.* });

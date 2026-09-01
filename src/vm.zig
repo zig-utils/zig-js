@@ -1919,10 +1919,11 @@ fn resolveQuickGlobalBinding(vm: *Interpreter, name: []const u8, allow_unbound_g
         if (env.direct_eval_forward_target != null) return null;
         if (env.with_object != null) return null;
         const locked = env.lockBindingsForRead();
-        const alias = env.aliases.contains(name);
-        const found = env.vars.contains(name);
+        const context = env.bindingHashContext();
+        const alias = env.aliases.contains(context, name);
+        const found = env.vars.contains(context, name);
         const root_global_data = found and env.parent == null and
-            !env.consts.contains(name) and !env.lexicals.contains(name);
+            !env.consts.contains(context, name) and !env.lexicals.contains(context, name);
         env.unlockBindingsForRead(locked);
         if (alias) return null;
         if (found) {
@@ -2425,9 +2426,10 @@ fn quickImmutableLocalBinding(vm: *Interpreter, name: []const u8) ?Value {
         if (env.direct_eval_forward_target != null) return null;
         if (env.with_object != null) return null;
         const locked = env.lockBindingsForRead();
-        const alias = env.aliases.contains(name);
-        const binding = env.vars.get(name);
-        const immutable = binding != null and env.consts.contains(name);
+        const context = env.bindingHashContext();
+        const alias = env.aliases.contains(context, name);
+        const binding = env.vars.get(context, name);
+        const immutable = binding != null and env.consts.contains(context, name);
         env.unlockBindingsForRead(locked);
         if (alias) return null;
         if (binding) |callee| return if (immutable) callee else null;
@@ -10162,12 +10164,12 @@ fn paramsBodyVarEnv(vm: *Interpreter, func: *Function, param_env: *Environment) 
     vm.initEnvironment(be, param_env, true);
     vm.env = be;
     try vm.hoistVarNames(func.body.block);
-    if (be.vars.contains("arguments")) {
+    if (be.vars.contains(be.bindingHashContext(), "arguments")) {
         if (param_env.get("arguments")) |av| try be.put("arguments", av);
     }
     // A body `var` that names a simple parameter inherits the parameter's value.
     for (func.params) |p| {
-        if (p.pattern == null and !p.is_rest and be.vars.contains(p.name)) {
+        if (p.pattern == null and !p.is_rest and be.vars.contains(be.bindingHashContext(), p.name)) {
             if (param_env.get(p.name)) |pv| try be.put(p.name, pv);
         }
     }

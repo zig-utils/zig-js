@@ -872,8 +872,125 @@ pub const RealmIntrinsics = struct {
     }
 };
 
+pub const BindingStringHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, key);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+/// One compact source-or-context word belongs to a complete declarative
+/// Environment Record. Production records retain the realm Shape key source
+/// until their first binding is installed; standalone users fail closed through
+/// the engine entropy provider. The installed context is then shared by every
+/// value, tag, and alias table in the record.
+pub const BindingHashState = union(enum) {
+    secure_entropy,
+    realm_shape: *Shape,
+    installed: BindingStringHashContext,
+
+    fn installedContext(state: @This()) ?BindingStringHashContext {
+        return switch (state) {
+            .installed => |context| context,
+            .secure_entropy, .realm_shape => null,
+        };
+    }
+
+    fn candidate(state: @This()) std.mem.Allocator.Error!BindingStringHashContext {
+        return switch (state) {
+            .installed => |context| context,
+            .realm_shape => |shape| .{ .seed = try shape.deriveSecureHashSeed() },
+            .secure_entropy => blk: {
+                var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+                agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+                break :blk .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+            },
+        };
+    }
+
+    fn publish(state: *@This(), context: BindingStringHashContext) void {
+        if (state.installedContext()) |installed| {
+            std.debug.assert(installed.seed == context.seed);
+            return;
+        }
+        state.* = .{ .installed = context };
+    }
+};
+
+fn BindingStringMapUnmanaged(comptime MapValue: type) type {
+    const Index = std.HashMapUnmanaged(
+        []const u8,
+        MapValue,
+        BindingStringHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        index: Index = .empty,
+
+        pub fn get(self: *const @This(), context: ?BindingStringHashContext, key: []const u8) ?MapValue {
+            return self.index.getContext(key, context orelse return null);
+        }
+
+        pub fn getPtr(self: *@This(), context: ?BindingStringHashContext, key: []const u8) ?*MapValue {
+            return self.index.getPtrContext(key, context orelse return null);
+        }
+
+        pub fn contains(self: *const @This(), context: ?BindingStringHashContext, key: []const u8) bool {
+            return self.index.containsContext(key, context orelse return false);
+        }
+
+        pub fn ensureUnusedCapacity(
+            self: *@This(),
+            allocator: std.mem.Allocator,
+            additional_count: u32,
+            context: BindingStringHashContext,
+        ) std.mem.Allocator.Error!void {
+            try self.index.ensureUnusedCapacityContext(allocator, additional_count, context);
+        }
+
+        pub fn putAssumeCapacity(self: *@This(), key: []const u8, map_value: MapValue, context: BindingStringHashContext) void {
+            self.index.putAssumeCapacityContext(key, map_value, context);
+        }
+
+        pub fn fetchRemove(self: *@This(), context: ?BindingStringHashContext, key: []const u8) ?Index.KV {
+            return self.index.fetchRemoveContext(key, context orelse return null);
+        }
+
+        pub fn count(self: *const @This()) usize {
+            return self.index.count();
+        }
+
+        pub fn iterator(self: *const @This()) Index.Iterator {
+            return self.index.iterator();
+        }
+
+        pub fn keyIterator(self: *const @This()) Index.KeyIterator {
+            return self.index.keyIterator();
+        }
+
+        pub fn valueIterator(self: *const @This()) Index.ValueIterator {
+            return self.index.valueIterator();
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.index.deinit(allocator);
+        }
+
+        pub fn capacity(self: *const @This()) u32 {
+            return self.index.capacity();
+        }
+    };
+}
+
 pub const Environment = struct {
-    vars: std.StringHashMapUnmanaged(Value) = .{},
+    vars: BindingStringMapUnmanaged(Value) = .{},
+    binding_hash_state: BindingHashState = .secure_entropy,
     /// Root-realm identity, initialized before publication and immutable to
     /// mutators. The stopped collector rewrites it with the other owned edges;
     /// the writable globalThis binding is not an authority for realm selection.
@@ -898,7 +1015,7 @@ pub const Environment = struct {
     /// Pending error while a VM async-disposal step is suspended at an await.
     dispose_pending: ?Value = null,
     /// Names in `vars` declared `const` — assigning to them is a TypeError.
-    consts: std.StringHashMapUnmanaged(void) = .{},
+    consts: BindingStringMapUnmanaged(void) = .{},
     /// Names in the GLOBAL (root) `vars` that are lexical declarations
     /// (`let`/`const`/`class`). A global lexical shadows a like-named global-object
     /// property (`let Array` reads `undefined`, not %Array%), so its read must NOT
@@ -906,21 +1023,21 @@ pub const Environment = struct {
     /// with its own-property. Inferring lexical-ness from "the global object lacks
     /// an own property" is wrong when the name shadows a pre-existing builtin, so
     /// this set records it explicitly. Only populated on the root environment.
-    lexicals: std.StringHashMapUnmanaged(void) = .{},
+    lexicals: BindingStringMapUnmanaged(void) = .{},
     /// Names that are *non-strict* immutable bindings — a named function
     /// expression's own name. Reassignment throws in strict code but is a silent
     /// no-op in sloppy code (unlike `const`, which always throws).
-    fn_names: std.StringHashMapUnmanaged(void) = .{},
+    fn_names: BindingStringMapUnmanaged(void) = .{},
     /// Names that are *deletable* bindings — a sloppy direct eval's top-level
     /// `var`/function declarations create deletable (configurable) bindings in the
     /// surrounding variable environment (EvalDeclarationInstantiation step 16.b),
     /// unlike ordinary declarations. `delete x` removes such a binding and returns
     /// true; a subsequent reference is then unresolvable (ReferenceError).
-    deletable: std.StringHashMapUnmanaged(void) = .{},
+    deletable: BindingStringMapUnmanaged(void) = .{},
     /// Module *indirect bindings* (`import { x } from "m"`): `local` resolves
     /// live to `name` in another module's environment, so a mutation of the
     /// exporter's binding is visible here. Assigning to one is a TypeError.
-    aliases: std.StringHashMapUnmanaged(Alias) = .{},
+    aliases: BindingStringMapUnmanaged(Alias) = .{},
     arena: std.mem.Allocator,
     /// Optional allocator for binding-table buckets and duplicated binding
     /// names. Null keeps the legacy arena-owned path; GC contexts set this to
@@ -1025,6 +1142,29 @@ pub const Environment = struct {
         return @constCast(self.bindingRecord());
     }
 
+    /// Attach a production Environment to its realm key source before the
+    /// record is published or populated. Standalone users keep the secure
+    /// entropy state and receive an independent key on first insertion.
+    pub fn useRealmHashKeys(self: *Environment, root_shape: *Shape) void {
+        std.debug.assert(self.binding_hash_state.installedContext() == null);
+        std.debug.assert(self.vars.count() == 0 and self.consts.count() == 0 and
+            self.lexicals.count() == 0 and self.fn_names.count() == 0 and
+            self.deletable.count() == 0 and self.aliases.count() == 0);
+        self.binding_hash_state = .{ .realm_shape = root_shape };
+    }
+
+    pub fn bindingHashContext(self: *const Environment) ?BindingStringHashContext {
+        return self.binding_hash_state.installedContext();
+    }
+
+    fn bindingHashCandidate(self: *const Environment) std.mem.Allocator.Error!BindingStringHashContext {
+        return self.binding_hash_state.candidate();
+    }
+
+    fn publishBindingHashContext(self: *Environment, context: BindingStringHashContext) void {
+        self.binding_hash_state.publish(context);
+    }
+
     fn activationBinding(self: *const Environment, name: []const u8) ?bc.DirectEvalBinding {
         if (self.activation) |*view| if (view.binding(name)) |binding| return binding;
         const target = self.direct_eval_forward_target orelse return null;
@@ -1036,14 +1176,16 @@ pub const Environment = struct {
         const record = @constCast(self.bindingRecord());
         const locked = record.lockBindingsForRead();
         defer record.unlockBindingsForRead(locked);
-        return record.aliases.contains(name) or record.vars.contains(name);
+        const context = record.bindingHashContext();
+        return record.aliases.contains(context, name) or record.vars.contains(context, name);
     }
 
     pub fn hasOwnLexical(self: *const Environment, name: []const u8) bool {
         const record = @constCast(self.bindingRecord());
         const locked = record.lockBindingsForRead();
         defer record.unlockBindingsForRead(locked);
-        return record.lexicals.contains(name) or record.consts.contains(name);
+        const context = record.bindingHashContext();
+        return record.lexicals.contains(context, name) or record.consts.contains(context, name);
     }
 
     pub fn lockBindings(self: *Environment) void {
@@ -1171,24 +1313,26 @@ pub const Environment = struct {
             // The owning mutator is the only structural writer. Snapshot before
             // allocating so a private activation retains one collector handshake
             // and an existing-value update never performs a fallible key copy.
-            if (self.vars.contains(name)) {
+            if (self.vars.contains(self.bindingHashContext(), name)) {
                 const locked = self.lockBindingsForWrite();
                 defer self.unlockBindingsForWrite(locked);
-                self.vars.getPtr(name).?.* = v;
+                self.vars.getPtr(self.bindingHashContext(), name).?.* = v;
                 return;
             }
             var owned: ?[]u8 = try self.dupeBindingName(name);
             defer if (owned) |key| self.freeBindingName(key);
             const locked = self.lockBindingsForWrite();
             defer self.unlockBindingsForWrite(locked);
-            try self.vars.ensureUnusedCapacity(self.bindingAllocator(), 1);
-            self.vars.putAssumeCapacity(owned.?, v);
+            const context = try self.bindingHashCandidate();
+            try self.vars.ensureUnusedCapacity(self.bindingAllocator(), 1, context);
+            self.vars.putAssumeCapacity(owned.?, v, context);
+            self.publishBindingHashContext(context);
             owned = null;
             return;
         }
 
         var locked = self.lockBindingsForWrite();
-        if (self.vars.getPtr(name)) |slot| {
+        if (self.vars.getPtr(self.bindingHashContext(), name)) |slot| {
             slot.* = v;
             self.unlockBindingsForWrite(locked);
             return;
@@ -1203,30 +1347,33 @@ pub const Environment = struct {
         defer if (owned) |key| self.freeBindingName(key);
         locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
-        if (self.vars.getPtr(name)) |slot| {
+        if (self.vars.getPtr(self.bindingHashContext(), name)) |slot| {
             slot.* = v;
             return;
         }
-        try self.vars.ensureUnusedCapacity(self.bindingAllocator(), 1);
-        self.vars.putAssumeCapacity(owned.?, v);
+        const context = try self.bindingHashCandidate();
+        try self.vars.ensureUnusedCapacity(self.bindingAllocator(), 1, context);
+        self.vars.putAssumeCapacity(owned.?, v, context);
+        self.publishBindingHashContext(context);
         owned = null;
     }
 
     fn putTaggedBinding(
         self: *Environment,
-        tag: *std.StringHashMapUnmanaged(void),
+        tag: *BindingStringMapUnmanaged(void),
         name: []const u8,
         v: Value,
     ) EvalError!void {
         while (true) {
             const single_writer = self.bindingsHaveSingleWriter();
             var locked = if (single_writer) false else self.lockBindingsForWrite();
-            const needs_value_key = !self.vars.contains(name);
-            const needs_tag_key = !tag.contains(name);
+            const observed_context = self.bindingHashContext();
+            const needs_value_key = !self.vars.contains(observed_context, name);
+            const needs_tag_key = !tag.contains(observed_context, name);
             if (!needs_value_key and !needs_tag_key) {
                 if (single_writer) locked = self.lockBindingsForWrite();
                 defer self.unlockBindingsForWrite(locked);
-                self.vars.getPtr(name).?.* = v;
+                self.vars.getPtr(self.bindingHashContext(), name).?.* = v;
                 return;
             }
             if (!single_writer) self.unlockBindingsForWrite(locked);
@@ -1244,8 +1391,9 @@ pub const Environment = struct {
             if (needs_tag_key) tag_key = try self.dupeBindingName(name);
 
             locked = self.lockBindingsForWrite();
-            const value_slot = self.vars.getPtr(name);
-            const has_tag = tag.contains(name);
+            const installed_context = self.bindingHashContext();
+            const value_slot = self.vars.getPtr(installed_context, name);
+            const has_tag = tag.contains(installed_context, name);
             if ((value_slot == null and value_key == null) or (!has_tag and tag_key == null)) {
                 self.unlockBindingsForWrite(locked);
                 continue;
@@ -1256,19 +1404,21 @@ pub const Environment = struct {
             // allocation when the second table fails, but no binding or side-table
             // state becomes semantically visible until both reservations succeed.
             const a = self.bindingAllocator();
-            if (value_slot == null) try self.vars.ensureUnusedCapacity(a, 1);
-            if (!has_tag) try tag.ensureUnusedCapacity(a, 1);
+            const context = try self.bindingHashCandidate();
+            if (value_slot == null) try self.vars.ensureUnusedCapacity(a, 1, context);
+            if (!has_tag) try tag.ensureUnusedCapacity(a, 1, context);
 
             if (value_slot == null) {
-                self.vars.putAssumeCapacity(value_key.?, v);
+                self.vars.putAssumeCapacity(value_key.?, v, context);
                 value_key = null;
             } else {
                 value_slot.?.* = v;
             }
             if (!has_tag) {
-                tag.putAssumeCapacity(tag_key.?, {});
+                tag.putAssumeCapacity(tag_key.?, {}, context);
                 tag_key = null;
             }
+            self.publishBindingHashContext(context);
             return;
         }
     }
@@ -1282,12 +1432,12 @@ pub const Environment = struct {
 
     fn markOwnedName(
         self: *Environment,
-        set: *std.StringHashMapUnmanaged(void),
+        set: *BindingStringMapUnmanaged(void),
         name: []const u8,
     ) EvalError!void {
         const single_writer = self.bindingsHaveSingleWriter();
         var locked = if (single_writer) false else self.lockBindingsForWrite();
-        if (set.contains(name)) {
+        if (set.contains(self.bindingHashContext(), name)) {
             if (!single_writer) self.unlockBindingsForWrite(locked);
             return;
         }
@@ -1297,9 +1447,11 @@ pub const Environment = struct {
         defer if (owned) |key| self.freeBindingName(key);
         locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
-        if (set.contains(name)) return;
-        try set.ensureUnusedCapacity(self.bindingAllocator(), 1);
-        set.putAssumeCapacity(owned.?, {});
+        if (set.contains(self.bindingHashContext(), name)) return;
+        const context = try self.bindingHashCandidate();
+        try set.ensureUnusedCapacity(self.bindingAllocator(), 1, context);
+        set.putAssumeCapacity(owned.?, {}, context);
+        self.publishBindingHashContext(context);
         owned = null;
     }
 
@@ -1332,13 +1484,14 @@ pub const Environment = struct {
         if (self.direct_eval_forward_target) |target| return target.removeVar(name);
         const locked = self.lockBindingsForWrite();
         defer self.unlockBindingsForWrite(locked);
-        const removed = if (self.vars.fetchRemove(name)) |entry| blk: {
+        const context = self.bindingHashContext();
+        const removed = if (self.vars.fetchRemove(context, name)) |entry| blk: {
             self.freeBindingName(entry.key);
             break :blk true;
         } else false;
-        if (self.consts.fetchRemove(name)) |entry| self.freeBindingName(entry.key);
-        if (self.fn_names.fetchRemove(name)) |entry| self.freeBindingName(entry.key);
-        if (self.deletable.fetchRemove(name)) |entry| self.freeBindingName(entry.key);
+        if (self.consts.fetchRemove(context, name)) |entry| self.freeBindingName(entry.key);
+        if (self.fn_names.fetchRemove(context, name)) |entry| self.freeBindingName(entry.key);
+        if (self.deletable.fetchRemove(context, name)) |entry| self.freeBindingName(entry.key);
         return removed;
     }
 
@@ -1350,8 +1503,9 @@ pub const Environment = struct {
             if (e.activationBinding(name) != null) return false;
             const record = e.mutableBindingRecord();
             const locked = record.lockBindingsForRead();
-            if (record.vars.contains(name)) {
-                const r = record.fn_names.contains(name);
+            const context = record.bindingHashContext();
+            if (record.vars.contains(context, name)) {
+                const r = record.fn_names.contains(context, name);
                 record.unlockBindingsForRead(locked);
                 return r;
             }
@@ -1369,8 +1523,9 @@ pub const Environment = struct {
             if (e.activationBinding(name)) |binding| return binding.immutable;
             const record = e.mutableBindingRecord();
             const locked = record.lockBindingsForRead();
-            if (record.vars.contains(name)) {
-                const r = record.consts.contains(name);
+            const context = record.bindingHashContext();
+            if (record.vars.contains(context, name)) {
+                const r = record.consts.contains(context, name);
                 record.unlockBindingsForRead(locked);
                 return r;
             }
@@ -1430,7 +1585,7 @@ pub const Environment = struct {
             // lock. A private activation instead owns the table exclusively and
             // uses the marker handshake until capture revokes that proof.
             const locked = record.lockBindingsForWrite();
-            if (record.vars.getPtr(name)) |ptr| {
+            if (record.vars.getPtr(record.bindingHashContext(), name)) |ptr| {
                 record.barrierStoredValue(v);
                 ptr.* = v;
                 record.unlockBindingsForWrite(locked);
@@ -1466,12 +1621,13 @@ pub const Environment = struct {
         const record = self.mutableBindingRecord();
         const locked = record.lockBindingsForRead();
         defer record.unlockBindingsForRead(locked);
-        if (record.aliases.contains(name)) return .immutable;
-        const current = record.vars.get(name) orelse return .missing;
+        const context = record.bindingHashContext();
+        if (record.aliases.contains(context, name)) return .immutable;
+        const current = record.vars.get(context, name) orelse return .missing;
         if (tdz_marker) |marker|
             if (current.isObject() and current.asObj() == marker) return .tdz;
-        if (record.consts.contains(name)) return .immutable;
-        if (record.fn_names.contains(name)) return .function_name;
+        if (record.consts.contains(context, name)) return .immutable;
+        if (record.fn_names.contains(context, name)) return .function_name;
         return .mutable;
     }
 
@@ -1488,7 +1644,7 @@ pub const Environment = struct {
         record.barrierStoredValue(v);
         const locked = record.lockBindingsForWrite();
         defer record.unlockBindingsForWrite(locked);
-        const slot = record.vars.getPtr(name) orelse return false;
+        const slot = record.vars.getPtr(record.bindingHashContext(), name) orelse return false;
         slot.* = v;
         return true;
     }
@@ -1504,7 +1660,7 @@ pub const Environment = struct {
         // taken. Allocation recovery is prohibited inside that trace-sensitive
         // region, and a concurrent insert can make the local copy unnecessary.
         const optimistic_lock = self.lockBindingsForRead();
-        const needs_local_key = !self.aliases.contains(local);
+        const needs_local_key = !self.aliases.contains(self.bindingHashContext(), local);
         self.unlockBindingsForRead(optimistic_lock);
         var local_key: ?[]u8 = if (needs_local_key) try self.dupeBindingName(local) else null;
         defer if (local_key) |key| self.freeBindingName(key);
@@ -1513,12 +1669,13 @@ pub const Environment = struct {
 
         const locked = self.lockBindingsForWrite(); // traceEnv reads `aliases`; serialize the structural write
         defer self.unlockBindingsForWrite(locked);
-        const existing = self.aliases.getPtr(local);
+        const existing = self.aliases.getPtr(self.bindingHashContext(), local);
         // Alias bindings are module-instantiation state and are never deleted.
         // A peer may only have inserted one since the optimistic read, in which
         // case the unused local copy is released after unlocking.
         std.debug.assert(existing != null or local_key != null);
-        if (existing == null) try self.aliases.ensureUnusedCapacity(self.bindingAllocator(), 1);
+        const context = if (existing == null) try self.bindingHashCandidate() else undefined;
+        if (existing == null) try self.aliases.ensureUnusedCapacity(self.bindingAllocator(), 1, context);
 
         const replacement = Alias{ .env = target, .name = target_key.? };
         target_key = null;
@@ -1527,7 +1684,8 @@ pub const Environment = struct {
             slot.* = replacement;
             self.freeBindingName(old_name);
         } else {
-            self.aliases.putAssumeCapacity(local_key.?, replacement);
+            self.aliases.putAssumeCapacity(local_key.?, replacement, context);
+            self.publishBindingHashContext(context);
             local_key = null;
         }
     }
@@ -1540,11 +1698,12 @@ pub const Environment = struct {
             if (e.activationBinding(name) != null) return false;
             const record = e.mutableBindingRecord();
             const locked = record.lockBindingsForRead();
-            if (record.aliases.contains(name)) {
+            const context = record.bindingHashContext();
+            if (record.aliases.contains(context, name)) {
                 record.unlockBindingsForRead(locked);
                 return true;
             }
-            if (record.vars.contains(name)) {
+            if (record.vars.contains(context, name)) {
                 record.unlockBindingsForRead(locked);
                 return false;
             }
@@ -1568,12 +1727,12 @@ pub const Environment = struct {
             // lock-free; their writes use the marker handshake above.
             const locked = record.lockBindingsForRead();
             if (record.aliases.count() != 0) {
-                if (record.aliases.get(name)) |a| {
+                if (record.aliases.get(record.bindingHashContext(), name)) |a| {
                     record.unlockBindingsForRead(locked);
                     return a.env.get(a.name);
                 }
             }
-            if (record.vars.get(name)) |v| {
+            if (record.vars.get(record.bindingHashContext(), name)) |v| {
                 record.unlockBindingsForRead(locked);
                 return v;
             }
@@ -1593,7 +1752,7 @@ pub const Environment = struct {
         const record = self.mutableBindingRecord();
         const locked = record.lockBindingsForRead();
         defer record.unlockBindingsForRead(locked);
-        return record.vars.get(name);
+        return record.vars.get(record.bindingHashContext(), name);
     }
 
     /// GetBindingValue from this exact Declarative Environment Record without
@@ -1604,8 +1763,9 @@ pub const Environment = struct {
             return view.frame.read(binding.slot);
         const record = self.mutableBindingRecord();
         const locked = record.lockBindingsForRead();
-        const alias = if (record.aliases.count() != 0) record.aliases.get(name) else null;
-        const local = if (alias == null) record.vars.get(name) else null;
+        const context = record.bindingHashContext();
+        const alias = if (record.aliases.count() != 0) record.aliases.get(context, name) else null;
+        const local = if (alias == null) record.vars.get(context, name) else null;
         record.unlockBindingsForRead(locked);
         if (alias) |target| return target.env.get(target.name);
         return local;
@@ -1623,7 +1783,7 @@ pub const Environment = struct {
         const record = self.mutableBindingRecord();
         const locked = record.lockBindingsForWrite();
         defer record.unlockBindingsForWrite(locked);
-        if (record.vars.getPtr(name)) |ptr| {
+        if (record.vars.getPtr(record.bindingHashContext(), name)) |ptr| {
             record.barrierStoredValue(v);
             ptr.* = v;
             return true;
@@ -4125,7 +4285,7 @@ pub const Interpreter = struct {
             // Linux tsan-threadfuzz: globalDefine put vs this contains). Only a
             // proven-private activation may elide this read lock.
             const locked = record.lockBindingsForRead();
-            const has = record.vars.contains(name);
+            const has = record.vars.contains(record.bindingHashContext(), name);
             record.unlockBindingsForRead(locked);
             if (has)
                 return if (e.parent == null and objectHasOwn(g, name)) g else null;
@@ -4193,8 +4353,9 @@ pub const Interpreter = struct {
             // is empty — the common case for ordinary scopes (aliases exist only for
             // `arguments`/`with`/eval-mapped bindings). Halves the per-identifier
             // hashing on the hot resolution path.
-            const alias = if (record.aliases.count() != 0) record.aliases.get(name) else null;
-            const found_var: ?Value = if (alias == null) record.vars.get(name) else null;
+            const context = record.bindingHashContext();
+            const alias = if (record.aliases.count() != 0) record.aliases.get(context, name) else null;
+            const found_var: ?Value = if (alias == null) record.vars.get(context, name) else null;
             // `consts` membership must be read under the SAME `binding_lock` as
             // `vars`/`aliases`: a peer thread's `putConst` writes `consts` while
             // holding that lock, so reading it after `unlockBindings` is the same
@@ -4206,7 +4367,7 @@ pub const Interpreter = struct {
             // binding and shadows any like-named global property. `consts`/`lexicals`
             // are read under the SAME `binding_lock` as `vars` (no-GIL race).
             const global_shadowable = found_var != null and e.parent == null and
-                !record.consts.contains(name) and !record.lexicals.contains(name);
+                !record.consts.contains(context, name) and !record.lexicals.contains(context, name);
             record.unlockBindingsForRead(locked);
             if (alias) |a| return .{ .value = a.env.get(a.name) orelse return null };
             if (found_var) |v| {
@@ -4280,7 +4441,8 @@ pub const Interpreter = struct {
             // lookupIdent); the `getPtr` result is not escaped, only its
             // presence, so nothing dangles after unlock.
             const locked = record.lockBindingsForRead();
-            const owns = record.vars.getPtr(name) != null or record.aliases.get(name) != null;
+            const context = record.bindingHashContext();
+            const owns = record.vars.getPtr(context, name) != null or record.aliases.get(context, name) != null;
             record.unlockBindingsForRead(locked);
             if (owns) return e;
             env = e.parent;
@@ -4294,7 +4456,8 @@ pub const Interpreter = struct {
             if (e.activationBinding(name) != null) return null;
             const record = e.mutableBindingRecord();
             const locked = record.lockBindingsForRead();
-            const owned = record.aliases.get(name) != null or record.vars.get(name) != null;
+            const context = record.bindingHashContext();
+            const owned = record.aliases.get(context, name) != null or record.vars.get(context, name) != null;
             record.unlockBindingsForRead(locked);
             if (owned) return null; // a real binding owns it
             if (record.with_object) |wo| {
@@ -4322,11 +4485,12 @@ pub const Interpreter = struct {
             if (e.activationBinding(name) != null) return .{ .environment = e };
             const record = e.mutableBindingRecord();
             const locked = record.lockBindingsForRead();
-            const owns_alias = record.aliases.contains(name);
-            const owns_var = record.vars.contains(name);
+            const context = record.bindingHashContext();
+            const owns_alias = record.aliases.contains(context, name);
+            const owns_var = record.vars.contains(context, name);
             const owns = owns_alias or owns_var;
             const root_object_candidate = owns_var and !owns_alias and e.parent == null and
-                !record.lexicals.contains(name) and !record.consts.contains(name);
+                !record.lexicals.contains(context, name) and !record.consts.contains(context, name);
             record.unlockBindingsForRead(locked);
             if (owns) {
                 if (root_object_candidate) if (self.currentGlobalObject()) |global|
@@ -4376,8 +4540,9 @@ pub const Interpreter = struct {
 
             const record = e.mutableBindingRecord();
             const locked = record.lockBindingsForRead();
-            const owns = record.vars.contains(name) or record.aliases.get(name) != null;
-            const deletable = owns and record.deletable.contains(name);
+            const context = record.bindingHashContext();
+            const owns = record.vars.contains(context, name) or record.aliases.get(context, name) != null;
+            const deletable = owns and record.deletable.contains(context, name);
             const is_global = e.parent == null;
             record.unlockBindingsForRead(locked);
             if (owns) {
@@ -4581,6 +4746,7 @@ pub const Interpreter = struct {
     pub fn initEnvironment(self: *Interpreter, env: *Environment, parent: ?*Environment, fn_scope: bool) void {
         env.* = .{
             .arena = self.arena,
+            .binding_hash_state = .{ .realm_shape = self.root_shape },
             .bindings_allocator = self.gc_side_storage,
             .gc_name_bytes_live = self.gc_environment_name_bytes_live,
             .parent = parent,
@@ -4603,6 +4769,7 @@ pub const Interpreter = struct {
             env.arena = self.arena;
             env.bindings_allocator = self.gc_side_storage;
             env.gc_name_bytes_live = self.gc_environment_name_bytes_live;
+            env.binding_hash_state = .{ .realm_shape = self.root_shape };
             env.parent = parent;
             // Cell ownership is fixed by allocEnv. In particular, a concurrent
             // marker can read this bit through a different Environment edge,
@@ -9490,11 +9657,11 @@ pub const Interpreter = struct {
                 self.initEnvironment(body_env, call_env, true);
                 self.env = body_env;
                 try self.hoistVarNames(func.body.block);
-                if (body_env.vars.contains("arguments")) {
+                if (body_env.vars.contains(body_env.bindingHashContext(), "arguments")) {
                     if (call_env.get("arguments")) |av| try body_env.put("arguments", av);
                 }
                 for (func.params) |p| {
-                    if (p.pattern == null and !p.is_rest and body_env.vars.contains(p.name)) {
+                    if (p.pattern == null and !p.is_rest and body_env.vars.contains(body_env.bindingHashContext(), p.name)) {
                         if (call_env.get(p.name)) |pv| try body_env.put(p.name, pv);
                     }
                 }
@@ -16051,8 +16218,9 @@ pub const Interpreter = struct {
                         const root = rootEnv(self.env);
                         const locked = root.lockBindingsForWrite();
                         defer root.unlockBindingsForWrite(locked);
-                        if (!root.consts.contains(key)) {
-                            if (root.vars.getPtr(key)) |slot| slot.* = v;
+                        const context = root.bindingHashContext();
+                        if (!root.consts.contains(context, key)) {
+                            if (root.vars.getPtr(context, key)) |slot| slot.* = v;
                         }
                     }
                     return true;
@@ -16102,8 +16270,9 @@ pub const Interpreter = struct {
             // membership test must not read it unlocked.
             const locked = root.lockBindingsForWrite();
             defer root.unlockBindingsForWrite(locked);
-            if (!root.consts.contains(key)) {
-                if (root.vars.getPtr(key)) |slot| slot.* = v;
+            const context = root.bindingHashContext();
+            if (!root.consts.contains(context, key)) {
+                if (root.vars.getPtr(context, key)) |slot| slot.* = v;
             }
         }
         return true;
@@ -35804,6 +35973,7 @@ fn agentThreadRun(src: []const u8) void {
     const a = arena_state.allocator();
     var env = Environment{ .arena = a, .fn_scope = true };
     const root_shape = Shape.createRoot(a) catch return;
+    env.useRealmHashKeys(root_shape);
     installGlobals(&env, root_shape) catch return;
     const global_obj = gc_mod.allocObj(a) catch return;
     global_obj.* = .{};
@@ -55472,6 +55642,124 @@ test "ToString canonicalizes object-produced StringData" {
     try std.testing.expectEqualStrings("693|s", try result.asWtf8(allocator));
 }
 
+test "Environment binding maps share one lazy secure exact-byte context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root_shape = try Shape.createRoot(arena.allocator());
+
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(BindingHashState));
+    try std.testing.expectEqual(
+        @sizeOf(std.StringHashMapUnmanaged(void)),
+        @sizeOf(BindingStringMapUnmanaged(void)),
+    );
+    var lazy = Environment{
+        .arena = std.testing.allocator,
+        .bindings_allocator = std.testing.allocator,
+    };
+    defer lazy.finalizeOwnedBindingStorage();
+    lazy.useRealmHashKeys(root_shape);
+    try std.testing.expect(lazy.bindingHashContext() == null);
+    try std.testing.expect(!lazy.hasOwnBinding("absent"));
+    try std.testing.expect(lazy.bindingHashContext() == null);
+    try lazy.put("first", Value.num(1));
+    const lazy_seed = lazy.bindingHashContext().?.seed;
+    try lazy.markLexical("first");
+    try std.testing.expectEqual(lazy_seed, lazy.bindingHashContext().?.seed);
+
+    const target_mask: u64 = 1023;
+    const collision_count = 32;
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var suffix: usize = 0;
+    while (names.items.len != collision_count) : (suffix += 1) {
+        const name = try std.fmt.allocPrint(arena.allocator(), "binding{d}", .{suffix});
+        if ((std.hash.Wyhash.hash(0, name) & target_mask) == 0)
+            try names.append(arena.allocator(), name);
+    }
+
+    const keyed_seed = 0x4249_4e44_494e_4701;
+    var env = Environment{
+        .arena = std.testing.allocator,
+        .bindings_allocator = std.testing.allocator,
+        .binding_hash_state = .{ .installed = .{ .seed = keyed_seed } },
+    };
+    defer env.finalizeOwnedBindingStorage();
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (names.items, 0..) |name, index| {
+        try std.testing.expectEqual(@as(u64, 0), std.hash.Wyhash.hash(0, name) & target_mask);
+        const bucket = std.hash.Wyhash.hash(keyed_seed, name) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        try env.put(name, Value.num(@floatFromInt(index)));
+    }
+    try std.testing.expect(occupied_count > collision_count / 2);
+    for (names.items, 0..) |name, expected|
+        try std.testing.expectEqual(@as(f64, @floatFromInt(expected)), env.getLocal(name).?.asNum());
+
+    try env.putConst("const\x00name", Value.num(1));
+    try env.markLexical("lexical\x00name");
+    try env.putFnName("function\x00name", Value.num(2));
+    try env.markDeletable(names.items[0]);
+    var target = Environment{ .arena = std.testing.allocator };
+    try env.putAlias("alias\x00name", &target, "export\x00name");
+
+    const context = env.bindingHashContext().?;
+    try std.testing.expectEqual(keyed_seed, context.seed);
+    try std.testing.expect(env.consts.contains(context, "const\x00name"));
+    try std.testing.expect(env.lexicals.contains(context, "lexical\x00name"));
+    try std.testing.expect(env.fn_names.contains(context, "function\x00name"));
+    try std.testing.expect(env.deletable.contains(context, names.items[0]));
+    const alias = env.aliases.get(context, "alias\x00name").?;
+    try std.testing.expectEqual(&target, alias.env);
+    try std.testing.expectEqualStrings("export\x00name", alias.name);
+    try std.testing.expect(env.getLocal("const\x00name") != null);
+    try std.testing.expect(env.getLocal("const\x00nam") == null);
+}
+
+test "Environment competing first writers publish one binding hash context" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root_shape = try Shape.createRoot(shape_arena.allocator());
+
+    var env = Environment{
+        .arena = std.testing.allocator,
+        .bindings_allocator = std.testing.allocator,
+    };
+    defer env.finalizeOwnedBindingStorage();
+    env.useRealmHashKeys(root_shape);
+
+    const Shared = struct {
+        env: *Environment,
+        ready: std.atomic.Value(u8) = .init(0),
+        start: std.atomic.Value(bool) = .init(false),
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This(), name: []const u8, number: f64) void {
+            _ = self.ready.fetchAdd(1, .release);
+            while (!self.start.load(.acquire)) std.atomic.spinLoopHint();
+            self.env.put(name, Value.num(number)) catch {
+                self.failed.store(true, .release);
+            };
+        }
+    };
+    var shared = Shared{ .env = &env };
+    const left = try std.Thread.spawn(.{}, Shared.run, .{ &shared, "left", 1 });
+    const right = try std.Thread.spawn(.{}, Shared.run, .{ &shared, "right", 2 });
+    while (shared.ready.load(.acquire) != 2) std.atomic.spinLoopHint();
+    shared.start.store(true, .release);
+    left.join();
+    right.join();
+
+    try std.testing.expect(!shared.failed.load(.acquire));
+    const context = env.bindingHashContext() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 1), env.vars.get(context, "left").?.asNum());
+    try std.testing.expectEqual(@as(f64, 2), env.vars.get(context, "right").?.asNum());
+}
+
 fn failureAtomicOwnedEnvironmentNames(backing: std.mem.Allocator) !void {
     var live_name_bytes: usize = 0;
     var env = Environment{
@@ -55487,27 +55775,27 @@ fn failureAtomicOwnedEnvironmentNames(backing: std.mem.Allocator) !void {
             try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
             return err;
         };
-        try std.testing.expectEqual(@as(f64, 1), env.vars.get("plain").?.asNum());
+        try std.testing.expectEqual(@as(f64, 1), env.vars.get(env.bindingHashContext(), "plain").?.asNum());
 
         env.markLexical("lexical") catch |err| {
-            try std.testing.expect(!env.lexicals.contains("lexical"));
+            try std.testing.expect(!env.lexicals.contains(env.bindingHashContext(), "lexical"));
             try std.testing.expectEqual(@as(usize, "plain".len), live_name_bytes);
             return err;
         };
         env.markDeletable("plain") catch |err| {
-            try std.testing.expect(!env.deletable.contains("plain"));
+            try std.testing.expect(!env.deletable.contains(env.bindingHashContext(), "plain"));
             try std.testing.expectEqual(@as(usize, "plain".len + "lexical".len), live_name_bytes);
             return err;
         };
-        try std.testing.expect(env.lexicals.contains("lexical"));
-        try std.testing.expect(env.deletable.contains("plain"));
+        try std.testing.expect(env.lexicals.contains(env.bindingHashContext(), "lexical"));
+        try std.testing.expect(env.deletable.contains(env.bindingHashContext(), "plain"));
         try std.testing.expectEqual(
             @as(usize, 2 * "plain".len + "lexical".len),
             live_name_bytes,
         );
         try std.testing.expect(env.removeVar("plain"));
-        try std.testing.expect(!env.vars.contains("plain"));
-        try std.testing.expect(!env.deletable.contains("plain"));
+        try std.testing.expect(!env.vars.contains(env.bindingHashContext(), "plain"));
+        try std.testing.expect(!env.deletable.contains(env.bindingHashContext(), "plain"));
         try std.testing.expectEqual(@as(usize, "lexical".len), live_name_bytes);
     }
     try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
@@ -55525,11 +55813,12 @@ fn failureAtomicFreshConstBinding(backing: std.mem.Allocator) !void {
         env.putConst("immutable", Value.num(7)) catch |err| {
             try std.testing.expectEqual(@as(usize, 0), env.vars.count());
             try std.testing.expectEqual(@as(usize, 0), env.consts.count());
+            try std.testing.expect(env.bindingHashContext() == null);
             try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
             return err;
         };
-        try std.testing.expectEqual(@as(f64, 7), env.vars.get("immutable").?.asNum());
-        try std.testing.expect(env.consts.contains("immutable"));
+        try std.testing.expectEqual(@as(f64, 7), env.vars.get(env.bindingHashContext(), "immutable").?.asNum());
+        try std.testing.expect(env.consts.contains(env.bindingHashContext(), "immutable"));
         try std.testing.expectEqual(@as(usize, 2 * "immutable".len), live_name_bytes);
     }
     try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
@@ -55550,13 +55839,13 @@ fn failureAtomicConstUpgrade(backing: std.mem.Allocator) !void {
             return err;
         };
         env.putConst("upgrade", Value.num(2)) catch |err| {
-            try std.testing.expectEqual(@as(f64, 1), env.vars.get("upgrade").?.asNum());
-            try std.testing.expect(!env.consts.contains("upgrade"));
+            try std.testing.expectEqual(@as(f64, 1), env.vars.get(env.bindingHashContext(), "upgrade").?.asNum());
+            try std.testing.expect(!env.consts.contains(env.bindingHashContext(), "upgrade"));
             try std.testing.expectEqual(@as(usize, "upgrade".len), live_name_bytes);
             return err;
         };
-        try std.testing.expectEqual(@as(f64, 2), env.vars.get("upgrade").?.asNum());
-        try std.testing.expect(env.consts.contains("upgrade"));
+        try std.testing.expectEqual(@as(f64, 2), env.vars.get(env.bindingHashContext(), "upgrade").?.asNum());
+        try std.testing.expect(env.consts.contains(env.bindingHashContext(), "upgrade"));
         try std.testing.expectEqual(@as(usize, 2 * "upgrade".len), live_name_bytes);
     }
     try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
@@ -55574,11 +55863,12 @@ fn failureAtomicFunctionNameBinding(backing: std.mem.Allocator) !void {
         env.putFnName("named", Value.num(3)) catch |err| {
             try std.testing.expectEqual(@as(usize, 0), env.vars.count());
             try std.testing.expectEqual(@as(usize, 0), env.fn_names.count());
+            try std.testing.expect(env.bindingHashContext() == null);
             try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
             return err;
         };
-        try std.testing.expectEqual(@as(f64, 3), env.vars.get("named").?.asNum());
-        try std.testing.expect(env.fn_names.contains("named"));
+        try std.testing.expectEqual(@as(f64, 3), env.vars.get(env.bindingHashContext(), "named").?.asNum());
+        try std.testing.expect(env.fn_names.contains(env.bindingHashContext(), "named"));
         try std.testing.expectEqual(@as(usize, 2 * "named".len), live_name_bytes);
     }
     try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
@@ -55597,17 +55887,18 @@ fn failureAtomicAliasPublication(backing: std.mem.Allocator) !void {
         defer env.finalizeOwnedBindingStorage();
         env.putAlias("local", &first_target, "first") catch |err| {
             try std.testing.expectEqual(@as(usize, 0), env.aliases.count());
+            try std.testing.expect(env.bindingHashContext() == null);
             try std.testing.expectEqual(@as(usize, 0), live_name_bytes);
             return err;
         };
         env.putAlias("local", &replacement_target, "replacement") catch |err| {
-            const retained = env.aliases.get("local").?;
+            const retained = env.aliases.get(env.bindingHashContext(), "local").?;
             try std.testing.expectEqual(&first_target, retained.env);
             try std.testing.expectEqualStrings("first", retained.name);
             try std.testing.expectEqual(@as(usize, "local".len + "first".len), live_name_bytes);
             return err;
         };
-        const replaced = env.aliases.get("local").?;
+        const replaced = env.aliases.get(env.bindingHashContext(), "local").?;
         try std.testing.expectEqual(&replacement_target, replaced.env);
         try std.testing.expectEqualStrings("replacement", replaced.name);
         try std.testing.expectEqual(@as(usize, "local".len + "replacement".len), live_name_bytes);

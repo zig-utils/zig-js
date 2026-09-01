@@ -5201,6 +5201,7 @@ pub const Context = struct {
             .parallel_js = false,
             .wasm_features = primary.wasm_features,
         };
+        self.env.useRealmHashKeys(self.root_shape);
         errdefer self.jit_owner.deinit();
 
         const gc_saved = gc_mod.setActiveHeap(null);
@@ -5395,6 +5396,7 @@ pub const Context = struct {
             .promise_state_locking = options.concurrent_gc or options.parallel_gc or options.parallel_js,
             .wasm_features = options.wasm_features,
         };
+        self.env.useRealmHashKeys(self.root_shape);
         self.gc_par_enabled = options.parallel_midscript_gc;
         self.gc_cooperative_enabled = options.enable_gc and options.parallel_js and !options.parallel_midscript_gc;
         var owned_gc_state: ?*GcState = null;
@@ -9565,6 +9567,7 @@ pub const Context = struct {
         // scope (so globals resolve), but its own declarations stay module-local.
         env.* = .{
             .arena = a,
+            .binding_hash_state = .{ .realm_shape = self.root_shape },
             .bindings_allocator = if (self.gc != null) self.gpa else null,
             .gc_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
             .parent = &self.env,
@@ -9706,6 +9709,7 @@ pub const Context = struct {
         const env = try gc_mod.allocEnv(a);
         env.* = .{
             .arena = a,
+            .binding_hash_state = .{ .realm_shape = self.root_shape },
             .bindings_allocator = if (self.gc != null) self.gpa else null,
             .gc_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
             .parent = &self.env,
@@ -9853,7 +9857,7 @@ pub const Context = struct {
         set.append(self.gpa, .{ .module = module, .name = name }) catch return .not_found;
         if (module.exports.get(name)) |kind| switch (kind) {
             .local => |local| {
-                if (module.env.aliases.get(local)) |alias|
+                if (module.env.aliases.get(module.env.bindingHashContext(), local)) |alias|
                     return .{ .found = alias };
                 return .{ .found = .{ .env = module.env, .name = local } };
             },
@@ -38787,7 +38791,13 @@ test "enable_gc: active module cache roots module environments during collection
     defer _ = gc_mod.setActiveHeap(gc_saved);
 
     const env = try gc_mod.allocEnv(a);
-    env.* = .{ .arena = a, .parent = &ctx.env, .gc_managed = gc_mod.allocationsAreManaged(), .fn_scope = true };
+    env.* = .{
+        .arena = a,
+        .binding_hash_state = .{ .realm_shape = ctx.root_shape },
+        .parent = &ctx.env,
+        .gc_managed = gc_mod.allocationsAreManaged(),
+        .fn_scope = true,
+    };
     try std.testing.expect(env.gc_managed);
     try std.testing.expect(!ctx.env.gc_managed);
 
