@@ -70,6 +70,32 @@ regression threshold. The warm mixed-tier row does not assert allocation
 equivalence; the cold lifecycle artifact remains the finalizer and retained-RSS
 evidence boundary.
 
+### Initialized-descriptor exact-parent result
+
+Issue [#663](https://github.com/zig-utils/zig-js/issues/663) publishes a fresh
+data property's value and final descriptor in one property-lock transaction,
+with the attribute entry prepared before Shape visibility and exact OOM
+rollback. The seven-pair quiet-reference [cold lifecycle report](.data/exact-parent-initialized-descriptors-context-2026-09-01.md)
+([raw](.data/exact-parent-initialized-descriptors-context-2026-09-01.json))
+compares candidate `1605a118` directly with parent `cb0200bc`. The complete
+1,000-Context create/no-evaluation/exact-destroy boundary is 707.827 →
+714.596 ms (`1.010x`); its scoped create phase is 584.337 → 586.135 ms
+(`1.003x`) and destroy is 124.455 → 126.801 ms (`1.019x`). Retired
+instructions are `1.0039x`, cycles `1.0022x`, and process energy `0.9977x`.
+Peak and retained RSS are `1.0091x` and `1.0122x`; every invocation finalizes
+exactly 2,529,000 cells. All series are stable, thermal state is nominal, and
+the row passes without a material cold-lifecycle claim.
+
+The separate seven-pair [warmed Shape-fanout control](.data/exact-parent-initialized-descriptors-shape-control-2026-09-01.md)
+([raw](.data/exact-parent-initialized-descriptors-shape-control-2026-09-01.json))
+executes 100,000 prepared transitions with exact checksum `5,000,150,000`.
+Wall time is 348.249 → 340.216 ms (`0.977x`), with instructions `1.0088x`,
+cycles `0.9930x`, process energy `0.9991x`, and peak RSS `1.0027x`. The
+control passes the frozen 10% material-regression threshold with stable series,
+nominal thermal state, and no discarded samples. These rows establish bounded
+end-to-end cost; they do not turn the atomic descriptor-publication hardening
+into a broader throughput claim.
+
 ## Required-bytecode/no-JIT arithmetic profile
 
 V20 added, and V23 retains, four zig-js-only non-scored rows from
