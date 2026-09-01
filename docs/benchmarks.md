@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v30.json`. V30 hash-inherits every V29 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, binary-provenance profile, and publication ruling. It re-pins the frontend native runner after class-capture lowering updated its structural guards and compiler checksums; those diagnostic rows remain outside representative coverage. Historical artifacts remain unchanged. Benchmark children never overlap, complete-process occupancy remains diagnostic, the scored boundary retains the 60% gate, historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v31.json`. V31 hash-inherits every V30 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, native runner, and publication ruling. It re-pins only exact-parent overlay provenance: both binary revisions must remain one-commit children, change the same non-empty subset of the frozen measurement surface, and resolve every effective overlay blob identically. Historical artifacts remain unchanged. Benchmark children never overlap, complete-process occupancy remains diagnostic, the scored boundary retains the 60% gate, historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -733,6 +733,14 @@ delta records 1,428,928 to 1,417,728 Context backing allocations and
 209,090,873 to 209,057,273 backing bytes. The host is classified as
 `diagnostic`; the artifact closes the measurement-contract boundary and makes
 no throughput claim.
+
+Schema-v3 binary provenance records the complete frozen measurement surface,
+not a demand for dummy edits. A logical parent/candidate pair may already
+inherit some effective overlay blobs. Both one-commit binary revisions must
+still change the same non-empty subset, every changed path must belong to the
+declared surface, and every effective surface blob must be identical across the
+two variants. An asymmetric, empty, undeclared, or blob-divergent overlay is
+rejected before collection.
 
 The default host class is `diagnostic`, which never blocks publication. Only a
 deliberately declared `quiet_reference` run gates: candidate wall time must be

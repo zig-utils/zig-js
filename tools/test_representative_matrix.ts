@@ -72,9 +72,10 @@ export function selfTest(): void {
   rejects("mixed replay cross-variant ruling drift", value => { value.exact_parent_integration.native_allocation_replay.cross_variant_ruling = ""; value.completed_metric_panels.efficiency_thermal.scored_integration.native_allocation_replay.cross_variant_ruling = ""; }, "compatibility ruling drift");
   rejects("exact-parent batch concurrency drift", value => { value.exact_parent_integration.serial_batch.execution = "parallel"; value.completed_metric_panels.efficiency_thermal.scored_integration.serial_batch.execution = "parallel"; }, "exact-parent batch policy drift");
   rejects("direct binary provenance drift", value => { value.exact_parent_integration.binary_provenance_profiles.schema_v2 = "unchecked"; value.completed_metric_panels.efficiency_thermal.scored_integration.binary_provenance_profiles.schema_v2 = "unchecked"; }, "binary provenance profile drift");
+  rejects("inherited overlay provenance drift", value => { value.exact_parent_integration.shared_measurement_overlay.changed_subset = "any"; value.completed_metric_panels.efficiency_thermal.scored_integration.shared_measurement_overlay.changed_subset = "any"; }, "V31 shared measurement overlay policy drift");
   rejects("frontend native runner drift", value => { value.exact_parent_integration.native_runners[1].sha256 = "0".repeat(64); value.completed_metric_panels.efficiency_thermal.scored_integration.native_runners[1].sha256 = "0".repeat(64); }, "changed without a matrix version bump");
-  rejects("unsupported future matrix", value => { value.schema_version = 31; }, "unsupported representative matrix schema");
-  console.log("representative matrix structural tests: 65/65 passed");
+  rejects("unsupported future matrix", value => { value.schema_version = 32; }, "unsupported representative matrix schema");
+  console.log("representative matrix structural tests: 66/66 passed");
 }
 
 if (process.argv[1] === __filename) selfTest();

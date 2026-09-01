@@ -38,7 +38,9 @@ export function validateSharedMeasurementOverlay(logicalParent: string, logicalC
   requireValue(resolveRevision(`${parentBinaryRevision}^1`, repository) === parentRevision, "parent binary revision is not a one-commit child of the logical parent");
   requireValue(resolveRevision(`${candidateBinaryRevision}^1`, repository) === candidateRevision, "candidate binary revision is not a one-commit child of the logical candidate");
   const expected = expectedPaths.slice().sort(), parentPaths = revisionChangedPaths(parentRevision, parentBinaryRevision, repository), candidatePaths = revisionChangedPaths(candidateRevision, candidateBinaryRevision, repository);
-  requireValue(JSON.stringify(parentPaths) === JSON.stringify(expected) && JSON.stringify(candidatePaths) === JSON.stringify(expected), "shared measurement overlay path inventory drift");
+  requireValue(parentPaths.length > 0 && candidatePaths.length > 0, "shared measurement overlay changed-path inventory is empty");
+  requireValue(JSON.stringify(parentPaths) === JSON.stringify(candidatePaths), "shared measurement overlay changed-path inventory is asymmetric");
+  requireValue(parentPaths.every((path) => expected.includes(path)), "shared measurement overlay changed an undeclared path");
   for (const path of expected) requireValue(revisionBlob(parentBinaryRevision, path, repository) === revisionBlob(candidateBinaryRevision, path, repository), `shared measurement overlay blob drift: ${path}`);
   return [parentBinaryRevision, candidateBinaryRevision];
 }
@@ -404,7 +406,8 @@ export function selfTest(): void {
   const directory = temporaryDirectory("zig-js-exact-parent");
   try {
     checked(["git", "init", "-q", directory], "initialize clean-worktree fixture"); checked(["git", "-C", directory, "config", "user.name", "Test"], "configure fixture name"); checked(["git", "-C", directory, "config", "user.email", "test@example.com"], "configure fixture email");
-    const tracked = `${directory}/tracked.txt`, overlay = `${directory}/overlay.txt`;
+    const tracked = `${directory}/tracked.txt`, overlay = `${directory}/overlay.txt`, inheritedOverlay = `${directory}/inherited.txt`;
+    writeText(inheritedOverlay, "shared inherited overlay\n"); checked(["git", "-C", directory, "add", "inherited.txt"], "stage inherited overlay fixture");
     for (let commit = 0; commit < 3; commit += 1) { writeText(tracked, `fixture ${commit}\n`); checked(["git", "-C", directory, "add", "tracked.txt"], "stage fixture"); checked(["git", "-C", directory, "commit", "-qm", `fixture ${commit}`], "commit fixture"); }
     const logicalParent = resolveRevision("HEAD~2", directory), logicalCandidate = resolveRevision("HEAD~1", directory);
     requireValue(JSON.stringify(validateExactParent(logicalParent, logicalCandidate, directory)) === JSON.stringify([logicalParent, logicalCandidate]), "fixture exact parent did not validate");
@@ -413,9 +416,16 @@ export function selfTest(): void {
     expectFailure(() => validateExactParent(logicalParent, resolveRevision("HEAD", directory), directory), "not requested exact parent");
     checked(["git", "-C", directory, "checkout", "-qb", "parent-overlay", logicalParent], "create parent overlay fixture"); writeText(overlay, "shared overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt"], "stage parent overlay"); checked(["git", "-C", directory, "commit", "-qm", "parent overlay"], "commit parent overlay"); const parentOverlay = resolveRevision("HEAD", directory);
     checked(["git", "-C", directory, "checkout", "-qb", "candidate-overlay", logicalCandidate], "create candidate overlay fixture"); writeText(overlay, "shared overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt"], "stage candidate overlay"); checked(["git", "-C", directory, "commit", "-qm", "candidate overlay"], "commit candidate overlay"); const candidateOverlay = resolveRevision("HEAD", directory);
-    requireValue(JSON.stringify(validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentOverlay, candidateOverlay, directory, ["overlay.txt"])) === JSON.stringify([parentOverlay, candidateOverlay]), "shared measurement overlay fixture did not validate");
+    requireValue(JSON.stringify(validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentOverlay, candidateOverlay, directory, ["inherited.txt", "overlay.txt"])) === JSON.stringify([parentOverlay, candidateOverlay]), "partially inherited shared measurement overlay fixture did not validate");
+    expectFailure(() => validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentOverlay, candidateOverlay, directory, ["inherited.txt"]), "changed an undeclared path");
+    expectFailure(() => validateSharedMeasurementOverlay(logicalParent, logicalCandidate, candidateOverlay, candidateOverlay, directory, ["inherited.txt", "overlay.txt"]), "parent binary revision is not a one-commit child");
     checked(["git", "-C", directory, "checkout", "-qb", "candidate-drift", logicalCandidate], "create mismatched candidate overlay fixture"); writeText(overlay, "different overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt"], "stage mismatched overlay"); checked(["git", "-C", directory, "commit", "-qm", "candidate overlay drift"], "commit mismatched overlay"); const candidateDrift = resolveRevision("HEAD", directory);
-    expectFailure(() => validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentOverlay, candidateDrift, directory, ["overlay.txt"]), "overlay blob drift");
+    expectFailure(() => validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentOverlay, candidateDrift, directory, ["inherited.txt", "overlay.txt"]), "overlay blob drift");
+    checked(["git", "-C", directory, "checkout", "-qb", "candidate-asymmetric", logicalCandidate], "create asymmetric candidate overlay fixture"); writeText(overlay, "shared overlay\n"); writeText(inheritedOverlay, "changed inherited overlay\n"); checked(["git", "-C", directory, "add", "overlay.txt", "inherited.txt"], "stage asymmetric overlay"); checked(["git", "-C", directory, "commit", "-qm", "candidate asymmetric overlay"], "commit asymmetric overlay"); const candidateAsymmetric = resolveRevision("HEAD", directory);
+    expectFailure(() => validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentOverlay, candidateAsymmetric, directory, ["inherited.txt", "overlay.txt"]), "changed-path inventory is asymmetric");
+    checked(["git", "-C", directory, "checkout", "-qb", "parent-empty", logicalParent], "create empty parent overlay fixture"); checked(["git", "-C", directory, "commit", "--allow-empty", "-qm", "parent empty overlay"], "commit empty parent overlay"); const parentEmpty = resolveRevision("HEAD", directory);
+    checked(["git", "-C", directory, "checkout", "-qb", "candidate-empty", logicalCandidate], "create empty candidate overlay fixture"); checked(["git", "-C", directory, "commit", "--allow-empty", "-qm", "candidate empty overlay"], "commit empty candidate overlay"); const candidateEmpty = resolveRevision("HEAD", directory);
+    expectFailure(() => validateSharedMeasurementOverlay(logicalParent, logicalCandidate, parentEmpty, candidateEmpty, directory, ["inherited.txt", "overlay.txt"]), "changed-path inventory is empty");
     requireClean(directory); writeText(tracked, "dirty\n"); expectFailure(() => requireClean(directory), "dirty tracked worktree");
   } finally { removeTemporaryDirectory(directory); }
   const processFixture = [

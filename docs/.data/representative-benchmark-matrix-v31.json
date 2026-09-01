@@ -1,0 +1,57 @@
+{
+  "schema_version": 31,
+  "matrix_id": "zig-js-representative-v31",
+  "status": "frozen",
+  "frozen_date": "2026-08-31",
+  "owner_issue": 842,
+  "history_policy": "This version hash-inherits every V30 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, native runner, and publication ruling. It changes no scored row or production engine behavior. It re-pins only the exact-parent validator and versions symmetric inheritance within the complete shared-measurement overlay surface. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v30",
+    "path": "docs/.data/representative-benchmark-matrix-v30.json",
+    "sha256": "c000dac8cb6a493def822d69425870597d506222ea1c5440ab697f1a2cbd20d2",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels"
+    ]
+  },
+  "change": "Re-pins tools/exact-parent-regression.ts after #842 made shared measurement overlays distinguish their complete frozen path surface from the non-empty subset that actually changes. Parent and candidate must change the same declared subset, every effective overlay blob must remain identical across variants, and ancestry, undeclared changes, asymmetric changes, empty overlays, or blob drift still fail closed. This admits logical revisions that already inherit some exact measurement blobs without inventing dummy edits or weakening provenance.",
+  "exact_parent_integration": {
+    "path": "tools/exact-parent-regression.ts",
+    "sha256": "624606cb460e196e1fb3c8be79579e37fd3202f2d3f0560d13d2fd2742904330",
+    "binary_provenance_profiles": {
+      "schema_v2": "declared_binary_revisions_equal_logical_revisions",
+      "schema_v3": "identical_one_commit_measurement_overlay_with_symmetric_inherited_blobs",
+      "partial_assertions": "refuse"
+    },
+    "shared_measurement_overlay": {
+      "path_surface": "complete_frozen_inventory",
+      "changed_subset": "same_nonempty_subset_on_parent_and_candidate",
+      "effective_blobs": "identical_across_parent_and_candidate",
+      "undeclared_changes": "refuse"
+    },
+    "publication_boundary": "V31 preserves every V30 timing, efficiency, provenance, cleanliness, checksum, serial-child, process-classification, native-runner, and mixed-tier allocation-replay gate. A schema-v3 overlay may inherit an inventoried blob only when both logical sides already resolve to the same effective overlay blob; every real change remains symmetric, declared, and non-empty."
+  },
+  "instrumentation_overhead_integration": {
+    "evidence_ruling": "Unchanged V30 parser, disabled-path evidence, allocation replay, serial batch, native runners, process classification, and mixed-tier signature boundaries; V31 re-pins exact-parent overlay provenance only."
+  },
+  "context_lifecycle_integration": {
+    "publication_boundary": "Unchanged V30 lifecycle scenarios, telemetry, checksums, reconciliation, plateau, measured-boundary occupancy, and binary provenance."
+  },
+  "no_jit_integration": {
+    "publication_boundary": "Unchanged V30 required-bytecode modes, logical work, checksums, attribution, quickening, measured-boundary occupancy, binary provenance, and allocation replay."
+  },
+  "string_indexing_integration": {
+    "publication_boundary": "Unchanged V30 string representations, widths, jobs, checksums, attribution, timing, allocation replay, serial collection, binary provenance, and non-throughput boundary."
+  }
+}
