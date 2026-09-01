@@ -334,8 +334,8 @@
       "surfaces": ["add/subtract/multiply/divide/remainder/power", "relational and equality comparisons", "bitwise operations and shifts"],
       "guards": ["exact Number representation for both operands", "eight successful Number observations", "in remains generic because its RHS must be Object"],
       "miss_behavior": ["record both changed operand kinds", "atomically publish terminal generic state", "execute the canonical operation exactly once without replaying coercion or exceptions"],
-      "metadata_lifetime": "One byte-sized atomic QuickBinaryState per immutable bytecode instruction in the owning Chunk arena; non-binary slots stay cold and teardown requires no separate reclamation.",
-      "no_gil_synchronization": "Observation/publication/dequickening use acquire-release atomics; generic is terminal under every interleaving and Context-owned attribution counters are atomic.",
+      "metadata_lifetime": "One byte-sized atomic QuickBinaryState per immutable bytecode instruction, colocated with that instruction's operand-kind optimizer profile in the owning Chunk arena; non-binary slots stay cold and teardown requires no separate reclamation.",
+      "no_gil_synchronization": "The state tag publishes no associated data, so hot mode reads use monotonic atomic modification order while observation/publication/dequickening remain atomic and generic is terminal under every interleaving. Activation-local attribution counts merge once into Context-owned atomics.",
       "observable_steps_debugger": "A hit replaces only one already-counted binary opcode. Debugger, watchdog, handler/finally, OOM, and moving-GC boundaries remain in the ordinary dispatch loop; a miss performs no coercion before canonical fallback.",
       "source_anchors": [
         {"path": "src/bytecode.zig", "text": "pub const QuickBinaryState = struct {"},
@@ -432,7 +432,6 @@
     },
     "chunk_metadata_fields": [
       "quick_property_plans",
-      "quick_binary_states",
       "quick_property_kernel_plans",
       "quick_array_plans",
       "quick_call_plans",

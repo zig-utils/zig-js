@@ -55,4 +55,4 @@ Every legacy pattern above remains labeled `legacy_narrow`; none is used as evid
 
 ## Drift gate
 
-The validator binds this inventory to 6 plan types, 14 tagged quickening types, 9 chunk metadata fields, 2 structural-candidate flags, and 33 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.
+The validator binds this inventory to 6 plan types, 14 tagged quickening types, 8 chunk metadata fields, 2 structural-candidate flags, and 33 test observability counters. Missing or duplicate identities, missing source/test anchors, unknown status values, and any legacy kernel relabeled as general all fail closed.

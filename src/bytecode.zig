@@ -654,6 +654,7 @@ pub const binding_ref_load_allow_unresolvable: u32 = 1 << 2;
 const OptimizerBinaryProfile = struct {
     lhs_kinds: std.atomic.Value(u8) = .init(0),
     rhs_kinds: std.atomic.Value(u8) = .init(0),
+    quick: QuickBinaryState = .{},
 
     fn observe(self: *OptimizerBinaryProfile, lhs: jit.ProfileValueKind, rhs: jit.ProfileValueKind) void {
         observeKind(&self.lhs_kinds, lhs);
@@ -690,7 +691,9 @@ pub const QuickBinaryState = struct {
     pub const Mode = enum { observing, number, generic };
 
     pub fn mode(self: *const QuickBinaryState) Mode {
-        return switch (self.raw.load(.acquire)) {
+        // The tag publishes no associated data: atomic modification order alone
+        // is sufficient, and the VM's hot read must not impose an acquire fence.
+        return switch (self.raw.load(.monotonic)) {
             number_tag => .number,
             generic_tag => .generic,
             else => .observing,
@@ -974,15 +977,11 @@ pub const Chunk = struct {
     /// One inline cache per instruction, allocated by `finalize` once the code
     /// stream is complete. Warm across runs of the same chunk.
     ics: []InlineCache = &.{},
-    /// Instruction-local operand observations for arithmetic/comparison sites.
-    /// Keeping these separate from the coarse function result profile lets the
-    /// optimizer retain Number-specialized lowering at numeric sites while
-    /// selecting the canonical runtime operation only where dynamic operands
-    /// have actually appeared.
+    /// Instruction-local operand observations and adjacent byte-sized adaptive
+    /// state for arithmetic/comparison sites. Keeping them separate from the
+    /// coarse function result profile lets the optimizer retain Number-specialized
+    /// lowering while the VM avoids a second instruction-indexed cache lookup.
     optimizer_binary_profiles: []OptimizerBinaryProfile = &.{},
-    /// One compact atomic adaptive state per immutable bytecode instruction.
-    /// Binary opcodes consume their own slot; other instructions stay cold.
-    quick_binary_states: []QuickBinaryState = &.{},
     /// Lazily allocated VM-owned quick-trace plans, indexed by their first
     /// bytecode. Kept type-erased here to avoid a bytecode → VM import cycle.
     /// Isolated execution publishes a plan only after fully decoding it and may
@@ -1034,8 +1033,6 @@ pub const Chunk = struct {
         @memset(self.ics, .{});
         self.optimizer_binary_profiles = try self.arena.alloc(OptimizerBinaryProfile, self.code.items.len);
         @memset(self.optimizer_binary_profiles, .{});
-        self.quick_binary_states = try self.arena.alloc(QuickBinaryState, self.code.items.len);
-        @memset(self.quick_binary_states, .{});
         self.quick_property_kernel_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
         @memset(self.quick_property_kernel_plans, null);
         self.quick_array_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
@@ -1078,7 +1075,7 @@ pub const Chunk = struct {
     }
 
     pub fn quickBinaryState(self: *Chunk, instruction: usize) ?*QuickBinaryState {
-        return if (instruction < self.quick_binary_states.len) &self.quick_binary_states[instruction] else null;
+        return if (instruction < self.optimizer_binary_profiles.len) &self.optimizer_binary_profiles[instruction].quick else null;
     }
 
     /// Emit an instruction, returning its index (for later jump back-patching).
@@ -1203,6 +1200,11 @@ test "optimizer binary profiles remain instruction-local and preserve numeric si
     const dynamic = try chunk.emit(.sub, 0);
     try chunk.finalize();
 
+    try std.testing.expectEqual(@as(usize, 3), @sizeOf(OptimizerBinaryProfile));
+    try std.testing.expectEqual(
+        @intFromPtr(&chunk.optimizer_binary_profiles[numeric].quick),
+        @intFromPtr(chunk.quickBinaryState(numeric).?),
+    );
     try std.testing.expect(!chunk.optimizerBinaryRequiresRuntime(numeric));
     try std.testing.expect(!chunk.optimizerBinaryRequiresRuntime(dynamic));
     chunk.observeOptimizerBinary(numeric, .number, .number);

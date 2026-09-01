@@ -2526,8 +2526,8 @@ pub const ExecutionTierInventory = struct {
         _ = self.counts[@backingInt(metric)].fetchAdd(count, .monotonic);
     }
 
-    pub fn recordQuickBinary(self: *ExecutionTierInventory, metric: QuickBinaryMetric) void {
-        _ = self.quick_binary[@backingInt(metric)].fetchAdd(1, .monotonic);
+    pub fn recordQuickBinaryMany(self: *ExecutionTierInventory, metric: QuickBinaryMetric, count: u64) void {
+        _ = self.quick_binary[@backingInt(metric)].fetchAdd(count, .monotonic);
     }
 
     pub fn recordBaselineTierUp(self: *ExecutionTierInventory, elapsed_ns: u64, succeeded: bool) void {
@@ -7166,10 +7166,6 @@ pub const Interpreter = struct {
 
     pub fn recordExecutionTier(self: *Interpreter, metric: ExecutionTierMetric) void {
         if (self.execution_tier_inventory) |inventory| inventory.record(metric);
-    }
-
-    pub fn recordQuickBinary(self: *Interpreter, metric: QuickBinaryMetric) void {
-        if (self.execution_tier_inventory) |inventory| inventory.recordQuickBinary(metric);
     }
 
     pub fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {

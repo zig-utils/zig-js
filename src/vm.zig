@@ -867,11 +867,11 @@ inline fn quickNumberToInt32(number: f64) i32 {
 }
 
 /// Execute one already-guarded Number/Number binary opcode. Null means the
-/// operands or opcode require the ordinary ECMAScript operation. In particular,
-/// `in` always stays generic because its RHS must be an Object.
+/// operands require the ordinary ECMAScript operation. `in` is dispatched by a
+/// separate ordinary case because its RHS must be an Object.
 inline fn quickNumberBinary(op: bc.Op, lhs: Value, rhs: Value) ?Value {
     @setEvalBranchQuota(10_000);
-    if (!lhs.isNumber() or !rhs.isNumber() or op == .in_op) return null;
+    if (!lhs.isNumber() or !rhs.isNumber()) return null;
     const a = lhs.asNum();
     const b = rhs.asNum();
     if (builtin.is_test) switch (op) {
@@ -911,6 +911,34 @@ inline fn quickNumberBinary(op: bc.Op, lhs: Value, rhs: Value) ?Value {
         },
         else => null,
     };
+}
+
+/// Cold adaptive-state paths stay out of the stable Number dispatch body. A
+/// generic site still retains the ordinary inline Number operation, while an
+/// observing site publishes only after the complete canonical operation is
+/// known and never replays coercion or effects.
+noinline fn runUnquickenedBinary(
+    vm: *Interpreter,
+    chunk: *Chunk,
+    quick: *bc.QuickBinaryState,
+    mode: bc.QuickBinaryState.Mode,
+    instruction: usize,
+    op: bc.Op,
+    lhs: Value,
+    rhs: Value,
+) EvalError!Value {
+    if (mode == .generic) {
+        if (quickNumberBinary(op, lhs, rhs)) |number| return number;
+        return vm.applyBinary(binOp(op), lhs, rhs);
+    }
+    std.debug.assert(mode == .observing);
+    chunk.observeOptimizerBinary(instruction, optimizerProfileKind(lhs), optimizerProfileKind(rhs));
+    if (quickNumberBinary(op, lhs, rhs)) |number| {
+        _ = quick.observeNumber();
+        return number;
+    }
+    quick.observeGeneric();
+    return vm.applyBinary(binOp(op), lhs, rhs);
 }
 
 const max_quick_property_instructions: usize = 20;
@@ -8231,7 +8259,17 @@ fn runChunk(
     // and publish once on every return/error path instead.
     const execution_inventory = vm.execution_tier_inventory;
     var vm_dispatches: u64 = 0;
-    defer if (execution_inventory) |inventory| inventory.recordMany(.vm_dispatches, vm_dispatches);
+    var vm_quick_kernel_hits: u64 = 0;
+    var quick_binary_number_hits: u64 = 0;
+    var quick_binary_number_misses: u64 = 0;
+    var quick_binary_dequickenings: u64 = 0;
+    defer if (execution_inventory) |inventory| {
+        inventory.recordMany(.vm_dispatches, vm_dispatches);
+        inventory.recordMany(.vm_quick_kernel_hits, vm_quick_kernel_hits);
+        inventory.recordQuickBinaryMany(.number_hits, quick_binary_number_hits);
+        inventory.recordQuickBinaryMany(.number_misses, quick_binary_number_misses);
+        inventory.recordQuickBinaryMany(.dequickenings, quick_binary_dequickenings);
+    };
     // Parallel-mode flag hoisted out of the hot loop: in the default engine this
     // is false, so frame slots and monomorphic property IC hits avoid locks and
     // repeated atomic mode loads. Shared/concurrent-GC contexts enable the flag
@@ -8444,7 +8482,7 @@ fn runChunk(
                         const steps_until_budget = vm.step_budget - vm.steps;
                         const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
                         if (try tryQuickNumericCallLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
-                            vm.recordExecutionTier(.vm_quick_kernel_hits);
+                            if (execution_inventory != null) vm_quick_kernel_hits += 1;
                             vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
                             continue;
@@ -8471,7 +8509,7 @@ fn runChunk(
                             exec.ip = start;
                         }
                         if (try tryQuickArrayLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
-                            vm.recordExecutionTier(.vm_quick_kernel_hits);
+                            if (execution_inventory != null) vm_quick_kernel_hits += 1;
                             if (builtin.is_test) switch (plan.*) {
                                 .object_allocation => _ = quick_object_allocation_first_entry_steps.cmpxchgStrong(
                                     std.math.maxInt(u64),
@@ -8540,14 +8578,14 @@ fn runChunk(
                     const steps_until_budget = vm.step_budget - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
                     if (tryQuickPropertyKernel(chunk, cf, start, max_extra_steps, parallel_sync)) |quick| {
-                        vm.recordExecutionTier(.vm_quick_kernel_hits);
+                        if (execution_inventory != null) vm_quick_kernel_hits += 1;
                         vm.steps += quick.extra_steps;
                         ip = quick.next_ip;
                         continue;
                     }
                     if (!parallel_sync) {
                         if (tryNumericPropertyUpdate(chunk, cf, start, max_extra_steps)) |quick| {
-                            vm.recordExecutionTier(.vm_quick_kernel_hits);
+                            if (execution_inventory != null) vm_quick_kernel_hits += 1;
                             vm.steps += quick.extra_steps;
                             ip = quick.next_ip;
                             continue;
@@ -8692,48 +8730,48 @@ fn runChunk(
                 // BigInt increments as a BigInt rather than TypeError-ing on `+1`).
                 try stack.append(stack_alloc, try applyUnaryEffect(vm, inst.op, stack.pop().?));
             },
-            .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
+            .in_op => {
+                const r = stack.pop().?;
+                const l = stack.pop().?;
+                chunk.observeOptimizerBinary(ip - 1, optimizerProfileKind(l), optimizerProfileKind(r));
+                try stack.append(stack_alloc, try vm.applyBinary(binOp(inst.op), l, r));
+            },
+            .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
                 const instruction = ip - 1;
-                const state = if (vm.bytecode_binary_quickening and inst.op != .in_op)
+                const state = if (!builtin.is_test or vm.bytecode_binary_quickening)
                     chunk.quickBinaryState(instruction)
                 else
                     null;
                 const result: Value = binary: {
-                    if (state) |quick| switch (quick.mode()) {
-                        .number => {
+                    if (state) |quick| {
+                        const mode = quick.mode();
+                        if (mode == .number) {
                             if (quickNumberBinary(inst.op, l, r)) |number| {
-                                vm.recordExecutionTier(.vm_quick_kernel_hits);
-                                vm.recordQuickBinary(.number_hits);
+                                if (execution_inventory != null) {
+                                    vm_quick_kernel_hits += 1;
+                                    quick_binary_number_hits += 1;
+                                }
                                 break :binary number;
                             }
                             // Guard failure has not coerced either operand. Record
                             // the new kinds, publish generic, then execute the
                             // ordinary operation once; exceptions/effects are
                             // never replayed by the quickening machinery.
-                            vm.recordQuickBinary(.number_misses);
+                            if (execution_inventory != null) quick_binary_number_misses += 1;
                             chunk.observeOptimizerBinary(instruction, optimizerProfileKind(l), optimizerProfileKind(r));
-                            if (quick.dequicken()) vm.recordQuickBinary(.dequickenings);
+                            if (quick.dequicken() and execution_inventory != null)
+                                quick_binary_dequickenings += 1;
                             break :binary try vm.applyBinary(binOp(inst.op), l, r);
-                        },
-                        .generic => {
-                            // The first dynamic observation already forced the
-                            // optimizer's runtime operation. Avoid merging the
-                            // same profile atomics forever while retaining the
-                            // ordinary inline Number path for later numeric uses.
-                            if (quickNumberBinary(inst.op, l, r)) |number| break :binary number;
-                            break :binary try vm.applyBinary(binOp(inst.op), l, r);
-                        },
-                        .observing => {},
-                    };
+                        }
+                        break :binary try runUnquickenedBinary(vm, chunk, quick, mode, instruction, inst.op, l, r);
+                    }
 
                     chunk.observeOptimizerBinary(instruction, optimizerProfileKind(l), optimizerProfileKind(r));
                     if (quickNumberBinary(inst.op, l, r)) |number| {
-                        if (state) |quick| _ = quick.observeNumber();
                         break :binary number;
                     }
-                    if (state) |quick| quick.observeGeneric();
                     break :binary try vm.applyBinary(binOp(inst.op), l, r);
                 };
                 try stack.append(stack_alloc, result);
@@ -9321,7 +9359,7 @@ fn runChunk(
                 if (!debug_execution) {
                     if (jsPlainFunction(callee)) |function| {
                         if (try tryQuickArgumentsCall(vm, function, stack.items[base..])) |result| {
-                            vm.recordExecutionTier(.vm_quick_kernel_hits);
+                            if (execution_inventory != null) vm_quick_kernel_hits += 1;
                             stack.shrinkRetainingCapacity(base - 1);
                             try stack.append(stack_alloc, result);
                             continue;
@@ -9331,7 +9369,7 @@ fn runChunk(
                 if (!debug_execution) {
                     if (jsChunkFn(callee)) |func| {
                         if (try tryQuickNumericRecurrence(vm, func, stack.items[base..], parallel_sync)) |result| {
-                            vm.recordExecutionTier(.vm_quick_kernel_hits);
+                            if (execution_inventory != null) vm_quick_kernel_hits += 1;
                             stack.shrinkRetainingCapacity(base - 1);
                             try stack.append(stack_alloc, result);
                             continue;
