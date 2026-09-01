@@ -3177,7 +3177,8 @@ test "realm root relocation rewrites active interpreter containers" {
     try machine.with_stack.append(machine.arena, &old_objects[13]);
     var literal_node: ast.Node = .undefined_lit;
     try machine.string_literal_cache.put(machine.arena, &literal_node, Value.obj(&old_objects[14]));
-    try machine.symbols.put(machine.arena, "root-symbol", &old_objects[15]);
+    machine.symbol_index_hash_context = .{ .seed = 0x5359_4d42_4f4c_0001 };
+    try machine.symbols.putContext(machine.arena, "root-symbol", &old_objects[15], machine.symbol_index_hash_context.?);
 
     var operand_stack = [_]Value{ Value.obj(&old_objects[16]), Value.obj(&old_objects[17]) };
     var pending_rest_arguments = [_]Value{Value.obj(&old_objects[27])};
@@ -3300,7 +3301,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[12], machine.gc_object_reserve.items[0]);
     try std.testing.expectEqual(&new_objects[13], machine.with_stack.items[0]);
     try std.testing.expectEqual(&new_objects[14], machine.string_literal_cache.get(&literal_node).?.asObj());
-    try std.testing.expectEqual(&new_objects[15], machine.symbols.get("root-symbol").?);
+    try std.testing.expectEqual(&new_objects[15], machine.symbols.getContext("root-symbol", machine.symbol_index_hash_context.?).?);
     try std.testing.expectEqual(&new_objects[16], operand_stack[0].asObj());
     try std.testing.expectEqual(&new_objects[17], operand_stack[1].asObj());
     try std.testing.expectEqual(&new_objects[18], execution.acc.asObj());

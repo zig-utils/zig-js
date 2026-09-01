@@ -3035,6 +3035,25 @@ pub const ActiveGeneratorRoot = struct {
     previous: ?*ActiveGeneratorRoot,
 };
 
+const SymbolIndexHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, key);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+const SymbolIndex = std.HashMapUnmanaged(
+    []const u8,
+    *value.Object,
+    SymbolIndexHashContext,
+    std.hash_map.default_max_load_percentage,
+);
+
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     /// Context-owned freeable backing for invocation-local indexes whose keys
@@ -3480,7 +3499,11 @@ pub const Interpreter = struct {
     /// Object.getOwnPropertySymbols and the Proxy traps (which must hand the
     /// Symbol, not its encoded string, to the handler). Populated whenever a
     /// Symbol is used as a property key (see `keyOf`).
-    symbols: std.StringHashMapUnmanaged(*value.Object) = .{},
+    symbols: SymbolIndex = .empty,
+    /// Installed only after the first successful Symbol-index insertion. The
+    /// realm Shape source supplies the unpredictable seed; misses and
+    /// interpreters that never reflect a Symbol remain derivation-free.
+    symbol_index_hash_context: ?SymbolIndexHashContext = null,
     /// Dynamic-import support (set by the module driver in context.zig). `cur_module`
     /// is the referrer path; `dyn_import`/`dyn_import_ctx` resolve+load+evaluate a
     /// specifier and write the module namespace into `out`, returning true on
@@ -10334,10 +10357,24 @@ pub const Interpreter = struct {
         return value.encodeStringKey(self.arena, try k.toString(self.arena));
     }
 
+    fn cachedSymbol(self: *const Interpreter, key: []const u8) ?*value.Object {
+        const hash_context = self.symbol_index_hash_context orelse return null;
+        return self.symbols.getContext(key, hash_context);
+    }
+
+    /// Insert before publishing the context so entropy or allocation failure
+    /// cannot make a lookup probe an empty table with partially installed state.
+    fn cacheSymbol(self: *Interpreter, key: []const u8, symbol: *value.Object) std.mem.Allocator.Error!void {
+        const hash_context = self.symbol_index_hash_context orelse
+            SymbolIndexHashContext{ .seed = try self.root_shape.deriveSecureHashSeed() };
+        try self.symbols.putContext(self.arena, key, symbol, hash_context);
+        if (self.symbol_index_hash_context == null) self.symbol_index_hash_context = hash_context;
+    }
+
     /// Index a Symbol by its encoded `sym_key` so it can later be recovered (by
     /// getOwnPropertySymbols / proxy traps), then return that key.
     fn registerSymbol(self: *Interpreter, sym: *value.Object) []const u8 {
-        self.symbols.put(self.arena, sym.symbolKey(), sym) catch {};
+        self.cacheSymbol(sym.symbolKey(), sym) catch {};
         if (self.symbolIdentityRegistry()) |symbol_registry| {
             const storage_key = self.symbolRegistryStorageKey(sym.symbolKey()) catch return sym.symbolKey();
             symbol_registry.setOwn(self.arena, self.root_shape, storage_key, Value.obj(sym)) catch {};
@@ -14254,7 +14291,7 @@ pub const Interpreter = struct {
         // A symbol-encoded key recovers the original Symbol (registered in
         // `keyOf` when it was used as a property key); other keys are strings.
         if (value.isRealSymbolKey(key)) {
-            if (self.symbols.get(key)) |sym| return Value.obj(sym);
+            if (self.cachedSymbol(key)) |sym| return Value.obj(sym);
             // Context embedding calls create short-lived Interpreter values.
             // Recover Symbols used by a previous call from a reflection-hidden
             // registry on the realm-rooted Symbol intrinsic.
@@ -14262,7 +14299,7 @@ pub const Interpreter = struct {
                 const storage_key = try self.symbolRegistryStorageKey(key);
                 if (symbol_registry.getOwn(storage_key)) |registered| {
                     if (registered.isObject() and registered.asObj().is_symbol) {
-                        self.symbols.put(self.arena, key, registered.asObj()) catch {};
+                        self.cacheSymbol(key, registered.asObj()) catch {};
                         return registered;
                     }
                 }
@@ -14276,7 +14313,7 @@ pub const Interpreter = struct {
                 for (ks) |k| {
                     const v = symv.asObj().getOwn(k) orelse continue;
                     if (v.isObject() and v.asObj().is_symbol and std.mem.eql(u8, v.asObj().symbolKey(), key)) {
-                        self.symbols.put(self.arena, key, v.asObj()) catch {};
+                        self.cacheSymbol(key, v.asObj()) catch {};
                         return Value.obj(v.asObj());
                     }
                 }
@@ -30698,7 +30735,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     if (ct.getOwn(fs.asObj().symbolKey()) != null) return self.throwError("TypeError", "Intl." ++ service ++ " already constructed on this object");
                     // Register the symbol so keyToValue recovers it (with its
                     // description) for getOwnPropertySymbols.
-                    try self.symbols.put(self.arena, fs.asObj().symbolKey(), fs.asObj());
+                    try self.cacheSymbol(fs.asObj().symbolKey(), fs.asObj());
                     try ct.setOwn(self.arena, self.root_shape, fs.asObj().symbolKey(), Value.obj(o));
                     try ct.setAttr(self.arena, fs.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = false });
                 };
@@ -53871,6 +53908,74 @@ fn makeSymbolObj(a: std.mem.Allocator, rs: *Shape, desc: ?[]const u8, proto: ?*v
     const n = try mintUniqueAtomicSerial(usize, &symbol_counter);
     o.setSymbolKey(try std.fmt.allocPrint(a, "\x00s{d}", .{n}));
     return Value.obj(o);
+}
+
+test "Interpreter Symbol index disperses predictable encoded-key collisions exactly" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const target_mask: u64 = 1023;
+    const collision_count = 32;
+    var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    var serial: usize = 0;
+    while (keys.items.len != collision_count) : (serial += 1) {
+        const key = try std.fmt.allocPrint(allocator, "\x00s{d}", .{serial});
+        if ((std.hash.Wyhash.hash(0, key) & target_mask) == 0)
+            try keys.append(allocator, key);
+    }
+
+    const keyed_context = SymbolIndexHashContext{ .seed = 0x5359_4d42_4f4c_0001 };
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (keys.items) |key| {
+        try std.testing.expectEqual(@as(u64, 0), std.hash.Wyhash.hash(0, key) & target_mask);
+        const bucket = keyed_context.hash(key) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+    }
+    try std.testing.expect(occupied_count > collision_count / 2);
+
+    var left = value.Object{};
+    var right = value.Object{};
+    var index: SymbolIndex = .empty;
+    defer index.deinit(std.testing.allocator);
+    try index.putContext(std.testing.allocator, "\x00s1\x00left", &left, keyed_context);
+    try index.putContext(std.testing.allocator, "\x00s1\x00right", &right, keyed_context);
+    try std.testing.expectEqual(&left, index.getContext("\x00s1\x00left", keyed_context).?);
+    try std.testing.expectEqual(&right, index.getContext("\x00s1\x00right", keyed_context).?);
+    try std.testing.expect(index.getContext("\x00s1\x00missing", keyed_context) == null);
+}
+
+test "Interpreter Symbol index first publication is lazy and failure atomic" {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root_shape = try Shape.createRoot(shape_arena.allocator());
+    var env = Environment{ .arena = std.testing.allocator };
+    var symbol = value.Object{};
+
+    var lazy = Interpreter{ .arena = std.testing.allocator, .env = &env, .root_shape = root_shape };
+    try std.testing.expect(lazy.cachedSymbol("\x00s1") == null);
+    try std.testing.expect(lazy.symbol_index_hash_context == null);
+    try std.testing.expectEqual(@as(usize, 0), lazy.symbols.count());
+
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var unavailable = Interpreter{ .arena = failing.allocator(), .env = &env, .root_shape = root_shape };
+    defer unavailable.symbols.deinit(failing.allocator());
+    try std.testing.expectError(error.OutOfMemory, unavailable.cacheSymbol("\x00s2\x00oom", &symbol));
+    try std.testing.expect(unavailable.symbol_index_hash_context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.symbols.count());
+    try std.testing.expect(unavailable.cachedSymbol("\x00s2\x00oom") == null);
+
+    var installed = Interpreter{ .arena = std.testing.allocator, .env = &env, .root_shape = root_shape };
+    defer installed.symbols.deinit(std.testing.allocator);
+    try installed.cacheSymbol("\x00s3\x00left", &symbol);
+    const installed_seed = installed.symbol_index_hash_context.?.seed;
+    try installed.cacheSymbol("\x00s3\x00right", &symbol);
+    try std.testing.expectEqual(installed_seed, installed.symbol_index_hash_context.?.seed);
+    try std.testing.expectEqual(&symbol, installed.cachedSymbol("\x00s3\x00left").?);
+    try std.testing.expectEqual(&symbol, installed.cachedSymbol("\x00s3\x00right").?);
 }
 
 test "Symbol description ownership copies borrowed bytes and unwinds allocation failures" {
