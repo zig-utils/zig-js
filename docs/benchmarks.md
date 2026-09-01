@@ -9,7 +9,7 @@ zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
-- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v31.json`. V31 hash-inherits every V30 workload, representation, width, job count, checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, native runner, and publication ruling. It re-pins only exact-parent overlay provenance: both binary revisions must remain one-commit children, change the same non-empty subset of the frozen measurement surface, and resolve every effective overlay blob identically. Historical artifacts remain unchanged. Benchmark children never overlap, complete-process occupancy remains diagnostic, the scored boundary retains the 60% gate, historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v32.json`. V32 hash-inherits every V31 workload, representation, width, quick/full job count, quick/full checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, native runner, and publication ruling. It adds only a duration-qualified 500,000-job publication tier for the four required-bytecode arithmetic rows; the 100-job smoke and 10,000-job structural contracts remain unchanged. Historical artifacts remain unchanged. Benchmark children never overlap, complete-process occupancy remains diagnostic, the scored boundary retains the 60% gate, historical reports are not rewritten, capability boundaries remain explicit, lifecycle/no-JIT/string-indexing/external-suite evidence never enters repository-owned aggregates, and quick mode is validation only.
 - `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
@@ -56,7 +56,14 @@ polymorphic site, and observable coercion plus exception controls. The
 GC-enabled Context with native tiers disabled, then require bytecode admission.
 Unsupported lowering is an error rather than a silent tree-walker result.
 
-The frozen contract records quick and full work counts and checksums. Its
+The frozen contract records quick and full work counts and checksums. V32 keeps
+those 100-job smoke and 10,000-job structural rows unchanged and adds a separate
+500,000-job publication tier with its own four exact checksums. The longer tier
+exists because the full rows can finish below the resolution needed for stable
+process-energy evidence; it changes measurement duration only, not source,
+Context options, warmup, required-bytecode admission, attribution, or control
+coverage. A shorter row that reports zero or quantized energy remains diagnostic
+and cannot be retried into a public efficiency claim. Its
 separate attribution run requires nonzero VM entry/dispatch and compilation
 counters while tree-walker entry, baseline/optimizer publication, and generated
 native-code bytes remain zero. V21 additionally records exact Number-specialized

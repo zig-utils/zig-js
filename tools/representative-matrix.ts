@@ -3,7 +3,7 @@ import { readText, run } from "./lib/home";
 
 const script = process.argv[1].replace(/\\/g, "/"), suffix = "/tools/representative-matrix.ts";
 export const ROOT = script.endsWith(suffix) ? script.slice(0, -suffix.length) : process.cwd();
-export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v31.json";
+export const DEFAULT_MANIFEST = ROOT + "/docs/.data/representative-benchmark-matrix-v32.json";
 const defaultSourcePath = "bench/representative_comparison.js";
 function requireValue(condition: boolean, message: string): void { if (!condition) throw new Error(message); }
 function digest(path: string): string {
@@ -30,7 +30,7 @@ export function loadManifest(
 ): any {
   const child = JSON.parse(readText(path));
   if (child.schema_version === 1) return child;
-  requireValue(child.schema_version >= 2 && child.schema_version <= 31, "unsupported representative matrix schema");
+  requireValue(child.schema_version >= 2 && child.schema_version <= 32, "unsupported representative matrix schema");
   const parent = child.parent || {}, parentPath = root + "/" + parent.path;
   const expectedParent = `zig-js-representative-v${child.schema_version - 1}`;
   requireValue(parent.matrix_id === expectedParent, `v${child.schema_version} must inherit ${expectedParent}`);
@@ -49,13 +49,28 @@ export function loadManifest(
       (child.schema_version >= 20 && child.schema_version < 24 ? child.context_lifecycle_integration : null),
     supersedingNoJit ||
       (child.schema_version >= 21 && child.schema_version < 24 ? child.no_jit_integration : null),
-    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 31),
+    deferIntegrationValidation || (child.schema_version >= 24 && child.schema_version <= 32),
   );
   requireValue(inherited.matrix_id === parent.matrix_id, "representative parent matrix id drift");
   requireValue(Array.isArray(parent.inherit) && unique(parent.inherit), `v${child.schema_version} inherited-field inventory is invalid`);
   for (const name of parent.inherit) {
     requireValue(Object.prototype.hasOwnProperty.call(inherited, name), `v${child.schema_version} inherits unknown parent field: ${name}`);
     requireValue(!Object.prototype.hasOwnProperty.call(child, name), `v${child.schema_version} rewrites inherited field: ${name}`);
+  }
+  if (child.schema_version === 32) {
+    requireValue(child.tier_attribution === undefined, "v32 must inherit the scored attribution contract unchanged");
+    requireValue(child.implemented_families_append === undefined && child.deferred_families_remove === undefined, "v32 changes the no-JIT publication tier only");
+    requireValue(child.pending_metric_panels === undefined && child.completed_metric_panels === undefined, "v32 must inherit completed panel inventory unchanged");
+    requireValue(child.no_jit_integration && typeof child.no_jit_integration === "object", "v32 must replace the no-JIT integration");
+    for (const name of ["exact_parent_integration", "instrumentation_overhead_integration", "context_lifecycle_integration", "string_indexing_integration"])
+      requireValue(child[name] === undefined, `v32 must inherit ${name} unchanged`);
+    const merged = {
+      ...inherited,
+      ...child,
+      no_jit_integration: { ...inherited.no_jit_integration, ...child.no_jit_integration },
+    };
+    if (!deferIntegrationValidation) validate(merged, root);
+    return merged;
   }
   if (child.schema_version >= 24 && child.schema_version <= 31) {
     const version = `v${child.schema_version}`;
@@ -210,7 +225,7 @@ export function loadManifest(
   };
 }
 export function validate(manifest: any, root = ROOT): void {
-  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 31, "unsupported representative matrix schema");
+  requireValue(manifest.schema_version >= 1 && manifest.schema_version <= 32, "unsupported representative matrix schema");
   requireValue(manifest.status === "frozen", "representative matrix must be frozen");
   const lanes = manifest.lanes;
   requireValue(Array.isArray(lanes) && same(lanes, [1, 2, 4, 8]), "v1 lanes must be exactly 1/2/4/8");
@@ -440,6 +455,24 @@ export function validate(manifest: any, root = ROOT): void {
         requireValue(workload.role === expected[1], `V20 no-JIT workload role drift: ${workload.id}`);
         requireValue(workload.jobs?.quick === 100 && workload.jobs?.full === 10000, `V20 no-JIT job contract drift: ${workload.id}`);
         requireValue(workload.checksums?.quick === expected[2] && workload.checksums?.full === expected[3], `V20 no-JIT checksum drift: ${workload.id}`);
+      }
+      if (manifest.schema_version >= 32) {
+        const publication = noJit.publication_tier;
+        const expectedPublication = [
+          ["representative_vm_arithmetic_number", 4594271287158],
+          ["representative_vm_arithmetic_bigint", 31534975730],
+          ["representative_vm_arithmetic_polymorphic", 62690691228],
+          ["representative_vm_arithmetic_coercion", 508812500],
+        ];
+        requireValue(publication && publication.owner_issue === 843 && publication.jobs === 500000, "V32 no-JIT publication-tier identity drift");
+        requireValue(publication.preserves_quick_and_full === true && publication.exact_parent_required === true, "V32 no-JIT publication-tier boundary drift");
+        requireValue(same(publication.required_efficiency_metrics || [], ["instructions", "cycles", "energy_joules", "thermal_state"]), "V32 no-JIT publication-tier metric inventory drift");
+        requireValue(typeof publication.rationale === "string" && publication.rationale.length > 0, "V32 no-JIT publication-tier rationale is missing");
+        requireValue(Array.isArray(publication.checksums) && publication.checksums.length === expectedPublication.length, "V32 no-JIT publication-tier workload inventory drift");
+        for (let index = 0; index < expectedPublication.length; index += 1) {
+          const actual = publication.checksums[index], expected = expectedPublication[index];
+          requireValue(actual?.workload === expected[0] && actual?.checksum === expected[1], `V32 no-JIT publication-tier checksum drift: ${expected[0]}`);
+        }
       }
       requireValue(noJit.attribution?.tree_walker_entries === 0 && noJit.attribution?.baseline_publications === 0 && noJit.attribution?.optimizer_publications === 0 && noJit.attribution?.generated_code_bytes === 0, "V20 no-JIT attribution boundary drift");
       requireValue(same(noJit.attribution?.required_nonzero || [], ["vm_entries", "vm_dispatches", "program_compiled", "template_plain_compiled"]), "V20 no-JIT required attribution inventory drift");

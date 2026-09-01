@@ -1,0 +1,50 @@
+{
+  "schema_version": 32,
+  "matrix_id": "zig-js-representative-v32",
+  "status": "frozen",
+  "frozen_date": "2026-09-01",
+  "owner_issue": 843,
+  "history_policy": "This version hash-inherits every V31 workload, representation, width, quick/full job count, quick/full checksum, execution mode, scored operation, attribution counter, mixed-tier replay signature, timing boundary, occupancy rule, native runner, and publication ruling. It changes no production engine behavior. It adds only a duration-qualified publication tier for the four required-bytecode/no-JIT arithmetic workloads. Any later workload, boundary, jobs, checksum, metric source, adapter, integration ruling, or acceptance change creates another version.",
+  "parent": {
+    "matrix_id": "zig-js-representative-v31",
+    "path": "docs/.data/representative-benchmark-matrix-v31.json",
+    "sha256": "8a3ce5311bc8d6553b6008bb3212684f744f9259733dad37e0acde5eaf9dedb3",
+    "inherit": [
+      "compatibility_panel",
+      "engines",
+      "lanes",
+      "protocol",
+      "modes",
+      "acceptance",
+      "required_families",
+      "implemented_families",
+      "deferred_families",
+      "additional_panels",
+      "tier_attribution",
+      "pending_metric_panels",
+      "completed_metric_panels",
+      "exact_parent_integration",
+      "instrumentation_overhead_integration",
+      "context_lifecycle_integration",
+      "string_indexing_integration"
+    ]
+  },
+  "change": "Adds a duration-qualified publication tier to the four required-bytecode/no-JIT arithmetic workloads after the unchanged 10,000-job structural tier proved shorter than reliable process-energy counter resolution. The publication tier preserves identical source, Context options, warmup, required-bytecode/no-native admission, attribution semantics, controls, and exact-parent gates.",
+  "no_jit_integration": {
+    "publication_tier": {
+      "owner_issue": 843,
+      "jobs": 500000,
+      "preserves_quick_and_full": true,
+      "exact_parent_required": true,
+      "required_efficiency_metrics": ["instructions", "cycles", "energy_joules", "thermal_state"],
+      "rationale": "The unchanged 10,000-job structural rows can complete below reliable process-energy resolution. Public efficiency evidence uses enough identical logical work for every required counter while retaining the ordinary five-percent RSD, nominal-thermal, AC-power, exact-parent, and no-discard gates.",
+      "checksums": [
+        {"workload": "representative_vm_arithmetic_number", "checksum": 4594271287158},
+        {"workload": "representative_vm_arithmetic_bigint", "checksum": 31534975730},
+        {"workload": "representative_vm_arithmetic_polymorphic", "checksum": 62690691228},
+        {"workload": "representative_vm_arithmetic_coercion", "checksum": 508812500}
+      ]
+    },
+    "publication_boundary": "V32 preserves every V31 required-bytecode mode, source, Context option, warmup, quick/full job count and checksum, attribution value, quickening contract, measured-boundary occupancy rule, binary-provenance rule, allocation replay, and control. Only the exact-parent publication invocation uses the frozen 500,000-job tier; shorter counter-quantized rows remain diagnostic."
+  }
+}
