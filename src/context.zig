@@ -639,6 +639,13 @@ pub const RuntimeAttributionProfiler = struct {
 
     inner: std.mem.Allocator,
     debug_registry: interp.DebugRegistryStats = .{},
+    // One profiler event updates several independent counters. Readers must
+    // not publish a mixture of the old and new values while allocator or GC
+    // writers are active. The active-writer count supports overlapping
+    // writers; the epoch detects a complete mutation between the reader's two
+    // boundary checks without serializing writers on a profiler lock.
+    counter_mutations_active: std.atomic.Value(u64) = .init(0),
+    counter_mutation_epoch: std.atomic.Value(u64) = .init(0),
     backing_allocations: std.atomic.Value(u64) = .init(0),
     backing_allocation_bytes: std.atomic.Value(u64) = .init(0),
     backing_growths: std.atomic.Value(u64) = .init(0),
@@ -682,6 +689,17 @@ pub const RuntimeAttributionProfiler = struct {
     full_pause_overflow: u64 = 0,
     full_pause_ns: [max_gc_pause_samples]u64 = @splat(0),
 
+    fn beginCounterMutation(self: *RuntimeAttributionProfiler) void {
+        const previous = self.counter_mutations_active.fetchAdd(1, .acq_rel);
+        std.debug.assert(previous != std.math.maxInt(u64));
+    }
+
+    fn finishCounterMutation(self: *RuntimeAttributionProfiler) void {
+        _ = self.counter_mutation_epoch.fetchAdd(1, .release);
+        const previous = self.counter_mutations_active.fetchSub(1, .acq_rel);
+        std.debug.assert(previous != 0);
+    }
+
     fn recordPeak(self: *RuntimeAttributionProfiler, current: u64) void {
         var peak = self.backing_peak_bytes.load(.monotonic);
         while (current > peak) {
@@ -694,6 +712,8 @@ pub const RuntimeAttributionProfiler = struct {
     }
 
     fn recordBackingAllocation(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
         _ = self.backing_allocations.fetchAdd(1, .monotonic);
         _ = self.backing_allocation_bytes.fetchAdd(@intCast(bytes), .monotonic);
         const previous = self.backing_current_bytes.fetchAdd(@intCast(bytes), .monotonic);
@@ -701,6 +721,8 @@ pub const RuntimeAttributionProfiler = struct {
     }
 
     fn recordBackingGrowth(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
         _ = self.backing_growths.fetchAdd(1, .monotonic);
         _ = self.backing_growth_bytes.fetchAdd(@intCast(bytes), .monotonic);
         const previous = self.backing_current_bytes.fetchAdd(@intCast(bytes), .monotonic);
@@ -708,12 +730,16 @@ pub const RuntimeAttributionProfiler = struct {
     }
 
     fn recordBackingRelease(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
         _ = self.backing_releases.fetchAdd(1, .monotonic);
         _ = self.backing_released_bytes.fetchAdd(@intCast(bytes), .monotonic);
         _ = self.backing_current_bytes.fetchSub(@intCast(bytes), .monotonic);
     }
 
     pub fn recordCellAllocation(self: *RuntimeAttributionProfiler, bytes: usize, kind: CellAllocationKind) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
         _ = self.gc_cell_allocations.fetchAdd(1, .monotonic);
         _ = self.gc_cell_bytes.fetchAdd(@intCast(bytes), .monotonic);
         switch (kind) {
@@ -725,6 +751,8 @@ pub const RuntimeAttributionProfiler = struct {
     }
 
     pub fn recordCellFree(self: *RuntimeAttributionProfiler, bytes: usize) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
         _ = self.gc_cell_frees.fetchAdd(1, .monotonic);
         _ = self.gc_cell_freed_bytes.fetchAdd(@intCast(bytes), .monotonic);
     }
@@ -734,6 +762,8 @@ pub const RuntimeAttributionProfiler = struct {
         bucket_idx: usize,
         purpose: CellSlabLockPurpose,
     ) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
         std.debug.assert(bucket_idx < self.cell_slab_lock_size_acquires.len);
         _ = self.cell_slab_lock_acquires.fetchAdd(1, .monotonic);
         _ = self.cell_slab_lock_purpose_acquires[@backingInt(purpose)].fetchAdd(1, .monotonic);
@@ -741,6 +771,8 @@ pub const RuntimeAttributionProfiler = struct {
     }
 
     fn recordCellSlabLockContention(self: *RuntimeAttributionProfiler, bucket_idx: usize, spins: u64) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
         std.debug.assert(bucket_idx < self.cell_slab_lock_size_contentions.len);
         std.debug.assert(spins != 0);
         _ = self.cell_slab_lock_contentions.fetchAdd(1, .monotonic);
@@ -750,6 +782,8 @@ pub const RuntimeAttributionProfiler = struct {
     }
 
     fn recordCellSlabOwnershipAttempt(self: *RuntimeAttributionProfiler, purpose: CellSlabOwnershipPurpose) void {
+        self.beginCounterMutation();
+        defer self.finishCounterMutation();
         _ = self.cell_slab_ownership_purpose_acquires[@backingInt(purpose)].fetchAdd(1, .monotonic);
     }
 
@@ -833,8 +867,10 @@ pub const RuntimeAttributionProfiler = struct {
         }
     }
 
-    pub fn snapshot(self: *RuntimeAttributionProfiler) Snapshot {
-        var out = Snapshot{
+    fn tryCounterSnapshot(self: *RuntimeAttributionProfiler) ?Snapshot {
+        if (self.counter_mutations_active.load(.acquire) != 0) return null;
+        const before = self.counter_mutation_epoch.load(.acquire);
+        const out = Snapshot{
             .allocation = .{
                 .backing_allocations = self.backing_allocations.load(.acquire),
                 .backing_allocation_bytes = self.backing_allocation_bytes.load(.acquire),
@@ -855,6 +891,27 @@ pub const RuntimeAttributionProfiler = struct {
             },
             .cell_slab_lock = self.cellSlabLockSnapshot(),
         };
+
+        // Check the active count before the closing epoch. If a writer ends
+        // between those reads, its release of the active count happens-before
+        // the epoch load and the changed epoch rejects this attempt. A writer
+        // that starts after the active-count check is ordered after the
+        // snapshot and cannot invalidate the values already read.
+        if (self.counter_mutations_active.load(.acquire) != 0) return null;
+        if (self.counter_mutation_epoch.load(.acquire) != before) return null;
+        return out;
+    }
+
+    pub fn snapshot(self: *RuntimeAttributionProfiler) Snapshot {
+        var spins: usize = 0;
+        var out: Snapshot = undefined;
+        while (true) : (spins += 1) {
+            if (self.tryCounterSnapshot()) |counter_snapshot| {
+                out = counter_snapshot;
+                break;
+            }
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
         self.lockPauses();
         defer self.pause_lock.unlock();
         out.minor_pauses.len = self.minor_pause_len;
@@ -950,12 +1007,85 @@ test "RuntimeAttributionProfiler records exact backing, cell, and pause samples"
     try std.testing.expectEqual(@as(u64, 75), before_free.minor_pauses.values[0]);
     try std.testing.expectEqual(@as(usize, 1), before_free.full_pauses.len);
     try std.testing.expectEqual(@as(u64, 125), before_free.full_pauses.values[0]);
+    try std.testing.expectEqual(@as(u64, 0), profile.counter_mutations_active.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 11), profile.counter_mutation_epoch.load(.acquire));
 
     allocator.free(memory);
     const after_free = profile.snapshot();
     try std.testing.expectEqual(@as(u64, 1), after_free.allocation.backing_releases);
     try std.testing.expectEqual(@as(u64, 48), after_free.allocation.backing_released_bytes);
     try std.testing.expectEqual(@as(u64, 0), after_free.allocation.backing_current_bytes);
+    try std.testing.expectEqual(@as(u64, 12), profile.counter_mutation_epoch.load(.acquire));
+}
+
+test "RuntimeAttributionProfiler rejects snapshots across concurrent partial mutations" {
+    var profile = RuntimeAttributionProfiler{ .inner = std.testing.allocator };
+    var first_started = std.atomic.Value(bool).init(false);
+    var second_started = std.atomic.Value(bool).init(false);
+    var release_first = std.atomic.Value(bool).init(false);
+    var release_second = std.atomic.Value(bool).init(false);
+
+    const Writer = struct {
+        profile: *RuntimeAttributionProfiler,
+        bytes: u64,
+        started: *std.atomic.Value(bool),
+        release: *std.atomic.Value(bool),
+
+        fn run(self: @This()) void {
+            self.profile.beginCounterMutation();
+            _ = self.profile.backing_allocations.fetchAdd(1, .monotonic);
+            self.started.store(true, .release);
+            while (!self.release.load(.acquire)) std.atomic.spinLoopHint();
+            _ = self.profile.backing_allocation_bytes.fetchAdd(self.bytes, .monotonic);
+            const previous = self.profile.backing_current_bytes.fetchAdd(self.bytes, .monotonic);
+            self.profile.recordPeak(previous +| self.bytes);
+            self.profile.finishCounterMutation();
+        }
+    };
+
+    var first = try std.Thread.spawn(.{}, Writer.run, .{Writer{
+        .profile = &profile,
+        .bytes = 48,
+        .started = &first_started,
+        .release = &release_first,
+    }});
+    var first_joined = false;
+    defer {
+        release_first.store(true, .release);
+        if (!first_joined) first.join();
+    }
+    var second = try std.Thread.spawn(.{}, Writer.run, .{Writer{
+        .profile = &profile,
+        .bytes = 80,
+        .started = &second_started,
+        .release = &release_second,
+    }});
+    var second_joined = false;
+    defer {
+        release_second.store(true, .release);
+        if (!second_joined) second.join();
+    }
+
+    while (!first_started.load(.acquire) or !second_started.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expectEqual(@as(u64, 2), profile.counter_mutations_active.load(.acquire));
+    try std.testing.expect(profile.tryCounterSnapshot() == null);
+
+    release_first.store(true, .release);
+    first.join();
+    first_joined = true;
+    try std.testing.expectEqual(@as(u64, 1), profile.counter_mutations_active.load(.acquire));
+    try std.testing.expect(profile.tryCounterSnapshot() == null);
+
+    release_second.store(true, .release);
+    second.join();
+    second_joined = true;
+    const snapshot = profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 0), profile.counter_mutations_active.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), profile.counter_mutation_epoch.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), snapshot.allocation.backing_allocations);
+    try std.testing.expectEqual(@as(u64, 128), snapshot.allocation.backing_allocation_bytes);
+    try std.testing.expectEqual(@as(u64, 128), snapshot.allocation.backing_current_bytes);
+    try std.testing.expectEqual(@as(u64, 128), snapshot.allocation.backing_peak_bytes);
 }
 
 test "BudgetAllocator enforces outstanding byte limit" {
