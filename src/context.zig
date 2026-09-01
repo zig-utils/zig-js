@@ -20171,6 +20171,44 @@ test "structuredClone preserves canonical string fields" {
     );
 }
 
+test "enable_gc: structured clone identity survives a getter collection request" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const collections_before = ctx.gc.?.collections;
+
+    const result = try ctx.evaluate(
+        \\const gcCloneLeaf = { marker: 7 };
+        \\const gcCloneRoot = { first: gcCloneLeaf };
+        \\Object.defineProperty(gcCloneRoot, "request", {
+        \\  enumerable: true,
+        \\  get() {
+        \\    let allocation = "safe";
+        \\    for (let i = 0; i < 12; i++) allocation += allocation;
+        \\    gc();
+        \\    return { allocation, leaf: gcCloneLeaf };
+        \\  }
+        \\});
+        \\gcCloneRoot.second = gcCloneLeaf;
+        \\gcCloneRoot.self = gcCloneRoot;
+        \\globalThis.gcCloneResult = structuredClone(gcCloneRoot);
+        \\gcCloneResult !== gcCloneRoot &&
+        \\  gcCloneResult.first === gcCloneResult.second &&
+        \\  gcCloneResult.request.leaf === gcCloneResult.first &&
+        \\  gcCloneResult.self === gcCloneResult &&
+        \\  gcCloneResult.request.allocation.indexOf("safesafe") === 0;
+    );
+    try std.testing.expect(result.asBool());
+    try std.testing.expect(ctx.gc.?.collections > collections_before);
+
+    const compacted = ctx.compactGarbage();
+    try std.testing.expect(compacted.status == .compacted or compacted.status == .no_candidates);
+    try std.testing.expect((try ctx.evaluate(
+        \\gcCloneResult.first === gcCloneResult.second &&
+        \\  gcCloneResult.request.leaf === gcCloneResult.first &&
+        \\  gcCloneResult.self === gcCloneResult
+    )).asBool());
+}
+
 test "structured clone rejects forged replayed and trailing SAB tokens" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

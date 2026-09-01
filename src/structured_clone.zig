@@ -280,7 +280,8 @@ const Serializer = struct {
     w: Writer,
     /// Object identity → pre-order id (the deserializer reconstructs the same
     /// numbering by creating object shells in read order).
-    memo: std.AutoHashMapUnmanaged(*value.Object, u32) = .empty,
+    memo: value.RuntimeObjectIdentityMapUnmanaged(u32) = .empty,
+    memo_context: ?value.RuntimeObjectIdentityHashContext = null,
     next_id: u32 = 0,
     shared_tokens: std.ArrayListUnmanaged(SharedRefToken) = .empty,
 
@@ -382,6 +383,25 @@ const Serializer = struct {
         return depth + 1;
     }
 
+    fn memoizedId(s: *const Serializer, identity: value.RuntimeObjectIdentity) ?u32 {
+        const context = s.memo_context orelse return null;
+        return s.memo.getContext(identity, context);
+    }
+
+    fn rememberObject(s: *Serializer, identity: value.RuntimeObjectIdentity) HostError!void {
+        const object_id = s.next_id;
+        const next_id = std.math.add(u32, object_id, 1) catch
+            return s.throwClone("DataCloneError: too many structured clone objects");
+        const memo_context = s.memo_context orelse
+            value.RuntimeObjectIdentityHashContext{ .seed = try s.self.newSecureHashSeed() };
+        try s.memo.putContext(s.w.gpa, identity, object_id, memo_context);
+        // Keep the context private until its first exact entry exists. An OOM
+        // above therefore publishes neither a usable memo nor an object id and
+        // a retry observes the same pre-order state.
+        s.memo_context = memo_context;
+        s.next_id = next_id;
+    }
+
     fn ser(s: *Serializer, v: Value, depth: u16) HostError!void {
         switch (v.kind()) {
             .undefined => try s.w.tag(.undef),
@@ -414,7 +434,8 @@ const Serializer = struct {
             }
             return;
         }
-        if (s.memo.get(o)) |id| {
+        const identity = value.RuntimeObjectIdentity.init(o);
+        if (s.memoizedId(identity)) |id| {
             try s.w.tag(.ref);
             try s.w.int(u32, id);
             return;
@@ -434,11 +455,7 @@ const Serializer = struct {
         if (o.is_arguments) return s.throwClone("DataCloneError: arguments objects cannot be cloned");
         if (o.behavior.is_htmldda) return s.throwClone("DataCloneError: this object cannot be cloned");
 
-        const object_id = s.next_id;
-        const next_id = std.math.add(u32, object_id, 1) catch
-            return s.throwClone("DataCloneError: too many structured clone objects");
-        try s.memo.put(s.w.gpa, o, object_id);
-        s.next_id = next_id;
+        try s.rememberObject(identity);
 
         if (o.arrayBuffer()) |ab| {
             if (ab.is_shared) {
@@ -1327,6 +1344,72 @@ test "structured clone flat Latin-1 writer is allocation-exact and atomic" {
     try std.testing.expectError(error.OutOfMemory, limited_writer.flatLatin1Str(flat));
     try std.testing.expect(limited_writer.limit_exceeded);
     try std.testing.expectEqual(@as(usize, 0), limited_writer.out.items.len);
+}
+
+test "structured clone memo publishes atomically and disperses default collisions" {
+    var machine = Interpreter{
+        .arena = std.testing.allocator,
+        .env = undefined,
+        .root_shape = undefined,
+        .secure_hash_prng_seeded = true,
+        .secure_hash_prng = std.Random.DefaultPrng.init(0x5343_4c4f_4e45_4944),
+    };
+
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    var failed = Serializer{ .self = &machine, .w = .{ .gpa = failing.allocator() } };
+    defer failed.memo.deinit(std.testing.allocator);
+    const first = value.RuntimeObjectIdentity{ .storage = .managed, .value = 1 };
+    try std.testing.expectError(error.OutOfMemory, failed.rememberObject(first));
+    try std.testing.expectEqual(@as(usize, 0), failed.memo.count());
+    try std.testing.expect(failed.memo_context == null);
+    try std.testing.expectEqual(@as(u32, 0), failed.next_id);
+
+    failed.w.gpa = std.testing.allocator;
+    try failed.rememberObject(first);
+    try std.testing.expect(failed.memo_context != null);
+    try std.testing.expectEqual(@as(u32, 1), failed.next_id);
+    try std.testing.expectEqual(@as(?u32, 0), failed.memoizedId(first));
+
+    const target_mask: u64 = 1023;
+    const collision_count = 32;
+    var identities: [collision_count]value.RuntimeObjectIdentity = undefined;
+    const legacy_context = std.hash_map.AutoContext(*value.Object){};
+    var found: usize = 0;
+    var candidate_address: usize = @alignOf(value.Object);
+    while (found != identities.len) : (candidate_address += @alignOf(value.Object)) {
+        const pointer: *value.Object = @ptrFromInt(candidate_address);
+        if (legacy_context.hash(pointer) & target_mask != 0) continue;
+        identities[found] = .{ .storage = .address, .value = @intCast(candidate_address) };
+        found += 1;
+    }
+
+    const context = value.RuntimeObjectIdentityHashContext{ .seed = 0x5343_4c4f_4e45_4d45 };
+    var memo = Serializer{
+        .self = &machine,
+        .w = .{ .gpa = std.testing.allocator },
+        .memo_context = context,
+    };
+    defer memo.memo.deinit(std.testing.allocator);
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (identities, 0..) |identity, id| {
+        const legacy_pointer: *value.Object = @ptrFromInt(@as(usize, @intCast(identity.value)));
+        try std.testing.expectEqual(@as(u64, 0), legacy_context.hash(legacy_pointer) & target_mask);
+        const bucket = context.hash(identity) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        try memo.rememberObject(identity);
+        try std.testing.expectEqual(@as(?u32, @intCast(id)), memo.memoizedId(identity));
+    }
+    try std.testing.expect(occupied_count >= 24);
+
+    const separately_tagged = value.RuntimeObjectIdentity{ .storage = .managed, .value = identities[0].value };
+    try std.testing.expect(memo.memoizedId(separately_tagged) == null);
+    try memo.rememberObject(separately_tagged);
+    try std.testing.expectEqual(@as(?u32, collision_count), memo.memoizedId(separately_tagged));
 }
 
 test "structured clone SAB token consumption is atomic" {

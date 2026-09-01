@@ -3061,7 +3061,7 @@ const Stringifier = struct {
                 // and 11: reject only an object already on the active ancestor
                 // path, then remove it on return. A global visited set would
                 // incorrectly reject legal repeated sibling references.
-                const identity = JsonObjectIdentity.init(o);
+                const identity = value.RuntimeObjectIdentity.init(o);
                 if (try st.active.enter(self, a, st.cycle_allocator, identity))
                     return self.throwError("TypeError", "Converting circular structure to JSON");
                 defer st.active.leave(identity);
@@ -3181,40 +3181,7 @@ const Stringifier = struct {
     }
 };
 
-const JsonObjectIdentity = struct {
-    storage: enum { managed, address },
-    value: u64,
-
-    fn init(object: *value.Object) @This() {
-        if (gc_mod.stableCellIdentity(@ptrCast(object))) |identity|
-            return .{ .storage = .managed, .value = identity };
-        return .{ .storage = .address, .value = @intCast(@intFromPtr(object)) };
-    }
-
-    fn eql(a: @This(), b: @This()) bool {
-        return a.storage == b.storage and a.value == b.value;
-    }
-};
-
-const JsonIdentityHashContext = struct {
-    seed: u64,
-
-    pub fn hash(context: @This(), identity: JsonObjectIdentity) u64 {
-        const encoded = [2]u64{ @backingInt(identity.storage), identity.value };
-        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&encoded));
-    }
-
-    pub fn eql(_: @This(), left: JsonObjectIdentity, right: JsonObjectIdentity) bool {
-        return left.eql(right);
-    }
-};
-
-const JsonActiveIndex = std.HashMapUnmanaged(
-    JsonObjectIdentity,
-    void,
-    JsonIdentityHashContext,
-    std.hash_map.default_max_load_percentage,
-);
+const JsonActiveIndex = value.RuntimeObjectIdentityMapUnmanaged(void);
 
 // Keep the common shallow JSON path free of hash-table allocation while
 // bounding its scan cost. Once promoted, every enter/leave updates both the
@@ -3222,9 +3189,9 @@ const JsonActiveIndex = std.HashMapUnmanaged(
 const json_cycle_index_threshold = 32;
 
 const JsonActiveStack = struct {
-    items: std.ArrayListUnmanaged(JsonObjectIdentity) = .empty,
+    items: std.ArrayListUnmanaged(value.RuntimeObjectIdentity) = .empty,
     index: JsonActiveIndex = .empty,
-    context: ?JsonIdentityHashContext = null,
+    context: ?value.RuntimeObjectIdentityHashContext = null,
     indexed: bool = false,
 
     fn deinit(active: *@This(), stack_allocator: std.mem.Allocator, index_allocator: std.mem.Allocator) void {
@@ -3240,7 +3207,7 @@ const JsonActiveStack = struct {
         machine: *Interpreter,
         stack_allocator: std.mem.Allocator,
         index_allocator: std.mem.Allocator,
-        identity: JsonObjectIdentity,
+        identity: value.RuntimeObjectIdentity,
     ) HostError!bool {
         if (active.indexed) {
             const context = active.context.?;
@@ -3262,7 +3229,7 @@ const JsonActiveStack = struct {
         // member as one failure-atomic transition. The bounded linear prefix is
         // intentionally retained in order for exact LIFO removal assertions.
         const context = active.context orelse
-            JsonIdentityHashContext{ .seed = try machine.newSecureHashSeed() };
+            value.RuntimeObjectIdentityHashContext{ .seed = try machine.newSecureHashSeed() };
         try active.items.ensureUnusedCapacity(stack_allocator, 1);
         try active.index.ensureTotalCapacityContext(index_allocator, @intCast(active.items.items.len + 1), context);
         active.items.appendAssumeCapacity(identity);
@@ -3274,7 +3241,7 @@ const JsonActiveStack = struct {
         return false;
     }
 
-    fn leave(active: *@This(), identity: JsonObjectIdentity) void {
+    fn leave(active: *@This(), identity: value.RuntimeObjectIdentity) void {
         const removed = active.items.pop().?;
         std.debug.assert(removed.eql(identity));
         if (active.indexed) {
@@ -4123,7 +4090,7 @@ test "JSON active cycle index promotes atomically and preserves path semantics" 
 
     // The bounded shallow path must not touch the membership allocator.
     for (0..json_cycle_index_threshold) |i| {
-        const identity = JsonObjectIdentity{ .storage = .managed, .value = @intCast(i + 1) };
+        const identity = value.RuntimeObjectIdentity{ .storage = .managed, .value = @intCast(i + 1) };
         try std.testing.expect(!try shallow.enter(&machine, shallow_allocator, unavailable_index.allocator(), identity));
     }
     try std.testing.expectEqual(@as(usize, 0), shallow.index.capacity());
@@ -4132,7 +4099,7 @@ test "JSON active cycle index promotes atomically and preserves path semantics" 
 
     // Failed promotion leaves the complete ordered path authoritative and does
     // not publish a partially populated index.
-    const next = JsonObjectIdentity{ .storage = .managed, .value = json_cycle_index_threshold + 1 };
+    const next = value.RuntimeObjectIdentity{ .storage = .managed, .value = json_cycle_index_threshold + 1 };
     try std.testing.expectError(error.OutOfMemory, shallow.enter(&machine, shallow_allocator, unavailable_index.allocator(), next));
     try std.testing.expectEqual(@as(usize, json_cycle_index_threshold), shallow.items.items.len);
     try std.testing.expect(!shallow.indexed);
@@ -4149,7 +4116,7 @@ test "JSON active cycle index promotes atomically and preserves path semantics" 
     var promoted: JsonActiveStack = .{};
     defer promoted.deinit(std.testing.allocator, std.testing.allocator);
     for (0..json_cycle_index_threshold + 1) |i| {
-        const identity = JsonObjectIdentity{ .storage = .managed, .value = @intCast(i + 1) };
+        const identity = value.RuntimeObjectIdentity{ .storage = .managed, .value = @intCast(i + 1) };
         try std.testing.expect(!try promoted.enter(&machine, std.testing.allocator, std.testing.allocator, identity));
     }
     try std.testing.expect(promoted.indexed);
@@ -4157,7 +4124,7 @@ test "JSON active cycle index promotes atomically and preserves path semantics" 
 
     // An active ancestor is a cycle. Once removed, the same identity may occur
     // as a later sibling and must serialize again.
-    const leaf = JsonObjectIdentity{ .storage = .managed, .value = json_cycle_index_threshold + 1 };
+    const leaf = value.RuntimeObjectIdentity{ .storage = .managed, .value = json_cycle_index_threshold + 1 };
     try std.testing.expect(try promoted.enter(&machine, std.testing.allocator, std.testing.allocator, leaf));
     try std.testing.expectEqual(@as(usize, json_cycle_index_threshold + 1), promoted.items.items.len);
     promoted.leave(leaf);
@@ -4173,23 +4140,23 @@ test "JSON active cycle index promotes atomically and preserves path semantics" 
 test "JSON active identity index disperses default collisions exactly" {
     const target_mask: u64 = 1023;
     const collision_count = 32;
-    var identities: [collision_count]JsonObjectIdentity = undefined;
+    var identities: [collision_count]value.RuntimeObjectIdentity = undefined;
     var found: usize = 0;
     var candidate: u64 = 1;
     while (found != identities.len) : (candidate += 1) {
-        const identity = JsonObjectIdentity{ .storage = .managed, .value = candidate };
-        if ((JsonIdentityHashContext{ .seed = 0 }).hash(identity) & target_mask != 0) continue;
+        const identity = value.RuntimeObjectIdentity{ .storage = .managed, .value = candidate };
+        if ((value.RuntimeObjectIdentityHashContext{ .seed = 0 }).hash(identity) & target_mask != 0) continue;
         identities[found] = identity;
         found += 1;
     }
 
-    const context = JsonIdentityHashContext{ .seed = 0x4a53_4f4e_5f49_444e };
+    const context = value.RuntimeObjectIdentityHashContext{ .seed = 0x4a53_4f4e_5f49_444e };
     var index: JsonActiveIndex = .empty;
     defer index.deinit(std.testing.allocator);
     var occupied: [target_mask + 1]bool = @splat(false);
     var occupied_count: usize = 0;
     for (identities) |identity| {
-        try std.testing.expectEqual(@as(u64, 0), (JsonIdentityHashContext{ .seed = 0 }).hash(identity) & target_mask);
+        try std.testing.expectEqual(@as(u64, 0), (value.RuntimeObjectIdentityHashContext{ .seed = 0 }).hash(identity) & target_mask);
         const bucket = context.hash(identity) & target_mask;
         if (!occupied[bucket]) {
             occupied[bucket] = true;
@@ -4200,7 +4167,7 @@ test "JSON active identity index disperses default collisions exactly" {
     try std.testing.expect(occupied_count >= 24);
     for (identities) |identity| try std.testing.expect(index.containsContext(identity, context));
 
-    const separately_tagged = JsonObjectIdentity{ .storage = .address, .value = identities[0].value };
+    const separately_tagged = value.RuntimeObjectIdentity{ .storage = .address, .value = identities[0].value };
     try std.testing.expect(!index.containsContext(separately_tagged, context));
     try index.putContext(std.testing.allocator, separately_tagged, {}, context);
     try std.testing.expect(index.containsContext(separately_tagged, context));

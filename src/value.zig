@@ -2043,6 +2043,50 @@ pub const WeakIdentityIndex = std.HashMapUnmanaged(
     std.hash_map.default_max_load_percentage,
 );
 
+/// Exact object identity for invocation-local indexes that may outlive a
+/// moving-collection checkpoint. Managed objects use zig-gc's relocation-
+/// stable cell id; arena/static objects retain their lifetime-stable address.
+/// The storage tag keeps the two identity domains disjoint even when their
+/// numeric payloads coincide.
+pub const RuntimeObjectIdentity = struct {
+    pub const Storage = enum(u8) { managed, address };
+
+    storage: Storage,
+    value: u64,
+
+    pub fn init(object: *Object) @This() {
+        if (gc_runtime.stableCellIdentity(@ptrCast(object))) |identity|
+            return .{ .storage = .managed, .value = identity };
+        return .{ .storage = .address, .value = @intCast(@intFromPtr(object)) };
+    }
+
+    pub fn eql(a: @This(), b: @This()) bool {
+        return a.storage == b.storage and a.value == b.value;
+    }
+};
+
+pub const RuntimeObjectIdentityHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), identity: RuntimeObjectIdentity) u64 {
+        const encoded = [2]u64{ @backingInt(identity.storage), identity.value };
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&encoded));
+    }
+
+    pub fn eql(_: @This(), left: RuntimeObjectIdentity, right: RuntimeObjectIdentity) bool {
+        return left.eql(right);
+    }
+};
+
+pub fn RuntimeObjectIdentityMapUnmanaged(comptime MapValue: type) type {
+    return std.HashMapUnmanaged(
+        RuntimeObjectIdentity,
+        MapValue,
+        RuntimeObjectIdentityHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+}
+
 pub const FinalizationRecord = struct {
     target: ?*anyopaque = null,
     held: Value = Value.undef(),
