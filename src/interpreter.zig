@@ -13371,22 +13371,45 @@ pub const Interpreter = struct {
     /// closes the iterator (preserving the original exception) before propagating.
     fn addEntriesFromIterable(self: *Interpreter, o: *value.Object, iterable: Value, is_set: bool) EvalError!void {
         if (iterable.isUndefined() or iterable.isNull()) return;
-        const adder = try self.getProperty(Value.obj(o), if (is_set) "add" else "set");
+        const iterable_root = try self.pushTempRoot(iterable);
+        defer self.restoreTempRoots(iterable_root);
+        const collection = Value.obj(o);
+        const collection_root = try self.pushTempRoot(collection);
+        defer self.restoreTempRoots(collection_root);
+        const adder = try self.getProperty(self.tempRoot(collection_root, collection), if (is_set) "add" else "set");
         if (!adder.isCallable())
             return self.throwError("TypeError", if (is_set) "Set add method is not callable" else "Map set method is not callable");
-        const iter = try self.iteratorOf(iterable);
+        const adder_root = try self.pushTempRoot(adder);
+        defer self.restoreTempRoots(adder_root);
+        const record = try self.getIteratorRecord(self.tempRoot(iterable_root, iterable));
+        const iter = record.iterator;
+        const iter_root = try self.pushTempRoot(iter);
+        defer self.restoreTempRoots(iter_root);
+        const next_method = record.next_method;
+        const next_root = try self.pushTempRoot(next_method);
+        defer self.restoreTempRoots(next_root);
+        var done = false;
+        errdefer if (!done) self.iteratorCloseKeepingThrow(self.tempRoot(iter_root, iter));
         while (true) {
-            const r = try self.callMethod(iter, "next", &.{});
+            const r = try self.callValueWithThis(
+                self.tempRoot(next_root, next_method),
+                &.{},
+                self.tempRoot(iter_root, iter),
+            );
             if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
-            if ((try self.getProperty(r, "done")).toBoolean()) break;
-            const item = try self.getProperty(r, "value");
-            self.addOneEntry(o, adder, item, is_set) catch |e| {
-                // IteratorClose, keeping the original abrupt completion's value.
-                const saved = self.exception;
-                self.iteratorClose(iter) catch {};
-                self.exception = saved;
-                return e;
-            };
+            const result_root = try self.pushTempRoot(r);
+            defer self.restoreTempRoots(result_root);
+            if ((try self.getProperty(r, "done")).toBoolean()) {
+                done = true;
+                break;
+            }
+            const item = try self.getProperty(self.tempRoot(result_root, r), "value");
+            try self.addOneEntry(
+                self.tempRoot(collection_root, collection).asObj(),
+                self.tempRoot(adder_root, adder),
+                item,
+                is_set,
+            );
         }
     }
 
@@ -13394,14 +13417,30 @@ pub const Interpreter = struct {
     /// `o`). For a Map the value must be an entry object `{0: key, 1: value}`.
     fn addOneEntry(self: *Interpreter, o: *value.Object, adder: Value, item: Value, is_set: bool) EvalError!void {
         const self_v = Value.obj(o);
+        const self_root = try self.pushTempRoot(self_v);
+        defer self.restoreTempRoots(self_root);
+        const adder_root = try self.pushTempRoot(adder);
+        defer self.restoreTempRoots(adder_root);
+        const item_root = try self.pushTempRoot(item);
+        defer self.restoreTempRoots(item_root);
         if (is_set) {
-            _ = try self.callValueWithThis(adder, &.{item}, self_v);
+            _ = try self.callValueWithThis(
+                self.tempRoot(adder_root, adder),
+                &.{self.tempRoot(item_root, item)},
+                self.tempRoot(self_root, self_v),
+            );
             return;
         }
         if (!builtins.isRealObject(item)) return self.throwError("TypeError", "Iterator value is not an entry object");
-        const k = try self.getProperty(item, "0");
-        const v = try self.getProperty(item, "1");
-        _ = try self.callValueWithThis(adder, &.{ k, v }, self_v);
+        const k = try self.getProperty(self.tempRoot(item_root, item), "0");
+        const k_root = try self.pushTempRoot(k);
+        defer self.restoreTempRoots(k_root);
+        const v = try self.getProperty(self.tempRoot(item_root, item), "1");
+        _ = try self.callValueWithThis(
+            self.tempRoot(adder_root, adder),
+            &.{ self.tempRoot(k_root, k), v },
+            self.tempRoot(self_root, self_v),
+        );
     }
 
     fn mapMethod(self: *Interpreter, o: *value.Object, name: []const u8, args: []const Value) EvalError!?Value {
@@ -16271,59 +16310,6 @@ pub const Interpreter = struct {
         };
     }
 
-    /// Legacy iterator-object entry point retained while its remaining callers
-    /// are classified as GetIterator, GetIteratorDirect, or an internal cursor.
-    /// Unlike `getIteratorRecord`, this accepts a `.next`-only object and bypasses
-    /// an observable generator @@iterator; new language GetIterator consumers
-    /// must not use it.
-    pub fn iteratorOf(self: *Interpreter, v: Value) EvalError!Value {
-        switch (v.kind()) {
-            .object => {
-                const o = v.asObj();
-                if (o.generator() != null) return v;
-                // A user-defined `[Symbol.iterator]()` method takes precedence.
-                if (self.symbolIteratorKey()) |ik| {
-                    const itfn = try self.getProperty(v, ik);
-                    if (!itfn.isUndefined() and !itfn.isNull()) {
-                        if (itfn.isObject() and itfn.asObj().isCallableObject())
-                            return try self.requireIteratorObject(try self.callValueWithThis(itfn, &.{}, v));
-                        return self.throwError("TypeError", "value is not iterable");
-                    }
-                }
-                // An array honors a deleted/overridden `Array.prototype[Symbol.iterator]`.
-                if (o.is_array) {
-                    switch (self.arrayIterState()) {
-                        .intact => return self.makeCursorIterator(v),
-                        .deleted => return self.throwError("TypeError", "value is not iterable"),
-                        .custom => |m| {
-                            if (!m.isCallable()) return self.throwError("TypeError", "value is not iterable");
-                            return try self.requireIteratorObject(try self.callValueWithThis(m, &.{}, v));
-                        },
-                    }
-                }
-                if (hasProperty(o, "next")) return v; // already an iterator (manual or generator-like)
-                // Sets (element = value) and Maps (element = [k,v] pair) iterate
-                // their dense `elements` store via an index cursor.
-                if (o.is_set or o.is_map) return self.makeCursorIterator(v);
-                return self.throwError("TypeError", "value is not iterable");
-            },
-            .string, .number, .boolean => {
-                if (self.symbolIteratorKey()) |ik| {
-                    const itfn = try self.getProperty(v, ik);
-                    if (!itfn.isUndefined() and !itfn.isNull()) {
-                        if (itfn.isObject() and itfn.asObj().isCallableObject())
-                            return try self.requireIteratorObject(try self.callValueWithThis(itfn, &.{}, v));
-                        return self.throwError("TypeError", "value is not iterable");
-                    }
-                    return self.throwError("TypeError", "value is not iterable");
-                }
-                if (v.isString()) return self.makeCursorIterator(v);
-                return self.throwError("TypeError", "value is not iterable");
-            },
-            else => return self.throwError("TypeError", "value is not iterable"),
-        }
-    }
-
     fn requireIteratorObject(self: *Interpreter, it: Value) EvalError!Value {
         if (!it.isObject() or it.asObj().is_symbol or it.asObj().is_bigint)
             return self.throwError("TypeError", "iterator is not an object");
@@ -16881,32 +16867,41 @@ pub const Interpreter = struct {
         }
     }
 
-    fn makeAsyncFromSyncIterator(self: *Interpreter, sync_iter: Value) EvalError!Value {
-        const it = (try self.newObject()).asObj();
-        try self.setProp(it, "__sync", sync_iter);
-        try self.setProp(it, "__next", try self.getProperty(sync_iter, "next"));
-        try setNative(self.arena, self.root_shape, it, "next", 1, asyncFromSyncNextFn);
-        try setNative(self.arena, self.root_shape, it, "return", 1, asyncFromSyncReturnFn);
-        try setNative(self.arena, self.root_shape, it, "throw", 1, asyncFromSyncThrowFn);
-        return Value.obj(it);
+    fn makeAsyncFromSyncIterator(self: *Interpreter, sync_iter: Value, next_method: Value) EvalError!Value {
+        const sync_root = try self.pushTempRoot(sync_iter);
+        defer self.restoreTempRoots(sync_root);
+        const next_root = try self.pushTempRoot(next_method);
+        defer self.restoreTempRoots(next_root);
+        const iterator = try self.newObject();
+        const iterator_root = try self.pushTempRoot(iterator);
+        defer self.restoreTempRoots(iterator_root);
+        try self.setProp(self.tempRoot(iterator_root, iterator).asObj(), "__sync", self.tempRoot(sync_root, sync_iter));
+        try self.setProp(self.tempRoot(iterator_root, iterator).asObj(), "__next", self.tempRoot(next_root, next_method));
+        try setNative(self.arena, self.root_shape, self.tempRoot(iterator_root, iterator).asObj(), "next", 1, asyncFromSyncNextFn);
+        try setNative(self.arena, self.root_shape, self.tempRoot(iterator_root, iterator).asObj(), "return", 1, asyncFromSyncReturnFn);
+        try setNative(self.arena, self.root_shape, self.tempRoot(iterator_root, iterator).asObj(), "throw", 1, asyncFromSyncThrowFn);
+        return self.tempRoot(iterator_root, iterator);
     }
 
     /// The async iterator for `for await`: `obj[Symbol.asyncIterator]()` if
     /// present, else an Async-from-Sync wrapper over `obj[Symbol.iterator]()`.
     pub fn asyncIteratorOf(self: *Interpreter, v: Value) EvalError!Value {
+        const input_root = try self.pushTempRoot(v);
+        defer self.restoreTempRoots(input_root);
         if (self.symbolAsyncIteratorKey()) |ik| {
-            if (v.isObject() and hasProperty(v.asObj(), ik)) {
-                const m = try self.getProperty(v, ik);
-                // GetMethod: undefined/null → method absent (fall back to sync);
-                // present but not callable → TypeError.
-                if (!m.isUndefined() and !m.isNull()) {
-                    if (m.isObject() and m.asObj().isCallableObject())
-                        return try self.callValueWithThis(m, &.{}, v);
-                    return self.throwError("TypeError", "[Symbol.asyncIterator] is not a function");
-                }
+            // GetMethod performs one ordinary Get. A preliminary HasProperty is
+            // observably wrong for proxies and can disagree with the later get.
+            const m = try self.getProperty(self.tempRoot(input_root, v), ik);
+            // undefined/null → method absent (fall back to sync); present but
+            // not callable → TypeError.
+            if (!m.isUndefined() and !m.isNull()) {
+                if (m.isCallable())
+                    return self.requireIteratorObject(try self.callValueWithThis(m, &.{}, self.tempRoot(input_root, v)));
+                return self.throwError("TypeError", "[Symbol.asyncIterator] is not a function");
             }
         }
-        return self.makeAsyncFromSyncIterator(try self.iteratorOf(v));
+        const record = try self.getIteratorRecord(self.tempRoot(input_root, v));
+        return self.makeAsyncFromSyncIterator(record.iterator, record.next_method);
     }
 
     /// Wrap an array/string/collection in an iterator object. Map/Set use true
@@ -16976,8 +16971,10 @@ pub const Interpreter = struct {
     fn iterStepM(self: *Interpreter, it: Value, next_method: Value) EvalError!IterStepResult {
         const r = try self.callValueWithThis(next_method, &.{}, it);
         if (!builtins.isRealObject(r)) return self.throwError("TypeError", "Iterator result interface is not an object");
+        const result_root = try self.pushTempRoot(r);
+        defer self.restoreTempRoots(result_root);
         const done = (try self.getProperty(r, "done")).toBoolean();
-        const val = if (done) Value.undef() else try self.getProperty(r, "value");
+        const val = if (done) Value.undef() else try self.getProperty(self.tempRoot(result_root, r), "value");
         return .{ .done = done, .value = val };
     }
 
@@ -16992,35 +16989,6 @@ pub const Interpreter = struct {
     /// Retained Array prototype identity; observable iterator slots stay live.
     fn arrayProtoObj(self: *Interpreter) ?*value.Object {
         return self.arrayProto();
-    }
-
-    /// The current `Array.prototype[Symbol.iterator]` slot: `.intact` (still the
-    /// native array-values iterator → fast index cursor is valid), `.deleted`
-    /// (no iterator → not iterable), or `.custom` (a user replacement to call).
-    const ArrayIter = union(enum) { intact, deleted, custom: Value };
-    fn arrayIterState(self: *Interpreter) ArrayIter {
-        const ap = self.arrayProtoObj() orelse return .intact;
-        const ik = self.symbolIteratorKey() orelse return .intact;
-        const slot = ap.getOwn(ik) orelse return .deleted;
-        if (slot.isObject() and slot.asObj().native == arrayValuesIterFn) return .intact;
-        return .{ .custom = slot };
-    }
-
-    /// Whether `Array.prototype[Symbol.iterator]` is still the native iterator,
-    /// so the array index fast paths are valid.
-    fn arrayIterIntact(self: *Interpreter) bool {
-        return switch (self.arrayIterState()) {
-            .intact => true,
-            else => false,
-        };
-    }
-
-    /// Does array `o` carry its OWN `[Symbol.iterator]` (data or accessor),
-    /// overriding `Array.prototype`'s? Internal collection snapshots must defer
-    /// to the iterator protocol when so.
-    fn arrayHasOwnIterator(self: *Interpreter, o: *value.Object) bool {
-        const ikey = self.wellKnownSymbolKey("iterator") orelse return false;
-        return o.getOwn(ikey) != null or o.getAccessor(ikey) != null;
     }
 
     fn objectProtoHasOwn(self: *Interpreter, o: *value.Object, key: []const u8) EvalError!bool {
@@ -21546,24 +21514,30 @@ fn mapGroupByFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     return Value.obj(map);
 }
 
-/// Collect an iterable's elements into a slice. Packed arrays can take a locked
-/// snapshot, but sparse/customized arrays must be driven through the iterator
-/// protocol so holes, prototype values, accessors, and custom iterators are
-/// observed before the groupBy callback runs.
+/// Collect an iterable's elements into a slice through the language GetIterator
+/// path. Even a packed Array must perform the observable @@iterator and `next`
+/// lookups once; direct snapshots are reserved for internal cursor consumers.
 fn collectIterable(self: *Interpreter, v: Value) EvalError![]Value {
-    if (v.isObject()) {
-        const o = v.asObj();
-        if (o.is_array and !o.is_arguments and self.arrayIterIntact() and !self.arrayHasOwnIterator(o)) {
-            if (try o.packedDenseElementsSnapshot(self.arena)) |items| return items;
-        }
-    }
-    const iter = try self.iteratorOf(v);
+    const record = try self.getIteratorRecord(v);
+    const iter = record.iterator;
+    const iter_root = try self.pushTempRoot(iter);
+    defer self.restoreTempRoots(iter_root);
+    const next_method = record.next_method;
+    const next_root = try self.pushTempRoot(next_method);
+    defer self.restoreTempRoots(next_root);
     var list: std.ArrayListUnmanaged(Value) = .empty;
+    var done = false;
+    errdefer if (!done) self.iteratorCloseKeepingThrow(self.tempRoot(iter_root, iter));
     while (true) {
-        const r = try self.callMethod(iter, "next", &.{});
-        if (!r.isObject()) return self.throwError("TypeError", "iterator.next() did not return an object");
-        if ((try self.getProperty(r, "done")).toBoolean()) break;
-        try list.append(self.arena, try self.getProperty(r, "value"));
+        const step = try self.iterStepM(
+            self.tempRoot(iter_root, iter),
+            self.tempRoot(next_root, next_method),
+        );
+        if (step.done) {
+            done = true;
+            break;
+        }
+        try list.append(self.arena, step.value);
     }
     return list.items;
 }
@@ -21991,15 +21965,6 @@ test "interpreter native private relocation mirrors every traced payload" {
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_environments[2])), realm_object.private_data.?);
 }
 
-/// IteratorStep + IteratorValue: advance `iter`, returning the next value or
-/// null when exhausted. A protocol violation (non-object result) throws.
-fn iterStep(self: *Interpreter, iter: Value) EvalError!?Value {
-    const r = try self.callMethod(iter, "next", &.{});
-    if (!r.isObject()) return self.throwError("TypeError", "iterator.next() did not return an object");
-    if ((try self.getProperty(r, "done")).toBoolean()) return null;
-    return try self.getProperty(r, "value");
-}
-
 /// Shared setup for `Promise.all`/`allSettled`/`any`: build the combined promise
 /// and wire a per-element reaction onto each input (coerced via the source's
 /// `then`). An empty input settles immediately.
@@ -22097,7 +22062,13 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
     // GetPromiseResolve + GetIterator are abrupt-rejected: a failure rejects the
     // returned promise (IfAbruptRejectPromise) rather than throwing out of the call.
     const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, cap, err);
-    const iter = self.iteratorOf(iterable) catch |err| return rejectAbrupt(self, cap, err);
+    const record = self.getIteratorRecord(iterable) catch |err| return rejectAbrupt(self, cap, err);
+    const iter = record.iterator;
+    const iter_root = try self.pushTempRoot(iter);
+    defer self.restoreTempRoots(iter_root);
+    const next_method = record.next_method;
+    const next_root = try self.pushTempRoot(next_method);
+    defer self.restoreTempRoots(next_root);
 
     const values = (try self.newArray()).asObj();
     const combine = try self.arena.create(promise.Combine);
@@ -22109,13 +22080,17 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
     while (true) {
         // IteratorStep/IteratorValue errors leave the iterator done → reject
         // without closing it.
-        const maybe = iterStep(self, iter) catch |err| return rejectAbrupt(self, cap, err);
-        const el = maybe orelse break;
+        const step = self.iterStepM(
+            self.tempRoot(iter_root, iter),
+            self.tempRoot(next_root, next_method),
+        ) catch |err| return rejectAbrupt(self, cap, err);
+        if (step.done) break;
+        const el = step.value;
         try values.appendElement(self.arena, Value.undef());
         combineAddPending(combine);
         // `nextPromise = Call(promiseResolve, C, «el»)` — an abrupt completion
         // here closes the (still-open) iterator before rejecting.
-        const next = self.callValueWithThis(promise_resolve, &.{el}, this) catch |err| return closeAndReject(self, cap, iter, err);
+        const next = self.callValueWithThis(promise_resolve, &.{el}, this) catch |err| return closeAndReject(self, cap, self.tempRoot(iter_root, iter), err);
         // One [[AlreadyCalled]] record shared by this element's resolve & reject
         // functions — the element settles at most once.
         const already = try self.arena.create(bool);
@@ -22135,7 +22110,7 @@ fn setupCombinator(self: *Interpreter, this: Value, iterable: Value, kind: @Type
         // own `then` (which may settle synchronously).
         const fulfill_element = if (kind == .any) cap.resolve else Value.obj(f);
         const reject_element = if (kind == .all) cap.reject else Value.obj(r);
-        _ = self.callMethod(next, "then", &.{ fulfill_element, reject_element }) catch |err| return closeAndReject(self, cap, iter, err);
+        _ = self.callMethod(next, "then", &.{ fulfill_element, reject_element }) catch |err| return closeAndReject(self, cap, self.tempRoot(iter_root, iter), err);
         index += 1;
     }
     if (combineDropPending(combine)) try combineSettle(self, combine);
@@ -22257,14 +22232,24 @@ fn promiseRaceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const cap = try newPromiseCapability(self, this);
     const promise_resolve = getPromiseResolve(self, this) catch |err| return rejectAbrupt(self, cap, err);
-    const iter = self.iteratorOf(if (args.len > 0) args[0] else Value.undef()) catch |err| return rejectAbrupt(self, cap, err);
+    const record = self.getIteratorRecord(if (args.len > 0) args[0] else Value.undef()) catch |err| return rejectAbrupt(self, cap, err);
+    const iter = record.iterator;
+    const iter_root = try self.pushTempRoot(iter);
+    defer self.restoreTempRoots(iter_root);
+    const next_method = record.next_method;
+    const next_root = try self.pushTempRoot(next_method);
+    defer self.restoreTempRoots(next_root);
     while (true) {
-        const maybe = iterStep(self, iter) catch |err| return rejectAbrupt(self, cap, err);
-        const el = maybe orelse break;
-        const next = self.callValueWithThis(promise_resolve, &.{el}, this) catch |err| return closeAndReject(self, cap, iter, err);
+        const step = self.iterStepM(
+            self.tempRoot(iter_root, iter),
+            self.tempRoot(next_root, next_method),
+        ) catch |err| return rejectAbrupt(self, cap, err);
+        if (step.done) break;
+        const el = step.value;
+        const next = self.callValueWithThis(promise_resolve, &.{el}, this) catch |err| return closeAndReject(self, cap, self.tempRoot(iter_root, iter), err);
         // The capability's resolve/reject settle the result; the first input to
         // fire wins (later settlements are no-ops on an already-settled promise).
-        _ = self.callMethod(next, "then", &.{ cap.resolve, cap.reject }) catch |err| return closeAndReject(self, cap, iter, err);
+        _ = self.callMethod(next, "then", &.{ cap.resolve, cap.reject }) catch |err| return closeAndReject(self, cap, self.tempRoot(iter_root, iter), err);
     }
     return cap.promise;
 }

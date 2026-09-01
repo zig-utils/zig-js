@@ -12717,6 +12717,53 @@ test "Promise keyed combinators preserve enumerable own keys" {
     try std.testing.expectEqualStrings("fulfilled:ok|rejected:bad", (try ctx.evaluate("settled")).asStr());
 }
 
+test "Promise iterable combinators require strict captured iterator records" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var promiseManualCalls = 0;
+        \\var promiseManualRejects = 0;
+        \\var promiseManual = { next: function() { promiseManualCalls += 1; return { done: true }; } };
+        \\Promise.all(promiseManual).then(undefined, function(error) {
+        \\  if (error instanceof TypeError) promiseManualRejects += 1;
+        \\});
+        \\Promise.race(promiseManual).then(undefined, function(error) {
+        \\  if (error instanceof TypeError) promiseManualRejects += 1;
+        \\});
+        \\var promiseNextGets = 0;
+        \\var promiseNextCalls = 0;
+        \\var promiseReplacementCalls = 0;
+        \\function promiseIterable(values) {
+        \\  var index = 0;
+        \\  var iterator = {};
+        \\  Object.defineProperty(iterator, "next", {
+        \\    configurable: true,
+        \\    get: function() {
+        \\      promiseNextGets += 1;
+        \\      return function() {
+        \\        promiseNextCalls += 1;
+        \\        if (index === 0) Object.defineProperty(iterator, "next", {
+        \\          configurable: true,
+        \\          value: function() { promiseReplacementCalls += 1; throw new Error("next was re-read"); }
+        \\        });
+        \\        return index < values.length ? { value: values[index++], done: false } : { done: true };
+        \\      };
+        \\    }
+        \\  });
+        \\  return { [Symbol.iterator]: function() { return iterator; } };
+        \\}
+        \\var promiseAllValue = "pending";
+        \\Promise.all(promiseIterable([3, 4])).then(function(values) { promiseAllValue = values.join(","); });
+        \\var promiseRaceValue = "pending";
+        \\Promise.race(promiseIterable([7])).then(function(value) { promiseRaceValue = String(value); });
+    );
+    try std.testing.expect((try ctx.evaluate(
+        \\promiseManualRejects === 2 && promiseManualCalls === 0 &&
+        \\promiseNextGets === 2 && promiseNextCalls === 5 && promiseReplacementCalls === 0 &&
+        \\promiseAllValue === "3,4" && promiseRaceValue === "7"
+    )).asBool());
+}
+
 test "Array.fromAsync awaits thenable elements" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();
@@ -15469,6 +15516,111 @@ test "Map/Set constructors take any iterable (AddEntriesFromIterable)" {
     )).asNum());
 }
 
+test "Map/Set constructors require strict captured iterator records" {
+    try std.testing.expect((try evalIn(
+        \\var manualCalls = 0;
+        \\var manual = { next: function() { manualCalls += 1; return { done: true }; } };
+        \\var manualErrors = 0;
+        \\try { new Set(manual); } catch (error) { if (error instanceof TypeError) manualErrors += 1; }
+        \\try { new Map(manual); } catch (error) { if (error instanceof TypeError) manualErrors += 1; }
+        \\var nextGets = 0;
+        \\var nextCalls = 0;
+        \\var replacementCalls = 0;
+        \\function iterableFor(values) {
+        \\  var index = 0;
+        \\  var iterator = {};
+        \\  Object.defineProperty(iterator, "next", {
+        \\    configurable: true,
+        \\    get: function() {
+        \\      nextGets += 1;
+        \\      return function() {
+        \\        nextCalls += 1;
+        \\        if (index === 0) Object.defineProperty(iterator, "next", {
+        \\          configurable: true,
+        \\          value: function() { replacementCalls += 1; throw new Error("next was re-read"); }
+        \\        });
+        \\        return index < values.length ? { value: values[index++], done: false } : { done: true };
+        \\      };
+        \\    }
+        \\  });
+        \\  return { [Symbol.iterator]: function() { return iterator; } };
+        \\}
+        \\var set = new Set(iterableFor([3, 4]));
+        \\var map = new Map(iterableFor([["a", 1], ["b", 2]]));
+        \\function* values() { yield 1; }
+        \\var generator = values();
+        \\var generatorIterator = iterableFor([9])[Symbol.iterator]();
+        \\var iteratorGets = 0;
+        \\var receiverOk = false;
+        \\Object.defineProperty(generator, Symbol.iterator, {
+        \\  get: function() {
+        \\    iteratorGets += 1;
+        \\    return function() { receiverOk = this === generator; return generatorIterator; };
+        \\  }
+        \\});
+        \\var overridden = new Set(generator);
+        \\var closeError = new Error("step");
+        \\var closeCalls = 0;
+        \\var closeIterable = { [Symbol.iterator]: function() { return {
+        \\  next: function() { throw closeError; },
+        \\  return: function() { closeCalls += 1; return { done: true }; }
+        \\}; } };
+        \\var sameError = false;
+        \\try { new Set(closeIterable); } catch (error) { sameError = error === closeError; }
+        \\manualErrors === 2 && manualCalls === 0 &&
+        \\nextGets === 3 && nextCalls === 8 && replacementCalls === 0 &&
+        \\set.has(3) && set.has(4) && map.get("a") === 1 && map.get("b") === 2 &&
+        \\iteratorGets === 1 && receiverOk && overridden.has(9) && !overridden.has(1) &&
+        \\sameError && closeCalls === 1
+    )).asBool());
+}
+
+test "Object.groupBy and Map.groupBy require strict captured iterator records" {
+    try std.testing.expect((try evalIn(
+        \\var groupManualCalls = 0;
+        \\var groupManual = { next: function() { groupManualCalls += 1; return { done: true }; } };
+        \\var groupManualErrors = 0;
+        \\try { Object.groupBy(groupManual, function(value) { return value; }); }
+        \\catch (error) { if (error instanceof TypeError) groupManualErrors += 1; }
+        \\try { Map.groupBy(groupManual, function(value) { return value; }); }
+        \\catch (error) { if (error instanceof TypeError) groupManualErrors += 1; }
+        \\var groupNextGets = 0;
+        \\var groupNextCalls = 0;
+        \\var groupReplacementCalls = 0;
+        \\var groupIndex = 0;
+        \\var groupIterator = {};
+        \\Object.defineProperty(groupIterator, "next", {
+        \\  configurable: true,
+        \\  get: function() {
+        \\    groupNextGets += 1;
+        \\    return function() {
+        \\      groupNextCalls += 1;
+        \\      if (groupIndex === 0) Object.defineProperty(groupIterator, "next", {
+        \\        configurable: true,
+        \\        value: function() { groupReplacementCalls += 1; throw new Error("next was re-read"); }
+        \\      });
+        \\      var values = [7, 8];
+        \\      return groupIndex < values.length ? { value: values[groupIndex++], done: false } : { done: true };
+        \\    };
+        \\  }
+        \\});
+        \\var grouped = Map.groupBy({ [Symbol.iterator]: function() { return groupIterator; } }, function(value) { return value % 2; });
+        \\var arrayNextCalls = 0;
+        \\var arrayIteratorPrototype = Object.getPrototypeOf([][Symbol.iterator]());
+        \\var intrinsicArrayNext = arrayIteratorPrototype.next;
+        \\arrayIteratorPrototype.next = function() {
+        \\  arrayNextCalls += 1;
+        \\  return intrinsicArrayNext.call(this);
+        \\};
+        \\var objectGroups = Object.groupBy([1, 2], function(value) { return value % 2 ? "odd" : "even"; });
+        \\arrayIteratorPrototype.next = intrinsicArrayNext;
+        \\groupManualErrors === 2 && groupManualCalls === 0 &&
+        \\groupNextGets === 1 && groupNextCalls === 3 && groupReplacementCalls === 0 &&
+        \\grouped.get(1)[0] === 7 && grouped.get(0)[0] === 8 &&
+        \\arrayNextCalls === 3 && objectGroups.odd[0] === 1 && objectGroups.even[0] === 2
+    )).asBool());
+}
+
 test "Map/Set expose [Symbol.iterator]; Set keys === values" {
     // `Map.prototype[Symbol.iterator]` is the same function as `entries`, and
     // `Set.prototype[Symbol.iterator]`/`keys`/`values` are all the same.
@@ -17366,6 +17518,73 @@ test "generators and async functions: private-in RHS can suspend" {
         );
         try std.testing.expectEqualStrings("yes:no", (try ctx.evaluate("out")).asStr());
     }
+}
+
+test "for-await sync fallback requires a strict captured iterator record" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\var asyncManualCalls = 0;
+        \\var asyncManualError = false;
+        \\(async function() {
+        \\  try {
+        \\    for await (var value of { next: function() { asyncManualCalls += 1; return { done: true }; } }) {}
+        \\  } catch (error) { asyncManualError = error instanceof TypeError; }
+        \\})();
+        \\var syncNextGets = 0;
+        \\var syncNextCalls = 0;
+        \\var syncReplacementCalls = 0;
+        \\var syncIndex = 0;
+        \\var syncIterator = {};
+        \\Object.defineProperty(syncIterator, "next", {
+        \\  configurable: true,
+        \\  get: function() {
+        \\    syncNextGets += 1;
+        \\    return function() {
+        \\      syncNextCalls += 1;
+        \\      if (syncIndex === 0) Object.defineProperty(syncIterator, "next", {
+        \\        configurable: true,
+        \\        value: function() { syncReplacementCalls += 1; throw new Error("next was re-read"); }
+        \\      });
+        \\      return syncIndex++ === 0 ? { value: 7, done: false } : { done: true };
+        \\    };
+        \\  }
+        \\});
+        \\var asyncSum = 0;
+        \\(async function() {
+        \\  for await (var value of { [Symbol.iterator]: function() { return syncIterator; } }) asyncSum += value;
+        \\})();
+        \\var asyncTrapLog = [];
+        \\var asyncProxyIndex = 0;
+        \\var asyncProxy = new Proxy({
+        \\  [Symbol.asyncIterator]: function() { return {
+        \\    next: function() { return asyncProxyIndex++ === 0 ? { value: 5, done: false } : { done: true }; }
+        \\  }; }
+        \\}, {
+        \\  has: function(target, key) {
+        \\    if (key === Symbol.asyncIterator) asyncTrapLog.push("has");
+        \\    return Reflect.has(target, key);
+        \\  },
+        \\  get: function(target, key, receiver) {
+        \\    if (key === Symbol.asyncIterator) asyncTrapLog.push("get");
+        \\    return Reflect.get(target, key, receiver);
+        \\  }
+        \\});
+        \\var asyncProxySum = 0;
+        \\(async function() { for await (var value of asyncProxy) asyncProxySum += value; })();
+        \\var asyncPrimitiveError = false;
+        \\(async function() {
+        \\  try {
+        \\    for await (var value of { [Symbol.asyncIterator]: function() { return 1; } }) {}
+        \\  } catch (error) { asyncPrimitiveError = error instanceof TypeError; }
+        \\})();
+    );
+    try std.testing.expect((try ctx.evaluate(
+        \\asyncManualError && asyncManualCalls === 0 &&
+        \\syncNextGets === 1 && syncNextCalls === 2 && syncReplacementCalls === 0 &&
+        \\asyncSum === 7 && asyncTrapLog.join(",") === "get" && asyncProxySum === 5 &&
+        \\asyncPrimitiveError
+    )).asBool());
 }
 
 test "for-await: Await observes PromiseResolve constructor lookups" {
