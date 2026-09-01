@@ -928,6 +928,11 @@ pub const Environment = struct {
     /// Internal accounting for GC-owned duplicated binding-name bytes.
     gc_name_bytes_live: ?*usize = null,
     parent: ?*Environment = null,
+    /// VM ClassDefinitionEvaluation installs its per-evaluation private-name map
+    /// only after heritage has completed. The class lexical Environment owns the
+    /// exact outer map needed when its computed names finish or unwind.
+    class_outer_private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    class_private_environment_active: bool = false,
     /// True only when this Environment itself was allocated as a GC cell. The
     /// root realm Environment is embedded in Context and remains false. This is
     /// immutable after initialization, allowing precise Environment edges to
@@ -7584,12 +7589,12 @@ pub const Interpreter = struct {
         return std.fmt.allocPrint(self.arena, "{s}\x00{d}", .{ name, id });
     }
 
-    fn remapPrivateName(map: *std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
+    fn remapPrivateName(map: *const std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
         if (!value.isRawPrivateName(name)) return name;
         return map.get(name) orelse name;
     }
 
-    fn rewritePrivateNamesInFunction(self: *Interpreter, f: *ast.FunctionNode, map: *std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+    fn rewritePrivateNamesInFunction(self: *Interpreter, f: *ast.FunctionNode, map: *const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
         for (f.params) |p| {
             if (p.default) |d| try self.rewritePrivateNamesInNode(d, map);
             if (p.pattern) |pat| try self.rewritePrivateNamesInNode(pat, map);
@@ -7597,7 +7602,7 @@ pub const Interpreter = struct {
         try self.rewritePrivateNamesInNode(f.body, map);
     }
 
-    fn rewritePrivateNamesInNode(self: *Interpreter, node: *Node, map: *std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+    fn rewritePrivateNamesInNode(self: *Interpreter, node: *Node, map: *const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
         switch (node.*) {
             .identifier => |name| node.* = .{ .identifier = remapPrivateName(map, name) },
             .unary => |u| try self.rewritePrivateNamesInNode(u.operand, map),
@@ -7645,7 +7650,10 @@ pub const Interpreter = struct {
                     if (m.key_expr == null and value.isRawPrivateName(m.key)) _ = nested_map.remove(m.key);
                 }
                 for (c.members) |m| {
-                    if (m.key_expr) |key_expr| try self.rewritePrivateNamesInNode(key_expr, map);
+                    // Computed names see the nested class's own PrivateEnvironment.
+                    // Rewrite only unshadowed outer names now; leave an own raw
+                    // `#name` for that class evaluation to mint and resolve.
+                    if (m.key_expr) |key_expr| try self.rewritePrivateNamesInNode(key_expr, &nested_map);
                     if (m.field_init) |init| try self.rewritePrivateNamesInNode(init, &nested_map);
                     if (m.func) |func| try self.rewritePrivateNamesInNode(func, &nested_map);
                     if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, &nested_map);
@@ -7892,19 +7900,40 @@ pub const Interpreter = struct {
         return n;
     }
 
-    /// Rewrite this class's private names (`#x` → a unique storage key) in member
-    /// keys and bodies, and return the raw→storage map (persisted in the arena) so
-    /// the class's functions can resolve private names a direct eval references.
-    /// Includes enclosing private names, with this class's declarations shadowing
-    /// them (ClassDefinitionEvaluation's NewPrivateEnvironment).
-    fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!?*const std.StringHashMapUnmanaged([]const u8) {
+    /// ClassDefinitionEvaluation creates and initializes every PrivateBoundIdentifier
+    /// after heritage but before evaluating any computed element name. The map is
+    /// immutable once returned and must be reused by class construction: closures
+    /// created while evaluating a computed name capture these exact identities.
+    pub fn prepareClassPrivateEnvironment(self: *Interpreter, members: []const ast.ClassMember) EvalError!?*const std.StringHashMapUnmanaged([]const u8) {
+        var has_private_bound_name = false;
+        for (members) |member| if (member.key_expr == null and value.isRawPrivateName(member.key)) {
+            has_private_bound_name = true;
+            break;
+        };
+        if (!has_private_bound_name) return self.current_private_map;
+
         const map = try self.arena.create(std.StringHashMapUnmanaged([]const u8));
         map.* = .empty;
         for (members) |m| {
             if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.contains(m.key)) continue;
             try map.put(self.arena, m.key, try self.nextPrivateStorageKey(m.key));
         }
-        if (map.count() == 0) return self.current_private_map;
+        std.debug.assert(map.count() != 0);
+        // Keep the published map immutable. Its flattened lookup preserves the
+        // complete lexical private environment without mutating an outer class.
+        if (self.current_private_map) |outer| {
+            var names = outer.iterator();
+            while (names.next()) |entry| {
+                if (!map.contains(entry.key_ptr.*))
+                    try map.put(self.arena, entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
+        return map;
+    }
+
+    /// Rewrite this class's private names (`#x` → a unique storage key) in member
+    /// keys and bodies using an already-created per-evaluation PrivateEnvironment.
+    fn rewriteClassPrivateNamesWithMap(self: *Interpreter, members: []ast.ClassMember, map: *const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
         for (members) |*m| {
             m.key = remapPrivateName(map, m.key);
             // A computed key (`[expr]`) may itself reference a private name —
@@ -7915,14 +7944,19 @@ pub const Interpreter = struct {
             if (m.func) |func| try self.rewritePrivateNamesInNode(func, map);
             if (m.static_block) |block| try self.rewritePrivateNamesInNode(block, map);
         }
-        // Keep the published map immutable. Its flattened lookup preserves the
-        // complete lexical private environment without mutating an outer class.
-        if (self.current_private_map) |outer| {
-            var names = outer.iterator();
-            while (names.next()) |entry| {
-                if (!map.contains(entry.key_ptr.*))
-                    try map.put(self.arena, entry.key_ptr.*, entry.value_ptr.*);
-            }
+    }
+
+    /// Tree-walker entry combines PrivateEnvironment creation and AST rewriting;
+    /// VM entry performs creation earlier, before its eagerly lowered keys.
+    fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!?*const std.StringHashMapUnmanaged([]const u8) {
+        const map = try self.prepareClassPrivateEnvironment(members);
+        if (map) |private_map| {
+            var has_own = false;
+            for (members) |m| if (m.key_expr == null and value.isRawPrivateName(m.key)) {
+                has_own = true;
+                break;
+            };
+            if (has_own) try self.rewriteClassPrivateNamesWithMap(members, private_map);
         }
         return map;
     }
@@ -7995,6 +8029,7 @@ pub const Interpreter = struct {
             derived,
             self.tempEnvRoot(class_env_root, class_env),
             computed_keys,
+            null,
         );
     }
 
@@ -8009,6 +8044,7 @@ pub const Interpreter = struct {
         source: []const u8,
         heritage: ?PreparedClassHeritage,
         computed_keys: []const Value,
+        private_map: ?*const std.StringHashMapUnmanaged([]const u8),
     ) EvalError!Value {
         const saved_strict = self.strict;
         self.strict = true;
@@ -8023,10 +8059,15 @@ pub const Interpreter = struct {
             heritage != null,
             self.env,
             computed_keys,
+            .{ .map = private_map },
         );
     }
 
-    fn buildClass(self: *Interpreter, name: []const u8, inferred_name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment, computed_keys: ?[]const Value) EvalError!Value {
+    const PreparedPrivateEnvironment = struct {
+        map: ?*const std.StringHashMapUnmanaged([]const u8),
+    };
+
+    fn buildClass(self: *Interpreter, name: []const u8, inferred_name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment, computed_keys: ?[]const Value, prepared_private: ?PreparedPrivateEnvironment) EvalError!Value {
         const class_env_root = try self.pushTempEnvRoot(class_env);
         defer self.restoreTempEnvRoots(class_env_root);
         const superclass = if (super_obj) |object| Value.obj(object) else Value.nul();
@@ -8044,7 +8085,15 @@ pub const Interpreter = struct {
             }
         }
         const members = if (has_private) try self.deepCopyClassMembers(members_arg) else members_arg;
-        const private_map = try self.rewriteClassPrivateNames(members);
+        const private_map = if (prepared_private) |prepared| prepared.map else try self.rewriteClassPrivateNames(members);
+        if (prepared_private != null and has_private) {
+            const map = private_map orelse
+                return self.throwError("InternalError", "class PrivateEnvironment was not prepared");
+            for (members) |member|
+                if (member.key_expr == null and value.isRawPrivateName(member.key) and map.get(member.key) == null)
+                    return self.throwError("InternalError", "class PrivateEnvironment is missing a bound name");
+            try self.rewriteClassPrivateNamesWithMap(members, map);
+        }
         // Execute the class's static elements / field initializers with this
         // class's private map active, so a direct eval in them resolves the
         // class's private names.

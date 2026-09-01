@@ -345,6 +345,7 @@ pub const Handler = struct {
     environment: ?*interp.Environment = null,
     environment_depth: u32 = 0,
     class_strict_depth: u32 = 0,
+    private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
 
     pub const none: u32 = std.math.maxInt(u32);
 };
@@ -356,6 +357,8 @@ fn restoreHandlerEnvironment(vm: *Interpreter, gen: ?*Generator, exec: *Exec, ha
     }
     exec.environment_depth = handler.environment_depth;
     exec.class_strict_depth = handler.class_strict_depth;
+    vm.current_private_map = handler.private_map;
+    if (gen) |activation| activation.private_map = handler.private_map;
     vm.strict = if (exec.class_strict_depth > 0) true else exec.class_strict_base;
 }
 
@@ -363,6 +366,7 @@ fn restoreSuspendedGeneratorHandlerEnvironment(generator: *Generator, handler: H
     if (handler.environment) |environment| generator.env = environment;
     generator.exec.environment_depth = handler.environment_depth;
     generator.exec.class_strict_depth = handler.class_strict_depth;
+    generator.private_map = handler.private_map;
 }
 
 fn activateExecStrict(vm: *Interpreter, exec: *Exec, gen: ?*Generator) void {
@@ -376,6 +380,10 @@ fn activateExecStrict(vm: *Interpreter, exec: *Exec, gen: ?*Generator) void {
 fn unwindEnvironmentToDepth(vm: *Interpreter, gen: ?*Generator, exec: *Exec, target_depth: u32) void {
     std.debug.assert(target_depth <= exec.environment_depth);
     while (exec.environment_depth > target_depth) {
+        if (vm.env.class_private_environment_active) {
+            vm.current_private_map = vm.env.class_outer_private_map;
+            if (gen) |activation| activation.private_map = vm.current_private_map;
+        }
         vm.env = vm.env.parent.?;
         exec.environment_depth -= 1;
     }
@@ -4466,17 +4474,19 @@ fn directEvalEnvironmentOwnsFrame(environment: *const Environment, frame: *const
         activation.frame.slots.len == frame.slots.len;
 }
 
-/// A previous eval may have installed views for either side of this boundary.
-/// They already occur in the static plan and must not consume runtime records.
+/// A previous capture or eval may have installed activation views for any
+/// defining frame at or above this boundary. They already occur in the static
+/// plan and must not consume runtime Environment Record counts.
 fn skipDirectEvalBoundaryActivations(
     cursor: ?*Environment,
-    child_frame: *const Frame,
-    parent_frame: *const Frame,
+    defining_frame: *const Frame,
 ) ?*Environment {
     var current = cursor;
     while (current) |environment| {
-        if (!directEvalEnvironmentOwnsFrame(environment, child_frame) and
-            !directEvalEnvironmentOwnsFrame(environment, parent_frame)) break;
+        var frame: ?*const Frame = defining_frame;
+        while (frame) |candidate| : (frame = candidate.parent)
+            if (directEvalEnvironmentOwnsFrame(environment, candidate)) break;
+        if (frame == null) break;
         current = environment.parent;
     }
     return current;
@@ -4664,12 +4674,12 @@ fn materializeDirectEvalEnvironment(
         var cursor = boundary_frame.closure_environment;
         var consumed: u32 = 0;
         while (consumed < boundary.environment_depth) : (consumed += 1) {
-            cursor = skipDirectEvalBoundaryActivations(cursor, boundary_frame, parent_frame);
+            cursor = skipDirectEvalBoundaryActivations(cursor, boundary_frame);
             const environment = cursor orelse
                 return vm.throwError("InternalError", "truncated direct-eval runtime boundary");
             cursor = environment.parent;
         }
-        cursor = skipDirectEvalBoundaryActivations(cursor, boundary_frame, parent_frame);
+        cursor = skipDirectEvalBoundaryActivations(cursor, boundary_frame);
         if (cursor != parent_frame.closure_environment)
             return vm.throwError("InternalError", "mismatched direct-eval runtime boundary");
         total_boundary_environments = std.math.add(
@@ -4734,7 +4744,7 @@ fn materializeDirectEvalEnvironment(
         var cursor = child_frame.closure_environment;
         var consumed: u32 = 0;
         while (consumed < boundary.environment_depth) : (consumed += 1) {
-            cursor = skipDirectEvalBoundaryActivations(cursor, child_frame, frames[child_depth + 1]);
+            cursor = skipDirectEvalBoundaryActivations(cursor, child_frame);
             const target = cursor orelse
                 return vm.throwError("InternalError", "truncated rooted direct-eval runtime boundary");
             const target_root = try vm.pushTempEnvRoot(target);
@@ -4744,7 +4754,7 @@ fn materializeDirectEvalEnvironment(
             boundary_target_index += 1;
             cursor = vm.tempEnvRoot(target_root, target).parent;
         }
-        cursor = skipDirectEvalBoundaryActivations(cursor, child_frame, frames[child_depth + 1]);
+        cursor = skipDirectEvalBoundaryActivations(cursor, child_frame);
         if (cursor != frames[child_depth + 1].closure_environment)
             return vm.throwError("InternalError", "mismatched rooted direct-eval runtime boundary");
     }
@@ -8952,6 +8962,14 @@ fn runChunk(
                 const arr = stack.items[stack.items.len - 1].asObj();
                 try arr.appendArrayHole(vm.arena);
             },
+            .get_private_name => {
+                const obj = stack.pop().?;
+                if (obj.isObject()) try vm.checkRestricted(obj.asObj());
+                const name = try resolveActivePrivateName(vm, chunk.names.items[inst.a]);
+                const result = try vm.getProperty(obj, name);
+                optimizer_delta.observeValue(optimizerProfileKind(result));
+                try stack.append(stack_alloc, result);
+            },
             .get_prop => {
                 const obj = stack.pop().?;
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
@@ -9119,6 +9137,10 @@ fn runChunk(
                 }
             },
             .exit_block => {
+                if (vm.env.class_private_environment_active) {
+                    vm.current_private_map = vm.env.class_outer_private_map;
+                    if (gen) |activation| activation.private_map = vm.current_private_map;
+                }
                 vm.env = vm.env.parent.?;
                 if (gen) |g| g.env = vm.env;
                 std.debug.assert(exec.environment_depth > 0);
@@ -9232,6 +9254,13 @@ fn runChunk(
                     try vm.addDisposable(resource, inst.a == 1);
                 }
             },
+            .set_private_name => {
+                const v = stack.pop().?;
+                const obj = stack.pop().?;
+                if (obj.isObject()) try vm.checkRestricted(obj.asObj());
+                const name = try resolveActivePrivateName(vm, chunk.names.items[inst.a]);
+                try stack.append(stack_alloc, try nativeSetProperty(vm, null, obj, name, v));
+            },
             .set_prop => {
                 var v = stack.pop().?;
                 const obj = stack.pop().?;
@@ -9342,6 +9371,11 @@ fn runChunk(
             .private_in => {
                 const r = stack.pop().?;
                 try stack.append(stack_alloc, Value.boolVal(try vm.privateIn(chunk.names.items[inst.a], r)));
+            },
+            .private_name_in => {
+                const r = stack.pop().?;
+                const name = try resolveActivePrivateName(vm, chunk.names.items[inst.a]);
+                try stack.append(stack_alloc, Value.boolVal(try vm.privateIn(name, r)));
             },
 
             .make_closure => {
@@ -9950,6 +9984,17 @@ fn runChunk(
                 try stack.append(stack_alloc, prepared.constructor);
                 try stack.append(stack_alloc, prepared.prototype);
             },
+            .prepare_class_private_environment => {
+                const template = &chunk.classes.items[inst.a];
+                if (vm.env.class_private_environment_active)
+                    return vm.throwError("InternalError", "class PrivateEnvironment was prepared twice");
+                const outer_private_map = vm.current_private_map;
+                const private_map = try vm.prepareClassPrivateEnvironment(template.node.class_expr.members);
+                vm.env.class_outer_private_map = outer_private_map;
+                vm.env.class_private_environment_active = true;
+                vm.current_private_map = private_map;
+                if (gen) |activation| activation.private_map = private_map;
+            },
             .scratch_store => {
                 // #706: the slot index is chunk-declared and bounds-checked at
                 // allocation time, so a store cannot address outside this
@@ -10008,6 +10053,7 @@ fn runChunk(
                     .environment = if (outer) vm.env.parent.? else vm.env,
                     .environment_depth = if (outer) exec.environment_depth - 1 else exec.environment_depth,
                     .class_strict_depth = exec.class_strict_depth,
+                    .private_map = vm.current_private_map,
                 });
             },
             .pop_handler => _ = exec.handlers.pop(),
@@ -11943,6 +11989,13 @@ fn binOp(op: bc.Op) ast.BinaryOp {
     };
 }
 
+fn resolveActivePrivateName(vm: *Interpreter, raw_name: []const u8) EvalError![]const u8 {
+    const private_map = vm.current_private_map orelse
+        return vm.throwError("InternalError", "private name has no active PrivateEnvironment");
+    return private_map.get(raw_name) orelse
+        return vm.throwError("InternalError", "private name is absent from the active PrivateEnvironment");
+}
+
 fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame: ?*Frame, heritage: ?Interpreter.PreparedClassHeritage, keys: []const Value, name_key: ?Value) EvalError!Value {
     // The canonical key may be a movable String. Constructor diagnostics and
     // static effects need an owned name before construction can call user code.
@@ -11968,7 +12021,289 @@ fn evalClassTemplate(vm: *Interpreter, template: *const bc.ClassTemplate, frame:
         materialized.environment.markCaptured();
     }
     const class = template.node.class_expr;
-    return vm.evalClassWithPreparedHeritage(class.name, inferred_name, class.members, class.source, heritage, keys);
+    return vm.evalClassWithPreparedHeritage(class.name, inferred_name, class.members, class.source, heritage, keys, vm.current_private_map);
+}
+
+test "computed class names retain their per-evaluation private environment" {
+    const Context = @import("context.zig").Context;
+    const source =
+        \\(function(){
+        \\  let get, set, update, call, has, evalGet, staticRead, defaultRead, eagerEval;
+        \\  function make(value) {
+        \\    class Box {
+        \\      #value = value;
+        \\      static #staticValue = value + 20;
+        \\      #method() { return this.#value + 1; }
+        \\      [(eagerEval = eval('#value in {}'),
+        \\        staticRead = () => Box.#staticValue,
+        \\        defaultRead = (object = new Box()) => object.#value,
+        \\        get = object => object.#value,
+        \\        set = (object, next) => object.#value = next,
+        \\        update = object => object.#value++,
+        \\        call = object => object.#method(),
+        \\        has = object => #value in object,
+        \\        evalGet = object => eval('object.#value'), 'key')] = 0;
+        \\    }
+        \\    return Box;
+        \\  }
+        \\  const First = make(3), firstGet = get;
+        \\  const Second = make(8), secondGet = get;
+        \\  const first = new First(), second = new Second();
+        \\  let mismatch;
+        \\  try { firstGet(second); mismatch = 'miss'; }
+        \\  catch (error) { mismatch = error.name; }
+        \\  return [firstGet(first), set(second, 10), update(second), secondGet(second),
+        \\          call(second), has(second), has({}), evalGet(second), staticRead(), defaultRead(), eagerEval, mismatch].join(':');
+        \\})()
+    ;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer context.destroy();
+        const result = try context.evaluate(source);
+        try std.testing.expectEqualStrings("3:10:10:11:12:true:false:11:28:8:false:TypeError", result.asStr());
+        const tdz = try context.evaluate(
+            "(function(){ try { class Box { #value; [eval('Box')] = 0; } } " ++
+                "catch (error) { return error.name; } })()",
+        );
+        try std.testing.expectEqualStrings("ReferenceError", tdz.asStr());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), context.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "computed class private environments preserve heritage, unwind, and suspension order" {
+    const Context = @import("context.zig").Context;
+    const source =
+        \\(function(){
+        \\  let outerRead, innerHas;
+        \\  class Outer {
+        \\    #value = 5;
+        \\    static define() {
+        \\      class Inner extends (outerRead = object => object.#value, Object) {
+        \\        #value;
+        \\        [(innerHas = object => #value in object, 'key')]() {}
+        \\      }
+        \\      try { class Broken { #broken; [globalThis.#broken] = 0; } }
+        \\      catch (error) {}
+        \\      const afterUnwind = object => object.#value;
+        \\      return [outerRead(new Outer()), innerHas(new Outer()), afterUnwind(new Outer())];
+        \\    }
+        \\  }
+        \\  function* suspended() {
+        \\    let read;
+        \\    class Box {
+        \\      #value = 7;
+        \\      [((read = object => object.#value), yield 'pause', 'key')] = 0;
+        \\    }
+        \\    return [Box, read];
+        \\  }
+        \\  const iterator = suspended(), first = iterator.next(), second = iterator.next();
+        \\  return Outer.define().join(':') + ':' + first.value + ':' + second.value[1](new second.value[0]());
+        \\})()
+    ;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer context.destroy();
+        const result = try context.evaluate(source);
+        try std.testing.expectEqualStrings("5:false:5:pause:7", result.asStr());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), context.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "awaited computed class names retain their private environment" {
+    const Context = @import("context.zig").Context;
+    const source =
+        \\var privateAwaitResult = 'pending';
+        \\async function buildPrivateAwait() {
+        \\  let read;
+        \\  class Box {
+        \\    #value = 9;
+        \\    [((read = object => object.#value), await 0, 'key')] = 0;
+        \\  }
+        \\  return read(new Box());
+        \\}
+        \\buildPrivateAwait().then(
+        \\  value => { privateAwaitResult = String(value); },
+        \\  error => { privateAwaitResult = error.name; }
+        \\);
+        \\drainMicrotasks();
+        \\privateAwaitResult
+    ;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer context.destroy();
+        try std.testing.expectEqualStrings("9", (try context.evaluate(source)).asStr());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), context.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
+}
+
+test "class private environment preparation is allocation-failure atomic" {
+    const Context = @import("context.zig").Context;
+    const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer context.destroy();
+    _ = try context.evaluate(
+        \\function buildPrivateClass() {
+        \\  let read;
+        \\  class Box {
+        \\    #value = 37;
+        \\    [(read = object => object.#value, 'key')] = 0;
+        \\  }
+        \\  return read(new Box());
+        \\}
+    );
+    const function_value = context.global_object.getOwn("buildPrivateClass") orelse return error.TestUnexpectedResult;
+    const function = Interpreter.funcOf(function_value) orelse return error.TestUnexpectedResult;
+    const function_chunk = function.chunk orelse return error.TestUnexpectedResult;
+    const saved_context = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(saved_context);
+
+    var completed = false;
+    var failures: usize = 0;
+    for (0..512) |fail_index| {
+        var machine = context.interpreter();
+        const saved_this = machine.this_value;
+        const saved_new_target = machine.new_target;
+        var failing: std.testing.FailingAllocator = .init(context.arena(), .{
+            .fail_index = fail_index,
+            .resize_fail_index = fail_index,
+        });
+        machine.arena = failing.allocator();
+        const result = runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef());
+        machine.arena = context.arena();
+        try std.testing.expectEqual(&context.env, machine.env);
+        try std.testing.expectEqual(saved_this.rawBits(), machine.this_value.rawBits());
+        try std.testing.expectEqual(saved_new_target.rawBits(), machine.new_target.rawBits());
+        try std.testing.expectEqual(@as(u32, 0), machine.depth);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_execs.items.len);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_env_roots.items.len);
+        try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+        try std.testing.expect(machine.pending_activation == null);
+        try std.testing.expect(machine.current_private_map == null);
+        if (failing.has_induced_failure) {
+            failures += 1;
+            if (result) |_| {} else |err| switch (err) {
+                error.OutOfMemory, error.Throw => {},
+                else => return err,
+            }
+            continue;
+        }
+        try std.testing.expectEqual(@as(f64, 37), (try result).asNum());
+        completed = true;
+        break;
+    }
+    try std.testing.expect(completed);
+    try std.testing.expect(failures > 0);
+}
+
+test "computed class private environment survives an actual moving collection" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    const Host = struct {
+        fn arm(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *Interpreter = @ptrCast(@alignCast(raw));
+            const context: *Context = @ptrCast(@alignCast(machine.gc_realm_context.?));
+            context.gc.?.nursery_threshold_bytes = 1;
+            context.gc_moving_checkpoint_requested.store(true, .release);
+            return Value.undef();
+        }
+    };
+    const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer context.destroy();
+    {
+        const saved_context = gc_mod.setActiveContext(context);
+        defer gc_mod.restoreActiveContext(saved_context);
+        const arm = try gc_mod.allocObj(context.arena());
+        arm.* = .{ .native = Host.arm };
+        try context.global_object.setOwn(context.arena(), context.root_shape, "privateClassArm", Value.obj(arm));
+        try context.env.put("privateClassArm", Value.obj(arm));
+    }
+    _ = try context.evaluate(
+        \\function privateClassMovingLoop(n) { var total = 0, i = 0; while (i < n) { total = total + i; i = i + 1; } return total; }
+        \\for (var warm = 0; warm < 10; warm = warm + 1) privateClassMovingLoop(4096);
+        \\let privateClassRead;
+        \\function buildMovingPrivateClass() {
+        \\  class Box {
+        \\    #value = 41;
+        \\    [(privateClassRead = object => object.#value, privateClassArm(), privateClassMovingLoop(20000), 'key')] = 0;
+        \\  }
+        \\  return privateClassRead(new Box());
+        \\}
+    );
+    const loop: *interp.Function = @ptrCast(@alignCast(context.global_object.getOwn("privateClassMovingLoop").?.asObj().jsFunction().?));
+    try std.testing.expectEqual(jit.TierState.ready, loop.chunk.?.tier.loadState());
+    try std.testing.expect(loop.chunk.?.tier.loadCode().?.manages_steps);
+    context.collectGarbage();
+    _ = try context.evaluate("globalThis.privateClassMovingSubject = { marker: 1 };");
+    const subject_before = context.global_object.getOwn("privateClassMovingSubject").?.asObj();
+    const heap = context.gc.?;
+    const moving_before = heap.accounting().moving_minor_collections;
+    try std.testing.expectEqual(@as(f64, 41), (try context.evaluate("buildMovingPrivateClass()")).asNum());
+    try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+    try std.testing.expect(subject_before != context.global_object.getOwn("privateClassMovingSubject").?.asObj());
+    try std.testing.expect(!context.gc_relocation_active.load(.acquire));
+}
+
+test "computed class private environments isolate shared no-GIL evaluations" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const Context = @import("context.zig").Context;
+    for ([_]interp.BytecodeExecutionMode{ .tree_walker, .required }) |mode| {
+        const context = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_gc = true,
+            .enable_threads = true,
+            .parallel_gc = true,
+            .parallel_js = true,
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer context.destroy();
+        const result = try context.evaluate(
+            \\function privateClassLane(seed) {
+            \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+            \\  let total = 0;
+            \\  for (let i = 0; i < 16; i++) {
+            \\    let read, has;
+            \\    class Box {
+            \\      #value = seed + i;
+            \\      [(read = object => object.#value, has = object => #value in object, 'key')] = 0;
+            \\    }
+            \\    const box = new Box();
+            \\    if (!has(box) || has({})) throw new Error('private identity');
+            \\    total += read(box);
+            \\  }
+            \\  return total;
+            \\}
+            \\const privateClassLanes = [];
+            \\for (let lane = 0; lane < 4; lane++) privateClassLanes.push(new Thread(privateClassLane, lane));
+            \\let privateClassTotal = 0;
+            \\for (let lane = 0; lane < 4; lane++) privateClassTotal += privateClassLanes[lane].join();
+            \\privateClassTotal
+        );
+        try std.testing.expectEqual(@as(f64, 576), result.asNum());
+        if (mode == .required)
+            try std.testing.expectEqual(@as(u64, 0), context.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+    }
 }
 
 test "class call guards restore direct VM entry state through allocation failure" {

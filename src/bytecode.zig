@@ -398,6 +398,7 @@ pub const Op = enum(u8) {
     array_append, // pop value, append to the array at top, leave array
     array_spread, // pop iterable, spread its elements into the array now at top, leave array
     get_prop, // operand a: name index; pop object -> push object[name]
+    get_private_name, // operand a: raw private-name index; resolve the active PrivateEnvironment, pop object -> push object[#name]
     super_get, // operand a: name index; push super.[name] (home_object.proto[name], receiver = this)
     super_get_index, // pop key; push super[key] (home_object.proto[key], receiver = this)
     check_super_this, // validate the active home object and initialized this binding
@@ -422,6 +423,7 @@ pub const Op = enum(u8) {
     import_call, // operand a: phase name index; pop options, pop specifier -> push import() promise
     get_index, // pop key, pop object -> push object[key]
     set_prop, // operand a: name index; pop value, pop object -> push value (after set)
+    set_private_name, // operand a: raw private-name index; resolve the active PrivateEnvironment, pop value/object -> push value
     set_index, // pop value, pop key, pop object -> push value (after set)
     init_class_field, // operand a: encoded name; pop value/object, CreateDataPropertyOrThrow, push value
     init_private_field, // operand a: private name; pop value, PrivateFieldAdd on this, push value
@@ -432,7 +434,8 @@ pub const Op = enum(u8) {
     delete_prop, // operands a: name index, b: strict; pop object -> push [[Delete]] result
     delete_index, // operand a: strict; pop key, pop object -> push [[Delete]] result
     instance_of, // pop rhs, pop lhs -> push (lhs instanceof rhs)
-    private_in, // operand a: private-name index; pop rhs object -> push (#name in rhs)
+    private_in, // operand a: resolved private-name index; pop rhs object -> push (#name in rhs)
+    private_name_in, // operand a: raw private-name index; resolve the active PrivateEnvironment, pop rhs -> push (#name in rhs)
 
     // --- functions ---
     make_closure, // operand: fn-template index; push a Function value capturing env
@@ -482,6 +485,7 @@ pub const Op = enum(u8) {
     async_iter_close, // pop async iterator -> push return result and has-return flag; caller awaits/validates when present
     async_iter_close_completion, // async_iter_close while [completion-value, kind] is beneath it, preserving throw completions during GetMethod/Call
     prepare_class_heritage, // pop raw extends value; validate once, push normalized constructor + prototype roots
+    prepare_class_private_environment, // operand a: class template; create/publish its per-evaluation PrivateEnvironment after heritage
     scratch_store, // operand a: scratch slot; pop -> activation-local program scratch[a] (#706)
     scratch_load, // operand a: scratch slot; push activation-local program scratch[a]
     eval_class, // operand a: class template index, b: total inferred-name + heritage + computed-name inputs

@@ -4099,14 +4099,33 @@ pub const Compiler = struct {
         super: CompiledSuperRef,
     };
 
-    /// Runtime class construction rewrites `#name` to its unique storage key
-    /// before compiling method bodies. An unreplaced source name can still
-    /// appear in an eagerly compiled computed class key; lowering it as an
-    /// ordinary property would erase PrivateFieldGet's required brand check.
+    fn isUnresolvedPrivateName(name: []const u8) bool {
+        return value_mod.isRawPrivateName(name) and !value_mod.isPrivateKey(name);
+    }
+
+    /// Runtime class construction normally rewrites `#name` to its unique
+    /// storage key before compiling a deferred body. Eager computed class names
+    /// retain the raw spelling and use dedicated bytecodes that resolve the
+    /// active per-evaluation PrivateEnvironment at execution time.
     fn addMemberName(self: *Compiler, name: []const u8) CompileError!u32 {
-        if (value_mod.isRawPrivateName(name) and !value_mod.isPrivateKey(name))
-            return error.Unsupported;
+        if (isUnresolvedPrivateName(name)) return error.Unsupported;
         return self.chunk.addName(try value_mod.encodeStringKey(self.arena, name));
+    }
+
+    fn emitGetMemberName(self: *Compiler, name: []const u8) CompileError!void {
+        const unresolved = isUnresolvedPrivateName(name);
+        _ = try self.chunk.emit(
+            if (unresolved) .get_private_name else .get_prop,
+            if (unresolved) try self.chunk.addName(name) else try self.addMemberName(name),
+        );
+    }
+
+    fn emitSetMemberName(self: *Compiler, name: []const u8) CompileError!void {
+        const unresolved = isUnresolvedPrivateName(name);
+        _ = try self.chunk.emit(
+            if (unresolved) .set_private_name else .set_prop,
+            if (unresolved) try self.chunk.addName(name) else try self.addMemberName(name),
+        );
     }
     fn preEvalPatternAssignmentRef(self: *Compiler, target: ?*Node, mode: PatternMode) CompileError!?PatternAssignmentRef {
         const t = target orelse return null;
@@ -4154,7 +4173,7 @@ pub const Compiler = struct {
                     _ = try self.chunk.emit(.set_index, 0);
                 } else {
                     try self.emitLoadActivationTemp(val); // [obj, val]
-                    _ = try self.chunk.emit(.set_prop, try self.addMemberName(m.property));
+                    try self.emitSetMemberName(m.property);
                 }
             },
             .super => |super_ref| {
@@ -4489,10 +4508,9 @@ pub const Compiler = struct {
             // Fetch the method (RequireObjectCoercible on the receiver) BEFORE the
             // args, per spec order, then tail-call with this = recv.
             const m = c.callee.member;
-            const ni = try self.addMemberName(m.property);
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
-            _ = try self.chunk.emit(.get_prop, ni);
+            try self.emitGetMemberName(m.property);
             _ = try self.chunk.emit(.swap, 0);
             if (spread) {
                 try self.compileArgsArray(c.args);
@@ -4764,7 +4782,7 @@ pub const Compiler = struct {
                     try self.compileExpr(key);
                     _ = try self.chunk.emit(.get_index, 0);
                 } else {
-                    _ = try self.chunk.emit(.get_prop, try self.addMemberName(member.property));
+                    try self.emitGetMemberName(member.property);
                 }
             },
             .call => |call| try self.compileOptionalCall(call, exits, false),
@@ -4787,7 +4805,7 @@ pub const Compiler = struct {
             try self.compileExpr(key);
             _ = try self.chunk.emit(.get_index, 0);
         } else {
-            _ = try self.chunk.emit(.get_prop, try self.addMemberName(member.property));
+            try self.emitGetMemberName(member.property);
         }
     }
 
@@ -4926,10 +4944,9 @@ pub const Compiler = struct {
             // `obj.tag`...`` → this = obj. Fetch the tag (RequireObjectCoercible +
             // any getter) BEFORE the arguments, per spec order.
             const m = tag.member;
-            const ni = try self.addMemberName(m.property);
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
-            _ = try self.chunk.emit(.get_prop, ni);
+            try self.emitGetMemberName(m.property);
             _ = try self.chunk.emit(.swap, 0); // [method, recv]
             _ = try self.chunk.emit(.template_object, ti);
             for (exprs) |e| try self.compileExpr(e);
@@ -5061,9 +5078,11 @@ pub const Compiler = struct {
                     .ushr => .ushr,
                 };
                 if (b.op == .in_op and b.left.* == .identifier and value_mod.isRawPrivateName(b.left.identifier)) {
-                    if (!value_mod.isPrivateKey(b.left.identifier)) return error.Unsupported;
                     try self.compileExpr(b.right);
-                    _ = try self.chunk.emit(.private_in, try self.chunk.addName(b.left.identifier));
+                    _ = try self.chunk.emit(
+                        if (isUnresolvedPrivateName(b.left.identifier)) .private_name_in else .private_in,
+                        try self.chunk.addName(b.left.identifier),
+                    );
                     return;
                 }
                 try self.compileExpr(b.left);
@@ -5115,8 +5134,7 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.set_index, 0);
                     } else {
                         try self.compileExpr(a.value);
-                        const ni = try self.addMemberName(m.property);
-                        _ = try self.chunk.emit(.set_prop, ni);
+                        try self.emitSetMemberName(m.property);
                     }
                 },
                 .super_member => try self.compileSuperAssign(a),
@@ -5186,12 +5204,11 @@ pub const Compiler = struct {
                 } else if (c.callee.* == .member and c.callee.member.computed == null) {
                     // `recv.name(args)`: bind `this = recv` at the call site.
                     const m = c.callee.member;
-                    const ni = try self.addMemberName(m.property);
                     if (spread) {
                         if (m.optional) return error.Unsupported;
                         try self.compileExpr(m.object);
                         _ = try self.chunk.emit(.dup, 0);
-                        _ = try self.chunk.emit(.get_prop, ni);
+                        try self.emitGetMemberName(m.property);
                         _ = try self.chunk.emit(.swap, 0);
                         try self.compileArgsArray(c.args);
                         _ = try self.chunk.emit(.call_with_this_spread, 0);
@@ -5202,7 +5219,7 @@ pub const Compiler = struct {
                         // nullish receiver throws before an argument is evaluated.
                         try self.compileExpr(m.object);
                         _ = try self.chunk.emit(.dup, 0);
-                        _ = try self.chunk.emit(.get_prop, ni);
+                        try self.emitGetMemberName(m.property);
                         _ = try self.chunk.emit(.swap, 0);
                         for (c.args) |arg| try self.compileExpr(arg);
                         _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
@@ -5296,8 +5313,7 @@ pub const Compiler = struct {
                     try self.compileExpr(ce);
                     _ = try self.chunk.emit(.get_index, 0);
                 } else {
-                    const ni = try self.addMemberName(m.property);
-                    _ = try self.chunk.emit(.get_prop, ni);
+                    try self.emitGetMemberName(m.property);
                 }
             },
             .super_member => |m| {
@@ -5880,17 +5896,17 @@ pub const Compiler = struct {
 
     fn emitGetMemberRef(self: *Compiler, ref: CompiledMemberRef) CompileError!void {
         try self.emitLoadMemberRefBase(ref);
-        _ = try self.chunk.emit(
-            if (ref.key != null) .get_index else .get_prop,
-            if (ref.key != null) 0 else try self.addMemberName(ref.property),
-        );
+        if (ref.key != null)
+            _ = try self.chunk.emit(.get_index, 0)
+        else
+            try self.emitGetMemberName(ref.property);
     }
 
     fn emitSetMemberRef(self: *Compiler, ref: CompiledMemberRef) CompileError!void {
-        _ = try self.chunk.emit(
-            if (ref.key != null) .set_index else .set_prop,
-            if (ref.key != null) 0 else try self.addMemberName(ref.property),
-        );
+        if (ref.key != null)
+            _ = try self.chunk.emit(.set_index, 0)
+        else
+            try self.emitSetMemberName(ref.property);
     }
 
     fn compileMemberLogicalAssign(self: *Compiler, assignment: anytype) CompileError!void {
@@ -6101,8 +6117,6 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.prepare_class_heritage, 0);
             input_count += 2;
         }
-        const computed_count = try self.compileClassComputedKeys(c.members);
-        input_count = std.math.add(u32, input_count, computed_count) catch return error.OutOfMemory;
         const capture_environment = if (captures_frame) capture: {
             const plan = try self.arena.create(bc.DirectEvalPlan);
             plan.* = try buildDirectEvalPlan(
@@ -6116,6 +6130,13 @@ pub const Compiler = struct {
         const class_index = try self.chunk.addClass(node, capture_environment);
         self.chunk.classes.items[class_index].inferred_name = inferred_name;
         self.chunk.classes.items[class_index].name_from_stack = name_from_stack;
+        // ClassDefinitionEvaluation creates a fresh PrivateEnvironment only
+        // when PrivateBoundIdentifiers is non-empty, after heritage validation.
+        // Computed names and construction then share that one identity.
+        if (classHasPrivateBoundNames(c.members))
+            _ = try self.chunk.emit(.prepare_class_private_environment, class_index);
+        const computed_count = try self.compileClassComputedKeys(c.members);
+        input_count = std.math.add(u32, input_count, computed_count) catch return error.OutOfMemory;
         _ = try self.chunk.emitAB(.eval_class, class_index, input_count);
         try self.emitExitClassEnvironment();
     }
@@ -6134,6 +6155,12 @@ pub const Compiler = struct {
             }
         }
         return count;
+    }
+
+    fn classHasPrivateBoundNames(members: []const ast.ClassMember) bool {
+        for (members) |member|
+            if (member.key_expr == null and value_mod.isRawPrivateName(member.key)) return true;
+        return false;
     }
 
     /// Build a fresh array holding a call/new's argument list, expanding any
@@ -7424,10 +7451,14 @@ test "compiler reports stable plain-function admission reasons" {
     if (private_class.* != .class_expr or private_class.class_expr.members.len != 2)
         return error.TestUnexpectedResult;
     const private_method = private_class.class_expr.members[1].func orelse return error.TestUnexpectedResult;
-    switch (try Compiler.admitPlainFunction(private_arena.allocator(), private_method.function)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
-    }
+    const private_chunk = switch (try Compiler.admitPlainFunction(private_arena.allocator(), private_method.function)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var private_reads: usize = 0;
+    for (private_chunk.code.items) |instruction|
+        private_reads += @intFromBool(instruction.op == .get_private_name);
+    try std.testing.expectEqual(@as(usize, 1), private_reads);
 
     var super_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer super_arena.deinit();
@@ -7462,10 +7493,14 @@ test "compiler reports stable plain-function admission reasons" {
     if (private_new_class.* != .class_expr or private_new_class.class_expr.members.len != 2)
         return error.TestUnexpectedResult;
     const private_new_method = private_new_class.class_expr.members[1].func orelse return error.TestUnexpectedResult;
-    switch (try Compiler.admitPlainFunction(private_new_arena.allocator(), private_new_method.function)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(.parameter_prologue, reason),
-    }
+    const private_new_chunk = switch (try Compiler.admitPlainFunction(private_new_arena.allocator(), private_new_method.function)) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var private_new_reads: usize = 0;
+    for (private_new_chunk.code.items) |instruction|
+        private_new_reads += @intFromBool(instruction.op == .get_private_name);
+    try std.testing.expectEqual(@as(usize, 1), private_new_reads);
 
     var super_new_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer super_new_arena.deinit();
@@ -8090,8 +8125,18 @@ test "compiler plans live deferred class captures only for real frame references
     );
     const private_key_program = try private_key_parser.parseProgram();
     switch (try Compiler.admitPlainFunction(private_key_arena.allocator(), private_key_program.program[0].func_decl)) {
-        .compiled => return error.TestUnexpectedResult,
-        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+        .compiled => |compiled| {
+            var prepares: usize = 0;
+            var private_reads: usize = 0;
+            for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
+                .prepare_class_private_environment => prepares += 1,
+                .get_private_name => private_reads += 1,
+                else => {},
+            };
+            try std.testing.expectEqual(@as(usize, 1), prepares);
+            try std.testing.expectEqual(@as(usize, 1), private_reads);
+        },
+        .rejected => return error.TestUnexpectedResult,
     }
 }
 
