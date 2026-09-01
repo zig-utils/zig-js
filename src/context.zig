@@ -32825,6 +32825,54 @@ test "environment declarations are invocation owned across no GIL suspension" {
     try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
 }
 
+test "parallel_js required bytecode isolates for-of protocol state per activation" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\var forOfGate = { ready: 0, go: 0 };
+        \\function forOfLane(seed) {
+        \\  if ($vm.useThreadGIL() !== false) throw new Error('GIL held');
+        \\  var values = [];
+        \\  for (var index = 0; index < 8; index++) values.push(seed + index);
+        \\  Atomics.add(forOfGate, 'ready', 1);
+        \\  Atomics.notify(forOfGate, 'ready');
+        \\  while (Atomics.load(forOfGate, 'go') === 0)
+        \\    Atomics.wait(forOfGate, 'go', 0, 1000);
+        \\  var checksum = 0;
+        \\  for (var round = 0; round < 64; round++) {
+        \\    var observed = 0;
+        \\    for (const value of values) {
+        \\      if (value !== seed + observed) throw new Error('foreign iterator state');
+        \\      checksum += value;
+        \\      observed++;
+        \\    }
+        \\    if (observed !== values.length) throw new Error('iterator ended early');
+        \\  }
+        \\  return checksum;
+        \\}
+        \\var forOfWorkers = [];
+        \\for (var lane = 0; lane < 4; lane++) forOfWorkers.push(new Thread(forOfLane, lane * 100));
+        \\while (Atomics.load(forOfGate, 'ready') < forOfWorkers.length)
+        \\  Atomics.wait(forOfGate, 'ready', Atomics.load(forOfGate, 'ready'), 1);
+        \\Atomics.store(forOfGate, 'go', 1);
+        \\Atomics.notify(forOfGate, 'go', forOfWorkers.length);
+        \\var forOfTotal = 0;
+        \\for (var lane = 0; lane < forOfWorkers.length; lane++) forOfTotal += forOfWorkers[lane].join();
+        \\forOfTotal;
+    );
+    // 64 * sum(seed + [0,7]) for seeds 0, 100, 200, and 300.
+    try std.testing.expectEqual(@as(f64, 314368), result.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.bytecodeAdmissionSnapshot().count(.template_plain_fallback));
+}
+
 test "block functions retain the runaway guard and restore execution after interruption" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_gc = true,

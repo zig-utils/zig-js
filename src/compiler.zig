@@ -120,6 +120,15 @@ fn SecureStringMapUnmanaged(comptime MapValue: type) type {
 /// completion value (`program`) or is discarded (`function`).
 const Mode = enum { program, function };
 
+/// One compiler-owned temporary whose storage belongs to one execution.
+/// Functions use frame/activation bindings; program chunks have no frame and
+/// therefore use Exec-owned scratch slots (#706).
+const ActivationTemp = union(enum) {
+    named: []const u8,
+    environment_var: []const u8,
+    scratch: u32,
+};
+
 const Loop = struct {
     breaks: std.ArrayListUnmanaged(usize) = .empty,
     continues: std.ArrayListUnmanaged(usize) = .empty,
@@ -151,10 +160,6 @@ const Loop = struct {
     /// `current - this` finally bodies leaves that many [value, kind] completion
     /// records on the operand stack, which it discards before jumping.
     active_finally: u32 = 0,
-    /// For a `for-of`/`for-await-of`: the temp holding "this iterator still
-    /// needs closing". The plain-jump continue path stores true here before
-    /// jumping so the handler does not close on a later abrupt exit.
-    iterator_done_temp: ?[]const u8 = null,
 };
 
 const SlotBinding = struct {
@@ -3774,8 +3779,8 @@ pub const Compiler = struct {
             }
         }
         defer if (lexical_scope) self.popLexicalScope();
-        const it_name = try self.freshTemp();
-        const r_name = try self.freshTemp();
+        const iterator_temp = try self.freshProtocolTemp();
+        const result_temp = try self.freshProtocolTemp();
 
         // ForIn/OfHeadEvaluation creates lexical head bindings before evaluating
         // the RHS, so `for (let x of x)` observes x's TDZ rather than an outer x.
@@ -3804,22 +3809,22 @@ pub const Compiler = struct {
         // for-await uses the async-iterator protocol (Symbol.asyncIterator, else
         // a wrapped sync iterator) and awaits each `next()` result.
         _ = try self.chunk.emit(if (await_each) .async_iter_of else .iter_of, 0);
-        try self.emitDefine(it_name);
+        try self.emitDefineActivationTemp(iterator_temp);
         // GetIterator reads the iterator's `next` method exactly ONCE (it becomes
         // the Iterator Record's [[NextMethod]]); cache it so a `next` accessor is
         // not re-read each iteration.
-        const next_name = try self.freshTemp();
-        try self.emitLoad(it_name);
+        const next_temp = try self.freshProtocolTemp();
+        try self.emitLoadActivationTemp(iterator_temp);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("next"));
-        try self.emitDefine(next_name);
+        try self.emitDefineActivationTemp(next_temp);
 
-        const done_name = try self.freshTemp();
+        const done_temp = try self.freshProtocolTemp();
         // This flag tracks whether an abrupt completion must close the iterator.
         // It becomes false only after IteratorValue succeeds: throws from
         // `next()`, `done`, or `value` precede the close-protected binding/body
         // region in ForIn/OfBodyEvaluation and do not perform IteratorClose.
         _ = try self.chunk.emit(.load_true, 0);
-        try self.emitDefine(done_name);
+        try self.emitDefineActivationTemp(done_temp);
 
         const none = std.math.maxInt(u32);
         const ph = try self.emitPushHandler(.push_handler, none, none);
@@ -3831,29 +3836,27 @@ pub const Compiler = struct {
         // or an outer-targeted break unwinds to the close handler.
         self.finally_depth += 1;
         const loop = try self.pushLoop();
-        loop.iterator_done_temp = done_name;
         const top = self.chunk.here();
         // r = it.next()  (for-await: r = await it.next()) — the cached `next`,
         // invoked with this=it via call_with_this (no second property lookup).
-        try self.emitLoad(next_name);
-        try self.emitLoad(it_name);
+        try self.emitLoadActivationTemp(next_temp);
+        try self.emitLoadActivationTemp(iterator_temp);
         _ = try self.chunk.emitAB(.call_with_this, 0, 0);
         if (await_each) _ = try self.chunk.emit(.await_op, 0); // await the next() result
         _ = try self.chunk.emit(.assert_iter_result, 0); // IteratorNext: result must be an Object
-        try self.emitDefine(r_name);
+        try self.emitDefineActivationTemp(result_temp);
         // if (r.done) break  — `not` then jump_if_false exits exactly when done.
-        try self.emitLoad(r_name);
+        try self.emitLoadActivationTemp(result_temp);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("done"));
         _ = try self.chunk.emit(.not, 0);
         const to_end = try self.chunk.emit(.jump_if_false, 0);
         // IteratorValue itself is outside IteratorClose. Leave its value on the
         // operand stack, then arm the close handler for environment creation,
         // target binding, and body evaluation.
-        try self.emitLoad(r_name);
+        try self.emitLoadActivationTemp(result_temp);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
         _ = try self.chunk.emit(.load_false, 0);
-        try self.emitStore(done_name);
-        _ = try self.chunk.emit(.pop, 0);
+        try self.emitStoreActivationTempDiscard(done_temp);
         if (environment_binding) {
             if (target.* == .identifier)
                 try self.emitFreshEnvironmentLexicalName(target.identifier, decl_kind.? == .@"const")
@@ -3898,8 +3901,7 @@ pub const Compiler = struct {
         }
         const continue_target = self.chunk.here();
         _ = try self.chunk.emit(.load_true, 0);
-        try self.emitStore(done_name);
-        _ = try self.chunk.emit(.pop, 0);
+        try self.emitStoreActivationTempDiscard(done_temp);
         _ = try self.chunk.emit(.jump, @intCast(top));
         // `continue` re-enters the loop at the top (next .next()) without
         // closing; clear the active-close flag first.
@@ -3908,8 +3910,7 @@ pub const Compiler = struct {
         // exhausted, so it is NOT closed — control just exits the loop.
         self.chunk.patchToHere(to_end);
         _ = try self.chunk.emit(.load_true, 0);
-        try self.emitStore(done_name);
-        _ = try self.chunk.emit(.pop, 0);
+        try self.emitStoreActivationTempDiscard(done_temp);
         // `break` is an abrupt completion, so it must run IteratorClose (which
         // throws if `return` is present-but-non-callable or returns a non-object).
         // The normal-done path above jumps over this close block.
@@ -3921,9 +3922,8 @@ pub const Compiler = struct {
             // itself throws (including for a primitive result), unwinding must
             // not call the same iterator's `return` a second time.
             _ = try self.chunk.emit(.load_true, 0);
-            try self.emitStore(done_name);
-            _ = try self.chunk.emit(.pop, 0);
-            try self.emitLoad(it_name);
+            try self.emitStoreActivationTempDiscard(done_temp);
+            try self.emitLoadActivationTemp(iterator_temp);
             if (await_each) try self.emitAsyncIteratorClose(false) else _ = try self.chunk.emit(.iter_close, 0);
             self.chunk.patchToHere(skip_close);
         }
@@ -3933,10 +3933,10 @@ pub const Compiler = struct {
 
         const after_finally = try self.chunk.emit(.jump, 0);
         self.chunk.code.items[ph].b = @intCast(self.chunk.here());
-        try self.emitLoad(done_name);
+        try self.emitLoadActivationTemp(done_temp);
         _ = try self.chunk.emit(.not, 0);
         const skip_close = try self.chunk.emit(.jump_if_false, 0);
-        try self.emitLoad(it_name);
+        try self.emitLoadActivationTemp(iterator_temp);
         if (await_each) try self.emitAsyncIteratorClose(true) else _ = try self.chunk.emit(.iter_close_completion, 0);
         self.chunk.patchToHere(skip_close);
         _ = try self.chunk.emit(.end_finally, 0);
@@ -5516,12 +5516,12 @@ pub const Compiler = struct {
     ///     r.value
     fn compileYieldStar(self: *Compiler, arg: *Node) CompileError!void {
         const async_d = self.in_async; // delegate to an async iterator?
-        const it = try self.freshTemp(); // the iterator
-        const r = try self.freshTemp(); // the last `{value, done}` result
-        const recv_v = try self.freshTemp(); // value carried by the resume
-        const recv_k = try self.freshTemp(); // resume kind: 0 next / 1 throw / 2 return
-        const next_m = try self.freshTemp(); // the iterator's captured `next` method
-        const m = try self.freshTemp(); // a GetMethod(it, throw|return) result
+        const it = try self.freshProtocolTemp(); // the iterator
+        const r = try self.freshProtocolTemp(); // the last `{value, done}` result
+        const recv_v = try self.freshProtocolTemp(); // value carried by the resume
+        const recv_k = try self.freshProtocolTemp(); // resume kind: 0 next / 1 throw / 2 return
+        const next_m = try self.freshProtocolTemp(); // the iterator's captured `next` method
+        const m = try self.freshProtocolTemp(); // a GetMethod(it, throw|return) result
         const ch = self.chunk;
         const done_n = try ch.addName("done");
         const value_n = try ch.addName("value");
@@ -5529,55 +5529,55 @@ pub const Compiler = struct {
         // it = GetIterator(arg); recv_v = undefined; recv_k = 0 (start with `next`).
         try self.compileExpr(arg);
         _ = try ch.emit(if (async_d) .async_iter_of else .iter_of, 0);
-        try self.emitDefine(it);
-        try self.emitLoad(it);
+        try self.emitDefineActivationTemp(it);
+        try self.emitLoadActivationTemp(it);
         _ = try ch.emit(.get_prop, try ch.addName("next"));
-        try self.emitDefine(next_m);
+        try self.emitDefineActivationTemp(next_m);
         _ = try ch.emit(.load_undefined, 0);
-        try self.emitDefine(recv_v);
+        try self.emitDefineActivationTemp(recv_v);
         _ = try ch.emit(.load_const, try ch.addConst(Value.num(0)));
-        try self.emitDefine(recv_k);
+        try self.emitDefineActivationTemp(recv_k);
 
         const top = ch.here();
         // if (recv_k == 0) fall through to the `next` branch, else jump to throw/return.
-        try self.emitLoad(recv_k);
+        try self.emitLoadActivationTemp(recv_k);
         _ = try ch.emit(.load_const, try ch.addConst(Value.num(0)));
         _ = try ch.emit(.eq_strict, 0);
         const to_nonnext = try ch.emit(.jump_if_false, 0);
 
         // --- next branch: r = next.call(it, recv_v) ---
-        try self.emitLoad(next_m);
-        try self.emitLoad(it);
-        try self.emitLoad(recv_v);
+        try self.emitLoadActivationTemp(next_m);
+        try self.emitLoadActivationTemp(it);
+        try self.emitLoadActivationTemp(recv_v);
         _ = try ch.emitAB(.call_with_this, 1, 0);
         if (async_d) _ = try ch.emit(.await_op, 0);
-        try self.emitDefine(r);
+        try self.emitDefineActivationTemp(r);
         const to_join_a = try ch.emit(.jump, 0); // -> normal/throw join
 
         // --- recv_k == 1 ? throw branch : return branch ---
         ch.patchToHere(to_nonnext);
-        try self.emitLoad(recv_k);
+        try self.emitLoadActivationTemp(recv_k);
         _ = try ch.emit(.load_const, try ch.addConst(Value.num(1)));
         _ = try ch.emit(.eq_strict, 0);
         const to_return = try ch.emit(.jump_if_false, 0);
 
         // --- throw branch ---
         // m = GetMethod(it, "throw")
-        try self.emitLoad(it);
+        try self.emitLoadActivationTemp(it);
         _ = try ch.emit(.get_prop, try ch.addName("throw"));
-        try self.emitDefine(m);
+        try self.emitDefineActivationTemp(m);
         const to_has_throw = try self.emitJumpIfNotStrictlyNullish(m);
         // No `throw` method: IteratorClose(it) (call `return` if present, ignoring
         // its result) then throw a TypeError. Closing first lets the inner
         // iterator release resources, matching the spec.
-        try self.emitLoad(it);
+        try self.emitLoadActivationTemp(it);
         _ = try ch.emit(.get_prop, try ch.addName("return"));
-        try self.emitDefine(m);
+        try self.emitDefineActivationTemp(m);
         const to_skip_close = try self.emitJumpIfNotStrictlyNullish(m);
         const to_after_close = try ch.emit(.jump, 0); // return absent: skip the call
         ch.patchToHere(to_skip_close);
-        try self.emitLoad(m); // func
-        try self.emitLoad(it); // this
+        try self.emitLoadActivationTemp(m); // func
+        try self.emitLoadActivationTemp(it); // this
         _ = try ch.emitAB(.call_with_this, 0, 0); // it.return()
         if (async_d) _ = try ch.emit(.await_op, 0);
         _ = try ch.emit(.pop, 0); // ignore the close result
@@ -5589,52 +5589,52 @@ pub const Compiler = struct {
         _ = try ch.emit(.throw_op, 0);
         // has a `throw` method: r = m.call(it, recv_v)
         ch.patchToHere(to_has_throw);
-        try self.emitLoad(m);
-        try self.emitLoad(it);
-        try self.emitLoad(recv_v);
+        try self.emitLoadActivationTemp(m);
+        try self.emitLoadActivationTemp(it);
+        try self.emitLoadActivationTemp(recv_v);
         _ = try ch.emitAB(.call_with_this, 1, 0);
         if (async_d) _ = try ch.emit(.await_op, 0);
-        try self.emitDefine(r);
+        try self.emitDefineActivationTemp(r);
         const to_join_b = try ch.emit(.jump, 0); // -> normal/throw join
 
         // --- return branch ---
         ch.patchToHere(to_return);
         // m = GetMethod(it, "return")
-        try self.emitLoad(it);
+        try self.emitLoadActivationTemp(it);
         _ = try ch.emit(.get_prop, try ch.addName("return"));
-        try self.emitDefine(m);
+        try self.emitDefineActivationTemp(m);
         const to_has_return = try self.emitJumpIfNotStrictlyNullish(m);
         // No `return` method: the delegating generator itself returns recv_v
         // (Await it first in an async generator), running any enclosing finally.
-        try self.emitLoad(recv_v);
+        try self.emitLoadActivationTemp(recv_v);
         if (async_d) _ = try ch.emit(.await_op, 0);
         _ = try ch.emit(.abrupt_return, 0);
         // has a `return` method: r = m.call(it, recv_v)
         ch.patchToHere(to_has_return);
-        try self.emitLoad(m);
-        try self.emitLoad(it);
-        try self.emitLoad(recv_v);
+        try self.emitLoadActivationTemp(m);
+        try self.emitLoadActivationTemp(it);
+        try self.emitLoadActivationTemp(recv_v);
         _ = try ch.emitAB(.call_with_this, 1, 0);
         if (async_d) _ = try ch.emit(.await_op, 0);
-        try self.emitDefine(r);
-        try self.emitLoad(r);
+        try self.emitDefineActivationTemp(r);
+        try self.emitLoadActivationTemp(r);
         _ = try ch.emit(.assert_iter_result, 0);
         _ = try ch.emit(.pop, 0);
         // if (r.done) the delegating generator returns r.value; else yield it.
-        try self.emitLoad(r);
+        try self.emitLoadActivationTemp(r);
         _ = try ch.emit(.get_prop, done_n);
         const to_return_yield = try ch.emit(.jump_if_false, 0);
-        try self.emitLoad(r);
+        try self.emitLoadActivationTemp(r);
         _ = try ch.emit(.get_prop, value_n);
         _ = try ch.emit(.abrupt_return, 0);
 
         // --- normal/throw join: validate r, branch on done ---
         ch.patchToHere(to_join_a);
         ch.patchToHere(to_join_b);
-        try self.emitLoad(r);
+        try self.emitLoadActivationTemp(r);
         _ = try ch.emit(.assert_iter_result, 0);
         _ = try ch.emit(.pop, 0);
-        try self.emitLoad(r);
+        try self.emitLoadActivationTemp(r);
         _ = try ch.emit(.get_prop, done_n);
         const to_yield = try ch.emit(.jump_if_false, 0);
         const to_end = try ch.emit(.jump, 0); // done -> the whole expression's value
@@ -5649,44 +5649,41 @@ pub const Compiler = struct {
         ch.patchToHere(to_yield);
         ch.patchToHere(to_return_yield);
         if (async_d) {
-            try self.emitLoad(r);
+            try self.emitLoadActivationTemp(r);
             _ = try ch.emit(.get_prop, value_n);
         } else {
-            try self.emitLoad(r); // yield the inner result object as-is
+            try self.emitLoadActivationTemp(r); // yield the inner result object as-is
         }
         _ = try ch.emit(.gen_yield_star, 0); // resume pushes [value, kind] (kind on top)
-        try self.emitStore(recv_k);
-        _ = try ch.emit(.pop, 0);
-        try self.emitStore(recv_v);
-        _ = try ch.emit(.pop, 0);
+        try self.emitStoreActivationTempDiscard(recv_k);
+        try self.emitStoreActivationTempDiscard(recv_v);
         if (async_d) {
             // AsyncGeneratorYield resumes through
             // AsyncGeneratorUnwrapYieldResumption, which awaits the completion
             // value before yield* forwards it to next/throw/return handling.
-            try self.emitLoad(recv_v);
+            try self.emitLoadActivationTemp(recv_v);
             _ = try ch.emit(.await_op, 0);
-            try self.emitStore(recv_v);
-            _ = try ch.emit(.pop, 0);
+            try self.emitStoreActivationTempDiscard(recv_v);
         }
         _ = try ch.emit(.jump, @intCast(top));
 
         // yield* evaluates to the final `r.value` when the inner iterator is done.
         ch.patchToHere(to_end);
-        try self.emitLoad(r);
+        try self.emitLoadActivationTemp(r);
         _ = try ch.emit(.get_prop, value_n);
     }
 
-    fn emitJumpIfNotStrictlyNullish(self: *Compiler, name: []const u8) CompileError!usize {
+    fn emitJumpIfNotStrictlyNullish(self: *Compiler, temp: ActivationTemp) CompileError!usize {
         const ch = self.chunk;
 
-        try self.emitLoad(name);
+        try self.emitLoadActivationTemp(temp);
         _ = try ch.emit(.load_undefined, 0);
         _ = try ch.emit(.eq_strict, 0);
         const to_check_null = try ch.emit(.jump_if_false, 0);
         const to_absent = try ch.emit(.jump, 0);
 
         ch.patchToHere(to_check_null);
-        try self.emitLoad(name);
+        try self.emitLoadActivationTemp(temp);
         _ = try ch.emit(.load_null, 0);
         _ = try ch.emit(.eq_strict, 0);
         const to_present = try ch.emit(.jump_if_false, 0);
@@ -5694,16 +5691,6 @@ pub const Compiler = struct {
         ch.patchToHere(to_absent);
         return to_present;
     }
-
-    /// One resolved-reference temporary. Function activations keep named
-    /// frame/Environment temps; program chunks have neither, so #706
-    /// activation-local scratch slots on the running Exec hold them instead of
-    /// synthesized global names, which nested or parallel evaluations of the
-    /// same program could collide on.
-    const ActivationTemp = union(enum) {
-        named: []const u8,
-        scratch: u32,
-    };
 
     const CompiledMemberRef = struct {
         object: ActivationTemp,
@@ -6041,9 +6028,21 @@ pub const Compiler = struct {
         return .{ .named = name };
     }
 
+    fn freshProtocolTemp(self: *Compiler) CompileError!ActivationTemp {
+        // Generator/async bytecode replaces its current lexical Environment at
+        // loop boundaries. Protocol state spans those replacements and
+        // suspension, so anchor it in the suspendable activation's private
+        // variable Environment. Ordinary functions use frame locals and
+        // programs use Exec scratch through the general helper.
+        if (self.mode == .function and self.scope == null)
+            return .{ .environment_var = try self.freshTemp() };
+        return self.freshActivationTemp();
+    }
+
     fn emitDefineActivationTemp(self: *Compiler, temp: ActivationTemp) CompileError!void {
         switch (temp) {
             .named => |name| return self.emitDefineActivationTempNamed(name),
+            .environment_var => |name| return self.emitDefine(name),
             .scratch => |index| _ = try self.chunk.emit(.scratch_store, index),
         }
     }
@@ -6057,14 +6056,14 @@ pub const Compiler = struct {
 
     fn emitLoadActivationTemp(self: *Compiler, temp: ActivationTemp) CompileError!void {
         switch (temp) {
-            .named => |name| return self.emitLoad(name),
+            .named, .environment_var => |name| return self.emitLoad(name),
             .scratch => |index| _ = try self.chunk.emit(.scratch_load, index),
         }
     }
 
     fn emitStoreActivationTempDiscard(self: *Compiler, temp: ActivationTemp) CompileError!void {
         switch (temp) {
-            .named => |name| {
+            .named, .environment_var => |name| {
                 try self.emitStore(name);
                 _ = try self.chunk.emit(.pop, 0);
             },
@@ -9321,6 +9320,38 @@ test "compiler lowers plain-function destructuring declarations without bind_pat
     }
 }
 
+test "compiler keeps for-of protocol state in activation-owned slots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function consume(values){ let total=0; for (const value of values) total += value; return total; }",
+    );
+    const program = try parser.parseProgram();
+    const compiled = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl)) {
+        .compiled => |code| code,
+        .rejected => return error.TestUnexpectedResult,
+    };
+
+    var saw_iterator = false;
+    var local_loads: usize = 0;
+    var local_stores: usize = 0;
+    for (compiled.chunk.code.items) |instruction| switch (instruction.op) {
+        .iter_of => saw_iterator = true,
+        .load_local, .load_local_lexical => local_loads += 1,
+        .store_local, .store_local_lexical => local_stores += 1,
+        .load_var, .store_var, .def_var, .def_lex => {
+            const name = compiled.chunk.names.items[instruction.a];
+            try std.testing.expect(!std.mem.startsWith(u8, name, "\x00ys"));
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_iterator);
+    try std.testing.expect(local_loads > 0 and local_stores > 0);
+    // parameter + total + loop binding + iterator/next/result/close state.
+    try std.testing.expect(compiled.chunk.local_count >= 7);
+}
+
 test "compiler reports stable program admission reasons" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -9339,6 +9370,7 @@ test "compiler reports stable program admission reasons" {
         "var holder = { value: 1 }; holder.value += 1;",
         "var holder = {}; holder.value++;",
         "var holder = { key: 2 }; holder[holder.key] ??= 3;",
+        "for (const value of [1, 2]) { value; }",
     };
     for (scratch_sources) |source| {
         var scratch_parser = try @import("parser.zig").Parser.init(arena.allocator(), source);
