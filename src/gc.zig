@@ -2535,7 +2535,7 @@ test "BoundFunction and module namespace relocation rewrites every managed slot"
     try std.testing.expectEqual(deferred_module, namespace.defer_module);
 }
 
-pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.Module), v: anytype) void {
+pub fn traceModuleGraph(cache: *ContextMod.Context.ModuleCache, v: anytype) void {
     var it = cache.valueIterator();
     while (it.next()) |mp| {
         const m = mp.*;
@@ -2552,7 +2552,7 @@ pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.M
     }
 }
 
-pub fn relocateModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.Module), v: anytype) void {
+pub fn relocateModuleGraph(cache: *ContextMod.Context.ModuleCache, v: anytype) void {
     var it = cache.valueIterator();
     while (it.next()) |module_pointer| {
         const module = module_pointer.*;
@@ -2633,9 +2633,12 @@ test "realm root relocation rewrites microtask variants and module graph" {
         .capability = &old_promises[3],
         .namespace = &old_objects[15],
     });
-    var modules: std.StringHashMapUnmanaged(*ContextMod.Context.Module) = .{};
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root_shape = try Shape.createRoot(shape_arena.allocator());
+    var modules: ContextMod.Context.ModuleCache = .{};
     defer modules.deinit(std.testing.allocator);
-    try modules.put(std.testing.allocator, "entry.js", &module);
+    try modules.put(std.testing.allocator, root_shape, "entry.js", &module);
 
     const Plan = struct {
         old_objects: *[16]Object,

@@ -465,7 +465,7 @@ fn runOneDetail(
     defer gpa.free(root_abs);
     var host = ModHost{ .gpa = gpa, .io = io, .root = root_abs };
     defer host.deinit();
-    var imp_cache: std.StringHashMapUnmanaged(*js.Context.Module) = .{};
+    var imp_cache: js.Context.ModuleCache = .{};
     ctx.mod_host = .{ .ctx = &host, .load = modLoad };
     ctx.mod_cache = &imp_cache;
     ctx.script_referrer = abs_path;

@@ -30,6 +30,132 @@ const fetch_headers = @import("fetch_headers.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
+const ModuleStringHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, key);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+fn SecureModuleStringMapUnmanaged(comptime MapValue: type) type {
+    const Index = std.HashMapUnmanaged(
+        []const u8,
+        MapValue,
+        ModuleStringHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        const Self = @This();
+
+        index: Index = .empty,
+        context: ?ModuleStringHashContext = null,
+
+        pub fn put(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            root_shape: *Shape,
+            key: []const u8,
+            map_value: MapValue,
+        ) std.mem.Allocator.Error!void {
+            const context = self.context orelse ModuleStringHashContext{ .seed = try root_shape.deriveSecureHashSeed() };
+            try self.index.putContext(allocator, key, map_value, context);
+            // A failed first insertion publishes neither capacity nor a context.
+            if (self.context == null) self.context = context;
+        }
+
+        fn get(self: *const Self, key: []const u8) ?MapValue {
+            const context = self.context orelse return null;
+            return self.index.getContext(key, context);
+        }
+
+        fn contains(self: *const Self, key: []const u8) bool {
+            const context = self.context orelse return false;
+            return self.index.containsContext(key, context);
+        }
+
+        fn remove(self: *Self, key: []const u8) bool {
+            const context = self.context orelse return false;
+            return self.index.removeContext(key, context);
+        }
+
+        fn clearRetainingCapacity(self: *Self) void {
+            self.index.clearRetainingCapacity();
+        }
+
+        fn count(self: *const Self) usize {
+            return self.index.count();
+        }
+
+        fn iterator(self: *const Self) Index.Iterator {
+            return self.index.iterator();
+        }
+
+        pub fn valueIterator(self: *const Self) Index.ValueIterator {
+            return self.index.valueIterator();
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.index.deinit(allocator);
+        }
+    };
+}
+
+test "runtime module string indexes are keyed lazy and failure atomic" {
+    const target_mask: u64 = 1023;
+    const collision_count = 32;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var suffix: usize = 0;
+    while (names.items.len != collision_count) : (suffix += 1) {
+        const name = try std.fmt.allocPrint(allocator, "module{d}", .{suffix});
+        if ((std.hash.Wyhash.hash(0, name) & target_mask) == 0)
+            try names.append(allocator, name);
+    }
+
+    const keyed_seed = 0x4d4f_4455_4c45_0001;
+    var keyed = SecureModuleStringMapUnmanaged(usize){ .context = .{ .seed = keyed_seed } };
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (names.items, 0..) |name, index| {
+        try std.testing.expectEqual(@as(u64, 0), std.hash.Wyhash.hash(0, name) & target_mask);
+        const bucket = std.hash.Wyhash.hash(keyed_seed, name) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        try keyed.put(allocator, root_shape, name, index);
+    }
+    try std.testing.expect(occupied_count > collision_count / 2);
+    for (names.items, 0..) |name, expected| try std.testing.expectEqual(expected, keyed.get(name).?);
+
+    const retained_seed = keyed.context.?.seed;
+    keyed.clearRetainingCapacity();
+    try std.testing.expectEqual(@as(usize, 0), keyed.count());
+    try std.testing.expectEqual(retained_seed, keyed.context.?.seed);
+    try keyed.put(allocator, root_shape, "module\x00json", 42);
+    try std.testing.expectEqual(@as(usize, 42), keyed.get("module\x00json").?);
+
+    var empty: SecureModuleStringMapUnmanaged(void) = .{};
+    try std.testing.expect(!empty.contains("absent"));
+    try std.testing.expect(empty.context == null);
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, empty.put(unavailable.allocator(), root_shape, "first", {}));
+    try std.testing.expect(empty.context == null);
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
+    try std.testing.expectEqual(@as(usize, 0), empty.index.capacity());
+}
+
 // Zig 0.17 renamed the builtin optimization enum tags from title case to
 // lowercase. Keep the declared dev.956+ compiler window source-compatible.
 const debug_build = std.ascii.eqlIgnoreCase(@tagName(builtin.mode), "debug");
@@ -3824,6 +3950,8 @@ pub const WasmOwned = union(enum) {
 /// (AST, strings, objects, boxed values) and a persistent global environment
 /// so variables survive across `evaluate` calls, like a real global context.
 pub const Context = struct {
+    pub const ModuleCache = SecureModuleStringMapUnmanaged(*Module);
+
     pub const DebugScript = struct {
         id: u64,
         url: []const u8,
@@ -4373,14 +4501,14 @@ pub const Context = struct {
     /// Active module graph state during `evaluateModule`, so runtime `import()`
     /// (dynamic import) can resolve+load+evaluate further modules on demand.
     mod_host: ?ModuleHost = null,
-    mod_cache: ?*std.StringHashMapUnmanaged(*Module) = null,
+    mod_cache: ?*ModuleCache = null,
     /// Persistent per-realm module-loader registry. Repeated evaluations reuse
     /// entries until the private JSC deletion boundary removes an exact key.
-    module_registry: std.StringHashMapUnmanaged(*Module) = .empty,
+    module_registry: ModuleCache = .{},
     /// Source text explicitly supplied through the private JSC loader. These
     /// entries outlive individual import calls and take precedence over the
     /// loader's filesystem fallback.
-    module_loader_sources: std.StringHashMapUnmanaged([]const u8) = .empty,
+    module_loader_sources: SecureModuleStringMapUnmanaged([]const u8) = .{},
     module_dependency_depth: usize = 0,
     deferred_async_queue: std.ArrayListUnmanaged(*Module) = .empty,
     deferred_async_started: std.ArrayListUnmanaged(*Module) = .empty,
@@ -9146,8 +9274,8 @@ pub const Context = struct {
         source: []const u8 = "",
         items: []*ast.Node,
         env: *interp.Environment,
-        deps: std.StringHashMapUnmanaged(*Module) = .{}, // specifier -> module
-        exports: std.StringHashMapUnmanaged(ExportKind) = .{}, // exported name -> binding
+        deps: SecureModuleStringMapUnmanaged(*Module) = .{}, // specifier -> module
+        exports: SecureModuleStringMapUnmanaged(ExportKind) = .{}, // exported name -> binding
         star_sources: std.ArrayListUnmanaged(*Module) = .empty, // `export * from`
         ns: ?*value.Object = null, // the namespace exotic object, if requested
         deferred_ns: ?*value.Object = null, // the `import defer` namespace, if requested (distinct, cached)
@@ -9306,10 +9434,11 @@ pub const Context = struct {
     pub fn provideModuleLoaderSource(self: *Context, origin: []const u8, source: []const u8) ![]const u8 {
         const path = try self.moduleLoaderResolve("", origin);
         const owned_source = try self.arena().dupe(u8, source);
-        try self.module_loader_sources.ensureUnusedCapacity(self.arena(), 1);
-        self.realmLock();
-        self.module_loader_sources.putAssumeCapacity(path, owned_source);
-        self.realmUnlock();
+        {
+            self.realmLock();
+            defer self.realmUnlock();
+            try self.module_loader_sources.put(self.arena(), self.root_shape, path, owned_source);
+        }
         self.installPrivateModuleLoader();
         return path;
     }
@@ -9404,19 +9533,18 @@ pub const Context = struct {
 
     fn putModuleCache(
         self: *Context,
-        cache: *std.StringHashMapUnmanaged(*Module),
+        cache: *ModuleCache,
         key: []const u8,
         module: *Module,
     ) RunError!void {
-        try cache.ensureUnusedCapacity(self.arena(), 1);
         if (cache == &self.module_registry) self.realmLock();
         defer if (cache == &self.module_registry) self.realmUnlock();
-        cache.putAssumeCapacity(key, module);
+        try cache.put(self.arena(), self.root_shape, key, module);
     }
 
     /// Recursively load and parse a module and its dependencies into `cache`
     /// (keyed by canonical path), collecting each module's imports and exports.
-    fn loadModule(self: *Context, path: []const u8, source: []const u8, host: ModuleHost, cache: *std.StringHashMapUnmanaged(*Module)) RunError!*Module {
+    fn loadModule(self: *Context, path: []const u8, source: []const u8, host: ModuleHost, cache: *ModuleCache) RunError!*Module {
         if (cache.get(path)) |m| return m;
         const a = self.arena();
 
@@ -9556,7 +9684,7 @@ pub const Context = struct {
     /// Resolve `specifier` against module `m`, load it, and record it in `m.deps`.
     /// `module_type` is the `type` import attribute ("json" → a synthetic JSON
     /// module; "" → an ordinary JS module).
-    fn loadDep(self: *Context, m: *Module, specifier: []const u8, module_type: []const u8, host: ModuleHost, cache: *std.StringHashMapUnmanaged(*Module)) RunError!*Module {
+    fn loadDep(self: *Context, m: *Module, specifier: []const u8, module_type: []const u8, host: ModuleHost, cache: *ModuleCache) RunError!*Module {
         if (m.deps.get(specifier)) |d| return d;
         var dep_path: []const u8 = "";
         const dep_src = host.load(host.ctx, m.path, specifier, &dep_path) orelse
@@ -9565,13 +9693,13 @@ pub const Context = struct {
             try self.loadSyntheticModule(dep_path, dep_src, module_type, cache)
         else
             try self.loadModule(dep_path, dep_src, host, cache);
-        try m.deps.put(self.arena(), specifier, dep);
+        try m.deps.put(self.arena(), self.root_shape, specifier, dep);
         return dep;
     }
 
     /// Build a synthetic module (JSON, text, or bytes): no JS body, a single
     /// `default` export materialized at evaluation time from the raw source.
-    fn loadSyntheticModule(self: *Context, path: []const u8, source: []const u8, syn_type: []const u8, cache: *std.StringHashMapUnmanaged(*Module)) RunError!*Module {
+    fn loadSyntheticModule(self: *Context, path: []const u8, source: []const u8, syn_type: []const u8, cache: *ModuleCache) RunError!*Module {
         const a = self.arena();
         const cache_key = try self.syntheticModuleCacheKey(path, syn_type);
         if (cache.get(cache_key)) |m| return m;
@@ -9586,7 +9714,7 @@ pub const Context = struct {
         };
         const m = try a.create(Module);
         m.* = .{ .path = cache_key, .items = &.{}, .env = env, .syn_source = try a.dupe(u8, source), .syn_type = syn_type };
-        try m.exports.put(a, "default", .{ .local = "*default*" });
+        try m.exports.put(a, self.root_shape, "default", .{ .local = "*default*" });
         try self.putModuleCache(cache, m.path, m);
         return m;
     }
@@ -9615,21 +9743,21 @@ pub const Context = struct {
         }
         if (e.default_expr != null) {
             const local = if (e.default_name.len > 0) e.default_name else "*default*";
-            try m.exports.put(a, "default", .{ .local = local });
+            try m.exports.put(a, self.root_shape, "default", .{ .local = local });
         }
         for (e.entries) |entry| {
             if (e.from.len == 0) {
-                try m.exports.put(a, entry.exported, .{ .local = entry.local });
+                try m.exports.put(a, self.root_shape, entry.exported, .{ .local = entry.local });
             } else {
                 const dep = m.deps.get(e.from).?;
-                try m.exports.put(a, entry.exported, .{ .indirect = .{ .module = dep, .name = entry.imported } });
+                try m.exports.put(a, self.root_shape, entry.exported, .{ .indirect = .{ .module = dep, .name = entry.imported } });
             }
         }
         if (e.star) {
             const dep = m.deps.get(e.from).?;
             if (e.star_as.len > 0) {
                 // `export * as ns from "m"` — a namespace re-export.
-                try m.exports.put(a, e.star_as, .{ .local = e.star_as });
+                try m.exports.put(a, self.root_shape, e.star_as, .{ .local = e.star_as });
             } else {
                 try m.star_sources.append(a, dep); // `export * from "m"`
             }
@@ -9640,12 +9768,12 @@ pub const Context = struct {
     fn declaredExportNames(self: *Context, m: *Module, d: *ast.Node) RunError!void {
         const a = self.arena();
         switch (d.*) {
-            .func_decl => |f| try m.exports.put(a, f.name, .{ .local = f.name }),
-            .var_decl => |v| try m.exports.put(a, v.name, .{ .local = v.name }),
+            .func_decl => |f| try m.exports.put(a, self.root_shape, f.name, .{ .local = f.name }),
+            .var_decl => |v| try m.exports.put(a, self.root_shape, v.name, .{ .local = v.name }),
             .destructure_decl => |dd| {
                 var names: std.ArrayListUnmanaged([]const u8) = .empty;
                 try modulePatternBoundNames(a, dd.pattern, &names);
-                for (names.items) |name| try m.exports.put(a, name, .{ .local = name });
+                for (names.items) |name| try m.exports.put(a, self.root_shape, name, .{ .local = name });
             },
             .decl_group => |group| for (group) |g| try declaredExportNames(self, m, g),
             else => {},
@@ -10674,6 +10802,38 @@ fn evaluateModuleWithFixturesInContext(ctx: *Context, source: []const u8, fixtur
 
 fn evaluateSelfModule(source: []const u8) !void {
     try evaluateModuleWithFixtures(source, &.{});
+}
+
+test "runtime module graph installs and retains secure table contexts" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try std.testing.expect(ctx.module_registry.context == null);
+    try std.testing.expect(ctx.module_loader_sources.context == null);
+
+    _ = try ctx.provideModuleLoaderSource("provided.js", "export const supplied = 1;");
+    const loader_seed = ctx.module_loader_sources.context.?.seed;
+    try std.testing.expect(ctx.module_registry.context == null);
+    _ = try ctx.provideModuleLoaderSource("second.js", "export const supplied = 2;");
+    try std.testing.expectEqual(loader_seed, ctx.module_loader_sources.context.?.seed);
+
+    try evaluateModuleWithFixturesInContext(
+        ctx,
+        "import { value } from './dep.js'; export { value as result };",
+        &.{.{ .path = "dep.js", .source = "export const value = 42;" }},
+    );
+    const registry_seed = ctx.module_registry.context.?.seed;
+    const entry = ctx.module_registry.get("entry.js") orelse return error.TestUnexpectedResult;
+    const dependency = ctx.module_registry.get("dep.js") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entry.deps.context != null);
+    try std.testing.expect(entry.exports.context != null);
+    try std.testing.expect(dependency.deps.context == null);
+    try std.testing.expect(dependency.exports.context != null);
+
+    ctx.clearModuleRegistry();
+    try std.testing.expectEqual(@as(usize, 0), ctx.module_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), ctx.module_loader_sources.count());
+    try std.testing.expectEqual(registry_seed, ctx.module_registry.context.?.seed);
+    try std.testing.expectEqual(loader_seed, ctx.module_loader_sources.context.?.seed);
 }
 
 test "modules reserve internal queue capacity chunks" {
@@ -38641,8 +38801,8 @@ test "enable_gc: active module cache roots module environments during collection
     const m = try a.create(Context.Module);
     m.* = .{ .path = "module-root", .items = &.{}, .env = env };
 
-    var cache: std.StringHashMapUnmanaged(*Context.Module) = .{};
-    try cache.put(a, m.path, m);
+    var cache: Context.ModuleCache = .{};
+    try cache.put(a, ctx.root_shape, m.path, m);
     ctx.mod_cache = &cache;
     defer ctx.mod_cache = null;
 
