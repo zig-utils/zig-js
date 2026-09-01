@@ -723,6 +723,17 @@ is [`allocation-replay-signature-intl-date-time-format-hour-cycle-v1.json`](.dat
 it preserves #772's mixed 84,001 tree-walker entries, 2 VM entries, and 89,600
 Shape transition requests without normalizing any tier.
 
+The first complete contracted replay is the seven-pair
+[`hour-cycle mixed-tier report`](.data/exact-parent-intl-date-time-format-hour-cycle-mixed-replay-2026-08-31.md)
+and its [raw artifact](.data/exact-parent-intl-date-time-format-hour-cycle-mixed-replay-2026-08-31.json).
+Every parent and candidate replay retained checksum `705814248` and the exact
+frozen execution, quickening, admission, Shape, native-code, publication, and
+generated-code signature. Across 12,800 fresh results, the exact invocation
+delta records 1,428,928 to 1,417,728 Context backing allocations and
+209,090,873 to 209,057,273 backing bytes. The host is classified as
+`diagnostic`; the artifact closes the measurement-contract boundary and makes
+no throughput claim.
+
 The default host class is `diagnostic`, which never blocks publication. Only a
 deliberately declared `quiet_reference` run gates: candidate wall time must be
 more than 110% of its exact parent while both variants have at most 5% RSD.
