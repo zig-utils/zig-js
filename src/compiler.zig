@@ -42,6 +42,21 @@ const SecureStringHashContext = struct {
     }
 };
 
+/// Compiler plans use AST node identity, never structural equality. Hash the
+/// exact arena address with the compilation secret instead of depending on
+/// predictable allocator placement or ASLR for collision resistance.
+const SecureIdentityHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), identity: usize) u64 {
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&identity));
+    }
+
+    pub fn eql(_: @This(), left: usize, right: usize) bool {
+        return left == right;
+    }
+};
+
 /// One lazy secret belongs to a complete compilation, including every nested
 /// function and admission prepass. Compiler maps never escape into a Chunk, so
 /// the state can remain stack-owned by the public compilation entry point.
@@ -112,6 +127,50 @@ fn SecureStringMapUnmanaged(comptime MapValue: type) type {
 
         fn keyIterator(self: *const Self) Index.KeyIterator {
             return self.index.keyIterator();
+        }
+    };
+}
+
+fn SecureIdentityMapUnmanaged(comptime MapValue: type) type {
+    const Index = std.HashMapUnmanaged(
+        usize,
+        MapValue,
+        SecureIdentityHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        const Self = @This();
+
+        index: Index = .empty,
+
+        fn put(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            state: *CompileHashState,
+            identity: usize,
+            value: MapValue,
+        ) std.mem.Allocator.Error!void {
+            const root_context = try state.candidate();
+            const context = SecureIdentityHashContext{ .seed = root_context.seed };
+            try self.index.putContext(allocator, identity, value, context);
+            // A failed first insertion publishes neither capacity nor the
+            // compilation-wide seed, so admission can retry from a clean root.
+            if (state.context == null) state.context = root_context;
+        }
+
+        fn get(self: *const Self, state: *const CompileHashState, identity: usize) ?MapValue {
+            const root_context = state.context orelse return null;
+            return self.index.getContext(identity, .{ .seed = root_context.seed });
+        }
+
+        fn contains(self: *const Self, state: *const CompileHashState, identity: usize) bool {
+            const root_context = state.context orelse return false;
+            return self.index.containsContext(identity, .{ .seed = root_context.seed });
+        }
+
+        fn count(self: *const Self) usize {
+            return self.index.count();
         }
     };
 }
@@ -194,7 +253,7 @@ const FnScope = struct {
     function_body: ?*const Node = null,
     /// Exact declaration identity -> the distinct Annex B variable slot.
     /// This plan is compiler-owned and immutable before bytecode publication.
-    annex_b_variables: std.AutoHashMapUnmanaged(*const Node, u32) = .empty,
+    annex_b_variables: SecureIdentityMapUnmanaged(u32) = .{},
     /// Which record of `parent` was visible when this function was created.
     /// A closure created by a parameter initializer must never resolve or
     /// materialize the parent's not-yet-created body VariableEnvironment.
@@ -915,7 +974,7 @@ const RepeatedBodyNameCaptures = struct {
 
 const RepeatedBodyCaptures = struct {
     bindings: RepeatedBodyNameCaptures,
-    captured_catch_patterns: std.AutoHashMapUnmanaged(*const ast.Node, void) = .{},
+    captured_catch_patterns: SecureIdentityMapUnmanaged(void) = .{},
 
     fn init(arena: std.mem.Allocator, hash_state: *CompileHashState, root: *const ast.Node) CompileError!RepeatedBodyCaptures {
         var captures: RepeatedBodyCaptures = .{
@@ -949,7 +1008,7 @@ const RepeatedBodyCaptures = struct {
     }
 
     fn catchPatternCaptured(self: *const RepeatedBodyCaptures, pattern: *const ast.Node) bool {
-        return self.captured_catch_patterns.contains(pattern);
+        return self.captured_catch_patterns.contains(self.bindings.multiple.state, @intFromPtr(pattern));
     }
 
     fn any(self: *const RepeatedBodyCaptures) bool {
@@ -1051,7 +1110,7 @@ fn collectRepeatedBodyBindings(arena: std.mem.Allocator, node: *const ast.Node, 
                     var catch_captures = RepeatedBodyNameCaptures.init(captures.bindings.multiple.state);
                     try collectPatternBindingNames(arena, catch_param, &catch_captures);
                     catch_captures.classify(catch_block);
-                    if (catch_captures.any()) try captures.captured_catch_patterns.put(arena, catch_param, {});
+                    if (catch_captures.any()) try captures.captured_catch_patterns.put(arena, captures.bindings.multiple.state, @intFromPtr(catch_param), {});
                 }
                 try collectRepeatedBodyBindings(arena, catch_block, captures);
             }
@@ -1492,7 +1551,7 @@ pub const Compiler = struct {
     hash_state: *CompileHashState,
     scope: ?*FnScope = null,
     environment_function_body: ?*const Node = null,
-    environment_annex_b: std.AutoHashMapUnmanaged(*const Node, u32) = .empty,
+    environment_annex_b: SecureIdentityMapUnmanaged(u32) = .{},
     /// Parameter initializers resolve only through the outer parameter record;
     /// ordinary body code resolves body vars first and then parameters.
     function_binding_phase: FunctionBindingPhase = .body,
@@ -2895,7 +2954,7 @@ pub const Compiler = struct {
                     .name = name,
                     .create_binding = !collector.variables.names.contains(name) and !collector.functions.contains(name),
                 });
-                try collector.compiler.environment_annex_b.put(collector.compiler.arena, declaration, index);
+                try collector.compiler.environment_annex_b.put(collector.compiler.arena, collector.compiler.hash_state, @intFromPtr(declaration), index);
             }
         };
         var collector = Collector{ .compiler = self, .variables = &variables, .functions = &function_names };
@@ -2980,11 +3039,11 @@ pub const Compiler = struct {
 
     fn emitAnnexBUpdate(self: *Compiler, declaration: *Node) CompileError!void {
         const scope = self.scope orelse {
-            if (self.environment_annex_b.get(declaration)) |index|
+            if (self.environment_annex_b.get(self.hash_state, @intFromPtr(declaration))) |index|
                 _ = try self.chunk.emit(.copy_annex_b, index);
             return;
         };
-        const variable_slot = scope.annex_b_variables.get(declaration) orelse return;
+        const variable_slot = scope.annex_b_variables.get(scope.hash_state, @intFromPtr(declaration)) orelse return;
         // B.3.2: GetBindingValue from this block's lexical record, then
         // SetMutableBinding on the function's VariableEnvironment directly.
         // Neither operation is ResolveBinding through an outer with object.
@@ -6550,7 +6609,7 @@ fn planFunctionDeclarations(arena: std.mem.Allocator, scope: *FnScope, function:
 
             pub fn add(self: *@This(), declaration: *Node, name: []const u8) CompileError!void {
                 const slot = try self.scope.addLocal(self.arena, name, false, false);
-                try self.scope.annex_b_variables.put(self.arena, declaration, slot);
+                try self.scope.annex_b_variables.put(self.arena, self.scope.hash_state, @intFromPtr(declaration), slot);
             }
         };
         var collector = Collector{ .arena = arena, .scope = scope };
@@ -6671,6 +6730,55 @@ test "compiler binding indexes share one lazy failure-atomic secure context" {
     var sibling = SecureStringMapUnmanaged(void){ .state = &lazy_state };
     try sibling.put(arena.allocator(), "third", {});
     try std.testing.expectEqual(lazy_state.context.?.seed, sibling.state.context.?.seed);
+}
+
+test "compiler AST identity indexes are keyed lazy and failure atomic" {
+    var empty_state: CompileHashState = .{};
+    var empty: SecureIdentityMapUnmanaged(u32) = .{};
+    try std.testing.expectEqual(@as(?u32, null), empty.get(&empty_state, 0x101));
+    try std.testing.expect(!empty.contains(&empty_state, 0x101));
+    try std.testing.expect(empty_state.context == null);
+
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, empty.put(unavailable.allocator(), &empty_state, 0x101, 7));
+    try std.testing.expect(empty_state.context == null);
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
+    try std.testing.expectEqual(@as(usize, 0), empty.index.capacity());
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try empty.put(allocator, &empty_state, 0x101, 7);
+    try std.testing.expect(empty_state.context != null);
+    try std.testing.expectEqual(@as(?u32, 7), empty.get(&empty_state, 0x101));
+
+    const target_mask: u64 = 1023;
+    var collision_identities: [32]usize = undefined;
+    var collision_count: usize = 0;
+    var candidate: usize = 1;
+    while (collision_count < collision_identities.len) : (candidate += 1) {
+        if ((SecureIdentityHashContext{ .seed = 0 }).hash(candidate) & target_mask != 0) continue;
+        collision_identities[collision_count] = candidate;
+        collision_count += 1;
+    }
+
+    var keyed_state = CompileHashState{ .context = .{ .seed = 0x4153_545f_4944_454e } };
+    var keyed: SecureIdentityMapUnmanaged(u32) = .{};
+    var keyed_buckets: [target_mask + 1]bool = @splat(false);
+    var distinct_keyed_buckets: usize = 0;
+    for (collision_identities, 0..) |identity, index| {
+        try std.testing.expectEqual(@as(u64, 0), (SecureIdentityHashContext{ .seed = 0 }).hash(identity) & target_mask);
+        const bucket = (SecureIdentityHashContext{ .seed = keyed_state.context.?.seed }).hash(identity) & target_mask;
+        if (!keyed_buckets[bucket]) {
+            keyed_buckets[bucket] = true;
+            distinct_keyed_buckets += 1;
+        }
+        try keyed.put(allocator, &keyed_state, identity, @intCast(index));
+    }
+    try std.testing.expect(distinct_keyed_buckets >= 24);
+    try std.testing.expectEqual(collision_identities.len, keyed.count());
+    for (collision_identities, 0..) |identity, index|
+        try std.testing.expectEqual(@as(?u32, @intCast(index)), keyed.get(&keyed_state, identity));
 }
 
 test "compiler direct eval plan retains ordered live binding identity" {
@@ -6872,7 +6980,7 @@ test "compiler hash seeds preserve frame and nested chunk layout" {
     defer ast_arena.deinit();
     var parser = try @import("parser.zig").Parser.init(
         ast_arena.allocator(),
-        "function target(first, second, first) { var ordinary = first; let lexical = ordinary; function nested(value) { let inner = lexical; return inner + value; } for (let index = 0; index < 1; index++) { (() => index); } class Box { method() { return 1; } } return nested(second); }",
+        "function target(first, second, first) { var ordinary = first; let lexical = ordinary; function nested(value) { let inner = lexical; return inner + value; } { function legacy() { return lexical; } } for (let index = 0; index < 1; index++) { try { throw [index]; } catch ([caught]) { (() => caught); } } class Box { method() { return 1; } } return nested(second) + legacy(); }",
     );
     const program = try parser.parseProgram();
     const function = program.program[0].func_decl;
@@ -7247,6 +7355,36 @@ test "compiler repeated body query preserves capture classifications" {
             try std.testing.expect(captures.catchPatternCaptured(body.block[0].try_stmt.catch_param.?));
         }
     }
+}
+
+fn exerciseRepeatedBodyIdentityAllocationFailures(allocator: std.mem.Allocator) !void {
+    var ast_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer ast_arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(
+        ast_arena.allocator(),
+        "function f(){ while(false){ try{}catch([first,last]){ (function(){ return last; }); } } }",
+    );
+    const program = try parser.parseProgram();
+    const statement = program.program[0].func_decl.body.block[0];
+    if (statement.* != .while_stmt) return error.TestUnexpectedResult;
+    const body = statement.while_stmt.body;
+
+    var replay = CompilerAllocationReplay{ .backing = allocator };
+    var compile_arena = std.heap.ArenaAllocator.init(replay.allocator());
+    defer compile_arena.deinit();
+    var hash_state = CompileHashState{ .context = .{ .seed = 0x4341_5443_485f_4f4f } };
+    const captures = try RepeatedBodyCaptures.init(compile_arena.allocator(), &hash_state, body);
+    if (body.* != .block or body.block.len != 1 or body.block[0].* != .try_stmt)
+        return error.TestUnexpectedResult;
+    try std.testing.expect(captures.catchPatternCaptured(body.block[0].try_stmt.catch_param.?));
+}
+
+test "compiler repeated catch identity planning survives every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseRepeatedBodyIdentityAllocationFailures,
+        .{},
+    );
 }
 
 test "canonical parameter lowering unwinds every compiler allocation failure" {
