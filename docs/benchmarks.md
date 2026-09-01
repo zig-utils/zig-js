@@ -74,6 +74,31 @@ not a JavaScriptCore comparison or performance result. Any speed claim still
 requires a clean exact-parent A/B on a quiet AC-powered reference host, with the
 polymorphic and coercion controls reported beside the stable Number row.
 
+### Arithmetic quickening exact-parent result (2026-09-01)
+
+The quiet-reference AC collection compares candidate `fd6747c6` directly with
+its first parent `9333b985`. Each row uses the V32 500,000-job publication tier,
+seven alternating pairs with no discarded samples, the same source hash, exact
+checksums, separate native-allocation replay, required bytecode, and zero native
+tier publication. The stable Number row reduces median wall time from 389.271 ms
+to 370.190 ms while also reducing retired instructions, cycles, and process
+energy. This is a restricted-host VM result, not a JavaScriptCore or native-tier
+throughput claim.
+
+| row | assessment | parent → candidate wall | candidate / parent instructions | cycles | process energy | allocation replay |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| stable Number ([report](.data/exact-parent-vm-arithmetic-number-2026-09-01.md), [raw](.data/exact-parent-vm-arithmetic-number-2026-09-01.json)) | `pass` | 389.271 → 370.190 ms (`0.951x`) | `0.9493x` | `0.9548x` | `0.9396x` | 12,129 / 12,129 requests; 2,869,694 / 2,869,694 bytes |
+| stable BigInt control ([report](.data/exact-parent-vm-arithmetic-bigint-2026-09-01.md), [raw](.data/exact-parent-vm-arithmetic-bigint-2026-09-01.json)) | `inconclusive_noise` for wall; efficiency stable | 1,513.581 → 1,502.853 ms (`0.993x`) | `1.0019x` | `0.9990x` | `1.0028x` | 34,012,294 / 34,012,294 requests; 5,327,543,122 / 5,327,542,822 bytes |
+| polymorphic control ([report](.data/exact-parent-vm-arithmetic-polymorphic-2026-09-01.md), [raw](.data/exact-parent-vm-arithmetic-polymorphic-2026-09-01.json)) | `pass` | 291.309 → 287.219 ms (`0.986x`) | `0.9948x` | `0.9915x` | `0.9972x` | 3,012,337 / 3,012,337 requests; 384,800,928 / 384,800,928 bytes |
+| observable-coercion control ([report](.data/exact-parent-vm-arithmetic-coercion-2026-09-01.md), [raw](.data/exact-parent-vm-arithmetic-coercion-2026-09-01.json)) | `pass` | 176.310 → 175.920 ms (`0.998x`) | `0.9858x` | `0.9827x` | `0.9673x` | 12,283 / 12,283 requests; 2,880,982 / 2,880,982 bytes |
+
+BigInt wall timing remains explicitly inconclusive because its parent and
+candidate RSD are 5.96% and 12.98%. Its instruction, cycle, and energy series
+are each stable below the 5% limit, thermal state is nominal throughout, and
+the collector records no publication-blocking regression. The other three
+rows pass both wall and efficiency gates; all four retain exact checksums and
+per-variant allocation replay.
+
 ## Required-bytecode UTF-16 indexing growth profile
 
 V23 adds a separate zig-js-only non-scored profile from
