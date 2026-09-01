@@ -4055,7 +4055,7 @@ pub const Context = struct {
     profile_execution_tiers: bool = false,
     execution_tier_inventory: interp.ExecutionTierInventory = .{},
     debug_exception_hook: ?interp.DebugExceptionHook = null,
-    debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
+    debug_statement_locations: interp.DebugStatementLocationIndex = .{},
     /// Guards the script-id/list and statement-location registry only in a
     /// no-GIL shared realm. This is deliberately separate from `realm_lock`:
     /// parsing can allocate while publishing a script and must not enter a GC
@@ -5832,7 +5832,7 @@ pub const Context = struct {
         locations: []const parser_mod.StatementLocation,
     ) !void {
         const additional_locations = std.math.cast(u32, locations.len) orelse return error.OutOfMemory;
-        try self.debug_statement_locations.ensureUnusedCapacity(allocator, additional_locations);
+        try self.debug_statement_locations.ensureUnusedCapacity(allocator, additional_locations, self.root_shape);
         for (locations) |entry| self.debug_statement_locations.putAssumeCapacity(entry.node, .{
             .script_id = script.id,
             .location = .{
@@ -5862,6 +5862,23 @@ pub const Context = struct {
         start_line: usize,
         locations: []const parser_mod.StatementLocation,
     ) !DebugScript {
+        return self.registerDebugScriptWithLocationsIndexAllocator(
+            self.arena(),
+            source,
+            url,
+            start_line,
+            locations,
+        );
+    }
+
+    fn registerDebugScriptWithLocationsIndexAllocator(
+        self: *Context,
+        index_allocator: std.mem.Allocator,
+        source: []const u8,
+        url: []const u8,
+        start_line: usize,
+        locations: []const parser_mod.StatementLocation,
+    ) !DebugScript {
         const allocator = self.arena();
         const owned_url = try allocator.dupe(u8, url);
         const owned_source = try allocator.dupe(u8, source);
@@ -5869,7 +5886,7 @@ pub const Context = struct {
         defer self.unlockDebugRegistry();
         try self.debug_scripts.ensureUnusedCapacity(allocator, 1);
         const additional_locations = std.math.cast(u32, locations.len) orelse return error.OutOfMemory;
-        try self.debug_statement_locations.ensureUnusedCapacity(allocator, additional_locations);
+        try self.debug_statement_locations.ensureUnusedCapacity(index_allocator, additional_locations, self.root_shape);
         const script = DebugScript{
             .id = self.next_debug_script_id,
             .url = owned_url,
@@ -20903,6 +20920,51 @@ test "parallel: debug registry publishes dynamic scripts atomically" {
         try std.testing.expect(location.script_id > 0);
         try std.testing.expect(location.script_id <= @as(u64, @intCast(ctx.debug_scripts.items.len)));
     }
+}
+
+test "debug registry failed first location publication leaves script state unpublished" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try std.testing.expectEqual(@as(usize, 0), ctx.debug_scripts.items.len);
+    try std.testing.expectEqual(@as(u64, 1), ctx.next_debug_script_id);
+    try std.testing.expect(ctx.debug_statement_locations.context == null);
+
+    const empty = try ctx.registerDebugScript("", "empty-debug.js", 1);
+    try std.testing.expectEqual(@as(u64, 1), empty.id);
+    try std.testing.expectEqual(@as(usize, 1), ctx.debug_scripts.items.len);
+    try std.testing.expectEqual(@as(u64, 2), ctx.next_debug_script_id);
+    try std.testing.expect(ctx.debug_statement_locations.context == null);
+    try std.testing.expectEqual(@as(usize, 0), ctx.debug_statement_locations.capacity());
+
+    var expression = ast.Node{ .number = 1 };
+    var statement = ast.Node{ .expr_stmt = &expression };
+    const locations = [_]parser_mod.StatementLocation{.{
+        .node = &statement,
+        .location = .{ .byte_offset = 0, .line = 1, .column = 1 },
+    }};
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        ctx.registerDebugScriptWithLocationsIndexAllocator(
+            unavailable.allocator(),
+            "1;",
+            "atomic-debug.js",
+            1,
+            &locations,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), ctx.debug_scripts.items.len);
+    try std.testing.expectEqual(@as(u64, 2), ctx.next_debug_script_id);
+    try std.testing.expect(ctx.debug_statement_locations.context == null);
+    try std.testing.expectEqual(@as(usize, 0), ctx.debug_statement_locations.count());
+    try std.testing.expectEqual(@as(usize, 0), ctx.debug_statement_locations.capacity());
+
+    const script = try ctx.registerDebugScriptWithLocations("1;", "atomic-debug.js", 1, &locations);
+    try std.testing.expectEqual(@as(u64, 2), script.id);
+    try std.testing.expectEqual(@as(u64, 3), ctx.next_debug_script_id);
+    try std.testing.expectEqual(@as(usize, 2), ctx.debug_scripts.items.len);
+    try std.testing.expect(ctx.debug_statement_locations.context != null);
+    try std.testing.expectEqual(script.id, ctx.debug_statement_locations.get(&statement).?.script_id);
 }
 
 test "tree-walker entry into a VM closure resolves frame upvalues (native callback)" {

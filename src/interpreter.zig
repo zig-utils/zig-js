@@ -542,6 +542,85 @@ pub const DebugStatementLocation = struct {
     debugger_statement: bool = false,
 };
 
+pub const DebugStatementLocationHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), node: *const Node) u64 {
+        const identity = @intFromPtr(node);
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&identity));
+    }
+
+    pub fn eql(_: @This(), left: *const Node, right: *const Node) bool {
+        return left == right;
+    }
+};
+
+/// Context-owned exact AST identity index for immutable debugger locations.
+/// The existing registry lock serializes first publication and every mutation;
+/// readers use the published context under that same lock. Empty realms retain
+/// no seed or allocation, and a failed first capacity acquisition publishes
+/// neither a context nor a partial entry.
+pub const DebugStatementLocationIndex = struct {
+    const Index = std.HashMapUnmanaged(
+        *const Node,
+        DebugStatementLocation,
+        DebugStatementLocationHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    index: Index = .empty,
+    context: ?DebugStatementLocationHashContext = null,
+
+    pub fn ensureUnusedCapacity(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        additional_count: u32,
+        realm_shape: *Shape,
+    ) std.mem.Allocator.Error!void {
+        if (additional_count == 0) return;
+        const context = self.context orelse
+            DebugStatementLocationHashContext{ .seed = try realm_shape.deriveSecureHashSeed() };
+        try self.index.ensureUnusedCapacityContext(allocator, additional_count, context);
+        self.context = context;
+    }
+
+    pub fn putAssumeCapacity(self: *@This(), node: *const Node, location: DebugStatementLocation) void {
+        self.index.putAssumeCapacityContext(node, location, self.context.?);
+    }
+
+    pub fn put(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        realm_shape: *Shape,
+        node: *const Node,
+        location: DebugStatementLocation,
+    ) std.mem.Allocator.Error!void {
+        try self.ensureUnusedCapacity(allocator, 1, realm_shape);
+        self.putAssumeCapacity(node, location);
+    }
+
+    pub fn get(self: *const @This(), node: *const Node) ?DebugStatementLocation {
+        const context = self.context orelse return null;
+        return self.index.getContext(node, context);
+    }
+
+    pub fn count(self: *const @This()) usize {
+        return self.index.count();
+    }
+
+    pub fn capacity(self: *const @This()) usize {
+        return self.index.capacity();
+    }
+
+    pub fn valueIterator(self: *const @This()) Index.ValueIterator {
+        return self.index.valueIterator();
+    }
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.index.deinit(allocator);
+    }
+};
+
 pub const DebugScriptRegistration = struct {
     id: u64,
     start_line: usize,
@@ -3178,7 +3257,7 @@ pub const Interpreter = struct {
     /// Test-only forced tier contract inherited from the Context. Production
     /// contexts always use `automatic`.
     bytecode_execution_mode: BytecodeExecutionMode = .automatic,
-    debug_statement_locations: ?*std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
+    debug_statement_locations: ?*DebugStatementLocationIndex = null,
     /// Non-null only for a no-GIL shared realm. Script publication mutates one
     /// Context-owned registry while every interpreter reads it at statement
     /// boundaries, so those map operations need a lock independent of object
@@ -60941,8 +61020,67 @@ test "interpreter break / continue" {
     )).asNum());
 }
 
+test "debug statement registry seeds atomically and disperses legacy pointer collisions" {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root_shape = try Shape.createRoot(shape_arena.allocator());
+    const location = DebugStatementLocation{
+        .script_id = 1,
+        .location = .{ .byte_offset = 0, .line = 1, .column = 1 },
+    };
+
+    var registry: DebugStatementLocationIndex = .{};
+    defer registry.deinit(std.testing.allocator);
+    var node: Node = undefined;
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, registry.put(unavailable.allocator(), root_shape, &node, location));
+    try std.testing.expect(registry.context == null);
+    try std.testing.expectEqual(@as(usize, 0), registry.count());
+    try std.testing.expectEqual(@as(usize, 0), registry.capacity());
+
+    try registry.put(std.testing.allocator, root_shape, &node, location);
+    try std.testing.expect(registry.context != null);
+    try std.testing.expectEqual(location, registry.get(&node).?);
+
+    const target_mask: u64 = 1023;
+    const collision_count = 32;
+    const legacy_context = std.hash_map.AutoContext(*const Node){};
+    var colliding: [collision_count]*const Node = undefined;
+    var found: usize = 0;
+    var candidate_address: usize = @alignOf(Node);
+    while (found != colliding.len) : (candidate_address += @alignOf(Node)) {
+        const candidate: *const Node = @ptrFromInt(candidate_address);
+        if (legacy_context.hash(candidate) & target_mask != 0) continue;
+        colliding[found] = candidate;
+        found += 1;
+    }
+
+    const keyed_context = DebugStatementLocationHashContext{ .seed = 0x4442_4752_4547_4953 };
+    var keyed = DebugStatementLocationIndex{ .context = keyed_context };
+    defer keyed.deinit(std.testing.allocator);
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (colliding, 0..) |candidate, index| {
+        try std.testing.expectEqual(@as(u64, 0), legacy_context.hash(candidate) & target_mask);
+        const bucket = keyed_context.hash(candidate) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        var exact = location;
+        exact.script_id = @intCast(index + 1);
+        try keyed.put(std.testing.allocator, root_shape, candidate, exact);
+        try std.testing.expectEqual(exact, keyed.get(candidate).?);
+    }
+    try std.testing.expect(occupied_count >= 24);
+    try std.testing.expectEqual(@as(usize, collision_count), keyed.count());
+}
+
 test "interpreter caches immutable debug locations after one registry lookup" {
-    var locations: std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = .empty;
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root_shape = try Shape.createRoot(shape_arena.allocator());
+    var locations: DebugStatementLocationIndex = .{};
     defer locations.deinit(std.testing.allocator);
     var node: Node = undefined;
     const expected = DebugStatementLocation{
@@ -60950,14 +61088,14 @@ test "interpreter caches immutable debug locations after one registry lookup" {
         .location = .{ .byte_offset = 23, .line = 4, .column = 9 },
         .source_url = "cached.js",
     };
-    try locations.put(std.testing.allocator, &node, expected);
+    try locations.put(std.testing.allocator, root_shape, &node, expected);
 
     var registry_lock = DebugRegistryLock{};
     var registry_stats = DebugRegistryStats{};
     var machine = Interpreter{
         .arena = std.testing.allocator,
         .env = undefined,
-        .root_shape = undefined,
+        .root_shape = root_shape,
         .debug_statement_locations = &locations,
         .debug_registry_lock = &registry_lock,
         .debug_registry_stats = &registry_stats,
@@ -60978,7 +61116,7 @@ test "interpreter caches immutable debug locations after one registry lookup" {
 }
 
 test "interpreter caches immutable absence of a debug location" {
-    var locations: std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = .empty;
+    var locations: DebugStatementLocationIndex = .{};
     defer locations.deinit(std.testing.allocator);
     var node: Node = undefined;
     var registry_lock = DebugRegistryLock{};
@@ -61001,6 +61139,9 @@ test "interpreter caches immutable absence of a debug location" {
 }
 
 test "interpreter skips impossible debug probes without skipping host checkpoints" {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root_shape = try Shape.createRoot(shape_arena.allocator());
     var expression = Node{ .number = 1 };
     var statement = Node{ .expr_stmt = &expression };
     const expected = DebugStatementLocation{
@@ -61008,12 +61149,12 @@ test "interpreter skips impossible debug probes without skipping host checkpoint
         .location = .{ .byte_offset = 7, .line = 2, .column = 3 },
         .source_url = "statement.js",
     };
-    var locations: std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = .empty;
+    var locations: DebugStatementLocationIndex = .{};
     defer locations.deinit(std.testing.allocator);
     // Even a forged impossible entry must not churn the cache: the parser can
     // publish only the statement root beside it.
-    try locations.put(std.testing.allocator, &expression, expected);
-    try locations.put(std.testing.allocator, &statement, expected);
+    try locations.put(std.testing.allocator, root_shape, &expression, expected);
+    try locations.put(std.testing.allocator, root_shape, &statement, expected);
 
     const Host = struct {
         fn checkpoint(ctx: *anyopaque, _: *Interpreter) void {
@@ -61026,7 +61167,7 @@ test "interpreter skips impossible debug probes without skipping host checkpoint
     var machine = Interpreter{
         .arena = std.testing.allocator,
         .env = undefined,
-        .root_shape = undefined,
+        .root_shape = root_shape,
         .debug_statement_locations = &locations,
         .debug_registry_stats = &registry_stats,
         .host_statement_ctx = &checkpoints,
@@ -61078,7 +61219,10 @@ test "catchable OOM services deferred allocation recovery after lock unwind" {
 }
 
 test "interpreter debug location cache retains four colliding statements with bounded eviction" {
-    var locations: std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = .empty;
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root_shape = try Shape.createRoot(shape_arena.allocator());
+    var locations: DebugStatementLocationIndex = .{};
     defer locations.deinit(std.testing.allocator);
     var nodes: [debug_location_cache_size + debug_location_cache_set_count]Node = undefined;
     var selected: [debug_location_cache_way_count + 1]*Node = undefined;
@@ -61112,7 +61256,7 @@ test "interpreter debug location cache retains four colliding statements with bo
         }
     }
     try std.testing.expectEqual(selected.len, selected_len);
-    for (selected, 0..) |node, index| try locations.put(std.testing.allocator, node, .{
+    for (selected, 0..) |node, index| try locations.put(std.testing.allocator, root_shape, node, .{
         .script_id = @intCast(index + 1),
         .location = .{ .byte_offset = index, .line = index + 1, .column = 1 },
     });
@@ -61122,7 +61266,7 @@ test "interpreter debug location cache retains four colliding statements with bo
     var machine = Interpreter{
         .arena = std.testing.allocator,
         .env = undefined,
-        .root_shape = undefined,
+        .root_shape = root_shape,
         .debug_statement_locations = &locations,
         .debug_registry_lock = &registry_lock,
         .debug_registry_stats = &registry_stats,
