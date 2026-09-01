@@ -1,4 +1,5 @@
 const std = @import("std");
+const agent = @import("agent.zig");
 const Shape = @import("shape.zig").Shape;
 const SharedBufferStorage = @import("shared_buffer.zig").SharedBufferStorage;
 const gc_runtime = @import("gc_runtime.zig");
@@ -2049,6 +2050,93 @@ pub const FinalizationRecord = struct {
     ready: bool = false,
 };
 
+pub const ObjectNameHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: []const u8) u64 {
+        return std.hash.Wyhash.hash(context.seed, key);
+    }
+
+    pub fn eql(_: @This(), left: []const u8, right: []const u8) bool {
+        return std.mem.eql(u8, left, right);
+    }
+};
+
+/// Object metadata tables borrow one context from their cold sidecar instead
+/// of storing six predictable or independently seeded map headers. Iteration
+/// and finalization do not hash, so those paths remain context-free.
+pub fn ObjectNameMapUnmanaged(comptime MapValue: type) type {
+    const Index = std.HashMapUnmanaged(
+        []const u8,
+        MapValue,
+        ObjectNameHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        index: Index = .empty,
+
+        pub fn get(self: *const @This(), context: ?ObjectNameHashContext, key: []const u8) ?MapValue {
+            return self.index.getContext(key, context orelse return null);
+        }
+
+        pub fn getPtr(self: *@This(), context: ?ObjectNameHashContext, key: []const u8) ?*MapValue {
+            return self.index.getPtrContext(key, context orelse return null);
+        }
+
+        pub fn contains(self: *const @This(), context: ?ObjectNameHashContext, key: []const u8) bool {
+            return self.index.containsContext(key, context orelse return false);
+        }
+
+        pub fn getOrPut(
+            self: *@This(),
+            allocator: std.mem.Allocator,
+            key: []const u8,
+            context: ObjectNameHashContext,
+        ) std.mem.Allocator.Error!Index.GetOrPutResult {
+            return self.index.getOrPutContext(allocator, key, context);
+        }
+
+        pub fn put(
+            self: *@This(),
+            allocator: std.mem.Allocator,
+            key: []const u8,
+            map_value: MapValue,
+            context: ObjectNameHashContext,
+        ) std.mem.Allocator.Error!void {
+            try self.index.putContext(allocator, key, map_value, context);
+        }
+
+        pub fn fetchRemove(self: *@This(), context: ?ObjectNameHashContext, key: []const u8) ?Index.KV {
+            return self.index.fetchRemoveContext(key, context orelse return null);
+        }
+
+        pub fn count(self: *const @This()) usize {
+            return self.index.count();
+        }
+
+        pub fn iterator(self: *const @This()) Index.Iterator {
+            return self.index.iterator();
+        }
+
+        pub fn keyIterator(self: *const @This()) Index.KeyIterator {
+            return self.index.keyIterator();
+        }
+
+        pub fn valueIterator(self: *const @This()) Index.ValueIterator {
+            return self.index.valueIterator();
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.index.deinit(allocator);
+        }
+
+        pub fn capacity(self: *const @This()) u32 {
+            return self.index.capacity();
+        }
+    };
+}
+
 /// Context-owned lifetime record for a C-API class instance. The concrete
 /// class definition stays private to `c_api.zig`; core GC and Context teardown
 /// only need one idempotent callback that runs class finalizers and releases
@@ -2062,7 +2150,7 @@ pub const CApiObjectOwner = struct {
     class_ref: ?*anyopaque,
     payload: ?*anyopaque = null,
     hooks: ?*const HostClassHooks = null,
-    custom_accessor_cells: std.StringHashMapUnmanaged(*Object) = .empty,
+    custom_accessor_cells: ObjectNameMapUnmanaged(*Object) = .{},
     finish_fn: *const fn (*CApiObjectOwner) void,
 
     pub fn finishOnce(self: *CApiObjectOwner) void {
@@ -2370,12 +2458,12 @@ pub const ObjectColdState = struct {
     /// explicitly addressed union payload through `__tsan_memcpy` before an
     /// atomic RMW. Date is the only rare payload mutated after publication.
     date_ms_bits: std.atomic.Value(u64) = .init(0),
-    private_brands: ?*std.StringHashMapUnmanaged(void) = null,
+    private_brands: ?*ObjectNameMapUnmanaged(void) = null,
     /// Accessor-property writers remain behind `property_lock`; exact read
     /// snapshots additionally enter `accessor_gate`, which lets
     /// unrelated-name prototype probes run together while map grow/delete and
     /// descriptor-cell publication wait for every reader to drain.
-    accessors: std.atomic.Value(?*std.StringHashMapUnmanaged(Accessor)) = .init(null),
+    accessors: std.atomic.Value(?*ObjectNameMapUnmanaged(Accessor)) = .init(null),
     accessor_gate: std.atomic.Value(u32) = .init(0),
     /// `Thread.restrict` is opt-in. Its owner id belongs with the other rare
     /// cross-thread behavior instead of taxing every unrestricted object.
@@ -2385,7 +2473,7 @@ pub const ObjectColdState = struct {
     key_order: std.atomic.Value(?*std.ArrayListUnmanaged(KeyOrderEntry)) = .init(null),
     /// Per-property attribute overrides are rare on ordinary objects. Keep the
     /// atomically published map pointer off the common allocation payload.
-    attrs: ?*std.StringHashMapUnmanaged(PropAttr) = null,
+    attrs: ?*ObjectNameMapUnmanaged(PropAttr) = null,
     /// Logical Array length only when it exceeds the dense element count.
     /// Packed dense arrays derive their length directly and leave this zero.
     array_len: u32 = 0,
@@ -2578,6 +2666,11 @@ pub const ObjectStorageState = struct {
     cold: std.atomic.Value(?*ObjectColdState) = .init(null),
     slots: std.atomic.Value(?*ObjectSlotsState) = .init(null),
     elements: std.atomic.Value(?*ObjectElementsState) = .init(null),
+    /// One lazy exact-byte context covers every named metadata table owned by
+    /// this Object. Keeping it in the already-required storage wrapper leaves
+    /// ObjectColdState in its 256-byte GC allocation while writers publish it
+    /// under `property_lock` and accessor readers observe it through the gate.
+    named_hash_context: ?ObjectNameHashContext = null,
     /// Context-owned C-class metadata. It belongs in the wrapper already
     /// required by a host-class object, keeping the cold sidecar inside its
     /// 256-byte GC allocation class.
@@ -3070,9 +3163,50 @@ pub const Object = struct {
     /// Atomic view of the cold accessor-map pointer. Writers remain serialized
     /// by `property_lock`; exact off-lock snapshots additionally enter the
     /// per-sidecar reader gate before touching map contents.
-    pub inline fn accessorsMap(self: *const Object) ?*std.StringHashMapUnmanaged(Accessor) {
+    pub inline fn accessorsMap(self: *const Object) ?*ObjectNameMapUnmanaged(Accessor) {
         const cold = self.coldState() orelse return null;
         return cold.accessors.load(.acquire);
+    }
+
+    fn installedNameHashContext(self: *const Object) ?ObjectNameHashContext {
+        const storage = self.storageState() orelse return null;
+        return storage.named_hash_context;
+    }
+
+    /// Context for callers already holding the Object's named-property lock.
+    /// Exposing the value separately keeps the shared map header seed-free.
+    pub inline fn nameHashContextUnlocked(self: *const Object) ?ObjectNameHashContext {
+        return self.installedNameHashContext();
+    }
+
+    fn deriveNameHashContext(self: *const Object) std.mem.Allocator.Error!ObjectNameHashContext {
+        if (self.shape) |shape| return .{ .seed = try shape.deriveSecureHashSeed() };
+        var bytes: [@sizeOf(u64)]u8 = undefined;
+        agent.engineIo().randomSecure(&bytes) catch return error.OutOfMemory;
+        return .{ .seed = std.mem.readInt(u64, &bytes, .little) };
+    }
+
+    /// Prepare a seed without making it observable. The caller publishes it
+    /// only after the first semantic map insertion succeeds, so allocation or
+    /// entropy failure leaves the Object with neither an entry nor a context.
+    fn candidateNameHashContext(self: *const Object) std.mem.Allocator.Error!ObjectNameHashContext {
+        return self.installedNameHashContext() orelse try self.deriveNameHashContext();
+    }
+
+    fn publishNameHashContext(self: *Object, context: ObjectNameHashContext) void {
+        const storage = self.storageState().?;
+        if (storage.named_hash_context) |installed| {
+            std.debug.assert(installed.seed == context.seed);
+        } else {
+            storage.named_hash_context = context;
+        }
+    }
+
+    fn scratchNameHashContext(self: *const Object, scratch_context: *?ObjectNameHashContext) std.mem.Allocator.Error!ObjectNameHashContext {
+        if (scratch_context.*) |context| return context;
+        const context = self.installedNameHashContext() orelse try self.deriveNameHashContext();
+        scratch_context.* = context;
+        return context;
     }
 
     fn beginAccessorRead(cold: *ObjectColdState) void {
@@ -3127,7 +3261,7 @@ pub const Object = struct {
         const accessors = cold.accessors.load(.acquire) orelse return null;
         beginAccessorRead(cold);
         defer endAccessorRead(cold);
-        return accessors.get(name);
+        return accessors.get(self.installedNameHashContext(), name);
     }
 
     /// The owning thread id for `Thread.restrict`, or zero for the overwhelmingly
@@ -4006,7 +4140,7 @@ pub const Object = struct {
         state.ptr = function;
     }
 
-    pub inline fn privateBrands(self: *const Object) ?*std.StringHashMapUnmanaged(void) {
+    pub inline fn privateBrands(self: *const Object) ?*ObjectNameMapUnmanaged(void) {
         const cold = self.coldState() orelse return null;
         return cold.private_brands;
     }
@@ -5495,19 +5629,24 @@ pub const Object = struct {
             // key_order backward then transitions each live spelling from pending
             // to emitted without a linear shape lookup per historical entry.
             const Membership = enum { absent, pending, emitted };
-            var membership: std.StringHashMapUnmanaged(Membership) = .empty;
+            var membership: ObjectNameMapUnmanaged(Membership) = .{};
             defer membership.deinit(scratch);
+            var hash_context = self.installedNameHashContext();
             var shape = self.shape;
             while (shape) |sh| {
                 if (sh.name) |name| {
-                    const entry = try membership.getOrPut(scratch, name);
+                    const context = try self.scratchNameHashContext(&hash_context);
+                    const entry = try membership.getOrPut(scratch, name, context);
                     if (!entry.found_existing) entry.value_ptr.* = if (sh.deleted) .absent else .pending;
                 }
                 shape = sh.parent;
             }
             if (self.accessorsMap()) |accessors| {
                 var it = accessors.iterator();
-                while (it.next()) |entry| try membership.put(scratch, entry.key_ptr.*, .pending);
+                while (it.next()) |entry| {
+                    const context = try self.scratchNameHashContext(&hash_context);
+                    try membership.put(scratch, entry.key_ptr.*, .pending, context);
+                }
             }
             var index = ord.items.len;
             while (index > 0) {
@@ -5515,7 +5654,7 @@ pub const Object = struct {
                 const operation = ord.items[index];
                 if (operation.deleted) continue;
                 const k = operation.key;
-                const state = membership.getPtr(k) orelse continue;
+                const state = membership.getPtr(hash_context, k) orelse continue;
                 if (state.* != .pending) continue;
                 state.* = .emitted;
                 try insertion.append(arena, k);
@@ -5526,7 +5665,7 @@ pub const Object = struct {
             var s2 = self.shape;
             while (s2) |sh| {
                 if (sh.name) |n| {
-                    const state = membership.getPtr(n).?;
+                    const state = membership.getPtr(hash_context, n).?;
                     if (state.* == .pending) {
                         state.* = .emitted;
                         try insertion.append(arena, n);
@@ -5538,7 +5677,7 @@ pub const Object = struct {
                 var it = m.iterator();
                 while (it.next()) |entry| {
                     const k = entry.key_ptr.*;
-                    const state = membership.getPtr(k).?;
+                    const state = membership.getPtr(hash_context, k).?;
                     if (state.* == .pending) {
                         state.* = .emitted;
                         try insertion.append(arena, k);
@@ -5549,12 +5688,14 @@ pub const Object = struct {
             // No accessors ever added: the newest operation for each spelling
             // decides liveness; reversing the surviving additions restores the
             // creation order of the last add after any delete/re-add sequence.
-            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            var seen: ObjectNameMapUnmanaged(void) = .{};
             defer seen.deinit(scratch);
+            var hash_context = self.installedNameHashContext();
             var s = self.shape;
             while (s) |sh| {
                 if (sh.name) |n| {
-                    const entry = try seen.getOrPut(scratch, n);
+                    const context = try self.scratchNameHashContext(&hash_context);
+                    const entry = try seen.getOrPut(scratch, n, context);
                     if (!entry.found_existing and !sh.deleted) try insertion.append(arena, n);
                 }
                 s = sh.parent;
@@ -5604,9 +5745,9 @@ pub const Object = struct {
     /// (perf-neutral) that gives those unlocked readers a defined synchronization
     /// with the atomic publish in `setAttrUnlocked`. Map *contents* stay guarded
     /// by `lockProperties`.
-    pub inline fn attrsMap(self: *const Object) ?*std.StringHashMapUnmanaged(PropAttr) {
+    pub inline fn attrsMap(self: *const Object) ?*ObjectNameMapUnmanaged(PropAttr) {
         const cold = self.coldState() orelse return null;
-        return @atomicLoad(?*std.StringHashMapUnmanaged(PropAttr), &cold.attrs, .monotonic);
+        return @atomicLoad(?*ObjectNameMapUnmanaged(PropAttr), &cold.attrs, .monotonic);
     }
 
     /// The attributes of own property `name` (all-true default if no override).
@@ -5623,7 +5764,7 @@ pub const Object = struct {
 
     fn getAttrUnlocked(self: *const Object, name: []const u8) PropAttr {
         if (self.attrsMap()) |m| {
-            if (m.get(name)) |a| return a;
+            if (m.get(self.installedNameHashContext(), name)) |a| return a;
         }
         return .{};
     }
@@ -5647,30 +5788,32 @@ pub const Object = struct {
         const cold = try self.ensureCold(arena);
         const alloc = try self.attrsAllocator(arena);
         if (self.attrsMap() == null) {
-            const m = try alloc.create(std.StringHashMapUnmanaged(PropAttr));
+            const m = try alloc.create(ObjectNameMapUnmanaged(PropAttr));
             m.* = .{};
             // Publish the map pointer atomically so off-lock `attrsMap()` readers
             // (fast-path guards) synchronize with it; content stays under the lock.
-            @atomicStore(?*std.StringHashMapUnmanaged(PropAttr), &cold.attrs, m, .release);
+            @atomicStore(?*ObjectNameMapUnmanaged(PropAttr), &cold.attrs, m, .release);
         }
         const attrs = self.attrsMap().?;
-        if (attrs.getPtr(name)) |value_ptr| {
+        if (attrs.getPtr(self.installedNameHashContext(), name)) |value_ptr| {
             const previous = value_ptr.*;
             value_ptr.* = a;
             return previous;
         }
+        const hash_context = try self.candidateNameHashContext();
         const owned_name = try alloc.dupe(u8, name);
         errdefer alloc.free(owned_name);
-        const gop = try attrs.getOrPut(alloc, owned_name);
+        const gop = try attrs.getOrPut(alloc, owned_name, hash_context);
         std.debug.assert(!gop.found_existing); // property_lock excludes a competing insert
         gop.key_ptr.* = owned_name;
         gop.value_ptr.* = a;
+        self.publishNameHashContext(hash_context);
         return null;
     }
 
     fn deleteAttrUnlocked(self: *Object, name: []const u8) void {
         const m = self.attrsMap() orelse return;
-        if (m.fetchRemove(name)) |removed| {
+        if (m.fetchRemove(self.installedNameHashContext(), name)) |removed| {
             if (self.activeBackingAllocator("attrs")) |allocator| allocator.free(removed.key);
         }
     }
@@ -5697,7 +5840,7 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         const m = self.privateBrands() orelse return false;
-        return m.contains(name);
+        return m.contains(self.installedNameHashContext(), name);
     }
 
     /// Brand this object with the private name `name` (PrivateFieldAdd /
@@ -5710,10 +5853,13 @@ pub const Object = struct {
         const cold = try self.ensureCold(arena);
         const alloc = try self.accessorsAllocator(arena);
         if (cold.private_brands == null) {
-            cold.private_brands = try alloc.create(std.StringHashMapUnmanaged(void));
+            cold.private_brands = try alloc.create(ObjectNameMapUnmanaged(void));
             cold.private_brands.?.* = .{};
         }
-        try cold.private_brands.?.put(alloc, name, {});
+        if (cold.private_brands.?.contains(self.installedNameHashContext(), name)) return;
+        const hash_context = try self.candidateNameHashContext();
+        try cold.private_brands.?.put(alloc, name, {}, hash_context);
+        self.publishNameHashContext(hash_context);
     }
 
     /// An own accessor (get/set) property, if present.
@@ -5723,7 +5869,7 @@ pub const Object = struct {
 
     fn getAccessorUnlocked(self: *const Object, name: []const u8) ?Accessor {
         const m = self.accessorsMap() orelse return null;
-        return m.get(name);
+        return m.get(self.installedNameHashContext(), name);
     }
 
     /// Publish a lazily allocated descriptor cell only if the accessor still
@@ -5742,7 +5888,7 @@ pub const Object = struct {
         const accessors = cold.accessors.load(.acquire) orelse return null;
         beginAccessorWrite(cold);
         defer endAccessorWrite(cold);
-        const accessor = accessors.getPtr(name) orelse return null;
+        const accessor = accessors.getPtr(self.installedNameHashContext(), name) orelse return null;
         const same_optional = struct {
             fn f(left: ?Value, right: ?Value) bool {
                 if (left == null or right == null) return left == null and right == null;
@@ -5760,7 +5906,7 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         const owner = self.cApiObjectOwner() orelse return null;
-        return owner.custom_accessor_cells.get(name);
+        return owner.custom_accessor_cells.get(self.installedNameHashContext(), name);
     }
 
     pub fn installCustomAccessorDescriptorCell(
@@ -5771,11 +5917,13 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         const owner = self.cApiObjectOwner() orelse return error.OutOfMemory;
-        if (owner.custom_accessor_cells.get(name)) |existing| return existing;
+        if (owner.custom_accessor_cells.get(self.installedNameHashContext(), name)) |existing| return existing;
+        const hash_context = try self.candidateNameHashContext();
         const owned_name = try owner.allocator.dupe(u8, name);
         errdefer owner.allocator.free(owned_name);
         gcBarrier(self, Value.obj(candidate));
-        try owner.custom_accessor_cells.put(owner.allocator, owned_name, candidate);
+        try owner.custom_accessor_cells.put(owner.allocator, owned_name, candidate, hash_context);
+        self.publishNameHashContext(hash_context);
         return candidate;
     }
 
@@ -5808,19 +5956,43 @@ pub const Object = struct {
         defer endAccessorWrite(cold);
         const alloc = try self.accessorsAllocator(arena);
         if (self.accessorsMap() == null) {
-            const nm = try alloc.create(std.StringHashMapUnmanaged(Accessor));
+            const nm = try alloc.create(ObjectNameMapUnmanaged(Accessor));
             nm.* = .{};
             cold.accessors.store(nm, .release);
         }
         const accessors = self.accessorsMap().?;
         var inserted = false;
-        const value_ptr = accessors.getPtr(name) orelse entry: {
+        const value_ptr = accessors.getPtr(self.installedNameHashContext(), name) orelse entry: {
+            // Prepare every fallible creation-order write before publishing the
+            // accessor entry. A failed multi-store insertion therefore leaves
+            // neither semantic metadata nor the Object's shared hash context.
+            try self.ensureKeyOrderUnlocked(arena);
+            const order = self.keyOrder().?;
+            var pending_order_key: ?[]u8 = null;
+            var pending_order_allocator: ?std.mem.Allocator = null;
+            defer if (pending_order_key) |owned| pending_order_allocator.?.free(owned);
+            if (keyOrderNeedsAdd(order, name)) {
+                const order_alloc = try self.keyOrderAllocator(arena);
+                const owned = try order_alloc.dupe(u8, name);
+                order.ensureUnusedCapacity(order_alloc, 1) catch |err| {
+                    order_alloc.free(owned);
+                    return err;
+                };
+                pending_order_key = owned;
+                pending_order_allocator = order_alloc;
+            }
+            const hash_context = try self.candidateNameHashContext();
             const owned_name = try alloc.dupe(u8, name);
             errdefer alloc.free(owned_name);
-            const gop = try accessors.getOrPut(alloc, owned_name);
+            const gop = try accessors.getOrPut(alloc, owned_name, hash_context);
             std.debug.assert(!gop.found_existing); // property_lock excludes a competing insert
             gop.key_ptr.* = owned_name;
             gop.value_ptr.* = .{};
+            self.publishNameHashContext(hash_context);
+            if (pending_order_key) |owned| {
+                order.appendAssumeCapacity(.{ .key = owned });
+                pending_order_key = null;
+            }
             inserted = true;
             break :entry gop.value_ptr;
         };
@@ -5829,11 +6001,6 @@ pub const Object = struct {
                 self.has_indexed_property.store(true, .monotonic);
                 self.indexed_own_seen.store(true, .release);
             }
-            // First accessor on this object: start key_order by snapshotting the
-            // existing data keys (shape-chain insertion order), so the new
-            // accessor interleaves correctly with them.
-            try self.ensureKeyOrderUnlocked(arena);
-            try self.recordKeyOrderUnlocked(arena, name);
         }
         if (get) |g| {
             gcBarrier(self, g);
@@ -5886,12 +6053,14 @@ pub const Object = struct {
         }
         var seed: std.ArrayListUnmanaged([]const u8) = .empty;
         defer seed.deinit(arena);
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        var seen: ObjectNameMapUnmanaged(void) = .{};
         defer seen.deinit(alloc);
+        var hash_context = self.installedNameHashContext();
         var s = self.shape;
         while (s) |sh| {
             if (sh.name) |n| {
-                const entry = try seen.getOrPut(alloc, n);
+                const context = try self.scratchNameHashContext(&hash_context);
+                const entry = try seen.getOrPut(alloc, n, context);
                 if (!entry.found_existing and !sh.deleted) try seed.append(arena, n);
             }
             s = sh.parent;
@@ -6071,20 +6240,24 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
 
+        const had_hash_context = self.installedNameHashContext() != null;
         const previous_attr = try self.setAttrUnlockedTracked(arena, name, attr);
-        errdefer if (previous_attr) |previous| {
-            self.attrsMap().?.getPtr(name).?.* = previous;
-        } else {
-            self.deleteAttrUnlocked(name);
-        };
+        errdefer {
+            if (previous_attr) |previous| {
+                self.attrsMap().?.getPtr(self.installedNameHashContext(), name).?.* = previous;
+            } else {
+                self.deleteAttrUnlocked(name);
+            }
+            if (!had_hash_context) self.storageState().?.named_hash_context = null;
+        }
         try self.setOwnUnlocked(arena, root, name, v);
     }
 
     /// Publish one lazily-created internal data property, including its final
     /// attributes, under a single property snapshot. A racing creator receives
     /// the already-published value instead of replacing it. Attribute storage
-    /// is prepared before the shape makes the property visible, so OOM can
-    /// leave only an unobservable attribute entry for a still-absent key.
+    /// is prepared before the shape makes the property visible; OOM restores
+    /// the exact prior attribute entry and first-context state.
     pub fn setOwnIfAbsentWithAttr(
         self: *Object,
         arena: std.mem.Allocator,
@@ -6096,7 +6269,16 @@ pub const Object = struct {
         self.lockProperties();
         defer self.unlockProperties();
         if (self.getOwnUnlocked(name)) |existing| return existing;
-        try self.setAttrUnlocked(arena, name, attr);
+        const had_hash_context = self.installedNameHashContext() != null;
+        const previous_attr = try self.setAttrUnlockedTracked(arena, name, attr);
+        errdefer {
+            if (previous_attr) |previous| {
+                self.attrsMap().?.getPtr(self.installedNameHashContext(), name).?.* = previous;
+            } else {
+                self.deleteAttrUnlocked(name);
+            }
+            if (!had_hash_context) self.storageState().?.named_hash_context = null;
+        }
         try self.setOwnUnlocked(arena, root, name, v);
         return null;
     }
@@ -6221,7 +6403,8 @@ pub const Object = struct {
 
     fn deleteAccessorOwnUnlocked(self: *Object, arena: std.mem.Allocator, key: []const u8, preserve_order: bool) std.mem.Allocator.Error!AccessorDeleteResult {
         const m = self.accessorsMap() orelse return .absent;
-        if (m.getPtr(key) == null) return .absent;
+        const hash_context = self.installedNameHashContext();
+        if (m.getPtr(hash_context, key) == null) return .absent;
         if (!self.getAttrUnlocked(key).configurable) return .blocked;
         var pending_order_key: ?[]u8 = null;
         var pending_order_allocator: ?std.mem.Allocator = null;
@@ -6252,7 +6435,7 @@ pub const Object = struct {
             const cold = self.coldState().?;
             beginAccessorWrite(cold);
             defer endAccessorWrite(cold);
-            if (m.fetchRemove(key)) |removed| {
+            if (m.fetchRemove(hash_context, key)) |removed| {
                 if (self.activeBackingAllocator("accessors")) |allocator| allocator.free(removed.key);
             }
         }
@@ -6414,11 +6597,13 @@ pub const Object = struct {
         const scratch = scratch_state.allocator();
         const Entry = struct { name: []const u8, value: Value };
         var entries: std.ArrayListUnmanaged(Entry) = .empty;
-        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        var seen: ObjectNameMapUnmanaged(void) = .{};
+        var hash_context = self.installedNameHashContext();
         var shape: ?*Shape = current;
         while (shape) |operation| {
             if (operation.name) |name| {
-                const membership = try seen.getOrPut(scratch, name);
+                const context = try self.scratchNameHashContext(&hash_context);
+                const membership = try seen.getOrPut(scratch, name, context);
                 if (!membership.found_existing and !operation.deleted)
                     try entries.append(scratch, .{ .name = name, .value = self.slotsItems()[operation.slot] });
             }
@@ -7232,6 +7417,255 @@ pub fn looseEquals(a: Value, b: Value) bool {
     return false;
 }
 
+test "Object named metadata keyed context disperses default collisions exactly" {
+    const family_len = 24;
+    var storage: [family_len][32]u8 = undefined;
+    var lengths: [family_len]usize = undefined;
+    const default_context = ObjectNameHashContext{ .seed = 0 };
+    const keyed_context = ObjectNameHashContext{ .seed = 0xd23b_6491_a7ce_580f };
+    var found: usize = 0;
+    var candidate: usize = 0;
+    while (found < family_len) : (candidate += 1) {
+        const key = try std.fmt.bufPrint(&storage[found], "metadata-collision-{d}", .{candidate});
+        if (default_context.hash(key) & 0xff != 0) continue;
+        lengths[found] = key.len;
+        found += 1;
+    }
+
+    var keyed_buckets: [4]u64 = @splat(0);
+    for (storage, lengths) |bytes, len| {
+        const bucket: u8 = @truncate(keyed_context.hash(bytes[0..len]));
+        keyed_buckets[bucket / 64] |= @as(u64, 1) << @intCast(bucket % 64);
+    }
+    var dispersed: usize = 0;
+    for (keyed_buckets) |bits| dispersed += @popCount(bits);
+    try std.testing.expect(dispersed > family_len / 2);
+
+    var map: ObjectNameMapUnmanaged(u8) = .{};
+    defer map.deinit(std.testing.allocator);
+    try map.put(std.testing.allocator, "name\x00left", 1, keyed_context);
+    try map.put(std.testing.allocator, "name\x00right", 2, keyed_context);
+    try std.testing.expectEqual(@as(?u8, 1), map.get(keyed_context, "name\x00left"));
+    try std.testing.expectEqual(@as(?u8, 2), map.get(keyed_context, "name\x00right"));
+    try std.testing.expect(map.get(keyed_context, "name\x00missing") == null);
+    try std.testing.expectEqual(
+        @sizeOf(std.StringHashMapUnmanaged(u8)),
+        @sizeOf(ObjectNameMapUnmanaged(u8)),
+    );
+}
+
+test "Object named metadata competing first writers share one context" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const Owner = CApiObjectOwner;
+    const finishOwner = struct {
+        fn finish(_: *Owner) void {}
+    }.finish;
+    var owner = Owner{
+        .allocator = allocator,
+        .class_ref = null,
+        .finish_fn = finishOwner,
+    };
+    var object = Object{};
+    var descriptor_cell = Object{};
+    try object.setCApiObjectOwner(allocator, &owner);
+    defer {
+        owner.finishOnce();
+        const storage_state = object.storageState().?;
+        const cold = object.coldState().?;
+        if (object.accessorsMap()) |accessors| {
+            var keys = accessors.keyIterator();
+            while (keys.next()) |key| allocator.free(key.*);
+            accessors.deinit(allocator);
+            allocator.destroy(accessors);
+        }
+        if (object.attrsMap()) |attrs| {
+            var keys = attrs.keyIterator();
+            while (keys.next()) |key| allocator.free(key.*);
+            attrs.deinit(allocator);
+            allocator.destroy(attrs);
+        }
+        if (object.privateBrands()) |brands| {
+            brands.deinit(allocator);
+            allocator.destroy(brands);
+        }
+        if (object.keyOrder()) |order| {
+            for (order.items) |entry| if (entry.owned) allocator.free(entry.key);
+            order.deinit(allocator);
+            allocator.destroy(order);
+        }
+        allocator.destroy(cold);
+        allocator.destroy(storage_state);
+    }
+
+    var start = std.atomic.Value(bool).init(false);
+    const Worker = struct {
+        fn run(target: *Object, alloc: std.mem.Allocator, cell: *Object, start_flag: *std.atomic.Value(bool), operation: u8) void {
+            while (!start_flag.load(.acquire)) std.atomic.spinLoopHint();
+            switch (operation) {
+                0 => target.setAttr(alloc, "attr\x00name", .{ .writable = false }) catch @panic("setAttr failed"),
+                1 => target.setAccessor(alloc, "accessor\x00name", Value.num(7), null) catch @panic("setAccessor failed"),
+                2 => target.addPrivateBrand(alloc, "brand\x00name") catch @panic("addPrivateBrand failed"),
+                3 => _ = target.installCustomAccessorDescriptorCell("custom\x00name", cell) catch @panic("custom descriptor failed"),
+                else => unreachable,
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, operation|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ &object, allocator, &descriptor_cell, &start, @as(u8, @intCast(operation)) });
+    start.store(true, .release);
+    for (threads) |thread| thread.join();
+
+    const hash_context = object.storageState().?.named_hash_context orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!object.getAttr("attr\x00name").writable);
+    try std.testing.expectEqual(@as(f64, 7), object.getAccessor("accessor\x00name").?.get.?.asNum());
+    try std.testing.expect(object.hasPrivateBrand("brand\x00name"));
+    try std.testing.expectEqual(&descriptor_cell, object.customAccessorDescriptorCell("custom\x00name").?);
+    try std.testing.expect(object.attrsMap().?.contains(hash_context, "attr\x00name"));
+    try std.testing.expect(object.accessorsMap().?.contains(hash_context, "accessor\x00name"));
+    try std.testing.expect(object.privateBrands().?.contains(hash_context, "brand\x00name"));
+    try std.testing.expect(owner.custom_accessor_cells.contains(hash_context, "custom\x00name"));
+}
+
+test "Object named metadata first accessor insertion is failure atomic" {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root = try Shape.createRoot(shape_arena.allocator());
+    const occupied = try root.transition("existing");
+    var observed_failure = false;
+    var observed_success = false;
+
+    for (0..16) |fail_index| {
+        var backing = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer backing.deinit();
+        var failing: std.testing.FailingAllocator = .init(backing.allocator(), .{ .fail_index = fail_index });
+        var object = Object{ .shape = occupied };
+        object.inline_slots[0] = Value.num(1);
+
+        if (object.setAccessor(failing.allocator(), "accessor\x00oom", Value.num(7), null)) |_| {
+            observed_success = true;
+            try std.testing.expect(object.storageState().?.named_hash_context != null);
+            try std.testing.expectEqual(@as(f64, 7), object.getAccessor("accessor\x00oom").?.get.?.asNum());
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            observed_failure = true;
+            try std.testing.expect(object.getAccessor("accessor\x00oom") == null);
+            if (object.storageState()) |storage_state| try std.testing.expect(storage_state.named_hash_context == null);
+            var snapshot = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer snapshot.deinit();
+            const keys = try object.ownKeys(snapshot.allocator());
+            try std.testing.expectEqual(@as(usize, 1), keys.len);
+            try std.testing.expectEqualStrings("existing", keys[0]);
+        }
+    }
+    try std.testing.expect(observed_failure);
+    try std.testing.expect(observed_success);
+}
+
+test "Object named metadata data descriptor rollback removes first context" {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root = try Shape.createRoot(shape_arena.allocator());
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    root.owner.arena = failing.allocator();
+
+    var backing = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer backing.deinit();
+    var object = Object{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        object.setOwnWithAttr(
+            backing.allocator(),
+            root,
+            "descriptor\x00oom",
+            Value.num(1),
+            .{ .writable = false },
+        ),
+    );
+    try std.testing.expect(object.getOwn("descriptor\x00oom") == null);
+    try std.testing.expectEqual(PropAttr{}, object.getAttr("descriptor\x00oom"));
+    try std.testing.expect(object.storageState().?.named_hash_context == null);
+    try std.testing.expectEqual(@as(usize, 0), object.attrsMap().?.count());
+}
+
+test "Object named metadata singleton allocation failures do not publish context" {
+    var backing = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer backing.deinit();
+    const allocator = backing.allocator();
+
+    var attr_object = Object{};
+    const attr_cold = try attr_object.ensureCold(allocator);
+    const attrs = try allocator.create(ObjectNameMapUnmanaged(PropAttr));
+    attrs.* = .{};
+    attr_cold.attrs = attrs;
+    var attr_failure: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        attr_object.setAttr(attr_failure.allocator(), "attr\x00oom", .{ .writable = false }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), attrs.count());
+    try std.testing.expect(attr_object.storageState().?.named_hash_context == null);
+
+    var brand_object = Object{};
+    const brand_cold = try brand_object.ensureCold(allocator);
+    const brands = try allocator.create(ObjectNameMapUnmanaged(void));
+    brands.* = .{};
+    brand_cold.private_brands = brands;
+    var brand_failure: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        brand_object.addPrivateBrand(brand_failure.allocator(), "brand\x00oom"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), brands.count());
+    try std.testing.expect(brand_object.storageState().?.named_hash_context == null);
+
+    const Owner = CApiObjectOwner;
+    const finishOwner = struct {
+        fn finish(_: *Owner) void {}
+    }.finish;
+    var owner = Owner{
+        .allocator = allocator,
+        .class_ref = null,
+        .finish_fn = finishOwner,
+    };
+    var custom_object = Object{};
+    var descriptor_cell = Object{};
+    try custom_object.setCApiObjectOwner(allocator, &owner);
+    var custom_failure: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+    owner.allocator = custom_failure.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        custom_object.installCustomAccessorDescriptorCell("custom\x00oom", &descriptor_cell),
+    );
+    try std.testing.expectEqual(@as(usize, 0), owner.custom_accessor_cells.count());
+    try std.testing.expect(custom_object.storageState().?.named_hash_context == null);
+}
+
+test "Object named metadata shape scratch indexes do not persist a context" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const root = try Shape.createRoot(allocator);
+    const occupied = try root.transition("shape\x00name");
+    var shaped = Object{ .shape = occupied };
+    shaped.inline_slots[0] = Value.num(1);
+    const keys = try shaped.ownKeys(allocator);
+    try std.testing.expectEqual(@as(usize, 1), keys.len);
+    try std.testing.expectEqualStrings("shape\x00name", keys[0]);
+    try std.testing.expect(shaped.storageState() == null);
+
+    try shaped.ensureKeyOrder(allocator);
+    try std.testing.expect(shaped.storageState().?.named_hash_context == null);
+    try std.testing.expectEqual(@as(usize, 1), shaped.keyOrder().?.items.len);
+}
+
 test "object named properties serialize concurrent same-name writes" {
     const root = try Shape.createRoot(std.heap.page_allocator);
     var object = Object{};
@@ -7348,11 +7782,12 @@ test "initialized data descriptor restores prior attributes on shape OOM" {
     root.owner.arena = failing.allocator();
 
     const previous = PropAttr{ .writable = true, .enumerable = false, .configurable = true };
-    var attrs: std.StringHashMapUnmanaged(PropAttr) = .empty;
+    const hash_context = ObjectNameHashContext{ .seed = 0x9a5b_47c3_2de1_806f };
+    var attrs: ObjectNameMapUnmanaged(PropAttr) = .{};
     defer attrs.deinit(std.testing.allocator);
-    try attrs.put(std.testing.allocator, "field", previous);
+    try attrs.put(std.testing.allocator, "field", previous, hash_context);
     var cold = ObjectColdState{ .attrs = &attrs };
-    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator };
+    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator, .named_hash_context = hash_context };
     storage.cold.store(&cold, .monotonic);
     var object = Object{};
     object.storage.store(&storage, .monotonic);
@@ -7873,7 +8308,7 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     const indexed_shape = try root.transition("0");
     try std.testing.expect(Object.prepareInlineLiteralShape(root, indexed_shape, 1) == null);
 
-    var accessor_map: std.StringHashMapUnmanaged(Accessor) = .empty;
+    var accessor_map: ObjectNameMapUnmanaged(Accessor) = .{};
     var accessored = Object{};
     accessored.initInlineSlots();
     var accessored_cold = ObjectColdState{ .accessors = .init(&accessor_map) };
@@ -7882,7 +8317,7 @@ test "fixed-shape object allocation publishes validated literal shape into inlin
     accessored.storage.store(&accessored_storage, .monotonic);
     try std.testing.expect(!accessored.initializePreparedInlineLiteralShape(prepared, &values));
 
-    var attrs_map: std.StringHashMapUnmanaged(PropAttr) = .empty;
+    var attrs_map: ObjectNameMapUnmanaged(PropAttr) = .{};
     var attributed_cold = ObjectColdState{ .attrs = &attrs_map };
     var attributed = Object{};
     var attributed_storage = ObjectStorageState{ .owner_allocator = arena.allocator() };
@@ -7998,9 +8433,10 @@ test "named deletion OOM leaves shape slots and order exact" {
 }
 
 test "accessor deletion OOM preserves accessor and creation order" {
-    var accessors: std.StringHashMapUnmanaged(Accessor) = .empty;
+    const hash_context = ObjectNameHashContext{ .seed = 0x85bd_63a1_4ec7_209f };
+    var accessors: ObjectNameMapUnmanaged(Accessor) = .{};
     defer accessors.deinit(std.testing.allocator);
-    try accessors.put(std.testing.allocator, "accessor", .{ .get = Value.num(7) });
+    try accessors.put(std.testing.allocator, "accessor", .{ .get = Value.num(7) }, hash_context);
     var order = std.ArrayListUnmanaged(KeyOrderEntry).empty;
     defer order.deinit(std.testing.allocator);
     try order.append(std.testing.allocator, .{ .key = "accessor" });
@@ -8008,7 +8444,7 @@ test "accessor deletion OOM preserves accessor and creation order" {
         .accessors = .init(&accessors),
         .key_order = .init(&order),
     };
-    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator };
+    var storage = ObjectStorageState{ .owner_allocator = std.testing.allocator, .named_hash_context = hash_context };
     storage.cold.store(&cold, .monotonic);
     var object = Object{};
     object.storage.store(&storage, .monotonic);

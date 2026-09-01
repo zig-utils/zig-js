@@ -5332,10 +5332,12 @@ test "gc binding: real Object graph — proto/slots/accessors survive, garbage s
     holder.* = .{};
     const acc_target = try heap.create(Object, .object);
     acc_target.* = .{};
-    const map = try a.create(std.StringHashMapUnmanaged(value.Accessor));
+    const hash_context = value.ObjectNameHashContext{ .seed = 0x57d2_3c9a_b410_68ef };
+    const map = try a.create(value.ObjectNameMapUnmanaged(value.Accessor));
     map.* = .{};
-    try map.put(a, "x", .{ .get = Value.obj(acc_target), .set = null });
+    try map.put(a, "x", .{ .get = Value.obj(acc_target), .set = null }, hash_context);
     const holder_cold = try holder.ensureCold(a);
+    holder.storageState().?.named_hash_context = hash_context;
     holder_cold.accessors.store(map, .monotonic);
     try eng.roots.append(a, holder);
 

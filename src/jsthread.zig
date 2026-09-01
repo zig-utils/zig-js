@@ -2739,13 +2739,13 @@ fn denseAtomicsIndex(o: *value.Object, key: []const u8) ?usize {
 
 fn attrUnlocked(o: *const value.Object, key: []const u8) value.PropAttr {
     if (o.attrsMap()) |m| {
-        if (m.get(key)) |a| return a;
+        if (m.get(o.nameHashContextUnlocked(), key)) |a| return a;
     }
     return .{};
 }
 
 fn accessorUnlocked(o: *const value.Object, key: []const u8) bool {
-    if (o.accessorsMap()) |m| return m.get(key) != null;
+    if (o.accessorsMap()) |m| return m.get(o.nameHashContextUnlocked(), key) != null;
     return false;
 }
 
