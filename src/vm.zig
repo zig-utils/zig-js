@@ -15318,6 +15318,16 @@ test "vm: computed tagged templates preserve reference order and recursion" {
         )).asStr(),
     );
 
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\var firstTemplate;
+        \\function remember(strings) {
+        \\  if (firstTemplate === undefined) firstTemplate = strings;
+        \\  return strings === firstTemplate;
+        \\}
+        \\function* invokeTemplate() { return remember`vm${1}site`; }
+        \\invokeTemplate().next().value && invokeTemplate().next().value
+    )).asBool());
+
     try std.testing.expectEqualStrings(
         "7090:bk|7091:bkg|7092:bkgs|7093:bkgsc",
         (try vmRun(arena.allocator(),

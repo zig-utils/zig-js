@@ -3054,6 +3054,83 @@ const SymbolIndex = std.HashMapUnmanaged(
     std.hash_map.default_max_load_percentage,
 );
 
+const SecureIdentityHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), identity: usize) u64 {
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&identity));
+    }
+
+    pub fn eql(_: @This(), left: usize, right: usize) bool {
+        return left == right;
+    }
+};
+
+fn SecureIdentityMapUnmanaged(comptime MapValue: type) type {
+    const Index = std.HashMapUnmanaged(
+        usize,
+        MapValue,
+        SecureIdentityHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        const Self = @This();
+
+        index: Index = .empty,
+
+        pub fn put(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            interpreter: *Interpreter,
+            identity: usize,
+            map_value: MapValue,
+        ) EvalError!void {
+            const context = interpreter.identity_hash_context orelse
+                SecureIdentityHashContext{ .seed = try interpreter.newSecureHashSeed() };
+            try self.index.putContext(allocator, identity, map_value, context);
+            // Failed first insertion publishes neither the table nor the shared
+            // context, so a catchable OOM can retry from a clean identity index.
+            if (interpreter.identity_hash_context == null) interpreter.identity_hash_context = context;
+        }
+
+        fn getOrPut(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            interpreter: *Interpreter,
+            identity: usize,
+        ) EvalError!Index.GetOrPutResult {
+            const context = interpreter.identity_hash_context orelse
+                SecureIdentityHashContext{ .seed = try interpreter.newSecureHashSeed() };
+            const result = try self.index.getOrPutContext(allocator, identity, context);
+            if (interpreter.identity_hash_context == null) interpreter.identity_hash_context = context;
+            return result;
+        }
+
+        pub fn get(self: *const Self, interpreter: *const Interpreter, identity: usize) ?MapValue {
+            const context = interpreter.identity_hash_context orelse return null;
+            return self.index.getContext(identity, context);
+        }
+
+        fn contains(self: *const Self, interpreter: *const Interpreter, identity: usize) bool {
+            const context = interpreter.identity_hash_context orelse return false;
+            return self.index.containsContext(identity, context);
+        }
+
+        fn count(self: *const Self) usize {
+            return self.index.count();
+        }
+
+        pub fn valueIterator(self: *const Self) Index.ValueIterator {
+            return self.index.valueIterator();
+        }
+
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.index.deinit(allocator);
+        }
+    };
+}
+
 pub const Interpreter = struct {
     arena: std.mem.Allocator,
     /// Context-owned freeable backing for invocation-local indexes whose keys
@@ -3433,6 +3510,10 @@ pub const Interpreter = struct {
     /// parallel execution.
     secure_hash_prng_seeded: bool = false,
     secure_hash_prng: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
+    /// One lazy exact-identity context covers interpreter-local source-site and
+    /// compiled-RegExp indexes. Interpreters are mutator-local, so publication
+    /// needs no shared-realm synchronization.
+    identity_hash_context: ?SecureIdentityHashContext = null,
     /// Host-defined `[[CanBlock]]` policy for this VM. Spawned `$262.agent`
     /// threads override it through their threadlocal agent record.
     main_can_block: bool = true,
@@ -3474,7 +3555,7 @@ pub const Interpreter = struct {
     /// The specific function-declaration nodes eligible for the legacy copy.
     /// Names are used to pre-create var bindings; nodes decide whether a
     /// particular same-named declaration updates that binding at runtime.
-    annexb_legacy_nodes: ?*std.AutoHashMapUnmanaged(*const Node, void) = null,
+    annexb_legacy_nodes: ?*SecureIdentityMapUnmanaged(void) = null,
     /// One-shot proof for the next function-body statement list. The function's
     /// static AST scan found no Annex B candidate, so evalStatements can skip
     /// building empty invocation-local maps. It is consumed before any nested
@@ -3533,7 +3614,7 @@ pub const Interpreter = struct {
     /// immutable compiled programs belong to a shared realm. This both avoids
     /// rebuilding the Thompson VM for every `exec` and prevents worker threads
     /// from sharing mutable matcher state.
-    regex_matchers: std.AutoHashMapUnmanaged(*regex.Regex, regex.Regex.Matcher) = .empty,
+    regex_matchers: SecureIdentityMapUnmanaged(regex.Regex.Matcher) = .{},
     signal: Signal = .none,
     ret_value: Value = Value.undef(),
     /// The `this` binding for the currently-executing function (undefined at
@@ -3565,13 +3646,13 @@ pub const Interpreter = struct {
     /// reused on every later evaluation, so `tag`...`` hands the tag the SAME
     /// object each time. A child realm re-parses its source, producing distinct
     /// nodes, so realms never share an entry.
-    template_cache: std.AutoHashMapUnmanaged(*const anyopaque, Value) = .empty,
+    template_cache: SecureIdentityMapUnmanaged(Value) = .{},
     /// A string literal is one immutable primitive per AST site, not a fresh
     /// allocation on every tree-walker visit. Besides avoiding needless churn,
     /// this lets parallel marking converge while another mutator loops over a
     /// literal. The cache is interpreter-local, arena-backed, and traced as an
     /// interpreter root while the activation is registered with the Context.
-    string_literal_cache: std.AutoHashMapUnmanaged(*const Node, Value) = .empty,
+    string_literal_cache: SecureIdentityMapUnmanaged(Value) = .{},
     /// [[HomeObject]] of the executing method (for `super.x`) and the superclass
     /// constructor of the executing derived constructor (for `super(...)`).
     home_object: ?*value.Object = null,
@@ -5002,7 +5083,7 @@ pub const Interpreter = struct {
             else => return false,
         };
         if (self.annexb_legacy_nodes) |set| {
-            if (set.contains(fn_node)) {
+            if (set.contains(self, @intFromPtr(fn_node))) {
                 const name = fn_node.func_decl.name;
                 const fnv = self.env.get(name) orelse Value.undef();
                 try self.globalDefineDeletable(name, fnv);
@@ -5319,9 +5400,9 @@ pub const Interpreter = struct {
             .number => |n| Value.num(n),
             .bigint_lit => |b| if (b.text) |s| try self.makeBigIntText(s) else try self.makeBigInt(b.value),
             .string => |s| blk: {
-                if (self.string_literal_cache.get(node)) |cached| break :blk cached;
+                if (self.string_literal_cache.get(self, @intFromPtr(node))) |cached| break :blk cached;
                 const literal = try Value.strAlloc(self.arena, s);
-                try self.string_literal_cache.put(self.arena, node, literal);
+                try self.string_literal_cache.put(self.arena, self, @intFromPtr(node), literal);
                 break :blk literal;
             },
             .boolean => |b| Value.boolVal(b),
@@ -5780,7 +5861,7 @@ pub const Interpreter = struct {
                 const fnv = try self.makeFunction(fnode, current_block_env);
                 try self.tempEnvRoot(block_env_root, block_env).put(fnode.name, fnv);
                 if (self.annexb_legacy_nodes) |set| {
-                    if (set.contains(node)) try self.globalDefineDeletable(fnode.name, fnv);
+                    if (set.contains(self, @intFromPtr(node))) try self.globalDefineDeletable(fnode.name, fnv);
                 }
                 break :blk Value.undef();
             },
@@ -7172,17 +7253,17 @@ pub const Interpreter = struct {
         };
     }
 
-    fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *SecureStringMembership, nodes: *std.AutoHashMapUnmanaged(*const Node, void)) EvalError!void {
+    fn collectAnnexBLegacy(self: *Interpreter, stmts: []*Node, depth: u32, out: *SecureStringMembership, nodes: *SecureIdentityMapUnmanaged(void)) EvalError!void {
         const Collector = struct {
             interpreter: *Interpreter,
             names: *SecureStringMembership,
-            nodes: *std.AutoHashMapUnmanaged(*const Node, void),
+            nodes: *SecureIdentityMapUnmanaged(void),
 
             pub fn add(collector: *@This(), node: *const Node, name: []const u8) EvalError!void {
                 const machine = collector.interpreter;
                 const scratch = machine.scratch_allocator orelse machine.arena;
                 _ = try collector.names.getOrPutSecure(machine, scratch, name);
-                try collector.nodes.put(scratch, node, {});
+                try collector.nodes.put(scratch, machine, @intFromPtr(node), {});
             }
         };
         var collector = Collector{ .interpreter = self, .names = out, .nodes = nodes };
@@ -7209,7 +7290,7 @@ pub const Interpreter = struct {
         // as `undefined`. Sloppy code only (strict block functions stay purely
         // block-scoped). The set stays live for nested blocks via `annexb_legacy`.
         var annexb_set: SecureStringMembership = .{};
-        var annexb_nodes: std.AutoHashMapUnmanaged(*const Node, void) = .empty;
+        var annexb_nodes: SecureIdentityMapUnmanaged(void) = .{};
         const saved_annexb = self.annexb_legacy;
         const saved_annexb_nodes = self.annexb_legacy_nodes;
         const annexb_scratch = self.scratch_allocator orelse self.arena;
@@ -8926,7 +9007,7 @@ pub const Interpreter = struct {
     /// evaluation — and the SAME object whether the site runs on the tree-walker
     /// or the bytecode VM (both key `template_cache` on the node pointer).
     pub fn getTemplateObject(self: *Interpreter, site: *const Node) EvalError!*value.Object {
-        if (self.template_cache.get(@ptrCast(site))) |cached| return cached.asObj();
+        if (self.template_cache.get(self, @intFromPtr(site))) |cached| return cached.asObj();
         const t = site.tagged_template;
         const s = (try self.newArray()).asObj();
         for (t.cooked) |c| try s.appendElement(self.arena, if (c) |cv| try Value.strAlloc(self.arena, cv) else Value.undef());
@@ -8936,7 +9017,7 @@ pub const Interpreter = struct {
         try s.setOwn(self.arena, self.root_shape, "raw", Value.obj(raw_arr));
         try s.setAttr(self.arena, "raw", .{ .writable = false, .enumerable = false, .configurable = false });
         try freezeTemplateArray(self, s);
-        try self.template_cache.put(self.arena, @ptrCast(site), Value.obj(s));
+        try self.template_cache.put(self.arena, self, @intFromPtr(site), Value.obj(s));
         return s;
     }
 
@@ -11831,7 +11912,7 @@ pub const Interpreter = struct {
     }
 
     fn regexMatcher(self: *Interpreter, re: *regex.Regex) EvalError!*regex.Regex.Matcher {
-        const entry = try self.regex_matchers.getOrPut(self.arena, re);
+        const entry = try self.regex_matchers.getOrPut(self.arena, self, @intFromPtr(re));
         if (!entry.found_existing) entry.value_ptr.* = re.matcher();
         return entry.value_ptr;
     }
@@ -53978,6 +54059,92 @@ test "Interpreter Symbol index first publication is lazy and failure atomic" {
     try std.testing.expectEqual(&symbol, installed.cachedSymbol("\x00s3\x00right").?);
 }
 
+test "Interpreter identity caches disperse pointer collisions and publish failure atomically" {
+    var shape_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shape_arena.deinit();
+    const root_shape = try Shape.createRoot(shape_arena.allocator());
+    var env = Environment{ .arena = std.testing.allocator };
+    var machine = Interpreter{ .arena = std.testing.allocator, .env = &env, .root_shape = root_shape };
+
+    var lazy: SecureIdentityMapUnmanaged(u32) = .{};
+    defer lazy.deinit(std.testing.allocator);
+    try std.testing.expect(lazy.get(&machine, 1) == null);
+    try std.testing.expect(!lazy.contains(&machine, 1));
+    try std.testing.expect(machine.identity_hash_context == null);
+
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, lazy.put(failing.allocator(), &machine, 1, 11));
+    try std.testing.expect(machine.identity_hash_context == null);
+    try std.testing.expectEqual(@as(usize, 0), lazy.count());
+    try std.testing.expectEqual(@as(usize, 0), lazy.index.capacity());
+
+    try lazy.put(std.testing.allocator, &machine, 1, 11);
+    try std.testing.expectEqual(@as(u32, 11), lazy.get(&machine, 1).?);
+
+    // These integer identities all occupy one bucket under the historical
+    // unkeyed hash. A fixed non-zero context must disperse them while exact
+    // pointer-sized equality keeps every cache site distinct.
+    const target_mask: u64 = 1023;
+    const collision_count = 32;
+    var identities: [collision_count]usize = undefined;
+    var found: usize = 0;
+    var candidate: usize = 2;
+    while (found != identities.len) : (candidate += 1) {
+        if ((SecureIdentityHashContext{ .seed = 0 }).hash(candidate) & target_mask == 0) {
+            identities[found] = candidate;
+            found += 1;
+        }
+    }
+
+    var collision_machine = Interpreter{ .arena = std.testing.allocator, .env = &env, .root_shape = root_shape };
+    collision_machine.identity_hash_context = .{ .seed = 0x4944_454e_5449_5459 };
+    var collision_map: SecureIdentityMapUnmanaged(u32) = .{};
+    defer collision_map.deinit(std.testing.allocator);
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (identities, 0..) |identity, index| {
+        try std.testing.expectEqual(@as(u64, 0), (SecureIdentityHashContext{ .seed = 0 }).hash(identity) & target_mask);
+        const bucket = collision_machine.identity_hash_context.?.hash(identity) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        try collision_map.put(std.testing.allocator, &collision_machine, identity, @intCast(index));
+    }
+    try std.testing.expect(occupied_count >= 24);
+    for (identities, 0..) |identity, index|
+        try std.testing.expectEqual(@as(u32, @intCast(index)), collision_map.get(&collision_machine, identity).?);
+    try std.testing.expect(collision_map.get(&collision_machine, candidate) == null);
+
+    var sibling: SecureIdentityMapUnmanaged(void) = .{};
+    defer sibling.deinit(std.testing.allocator);
+    try sibling.put(std.testing.allocator, &collision_machine, identities[0], {});
+    try std.testing.expectEqual(@as(u64, 0x4944_454e_5449_5459), collision_machine.identity_hash_context.?.seed);
+    try std.testing.expect(sibling.contains(&collision_machine, identities[0]));
+}
+
+test "string literal cache preserves exact AST-site identity" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var parser = try Parser.init(allocator,
+        \\"same literal site";
+        \\"same literal site";
+    );
+    const program = try parser.parseProgram();
+    var env = Environment{ .arena = allocator };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+
+    const first = try machine.eval(program.program[0]);
+    const repeated = try machine.eval(program.program[0]);
+    const distinct = try machine.eval(program.program[1]);
+    try std.testing.expectEqual(first.rawBits(), repeated.rawBits());
+    try std.testing.expect(first.rawBits() != distinct.rawBits());
+    try std.testing.expectEqual(@as(usize, 2), machine.string_literal_cache.count());
+    try std.testing.expect(machine.identity_hash_context != null);
+}
+
 test "Symbol description ownership copies borrowed bytes and unwinds allocation failures" {
     const Probe = struct {
         fn run(backing: std.mem.Allocator) !void {
@@ -60713,6 +60880,15 @@ test "interpreter template literals" {
         \\elemDesc.enumerable === true && elemDesc.writable === false && elemDesc.configurable === false &&
         \\lenDesc.enumerable === false && lenDesc.writable === false && lenDesc.configurable === false &&
         \\t.extra === undefined && t.raw.extra === undefined
+    )).asBool());
+    try std.testing.expect((try evalSource(a,
+        \\let first, exact = true;
+        \\function tag(strings) {
+        \\  if (first === undefined) first = strings;
+        \\  exact = exact && strings === first;
+        \\}
+        \\for (let i = 0; i < 4; i++) tag`same${i}site`;
+        \\exact
     )).asBool());
 }
 
