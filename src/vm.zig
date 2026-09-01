@@ -35,6 +35,7 @@ const Interpreter = interp.Interpreter;
 const Environment = interp.Environment;
 const Function = interp.Function;
 const EvalError = interp.EvalError;
+const PrivateNameMap = interp.PrivateNameMap;
 
 const async_gen_request_reserve_granularity: usize = 16;
 const native_tier_entry_threshold: u32 = 3;
@@ -345,7 +346,7 @@ pub const Handler = struct {
     environment: ?*interp.Environment = null,
     environment_depth: u32 = 0,
     class_strict_depth: u32 = 0,
-    private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    private_map: ?*const PrivateNameMap = null,
 
     pub const none: u32 = std.math.maxInt(u32);
 };
@@ -494,7 +495,7 @@ pub const Generator = struct {
     strict: bool = false,
     // Immutable lexical metadata published with the activation. The map and
     // its strings are Context-arena-owned, not moving GC cells.
-    private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    private_map: ?*const PrivateNameMap = null,
     field_init_ctx: bool = false,
     exec: Exec = .{},
     env: *Environment,
@@ -5715,7 +5716,7 @@ test "callee parameter initialization restores metadata after allocation failure
     const tdz_marker = try gc_mod.allocObj(allocator);
     tdz_marker.* = .{};
     const caller_params = [_]ast.Param{.{ .name = "caller" }};
-    const caller_private_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const caller_private_map = PrivateNameMap.init(0x5052_4956_4154_4501);
     var failures: usize = 0;
     var succeeded = false;
     for (0..128) |fail_index| {
@@ -12934,7 +12935,7 @@ const Activation = struct {
     saved_cur_module: []const u8,
     saved_eval_nt: bool,
     saved_bytecode_execution_mode: interp.BytecodeExecutionMode,
-    saved_pm: ?*const std.StringHashMapUnmanaged([]const u8),
+    saved_pm: ?*const PrivateNameMap,
     saved_active_call_frame: ?*interp.LegacyCallFrame,
     saved_debug_call_frame: ?*interp.DebugCallFrame,
     saved_stack_trace_call_frame: ?*interp.StackTraceCallFrame,

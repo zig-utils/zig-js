@@ -6,6 +6,7 @@ const agent = @import("agent.zig");
 const Shape = @import("shape.zig").Shape;
 const regex = @import("regex");
 const regexp_compat = @import("regexp_compat.zig");
+const PrivateNameMap = @import("private_name_map.zig").PrivateNameMap;
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
@@ -264,7 +265,7 @@ pub const Parser = struct {
     in_class: bool = false,
     /// Direct eval's exact enclosing PrivateEnvironment. Locally declared class
     /// names are checked normally; other private uses must occur in this map.
-    eval_private_names: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    eval_private_names: ?*const PrivateNameMap = null,
     /// True while parsing strict-mode code: the program (or an enclosing
     /// function) had a `"use strict"` directive prologue, a function body has
     /// its own such directive, or we're inside a class (always strict). Inherited
@@ -5929,7 +5930,7 @@ test "private eval contexts validate exact enclosing names" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    var names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var names = PrivateNameMap.init(0x5052_4956_4154_4501);
     try names.put(allocator, "#outer", "#outer\x001");
     const cases = [_]struct { source: []const u8, valid: bool }{
         .{ .source = "this.#outer", .valid = true },

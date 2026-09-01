@@ -46,6 +46,8 @@ const fetch_headers = @import("fetch_headers.zig");
 const strcell = @import("strcell.zig");
 const StringCell = strcell.StringCell;
 
+pub const PrivateNameMap = @import("private_name_map.zig").PrivateNameMap;
+
 const Node = ast.Node;
 const Value = value.Value;
 pub const DynamicImportResult = enum { success, failure, pending };
@@ -931,7 +933,7 @@ pub const Environment = struct {
     /// VM ClassDefinitionEvaluation installs its per-evaluation private-name map
     /// only after heritage has completed. The class lexical Environment owns the
     /// exact outer map needed when its computed names finish or unwind.
-    class_outer_private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    class_outer_private_map: ?*const PrivateNameMap = null,
     class_private_environment_active: bool = false,
     /// True only when this Environment itself was allocated as a GC cell. The
     /// root realm Environment is embedded in Context and remains false. This is
@@ -2695,7 +2697,7 @@ pub const Function = struct {
     /// references through this map (`getWithEval(){ return eval("this.#x") }`).
     /// Captured lexically by every function, including arrows and nested functions.
     /// The map and its storage-key strings are immutable Context-arena metadata.
-    private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    private_map: ?*const PrivateNameMap = null,
     /// Arrow functions capture `this` lexically at creation (like `home_object`
     /// and `super_ctor`); every call uses this captured value and ignores any
     /// provided `this` (a `.call`/`.apply`/`.bind` thisArg, or the receiver of a
@@ -3464,7 +3466,7 @@ pub const Interpreter = struct {
     /// The private-name map of the class whose method/constructor/static element is
     /// currently executing (see Function.private_map). A direct eval uses it to
     /// rewrite the private names in the eval'd code to the right storage keys.
-    current_private_map: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    current_private_map: ?*const PrivateNameMap = null,
     /// True while executing eval'd code: EvalDeclarationInstantiation creates
     /// new global var/function bindings as *deletable* (configurable), unlike a
     /// script's GlobalDeclarationInstantiation (D = false). Saved/restored
@@ -7589,12 +7591,12 @@ pub const Interpreter = struct {
         return std.fmt.allocPrint(self.arena, "{s}\x00{d}", .{ name, id });
     }
 
-    fn remapPrivateName(map: *const std.StringHashMapUnmanaged([]const u8), name: []const u8) []const u8 {
+    fn remapPrivateName(map: *const PrivateNameMap, name: []const u8) []const u8 {
         if (!value.isRawPrivateName(name)) return name;
         return map.get(name) orelse name;
     }
 
-    fn rewritePrivateNamesInFunction(self: *Interpreter, f: *ast.FunctionNode, map: *const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+    fn rewritePrivateNamesInFunction(self: *Interpreter, f: *ast.FunctionNode, map: *const PrivateNameMap) EvalError!void {
         for (f.params) |p| {
             if (p.default) |d| try self.rewritePrivateNamesInNode(d, map);
             if (p.pattern) |pat| try self.rewritePrivateNamesInNode(pat, map);
@@ -7602,7 +7604,7 @@ pub const Interpreter = struct {
         try self.rewritePrivateNamesInNode(f.body, map);
     }
 
-    fn rewritePrivateNamesInNode(self: *Interpreter, node: *Node, map: *const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+    fn rewritePrivateNamesInNode(self: *Interpreter, node: *Node, map: *const PrivateNameMap) EvalError!void {
         switch (node.*) {
             .identifier => |name| node.* = .{ .identifier = remapPrivateName(map, name) },
             .unary => |u| try self.rewritePrivateNamesInNode(u.operand, map),
@@ -7642,7 +7644,7 @@ pub const Interpreter = struct {
             .await_expr => |a| try self.rewritePrivateNamesInNode(a.argument, map),
             .class_expr => |c| {
                 if (c.superclass) |sc| try self.rewritePrivateNamesInNode(sc, map);
-                var nested_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+                var nested_map = map.emptyClone();
                 defer nested_map.deinit(self.arena);
                 var it = map.iterator();
                 while (it.next()) |entry| try nested_map.put(self.arena, entry.key_ptr.*, entry.value_ptr.*);
@@ -7904,7 +7906,7 @@ pub const Interpreter = struct {
     /// after heritage but before evaluating any computed element name. The map is
     /// immutable once returned and must be reused by class construction: closures
     /// created while evaluating a computed name capture these exact identities.
-    pub fn prepareClassPrivateEnvironment(self: *Interpreter, members: []const ast.ClassMember) EvalError!?*const std.StringHashMapUnmanaged([]const u8) {
+    pub fn prepareClassPrivateEnvironment(self: *Interpreter, members: []const ast.ClassMember) EvalError!?*const PrivateNameMap {
         var has_private_bound_name = false;
         for (members) |member| if (member.key_expr == null and value.isRawPrivateName(member.key)) {
             has_private_bound_name = true;
@@ -7912,8 +7914,12 @@ pub const Interpreter = struct {
         };
         if (!has_private_bound_name) return self.current_private_map;
 
-        const map = try self.arena.create(std.StringHashMapUnmanaged([]const u8));
-        map.* = .empty;
+        // The root Shape owns the realm's atomic hash-key domain, so parallel
+        // class evaluations derive independent contexts without sharing the
+        // Interpreter's invocation-local PRNG state.
+        const seed = try self.root_shape.deriveSecureHashSeed();
+        const map = try self.arena.create(PrivateNameMap);
+        map.* = PrivateNameMap.init(seed);
         for (members) |m| {
             if (m.key_expr != null or !value.isRawPrivateName(m.key) or map.contains(m.key)) continue;
             try map.put(self.arena, m.key, try self.nextPrivateStorageKey(m.key));
@@ -7933,7 +7939,7 @@ pub const Interpreter = struct {
 
     /// Rewrite this class's private names (`#x` → a unique storage key) in member
     /// keys and bodies using an already-created per-evaluation PrivateEnvironment.
-    fn rewriteClassPrivateNamesWithMap(self: *Interpreter, members: []ast.ClassMember, map: *const std.StringHashMapUnmanaged([]const u8)) EvalError!void {
+    fn rewriteClassPrivateNamesWithMap(self: *Interpreter, members: []ast.ClassMember, map: *const PrivateNameMap) EvalError!void {
         for (members) |*m| {
             m.key = remapPrivateName(map, m.key);
             // A computed key (`[expr]`) may itself reference a private name —
@@ -7948,7 +7954,7 @@ pub const Interpreter = struct {
 
     /// Tree-walker entry combines PrivateEnvironment creation and AST rewriting;
     /// VM entry performs creation earlier, before its eagerly lowered keys.
-    fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!?*const std.StringHashMapUnmanaged([]const u8) {
+    fn rewriteClassPrivateNames(self: *Interpreter, members: []ast.ClassMember) EvalError!?*const PrivateNameMap {
         const map = try self.prepareClassPrivateEnvironment(members);
         if (map) |private_map| {
             var has_own = false;
@@ -8044,7 +8050,7 @@ pub const Interpreter = struct {
         source: []const u8,
         heritage: ?PreparedClassHeritage,
         computed_keys: []const Value,
-        private_map: ?*const std.StringHashMapUnmanaged([]const u8),
+        private_map: ?*const PrivateNameMap,
     ) EvalError!Value {
         const saved_strict = self.strict;
         self.strict = true;
@@ -8064,7 +8070,7 @@ pub const Interpreter = struct {
     }
 
     const PreparedPrivateEnvironment = struct {
-        map: ?*const std.StringHashMapUnmanaged([]const u8),
+        map: ?*const PrivateNameMap,
     };
 
     fn buildClass(self: *Interpreter, name: []const u8, inferred_name: []const u8, members_arg: []ast.ClassMember, super_obj: ?*value.Object, super_proto: ?*value.Object, source: []const u8, derived: bool, class_env: *Environment, computed_keys: ?[]const Value, prepared_private: ?PreparedPrivateEnvironment) EvalError!Value {
@@ -59644,6 +59650,37 @@ test "identity serial minting stays unique across threads" {
 
     std.sort.heap(u64, &ids, {}, std.sort.asc(u64));
     for (ids, 1..) |id, expected| try std.testing.expectEqual(@as(u64, @intCast(expected)), id);
+}
+
+test "runtime class private environments preserve reuse shadowing and identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var environment = Environment{ .arena = allocator };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &environment, .root_shape = root_shape };
+
+    const outer_members = [_]ast.ClassMember{
+        .{ .key = "#outer", .is_field = true },
+        .{ .key = "#shared", .is_field = true },
+    };
+    const outer = (try machine.prepareClassPrivateEnvironment(&outer_members)) orelse return error.TestUnexpectedResult;
+    const outer_name = outer.get("#outer") orelse return error.TestUnexpectedResult;
+    const outer_shared = outer.get("#shared") orelse return error.TestUnexpectedResult;
+
+    machine.current_private_map = outer;
+    const public_only = [_]ast.ClassMember{.{ .key = "ordinary", .is_field = true }};
+    try std.testing.expectEqual(outer, (try machine.prepareClassPrivateEnvironment(&public_only)).?);
+
+    const inner_members = [_]ast.ClassMember{
+        .{ .key = "#shared", .is_field = true },
+        .{ .key = "#inner", .is_field = true },
+    };
+    const inner = (try machine.prepareClassPrivateEnvironment(&inner_members)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(outer_name, inner.get("#outer") orelse return error.TestUnexpectedResult);
+    try std.testing.expect(!std.mem.eql(u8, outer_shared, inner.get("#shared") orelse return error.TestUnexpectedResult));
+    try std.testing.expect(inner.get("#inner") != null);
+    try std.testing.expectEqual(@as(usize, 3), inner.count());
 }
 
 test "interpreter class private fields/methods and static blocks" {
