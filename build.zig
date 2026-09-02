@@ -621,7 +621,7 @@ pub fn build(b: *std.Build) void {
 
     const c_api_c_smoke = b.addExecutable(.{
         .name = "c-api-smoke-c",
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .sanitize_thread = tsan }),
     });
     c_api_c_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_smoke.c") });
     c_api_c_smoke.root_module.addIncludePath(b.path("include"));
@@ -631,7 +631,7 @@ pub fn build(b: *std.Build) void {
 
     const c_api_cpp_smoke = b.addExecutable(.{
         .name = "c-api-smoke-cpp",
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true }),
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true, .sanitize_thread = tsan }),
     });
     c_api_cpp_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_smoke.cpp") });
     c_api_cpp_smoke.root_module.addIncludePath(b.path("include"));
@@ -644,7 +644,7 @@ pub fn build(b: *std.Build) void {
     // hosts move ASCII only, where the two forms coincide.
     const c_api_latin1 = b.addExecutable(.{
         .name = "c-api-latin1",
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .sanitize_thread = tsan }),
     });
     c_api_latin1.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_latin1.c") });
     c_api_latin1.root_module.addIncludePath(b.path("include"));
@@ -654,7 +654,7 @@ pub fn build(b: *std.Build) void {
 
     const c_api_inspector_smoke = b.addExecutable(.{
         .name = "c-api-inspector-smoke",
-        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .sanitize_thread = tsan }),
     });
     c_api_inspector_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_inspector_smoke.c") });
     c_api_inspector_smoke.root_module.addIncludePath(b.path("include"));
