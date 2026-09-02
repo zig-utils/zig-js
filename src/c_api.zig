@@ -786,6 +786,39 @@ fn CPrivateIdentityMapUnmanaged(comptime ValueType: type) type {
             return self.getOrPutSecureUsing(allocator, key, newCPrivateIdentityHashContext);
         }
 
+        fn ensureUnusedCapacityWithContext(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            additional: usize,
+            context: CPrivateIdentityHashContext,
+        ) std.mem.Allocator.Error!void {
+            if (self.context) |installed| {
+                std.debug.assert(installed.seed == context.seed);
+                return self.index.ensureUnusedCapacityContext(allocator, @intCast(additional), installed);
+            }
+            try self.index.ensureUnusedCapacityContext(allocator, @intCast(additional), context);
+            self.context = context;
+        }
+
+        fn ensureUnusedCapacitySecureUsing(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            additional: usize,
+            context_provider: CPrivateIdentityContextProvider,
+        ) std.mem.Allocator.Error!void {
+            if (additional == 0) return;
+            const context = self.context orelse try context_provider();
+            return self.ensureUnusedCapacityWithContext(allocator, additional, context);
+        }
+
+        fn ensureUnusedCapacitySecure(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            additional: usize,
+        ) std.mem.Allocator.Error!void {
+            return self.ensureUnusedCapacitySecureUsing(allocator, additional, newCPrivateIdentityHashContext);
+        }
+
         fn get(self: *const Self, key: usize) ?ValueType {
             const context = self.context orelse return null;
             return self.index.getContext(key, context);
@@ -807,6 +840,24 @@ fn CPrivateIdentityMapUnmanaged(comptime ValueType: type) type {
 
         fn capacity(self: *const Self) usize {
             return self.index.capacity();
+        }
+
+        fn putAssumeCapacity(self: *Self, key: usize, mapped_value: ValueType) void {
+            self.index.putAssumeCapacityContext(key, mapped_value, self.context.?);
+        }
+
+        fn iterator(self: *const Self) Index.Iterator {
+            return self.index.iterator();
+        }
+
+        fn valueIterator(self: *const Self) Index.ValueIterator {
+            return self.index.valueIterator();
+        }
+
+        fn resetIfEmpty(self: *Self, allocator: std.mem.Allocator) void {
+            std.debug.assert(self.count() == 0);
+            self.deinit(allocator);
+            self.* = .{};
         }
 
         fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -1221,11 +1272,11 @@ const CContextGroup = struct {
     /// Private EncodedJSValue boundaries expose the engine cell address, so
     /// publishing the same object twice must return the same encoded handle.
     /// Keep one canonical Boxed cell per VM-owned object across sibling realms.
-    private_object_boxes: std.AutoHashMapUnmanaged(*Object, *Boxed) = .empty,
+    private_object_boxes: CPrivateIdentityMapUnmanaged(*Boxed) = .{},
     /// Stable encoded snapshots returned by the private JSArray iterator fast
     /// path. There is no consumer release hook, so vectors live with the VM;
     /// each pointer remains independently revalidatable until group teardown.
-    private_contiguous_vectors: std.AutoHashMapUnmanaged(usize, *PrivateContiguousVector) = .empty,
+    private_contiguous_vectors: CPrivateIdentityMapUnmanaged(*PrivateContiguousVector) = .{},
     /// JSC returns VM small strings for these pure diagnostic projections.
     /// Preserve that raw EncodedJSValue stability across repeated calls.
     no_side_effect_strings: [6]?*Boxed = @splat(null),
@@ -1329,8 +1380,8 @@ const CContextGroup = struct {
     fn reconcilePrivateObjectBoxes(self: *CContextGroup) void {
         const backing = self.primary.gc_cell_backing orelse return;
         while (true) {
-            var stale_key: ?*Object = null;
-            var replacement_key: ?*Object = null;
+            var stale_key: ?usize = null;
+            var replacement_key: ?usize = null;
             var replacement_box: ?*Boxed = null;
             var iterator = self.private_object_boxes.iterator();
             while (iterator.next()) |entry| {
@@ -1341,10 +1392,10 @@ const CContextGroup = struct {
                 }
                 const current = boxed.value.asObj();
                 const realm_id = backing.realmIdForCellAddress(@intFromPtr(current));
-                if (realm_id == ContextMod.GcCellBacking.no_realm or current != entry.key_ptr.*) {
+                if (realm_id == ContextMod.GcCellBacking.no_realm or @intFromPtr(current) != entry.key_ptr.*) {
                     stale_key = entry.key_ptr.*;
                     if (realm_id != ContextMod.GcCellBacking.no_realm) {
-                        replacement_key = current;
+                        replacement_key = @intFromPtr(current);
                         replacement_box = boxed;
                     }
                     break;
@@ -1352,9 +1403,9 @@ const CContextGroup = struct {
             }
             const old = stale_key orelse return;
             _ = self.private_object_boxes.remove(old);
-            if (replacement_key) |current| {
-                if (!self.private_object_boxes.contains(current))
-                    self.private_object_boxes.putAssumeCapacity(current, replacement_box.?);
+            if (replacement_key) |current_key| {
+                if (!self.private_object_boxes.contains(current_key))
+                    self.private_object_boxes.putAssumeCapacity(current_key, replacement_box.?);
             }
         }
     }
@@ -3292,14 +3343,20 @@ fn privateEncodedFromValue(context: *Context, internal: Value) EncodedValue {
                 break :object privateEncodedFromRef(box(context, internal));
             const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
             const object_ptr = internal.asObj();
-            if (group.private_object_boxes.get(object_ptr)) |existing|
+            const object_key = @intFromPtr(object_ptr);
+            if (group.private_object_boxes.get(object_key)) |existing|
                 break :object privateEncodedFromRef(@ptrCast(existing));
+            const first_entry = group.private_object_boxes.count() == 0;
+            group.private_object_boxes.ensureUnusedCapacitySecure(gpa, 1) catch break :object .empty;
             // Private EncodedJSValues are VM cells, not realm handles. Store
             // their stable wrapper in the hidden owner arena so an explicit
             // protect can outlive test-isolation replacement while its Value
             // remains traced from the owner's C-handle table.
-            const created: *Boxed = @ptrCast(@alignCast(privateBoxInOwner(group.primary, context, internal) orelse break :object .empty));
-            group.private_object_boxes.put(gpa, object_ptr, created) catch break :object .empty;
+            const created: *Boxed = @ptrCast(@alignCast(privateBoxInOwner(group.primary, context, internal) orelse {
+                if (first_entry) group.private_object_boxes.resetIfEmpty(gpa);
+                break :object .empty;
+            }));
+            group.private_object_boxes.putAssumeCapacity(object_key, created);
             break :object privateEncodedFromRef(@ptrCast(created));
         },
     };
@@ -11826,7 +11883,7 @@ fn privateFormDataBlobSource(group: *CContextGroup, raw_blob: *anyopaque) ?Value
     var boxes = group.private_object_boxes.iterator();
     while (boxes.next()) |entry| {
         if (@intFromPtr(entry.value_ptr.*) != @intFromPtr(raw_blob)) continue;
-        const object = entry.key_ptr.*;
+        const object: *Object = @ptrFromInt(entry.key_ptr.*);
         if (!object.behavior.is_blob) return null;
         return Value.obj(object);
     }
@@ -12096,7 +12153,7 @@ fn privateFetchHeadersBoxed(encoded: EncodedValue) ?*Boxed {
 fn privateFetchHeadersExistingBox(group: *CContextGroup, record: *fetch_headers.Record) ?*Boxed {
     var boxes = group.private_object_boxes.iterator();
     while (boxes.next()) |entry| {
-        const object = entry.key_ptr.*;
+        const object: *Object = @ptrFromInt(entry.key_ptr.*);
         if (object.private_data_tag != .fetch_headers or object.private_data == null) continue;
         if (@intFromPtr(object.private_data.?) == @intFromPtr(record)) return entry.value_ptr.*;
     }
@@ -13416,11 +13473,17 @@ export fn Bun__JSArray__getContiguousVector(
         return null;
     };
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-    group.private_contiguous_vectors.put(gpa, @intFromPtr(vector.ptr), record) catch {
+    const result = group.private_contiguous_vectors.getOrPutSecure(gpa, @intFromPtr(vector.ptr)) catch {
         gpa.destroy(record);
         gpa.free(vector);
         return null;
     };
+    if (result.found_existing) {
+        gpa.destroy(record);
+        gpa.free(vector);
+        return null;
+    }
+    result.value_ptr.* = record;
     output.* = @intCast(vector.len);
     return vector.ptr;
 }
@@ -23127,6 +23190,79 @@ test "private ABI identity maps are keyed exact and failure atomic" {
         try std.testing.expectEqual(@as(?u8, @intCast(index)), identities.get(identity));
     for (colliders) |identity| try std.testing.expect(identities.remove(identity));
     try std.testing.expectEqual(@as(usize, 0), identities.count());
+}
+
+test "private VM identity registries seed independently and rekey without allocation" {
+    const Providers = struct {
+        fn objectBoxes() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x4f42_4a45_4354_0001 };
+        }
+
+        fn vectors() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x5645_4354_4f52_0001 };
+        }
+
+        fn unavailable() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return error.OutOfMemory;
+        }
+    };
+    const boxed: *Boxed = @ptrFromInt(0x1000);
+    const vector: *PrivateContiguousVector = @ptrFromInt(0x2000);
+
+    var zero_capacity: CPrivateIdentityMapUnmanaged(*Boxed) = .{};
+    defer zero_capacity.deinit(std.testing.allocator);
+    try zero_capacity.ensureUnusedCapacitySecureUsing(std.testing.allocator, 0, Providers.unavailable);
+    try std.testing.expect(zero_capacity.context == null);
+    try std.testing.expectEqual(@as(usize, 0), zero_capacity.capacity());
+
+    var unavailable: CPrivateIdentityMapUnmanaged(*Boxed) = .{};
+    defer unavailable.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        unavailable.ensureUnusedCapacitySecureUsing(std.testing.allocator, 1, Providers.unavailable),
+    );
+    try std.testing.expect(unavailable.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.count());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.capacity());
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var allocation_failure: CPrivateIdentityMapUnmanaged(*Boxed) = .{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        allocation_failure.ensureUnusedCapacitySecureUsing(failing.allocator(), 1, Providers.objectBoxes),
+    );
+    try std.testing.expect(allocation_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.capacity());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+
+    var object_boxes: CPrivateIdentityMapUnmanaged(*Boxed) = .{};
+    defer object_boxes.deinit(std.testing.allocator);
+    try object_boxes.ensureUnusedCapacitySecureUsing(std.testing.allocator, 1, Providers.objectBoxes);
+    object_boxes.putAssumeCapacity(0x3000, boxed);
+    try std.testing.expectEqual(boxed, object_boxes.get(0x3000).?);
+    try std.testing.expect(object_boxes.remove(0x3000));
+    object_boxes.putAssumeCapacity(0x4000, boxed);
+    try std.testing.expect(object_boxes.get(0x3000) == null);
+    try std.testing.expectEqual(boxed, object_boxes.get(0x4000).?);
+
+    var vectors: CPrivateIdentityMapUnmanaged(*PrivateContiguousVector) = .{};
+    defer vectors.deinit(std.testing.allocator);
+    const inserted = try vectors.getOrPutSecureUsing(std.testing.allocator, 0x5000, Providers.vectors);
+    try std.testing.expect(!inserted.found_existing);
+    inserted.value_ptr.* = vector;
+    try std.testing.expectEqual(vector, vectors.get(0x5000).?);
+    try std.testing.expect(vectors.get(0x5001) == null);
+    try std.testing.expect(object_boxes.context.?.seed != vectors.context.?.seed);
+
+    var wrapper_failure: CPrivateIdentityMapUnmanaged(*Boxed) = .{};
+    try wrapper_failure.ensureUnusedCapacitySecureUsing(std.testing.allocator, 1, Providers.objectBoxes);
+    try std.testing.expect(wrapper_failure.context != null);
+    try std.testing.expect(wrapper_failure.capacity() > 0);
+    wrapper_failure.resetIfEmpty(std.testing.allocator);
+    try std.testing.expect(wrapper_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), wrapper_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), wrapper_failure.capacity());
 }
 
 test "private script execution context registry is secure and failure atomic" {

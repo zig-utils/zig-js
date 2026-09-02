@@ -527,7 +527,11 @@ The proxy internal-field projection returns exact live target/handler cells
 without ordinary property access or userland traps. Revoked fields become
 JavaScript `null`; invalid field IDs and non-proxies return the empty ABI value.
 A per-VM canonical object-handle table keeps re-published EncodedJSValues
-bit-identical across sibling realms while isolating independent VMs.
+bit-identical across sibling realms while isolating independent VMs. The table
+uses its own lazy secure exact-identity hash context, reserves native capacity
+before allocating an arena-resident wrapper, and publishes neither state on a
+failed first allocation. Precise-GC relocation rekeys the existing canonical
+wrapper without allocating or changing its encoded handle.
 
 The script-execution-context identifier boundary lazily assigns a stable,
 nonzero 32-bit process identifier to each global context. The process registry
@@ -1014,7 +1018,10 @@ the maximum u32 boundary. The two contiguous-vector exports return independent
 stable JSC64 snapshots only for eligible packed Int32/boxed arrays. Revalidation
 checks the exact array, vector, length, backing identity, current encodings, and
 prototype safety; replacement, growth, holes, accessors, double/undecided
-storage, pollution, or mismatched pointers fall back without dereference.
+storage, pollution, or mismatched pointers fall back without dereference. The
+VM-owned vector registry has an independent lazy secure exact-identity hash
+context; allocation or entropy failure publishes no partial registry entry and
+frees the complete candidate snapshot.
 `Bun__JSValue__toNumber` implements full ToNumber:
 primitive conversions, number-hint ToPrimitive hook order, Symbol/BigInt
 TypeError, same-VM sibling values, foreign-value rejection, and exceptional NaN
