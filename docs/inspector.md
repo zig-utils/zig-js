@@ -17,6 +17,14 @@ decisions and should expose dispatch only to an authenticated debugger peer.
 Sessions and their context group are thread-affine. A session retains its global
 context until ZJSInspectorSessionRelease, supports multiple simultaneous
 sessions, and is detached deterministically when inspectability is disabled.
+Both context and worker session refs are nonzero random capabilities rather
+than dereferenceable allocator addresses. The process registry compares the
+exact live token and transport kind under its mutex before accessing session
+state, with token entropy independent from secure bucket placement. Null,
+forged, wrong-transport, foreign-thread, duplicate-release, and retired tokens
+are rejected without dereference; invalid context dispatch returns false and an
+invalid worker pump reports closed. Physical removal consumes the exact token,
+and the empty registry releases its storage and hash context before reuse.
 At each stop, the first enabled session (or the session that requested the
 pending pause/step) owns continuation. Observer sessions receive and may inspect
 the paused snapshot before the owner callback runs, but their resume/step

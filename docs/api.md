@@ -723,6 +723,15 @@ static members and initialize/finalize lifetime callbacks.
 The zig-js extension header exposes `ZJSInspectorSessionCreate`,
 `ZJSInspectorSessionDispatch`, and `ZJSInspectorSessionRelease` for the
 versioned in-process JSON transport documented in [Inspector protocol](/inspector).
+Context and worker inspector session refs are nonzero random capabilities, not
+allocator addresses. One mutex-protected process registry validates the exact
+live token and session kind before reading session state; token entropy is
+independent from the registry's secure bucket seed. Null, forged,
+wrong-transport, foreign-thread, duplicate-release, and retired capabilities
+are inert (`Dispatch` returns `false`, and an invalid worker `Pump` returns
+`closed`). Removing the final session frees and resets the registry so a later
+inspector lifecycle obtains fresh hash entropy. Context-session broadcasts keep
+their original creation order independently of this lookup index.
 All successful C-API, eval, generated-function, and JavaScript-module parses
 publish stable script IDs and exact adjusted statement locations. `debugger;`
 and explicit pause requests stop at those

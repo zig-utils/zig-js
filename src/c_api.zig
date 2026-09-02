@@ -469,7 +469,18 @@ const PrivateRemoteInspectorProcessState = struct {
 
 var private_remote_inspector_process: PrivateRemoteInspectorProcessState = .{};
 var private_inspector_sessions_lock: std.atomic.Mutex = .unlocked;
-var private_inspector_sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty;
+const PrivateInspectorHandle = union(enum) {
+    context: *CInspectorSession,
+    worker: *CWorkerInspectorSession,
+};
+const PrivateInspectorSessionRegistry = struct {
+    /// Broadcast order is observable; capability lookup is not. Both remain
+    /// behind `private_inspector_sessions_lock`, and no caller token is ever
+    /// interpreted as an allocation address.
+    context_sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty,
+    handles: CPrivateIdentityMapUnmanaged(PrivateInspectorHandle) = .{},
+};
+var private_inspector_sessions: PrivateInspectorSessionRegistry = .{};
 var private_script_execution_contexts_lock: std.atomic.Mutex = .unlocked;
 var private_script_execution_contexts: CPrivateIdentityMapUnmanaged(*Context) = .{};
 var next_private_script_execution_context_id: std.atomic.Value(u32) = .init(1);
@@ -2377,6 +2388,7 @@ const CInspectorResolvedBreakpoint = struct {
 };
 
 const CInspectorSession = struct {
+    handle: usize = 0,
     state: *CInspectorState,
     callback: *const fn ([*]const u8, usize, ?*anyopaque) callconv(.c) void,
     user_data: ?*anyopaque,
@@ -2388,9 +2400,10 @@ const CInspectorSession = struct {
     test_reporter_enabled: bool = false,
     http_server_enabled: bool = false,
     release_requested: bool = false,
-    /// Process-wide broadcasts retain a session across arbitrary frontend
-    /// callbacks. A callback may release this or a later snapshotted session;
-    /// destruction waits until every broadcast drops its temporary reference.
+    /// Process-wide broadcasts and capability-dispatched operations retain a
+    /// session across arbitrary frontend callbacks. A callback may release this
+    /// or a later snapshotted session; destruction waits for every temporary
+    /// reference to drain.
     broadcast_refs: usize = 0,
 };
 
@@ -17614,7 +17627,13 @@ fn inspectorState(c: *Context) ?*CInspectorState {
 }
 
 fn inspectorSession(ref: ZJSInspectorSessionRef) ?*CInspectorSession {
-    return @ptrCast(@alignCast(ref orelse return null));
+    const handle = @intFromPtr(ref orelse return null);
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    return switch (private_inspector_sessions.handles.get(handle) orelse return null) {
+        .context => |session| session,
+        .worker => null,
+    };
 }
 
 fn lockPrivateInspectorSessions() void {
@@ -17627,22 +17646,75 @@ fn lockPrivateInspectorSessions() void {
     }
 }
 
+fn registerPrivateInspectorSessionUsing(
+    registry: *PrivateInspectorSessionRegistry,
+    allocator: std.mem.Allocator,
+    session: *CInspectorSession,
+    token_provider: CPrivateCapabilityTokenProvider,
+    context_provider: CPrivateIdentityContextProvider,
+) error{OutOfMemory}!usize {
+    while (true) {
+        const handle = try token_provider();
+        if (handle == 0 or registry.handles.contains(handle)) continue;
+
+        const reset_handles_on_order_failure = registry.handles.count() == 0;
+        try registry.handles.ensureUnusedCapacitySecureUsing(allocator, 1, context_provider);
+        registry.context_sessions.ensureUnusedCapacity(allocator, 1) catch |err| {
+            if (reset_handles_on_order_failure and registry.handles.count() == 0)
+                registry.handles.resetIfEmpty(allocator);
+            return err;
+        };
+        registry.handles.putAssumeCapacity(handle, .{ .context = session });
+        registry.context_sessions.appendAssumeCapacity(session);
+        return handle;
+    }
+}
+
+fn unregisterPrivateInspectorSessionUsing(
+    registry: *PrivateInspectorSessionRegistry,
+    allocator: std.mem.Allocator,
+    handle: usize,
+    session: *CInspectorSession,
+) bool {
+    const registered = switch (registry.handles.get(handle) orelse return false) {
+        .context => |candidate| candidate,
+        .worker => return false,
+    };
+    if (registered != session) return false;
+    std.debug.assert(registry.handles.remove(handle));
+    for (registry.context_sessions.items, 0..) |candidate, index| {
+        if (candidate != session) continue;
+        _ = registry.context_sessions.orderedRemove(index);
+        if (registry.context_sessions.items.len == 0)
+            registry.context_sessions.clearAndFree(allocator);
+        if (registry.handles.count() == 0)
+            registry.handles.resetIfEmpty(allocator);
+        return true;
+    }
+    unreachable;
+}
+
 fn registerPrivateInspectorSession(session: *CInspectorSession) error{OutOfMemory}!void {
     lockPrivateInspectorSessions();
     defer private_inspector_sessions_lock.unlock();
-    try private_inspector_sessions.append(gpa, session);
+    session.handle = try registerPrivateInspectorSessionUsing(
+        &private_inspector_sessions,
+        gpa,
+        session,
+        newCPrivateCapabilityToken,
+        newCPrivateIdentityHashContext,
+    );
 }
 
-fn unregisterPrivateInspectorSession(session: *CInspectorSession) void {
+fn unregisterPrivateInspectorSession(session: *CInspectorSession) bool {
     lockPrivateInspectorSessions();
     defer private_inspector_sessions_lock.unlock();
-    for (private_inspector_sessions.items, 0..) |candidate, index| {
-        if (candidate != session) continue;
-        _ = private_inspector_sessions.orderedRemove(index);
-        if (private_inspector_sessions.items.len == 0)
-            private_inspector_sessions.clearAndFree(gpa);
-        return;
-    }
+    return unregisterPrivateInspectorSessionUsing(
+        &private_inspector_sessions,
+        gpa,
+        session.handle,
+        session,
+    );
 }
 
 /// Snapshot creation order while holding one temporary lifetime reference per
@@ -17653,13 +17725,13 @@ fn snapshotPrivateInspectorSessions() ?[]*CInspectorSession {
     defer private_inspector_sessions_lock.unlock();
 
     var count: usize = 0;
-    for (private_inspector_sessions.items) |session|
+    for (private_inspector_sessions.context_sessions.items) |session|
         count += @intFromBool(session.attached and !session.release_requested);
     if (count == 0) return null;
 
     const snapshot = gpa.alloc(*CInspectorSession, count) catch return null;
     var index: usize = 0;
-    for (private_inspector_sessions.items) |session| {
+    for (private_inspector_sessions.context_sessions.items) |session| {
         if (!session.attached or session.release_requested) continue;
         session.broadcast_refs += 1;
         snapshot[index] = session;
@@ -17694,21 +17766,35 @@ fn privateInspectorSessionDeliverable(session: *CInspectorSession) bool {
     return session.attached and !session.release_requested;
 }
 
+fn acquirePrivateInspectorSessionForOperation(ref: ZJSInspectorSessionRef) ?*CInspectorSession {
+    const handle = @intFromPtr(ref orelse return null);
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    const session = switch (private_inspector_sessions.handles.get(handle) orelse return null) {
+        .context => |entry| entry,
+        .worker => return null,
+    };
+    if (!session.state.context.isOwnerThread() or !session.attached or session.release_requested)
+        return null;
+    session.broadcast_refs += 1;
+    return session;
+}
+
 /// Private inspector-agent handles are the exact per-frontend session in
 /// zig-js. Validate identity against the process registry without dereferencing
 /// arbitrary consumer pointers, then retain the session across a reentrant
 /// frontend callback exactly like the process-wide hot-reload broadcast.
 fn acquirePrivateInspectorAgent(agent_ref: ?*anyopaque) ?*CInspectorSession {
-    const raw = agent_ref orelse return null;
+    const handle = @intFromPtr(agent_ref orelse return null);
     lockPrivateInspectorSessions();
     defer private_inspector_sessions_lock.unlock();
-    for (private_inspector_sessions.items) |session| {
-        if (@intFromPtr(session) != @intFromPtr(raw)) continue;
-        if (!session.attached or session.release_requested) return null;
-        session.broadcast_refs += 1;
-        return session;
-    }
-    return null;
+    const session = switch (private_inspector_sessions.handles.get(handle) orelse return null) {
+        .context => |entry| entry,
+        .worker => return null,
+    };
+    if (!session.attached or session.release_requested) return null;
+    session.broadcast_refs += 1;
+    return session;
 }
 
 const PrivateTestReporterType = enum(u8) {
@@ -19265,7 +19351,7 @@ fn createInspectorSession(
         .method = "Inspector.attached",
         .params = .{ .protocolVersion = "zig-js-inspector/0.1" },
     });
-    return @ptrCast(session);
+    return @ptrFromInt(session.handle);
 }
 
 export fn ZJSInspectorSessionCreate(
@@ -19280,7 +19366,7 @@ fn releaseInspectorSessionNow(session: *CInspectorSession) bool {
     const state = session.state;
     const ctx: JSContextRef = @ptrCast(state.context);
     std.debug.assert(session.broadcast_refs == 0);
-    unregisterPrivateInspectorSession(session);
+    std.debug.assert(unregisterPrivateInspectorSession(session));
     if (state.next_pause_owner == session) state.next_pause_owner = null;
     releaseInspectorRemotes(state, session, null, false);
     for (state.sessions.items, 0..) |candidate, index| {
@@ -19330,15 +19416,28 @@ fn finishInspectorOperation(state: *CInspectorState) void {
 }
 
 export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callconv(.c) void {
-    const session = inspectorSession(session_ref) orelse return;
-    const state = session.state;
-    const ctx: JSContextRef = @ptrCast(state.context);
-    _ = ctxFrom(ctx) orelse return;
+    const handle = @intFromPtr(session_ref orelse return);
     lockPrivateInspectorSessions();
+    const registered = private_inspector_sessions.handles.get(handle) orelse {
+        private_inspector_sessions_lock.unlock();
+        return;
+    };
+    const session = switch (registered) {
+        .context => |entry| entry,
+        .worker => {
+            private_inspector_sessions_lock.unlock();
+            return;
+        },
+    };
+    if (!session.state.context.isOwnerThread()) {
+        private_inspector_sessions_lock.unlock();
+        return;
+    }
     if (session.release_requested) {
         private_inspector_sessions_lock.unlock();
         return;
     }
+    const state = session.state;
     session.release_requested = true;
     session.attached = false;
     session.lifecycle_reporter_enabled = false;
@@ -19374,11 +19473,11 @@ export fn ZJSInspectorSessionDispatch(
     message: [*c]const u8,
     message_length: usize,
 ) callconv(.c) bool {
-    const session = inspectorSession(session_ref) orelse return false;
+    const session = acquirePrivateInspectorSessionForOperation(session_ref) orelse return false;
+    defer releasePrivateInspectorBroadcastRef(session);
     const state = session.state;
     const ctx: JSContextRef = @ptrCast(state.context);
-    _ = ctxFrom(ctx) orelse return false;
-    if (!session.attached or message == null or message_length == 0) return false;
+    if (message == null or message_length == 0) return false;
     state.operation_depth += 1;
     defer finishInspectorOperation(state);
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, message[0..message_length], .{}) catch {
@@ -22688,10 +22787,82 @@ pub const ZJSWorkerInspectorPumpResult = enum(c_uint) {
 };
 
 const CWorkerInspectorSession = struct {
+    handle: usize = 0,
     client: *WorkerMod.InspectorClient,
     callback: *const fn ([*]const u8, usize, ?*anyopaque) callconv(.c) void,
     user_data: ?*anyopaque,
 };
+
+fn registerPrivateWorkerInspectorSessionUsing(
+    handles: *CPrivateIdentityMapUnmanaged(PrivateInspectorHandle),
+    allocator: std.mem.Allocator,
+    session: *CWorkerInspectorSession,
+    token_provider: CPrivateCapabilityTokenProvider,
+    context_provider: CPrivateIdentityContextProvider,
+) error{OutOfMemory}!usize {
+    while (true) {
+        const handle = try token_provider();
+        if (handle == 0 or handles.contains(handle)) continue;
+        try handles.ensureUnusedCapacitySecureUsing(allocator, 1, context_provider);
+        handles.putAssumeCapacity(handle, .{ .worker = session });
+        return handle;
+    }
+}
+
+fn registerPrivateWorkerInspectorSession(session: *CWorkerInspectorSession) error{OutOfMemory}!void {
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    session.handle = try registerPrivateWorkerInspectorSessionUsing(
+        &private_inspector_sessions.handles,
+        gpa,
+        session,
+        newCPrivateCapabilityToken,
+        newCPrivateIdentityHashContext,
+    );
+}
+
+fn removePrivateWorkerInspectorSessionUsing(
+    handles: *CPrivateIdentityMapUnmanaged(PrivateInspectorHandle),
+    allocator: std.mem.Allocator,
+    handle: usize,
+) ?*CWorkerInspectorSession {
+    const session = switch (handles.get(handle) orelse return null) {
+        .worker => |entry| entry,
+        .context => return null,
+    };
+    std.debug.assert(handles.remove(handle));
+    if (handles.count() == 0) handles.resetIfEmpty(allocator);
+    return session;
+}
+
+fn workerInspectorSession(ref: ZJSWorkerInspectorSessionRef) ?*CWorkerInspectorSession {
+    const handle = @intFromPtr(ref orelse return null);
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    const session = switch (private_inspector_sessions.handles.get(handle) orelse return null) {
+        .worker => |entry| entry,
+        .context => return null,
+    };
+    if (!session.client.isOwnerThread()) return null;
+    return session;
+}
+
+fn takePrivateWorkerInspectorSession(ref: ZJSWorkerInspectorSessionRef) ?*CWorkerInspectorSession {
+    const handle = @intFromPtr(ref orelse return null);
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    const session = switch (private_inspector_sessions.handles.get(handle) orelse return null) {
+        .worker => |entry| entry,
+        .context => return null,
+    };
+    if (!session.client.isOwnerThread()) return null;
+    std.debug.assert(session.handle == handle);
+    return removePrivateWorkerInspectorSessionUsing(
+        &private_inspector_sessions.handles,
+        gpa,
+        handle,
+    );
+}
 
 fn workerInspectorBackendCreate(
     ctx: *Context,
@@ -22790,13 +22961,12 @@ export fn ZJSWorkerInspectorSessionCreate(
         return null;
     };
     session.* = .{ .client = client, .callback = cb, .user_data = user_data };
-    return @ptrCast(session);
-}
-
-fn workerInspectorSession(ref: ZJSWorkerInspectorSessionRef) ?*CWorkerInspectorSession {
-    const session: *CWorkerInspectorSession = @ptrCast(@alignCast(ref orelse return null));
-    if (!session.client.isOwnerThread()) return null;
-    return session;
+    registerPrivateWorkerInspectorSession(session) catch {
+        WorkerMod.Worker.releaseInspectorClient(client);
+        gpa.destroy(session);
+        return null;
+    };
+    return @ptrFromInt(session.handle);
 }
 
 export fn ZJSWorkerInspectorSessionDispatch(
@@ -22819,12 +22989,14 @@ export fn ZJSWorkerInspectorSessionPump(
         return if (session.client.transport_closed.load(.acquire)) .closed else .timeout;
     defer event.deinit();
     if (event.kind == .detached) return .closed;
-    session.callback(event.message.ptr, event.message.len, session.user_data);
+    const callback = session.callback;
+    const user_data = session.user_data;
+    callback(event.message.ptr, event.message.len, user_data);
     return .message;
 }
 
 export fn ZJSWorkerInspectorSessionRelease(session_ref: ZJSWorkerInspectorSessionRef) callconv(.c) void {
-    const session = workerInspectorSession(session_ref) orelse return;
+    const session = takePrivateWorkerInspectorSession(session_ref) orelse return;
     WorkerMod.Worker.releaseInspectorClient(session.client);
     gpa.destroy(session);
 }
@@ -23441,6 +23613,245 @@ test "private global lifecycle registry is secure failure atomic and resettable"
     ) == null);
     _ = removePrivateGlobalLifecycleUsing(&lifecycles, std.testing.allocator, 0x4000);
     try std.testing.expect(lifecycles.context == null);
+}
+
+test "inspector session capability registries are secure failure atomic and resettable" {
+    const Providers = struct {
+        var colliding_candidate: usize = 0x1000;
+        var colliding_bucket: u64 = 0;
+        var colliding_initialized: bool = false;
+        var retry_calls: usize = 0;
+
+        fn firstContext() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x494e_5350_4543_0001 };
+        }
+
+        fn secondContext() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x494e_5350_4543_0002 };
+        }
+
+        fn unavailableContext() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return error.OutOfMemory;
+        }
+
+        fn fixedToken() std.mem.Allocator.Error!usize {
+            return 0x1000;
+        }
+
+        fn secondToken() std.mem.Allocator.Error!usize {
+            return 0x494e_5350_0000_0002;
+        }
+
+        fn unavailableToken() std.mem.Allocator.Error!usize {
+            return error.OutOfMemory;
+        }
+
+        fn collidingToken() std.mem.Allocator.Error!usize {
+            if (!colliding_initialized) {
+                colliding_bucket = std.hash.Wyhash.hash(
+                    0,
+                    std.mem.asBytes(&colliding_candidate),
+                ) & 1023;
+                colliding_initialized = true;
+            }
+            while (true) {
+                const token = colliding_candidate;
+                colliding_candidate += @alignOf(CInspectorSession);
+                if (std.hash.Wyhash.hash(0, std.mem.asBytes(&token)) & 1023 == colliding_bucket)
+                    return token;
+            }
+        }
+
+        fn zeroCollisionUnique() std.mem.Allocator.Error!usize {
+            defer retry_calls += 1;
+            return switch (retry_calls) {
+                0 => 0,
+                1 => 0x1000,
+                else => std.math.maxInt(usize) - 870,
+            };
+        }
+    };
+
+    var unavailable: PrivateInspectorSessionRegistry = .{};
+    defer unavailable.context_sessions.deinit(std.testing.allocator);
+    defer unavailable.handles.deinit(std.testing.allocator);
+    const fake_session: *CInspectorSession = @ptrFromInt(0x2000);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateInspectorSessionUsing(
+            &unavailable,
+            std.testing.allocator,
+            fake_session,
+            Providers.unavailableToken,
+            Providers.firstContext,
+        ),
+    );
+    try std.testing.expect(unavailable.handles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.handles.capacity());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.context_sessions.capacity);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateInspectorSessionUsing(
+            &unavailable,
+            std.testing.allocator,
+            fake_session,
+            Providers.fixedToken,
+            Providers.unavailableContext,
+        ),
+    );
+    try std.testing.expect(unavailable.handles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.handles.capacity());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.context_sessions.capacity);
+
+    var allocation_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed: PrivateInspectorSessionRegistry = .{};
+    defer failed.context_sessions.deinit(allocation_failure.allocator());
+    defer failed.handles.deinit(allocation_failure.allocator());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateInspectorSessionUsing(
+            &failed,
+            allocation_failure.allocator(),
+            fake_session,
+            Providers.fixedToken,
+            Providers.firstContext,
+        ),
+    );
+    try std.testing.expect(failed.handles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.handles.capacity());
+    try std.testing.expectEqual(@as(usize, 0), failed.context_sessions.capacity);
+    try std.testing.expectEqual(allocation_failure.allocated_bytes, allocation_failure.freed_bytes);
+
+    var order_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var failed_order: PrivateInspectorSessionRegistry = .{};
+    defer failed_order.context_sessions.deinit(order_failure.allocator());
+    defer failed_order.handles.deinit(order_failure.allocator());
+    try failed_order.handles.ensureUnusedCapacityWithContext(
+        order_failure.allocator(),
+        1,
+        try Providers.firstContext(),
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateInspectorSessionUsing(
+            &failed_order,
+            order_failure.allocator(),
+            fake_session,
+            Providers.fixedToken,
+            Providers.unavailableContext,
+        ),
+    );
+    try std.testing.expect(failed_order.handles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed_order.handles.capacity());
+    try std.testing.expectEqual(@as(usize, 0), failed_order.context_sessions.capacity);
+    try std.testing.expectEqual(order_failure.allocated_bytes, order_failure.freed_bytes);
+
+    Providers.colliding_candidate = 0x1000;
+    Providers.colliding_initialized = false;
+    var registry: PrivateInspectorSessionRegistry = .{};
+    defer registry.context_sessions.deinit(std.testing.allocator);
+    defer registry.handles.deinit(std.testing.allocator);
+    var tokens: [32]usize = undefined;
+    var fake_sessions: [tokens.len]*CInspectorSession = undefined;
+    var secure_buckets: [1024]bool = @splat(false);
+    var secure_bucket_count: usize = 0;
+    const first_context = try Providers.firstContext();
+    for (&tokens, &fake_sessions, 0..) |*token, *session, index| {
+        session.* = @ptrFromInt(0x4000 + index * @alignOf(CInspectorSession));
+        token.* = try registerPrivateInspectorSessionUsing(
+            &registry,
+            std.testing.allocator,
+            session.*,
+            Providers.collidingToken,
+            Providers.firstContext,
+        );
+        try std.testing.expectEqual(Providers.colliding_bucket, std.hash.Wyhash.hash(0, std.mem.asBytes(token)) & 1023);
+        const secure_bucket: usize = @intCast(first_context.hash(token.*) & 1023);
+        if (!secure_buckets[secure_bucket]) {
+            secure_buckets[secure_bucket] = true;
+            secure_bucket_count += 1;
+        }
+        try std.testing.expectEqual(session.*, registry.context_sessions.items[index]);
+        const registered = registry.handles.get(token.*) orelse return error.MissingInspectorSession;
+        try std.testing.expectEqual(session.*, registered.context);
+    }
+    try std.testing.expect(secure_bucket_count > tokens.len / 2);
+    try std.testing.expect(registry.handles.get(std.math.maxInt(usize) - 871) == null);
+
+    Providers.retry_calls = 0;
+    const extra_session: *CInspectorSession = @ptrFromInt(0x8000);
+    const extra_token = try registerPrivateInspectorSessionUsing(
+        &registry,
+        std.testing.allocator,
+        extra_session,
+        Providers.zeroCollisionUnique,
+        Providers.unavailableContext,
+    );
+    try std.testing.expectEqual(@as(usize, 3), Providers.retry_calls);
+    try std.testing.expectEqual(std.math.maxInt(usize) - 870, extra_token);
+    try std.testing.expectEqual(extra_session, registry.handles.get(extra_token).?.context);
+
+    const fake_worker_session: *CWorkerInspectorSession = @ptrFromInt(0x9000);
+    const worker_token = try registerPrivateWorkerInspectorSessionUsing(
+        &registry.handles,
+        std.testing.allocator,
+        fake_worker_session,
+        Providers.secondToken,
+        Providers.unavailableContext,
+    );
+    try std.testing.expectEqual(first_context.seed, registry.handles.context.?.seed);
+    try std.testing.expectEqual(fake_worker_session, registry.handles.get(worker_token).?.worker);
+    try std.testing.expect(!unregisterPrivateInspectorSessionUsing(
+        &registry,
+        std.testing.allocator,
+        worker_token,
+        extra_session,
+    ));
+    try std.testing.expectEqual(
+        fake_worker_session,
+        removePrivateWorkerInspectorSessionUsing(&registry.handles, std.testing.allocator, worker_token).?,
+    );
+
+    try std.testing.expect(!unregisterPrivateInspectorSessionUsing(
+        &registry,
+        std.testing.allocator,
+        tokens[0],
+        extra_session,
+    ));
+    try std.testing.expectEqual(fake_sessions[0], registry.handles.get(tokens[0]).?.context);
+    for (tokens, fake_sessions) |token, session|
+        try std.testing.expect(unregisterPrivateInspectorSessionUsing(
+            &registry,
+            std.testing.allocator,
+            token,
+            session,
+        ));
+    try std.testing.expect(unregisterPrivateInspectorSessionUsing(
+        &registry,
+        std.testing.allocator,
+        extra_token,
+        extra_session,
+    ));
+    try std.testing.expect(registry.handles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), registry.handles.capacity());
+    try std.testing.expectEqual(@as(usize, 0), registry.context_sessions.capacity);
+
+    const reseeded_token = try registerPrivateInspectorSessionUsing(
+        &registry,
+        std.testing.allocator,
+        fake_session,
+        Providers.secondToken,
+        Providers.secondContext,
+    );
+    try std.testing.expectEqual((try Providers.secondContext()).seed, registry.handles.context.?.seed);
+    try std.testing.expect(registry.handles.get(tokens[0]) == null);
+    try std.testing.expect(unregisterPrivateInspectorSessionUsing(
+        &registry,
+        std.testing.allocator,
+        reseeded_token,
+        fake_session,
+    ));
+    try std.testing.expect(registry.handles.context == null);
 }
 
 test "private global lifecycles register and retire concurrently" {
@@ -24360,7 +24771,7 @@ test "private hot-reload inspector broadcast spans VMs and survives reentrant re
     third_state.session = null;
     JSGlobalContextRelease(second);
     JSGlobalContextRelease(first);
-    try std.testing.expectEqual(@as(usize, 0), private_inspector_sessions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), private_inspector_sessions.context_sessions.items.len);
     BunDebugger__willHotReload();
 }
 
@@ -24905,6 +25316,65 @@ test "private debugger async-call hooks preserve lifecycle and active parent sta
     JSGlobalContextRelease(sibling);
     JSGlobalContextRelease(first);
     JSContextGroupRelease(group);
+}
+
+test "C-API: inspector session capabilities reject forged stale and wrong-thread handles" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const State = struct {
+        callbacks: usize = 0,
+
+        fn receive(_: [*]const u8, _: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            self.callbacks += 1;
+        }
+    };
+    const WrongThread = struct {
+        session: ZJSInspectorSessionRef,
+        dispatched: bool = true,
+
+        fn run(self: *@This()) void {
+            const schema = "{\"id\":90,\"method\":\"Schema.getDomains\"}";
+            self.dispatched = ZJSInspectorSessionDispatch(self.session, schema, schema.len);
+            ZJSInspectorSessionRelease(self.session);
+        }
+    };
+
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    JSGlobalContextSetInspectable(context, true);
+    var state: State = .{};
+    const session = ZJSInspectorSessionCreate(context, State.receive, &state) orelse
+        return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(session);
+    const session_token = @intFromPtr(session);
+    const forged_token: usize = if (session_token == 1) 2 else 1;
+    const forged: ZJSInspectorSessionRef = @ptrFromInt(forged_token);
+    const schema = "{\"id\":1,\"method\":\"Schema.getDomains\"}";
+
+    try std.testing.expect(!ZJSInspectorSessionDispatch(null, schema, schema.len));
+    try std.testing.expect(!ZJSInspectorSessionDispatch(forged, schema, schema.len));
+    ZJSInspectorSessionRelease(null);
+    ZJSInspectorSessionRelease(forged);
+    try std.testing.expect(inspectorSession(session) != null);
+
+    var wrong_thread = WrongThread{ .session = session };
+    var thread = try std.Thread.spawn(.{}, WrongThread.run, .{&wrong_thread});
+    thread.join();
+    try std.testing.expect(!wrong_thread.dispatched);
+    try std.testing.expect(inspectorSession(session) != null);
+    try std.testing.expect(ZJSInspectorSessionDispatch(session, schema, schema.len));
+
+    ZJSInspectorSessionRelease(session);
+    try std.testing.expect(inspectorSession(session) == null);
+    try std.testing.expect(!ZJSInspectorSessionDispatch(session, schema, schema.len));
+    ZJSInspectorSessionRelease(session);
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    try std.testing.expectEqual(@as(usize, 0), private_inspector_sessions.context_sessions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), private_inspector_sessions.context_sessions.capacity);
+    try std.testing.expect(private_inspector_sessions.handles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), private_inspector_sessions.handles.capacity());
 }
 
 test "C-API: inspector protocol inventory has no hidden commands" {
@@ -29029,6 +29499,91 @@ test "C-API: worker inspector target metadata is stable and validated" {
     try std.testing.expect(first_info.state == .closing or first_info.state == .closed);
 }
 
+test "C-API: worker inspector capabilities reject forged stale and wrong-thread handles" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const State = struct {
+        messages: usize = 0,
+
+        fn receive(_: [*]const u8, _: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            self.messages += 1;
+        }
+    };
+    const WrongThread = struct {
+        session: ZJSWorkerInspectorSessionRef,
+        dispatched: bool = true,
+        pumped: ZJSWorkerInspectorPumpResult = .message,
+
+        fn run(self: *@This()) void {
+            const schema = "{\"id\":90,\"method\":\"Schema.getDomains\"}";
+            self.dispatched = ZJSWorkerInspectorSessionDispatch(self.session, schema, schema.len);
+            self.pumped = ZJSWorkerInspectorSessionPump(self.session, 1);
+            ZJSWorkerInspectorSessionRelease(self.session);
+        }
+    };
+
+    const source = JSStringCreateWithUTF8CString("") orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const worker = JSWorkerCreate(source) orelse return error.WorkerSpawnFailed;
+    defer JSWorkerRelease(worker);
+    var state: State = .{};
+    const session = ZJSWorkerInspectorSessionCreate(worker, State.receive, &state) orelse
+        return error.SessionCreateFailed;
+    defer ZJSWorkerInspectorSessionRelease(session);
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    JSGlobalContextSetInspectable(context, true);
+    var context_state: State = .{};
+    const context_session = ZJSInspectorSessionCreate(context, State.receive, &context_state) orelse
+        return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(context_session);
+    const session_token = @intFromPtr(session);
+    const forged_token: usize = if (session_token == 1) 2 else 1;
+    const forged: ZJSWorkerInspectorSessionRef = @ptrFromInt(forged_token);
+    const schema = "{\"id\":1,\"method\":\"Schema.getDomains\"}";
+
+    try std.testing.expect(!ZJSWorkerInspectorSessionDispatch(null, schema, schema.len));
+    try std.testing.expect(!ZJSWorkerInspectorSessionDispatch(forged, schema, schema.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.closed, ZJSWorkerInspectorSessionPump(null, 1));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.closed, ZJSWorkerInspectorSessionPump(forged, 1));
+    ZJSWorkerInspectorSessionRelease(null);
+    ZJSWorkerInspectorSessionRelease(forged);
+    try std.testing.expect(!ZJSInspectorSessionDispatch(session, schema, schema.len));
+    try std.testing.expect(!ZJSWorkerInspectorSessionDispatch(context_session, schema, schema.len));
+    try std.testing.expectEqual(
+        ZJSWorkerInspectorPumpResult.closed,
+        ZJSWorkerInspectorSessionPump(context_session, 1),
+    );
+    ZJSInspectorSessionRelease(session);
+    ZJSWorkerInspectorSessionRelease(context_session);
+    try std.testing.expect(ZJSInspectorSessionDispatch(context_session, schema, schema.len));
+    try std.testing.expect(workerInspectorSession(session) != null);
+
+    var wrong_thread = WrongThread{ .session = session };
+    var thread = try std.Thread.spawn(.{}, WrongThread.run, .{&wrong_thread});
+    thread.join();
+    try std.testing.expect(!wrong_thread.dispatched);
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.closed, wrong_thread.pumped);
+    try std.testing.expect(workerInspectorSession(session) != null);
+
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(session, 10_000));
+    try std.testing.expect(ZJSWorkerInspectorSessionDispatch(session, schema, schema.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.message, ZJSWorkerInspectorSessionPump(session, 10_000));
+    try std.testing.expect(state.messages >= 2);
+
+    ZJSWorkerInspectorSessionRelease(session);
+    try std.testing.expect(workerInspectorSession(session) == null);
+    try std.testing.expect(!ZJSWorkerInspectorSessionDispatch(session, schema, schema.len));
+    try std.testing.expectEqual(ZJSWorkerInspectorPumpResult.closed, ZJSWorkerInspectorSessionPump(session, 1));
+    ZJSWorkerInspectorSessionRelease(session);
+    ZJSInspectorSessionRelease(context_session);
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    try std.testing.expect(private_inspector_sessions.handles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), private_inspector_sessions.handles.capacity());
+}
+
 test "C-API: worker inspector marshals commands and callbacks across threads" {
     const State = struct {
         owner: std.Thread.Id,
@@ -29306,7 +29861,7 @@ test "C-API: worker inspector detach and worker release unroot remotes exactly o
         }
 
         fn release(session_ref: *anyopaque) void {
-            const session: *CInspectorSession = @ptrCast(@alignCast(session_ref));
+            const session = inspectorSession(session_ref) orelse @panic("missing inspector session");
             const context = session.state.context;
             remotes_before.store(session.state.remote_objects.items.len, .release);
             handles_before.store(context.c_api_handles.items.len, .release);
