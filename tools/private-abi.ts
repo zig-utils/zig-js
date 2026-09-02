@@ -47,7 +47,7 @@ const CONTRACT_DIGESTS: Record<string, string> = {
   "docs/abi/sql-object-structure-411.json":
     "ab2dd7209ed44cf24f62f8b55d77581b8a98fdf0c5f5b6b666165d9610ba3475",
   "docs/abi/global-object-lifecycle-412.json":
-    "3aef3af6c511e8af624dc35557f735f31a79efdab1152bec8a0ccac18dd77bfa",
+    "059a978d20e86316900e7c89b9656aab436b4097d1bad5f41920d9c406ac9b7b",
   "docs/abi/process-initialization-shell-timeout-417.json":
     "c9c8e6069310f24453e70b04e3568abd504d80ab094acd66239f88e9af904468",
   "docs/abi/consumer-provided-private-exports-422.json":

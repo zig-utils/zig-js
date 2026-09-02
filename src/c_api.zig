@@ -483,7 +483,9 @@ const PrivateGlobalLifecycle = struct {
     worker: ?*anyopaque,
 };
 var private_global_lifecycles_lock: std.atomic.Mutex = .unlocked;
-var private_global_lifecycles: std.AutoHashMapUnmanaged(usize, PrivateGlobalLifecycle) = .empty;
+/// Opaque caller pointers are hashed as integers and must match exactly before
+/// the stored record's Context pointer is ever dereferenced.
+var private_global_lifecycles: CPrivateIdentityMapUnmanaged(PrivateGlobalLifecycle) = .{};
 var private_serialized_script_lock: std.atomic.Mutex = .unlocked;
 var private_serialized_script_handles: CPrivateIdentityMapUnmanaged(PrivateSerializedScriptOwned) = .{};
 
@@ -534,10 +536,41 @@ fn lockPrivateGlobalLifecycles() void {
     }
 }
 
-fn registerPrivateGlobalLifecycle(record: PrivateGlobalLifecycle) error{OutOfMemory}!void {
+fn registerPrivateGlobalLifecycleUsing(
+    registry: *CPrivateIdentityMapUnmanaged(PrivateGlobalLifecycle),
+    allocator: std.mem.Allocator,
+    record: PrivateGlobalLifecycle,
+    context_provider: CPrivateIdentityContextProvider,
+) error{ OutOfMemory, LifecycleAlreadyRegistered }!void {
+    const result = try registry.getOrPutSecureUsing(
+        allocator,
+        @intFromPtr(record.context),
+        context_provider,
+    );
+    if (result.found_existing) return error.LifecycleAlreadyRegistered;
+    result.value_ptr.* = record;
+}
+
+fn removePrivateGlobalLifecycleUsing(
+    registry: *CPrivateIdentityMapUnmanaged(PrivateGlobalLifecycle),
+    allocator: std.mem.Allocator,
+    address: usize,
+) ?PrivateGlobalLifecycle {
+    const record = registry.get(address) orelse return null;
+    std.debug.assert(registry.remove(address));
+    if (registry.count() == 0) registry.resetIfEmpty(allocator);
+    return record;
+}
+
+fn registerPrivateGlobalLifecycle(record: PrivateGlobalLifecycle) error{ OutOfMemory, LifecycleAlreadyRegistered }!void {
     lockPrivateGlobalLifecycles();
     defer private_global_lifecycles_lock.unlock();
-    try private_global_lifecycles.putNoClobber(gpa, @intFromPtr(record.context), record);
+    try registerPrivateGlobalLifecycleUsing(
+        &private_global_lifecycles,
+        gpa,
+        record,
+        newCPrivateIdentityHashContext,
+    );
 }
 
 fn privateGlobalLifecycle(context: JSContextRef) ?PrivateGlobalLifecycle {
@@ -553,7 +586,17 @@ fn takePrivateGlobalLifecycle(context: JSContextRef) ?PrivateGlobalLifecycle {
     defer private_global_lifecycles_lock.unlock();
     const record = private_global_lifecycles.get(address) orelse return null;
     if (!record.context.isOwnerThread()) return null;
-    return private_global_lifecycles.fetchRemove(address).?.value;
+    return removePrivateGlobalLifecycleUsing(&private_global_lifecycles, gpa, address);
+}
+
+fn unregisterPrivateGlobalLifecycle(context: *Context) bool {
+    lockPrivateGlobalLifecycles();
+    defer private_global_lifecycles_lock.unlock();
+    return removePrivateGlobalLifecycleUsing(
+        &private_global_lifecycles,
+        gpa,
+        @intFromPtr(context),
+    ) != null;
 }
 
 fn unregisterPrivateScriptExecutionContext(context: *Context) void {
@@ -17423,15 +17466,11 @@ export fn Zig__GlobalObject__createForTestIsolation(
         return null;
     };
     if (!privateTransferScriptExecutionContextIdentifier(old_record.context, new_context)) {
-        lockPrivateGlobalLifecycles();
-        _ = private_global_lifecycles.remove(@intFromPtr(new_context));
-        private_global_lifecycles_lock.unlock();
+        _ = unregisterPrivateGlobalLifecycle(new_context);
         JSGlobalContextRelease(new_global);
         return null;
     }
-    lockPrivateGlobalLifecycles();
-    _ = private_global_lifecycles.remove(@intFromPtr(old_record.context));
-    private_global_lifecycles_lock.unlock();
+    _ = unregisterPrivateGlobalLifecycle(old_record.context);
     old_record.context.requestTermination();
     JSGlobalContextRelease(old_global);
     return new_global;
@@ -23265,6 +23304,180 @@ test "private VM identity registries seed independently and rekey without alloca
     try std.testing.expectEqual(@as(usize, 0), wrapper_failure.capacity());
 }
 
+test "private global lifecycle registry is secure failure atomic and resettable" {
+    const Providers = struct {
+        fn first() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x4c49_4645_4359_0001 };
+        }
+
+        fn second() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x4c49_4645_4359_0002 };
+        }
+
+        fn unavailable() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return error.OutOfMemory;
+        }
+
+        fn record(address: usize, execution_context_id: i32) PrivateGlobalLifecycle {
+            return .{
+                .context = @ptrFromInt(address),
+                .group = @ptrFromInt(0x1000),
+                .console = null,
+                .execution_context_id = execution_context_id,
+                .mini_mode = false,
+                .eval_mode = false,
+                .worker = null,
+            };
+        }
+    };
+
+    var unavailable: CPrivateIdentityMapUnmanaged(PrivateGlobalLifecycle) = .{};
+    defer unavailable.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateGlobalLifecycleUsing(
+            &unavailable,
+            std.testing.allocator,
+            Providers.record(0x2000, 1),
+            Providers.unavailable,
+        ),
+    );
+    try std.testing.expect(unavailable.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.count());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.capacity());
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var allocation_failure: CPrivateIdentityMapUnmanaged(PrivateGlobalLifecycle) = .{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateGlobalLifecycleUsing(
+            &allocation_failure,
+            failing.allocator(),
+            Providers.record(0x3000, 2),
+            Providers.first,
+        ),
+    );
+    try std.testing.expect(allocation_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.capacity());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try registerPrivateGlobalLifecycleUsing(
+        &allocation_failure,
+        std.testing.allocator,
+        Providers.record(0x3000, 2),
+        Providers.first,
+    );
+    try std.testing.expectEqual(
+        @as(i32, 2),
+        allocation_failure.get(0x3000).?.execution_context_id,
+    );
+    _ = removePrivateGlobalLifecycleUsing(&allocation_failure, std.testing.allocator, 0x3000);
+    try std.testing.expect(allocation_failure.context == null);
+
+    var colliders: [32]usize = undefined;
+    var collider_count: usize = 0;
+    var candidate: usize = @alignOf(Context);
+    const default_bucket = std.hash.Wyhash.hash(0, std.mem.asBytes(&candidate)) & 1023;
+    while (collider_count < colliders.len) : (candidate += @alignOf(Context)) {
+        if (std.hash.Wyhash.hash(0, std.mem.asBytes(&candidate)) & 1023 != default_bucket) continue;
+        colliders[collider_count] = candidate;
+        collider_count += 1;
+    }
+
+    var lifecycles: CPrivateIdentityMapUnmanaged(PrivateGlobalLifecycle) = .{};
+    defer lifecycles.deinit(std.testing.allocator);
+    const first_context = try Providers.first();
+    var keyed_buckets: [1024]bool = @splat(false);
+    var keyed_bucket_count: usize = 0;
+    for (colliders, 0..) |address, index| {
+        try registerPrivateGlobalLifecycleUsing(
+            &lifecycles,
+            std.testing.allocator,
+            Providers.record(address, @intCast(index + 10)),
+            Providers.first,
+        );
+        const bucket: usize = @intCast(first_context.hash(address) & 1023);
+        if (!keyed_buckets[bucket]) {
+            keyed_buckets[bucket] = true;
+            keyed_bucket_count += 1;
+        }
+    }
+    try std.testing.expect(keyed_bucket_count > colliders.len / 2);
+    try std.testing.expect(lifecycles.get(0xdead_0000) == null);
+    try std.testing.expectError(
+        error.LifecycleAlreadyRegistered,
+        registerPrivateGlobalLifecycleUsing(
+            &lifecycles,
+            std.testing.allocator,
+            Providers.record(colliders[0], 999),
+            Providers.unavailable,
+        ),
+    );
+    try std.testing.expectEqual(@as(i32, 10), lifecycles.get(colliders[0]).?.execution_context_id);
+    for (colliders, 0..) |address, index| {
+        const removed = removePrivateGlobalLifecycleUsing(
+            &lifecycles,
+            std.testing.allocator,
+            address,
+        ) orelse return error.MissingLifecycle;
+        try std.testing.expectEqual(@as(i32, @intCast(index + 10)), removed.execution_context_id);
+    }
+    try std.testing.expect(lifecycles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycles.count());
+    try std.testing.expectEqual(@as(usize, 0), lifecycles.capacity());
+
+    try registerPrivateGlobalLifecycleUsing(
+        &lifecycles,
+        std.testing.allocator,
+        Providers.record(0x4000, 3),
+        Providers.second,
+    );
+    try std.testing.expectEqual((try Providers.second()).seed, lifecycles.context.?.seed);
+    try std.testing.expect(lifecycles.get(colliders[0]) == null);
+    try std.testing.expect(removePrivateGlobalLifecycleUsing(
+        &lifecycles,
+        std.testing.allocator,
+        0x5000,
+    ) == null);
+    _ = removePrivateGlobalLifecycleUsing(&lifecycles, std.testing.allocator, 0x4000);
+    try std.testing.expect(lifecycles.context == null);
+}
+
+test "private global lifecycles register and retire concurrently" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const Worker = struct {
+        created: bool = false,
+        live: bool = false,
+        retired: bool = false,
+
+        fn run(result: *@This()) void {
+            const global = Zig__GlobalObject__create(null, -1, false, false, null) orelse return;
+            result.created = true;
+            result.live = privateGlobalLifecycle(global) != null;
+            Zig__GlobalObject__destructOnExit(global);
+            result.retired = privateGlobalLifecycle(global) == null;
+        }
+    };
+
+    var results: [8]Worker = @splat(.{});
+    var threads: [results.len]std.Thread = undefined;
+    for (&threads, &results) |*thread, *result|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{result});
+    for (&threads) |*thread| thread.join();
+    for (results) |result| {
+        try std.testing.expect(result.created);
+        try std.testing.expect(result.live);
+        try std.testing.expect(result.retired);
+    }
+
+    lockPrivateGlobalLifecycles();
+    defer private_global_lifecycles_lock.unlock();
+    try std.testing.expect(private_global_lifecycles.context == null);
+    try std.testing.expectEqual(@as(usize, 0), private_global_lifecycles.count());
+    try std.testing.expectEqual(@as(usize, 0), private_global_lifecycles.capacity());
+}
+
 test "private script execution context registry is secure and failure atomic" {
     const Providers = struct {
         fn fixed() std.mem.Allocator.Error!CPrivateIdentityHashContext {
@@ -23880,6 +24093,13 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
     );
     first_context.queueExternalStringRelease(external_string_owner);
     const first_record = privateGlobalLifecycle(first) orelse return error.MissingLifecycle;
+    const lifecycle_hash_seed = lifecycle_hash_seed: {
+        lockPrivateGlobalLifecycles();
+        defer private_global_lifecycles_lock.unlock();
+        try std.testing.expectEqual(@as(usize, 1), private_global_lifecycles.count());
+        try std.testing.expect(private_global_lifecycles.context != null);
+        break :lifecycle_hash_seed private_global_lifecycles.context.?.seed;
+    };
     try std.testing.expectEqual(@as(?*anyopaque, &first_console), first_record.console);
     try std.testing.expectEqual(@as(i32, 4242), first_record.execution_context_id);
     try std.testing.expect(first_record.mini_mode and first_record.eval_mode);
@@ -23917,6 +24137,14 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
         return error.IsolationCreateFailed;
     const isolated_context = ctxForLifecycle(isolated) orelse return error.ContextCreateFailed;
     const isolated_record = privateGlobalLifecycle(isolated) orelse return error.MissingLifecycle;
+    {
+        lockPrivateGlobalLifecycles();
+        defer private_global_lifecycles_lock.unlock();
+        try std.testing.expectEqual(@as(usize, 1), private_global_lifecycles.count());
+        try std.testing.expectEqual(lifecycle_hash_seed, private_global_lifecycles.context.?.seed);
+        try std.testing.expect(private_global_lifecycles.get(@intFromPtr(first_context)) == null);
+        try std.testing.expect(private_global_lifecycles.get(@intFromPtr(isolated_context)) != null);
+    }
     try std.testing.expectEqual(first_group, isolated_record.group);
     try std.testing.expectEqual(@as(?*anyopaque, &second_console), isolated_record.console);
     try std.testing.expectEqual(@as(i32, 4242), isolated_record.execution_context_id);
@@ -23958,6 +24186,12 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
     Zig__GlobalObject__destructOnExit(isolated);
     Zig__GlobalObject__destructOnExit(null);
     Zig__GlobalObject__destructOnExit(@ptrFromInt(1));
+    {
+        lockPrivateGlobalLifecycles();
+        defer private_global_lifecycles_lock.unlock();
+        try std.testing.expect(private_global_lifecycles.context == null);
+        try std.testing.expectEqual(@as(usize, 0), private_global_lifecycles.capacity());
+    }
     try std.testing.expectEqual(@as(JSContextRef, null), ScriptExecutionContextIdentifier__getGlobalObject(4242));
     try std.testing.expect(Zig__GlobalObject__create(null, 4242, false, false, null) == null);
     try std.testing.expect(Zig__GlobalObject__create(null, 4241, false, false, null) == null);
@@ -23988,6 +24222,13 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
     try std.testing.expect(Zig__GlobalObject__createForTestIsolation(null, null) == null);
     try std.testing.expect(Zig__GlobalObject__createForTestIsolation(@ptrFromInt(1), null) == null);
     Zig__GlobalObject__destructOnExit(large);
+    {
+        lockPrivateGlobalLifecycles();
+        defer private_global_lifecycles_lock.unlock();
+        try std.testing.expect(private_global_lifecycles.context == null);
+        try std.testing.expectEqual(@as(usize, 0), private_global_lifecycles.count());
+        try std.testing.expectEqual(@as(usize, 0), private_global_lifecycles.capacity());
+    }
 }
 
 test "private shell timeout trap is distinct consumed and VM wide" {

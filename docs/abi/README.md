@@ -533,6 +533,13 @@ before allocating an arena-resident wrapper, and publishes neither state on a
 failed first allocation. Precise-GC relocation rekeys the existing canonical
 wrapper without allocating or changing its encoded handle.
 
+The process-wide private-global lifecycle table is separately mutex-protected
+and uses its own lazy secure exact-pointer hash context. First publication is
+failure-atomic, and create-for-isolation rollback, successful replacement, and
+destruct-on-exit all use the same exact removal path. Removing the last live
+record releases and resets the table, so a later lifecycle starts with fresh
+entropy while null, forged, foreign, stale, and duplicate handles remain inert.
+
 The script-execution-context identifier boundary lazily assigns a stable,
 nonzero 32-bit process identifier to each global context. The process registry
 uses an independent lazy secure hash seed with exact integer equality; its first

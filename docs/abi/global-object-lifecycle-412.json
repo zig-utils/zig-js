@@ -45,6 +45,8 @@
     "create owns one hidden precise-heap owner, one private VM reference, and one exposed precise sibling realm; allocation failure releases all three without publishing a partial lifecycle.",
     "mini mode selects the small heap tag and ordinary mode selects the large heap tag while both preserve one VM identity for their exposed realm.",
     "console, execution-context, eval-mode, worker, and heap-mode metadata are copied into the lifecycle record without dereferencing opaque embedder pointers.",
+    "the process-wide private-global lifecycle registry is mutex-protected and uses an independent lazy secure exact-pointer hash context; entropy or first backing-allocation failure publishes no partial state.",
+    "isolation rollback, successful replacement, and destruct-on-exit share exact removal; removing the final record releases and resets the table so later insertion starts with fresh entropy while forged, retired, and duplicate addresses remain inert.",
     "positive worker or macro execution-context identifiers above one are installed exactly and remain process-unique; main/default globals receive a non-zero lazy identity.",
     "test isolation creates a fresh realm with an independent non-cell arena on the same precise heap, VM, JIT owner, and GlobalSymbolRegistry, with new globals, intrinsics, module state, jobs, and object graph.",
     "test isolation transfers the inherited process lookup to the replacement and assigns the retired realm a fresh unpublished identifier.",
