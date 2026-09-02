@@ -658,13 +658,98 @@ fn destroyGcAggregates(inst: *Instance) void {
     }
 }
 
+const ExceptionIdentityHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), exception: *js_value.WasmException) u64 {
+        const address = @intFromPtr(exception);
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&address));
+    }
+
+    pub fn eql(_: @This(), left: *js_value.WasmException, right: *js_value.WasmException) bool {
+        return left == right;
+    }
+};
+
+const ExceptionIdentityContextProvider = *const fn () std.mem.Allocator.Error!ExceptionIdentityHashContext;
+
+fn newExceptionIdentityHashContext() std.mem.Allocator.Error!ExceptionIdentityHashContext {
+    var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+    agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+    return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+}
+
+/// Invocation-local cycle detector for exception payload graphs. Exceptions
+/// can cross instance graphs, so an epoch stored on the exception itself would
+/// race independent instance collections. The first mutation installs secure
+/// bucket placement only after its backing allocation succeeds; a failed mark
+/// therefore leaves this set empty and retryable.
+const ExceptionSeenSet = struct {
+    const Index = std.HashMapUnmanaged(
+        *js_value.WasmException,
+        void,
+        ExceptionIdentityHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    index: Index = .empty,
+    context: ?ExceptionIdentityHashContext = null,
+    context_provider: ExceptionIdentityContextProvider = newExceptionIdentityHashContext,
+
+    fn getOrPutWithContext(
+        self: *@This(),
+        allocator: Allocator,
+        exception: *js_value.WasmException,
+        context: ExceptionIdentityHashContext,
+    ) std.mem.Allocator.Error!Index.GetOrPutResult {
+        if (self.context) |installed| {
+            std.debug.assert(installed.seed == context.seed);
+            return self.index.getOrPutContext(allocator, exception, installed);
+        }
+        const result = try self.index.getOrPutContext(allocator, exception, context);
+        self.context = context;
+        return result;
+    }
+
+    fn getOrPut(
+        self: *@This(),
+        allocator: Allocator,
+        exception: *js_value.WasmException,
+    ) std.mem.Allocator.Error!Index.GetOrPutResult {
+        const context = self.context orelse try self.context_provider();
+        return self.getOrPutWithContext(allocator, exception, context);
+    }
+
+    fn contains(self: *const @This(), exception: *js_value.WasmException) bool {
+        const context = self.context orelse return false;
+        return self.index.containsContext(exception, context);
+    }
+
+    fn remove(self: *@This(), exception: *js_value.WasmException) bool {
+        const context = self.context orelse return false;
+        return self.index.removeContext(exception, context);
+    }
+
+    fn count(self: *const @This()) usize {
+        return self.index.count();
+    }
+
+    fn capacity(self: *const @This()) usize {
+        return self.index.capacity();
+    }
+
+    fn deinit(self: *@This(), allocator: Allocator) void {
+        self.index.deinit(allocator);
+    }
+};
+
 fn markGcSlot(
     inst: *Instance,
     slot: ValueSlot,
     epoch: u32,
     worklist: *std.ArrayListUnmanaged(*GcObject),
     exception_worklist: *std.ArrayListUnmanaged(*js_value.WasmException),
-    exception_seen: *std.AutoHashMapUnmanaged(*js_value.WasmException, void),
+    exception_seen: *ExceptionSeenSet,
 ) error{OutOfMemory}!void {
     const reference = switch (slot) {
         .gcref => |value| value orelse return,
@@ -688,7 +773,11 @@ fn markGcSlot(
 /// payloads reachable through live wrappers or native exnrefs are included
 /// automatically. Cross-instance objects are left to their owner. Mark
 /// allocation failure performs no sweep.
-pub fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error{OutOfMemory}!usize {
+fn collectGcAggregatesQuiescentUsing(
+    inst: *Instance,
+    roots: []const ValueSlot,
+    exception_context_provider: ExceptionIdentityContextProvider,
+) error{OutOfMemory}!usize {
     while (!inst.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
     defer inst.gc_object_lock.unlock();
 
@@ -705,7 +794,7 @@ pub fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) e
     defer worklist.deinit(inst.gpa);
     var exception_worklist: std.ArrayListUnmanaged(*js_value.WasmException) = .empty;
     defer exception_worklist.deinit(inst.gpa);
-    var exception_seen: std.AutoHashMapUnmanaged(*js_value.WasmException, void) = .empty;
+    var exception_seen = ExceptionSeenSet{ .context_provider = exception_context_provider };
     defer exception_seen.deinit(inst.gpa);
 
     for (roots) |slot| try markGcSlot(inst, slot, epoch, &worklist, &exception_worklist, &exception_seen);
@@ -752,6 +841,10 @@ pub fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) e
         }
     }
     return reclaimed;
+}
+
+pub fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error{OutOfMemory}!usize {
+    return collectGcAggregatesQuiescentUsing(inst, roots, newExceptionIdentityHashContext);
 }
 
 // ---------------------------------------------------------------------------
@@ -7783,6 +7876,244 @@ test "wasm.exec GC extern conversions preserve host aggregate and i31 identity" 
     try std.testing.expect(result[0] == .externalized_i31);
     try invokeSlots(inst, 1, &.{.{ .externref = js_value.Value.nul() }}, &result, &diag);
     try std.testing.expect(result[0] == .gcref and result[0].gcref == null);
+}
+
+test "wasm.exec GC exception identity set seeds atomically and disperses legacy collisions" {
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!ExceptionIdentityHashContext {
+            return .{ .seed = 0x5741_534d_4558_0001 };
+        }
+        fn unavailable() std.mem.Allocator.Error!ExceptionIdentityHashContext {
+            return error.OutOfMemory;
+        }
+    };
+    const first_pointer: *js_value.WasmException = @ptrFromInt(@alignOf(js_value.WasmException));
+
+    var unavailable = ExceptionSeenSet{ .context_provider = FixedContext.unavailable };
+    defer unavailable.deinit(std.testing.allocator);
+    try std.testing.expectError(error.OutOfMemory, unavailable.getOrPut(std.testing.allocator, first_pointer));
+    try std.testing.expect(unavailable.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.count());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.capacity());
+
+    const fixed = try FixedContext.first();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed = ExceptionSeenSet{};
+    defer failed.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed.getOrPutWithContext(failing.allocator(), first_pointer, fixed),
+    );
+    try std.testing.expect(failed.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.capacity());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expect(!(try failed.getOrPutWithContext(std.testing.allocator, first_pointer, fixed)).found_existing);
+    try std.testing.expect(failed.contains(first_pointer));
+
+    const target_mask: u64 = 1023;
+    const collision_count: usize = 32;
+    const legacy_context = std.hash_map.AutoContext(*js_value.WasmException){};
+    var colliding: [collision_count]*js_value.WasmException = undefined;
+    var found: usize = 0;
+    var candidate_address: usize = @alignOf(js_value.WasmException);
+    while (found != colliding.len) : (candidate_address += @alignOf(js_value.WasmException)) {
+        const candidate: *js_value.WasmException = @ptrFromInt(candidate_address);
+        if (legacy_context.hash(candidate) & target_mask != 0) continue;
+        colliding[found] = candidate;
+        found += 1;
+    }
+
+    var seen = ExceptionSeenSet{};
+    defer seen.deinit(std.testing.allocator);
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (colliding) |exception| {
+        try std.testing.expectEqual(@as(u64, 0), legacy_context.hash(exception) & target_mask);
+        const bucket = fixed.hash(exception) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        try std.testing.expect(!(try seen.getOrPutWithContext(std.testing.allocator, exception, fixed)).found_existing);
+        try std.testing.expect(seen.contains(exception));
+    }
+    try std.testing.expect(occupied_count >= 24);
+    try std.testing.expectEqual(colliding.len, seen.count());
+    for (colliding) |exception| try std.testing.expect(seen.remove(exception));
+    try std.testing.expectEqual(@as(usize, 0), seen.count());
+}
+
+test "wasm.exec GC exception graphs retain cycles and reclaim unreachable aggregates" {
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!ExceptionIdentityHashContext {
+            return .{ .seed = 0x5741_534d_4752_0001 };
+        }
+    };
+
+    var mod: types.Module = .{ .arena = std.heap.ArenaAllocator.init(talloc) };
+    defer mod.deinit();
+    var inst: Instance = .{
+        .module = &mod,
+        .funcs = &.{},
+        .tables = &.{},
+        .mems = &.{},
+        .globals = &.{},
+        .tags = &.{},
+        .elem_segments = &.{},
+        .data_segments = &.{},
+        .gpa = talloc,
+        .arena = std.heap.ArenaAllocator.init(talloc),
+    };
+    defer inst.arena.deinit();
+    defer destroyGcAggregates(&inst);
+
+    const graph_width: usize = 4096;
+    var aggregates: [graph_width]*GcObject = undefined;
+    for (&aggregates) |*aggregate| aggregate.* = try createGcAggregate(&inst, 0, .struct_, &.{});
+    _ = try createGcAggregate(&inst, 0, .struct_, &.{}); // deliberately unreachable
+
+    var owner_token: u8 = 0;
+    var exceptions: [graph_width]js_value.WasmException = undefined;
+    var payloads: [graph_width][2]ValueSlot = undefined;
+    var roots: [graph_width]ValueSlot = undefined;
+    for (&exceptions) |*exception| exception.* = .{
+        .tag = @ptrCast(&owner_token),
+        .payload = &.{},
+        .externrefs = &.{},
+        .owner = @ptrCast(&inst),
+    };
+    for (&payloads, 0..) |*payload, index| {
+        payload.* = .{
+            .{ .exnref = &exceptions[(index + 1) % exceptions.len] },
+            .{ .gcref = gcObjectRef(aggregates[index]) },
+        };
+        exceptions[index].payload = payload[0..];
+        roots[index] = .{ .exnref = &exceptions[index] };
+    }
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try collectGcAggregatesQuiescentUsing(&inst, &roots, FixedContext.first),
+    );
+    try std.testing.expectEqual(@as(usize, graph_width), inst.gc_object_count);
+    try std.testing.expectEqual(
+        @as(usize, graph_width),
+        try collectGcAggregatesQuiescentUsing(&inst, &.{}, FixedContext.first),
+    );
+    try std.testing.expectEqual(@as(usize, 0), inst.gc_object_count);
+}
+
+fn exerciseGcExceptionGraphCollection(gpa: Allocator) !void {
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!ExceptionIdentityHashContext {
+            return .{ .seed = 0x5741_534d_4f4f_0001 };
+        }
+    };
+    var mod: types.Module = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
+    defer mod.deinit();
+    var inst: Instance = .{
+        .module = &mod,
+        .funcs = &.{},
+        .tables = &.{},
+        .mems = &.{},
+        .globals = &.{},
+        .tags = &.{},
+        .elem_segments = &.{},
+        .data_segments = &.{},
+        .gpa = gpa,
+        .arena = std.heap.ArenaAllocator.init(gpa),
+    };
+    defer inst.arena.deinit();
+    defer destroyGcAggregates(&inst);
+
+    const reachable = try createGcAggregate(&inst, 0, .struct_, &.{});
+    _ = try createGcAggregate(&inst, 0, .struct_, &.{});
+    var owner_token: u8 = 0;
+    var first = js_value.WasmException{
+        .tag = @ptrCast(&owner_token),
+        .payload = &.{},
+        .externrefs = &.{},
+        .owner = @ptrCast(&inst),
+    };
+    var second = js_value.WasmException{
+        .tag = @ptrCast(&owner_token),
+        .payload = &.{},
+        .externrefs = &.{},
+        .owner = @ptrCast(&inst),
+    };
+    var first_payload = [_]ValueSlot{ .{ .exnref = &second }, .{ .gcref = gcObjectRef(reachable) } };
+    var second_payload = [_]ValueSlot{.{ .exnref = &first }};
+    first.payload = &first_payload;
+    second.payload = &second_payload;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try collectGcAggregatesQuiescentUsing(&inst, &.{.{ .exnref = &first }}, FixedContext.first),
+    );
+    try std.testing.expectEqual(@as(usize, 1), inst.gc_object_count);
+}
+
+test "wasm.exec GC exception graph collection is allocation-failure atomic" {
+    try std.testing.checkAllAllocationFailures(
+        talloc,
+        exerciseGcExceptionGraphCollection,
+        .{},
+    );
+
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!ExceptionIdentityHashContext {
+            return .{ .seed = 0x5741_534d_5245_0001 };
+        }
+        fn unavailable() std.mem.Allocator.Error!ExceptionIdentityHashContext {
+            return error.OutOfMemory;
+        }
+    };
+    var mod: types.Module = .{ .arena = std.heap.ArenaAllocator.init(talloc) };
+    defer mod.deinit();
+    var inst: Instance = .{
+        .module = &mod,
+        .funcs = &.{},
+        .tables = &.{},
+        .mems = &.{},
+        .globals = &.{},
+        .tags = &.{},
+        .elem_segments = &.{},
+        .data_segments = &.{},
+        .gpa = talloc,
+        .arena = std.heap.ArenaAllocator.init(talloc),
+    };
+    defer inst.arena.deinit();
+    defer destroyGcAggregates(&inst);
+    const reachable = try createGcAggregate(&inst, 0, .struct_, &.{});
+    _ = try createGcAggregate(&inst, 0, .struct_, &.{});
+    var owner_token: u8 = 0;
+    var exception = js_value.WasmException{
+        .tag = @ptrCast(&owner_token),
+        .payload = &.{},
+        .externrefs = &.{},
+        .owner = @ptrCast(&inst),
+    };
+    var payload = [_]ValueSlot{.{ .gcref = gcObjectRef(reachable) }};
+    exception.payload = &payload;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        collectGcAggregatesQuiescentUsing(&inst, &.{.{ .exnref = &exception }}, FixedContext.unavailable),
+    );
+    try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
+
+    var failing = std.testing.FailingAllocator.init(talloc, .{ .fail_index = 0 });
+    inst.gpa = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        collectGcAggregatesQuiescentUsing(&inst, &.{.{ .exnref = &exception }}, FixedContext.first),
+    );
+    try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
+    inst.gpa = talloc;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try collectGcAggregatesQuiescentUsing(&inst, &.{.{ .exnref = &exception }}, FixedContext.first),
+    );
+    try std.testing.expectEqual(@as(usize, 1), inst.gc_object_count);
 }
 
 fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
