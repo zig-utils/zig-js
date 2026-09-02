@@ -682,11 +682,14 @@ across user-triggered GC are covered in both focused and compiled consumers.
 
 The owned serialization boundary returns the pinned 24-byte
 `{bytes,size,handle}` layout and keeps its structured-clone frame stable until
-an idempotent opaque-token release. Ordinary graphs round-trip cycles, aliases,
-and typed data; default-mode SharedArrayBuffers retain process-local backing,
-while storage and cross-process flags reject them rather than publishing
-non-portable tokens. Malformed input, foreign values, uncloneable values, and
-allocation failure use the shared pending-exception channel.
+an idempotent secure-entropy capability release. Handles are never dereferenced;
+the exact owner registry uses a separate secure hash seed, rejects live token
+collisions, and publishes no partial owner on entropy or allocation failure.
+Ordinary graphs round-trip cycles, aliases, and typed data; default-mode
+SharedArrayBuffers retain process-local backing, while storage and cross-process
+flags reject them rather than publishing non-portable tokens. Malformed input,
+foreign values, uncloneable values, and allocation failure use the shared
+pending-exception channel.
 
 The cached-bytecode boundary returns an immutable, versioned `ZJSCBC01`
 artifact owned by its opaque handle. The endian-stable header records the

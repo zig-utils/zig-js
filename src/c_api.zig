@@ -485,8 +485,7 @@ const PrivateGlobalLifecycle = struct {
 var private_global_lifecycles_lock: std.atomic.Mutex = .unlocked;
 var private_global_lifecycles: std.AutoHashMapUnmanaged(usize, PrivateGlobalLifecycle) = .empty;
 var private_serialized_script_lock: std.atomic.Mutex = .unlocked;
-var private_serialized_script_handles: std.AutoHashMapUnmanaged(usize, PrivateSerializedScriptOwned) = .empty;
-var private_serialized_script_next_handle: usize = 1;
+var private_serialized_script_handles: CPrivateIdentityMapUnmanaged(PrivateSerializedScriptOwned) = .{};
 
 fn lockPrivateSerializedScripts() void {
     var spins: usize = 0;
@@ -498,10 +497,13 @@ fn lockPrivateSerializedScripts() void {
 fn registerPrivateSerializedScript(owned: PrivateSerializedScriptOwned) error{OutOfMemory}!*anyopaque {
     lockPrivateSerializedScripts();
     defer private_serialized_script_lock.unlock();
-    const token = private_serialized_script_next_handle;
-    private_serialized_script_next_handle = std.math.add(usize, token, 1) catch
-        return error.OutOfMemory;
-    try private_serialized_script_handles.putNoClobber(gpa, token, owned);
+    const token = try registerPrivateSerializedScriptUsing(
+        &private_serialized_script_handles,
+        gpa,
+        owned,
+        newCPrivateCapabilityToken,
+        newCPrivateIdentityHashContext,
+    );
     return @ptrFromInt(token);
 }
 
@@ -509,8 +511,13 @@ fn takePrivateSerializedScript(raw: ?*anyopaque) ?PrivateSerializedScriptOwned {
     const token = @intFromPtr(raw orelse return null);
     lockPrivateSerializedScripts();
     defer private_serialized_script_lock.unlock();
-    const removed = private_serialized_script_handles.fetchRemove(token) orelse return null;
-    return removed.value;
+    const owned = private_serialized_script_handles.get(token) orelse return null;
+    std.debug.assert(private_serialized_script_handles.remove(token));
+    if (private_serialized_script_handles.count() == 0) {
+        private_serialized_script_handles.deinit(gpa);
+        private_serialized_script_handles = .{};
+    }
+    return owned;
 }
 
 fn lockPrivateScriptExecutionContexts() void {
@@ -687,6 +694,7 @@ const CPrivateIdentityHashContext = struct {
 };
 
 const CPrivateIdentityContextProvider = *const fn () std.mem.Allocator.Error!CPrivateIdentityHashContext;
+const CPrivateCapabilityTokenProvider = *const fn () std.mem.Allocator.Error!usize;
 
 fn newCPrivateIdentityHashContext() std.mem.Allocator.Error!CPrivateIdentityHashContext {
     var seed_bytes: [@sizeOf(u64)]u8 = undefined;
@@ -694,10 +702,17 @@ fn newCPrivateIdentityHashContext() std.mem.Allocator.Error!CPrivateIdentityHash
     return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
 }
 
-/// Lazy exact-address index for private diagnostic graph state. Empty and
-/// lookup-only paths require no entropy. The context is published only after
-/// the first backing allocation succeeds, so callers can retry an OOM without
-/// inheriting a partially initialized or predictably keyed table.
+fn newCPrivateCapabilityToken() std.mem.Allocator.Error!usize {
+    var token_bytes: [@sizeOf(usize)]u8 = undefined;
+    agent.engineIo().randomSecure(&token_bytes) catch return error.OutOfMemory;
+    return std.mem.readInt(usize, &token_bytes, .little);
+}
+
+/// Lazy exact-identity index for private ABI state. Empty and lookup-only paths
+/// require no entropy. The context is published only after the first backing
+/// allocation succeeds, so callers can retry an OOM without inheriting a
+/// partially initialized or predictably keyed table. Capability registries
+/// must generate their authority tokens independently from this bucket seed.
 fn CPrivateIdentityMapUnmanaged(comptime ValueType: type) type {
     const Index = std.HashMapUnmanaged(
         usize,
@@ -764,10 +779,31 @@ fn CPrivateIdentityMapUnmanaged(comptime ValueType: type) type {
             return self.index.count();
         }
 
+        fn capacity(self: *const Self) usize {
+            return self.index.capacity();
+        }
+
         fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.index.deinit(allocator);
         }
     };
+}
+
+fn registerPrivateSerializedScriptUsing(
+    registry: *CPrivateIdentityMapUnmanaged(PrivateSerializedScriptOwned),
+    allocator: std.mem.Allocator,
+    owned: PrivateSerializedScriptOwned,
+    token_provider: CPrivateCapabilityTokenProvider,
+    context_provider: CPrivateIdentityContextProvider,
+) std.mem.Allocator.Error!usize {
+    while (true) {
+        const token = try token_provider();
+        if (token == 0) continue;
+        const result = try registry.getOrPutSecureUsing(allocator, token, context_provider);
+        if (result.found_existing) continue;
+        result.value_ptr.* = owned;
+        return token;
+    }
 }
 
 const ReachabilityVisitor = struct {
@@ -15197,8 +15233,9 @@ fn privateSerializeJSValue(
 }
 
 export fn Bun__SerializedScriptSlice__free(raw: ?*anyopaque) callconv(.c) void {
-    // Monotonic opaque tokens are never dereferenced or reused, so null,
-    // duplicate, and arbitrarily stale caller input cannot free newer data.
+    // Secure opaque capabilities are never dereferenced. Exact live-collision
+    // rejection makes null, duplicate, stale, and forged input inert instead
+    // of letting a predictable token release another consumer's bytes.
     const owned = takePrivateSerializedScript(raw) orelse return;
     structured_clone.releaseSerialized(owned.bytes);
     owned.allocator.free(owned.bytes);
@@ -23043,6 +23080,165 @@ test "private heap snapshot identity maps are keyed exact and failure atomic" {
         try std.testing.expectEqual(@as(?u8, @intCast(index)), identities.get(identity));
     for (colliders) |identity| try std.testing.expect(identities.remove(identity));
     try std.testing.expectEqual(@as(usize, 0), identities.count());
+}
+
+test "private serialized owner capabilities reject collisions and publish atomically" {
+    const Providers = struct {
+        var token_calls: usize = 0;
+
+        fn fixedContext() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x5345_5249_414c_0001 };
+        }
+
+        fn unavailableContext() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return error.OutOfMemory;
+        }
+
+        fn fixedToken() std.mem.Allocator.Error!usize {
+            return 0x5345_5249_0000_0003;
+        }
+
+        fn unavailableToken() std.mem.Allocator.Error!usize {
+            return error.OutOfMemory;
+        }
+
+        fn zeroCollisionUnique() std.mem.Allocator.Error!usize {
+            defer token_calls += 1;
+            return switch (token_calls) {
+                0 => 0,
+                1 => 0x5345_5249_0000_0001,
+                else => 0x5345_5249_0000_0002,
+            };
+        }
+    };
+    var existing_bytes = [_]u8{0x11};
+    var unique_bytes = [_]u8{0x22};
+    const existing_token: usize = 0x5345_5249_0000_0001;
+    const unique_token: usize = 0x5345_5249_0000_0002;
+    const identity_context = try Providers.fixedContext();
+
+    var registry: CPrivateIdentityMapUnmanaged(PrivateSerializedScriptOwned) = .{};
+    defer registry.deinit(std.testing.allocator);
+    const existing = try registry.getOrPutWithContext(std.testing.allocator, existing_token, identity_context);
+    try std.testing.expect(!existing.found_existing);
+    existing.value_ptr.* = .{ .bytes = &existing_bytes, .allocator = std.testing.allocator };
+
+    Providers.token_calls = 0;
+    try std.testing.expectEqual(
+        unique_token,
+        try registerPrivateSerializedScriptUsing(
+            &registry,
+            std.testing.allocator,
+            .{ .bytes = &unique_bytes, .allocator = std.testing.allocator },
+            Providers.zeroCollisionUnique,
+            Providers.unavailableContext,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), Providers.token_calls);
+    try std.testing.expectEqual(@as(usize, 2), registry.count());
+    try std.testing.expectEqual(@intFromPtr(&existing_bytes), @intFromPtr(registry.get(existing_token).?.bytes.ptr));
+    try std.testing.expectEqual(@intFromPtr(&unique_bytes), @intFromPtr(registry.get(unique_token).?.bytes.ptr));
+
+    var token_failure: CPrivateIdentityMapUnmanaged(PrivateSerializedScriptOwned) = .{};
+    defer token_failure.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateSerializedScriptUsing(
+            &token_failure,
+            std.testing.allocator,
+            .{ .bytes = &unique_bytes, .allocator = std.testing.allocator },
+            Providers.unavailableToken,
+            Providers.fixedContext,
+        ),
+    );
+    try std.testing.expect(token_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), token_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), token_failure.capacity());
+
+    var context_failure: CPrivateIdentityMapUnmanaged(PrivateSerializedScriptOwned) = .{};
+    defer context_failure.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateSerializedScriptUsing(
+            &context_failure,
+            std.testing.allocator,
+            .{ .bytes = &unique_bytes, .allocator = std.testing.allocator },
+            Providers.fixedToken,
+            Providers.unavailableContext,
+        ),
+    );
+    try std.testing.expect(context_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), context_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), context_failure.capacity());
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var allocation_failure: CPrivateIdentityMapUnmanaged(PrivateSerializedScriptOwned) = .{};
+    defer allocation_failure.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerPrivateSerializedScriptUsing(
+            &allocation_failure,
+            failing.allocator(),
+            .{ .bytes = &unique_bytes, .allocator = std.testing.allocator },
+            Providers.fixedToken,
+            Providers.fixedContext,
+        ),
+    );
+    try std.testing.expect(allocation_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.capacity());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expectEqual(
+        try Providers.fixedToken(),
+        try registerPrivateSerializedScriptUsing(
+            &allocation_failure,
+            std.testing.allocator,
+            .{ .bytes = &unique_bytes, .allocator = std.testing.allocator },
+            Providers.fixedToken,
+            Providers.fixedContext,
+        ),
+    );
+}
+
+test "private serialized owner capabilities release exactly once under contention" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var first_bytes = [_]u8{0x31};
+    var second_bytes = [_]u8{0x32};
+    const first = try registerPrivateSerializedScript(.{
+        .bytes = &first_bytes,
+        .allocator = std.testing.allocator,
+    });
+    defer _ = takePrivateSerializedScript(first);
+    const second = try registerPrivateSerializedScript(.{
+        .bytes = &second_bytes,
+        .allocator = std.testing.allocator,
+    });
+    defer _ = takePrivateSerializedScript(second);
+
+    const Release = struct {
+        handle: *anyopaque,
+        wins: *std.atomic.Value(usize),
+
+        fn run(self: *@This()) void {
+            if (takePrivateSerializedScript(self.handle) != null)
+                _ = self.wins.fetchAdd(1, .monotonic);
+        }
+    };
+    var wins: std.atomic.Value(usize) = .init(0);
+    var releases: [8]Release = @splat(.{ .handle = first, .wins = &wins });
+    var threads: [releases.len]std.Thread = undefined;
+    for (&threads, &releases) |*thread, *release|
+        thread.* = try std.Thread.spawn(.{}, Release.run, .{release});
+    for (threads) |thread| thread.join();
+
+    try std.testing.expectEqual(@as(usize, 1), wins.load(.monotonic));
+    try std.testing.expect(takePrivateSerializedScript(first) == null);
+    try std.testing.expect(takePrivateSerializedScript(null) == null);
+    const forged: *anyopaque = @ptrFromInt(std.math.maxInt(usize) - 866);
+    try std.testing.expect(takePrivateSerializedScript(forged) == null);
+    const untouched = takePrivateSerializedScript(second) orelse return error.MissingSerializedOwner;
+    try std.testing.expectEqual(@intFromPtr(&second_bytes), @intFromPtr(untouched.bytes.ptr));
 }
 
 test "private reachability roots use dense flags with transactional insertion" {
