@@ -335,7 +335,93 @@ const WaiterList = struct {
     tickets: std.ArrayListUnmanaged(*Ticket) = .empty,
 };
 
-var waiters: std.AutoHashMapUnmanaged(WaitKey, *WaiterList) = .empty;
+const WaitKeyHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: WaitKey) u64 {
+        var hasher = std.hash.Wyhash.init(context.seed);
+        const storage_identity = @intFromPtr(key.storage);
+        hasher.update(std.mem.asBytes(&storage_identity));
+        hasher.update(std.mem.asBytes(&key.offset));
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), left: WaitKey, right: WaitKey) bool {
+        return left.storage == right.storage and left.offset == right.offset;
+    }
+};
+
+const WaiterIndex = std.HashMapUnmanaged(
+    WaitKey,
+    *WaiterList,
+    WaitKeyHashContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+/// Process-global waiter-domain index. Every method is called with
+/// `waiters_mutex` held; the context is installed only after the first backing
+/// allocation succeeds, and all later operations use that exact context.
+const WaiterTable = struct {
+    index: WaiterIndex = .empty,
+    context: ?WaitKeyHashContext = null,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.index.deinit(allocator);
+    }
+
+    fn getOrPutWithContext(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        key: WaitKey,
+        context: WaitKeyHashContext,
+    ) std.mem.Allocator.Error!WaiterIndex.GetOrPutResult {
+        if (self.context) |installed| {
+            std.debug.assert(installed.seed == context.seed);
+            return self.index.getOrPutContext(allocator, key, installed);
+        }
+        const entry = try self.index.getOrPutContext(allocator, key, context);
+        self.context = context;
+        return entry;
+    }
+
+    fn getOrPut(self: *@This(), allocator: std.mem.Allocator, key: WaitKey) std.mem.Allocator.Error!WaiterIndex.GetOrPutResult {
+        if (self.context) |context| return self.index.getOrPutContext(allocator, key, context);
+        var bytes: [8]u8 = undefined;
+        // Algorithmic-complexity resistance is a security boundary: entropy
+        // failure follows the existing allocation-failure path, never a fixed
+        // clock, address, or constant fallback.
+        engineIo().randomSecure(&bytes) catch return error.OutOfMemory;
+        return self.getOrPutWithContext(allocator, key, .{ .seed = std.mem.readInt(u64, &bytes, .little) });
+    }
+
+    fn get(self: *const @This(), key: WaitKey) ?*WaiterList {
+        const context = self.context orelse return null;
+        return self.index.getContext(key, context);
+    }
+
+    fn remove(self: *@This(), key: WaitKey) bool {
+        const context = self.context orelse return false;
+        return self.index.removeContext(key, context);
+    }
+
+    fn iterator(self: *@This()) WaiterIndex.Iterator {
+        return self.index.iterator();
+    }
+
+    fn valueIterator(self: *@This()) WaiterIndex.ValueIterator {
+        return self.index.valueIterator();
+    }
+
+    fn count(self: *const @This()) usize {
+        return self.index.count();
+    }
+
+    fn capacity(self: *const @This()) usize {
+        return self.index.capacity();
+    }
+};
+
+var waiters: WaiterTable = .{};
 var waiters_mutex: std.Io.Mutex = .init;
 /// Signaled when an async ticket settles (notify or teardown), waking the
 /// owner's harvest loop.
@@ -729,6 +815,63 @@ fn wakeAllWaiters() void {
     }
     removeEmptyListsLocked();
     waiters_cond.broadcast(io);
+}
+
+test "waiter table disperses legacy collisions and publishes context atomically" {
+    const storage = try SharedBufferStorage.create(8, null);
+    defer storage.release();
+    const target_mask: u64 = 1023;
+    const collision_count: usize = 32;
+    const legacy_context = std.hash_map.AutoContext(WaitKey){};
+    var keys: [collision_count]WaitKey = undefined;
+    var found: usize = 0;
+    var offset: usize = 0;
+    while (found != keys.len) : (offset += @sizeOf(i64)) {
+        const key = WaitKey{ .storage = storage, .offset = offset };
+        if ((legacy_context.hash(key) & target_mask) != 0) continue;
+        keys[found] = key;
+        found += 1;
+    }
+
+    const keyed_context = WaitKeyHashContext{ .seed = 0x5741_4954_4552_0001 };
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    var list = WaiterList{};
+    var table = WaiterTable{};
+    defer table.deinit(std.testing.allocator);
+    for (keys) |key| {
+        try std.testing.expectEqual(@as(u64, 0), legacy_context.hash(key) & target_mask);
+        const bucket = keyed_context.hash(key) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        const entry = try table.getOrPutWithContext(std.testing.allocator, key, keyed_context);
+        try std.testing.expect(!entry.found_existing);
+        entry.value_ptr.* = &list;
+    }
+    try std.testing.expect(occupied_count > collision_count / 2);
+    try std.testing.expectEqual(collision_count, table.count());
+    for (keys) |key| try std.testing.expect(table.get(key) == &list);
+    for (keys) |key| try std.testing.expect(table.remove(key));
+    try std.testing.expectEqual(@as(usize, 0), table.count());
+    try std.testing.expectEqual(keyed_context.seed, table.context.?.seed);
+
+    var unavailable: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed = WaiterTable{};
+    defer failed.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed.getOrPutWithContext(unavailable.allocator(), keys[0], keyed_context),
+    );
+    try std.testing.expect(failed.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.capacity());
+
+    const retried = try failed.getOrPutWithContext(std.testing.allocator, keys[0], keyed_context);
+    retried.value_ptr.* = &list;
+    try std.testing.expect(failed.get(keys[0]) == &list);
+    try std.testing.expectEqual(@as(usize, 1), failed.count());
 }
 
 test "waiter table: wait blocks until notify; not-equal early-out" {
