@@ -535,8 +535,10 @@ uses an independent lazy secure hash seed with exact integer equality; its first
 mapping and context publish together only after successful allocation. Parallel
 creation stays unique and resolves only live contexts; explicit Home worker
 removal and every natural teardown retire the mapping before context storage is
-freed. Sibling realms remain isolated, while zero, unknown, and already-retired
-IDs are inert. The pinned teardown/UAF-prevention contract is in
+freed. Home's `INT32_MAX` macro sentinel consumes a generated process ID rather
+than becoming visible, and the monotonic namespace refuses to rebind retired or
+skipped IDs. Sibling realms remain isolated, while zero, unknown, and
+already-retired IDs are inert. The pinned teardown/UAF-prevention contract is in
 [`home-script-execution-context-7ed99c02.json`](home-script-execution-context-7ed99c02.json).
 
 The two retired module-registry snapshot exports exactly preserve pinned JSC's

@@ -566,6 +566,18 @@ fn unregisterPrivateScriptExecutionContext(context: *Context) void {
         _ = private_script_execution_contexts.remove(key);
 }
 
+const PrivateScriptExecutionContextIdAllocation = struct {
+    identifier: u32,
+    next: u32,
+};
+
+fn allocatePrivateScriptExecutionContextIdentifier(current: u32) ?PrivateScriptExecutionContextIdAllocation {
+    if (current == 0 or current == std.math.maxInt(u32)) return null;
+    const macro_sentinel: u32 = @intCast(std.math.maxInt(i32));
+    const identifier = if (current == macro_sentinel) current + 1 else current;
+    return .{ .identifier = identifier, .next = identifier + 1 };
+}
+
 fn privateScriptExecutionContextIdentifier(context: *Context) u32 {
     const existing = context.c_api_script_execution_context_id.load(.acquire);
     if (existing != 0) return existing;
@@ -574,18 +586,18 @@ fn privateScriptExecutionContextIdentifier(context: *Context) u32 {
     const winner = context.c_api_script_execution_context_id.load(.acquire);
     if (winner != 0) return winner;
     const current = next_private_script_execution_context_id.load(.monotonic);
-    if (current == 0 or current == std.math.maxInt(u32)) return 0;
+    const allocation = allocatePrivateScriptExecutionContextIdentifier(current) orelse return 0;
     if (!(installPrivateScriptExecutionContextUsing(
         &private_script_execution_contexts,
         gpa,
-        current,
+        allocation.identifier,
         context,
         newCPrivateIdentityHashContext,
     ) catch return 0)) return 0;
-    next_private_script_execution_context_id.store(current + 1, .monotonic);
+    next_private_script_execution_context_id.store(allocation.next, .monotonic);
     context.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
-    context.c_api_script_execution_context_id.store(current, .release);
-    return current;
+    context.c_api_script_execution_context_id.store(allocation.identifier, .release);
+    return allocation.identifier;
 }
 
 fn privateAssignScriptExecutionContextIdentifier(context: *Context, identifier: u32) bool {
@@ -593,6 +605,11 @@ fn privateAssignScriptExecutionContextIdentifier(context: *Context, identifier: 
     lockPrivateScriptExecutionContexts();
     defer private_script_execution_contexts_lock.unlock();
     if (context.c_api_script_execution_context_id.load(.acquire) != 0) return false;
+    // Home's worker identifiers and our generated identifiers share one
+    // monotonic process namespace. Values below `next` have either been used
+    // or deliberately skipped and cannot be rebound to a newer global.
+    const next = next_private_script_execution_context_id.load(.monotonic);
+    if (next == std.math.maxInt(u32) or identifier < next) return false;
     if (!(installPrivateScriptExecutionContextUsing(
         &private_script_execution_contexts,
         gpa,
@@ -600,9 +617,10 @@ fn privateAssignScriptExecutionContextIdentifier(context: *Context, identifier: 
         context,
         newCPrivateIdentityHashContext,
     ) catch return false)) return false;
-    const next = next_private_script_execution_context_id.load(.monotonic);
-    if (next <= identifier and identifier != std.math.maxInt(u32))
-        next_private_script_execution_context_id.store(identifier + 1, .monotonic);
+    next_private_script_execution_context_id.store(
+        if (identifier == std.math.maxInt(u32)) identifier else identifier + 1,
+        .monotonic,
+    );
     context.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
     context.c_api_script_execution_context_id.store(identifier, .release);
     return true;
@@ -618,13 +636,13 @@ fn privateTransferScriptExecutionContextIdentifier(old: *Context, new: *Context)
     if (private_script_execution_contexts.get(inherited_key)) |owner|
         if (owner != old) return false;
 
-    const replacement = next_private_script_execution_context_id.load(.monotonic);
-    if (replacement == 0 or replacement == std.math.maxInt(u32)) return false;
+    const current = next_private_script_execution_context_id.load(.monotonic);
+    const replacement = allocatePrivateScriptExecutionContextIdentifier(current) orelse return false;
     const mapping = private_script_execution_contexts.getOrPutSecure(gpa, inherited_key) catch return false;
     if (mapping.found_existing) std.debug.assert(mapping.value_ptr.* == old);
     mapping.value_ptr.* = new;
-    next_private_script_execution_context_id.store(replacement + 1, .monotonic);
-    old.c_api_script_execution_context_id.store(replacement, .release);
+    next_private_script_execution_context_id.store(replacement.next, .monotonic);
+    old.c_api_script_execution_context_id.store(replacement.identifier, .release);
     new.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
     new.c_api_script_execution_context_id.store(inherited, .release);
     return true;
@@ -17290,9 +17308,13 @@ export fn Zig__GlobalObject__create(
         return null;
     };
     const typed_context = ctxForLifecycle(context).?;
-    if (execution_context_id > 1 and
-        !privateAssignScriptExecutionContextIdentifier(typed_context, @intCast(execution_context_id)))
-    {
+    const identifier_ready = if (execution_context_id == std.math.maxInt(i32))
+        privateScriptExecutionContextIdentifier(typed_context) != 0
+    else if (execution_context_id > 1)
+        privateAssignScriptExecutionContextIdentifier(typed_context, @intCast(execution_context_id))
+    else
+        true;
+    if (!identifier_ready) {
         JSC__VM__deinit(group_ref, context);
         JSGlobalContextRelease(context);
         return null;
@@ -23189,6 +23211,22 @@ test "private script execution context registry is secure and failure atomic" {
     try std.testing.expectEqual(second, allocation_failure.get(12).?);
 }
 
+test "private script execution context allocation reserves the macro sentinel" {
+    const ordinary = allocatePrivateScriptExecutionContextIdentifier(41) orelse
+        return error.MissingScriptExecutionContextIdentifier;
+    try std.testing.expectEqual(@as(u32, 41), ordinary.identifier);
+    try std.testing.expectEqual(@as(u32, 42), ordinary.next);
+
+    const macro_sentinel: u32 = @intCast(std.math.maxInt(i32));
+    const skipped = allocatePrivateScriptExecutionContextIdentifier(macro_sentinel) orelse
+        return error.MissingScriptExecutionContextIdentifier;
+    try std.testing.expectEqual(macro_sentinel + 1, skipped.identifier);
+    try std.testing.expectEqual(macro_sentinel + 2, skipped.next);
+
+    try std.testing.expect(allocatePrivateScriptExecutionContextIdentifier(0) == null);
+    try std.testing.expect(allocatePrivateScriptExecutionContextIdentifier(std.math.maxInt(u32)) == null);
+}
+
 test "private serialized owner capabilities reject collisions and publish atomically" {
     const Providers = struct {
         var token_calls: usize = 0;
@@ -23785,6 +23823,25 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
     Zig__GlobalObject__destructOnExit(null);
     Zig__GlobalObject__destructOnExit(@ptrFromInt(1));
     try std.testing.expectEqual(@as(JSContextRef, null), ScriptExecutionContextIdentifier__getGlobalObject(4242));
+    try std.testing.expect(Zig__GlobalObject__create(null, 4242, false, false, null) == null);
+    try std.testing.expect(Zig__GlobalObject__create(null, 4241, false, false, null) == null);
+
+    const macro = Zig__GlobalObject__create(null, std.math.maxInt(i32), false, false, null) orelse
+        return error.ContextCreateFailed;
+    const macro_id = ScriptExecutionContextIdentifier__forGlobalObject(macro);
+    try std.testing.expect(macro_id != 0 and macro_id != @as(u32, @intCast(std.math.maxInt(i32))));
+    try std.testing.expectEqual(macro, ScriptExecutionContextIdentifier__getGlobalObject(macro_id));
+    try std.testing.expectEqual(macro_id, ScriptExecutionContextIdentifier__forGlobalObject(macro));
+    Zig__GlobalObject__destructOnExit(macro);
+
+    const worker_after_macro_id: i32 = @intCast(macro_id + 1);
+    const worker_after_macro = Zig__GlobalObject__create(null, worker_after_macro_id, false, false, null) orelse
+        return error.ContextCreateFailed;
+    try std.testing.expectEqual(
+        @as(u32, @intCast(worker_after_macro_id)),
+        ScriptExecutionContextIdentifier__forGlobalObject(worker_after_macro),
+    );
+    Zig__GlobalObject__destructOnExit(worker_after_macro);
 
     const large = Zig__GlobalObject__create(null, -1, false, false, null) orelse
         return error.ContextCreateFailed;

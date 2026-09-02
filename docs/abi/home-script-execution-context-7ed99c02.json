@@ -22,6 +22,8 @@
     "Every C-API context destruction path unregisters its identifier before freeing context-owned state.",
     "The registry and identifier allocator are serialized across host threads.",
     "Live identifier lookup uses independently seeded exact-integer hashing with failure-atomic first publication.",
-    "The exact Home-profile library compiles, links, and runs a consumer covering explicit removal, natural teardown, sibling isolation, and parallel lifetimes."
+    "The INT32_MAX macro sentinel consumes a fresh process identifier and is never exposed as a context identifier.",
+    "Explicit worker identifiers advance the shared monotonic namespace; retired and skipped identifiers cannot be rebound to a newer context.",
+    "The exact Home-profile library compiles, links, and runs a consumer covering explicit removal, natural teardown, sentinel translation, both worker/macro creation orders, sibling isolation, and parallel lifetimes."
   ]
 }

@@ -103,6 +103,31 @@ pub fn run(profile: []const u8) !void {
     Zig__GlobalObject__destructOnExit(null);
     if (ScriptExecutionContextIdentifier__getGlobalObject(identifier) != null)
         fail(profile, "teardown left a stale execution-context lookup");
+    if (Zig__GlobalObject__create(null, execution_context_id, false, false, null)) |reused| {
+        Zig__GlobalObject__destructOnExit(reused);
+        fail(profile, "retired execution-context identifier was rebound");
+    }
+    if (Zig__GlobalObject__create(null, execution_context_id - 1, false, false, null)) |reused| {
+        Zig__GlobalObject__destructOnExit(reused);
+        fail(profile, "skipped execution-context identifier was rebound");
+    }
+
+    const macro = Zig__GlobalObject__create(null, std.math.maxInt(i32), false, false, null) orelse
+        fail(profile, "macro sentinel creation failed");
+    const macro_identifier = ScriptExecutionContextIdentifier__forGlobalObject(macro);
+    if (macro_identifier == 0 or macro_identifier == @as(u32, @intCast(std.math.maxInt(i32))))
+        fail(profile, "macro sentinel was not translated to a generated identifier");
+    if (ScriptExecutionContextIdentifier__getGlobalObject(macro_identifier) != macro or
+        ScriptExecutionContextIdentifier__forGlobalObject(macro) != macro_identifier)
+        fail(profile, "generated macro identifier was not stable and live");
+    Zig__GlobalObject__destructOnExit(macro);
+
+    const worker_after_macro_id: i32 = @intCast(macro_identifier + 1);
+    const worker_after_macro = Zig__GlobalObject__create(null, worker_after_macro_id, false, false, null) orelse
+        fail(profile, "worker creation after macro failed");
+    if (ScriptExecutionContextIdentifier__forGlobalObject(worker_after_macro) != @as(u32, @intCast(worker_after_macro_id)))
+        fail(profile, "worker identifier after macro was not preserved");
+    Zig__GlobalObject__destructOnExit(worker_after_macro);
 
     const ordinary = JSGlobalContextCreate(null) orelse fail(profile, "ordinary context creation failed");
     if (Zig__GlobalObject__createForTestIsolation(ordinary, null) != null)
