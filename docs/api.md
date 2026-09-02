@@ -41,7 +41,9 @@ parser/linker; its exact MIME, Promise, realm, and error contract is recorded in
 [`abi/wasm-streaming-api-408.json`](abi/wasm-streaming-api-408.json).
 `Extensions.h` exposes the VM-affine create/finalize/release lifecycle around
 the pinned void `JSC__Wasm__StreamingCompiler__addBytes` feed; arbitrary tokens
-are never dereferenced, and finalization copies into caller storage.
+are never dereferenced. Valid handles are nonzero secure-entropy capabilities;
+the exact registry uses a separate secure hash seed, and finalization copies
+into caller storage.
 The pinned SQL row fast path has a real opaque Structure, shared object shapes,
 and bounds-checked GC-barriered offset writes; its exact ABI is recorded in
 [`abi/sql-object-structure-411.json`](abi/sql-object-structure-411.json).

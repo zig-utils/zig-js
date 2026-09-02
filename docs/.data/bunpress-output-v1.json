@@ -50,8 +50,8 @@
     },
     {
       "path": "api/index.html",
-      "bytes": 389767,
-      "sha256": "f907c9fb4dac235e51a9ced3dadb234aef22d13eca1feb67a2d876c7cafb0ab5"
+      "bytes": 389875,
+      "sha256": "4f18baded137b25b51879ac330a560b88236f2b3286ab37d156ba2a87df531a6"
     },
     {
       "path": "architecture/index.html",
@@ -274,5 +274,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "ef1257ba0c35bb3d49a72be991b40db175914400e6c3b9bd4bf8d20e2df18400"
+  "tree_sha256": "ed4cfd298c8cf4f5b9e22cb650f34e8185d0890ea7125393933dfdf7e0578d49"
 }

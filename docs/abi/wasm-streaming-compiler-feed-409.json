@@ -32,7 +32,8 @@
   ],
   "semantics": [
     "The pinned JSC__Wasm__StreamingCompiler__addBytes export retains its exact C calling convention, opaque compiler token, byte pointer, byte length, and void result.",
-    "Opaque handles are monotonically issued nonzero registry tokens and are never dereferenced or reused, so null, forged, and stale caller values fail closed.",
+    "Opaque handles are independently sampled nonzero capability tokens from secure host entropy and are never dereferenced; live collisions are rejected and resampled, so null, forged, and stale caller values fail closed.",
+    "Registry bucket placement uses a separate secure-entropy seed with exact token equality; token entropy failure, seed entropy failure, and first-allocation failure publish no handle or partial registry state.",
     "Every record retains both its creating Context identity and its VM identity; sibling contexts in one group may finalize it while an independent VM is rejected.",
     "A non-empty span requires a non-null pointer and is copied before the call returns; the caller retains no backing-storage lifetime obligation.",
     "Zero-length input is an exact no-op and accepts a null pointer.",

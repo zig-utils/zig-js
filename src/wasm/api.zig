@@ -12,6 +12,7 @@ const interpreter = @import("../interpreter.zig");
 const context = @import("../context.zig");
 const promise = @import("../promise.zig");
 const stack_scan = @import("../stack_scan.zig");
+const agent = @import("../agent.zig");
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const validate_mod = @import("validate.zig");
@@ -48,10 +49,132 @@ const StreamingCompilerEntry = struct {
     finalized: bool = false,
 };
 
+const StreamingCompilerHashContext = struct {
+    seed: u64,
+
+    pub fn hash(hash_context: @This(), token: usize) u64 {
+        return std.hash.Wyhash.hash(hash_context.seed, std.mem.asBytes(&token));
+    }
+
+    pub fn eql(_: @This(), left: usize, right: usize) bool {
+        return left == right;
+    }
+};
+
+const StreamingCompilerContextProvider = *const fn () std.mem.Allocator.Error!StreamingCompilerHashContext;
+const StreamingCompilerTokenProvider = *const fn () std.mem.Allocator.Error!usize;
+
+fn newStreamingCompilerHashContext() std.mem.Allocator.Error!StreamingCompilerHashContext {
+    var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+    agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+    return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+}
+
+fn newStreamingCompilerToken() std.mem.Allocator.Error!usize {
+    var token_bytes: [@sizeOf(usize)]u8 = undefined;
+    agent.engineIo().randomSecure(&token_bytes) catch return error.OutOfMemory;
+    return std.mem.readInt(usize, &token_bytes, .little);
+}
+
+/// Process-global opaque capability registry. Every operation is performed
+/// under `streaming_compiler_lock`. Token entropy is the authority boundary for
+/// the pinned context-free `addBytes` ABI; the independent hash context only
+/// controls bucket placement. A first insertion publishes the context after
+/// its backing allocation succeeds, leaving entropy and allocation failures
+/// empty and retryable.
+const StreamingCompilerRegistry = struct {
+    const Index = std.HashMapUnmanaged(
+        usize,
+        StreamingCompilerEntry,
+        StreamingCompilerHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    index: Index = .empty,
+    context: ?StreamingCompilerHashContext = null,
+
+    fn putNoClobberWithContext(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        token: usize,
+        entry: StreamingCompilerEntry,
+        hash_context: StreamingCompilerHashContext,
+    ) std.mem.Allocator.Error!void {
+        if (self.context) |installed| {
+            std.debug.assert(installed.seed == hash_context.seed);
+            try self.index.putNoClobberContext(allocator, token, entry, installed);
+            return;
+        }
+        try self.index.putNoClobberContext(allocator, token, entry, hash_context);
+        self.context = hash_context;
+    }
+
+    fn putNoClobberUsing(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        token: usize,
+        entry: StreamingCompilerEntry,
+        context_provider: StreamingCompilerContextProvider,
+    ) std.mem.Allocator.Error!void {
+        const hash_context = self.context orelse try context_provider();
+        try self.putNoClobberWithContext(allocator, token, entry, hash_context);
+    }
+
+    fn contains(self: *const @This(), token: usize) bool {
+        const hash_context = self.context orelse return false;
+        return self.index.containsContext(token, hash_context);
+    }
+
+    fn getPtr(self: *@This(), token: usize) ?*StreamingCompilerEntry {
+        const hash_context = self.context orelse return null;
+        return self.index.getPtrContext(token, hash_context);
+    }
+
+    fn get(self: *const @This(), token: usize) ?StreamingCompilerEntry {
+        const hash_context = self.context orelse return null;
+        return self.index.getContext(token, hash_context);
+    }
+
+    fn fetchRemove(self: *@This(), token: usize) ?Index.KV {
+        const hash_context = self.context orelse return null;
+        return self.index.fetchRemoveContext(token, hash_context);
+    }
+
+    fn iterator(self: *@This()) Index.Iterator {
+        return self.index.iterator();
+    }
+
+    fn count(self: *const @This()) usize {
+        return self.index.count();
+    }
+
+    fn capacity(self: *const @This()) usize {
+        return self.index.capacity();
+    }
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.index.deinit(allocator);
+    }
+};
+
+fn registerStreamingCompilerUsing(
+    registry: *StreamingCompilerRegistry,
+    allocator: std.mem.Allocator,
+    entry: StreamingCompilerEntry,
+    token_provider: StreamingCompilerTokenProvider,
+    context_provider: StreamingCompilerContextProvider,
+) std.mem.Allocator.Error!usize {
+    while (true) {
+        const token = try token_provider();
+        if (token == 0 or registry.contains(token)) continue;
+        try registry.putNoClobberUsing(allocator, token, entry, context_provider);
+        return token;
+    }
+}
+
 const streaming_compiler_allocator = std.heap.page_allocator;
 var streaming_compiler_lock: std.atomic.Mutex = .unlocked;
-var streaming_compilers: std.AutoHashMapUnmanaged(usize, StreamingCompilerEntry) = .empty;
-var next_streaming_compiler_token: usize = 1;
+var streaming_compilers: StreamingCompilerRegistry = .{};
 var streaming_compiler_test_spans: if (builtin.is_test) std.atomic.Value(usize) else void = if (builtin.is_test) .init(0) else {};
 
 fn lockStreamingCompilers() void {
@@ -68,12 +191,16 @@ fn streamingCompilerVm(store: *context.Context) usize {
 pub fn createStreamingCompiler(store: *context.Context) ?*anyopaque {
     lockStreamingCompilers();
     defer streaming_compiler_lock.unlock();
-    const token = next_streaming_compiler_token;
-    next_streaming_compiler_token = std.math.add(usize, token, 1) catch return null;
-    streaming_compilers.putNoClobber(streaming_compiler_allocator, token, .{
-        .owner_context = @intFromPtr(store),
-        .owner_vm = streamingCompilerVm(store),
-    }) catch return null;
+    const token = registerStreamingCompilerUsing(
+        &streaming_compilers,
+        streaming_compiler_allocator,
+        .{
+            .owner_context = @intFromPtr(store),
+            .owner_vm = streamingCompilerVm(store),
+        },
+        newStreamingCompilerToken,
+        newStreamingCompilerHashContext,
+    ) catch return null;
     return @ptrFromInt(token);
 }
 
@@ -135,7 +262,7 @@ pub fn releaseStreamingCompiler(store: *context.Context, raw: ?*anyopaque) Strea
     removed.bytes.deinit(streaming_compiler_allocator);
     if (streaming_compilers.count() == 0) {
         streaming_compilers.deinit(streaming_compiler_allocator);
-        streaming_compilers = .empty;
+        streaming_compilers = .{};
     }
     return .ok;
 }
@@ -159,7 +286,7 @@ fn retireStreamingCompilers(store: *context.Context) void {
     }
     if (streaming_compilers.count() == 0) {
         streaming_compilers.deinit(streaming_compiler_allocator);
-        streaming_compilers = .empty;
+        streaming_compilers = .{};
     }
 }
 
@@ -3798,6 +3925,160 @@ test "wasm api streaming compilation consumes Response bodies and rejects bounda
         \\streamingWasm408.order.join(",") === "before,after";
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api streaming capability registry rejects predictable handles and publishes atomically" {
+    const Providers = struct {
+        var token_calls: usize = 0;
+
+        fn fixedContext() std.mem.Allocator.Error!StreamingCompilerHashContext {
+            return .{ .seed = 0x5354_5245_414d_0001 };
+        }
+
+        fn unavailableContext() std.mem.Allocator.Error!StreamingCompilerHashContext {
+            return error.OutOfMemory;
+        }
+
+        fn fixedToken() std.mem.Allocator.Error!usize {
+            return 0x5354_524d_0000_0003;
+        }
+
+        fn unavailableToken() std.mem.Allocator.Error!usize {
+            return error.OutOfMemory;
+        }
+
+        fn zeroCollisionUnique() std.mem.Allocator.Error!usize {
+            defer token_calls += 1;
+            return switch (token_calls) {
+                0 => 0,
+                1 => 0x5354_524d_0000_0001,
+                else => 0x5354_524d_0000_0002,
+            };
+        }
+    };
+    const existing_token: usize = 0x5354_524d_0000_0001;
+    const unique_token: usize = 0x5354_524d_0000_0002;
+    const hash_context = try Providers.fixedContext();
+
+    var registry: StreamingCompilerRegistry = .{};
+    defer registry.deinit(std.testing.allocator);
+    try registry.putNoClobberWithContext(std.testing.allocator, existing_token, .{
+        .owner_context = 11,
+        .owner_vm = 17,
+    }, hash_context);
+
+    Providers.token_calls = 0;
+    try std.testing.expectEqual(
+        unique_token,
+        try registerStreamingCompilerUsing(
+            &registry,
+            std.testing.allocator,
+            .{ .owner_context = 23, .owner_vm = 29 },
+            Providers.zeroCollisionUnique,
+            Providers.unavailableContext,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), Providers.token_calls);
+    try std.testing.expectEqual(@as(usize, 2), registry.count());
+    try std.testing.expectEqual(@as(usize, 17), registry.get(existing_token).?.owner_vm);
+    try std.testing.expectEqual(@as(usize, 29), registry.get(unique_token).?.owner_vm);
+
+    var token_failure: StreamingCompilerRegistry = .{};
+    defer token_failure.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerStreamingCompilerUsing(
+            &token_failure,
+            std.testing.allocator,
+            .{ .owner_context = 31, .owner_vm = 37 },
+            Providers.unavailableToken,
+            Providers.fixedContext,
+        ),
+    );
+    try std.testing.expect(token_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), token_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), token_failure.capacity());
+
+    var context_failure: StreamingCompilerRegistry = .{};
+    defer context_failure.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerStreamingCompilerUsing(
+            &context_failure,
+            std.testing.allocator,
+            .{ .owner_context = 41, .owner_vm = 43 },
+            Providers.fixedToken,
+            Providers.unavailableContext,
+        ),
+    );
+    try std.testing.expect(context_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), context_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), context_failure.capacity());
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var allocation_failure: StreamingCompilerRegistry = .{};
+    defer allocation_failure.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        registerStreamingCompilerUsing(
+            &allocation_failure,
+            failing.allocator(),
+            .{ .owner_context = 47, .owner_vm = 53 },
+            Providers.fixedToken,
+            Providers.fixedContext,
+        ),
+    );
+    try std.testing.expect(allocation_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.capacity());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expectEqual(
+        try Providers.fixedToken(),
+        try registerStreamingCompilerUsing(
+            &allocation_failure,
+            std.testing.allocator,
+            .{ .owner_context = 47, .owner_vm = 53 },
+            Providers.fixedToken,
+            Providers.fixedContext,
+        ),
+    );
+}
+
+test "wasm api streaming capability registry disperses legacy integer collisions" {
+    const target_mask: u64 = 1023;
+    const collision_count: usize = 32;
+    const hash_context = StreamingCompilerHashContext{ .seed = 0x5354_5245_414d_0002 };
+    const legacy_context = std.hash_map.AutoContext(usize){};
+    var colliding: [collision_count]usize = undefined;
+    var found: usize = 0;
+    var candidate: usize = 1;
+    while (found != colliding.len) : (candidate += 1) {
+        if (legacy_context.hash(candidate) & target_mask != 0) continue;
+        colliding[found] = candidate;
+        found += 1;
+    }
+
+    var registry: StreamingCompilerRegistry = .{};
+    defer registry.deinit(std.testing.allocator);
+    var occupied: [target_mask + 1]bool = @splat(false);
+    var occupied_count: usize = 0;
+    for (colliding, 0..) |token, index| {
+        try std.testing.expectEqual(@as(u64, 0), legacy_context.hash(token) & target_mask);
+        const bucket = hash_context.hash(token) & target_mask;
+        if (!occupied[bucket]) {
+            occupied[bucket] = true;
+            occupied_count += 1;
+        }
+        try registry.putNoClobberWithContext(std.testing.allocator, token, .{
+            .owner_context = index + 1,
+            .owner_vm = index + 101,
+        }, hash_context);
+        try std.testing.expectEqual(index + 101, registry.get(token).?.owner_vm);
+    }
+    try std.testing.expect(occupied_count >= 24);
+    try std.testing.expectEqual(colliding.len, registry.count());
+    for (colliding) |token| try std.testing.expect(registry.fetchRemove(token) != null);
+    try std.testing.expectEqual(@as(usize, 0), registry.count());
 }
 
 test "wasm api streaming compilation feeds each Response chunk directly" {

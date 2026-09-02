@@ -41,7 +41,7 @@ const CONTRACT_DIGESTS: Record<string, string> = {
   "docs/abi/wasm-streaming-api-408.json":
     "755a58709e140bb03e34c9f057529a192c48402519684d30fe7ec14b97a29d20",
   "docs/abi/wasm-streaming-compiler-feed-409.json":
-    "e9cbe5e8a905d66bb852dd50fd06d35be6015bc6dc9b85170e3a98f22e4365bf",
+    "03a4981297c615229f6992913c2e141cbe66c5afcb1bcbc02d9cec1e295d5955",
   "docs/abi/wasm-streaming-response-feed-410.json":
     "b9dfc099b30ca62aef23a59f041968393c3862f81dc545a711905ee22900c992",
   "docs/abi/sql-object-structure-411.json":
