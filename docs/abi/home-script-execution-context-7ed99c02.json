@@ -21,6 +21,7 @@
     "Removal is context-isolated and idempotent for zero, unknown, and already-retired identifiers.",
     "Every C-API context destruction path unregisters its identifier before freeing context-owned state.",
     "The registry and identifier allocator are serialized across host threads.",
+    "Live identifier lookup uses independently seeded exact-integer hashing with failure-atomic first publication.",
     "The exact Home-profile library compiles, links, and runs a consumer covering explicit removal, natural teardown, sibling isolation, and parallel lifetimes."
   ]
 }

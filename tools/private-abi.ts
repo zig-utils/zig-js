@@ -31,7 +31,7 @@ const PLATFORM: Record<string, string[]> = {
 };
 const CONTRACT_DIGESTS: Record<string, string> = {
   "docs/abi/home-script-execution-context-7ed99c02.json":
-    "7cd3df82c4b5d655c2f78985aabce587dcd00675f2e68b294dd4418aac3863d1",
+    "96ee63996ebfcbab873bc9dd920d04e7d6a5202c28698665bebede5c4c421019",
   "docs/abi/cpu-profile-sampling-404.json":
     "fa30c5e8b8f72b6396be992d6543882e735ca8a84a9981220f3273e378b1cda4",
   "docs/abi/readable-stream-consumption-405.json":

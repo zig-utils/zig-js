@@ -471,7 +471,7 @@ var private_remote_inspector_process: PrivateRemoteInspectorProcessState = .{};
 var private_inspector_sessions_lock: std.atomic.Mutex = .unlocked;
 var private_inspector_sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty;
 var private_script_execution_contexts_lock: std.atomic.Mutex = .unlocked;
-var private_script_execution_contexts: std.AutoHashMapUnmanaged(u32, *Context) = .empty;
+var private_script_execution_contexts: CPrivateIdentityMapUnmanaged(*Context) = .{};
 var next_private_script_execution_context_id: std.atomic.Value(u32) = .init(1);
 const PrivateGlobalLifecycle = struct {
     context: *Context,
@@ -561,8 +561,9 @@ fn unregisterPrivateScriptExecutionContext(context: *Context) void {
     if (identifier == 0) return;
     lockPrivateScriptExecutionContexts();
     defer private_script_execution_contexts_lock.unlock();
-    if (private_script_execution_contexts.get(identifier) == context)
-        _ = private_script_execution_contexts.remove(identifier);
+    const key: usize = identifier;
+    if (private_script_execution_contexts.get(key) == context)
+        _ = private_script_execution_contexts.remove(key);
 }
 
 fn privateScriptExecutionContextIdentifier(context: *Context) u32 {
@@ -574,7 +575,13 @@ fn privateScriptExecutionContextIdentifier(context: *Context) u32 {
     if (winner != 0) return winner;
     const current = next_private_script_execution_context_id.load(.monotonic);
     if (current == 0 or current == std.math.maxInt(u32)) return 0;
-    private_script_execution_contexts.putNoClobber(gpa, current, context) catch return 0;
+    if (!(installPrivateScriptExecutionContextUsing(
+        &private_script_execution_contexts,
+        gpa,
+        current,
+        context,
+        newCPrivateIdentityHashContext,
+    ) catch return 0)) return 0;
     next_private_script_execution_context_id.store(current + 1, .monotonic);
     context.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
     context.c_api_script_execution_context_id.store(current, .release);
@@ -585,9 +592,14 @@ fn privateAssignScriptExecutionContextIdentifier(context: *Context, identifier: 
     if (identifier == 0) return false;
     lockPrivateScriptExecutionContexts();
     defer private_script_execution_contexts_lock.unlock();
-    if (context.c_api_script_execution_context_id.load(.acquire) != 0 or
-        private_script_execution_contexts.contains(identifier)) return false;
-    private_script_execution_contexts.putNoClobber(gpa, identifier, context) catch return false;
+    if (context.c_api_script_execution_context_id.load(.acquire) != 0) return false;
+    if (!(installPrivateScriptExecutionContextUsing(
+        &private_script_execution_contexts,
+        gpa,
+        identifier,
+        context,
+        newCPrivateIdentityHashContext,
+    ) catch return false)) return false;
     const next = next_private_script_execution_context_id.load(.monotonic);
     if (next <= identifier and identifier != std.math.maxInt(u32))
         next_private_script_execution_context_id.store(identifier + 1, .monotonic);
@@ -602,19 +614,15 @@ fn privateTransferScriptExecutionContextIdentifier(old: *Context, new: *Context)
     lockPrivateScriptExecutionContexts();
     defer private_script_execution_contexts_lock.unlock();
     if (new.c_api_script_execution_context_id.load(.acquire) != 0) return false;
-    if (private_script_execution_contexts.get(inherited)) |owner|
+    const inherited_key: usize = inherited;
+    if (private_script_execution_contexts.get(inherited_key)) |owner|
         if (owner != old) return false;
-    private_script_execution_contexts.ensureUnusedCapacity(gpa, 1) catch return false;
-    if (private_script_execution_contexts.get(inherited) == old)
-        _ = private_script_execution_contexts.remove(inherited);
-    private_script_execution_contexts.putAssumeCapacity(inherited, new);
 
     const replacement = next_private_script_execution_context_id.load(.monotonic);
-    if (replacement == 0 or replacement == std.math.maxInt(u32)) {
-        _ = private_script_execution_contexts.remove(inherited);
-        private_script_execution_contexts.putAssumeCapacity(inherited, old);
-        return false;
-    }
+    if (replacement == 0 or replacement == std.math.maxInt(u32)) return false;
+    const mapping = private_script_execution_contexts.getOrPutSecure(gpa, inherited_key) catch return false;
+    if (mapping.found_existing) std.debug.assert(mapping.value_ptr.* == old);
+    mapping.value_ptr.* = new;
     next_private_script_execution_context_id.store(replacement + 1, .monotonic);
     old.c_api_script_execution_context_id.store(replacement, .release);
     new.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
@@ -804,6 +812,21 @@ fn registerPrivateSerializedScriptUsing(
         result.value_ptr.* = owned;
         return token;
     }
+}
+
+fn installPrivateScriptExecutionContextUsing(
+    registry: *CPrivateIdentityMapUnmanaged(*Context),
+    allocator: std.mem.Allocator,
+    identifier: u32,
+    context: *Context,
+    context_provider: CPrivateIdentityContextProvider,
+) std.mem.Allocator.Error!bool {
+    if (identifier == 0) return false;
+    const key: usize = identifier;
+    const result = try registry.getOrPutSecureUsing(allocator, key, context_provider);
+    if (result.found_existing) return false;
+    result.value_ptr.* = context;
+    return true;
 }
 
 const ReachabilityVisitor = struct {
@@ -17447,7 +17470,8 @@ export fn ScriptExecutionContextIdentifier__getGlobalObject(identifier: u32) cal
     if (identifier == 0) return null;
     lockPrivateScriptExecutionContexts();
     defer private_script_execution_contexts_lock.unlock();
-    return @ptrCast(private_script_execution_contexts.get(identifier) orelse return null);
+    const key: usize = identifier;
+    return @ptrCast(private_script_execution_contexts.get(key) orelse return null);
 }
 
 /// Home removes a worker from the process registry before freeing its event
@@ -17457,7 +17481,8 @@ export fn Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier(identif
     if (identifier == 0) return;
     lockPrivateScriptExecutionContexts();
     defer private_script_execution_contexts_lock.unlock();
-    _ = private_script_execution_contexts.remove(identifier);
+    const key: usize = identifier;
+    _ = private_script_execution_contexts.remove(key);
 }
 
 fn inspectorState(c: *Context) ?*CInspectorState {
@@ -23014,7 +23039,7 @@ test "private heap snapshot string interning is secure and failure atomic" {
     try std.testing.expectEqual(@as(u64, 0x4845_4150_5354_0001), strings.map.context.?.seed);
 }
 
-test "private heap snapshot identity maps are keyed exact and failure atomic" {
+test "private ABI identity maps are keyed exact and failure atomic" {
     const FixedContext = struct {
         fn first() std.mem.Allocator.Error!CPrivateIdentityHashContext {
             return .{ .seed = 0x4845_4150_4944_0001 };
@@ -23080,6 +23105,88 @@ test "private heap snapshot identity maps are keyed exact and failure atomic" {
         try std.testing.expectEqual(@as(?u8, @intCast(index)), identities.get(identity));
     for (colliders) |identity| try std.testing.expect(identities.remove(identity));
     try std.testing.expectEqual(@as(usize, 0), identities.count());
+}
+
+test "private script execution context registry is secure and failure atomic" {
+    const Providers = struct {
+        fn fixed() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x5343_5249_5054_0001 };
+        }
+
+        fn unavailable() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return error.OutOfMemory;
+        }
+    };
+    const first: *Context = @ptrFromInt(0x1000);
+    const second: *Context = @ptrFromInt(0x2000);
+
+    var unavailable: CPrivateIdentityMapUnmanaged(*Context) = .{};
+    defer unavailable.deinit(std.testing.allocator);
+    try std.testing.expect(!try installPrivateScriptExecutionContextUsing(
+        &unavailable,
+        std.testing.allocator,
+        0,
+        first,
+        Providers.unavailable,
+    ));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        installPrivateScriptExecutionContextUsing(
+            &unavailable,
+            std.testing.allocator,
+            7,
+            first,
+            Providers.unavailable,
+        ),
+    );
+    try std.testing.expect(unavailable.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.count());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.capacity());
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var allocation_failure: CPrivateIdentityMapUnmanaged(*Context) = .{};
+    defer allocation_failure.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        installPrivateScriptExecutionContextUsing(
+            &allocation_failure,
+            failing.allocator(),
+            11,
+            first,
+            Providers.fixed,
+        ),
+    );
+    try std.testing.expect(allocation_failure.context == null);
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.count());
+    try std.testing.expectEqual(@as(usize, 0), allocation_failure.capacity());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+
+    try std.testing.expect(try installPrivateScriptExecutionContextUsing(
+        &allocation_failure,
+        std.testing.allocator,
+        11,
+        first,
+        Providers.fixed,
+    ));
+    try std.testing.expect(!try installPrivateScriptExecutionContextUsing(
+        &allocation_failure,
+        std.testing.allocator,
+        11,
+        second,
+        Providers.unavailable,
+    ));
+    try std.testing.expectEqual(first, allocation_failure.get(11).?);
+    try std.testing.expect(try installPrivateScriptExecutionContextUsing(
+        &allocation_failure,
+        std.testing.allocator,
+        12,
+        second,
+        Providers.unavailable,
+    ));
+    try std.testing.expectEqual(second, allocation_failure.get(12).?);
+    try std.testing.expect(allocation_failure.remove(11));
+    try std.testing.expect(!allocation_failure.remove(11));
+    try std.testing.expectEqual(second, allocation_failure.get(12).?);
 }
 
 test "private serialized owner capabilities reject collisions and publish atomically" {
