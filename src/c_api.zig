@@ -674,12 +674,109 @@ const ReachabilityEdge = struct {
     name: ReachabilityEdgeName,
 };
 
+const CPrivateIdentityHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: usize) u64 {
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&key));
+    }
+
+    pub fn eql(_: @This(), left: usize, right: usize) bool {
+        return left == right;
+    }
+};
+
+const CPrivateIdentityContextProvider = *const fn () std.mem.Allocator.Error!CPrivateIdentityHashContext;
+
+fn newCPrivateIdentityHashContext() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+    var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+    agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+    return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+}
+
+/// Lazy exact-address index for private diagnostic graph state. Empty and
+/// lookup-only paths require no entropy. The context is published only after
+/// the first backing allocation succeeds, so callers can retry an OOM without
+/// inheriting a partially initialized or predictably keyed table.
+fn CPrivateIdentityMapUnmanaged(comptime ValueType: type) type {
+    const Index = std.HashMapUnmanaged(
+        usize,
+        ValueType,
+        CPrivateIdentityHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    return struct {
+        const Self = @This();
+
+        index: Index = .empty,
+        context: ?CPrivateIdentityHashContext = null,
+
+        fn getOrPutWithContext(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            key: usize,
+            context: CPrivateIdentityHashContext,
+        ) std.mem.Allocator.Error!Index.GetOrPutResult {
+            if (self.context) |installed| {
+                std.debug.assert(installed.seed == context.seed);
+                return self.index.getOrPutContext(allocator, key, installed);
+            }
+            const result = try self.index.getOrPutContext(allocator, key, context);
+            self.context = context;
+            return result;
+        }
+
+        fn getOrPutSecureUsing(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            key: usize,
+            context_provider: CPrivateIdentityContextProvider,
+        ) std.mem.Allocator.Error!Index.GetOrPutResult {
+            const context = self.context orelse try context_provider();
+            return self.getOrPutWithContext(allocator, key, context);
+        }
+
+        fn getOrPutSecure(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            key: usize,
+        ) std.mem.Allocator.Error!Index.GetOrPutResult {
+            return self.getOrPutSecureUsing(allocator, key, newCPrivateIdentityHashContext);
+        }
+
+        fn get(self: *const Self, key: usize) ?ValueType {
+            const context = self.context orelse return null;
+            return self.index.getContext(key, context);
+        }
+
+        fn contains(self: *const Self, key: usize) bool {
+            const context = self.context orelse return false;
+            return self.index.containsContext(key, context);
+        }
+
+        fn remove(self: *Self, key: usize) bool {
+            const context = self.context orelse return false;
+            return self.index.removeContext(key, context);
+        }
+
+        fn count(self: *const Self) usize {
+            return self.index.count();
+        }
+
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.index.deinit(allocator);
+        }
+    };
+}
+
 const ReachabilityVisitor = struct {
     allocator: std.mem.Allocator,
-    seen: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    identity_context_provider: CPrivateIdentityContextProvider = newCPrivateIdentityHashContext,
+    seen: CPrivateIdentityMapUnmanaged(usize) = .{},
     queue: std.ArrayListUnmanaged(ReachabilityCell) = .empty,
     objects: std.ArrayListUnmanaged(*Object) = .empty,
-    roots_seen: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    root_flags: std.ArrayListUnmanaged(bool) = .empty,
     roots: std.ArrayListUnmanaged(usize) = .empty,
     edges: std.ArrayListUnmanaged(ReachabilityEdge) = .empty,
     current_source_index: ?usize = null,
@@ -689,7 +786,7 @@ const ReachabilityVisitor = struct {
         self.seen.deinit(self.allocator);
         self.queue.deinit(self.allocator);
         self.objects.deinit(self.allocator);
-        self.roots_seen.deinit(self.allocator);
+        self.root_flags.deinit(self.allocator);
         self.roots.deinit(self.allocator);
         self.edges.deinit(self.allocator);
     }
@@ -719,6 +816,7 @@ const ReachabilityVisitor = struct {
         edge_name: ReachabilityEdgeName,
         maybe_cell: anytype,
     ) void {
+        if (self.failed) return;
         const cell = switch (@typeInfo(@TypeOf(maybe_cell))) {
             .optional => maybe_cell orelse return,
             .pointer => maybe_cell,
@@ -746,23 +844,32 @@ const ReachabilityVisitor = struct {
         else
             @compileError("unclassified reachability cell " ++ @typeName(Pointer));
         const pointer: *anyopaque = @ptrCast(cell);
-        const result = self.seen.getOrPut(self.allocator, @intFromPtr(pointer)) catch {
+        const address = @intFromPtr(pointer);
+        const result = self.seen.getOrPutSecureUsing(self.allocator, address, self.identity_context_provider) catch {
             self.failed = true;
             return;
         };
         if (!result.found_existing) {
             const node_index = self.queue.items.len + 1; // zero is the synthetic root
             self.queue.append(self.allocator, .{ .pointer = pointer, .kind = kind }) catch {
-                _ = self.seen.remove(@intFromPtr(pointer));
+                _ = self.seen.remove(address);
+                self.failed = true;
+                return;
+            };
+            self.root_flags.append(self.allocator, false) catch {
+                self.queue.items.len -= 1;
+                _ = self.seen.remove(address);
+                self.failed = true;
+                return;
+            };
+            if (kind == .object) self.objects.append(self.allocator, @ptrCast(@alignCast(pointer))) catch {
+                self.root_flags.items.len -= 1;
+                self.queue.items.len -= 1;
+                _ = self.seen.remove(address);
                 self.failed = true;
                 return;
             };
             result.value_ptr.* = node_index;
-            if (kind == .object)
-                self.objects.append(self.allocator, @ptrCast(@alignCast(pointer))) catch {
-                    self.failed = true;
-                    return;
-                };
         }
         const to_index = result.value_ptr.*;
         if (self.current_source_index) |from_index| {
@@ -775,13 +882,9 @@ const ReachabilityVisitor = struct {
                 self.failed = true;
             };
         } else {
-            const root = self.roots_seen.getOrPut(self.allocator, to_index) catch {
-                self.failed = true;
-                return;
-            };
-            if (root.found_existing) return;
+            const root_flag = &self.root_flags.items[to_index - 1];
+            if (root_flag.*) return;
             self.roots.append(self.allocator, to_index) catch {
-                _ = self.roots_seen.remove(to_index);
                 self.failed = true;
                 return;
             };
@@ -794,8 +897,11 @@ const ReachabilityVisitor = struct {
                     else => edge_name,
                 },
             }) catch {
+                self.roots.items.len -= 1;
                 self.failed = true;
+                return;
             };
+            root_flag.* = true;
         }
     }
 
@@ -821,7 +927,7 @@ const ReachabilityVisitor = struct {
 
     fn drain(self: *ReachabilityVisitor) void {
         var index: usize = 0;
-        while (index < self.queue.items.len) : (index += 1) {
+        while (!self.failed and index < self.queue.items.len) : (index += 1) {
             const cell = self.queue.items[index];
             self.current_source_index = index + 1;
             defer self.current_source_index = null;
@@ -845,7 +951,7 @@ const ReachabilityVisitor = struct {
     }
 
     fn finishEphemerons(self: *ReachabilityVisitor) void {
-        while (true) {
+        while (!self.failed) {
             const before = self.queue.items.len;
             for (self.objects.items) |object| {
                 self.current_source_index = self.seen.get(@intFromPtr(object));
@@ -1066,7 +1172,7 @@ const CContextGroup = struct {
     /// diagnostic heap-snapshot IDs lazily and retain the mapping so repeated
     /// snapshots preserve identity. Precise-GC cells use zig-gc's relocation-
     /// stable header identity instead and never enter this table.
-    heap_snapshot_ids: std.AutoHashMapUnmanaged(usize, u64) = .empty,
+    heap_snapshot_ids: CPrivateIdentityMapUnmanaged(u64) = .{},
     next_heap_snapshot_id: u64 = 2,
     collection_epoch: u64 = 0,
     /// JavaScriptCore stores the active exception on the VM, not the realm.
@@ -1404,7 +1510,11 @@ fn privateHeapSnapshotFallbackSize(cell: ReachabilityCell) !PrivateHeapSnapshotS
     };
 }
 
-fn privateHeapSnapshotCellId(group: *CContextGroup, pointer: *anyopaque) !u64 {
+fn privateHeapSnapshotCellIdUsing(
+    group: *CContextGroup,
+    pointer: *anyopaque,
+    context_provider: CPrivateIdentityContextProvider,
+) !u64 {
     if (group.primary.gc) |heap| if (heap.cellMetadata(pointer)) |metadata| {
         const raw = @intFromEnum(metadata.id);
         if (raw > (std.math.maxInt(u64) - 1) / 2) return error.StableIdExhausted;
@@ -1414,9 +1524,15 @@ fn privateHeapSnapshotCellId(group: *CContextGroup, pointer: *anyopaque) !u64 {
     if (group.heap_snapshot_ids.get(address)) |id| return id;
     const id = group.next_heap_snapshot_id;
     if (id == 0 or id > std.math.maxInt(u64) - 2) return error.StableIdExhausted;
-    try group.heap_snapshot_ids.putNoClobber(gpa, address, id);
+    const result = try group.heap_snapshot_ids.getOrPutSecureUsing(gpa, address, context_provider);
+    if (result.found_existing) return result.value_ptr.*;
+    result.value_ptr.* = id;
     group.next_heap_snapshot_id = id + 2;
     return id;
+}
+
+fn privateHeapSnapshotCellId(group: *CContextGroup, pointer: *anyopaque) !u64 {
+    return privateHeapSnapshotCellIdUsing(group, pointer, newCPrivateIdentityHashContext);
 }
 
 fn privateBuildHeapSnapshotGraph(group: *CContextGroup, allocator: std.mem.Allocator) !ReachabilityVisitor {
@@ -22859,6 +22975,167 @@ test "private heap snapshot string interning is secure and failure atomic" {
     try std.testing.expectEqual(@as(usize, 3), strings.items.items.len);
     try std.testing.expectEqual(@as(usize, 3), strings.map.count());
     try std.testing.expectEqual(@as(u64, 0x4845_4150_5354_0001), strings.map.context.?.seed);
+}
+
+test "private heap snapshot identity maps are keyed exact and failure atomic" {
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x4845_4150_4944_0001 };
+        }
+        fn unavailable() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return error.OutOfMemory;
+        }
+    };
+
+    var unavailable: CPrivateIdentityMapUnmanaged(u8) = .{};
+    defer unavailable.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        unavailable.getOrPutSecureUsing(std.testing.allocator, 1, FixedContext.unavailable),
+    );
+    try std.testing.expect(unavailable.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.count());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.index.capacity());
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed: CPrivateIdentityMapUnmanaged(u8) = .{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed.getOrPutWithContext(failing.allocator(), 1, try FixedContext.first()),
+    );
+    try std.testing.expect(failed.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.index.capacity());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    const retry = try failed.getOrPutWithContext(std.testing.allocator, 1, try FixedContext.first());
+    try std.testing.expect(!retry.found_existing);
+    retry.value_ptr.* = 7;
+    try std.testing.expectEqual(@as(?u8, 7), failed.get(1));
+    failed.deinit(std.testing.allocator);
+
+    var colliders: [32]usize = undefined;
+    var collider_count: usize = 0;
+    var candidate: usize = 1;
+    const old_bucket = std.hash.Wyhash.hash(0, std.mem.asBytes(&candidate)) & 1023;
+    while (collider_count < colliders.len) : (candidate += 1) {
+        if (std.hash.Wyhash.hash(0, std.mem.asBytes(&candidate)) & 1023 != old_bucket) continue;
+        colliders[collider_count] = candidate;
+        collider_count += 1;
+    }
+
+    const fixed = try FixedContext.first();
+    var identities: CPrivateIdentityMapUnmanaged(u8) = .{};
+    defer identities.deinit(std.testing.allocator);
+    var keyed_buckets: [1024]bool = @splat(false);
+    var keyed_bucket_count: usize = 0;
+    for (colliders, 0..) |identity, index| {
+        const result = try identities.getOrPutWithContext(std.testing.allocator, identity, fixed);
+        try std.testing.expect(!result.found_existing);
+        result.value_ptr.* = @intCast(index);
+        const bucket: usize = @intCast(fixed.hash(identity) & 1023);
+        if (!keyed_buckets[bucket]) {
+            keyed_buckets[bucket] = true;
+            keyed_bucket_count += 1;
+        }
+    }
+    try std.testing.expect(keyed_bucket_count > colliders.len / 2);
+    for (colliders, 0..) |identity, index|
+        try std.testing.expectEqual(@as(?u8, @intCast(index)), identities.get(identity));
+    for (colliders) |identity| try std.testing.expect(identities.remove(identity));
+    try std.testing.expectEqual(@as(usize, 0), identities.count());
+}
+
+test "private reachability roots use dense flags with transactional insertion" {
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x5245_4143_4849_0001 };
+        }
+        fn unavailable() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return error.OutOfMemory;
+        }
+    };
+    const first_cell: *strcell.StringCell = @ptrFromInt(0x1000);
+    const second_cell: *strcell.StringCell = @ptrFromInt(0x2000);
+
+    var unavailable = ReachabilityVisitor{
+        .allocator = std.testing.allocator,
+        .identity_context_provider = FixedContext.unavailable,
+    };
+    defer unavailable.deinit();
+    unavailable.mark(first_cell);
+    try std.testing.expect(unavailable.failed);
+    try std.testing.expect(unavailable.seen.context == null);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.seen.count());
+    try std.testing.expectEqual(@as(usize, 0), unavailable.queue.items.len);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.root_flags.items.len);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.roots.items.len);
+    try std.testing.expectEqual(@as(usize, 0), unavailable.edges.items.len);
+
+    for (0..6) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var visitor = ReachabilityVisitor{
+            .allocator = failing.allocator(),
+            .identity_context_provider = FixedContext.first,
+        };
+        visitor.mark(first_cell);
+        try std.testing.expectEqual(visitor.queue.items.len, visitor.root_flags.items.len);
+        try std.testing.expectEqual(visitor.queue.items.len, visitor.seen.count());
+        try std.testing.expectEqual(visitor.roots.items.len, visitor.edges.items.len);
+        visitor.deinit();
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+
+    var visitor = ReachabilityVisitor{
+        .allocator = std.testing.allocator,
+        .identity_context_provider = FixedContext.first,
+    };
+    defer visitor.deinit();
+    visitor.mark(first_cell);
+    visitor.mark(first_cell);
+    visitor.mark(second_cell);
+    try std.testing.expect(!visitor.failed);
+    try std.testing.expectEqual(@as(usize, 2), visitor.queue.items.len);
+    try std.testing.expectEqualSlices(bool, &.{ true, true }, visitor.root_flags.items);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2 }, visitor.roots.items);
+    try std.testing.expectEqual(@as(usize, 2), visitor.edges.items.len);
+}
+
+test "private heap snapshot IDs preserve arena and precise identities" {
+    const FixedContext = struct {
+        fn first() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return .{ .seed = 0x5354_4142_4c45_0001 };
+        }
+        fn unavailable() std.mem.Allocator.Error!CPrivateIdentityHashContext {
+            return error.OutOfMemory;
+        }
+    };
+
+    const arena_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(arena_ref);
+    const arena_group: *CContextGroup = @ptrCast(@alignCast(arena_ref));
+    const arena_cell: *anyopaque = @ptrCast(arena_group.primary.global_object);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        privateHeapSnapshotCellIdUsing(arena_group, arena_cell, FixedContext.unavailable),
+    );
+    try std.testing.expect(arena_group.heap_snapshot_ids.context == null);
+    try std.testing.expectEqual(@as(usize, 0), arena_group.heap_snapshot_ids.count());
+    try std.testing.expectEqual(@as(u64, 2), arena_group.next_heap_snapshot_id);
+    const arena_id = try privateHeapSnapshotCellIdUsing(arena_group, arena_cell, FixedContext.first);
+    try std.testing.expectEqual(@as(u64, 0), arena_id & 1);
+    try std.testing.expectEqual(arena_id, try privateHeapSnapshotCellId(arena_group, arena_cell));
+    try std.testing.expectEqual(@as(usize, 1), arena_group.heap_snapshot_ids.count());
+    try std.testing.expectEqual(arena_id + 2, arena_group.next_heap_snapshot_id);
+
+    const precise_ref = JSC__VM__create(0) orelse return error.VMCreateFailed;
+    defer JSContextGroupRelease(@ptrCast(precise_ref));
+    const precise_group = privateGroupFromVM(precise_ref) orelse return error.MissingVM;
+    const precise_cell: *anyopaque = @ptrCast(precise_group.primary.global_object);
+    const precise_id = try privateHeapSnapshotCellIdUsing(precise_group, precise_cell, FixedContext.unavailable);
+    try std.testing.expectEqual(@as(u64, 1), precise_id & 1);
+    try std.testing.expectEqual(precise_id, try privateHeapSnapshotCellId(precise_group, precise_cell));
+    try std.testing.expectEqual(@as(usize, 0), precise_group.heap_snapshot_ids.count());
+    try std.testing.expect(precise_group.heap_snapshot_ids.context == null);
 }
 
 test "C-API: create + release context, round-trip a number" {
