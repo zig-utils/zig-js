@@ -14705,6 +14705,32 @@ pub const Interpreter = struct {
         return self.deleteOwn(target, key);
     }
 
+    /// Sort canonical array-index keys in spec order and collapse overlaps from
+    /// separate physical property stores without input-dependent hashing.
+    fn sortUniqueCanonicalIndexKeys(indices: *std.ArrayListUnmanaged([]const u8)) void {
+        std.mem.sort([]const u8, indices.items, {}, struct {
+            fn lt(_: void, x: []const u8, y: []const u8) bool {
+                return value.canonicalIndex(x).? < value.canonicalIndex(y).?;
+            }
+        }.lt);
+        if (indices.items.len < 2) return;
+
+        // OrdinaryOwnPropertyKeys requires ascending integer indices. Dense,
+        // shape, exotic, and host sources may describe the same canonical key,
+        // so collapse equal neighbours after the required sort instead of
+        // admitting script-chosen indices to a fixed-seed hash table.
+        var write: usize = 1;
+        var previous = value.canonicalIndex(indices.items[0]).?;
+        for (indices.items[1..]) |key| {
+            const current = value.canonicalIndex(key).?;
+            if (current == previous) continue;
+            indices.items[write] = key;
+            write += 1;
+            previous = current;
+        }
+        indices.items.len = write;
+    }
+
     /// `ownKeys` trap → an array of keys (string values). Falls back to the
     /// target's own string keys.
     /// An object's [[OwnPropertyKeys]] as encoded key strings — proxy-aware, and
@@ -14735,15 +14761,12 @@ pub const Interpreter = struct {
                 // any user integer-index keys (all ascending), then "length", then
                 // other string keys in insertion order, then symbols.
                 var indices: std.ArrayListUnmanaged([]const u8) = .empty;
-                var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-                defer seen.deinit(scratch);
-                for (0..utf16LenOfValue(p)) |i| {
+                const virtual_length = utf16LenOfValue(p);
+                for (0..virtual_length) |i| {
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-                    try seen.put(scratch, i, {});
                 }
                 for (try t.denseElementIndices(self.arena)) |dense_i| {
-                    const entry = try seen.getOrPut(scratch, dense_i);
-                    if (entry.found_existing) continue;
+                    if (dense_i < virtual_length) continue;
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
                 }
                 var strings: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -14752,16 +14775,11 @@ pub const Interpreter = struct {
                     if (std.mem.eql(u8, k, "length") or value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                     if (value.isRealSymbolKey(k)) {
                         try symbols.append(self.arena, k);
-                    } else if (value.canonicalIndex(k)) |idx| {
-                        const entry = try seen.getOrPut(scratch, idx);
-                        if (!entry.found_existing) try indices.append(self.arena, k);
+                    } else if (value.canonicalIndex(k) != null) {
+                        try indices.append(self.arena, k);
                     } else try strings.append(self.arena, k);
                 }
-                std.mem.sort([]const u8, indices.items, {}, struct {
-                    fn lt(_: void, x: []const u8, y: []const u8) bool {
-                        return value.canonicalIndex(x).? < value.canonicalIndex(y).?;
-                    }
-                }.lt);
+                sortUniqueCanonicalIndexKeys(&indices);
                 var list: std.ArrayListUnmanaged([]const u8) = .empty;
                 try list.appendSlice(self.arena, indices.items);
                 try list.append(self.arena, "length");
@@ -14786,11 +14804,8 @@ pub const Interpreter = struct {
             // then string keys in creation order — "length" exists from
             // construction so it precedes any user-added string key — then symbols.
             var indices: std.ArrayListUnmanaged([]const u8) = .empty;
-            var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-            defer seen.deinit(scratch);
             for (try t.denseElementIndices(self.arena)) |i| {
                 try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
-                try seen.put(scratch, i, {});
             }
             var strings: std.ArrayListUnmanaged([]const u8) = .empty;
             var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -14798,18 +14813,13 @@ pub const Interpreter = struct {
                 if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                 if (value.isRealSymbolKey(k)) {
                     try symbols.append(self.arena, k);
-                } else if (value.canonicalIndex(k)) |idx| {
-                    const entry = try seen.getOrPut(scratch, idx);
-                    if (!entry.found_existing) try indices.append(self.arena, k);
+                } else if (value.canonicalIndex(k) != null) {
+                    try indices.append(self.arena, k);
                 } else {
                     try strings.append(self.arena, k);
                 }
             }
-            std.mem.sort([]const u8, indices.items, {}, struct {
-                fn lt(_: void, x: []const u8, y: []const u8) bool {
-                    return value.canonicalIndex(x).? < value.canonicalIndex(y).?;
-                }
-            }.lt);
+            sortUniqueCanonicalIndexKeys(&indices);
             var list: std.ArrayListUnmanaged([]const u8) = .empty;
             try list.appendSlice(self.arena, indices.items);
             try list.append(self.arena, "length");
@@ -14825,11 +14835,8 @@ pub const Interpreter = struct {
         const fn_has_proto = t.jsFunction() != null and Interpreter.jsFunctionHasOwnPrototypeSlot(t);
         if (fn_has_proto) try self.materializeFunctionPrototype(t);
         var indices: std.ArrayListUnmanaged([]const u8) = .empty;
-        var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-        defer seen.deinit(scratch);
         for (try t.denseElementIndices(self.arena)) |dense_i| {
             try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{dense_i}));
-            try seen.put(scratch, dense_i, {});
         }
         var strings: std.ArrayListUnmanaged([]const u8) = .empty;
         var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -14847,9 +14854,8 @@ pub const Interpreter = struct {
                 if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
                 if (value.isRealSymbolKey(k)) {
                     try symbols.append(self.arena, k);
-                } else if (value.canonicalIndex(k)) |idx| {
-                    const entry = try seen.getOrPut(scratch, idx);
-                    if (!entry.found_existing) try indices.append(self.arena, k);
+                } else if (value.canonicalIndex(k) != null) {
+                    try indices.append(self.arena, k);
                 } else {
                     if (seen_strings == null) seen_strings = .{};
                     if (!try seen_strings.?.getOrPutSecure(self, scratch, k)) try strings.append(self.arena, k);
@@ -14860,20 +14866,15 @@ pub const Interpreter = struct {
             if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
             if (value.isRealSymbolKey(k)) {
                 try symbols.append(self.arena, k);
-            } else if (value.canonicalIndex(k)) |idx| {
-                const entry = try seen.getOrPut(scratch, idx);
-                if (!entry.found_existing) try indices.append(self.arena, k);
+            } else if (value.canonicalIndex(k) != null) {
+                try indices.append(self.arena, k);
             } else {
                 if (seen_strings) |*membership| {
                     if (!try membership.getOrPutSecure(self, scratch, k)) try strings.append(self.arena, k);
                 } else try strings.append(self.arena, k);
             }
         }
-        std.mem.sort([]const u8, indices.items, {}, struct {
-            fn lt(_: void, x: []const u8, y: []const u8) bool {
-                return value.canonicalIndex(x).? < value.canonicalIndex(y).?;
-            }
-        }.lt);
+        sortUniqueCanonicalIndexKeys(&indices);
         // Move a function's `prototype` to directly follow `name` (spec creation
         // order), rather than wherever the lazy install appended it.
         if (fn_has_proto) {
@@ -55354,6 +55355,80 @@ test "Proxy ownKeys membership installs exact seeded contexts failure atomically
     try std.testing.expect(membership.remove("\x00\x00\x00key"));
     try std.testing.expect(membership.remove("\x00s42"));
     try std.testing.expectEqual(@as(usize, 1), membership.count());
+}
+
+test "own-key integer ordering collapses a default-hash collision family" {
+    const target_mask: u64 = 1023;
+    const collision_count: usize = 32;
+    var colliding: [collision_count]usize = undefined;
+    var found: usize = 0;
+    var candidate: usize = 2;
+    while (found != colliding.len) : (candidate += 1) {
+        if ((std.hash.Wyhash.hash(0, std.mem.asBytes(&candidate)) & target_mask) != 0) continue;
+        try std.testing.expect(candidate < 0xFFFF_FFFF);
+        colliding[found] = candidate;
+        found += 1;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Feed the shared primitive reverse-ordered duplicate keys. Every chosen
+    // integer occupied the same low default-hash bucket used by the removed
+    // AutoHashMap, but the observable result is exact numeric order and unique.
+    var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+    try keys.append(a, "1");
+    try keys.append(a, "0");
+    try keys.append(a, "1");
+    var reverse = colliding.len;
+    while (reverse != 0) {
+        reverse -= 1;
+        const key = try std.fmt.allocPrint(a, "{d}", .{colliding[reverse]});
+        try keys.append(a, key);
+        try keys.append(a, key);
+    }
+    Interpreter.sortUniqueCanonicalIndexKeys(&keys);
+    try std.testing.expectEqual(collision_count + 2, keys.items.len);
+    try std.testing.expectEqualStrings("0", keys.items[0]);
+    try std.testing.expectEqualStrings("1", keys.items[1]);
+    for (colliding, keys.items[2..]) |expected, actual| {
+        try std.testing.expectEqual(@as(u64, 0), std.hash.Wyhash.hash(0, std.mem.asBytes(&expected)) & target_mask);
+        try std.testing.expectEqual(@as(u32, @intCast(expected)), value.canonicalIndex(actual).?);
+    }
+
+    // Exercise all three consumers with the same family. Alternating ordinary
+    // writes and accessors covers dense/sparse merging; String exotic indices
+    // add their virtual prefix, and every path retains string/symbol placement.
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(a, "const collisionIndices = [");
+    for (colliding, 0..) |index, i| {
+        try source.appendSlice(a, try std.fmt.allocPrint(a, "{s}{d}", .{ if (i == 0) "" else ",", index }));
+    }
+    try source.appendSlice(a,
+        \\];
+        \\const marker = Symbol("marker");
+        \\function install(target) {
+        \\  for (let i = collisionIndices.length - 1; i >= 0; i = i - 1) {
+        \\    const key = String(collisionIndices[i]);
+        \\    if ((i & 1) === 0) target[key] = i;
+        \\    else Object.defineProperty(target, key, { enumerable: true, configurable: true, get() { return key; } });
+        \\  }
+        \\  target.tail = true;
+        \\  target[marker] = true;
+        \\  return target;
+        \\}
+        \\function same(actual, expected) {
+        \\  if (actual.length !== expected.length) return false;
+        \\  for (let i = 0; i < actual.length; i = i + 1) if (actual[i] !== expected[i]) return false;
+        \\  return true;
+        \\}
+        \\const expected = collisionIndices.map(String);
+        \\same(Reflect.ownKeys(install({})), expected.concat(["tail", marker])) &&
+        \\same(Reflect.ownKeys(install([])), expected.concat(["length", "tail", marker])) &&
+        \\same(Reflect.ownKeys(install(new String("xy"))), ["0", "1"].concat(expected, ["length", "tail", marker]))
+    );
+    try std.testing.expect((try evalSource(a, source.items)).asBool());
 }
 
 test "String value methods return the exact StringData cell" {
