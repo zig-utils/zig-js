@@ -3576,11 +3576,46 @@ fn emitDirectNamedPropertyWrite(
     return direct;
 }
 
+/// The three words the JIT reads out of an `ObjectElementsState.list`, named
+/// for the loads that use them.
+///
+/// A description of the prefix, not a mirror of the type.
+///
+/// This used to be asserted `@sizeOf`-equal to `std.ArrayListUnmanaged(Value)`,
+/// which stopped being true when 0.17.0-dev.1963 appended `pointer_stability`.
+/// Measured, `@sizeOf(ArrayListUnmanaged(u64))`:
+///
+///     toolchain   Debug  ReleaseSafe  ReleaseFast
+///     dev.1818       24           24           24
+///     dev.1963       32           32           24
+///
+/// So the equality held everywhere on 1818, and on 1963 it fails in two build
+/// modes and passes in the third — a compile error that depends on `-O`. The
+/// JIT never read that tail: `@offsetOf(items)` is 0 and `@offsetOf(capacity)`
+/// is 16 in all six combinations above. Only the assertion was wrong.
+///
+/// The offsets the loads use come from the real type now
+/// (`denseListWordOffset`); this struct only bounds them.
 const DenseListLayout = extern struct {
     items: [*]Value,
     len: usize,
     capacity: usize,
 };
+
+const DenseList = std.ArrayListUnmanaged(Value);
+
+/// Byte offset of one of the words above, inside the real list type.
+///
+/// `@offsetOf` on `DenseList`, not on `DenseListLayout`: a std that reorders
+/// or extends the struct moves the loads with it instead of silently reading
+/// the wrong word. `len` is the second word of the `items` slice — pointer,
+/// then length — which is the one layout fact here the language does fix.
+fn denseListWordOffset(comptime field: []const u8) usize {
+    if (comptime std.mem.eql(u8, field, "items")) return @offsetOf(DenseList, "items");
+    if (comptime std.mem.eql(u8, field, "len")) return @offsetOf(DenseList, "items") + @sizeOf([*]Value);
+    if (comptime std.mem.eql(u8, field, "capacity")) return @offsetOf(DenseList, "capacity");
+    @compileError("not a word the JIT reads: " ++ field);
+}
 
 fn objectStorageByteOffset(comptime field: []const u8) !u15 {
     return std.math.cast(u15, @offsetOf(ObjectStorageState, field)) orelse error.UnsupportedChunk;
@@ -3589,7 +3624,7 @@ fn objectStorageByteOffset(comptime field: []const u8) !u15 {
 fn objectElementsByteOffset(comptime field: []const u8) !u15 {
     return std.math.cast(
         u15,
-        @offsetOf(ObjectElementsState, "list") + @offsetOf(DenseListLayout, field),
+        @offsetOf(ObjectElementsState, "list") + denseListWordOffset(field),
     ) orelse error.UnsupportedChunk;
 }
 
@@ -3601,8 +3636,11 @@ fn emitDirectDenseArrayGuards(
     comptime has_index: bool,
 ) !void {
     comptime {
-        std.debug.assert(@sizeOf(DenseListLayout) == @sizeOf(std.ArrayListUnmanaged(Value)));
-        std.debug.assert(@alignOf(DenseListLayout) == @alignOf(std.ArrayListUnmanaged(Value)));
+        // The prefix the JIT reads, not the whole type — see `DenseListLayout`.
+        std.debug.assert(@sizeOf([]Value) == 2 * @sizeOf(usize)); // pointer, then length
+        std.debug.assert(@sizeOf(DenseListLayout) <= @sizeOf(DenseList));
+        std.debug.assert(@alignOf(DenseListLayout) <= @alignOf(DenseList));
+        std.debug.assert(denseListWordOffset("capacity") + @sizeOf(usize) <= @sizeOf(DenseList));
     }
 
     // Shared-realm mutation requires the element lock. The same global gate
