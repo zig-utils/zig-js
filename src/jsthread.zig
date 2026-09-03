@@ -1591,12 +1591,91 @@ test "condition sync handoff countdown tracks acknowledged tickets" {
     try std.testing.expectEqual(@as(usize, 0), rec.sync_handoff_pending);
 }
 
+const ThreadLocalHashContext = struct {
+    seed: u64,
+
+    pub fn hash(context: @This(), key: u64) u64 {
+        return std.hash.Wyhash.hash(context.seed, std.mem.asBytes(&key));
+    }
+
+    pub fn eql(_: @This(), left: u64, right: u64) bool {
+        return left == right;
+    }
+};
+
+const ThreadLocalHashContextProvider = *const fn () std.mem.Allocator.Error!ThreadLocalHashContext;
+
+fn newThreadLocalHashContext() std.mem.Allocator.Error!ThreadLocalHashContext {
+    var seed_bytes: [@sizeOf(u64)]u8 = undefined;
+    agent.engineIo().randomSecure(&seed_bytes) catch return error.OutOfMemory;
+    return .{ .seed = std.mem.readInt(u64, &seed_bytes, .little) };
+}
+
+const ThreadLocalValueMap = struct {
+    const Index = std.HashMapUnmanaged(
+        u64,
+        Value,
+        ThreadLocalHashContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    index: Index = .empty,
+    context: ?ThreadLocalHashContext = null,
+
+    fn get(self: *const @This(), tid: u64) ?Value {
+        const context = self.context orelse return null;
+        return self.index.getContext(tid, context);
+    }
+
+    fn remove(self: *@This(), tid: u64) bool {
+        const context = self.context orelse return false;
+        return self.index.removeContext(tid, context);
+    }
+
+    fn putUsing(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        tid: u64,
+        stored_value: Value,
+        context_provider: ThreadLocalHashContextProvider,
+    ) std.mem.Allocator.Error!void {
+        if (self.context) |context|
+            return self.index.putContext(allocator, tid, stored_value, context);
+        const context = try context_provider();
+        try self.index.putContext(allocator, tid, stored_value, context);
+        self.context = context;
+    }
+
+    fn put(self: *@This(), allocator: std.mem.Allocator, tid: u64, stored_value: Value) std.mem.Allocator.Error!void {
+        return self.putUsing(allocator, tid, stored_value, newThreadLocalHashContext);
+    }
+
+    fn valueIterator(self: *@This()) Index.ValueIterator {
+        return self.index.valueIterator();
+    }
+
+    fn count(self: *const @This()) usize {
+        return self.index.count();
+    }
+
+    fn capacity(self: *const @This()) usize {
+        return self.index.capacity();
+    }
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.index.deinit(allocator);
+    }
+};
+
 const TLRecord = struct {
     brand: SyncBrand = sync_brand_thread_local,
     gil: *gil_mod.Gil,
     arena: std.mem.Allocator,
     owner: ?*value.Object = null,
-    map: std.AutoHashMapUnmanaged(u64, Value) = .empty,
+    /// OS thread IDs are exact equality keys, but their bucket placement is
+    /// independently seeded on the first store. Entropy/allocation failure
+    /// publishes neither a context nor a value, and empty reads stay free.
+    map: ThreadLocalValueMap = .{},
     // Each thread keys `map` by its own tid, but they share the table: a peer's
     // `put` (which can rehash/grow) races another thread's `get`/`put` under
     // `parallel_js`. Always-lock (ThreadLocal is a niche API — uncontended in the
@@ -1623,6 +1702,114 @@ test "ThreadLocal map lock is trace-sensitive" {
     try std.testing.expect(gc_runtime.inTraceSensitiveLock());
     rec.unlockMap();
     try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+}
+
+test "ThreadLocal value index is secure lazy failure atomic and exact" {
+    const Providers = struct {
+        var calls: usize = 0;
+
+        fn firstContext() std.mem.Allocator.Error!ThreadLocalHashContext {
+            calls += 1;
+            return .{ .seed = 0x544c_4f43_414c_0001 };
+        }
+
+        fn unavailableContext() std.mem.Allocator.Error!ThreadLocalHashContext {
+            calls += 1;
+            return error.OutOfMemory;
+        }
+    };
+
+    var empty: ThreadLocalValueMap = .{};
+    defer empty.deinit(std.testing.allocator);
+    try std.testing.expect(empty.get(7) == null);
+    try std.testing.expect(!empty.remove(7));
+    try std.testing.expect(empty.context == null);
+    try std.testing.expectEqual(@as(usize, 0), empty.capacity());
+
+    Providers.calls = 0;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        empty.putUsing(
+            std.testing.allocator,
+            7,
+            Value.num(7),
+            Providers.unavailableContext,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), Providers.calls);
+    try std.testing.expect(empty.context == null);
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
+    try std.testing.expectEqual(@as(usize, 0), empty.capacity());
+
+    var allocation_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var failed: ThreadLocalValueMap = .{};
+    defer failed.deinit(allocation_failure.allocator());
+    Providers.calls = 0;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed.putUsing(
+            allocation_failure.allocator(),
+            7,
+            Value.num(7),
+            Providers.firstContext,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), Providers.calls);
+    try std.testing.expect(failed.context == null);
+    try std.testing.expectEqual(@as(usize, 0), failed.count());
+    try std.testing.expectEqual(@as(usize, 0), failed.capacity());
+    try std.testing.expectEqual(allocation_failure.allocated_bytes, allocation_failure.freed_bytes);
+
+    const target_mask: u64 = 1023;
+    const collision_count = 32;
+    const legacy_context = std.hash_map.AutoContext(u64){};
+    var tids: [collision_count]u64 = undefined;
+    var candidate: u64 = 1;
+    var found: usize = 0;
+    while (found != tids.len) : (candidate += 1) {
+        if (legacy_context.hash(candidate) & target_mask != 0) continue;
+        tids[found] = candidate;
+        found += 1;
+    }
+
+    var map: ThreadLocalValueMap = .{};
+    defer map.deinit(std.testing.allocator);
+    Providers.calls = 0;
+    var secure_buckets: [target_mask + 1]bool = @splat(false);
+    var secure_bucket_count: usize = 0;
+    for (tids, 0..) |tid, index| {
+        try std.testing.expectEqual(@as(u64, 0), legacy_context.hash(tid) & target_mask);
+        try map.putUsing(
+            std.testing.allocator,
+            tid,
+            Value.num(@floatFromInt(index)),
+            if (index == 0) Providers.firstContext else Providers.unavailableContext,
+        );
+        const secure_bucket: usize = @intCast(map.context.?.hash(tid) & target_mask);
+        if (!secure_buckets[secure_bucket]) {
+            secure_buckets[secure_bucket] = true;
+            secure_bucket_count += 1;
+        }
+        try std.testing.expectEqual(@as(f64, @floatFromInt(index)), map.get(tid).?.asNum());
+    }
+    try std.testing.expectEqual(@as(usize, 1), Providers.calls);
+    try std.testing.expect(secure_bucket_count > tids.len / 2);
+    try std.testing.expectEqual(tids.len, map.count());
+
+    const installed_seed = map.context.?.seed;
+    try map.putUsing(
+        std.testing.allocator,
+        tids[1],
+        Value.num(870),
+        Providers.unavailableContext,
+    );
+    try std.testing.expectEqual(@as(usize, 1), Providers.calls);
+    try std.testing.expectEqual(installed_seed, map.context.?.seed);
+    try std.testing.expectEqual(@as(f64, 870), map.get(tids[1]).?.asNum());
+    try std.testing.expect(map.remove(tids[0]));
+    try std.testing.expect(map.get(tids[0]) == null);
+    try std.testing.expectEqual(@as(f64, 870), map.get(tids[1]).?.asNum());
+    try std.testing.expectEqual(tids.len - 1, map.count());
 }
 
 fn rememberThreadLocalForCurrentThread(rec: *TLRecord) !void {

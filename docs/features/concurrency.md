@@ -54,6 +54,12 @@ globals, keeps the original affinity rule, and pays nothing.
 - `ConcurrentAccessError` — thrown where concurrent access is refused rather
   than raced.
 
+Each `ThreadLocal` keeps exact OS-thread identities behind its per-instance
+lock and lazily installs a securely seeded lookup index on the first store.
+Empty reads allocate nothing, and thread exit removes that thread's value so a
+value reachable only through `ThreadLocal` storage does not outlive its owning
+thread.
+
 See the [Thread API reference](/threads/api) for exact signatures.
 
 ## Workers and agents
