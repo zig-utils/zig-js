@@ -1823,9 +1823,43 @@ fn push(s: *State, v: u64) ExecError!void {
     try pushSlot(s, .{ .numeric = v });
 }
 
+/// Reserve the activation's exact operand, local, and label capacity once.
+/// Validation proves the operand-stack height is a static function of the
+/// program counter, so `Module.operand_depths`/`label_depths` bound every
+/// push the body can make; a module that reached the executor without
+/// `validate` (hand-built test modules) falls back to the validator's own
+/// coarse bound of one operand and one label per instruction. After this,
+/// the body pushes with `appendAssumeCapacity`; only the process-wide
+/// `MAX_OPERAND_SLOTS` trap check remains per push.
+fn reserveActivation(s: *State, mod: *const types.Module, idx: u32, body: *const types.FuncBody, param_count: usize) ExecError!void {
+    const coarse: usize = body.instrs.len + 1;
+    const operand_depth: usize = if (idx < mod.operand_depths.len) mod.operand_depths[idx] else coarse;
+    const label_depth: usize = if (idx < mod.label_depths.len) mod.label_depths[idx] else coarse;
+    // `pushSlot` traps once the stack reaches `MAX_OPERAND_SLOTS`, so reserving
+    // past that ceiling can never be used and would let a body whose validated
+    // height is far above the ceiling (a long `i32.const` run) force a large
+    // allocation before its first trapping push. Capacity still covers every
+    // push the trap check admits, which is what `appendAssumeCapacity` needs.
+    // Labels have no such ceiling, so `label_depth` must be reserved exactly.
+    const operand_headroom = MAX_OPERAND_SLOTS -| s.stack.items.len;
+    try s.stack.ensureUnusedCapacity(s.alloc, @min(operand_depth, operand_headroom));
+    try s.locals.ensureUnusedCapacity(s.alloc, param_count + body.locals.len);
+    try s.labels.ensureUnusedCapacity(s.alloc, label_depth);
+}
+
 fn pushSlot(s: *State, slot: WasmSlot) ExecError!void {
     if (s.stack.items.len >= MAX_OPERAND_SLOTS) return s.trap("operand stack exhausted");
-    try s.stack.append(s.alloc, slot);
+    // `reserveActivation` has normally already reserved this body's validated
+    // high-water mark, so this check falls through and the push is a store.
+    // It is not redundant: validation models only the pushes a body's own
+    // instructions make, so some real pushes happen at heights it never
+    // visits -- a `catch` delivers its tag payload at the `try_table`'s
+    // height, and `return_call` goes unreachable without recording the
+    // results a host import returns. Synthetic `State`s built directly by
+    // tests reserve nothing at all. Those grow here instead of writing past
+    // the end of the buffer.
+    if (s.stack.items.len == s.stack.capacity) return s.stack.append(s.alloc, slot);
+    s.stack.appendAssumeCapacity(slot);
 }
 
 fn pop(s: *State) u64 {
@@ -3393,13 +3427,14 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     const mod = def.inst.module;
     const body = &mod.code[def.idx];
     const fty = mod.funcTypeAt(mod.funcs[def.idx]).?;
+    try reserveActivation(s, mod, def.idx, body, fty.params.len);
     // Params move from the operand stack into fresh locals; declared locals
     // follow, zero-initialized.
     const arg_start = s.stack.items.len - fty.params.len;
     const locals_base = s.locals.items.len;
-    try s.locals.appendSlice(s.alloc, s.stack.items[arg_start..]);
+    s.locals.appendSliceAssumeCapacity(s.stack.items[arg_start..]);
     s.stack.items.len = arg_start;
-    for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlotIn(mod, local_type));
+    for (body.locals) |local_type| s.locals.appendAssumeCapacity(zeroSlotIn(mod, local_type));
     try s.frames.append(s.alloc, .{
         .func = f,
         .pc = 0,
@@ -3410,7 +3445,7 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
         .result_arity = fty.results.len,
     });
     // Implicit function-level label: branching to it returns.
-    try s.labels.append(s.alloc, .{
+    s.labels.appendAssumeCapacity(.{
         .target_pc = @intCast(body.instrs.len),
         .stack_height = s.stack.items.len,
         .arity = fty.results.len,
@@ -3734,13 +3769,18 @@ fn replaceFrame(s: *State, f: *const FuncInst) ExecError!void {
     const body = &mod.code[def.idx];
     const fty = mod.funcTypeAt(mod.funcs[def.idx]).?;
     const arg_start = s.stack.items.len - fty.params.len;
-    const args = s.stack.items[arg_start..];
 
+    // Reserve BEFORE taking the argument slice: reserving may reallocate the
+    // operand stack, which would dangle a slice captured across it. The
+    // locals/labels lists are truncated to the caller's bases first so the
+    // reservation covers exactly what the replacement pushes.
     s.locals.items.len = current.locals_base;
-    try s.locals.appendSlice(s.alloc, args);
-    for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlotIn(mod, local_type));
-    s.stack.items.len = current.stack_base;
     s.labels.items.len = current.label_base;
+    try reserveActivation(s, mod, def.idx, body, fty.params.len);
+    const args = s.stack.items[arg_start..];
+    s.locals.appendSliceAssumeCapacity(args);
+    for (body.locals) |local_type| s.locals.appendAssumeCapacity(zeroSlotIn(mod, local_type));
+    s.stack.items.len = current.stack_base;
     pruneHandlers(s);
     s.frames.items[current_index] = .{
         .func = f,
@@ -3751,7 +3791,7 @@ fn replaceFrame(s: *State, f: *const FuncInst) ExecError!void {
         .label_base = current.label_base,
         .result_arity = fty.results.len,
     };
-    try s.labels.append(s.alloc, .{
+    s.labels.appendAssumeCapacity(.{
         .target_pc = @intCast(body.instrs.len),
         .stack_height = current.stack_base,
         .arity = fty.results.len,
@@ -4177,7 +4217,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
         switch (instr.op) {
             .unreachable_ => return s.trap("unreachable"),
             .nop => {},
-            .block => try s.labels.append(s.alloc, .{
+            .block => s.labels.appendAssumeCapacity(.{
                 .target_pc = instr.imm.block.end_pc,
                 .stack_height = s.stack.items.len - instr.imm.block.type.funcType(mod).?.params.len,
                 .arity = instr.imm.block.type.funcType(mod).?.results.len,
@@ -4188,7 +4228,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const block_type = immediate.block.type.funcType(mod).?;
                 const label_index = s.labels.items.len;
                 const stack_height = s.stack.items.len - block_type.params.len;
-                try s.labels.append(s.alloc, .{
+                s.labels.appendAssumeCapacity(.{
                     .target_pc = immediate.block.end_pc,
                     .stack_height = stack_height,
                     .arity = block_type.results.len,
@@ -4203,7 +4243,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                     .catches = immediate.catches,
                 });
             },
-            .loop => try s.labels.append(s.alloc, .{
+            .loop => s.labels.appendAssumeCapacity(.{
                 .target_pc = instr.imm.block.else_pc,
                 .stack_height = s.stack.items.len - instr.imm.block.type.funcType(mod).?.params.len,
                 .arity = instr.imm.block.type.funcType(mod).?.params.len,
@@ -4212,7 +4252,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .if_ => {
                 const b = instr.imm.block;
                 if (popI32(s) != 0) {
-                    try s.labels.append(s.alloc, .{
+                    s.labels.appendAssumeCapacity(.{
                         .target_pc = b.end_pc,
                         .stack_height = s.stack.items.len - b.type.funcType(mod).?.params.len,
                         .arity = b.type.funcType(mod).?.results.len,
@@ -4221,7 +4261,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 } else if (b.else_pc == b.end_pc) {
                     fr.pc = b.end_pc; // no else arm: skip the whole if
                 } else {
-                    try s.labels.append(s.alloc, .{
+                    s.labels.appendAssumeCapacity(.{
                         .target_pc = b.end_pc,
                         .stack_height = s.stack.items.len - b.type.funcType(mod).?.params.len,
                         .arity = b.type.funcType(mod).?.results.len,
@@ -5921,6 +5961,45 @@ test "wasm.exec memory64 SIMD and atomic accesses use i64 addresses" {
     const atomic_features: types.Features = .{ .memory64 = true, .threads = true };
     try expectResultsWithFeatures(atomic_bytes, atomic_features, 0, &.{0}, &.{0});
     try expectTrapWithFeatures(atomic_bytes, atomic_features, 1, 0, &.{0x1_0000_0000}, "out of bounds memory access");
+}
+
+fn hostSixteenResults(ctx: *anyopaque, args: []const u64, results: []u64, diag: *types.Diagnostic) error{ Trap, Host }!void {
+    _ = ctx;
+    _ = args;
+    _ = diag;
+    for (results, 0..) |*r, i| r.* = @intCast(i + 1);
+}
+
+test "wasm.exec return_call into a host import grows the stack for results validation never counted" {
+    // `return_call` pops the callee's parameters and then goes unreachable
+    // without pushing its results -- correct, because a tail call never returns
+    // to this frame -- so the body records an operand depth of 0. The executor
+    // still pushes the import's results when the host call returns, so that
+    // push must grow the stack itself instead of assuming reserved capacity.
+    const features: types.Features = .{ .tail_calls = true, .multi_value = true };
+    const mod_bytes = comptime (hdr ++
+        typesSec(&.{ft("", "\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F\x7F")}) ++
+        importSec(&.{impFunc("a", "f", 0)}) ++
+        funcSec(&.{0}) ++
+        codeSec(&.{"\x12\x00"})); // return_call 0 (codeSec appends `end`)
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(mod_bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    // The reservation this body would get is zero, while sixteen slots arrive.
+    try std.testing.expectEqual(@as(u32, 0), mod.operand_depths[0]);
+
+    const sixteen_i32 = [_]types.ValType{ .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32 };
+    var sink: u32 = 0;
+    const host: ImportFunc = .{
+        .ctx = @ptrCast(&sink),
+        .type = .{ .params = &.{}, .results = &sixteen_i32 },
+        .call = hostSixteenResults,
+    };
+    const inst = try instantiate(talloc, mod, .{ .funcs = &.{host} }, &diag);
+    defer destroyInstance(talloc, inst);
+    var results: [16]u64 = undefined;
+    try invoke(inst, 1, &.{}, &results, &diag);
+    for (results, 0..) |r, i| try std.testing.expectEqual(@as(u64, i + 1), r);
 }
 
 test "wasm.exec host constructors memory table global" {

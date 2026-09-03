@@ -968,6 +968,20 @@ pub const Module = struct {
     datas: []const Data = &.{},
     data_count: ?u32 = null,
     code: []const FuncBody = &.{},
+    /// Per defined function (parallel to `code`): the operand-stack and
+    /// control-frame high-water marks the validator observed. Validation
+    /// proves the operand stack height is a static function of the program
+    /// counter, so these bound every push the body's own instructions make.
+    /// The executor reserves this much at frame entry and then pushes without
+    /// per-instruction growth checks. Empty until `validate` has run.
+    ///
+    /// These do NOT bound pushes at heights the validator never visits:
+    /// exception delivery pushes a tag payload at the `try_table`'s height,
+    /// and `return_call` records no depth for the results a host import
+    /// returns. Those sites must grow the stack themselves -- see
+    /// `pushSlotChecked` in exec.zig.
+    operand_depths: []const u32 = &.{},
+    label_depths: []const u32 = &.{},
     custom_sections: []const CustomSection = &.{},
 
     // Import counts per kind (prefix of each index space is imported).

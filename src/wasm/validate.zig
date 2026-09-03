@@ -617,14 +617,14 @@ fn validateDefinedTypes(mod: *const types.Module, diag: *types.Diagnostic) Error
     }
 }
 
-pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
+pub fn validate(mod: *types.Module, diag: *types.Diagnostic) Error!void {
     validateWithAllocator(mod, diag, std.heap.page_allocator) catch |err| switch (err) {
         error.OutOfMemory => return failMod(diag, "out of memory"),
         error.Invalid => return error.Invalid,
     };
 }
 
-fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allocator: Allocator) (Error || Allocator.Error)!void {
+fn validateWithAllocator(mod: *types.Module, diag: *types.Diagnostic, allocator: Allocator) (Error || Allocator.Error)!void {
     // 1. Type indices must resolve; reference value positions are opt-in.
     try validateDefinedTypes(mod, diag);
     for (mod.imports) |imp| switch (imp.desc) {
@@ -740,9 +740,20 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
             return failMod(diag, "start function must have nullary type");
     }
 
-    // 8. Function bodies.
-    for (mod.funcs, mod.code) |typeidx, body|
-        try validateFunc(mod, diag, mod.funcTypeAt(typeidx).?, body, allocator);
+    // 8. Function bodies. Each body's operand-stack and control-frame
+    // high-water marks are published alongside `code` so the executor can
+    // reserve an activation's exact capacity once instead of growth-checking
+    // every push (see `Module.operand_depths`).
+    const arena = mod.arena.allocator();
+    const operand_depths = try arena.alloc(u32, mod.code.len);
+    const label_depths = try arena.alloc(u32, mod.code.len);
+    for (mod.funcs, mod.code, operand_depths, label_depths) |typeidx, body, *operand_depth, *label_depth| {
+        const depths = try validateFunc(mod, diag, mod.funcTypeAt(typeidx).?, body, allocator);
+        operand_depth.* = depths.operands;
+        label_depth.* = depths.labels;
+    }
+    mod.operand_depths = operand_depths;
+    mod.label_depths = label_depths;
 }
 
 fn validateTagType(mod: *const types.Module, tag: types.Tag, diag: *types.Diagnostic) Error!void {
@@ -1021,6 +1032,9 @@ const FuncValidator = struct {
     op_len: usize = 0,
     frames: []Frame,
     fr_len: usize = 0,
+    /// High-water marks published as `Module.operand_depths`/`label_depths`.
+    max_op_len: usize = 0,
+    max_fr_len: usize = 0,
 
     fn fail(self: *FuncValidator, comptime msg: []const u8) Error {
         self.diag.set(self.offsets[self.pc], msg, .{});
@@ -1030,6 +1044,7 @@ const FuncValidator = struct {
     fn push(self: *FuncValidator, v: StackVal) void {
         self.opds[self.op_len] = v;
         self.op_len += 1;
+        self.max_op_len = @max(self.max_op_len, self.op_len);
     }
 
     /// Popping from a frame-height stack in an unreachable frame yields the
@@ -1093,6 +1108,7 @@ const FuncValidator = struct {
             .init_height = self.init_len,
         };
         self.fr_len += 1;
+        self.max_fr_len = @max(self.max_fr_len, self.fr_len);
         self.pushTypes(ft.params);
     }
 
@@ -2108,13 +2124,15 @@ const FuncValidator = struct {
     }
 };
 
+const BodyDepths = struct { operands: u32, labels: u32 };
+
 fn validateFunc(
     mod: *const types.Module,
     diag: *types.Diagnostic,
     ft: types.FuncType,
     body: types.FuncBody,
     allocator: Allocator,
-) (Error || Allocator.Error)!void {
+) (Error || Allocator.Error)!BodyDepths {
     // Both stacks are bounded by the instruction count: each instruction
     // pushes at most one operand and opens at most one control frame. The
     const n = body.instrs.len + 1;
@@ -2151,6 +2169,7 @@ fn validateFunc(
     };
     try v.pushFrame(.block, .{ .params = &.{}, .results = ft.results });
     try v.run();
+    return .{ .operands = @intCast(v.max_op_len), .labels = @intCast(v.max_fr_len) };
 }
 
 // ---------------------------------------------------------------------------
@@ -2330,6 +2349,30 @@ fn expectInvalidAtWithFeatures(comptime bytes: []const u8, features: types.Featu
     try std.testing.expectError(error.Invalid, validate(mod, &diag));
     try std.testing.expectEqualStrings(msg, diag.message());
     try std.testing.expectEqual(off, diag.offset);
+}
+
+test "wasm.validate publishes operand and label high-water marks per body" {
+    // `i32.const 1; i32.const 2; i32.add; block; i32.const 3; drop; end; end`:
+    // two operands live during the add and again inside the block (the block
+    // keeps one below its height), and the block nests one control frame under
+    // the function frame.
+    const nested = comptime (hdr ++ type_i32 ++ func0 ++
+        code1("\x41\x01\x41\x02\x6A\x02\x40\x41\x03\x1A\x0B\x0B"));
+    var diag: types.Diagnostic = .{};
+    const mod = try decode.decode(std.testing.allocator, nested, &diag);
+    defer decode.destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(@as(usize, 0), mod.operand_depths.len);
+    try validate(mod, &diag);
+    try std.testing.expectEqualSlices(u32, &.{2}, mod.operand_depths);
+    try std.testing.expectEqualSlices(u32, &.{2}, mod.label_depths);
+
+    // An empty body touches no operands and holds only the function frame.
+    const empty = comptime (hdr ++ type_void ++ func0 ++ code1("\x0B"));
+    const empty_mod = try decode.decode(std.testing.allocator, empty, &diag);
+    defer decode.destroyModule(std.testing.allocator, empty_mod);
+    try validate(empty_mod, &diag);
+    try std.testing.expectEqualSlices(u32, &.{0}, empty_mod.operand_depths);
+    try std.testing.expectEqualSlices(u32, &.{1}, empty_mod.label_depths);
 }
 
 test "wasm.validate empty module" {
