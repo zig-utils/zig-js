@@ -214,22 +214,30 @@ const OperandStack = struct {
         self.items[self.items.len - 1] = item;
     }
 
+    /// The stack as the `ArrayListUnmanaged` it is a view of, so the list can
+    /// grow and free the buffer on the stack's behalf.
+    ///
+    /// Built with `initBuffer` rather than a struct literal. A literal names
+    /// every field, and Zig 0.17.0-dev.1963 added `pointer_stability` to the
+    /// list — so a literal that was complete on 1818 is a compile error on
+    /// 1963. `initBuffer` fills whatever fields the current std has, and
+    /// `items.len` is the only thing this type adds on top.
+    fn asList(self: *const OperandStack) std.ArrayListUnmanaged(Value) {
+        var list: std.ArrayListUnmanaged(Value) = .initBuffer(self.items.ptr[0..self.capacity]);
+        list.items.len = self.items.len;
+        return list;
+    }
+
     pub fn ensureTotalCapacity(self: *OperandStack, allocator: std.mem.Allocator, new_capacity: usize) std.mem.Allocator.Error!void {
         if (new_capacity <= self.capacity) return;
-        var list: std.ArrayListUnmanaged(Value) = .{
-            .items = self.items,
-            .capacity = self.capacity,
-        };
+        var list = self.asList();
         try list.ensureTotalCapacity(allocator, new_capacity);
         self.items = list.items;
         self.capacity = list.capacity;
     }
 
     noinline fn grow(self: *OperandStack, allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
-        var list: std.ArrayListUnmanaged(Value) = .{
-            .items = self.items,
-            .capacity = self.capacity,
-        };
+        var list = self.asList();
         try list.ensureTotalCapacity(allocator, self.items.len + 1);
         self.items = list.items;
         self.capacity = list.capacity;
@@ -252,10 +260,7 @@ const OperandStack = struct {
     }
 
     pub fn deinit(self: *OperandStack, allocator: std.mem.Allocator) void {
-        var list: std.ArrayListUnmanaged(Value) = .{
-            .items = self.items,
-            .capacity = self.capacity,
-        };
+        var list = self.asList();
         list.deinit(allocator);
         self.* = .empty;
     }
@@ -10044,7 +10049,7 @@ fn runChunk(
                 try vm.notifyDebuggerException(false);
                 return error.Throw;
             },
-            .throw_not_a_reference => return vm.throwNotAReference(@enumFromInt(inst.a)),
+            .throw_not_a_reference => return vm.throwNotAReference(@fromBackingInt(@intCast(inst.a))),
             .push_handler, .push_handler_catch, .push_handler_outer => {
                 const outer = inst.op == .push_handler_outer;
                 if (outer and (exec.environment_depth == 0 or vm.env.parent == null)) return error.OutOfMemory;

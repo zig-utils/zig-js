@@ -1774,7 +1774,7 @@ test "jsthread native private relocation mirrors every traced payload" {
         .release_state = .{ .lock = &lock },
     };
     var pending = [_]*HoldJob{&hold};
-    lock.pending = .{ .items = &pending, .capacity = pending.len };
+    lock.pending = .fromOwnedSlice(&pending);
 
     var waiter_lock = LockRecord{ .gil = undefined, .owner = &old_objects[4] };
     var waiter = AsyncCondWaiter{ .lock = &waiter_lock, .outer = &old_objects[5] };
@@ -1782,7 +1782,7 @@ test "jsthread native private relocation mirrors every traced payload" {
     var condition = CondRecord{
         .gil = undefined,
         .owner = &old_objects[3],
-        .queue = .{ .items = &queue, .capacity = queue.len },
+        .queue = .fromOwnedSlice(&queue),
     };
 
     var thread_local = TLRecord{
@@ -1905,7 +1905,7 @@ test "realm root relocation rewrites GIL tasks thread records and property waite
         .release_state = .{ .lock = &lock },
     };
     var task_items = [_]*anyopaque{@ptrCast(&job)};
-    g.tasks = .{ .items = &task_items, .capacity = task_items.len };
+    g.tasks = .fromOwnedSlice(&task_items);
 
     var queue = promise.MicrotaskQueue{};
     var pending_joins = [_]PendingJoin{.{ .promise = &old_objects[5], .microtasks = &queue }};
@@ -1916,8 +1916,8 @@ test "realm root relocation rewrites GIL tasks thread records and property waite
         .ctx = undefined,
         .result = Value.obj(&old_objects[3]),
         .js_obj = &old_objects[4],
-        .pending_joins = .{ .items = &pending_joins, .capacity = pending_joins.len },
-        .settling_joins = .{ .items = &settling_joins, .capacity = settling_joins.len },
+        .pending_joins = .fromOwnedSlice(&pending_joins),
+        .settling_joins = .fromOwnedSlice(&settling_joins),
     };
     var ticket = PropAsyncTicket{
         .obj = &old_objects[7],

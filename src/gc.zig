@@ -1888,11 +1888,11 @@ test "Function marking and relocation cover every managed field" {
     var generator_constants = [_]Value{Value.obj(&old_objects[11])};
     var async_constants = [_]Value{Value.obj(&old_objects[12])};
     var plain_chunk = bytecode.Chunk.init(std.testing.allocator);
-    plain_chunk.consts = .{ .items = &plain_constants, .capacity = plain_constants.len };
+    plain_chunk.consts = .fromOwnedSlice(&plain_constants);
     var generator_chunk = bytecode.Chunk.init(std.testing.allocator);
-    generator_chunk.consts = .{ .items = &generator_constants, .capacity = generator_constants.len };
+    generator_chunk.consts = .fromOwnedSlice(&generator_constants);
     var async_chunk = bytecode.Chunk.init(std.testing.allocator);
-    async_chunk.consts = .{ .items = &async_constants, .capacity = async_constants.len };
+    async_chunk.consts = .fromOwnedSlice(&async_constants);
     var parent_frame_slots = [_]Value{Value.obj(&old_objects[13])};
     var parent_frame = vm.Frame{ .slots = &parent_frame_slots, .parent = null };
     var captured_frame_slots = [_]Value{Value.obj(&old_objects[14])};
@@ -2092,8 +2092,8 @@ test "Promise relocation rewrites inline and overflow reaction graphs" {
             .resolve = Value.obj(&old_objects[6]),
             .reject = Value.obj(&old_objects[7]),
         },
-        .on_fulfill = .{ .items = &fulfill_overflow, .capacity = fulfill_overflow.len },
-        .on_reject = .{ .items = &reject_overflow, .capacity = reject_overflow.len },
+        .on_fulfill = .fromOwnedSlice(&fulfill_overflow),
+        .on_reject = .fromOwnedSlice(&reject_overflow),
     };
 
     const Plan = struct {
@@ -2353,7 +2353,7 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
             .stack = .{ .items = &stack, .capacity = stack.len },
             .acc = Value.obj(&old_objects[2]),
             .frame = &child_frame,
-            .handlers = .{ .items = &handlers, .capacity = handlers.len },
+            .handlers = .fromOwnedSlice(&handlers),
         },
         .env = &old_environment,
         .this_value = Value.obj(&old_objects[5]),
@@ -2362,7 +2362,7 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
         .import_meta_slot = &import_meta,
         .result = &old_objects[9],
         .async_parent_promise = &old_promise,
-        .requests = .{ .items = &requests, .capacity = requests.len },
+        .requests = .fromOwnedSlice(&requests),
     };
     var helper = value.IterHelper{
         .src = Value.obj(&old_objects[14]),
@@ -3395,9 +3395,9 @@ test "realm root relocation rewrites Context registries and embedder handles" {
         context.next_ticks.items = saved_next_ticks;
         context.next_ticks.head = saved_next_tick_head;
     }
-    context.microtasks.items = .{ .items = &microtask_items, .capacity = microtask_items.len };
+    context.microtasks.items = .fromOwnedSlice(&microtask_items);
     context.microtasks.head = 0;
-    context.next_ticks.items = .{ .items = &next_tick_items, .capacity = next_tick_items.len };
+    context.next_ticks.items = .fromOwnedSlice(&next_tick_items);
     context.next_ticks.head = 0;
 
     var unhandled = [_]*promise.Promise{&old_promises[0]};
@@ -3453,15 +3453,15 @@ test "realm root relocation rewrites Context registries and embedder handles" {
         context.private_strong_roots = saved_strong_roots;
         context.private_weak_roots = saved_weak_roots;
     }
-    context.unhandled_rejections = .{ .items = &unhandled, .capacity = unhandled.len };
-    context.handled_rejections = .{ .items = &handled, .capacity = handled.len };
-    context.async_waiters = .{ .items = &async_waiters, .capacity = async_waiters.len };
-    context.timers = .{ .items = &timers, .capacity = timers.len };
-    context.finalization_cleanup_jobs = .{ .items = &finalization_jobs, .capacity = finalization_jobs.len };
-    context.c_api_class_prototypes = .{ .items = &prototypes, .capacity = prototypes.len };
-    context.c_api_handles = .{ .items = &handles, .capacity = handles.len };
-    context.private_strong_roots = .{ .items = &strong_roots, .capacity = strong_roots.len };
-    context.private_weak_roots = .{ .items = &weak_roots, .capacity = weak_roots.len };
+    context.unhandled_rejections = .fromOwnedSlice(&unhandled);
+    context.handled_rejections = .fromOwnedSlice(&handled);
+    context.async_waiters = .fromOwnedSlice(&async_waiters);
+    context.timers = .fromOwnedSlice(&timers);
+    context.finalization_cleanup_jobs = .fromOwnedSlice(&finalization_jobs);
+    context.c_api_class_prototypes = .fromOwnedSlice(&prototypes);
+    context.c_api_handles = .fromOwnedSlice(&handles);
+    context.private_strong_roots = .fromOwnedSlice(&strong_roots);
+    context.private_weak_roots = .fromOwnedSlice(&weak_roots);
 
     const Plan = struct {
         old_objects: *[18]Object,
@@ -4511,7 +4511,7 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     const saved_cleanup_jobs = sibling.finalization_cleanup_jobs;
     defer sibling.finalization_cleanup_jobs = saved_cleanup_jobs;
     var pending_cleanup = [_]*Object{&relocated_sibling_root};
-    sibling.finalization_cleanup_jobs = .{ .items = &pending_cleanup, .capacity = pending_cleanup.len };
+    sibling.finalization_cleanup_jobs = .fromOwnedSlice(&pending_cleanup);
     try std.testing.expectError(error.RealmNotQuiescent, state.realms.retireQuiescent(sibling));
     sibling.finalization_cleanup_jobs = .empty;
     try std.testing.expectError(error.OwnerCannotRetire, state.realms.retireQuiescent(owner));
@@ -4700,7 +4700,7 @@ test "precise sibling realm shares one heap and retires only after cross-realm h
     const moving_handle = try sibling.protectValue(moving_value);
     const saved_cleanup_jobs = sibling.finalization_cleanup_jobs;
     var pending_cleanup = [_]*Object{moving_handle.get().asObj()};
-    sibling.finalization_cleanup_jobs = .{ .items = &pending_cleanup, .capacity = pending_cleanup.len };
+    sibling.finalization_cleanup_jobs = .fromOwnedSlice(&pending_cleanup);
     try std.testing.expectEqual(.unsupported, owner.compactGarbage().status);
     sibling.finalization_cleanup_jobs = saved_cleanup_jobs;
     const compaction = owner.compactGarbage();

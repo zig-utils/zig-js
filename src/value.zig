@@ -4396,7 +4396,10 @@ pub const Object = struct {
             return err;
         };
         @memcpy(values[0..old_slots.len], old_slots);
-        state.* = .{ .list = .{ .items = values[0..old_slots.len], .capacity = values.len } };
+        // `initBuffer`, not a literal: 0.17.0-dev.1963 added a field to the
+        // list, and a literal that names the old fields no longer compiles.
+        state.* = .{ .list = .initBuffer(values) };
+        state.list.items.len = old_slots.len;
         state.list.appendAssumeCapacity(value_);
         storage.state.slots.store(state, .release);
     }
