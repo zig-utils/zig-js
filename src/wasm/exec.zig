@@ -1832,9 +1832,17 @@ fn push(s: *State, v: u64) ExecError!void {
 /// the body pushes with `appendAssumeCapacity`; only the process-wide
 /// `MAX_OPERAND_SLOTS` trap check remains per push.
 fn reserveActivation(s: *State, mod: *const types.Module, idx: u32, body: *const types.FuncBody, param_count: usize) ExecError!void {
-    const coarse: usize = body.instrs.len + 1;
-    const operand_depth: usize = if (idx < mod.operand_depths.len) mod.operand_depths[idx] else coarse;
-    const label_depth: usize = if (idx < mod.label_depths.len) mod.label_depths[idx] else coarse;
+    // Every module that reaches the executor has been validated, and `validate`
+    // fills one entry per `code` body before publishing either array, so both
+    // are indexable here. Fail closed rather than guessing if that ever stops
+    // holding: the pushes these reservations cover assume capacity, so an
+    // under-reservation is an out-of-bounds write, and no cheap syntactic
+    // bound is sound -- one instruction can push several slots, so the
+    // tempting `instrs.len` is not an operand bound at all.
+    if (idx >= mod.operand_depths.len or idx >= mod.label_depths.len)
+        return s.trap("activation depths unavailable: module was not validated");
+    const operand_depth: usize = mod.operand_depths[idx];
+    const label_depth: usize = mod.label_depths[idx];
     // `pushSlot` traps once the stack reaches `MAX_OPERAND_SLOTS`, so reserving
     // past that ceiling can never be used and would let a body whose validated
     // height is far above the ceiling (a long `i32.const` run) force a large
@@ -1849,16 +1857,13 @@ fn reserveActivation(s: *State, mod: *const types.Module, idx: u32, body: *const
 
 fn pushSlot(s: *State, slot: WasmSlot) ExecError!void {
     if (s.stack.items.len >= MAX_OPERAND_SLOTS) return s.trap("operand stack exhausted");
-    // `reserveActivation` has normally already reserved this body's validated
-    // high-water mark, so this check falls through and the push is a store.
-    // It is not redundant: validation models only the pushes a body's own
-    // instructions make, so some real pushes happen at heights it never
-    // visits -- a `catch` delivers its tag payload at the `try_table`'s
-    // height, and `return_call` goes unreachable without recording the
-    // results a host import returns. Synthetic `State`s built directly by
-    // tests reserve nothing at all. Those grow here instead of writing past
-    // the end of the buffer.
-    if (s.stack.items.len == s.stack.capacity) return s.stack.append(s.alloc, slot);
+    // `reserveActivation` has reserved this body's validated high-water mark,
+    // which `validate` records as a COMPLETE bound: besides the pushes the
+    // instruction walk performs, it also records the height a `catch` delivers
+    // its clause types at, and the result arity a `return_call` materializes
+    // when it lands in a host import. Every push therefore fits, and this is a
+    // plain store. A `State` built directly (unit-test harnesses) must reserve
+    // for itself.
     s.stack.appendAssumeCapacity(slot);
 }
 
@@ -4206,6 +4211,11 @@ fn truncSatI64U(x: anytype) u64 {
 }
 
 fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: []ValueSlot) ExecError!void {
+    // The entry arguments are the caller's push, not the callee body's, so no
+    // published depth covers them and `pushFrame` has not reserved anything
+    // yet -- on a fresh `State` the stack still has zero capacity. Size it for
+    // them here; the activation reserves its own body depth on top.
+    try s.stack.ensureUnusedCapacity(s.alloc, args.len);
     for (args) |slot| try pushSlot(s, slot);
     try pushFrame(s, entry);
     while (s.frames.items.len > 0) {
@@ -5985,8 +5995,9 @@ test "wasm.exec return_call into a host import grows the stack for results valid
     var diag: types.Diagnostic = .{};
     const mod = try buildModuleWithFeatures(mod_bytes, features, &diag);
     defer decode.destroyModule(talloc, mod);
-    // The reservation this body would get is zero, while sixteen slots arrive.
-    try std.testing.expectEqual(@as(u32, 0), mod.operand_depths[0]);
+    // `return_call` pushes nothing onto the abstract stack, so before the bound
+    // was completed this body recorded depth 0 while sixteen slots arrived.
+    try std.testing.expectEqual(@as(u32, 16), mod.operand_depths[0]);
 
     const sixteen_i32 = [_]types.ValType{ .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32 };
     var sink: u32 = 0;
@@ -6095,6 +6106,9 @@ test "wasm.exec executes every atomic load store RMW and cmpxchg opcode" {
     defer arena.deinit();
     var diag: types.Diagnostic = .{};
     var state: State = .{ .alloc = arena.allocator(), .diag = &diag };
+    // Direct-`State` harness: no `reserveActivation` runs here, so reserve what
+    // `pushSlot` now assumes. Production always enters through a call.
+    try state.stack.ensureUnusedCapacity(state.alloc, 64);
     const initial: u64 = 0x0102030405060708;
     const operand: u64 = 0xf1e2d3c4b5a69788;
 
@@ -6197,6 +6211,9 @@ test "wasm.exec atomic wait and notify share the FIFO waiter table" {
             defer arena.deinit();
             var diag: types.Diagnostic = .{};
             var state: State = .{ .alloc = arena.allocator(), .diag = &diag };
+            // Direct-`State` harness: no `reserveActivation` runs here, so reserve what
+            // `pushSlot` now assumes. Production always enters through a call.
+            state.stack.ensureUnusedCapacity(state.alloc, 64) catch return;
             pushI32(&state, 0) catch return;
             pushI32(&state, 0) catch return;
             pushI64(&state, std.time.ns_per_s) catch return;
@@ -6217,6 +6234,9 @@ test "wasm.exec atomic wait and notify share the FIFO waiter table" {
         defer arena.deinit();
         var diag: types.Diagnostic = .{};
         var state: State = .{ .alloc = arena.allocator(), .diag = &diag };
+        // Direct-`State` harness: no `reserveActivation` runs here, so reserve what
+        // `pushSlot` now assumes. Production always enters through a call.
+        try state.stack.ensureUnusedCapacity(state.alloc, 64);
         try pushI32(&state, 0);
         try pushI32(&state, 1);
         try executeAtomic(&state, &inst, atomicTestInstr(.memory_atomic_notify));
@@ -6234,6 +6254,9 @@ test "wasm.exec atomic wait and notify share the FIFO waiter table" {
     defer arena.deinit();
     var diag: types.Diagnostic = .{};
     var state: State = .{ .alloc = arena.allocator(), .diag = &diag };
+    // Direct-`State` harness: no `reserveActivation` runs here, so reserve what
+    // `pushSlot` now assumes. Production always enters through a call.
+    try state.stack.ensureUnusedCapacity(state.alloc, 64);
     try pushI32(&state, 0);
     try pushI64(&state, 1);
     try pushI64(&state, 0);
@@ -8611,6 +8634,8 @@ test "wasm.exec execution roots refresh after pop and local overwrite" {
             .checkpoint = RootLivenessProbe.checkpoint,
         },
     };
+    // Direct-`State` harness: pushes without an activation, so reserve here.
+    try state.stack.ensureUnusedCapacity(state.alloc, 64);
     var object = js_value.Object{};
     try pushSlot(&state, .{ .externref = js_value.Value.obj(&object) });
     checkpoint(&state);

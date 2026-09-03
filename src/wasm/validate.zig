@@ -1221,6 +1221,13 @@ const FuncValidator = struct {
         for (ft.results, expected) |actual, result|
             if (!valTypeMatches(self.mod, actual, result)) return self.fail("type mismatch");
         try self.popTypes(ft.params);
+        // A tail call never returns to this frame, so the results are correctly
+        // not pushed onto the abstract stack. The executor still materializes
+        // them: a tail call into a HOST import returns through this activation,
+        // which truncates to the frame base and pushes the callee's results
+        // there. `tailCallFunc` has already proved those equal this function's
+        // results, so the peak is exactly that arity at height zero.
+        self.max_op_len = @max(self.max_op_len, ft.results.len);
         self.setUnreachable();
     }
 
@@ -1763,10 +1770,19 @@ const FuncValidator = struct {
                 .try_table => {
                     const immediate = instr.imm.try_table;
                     for (immediate.catches) |catch_clause| try self.validateCatch(catch_clause);
-                    try self.pushFrame(
-                        .try_table,
-                        immediate.block.type.funcType(self.mod) orelse return self.fail("unknown type"),
-                    );
+                    const try_type = immediate.block.type.funcType(self.mod) orelse return self.fail("unknown type");
+                    // Exception delivery truncates the operand stack to this
+                    // instruction's height and pushes the matched clause's
+                    // branch types THERE, before branching to the handler's
+                    // label. The instruction walk never visits that height, so
+                    // record it: `max_op_len` is what the executor reserves,
+                    // and an unrecorded push writes past the reservation.
+                    const handler_height = self.op_len -| try_type.params.len;
+                    for (immediate.catches) |catch_clause| {
+                        const target_frame = try self.target(catch_clause.labelIndex());
+                        self.max_op_len = @max(self.max_op_len, handler_height + target_frame.branchTypes().len);
+                    }
+                    try self.pushFrame(.try_table, try_type);
                 },
                 .else_ => {
                     // The decoder guarantees structure; stay defensive.
@@ -2349,6 +2365,35 @@ fn expectInvalidAtWithFeatures(comptime bytes: []const u8, features: types.Featu
     try std.testing.expectError(error.Invalid, validate(mod, &diag));
     try std.testing.expectEqualStrings(msg, diag.message());
     try std.testing.expectEqual(off, diag.offset);
+}
+
+test "wasm.validate records the height a catch delivers its clause types at" {
+    // `block (result i32 i32 i32) { i32.const; i32.const; try_table (catch $t 0)
+    //  ...end; drop; drop; unreachable }`. The instruction walk peaks at 3 (the
+    // block's results, pushed at its `end`). Exception delivery instead
+    // truncates to the try_table's own height -- 2, with both constants still
+    // live below it -- and pushes the handler label's three types THERE, for a
+    // real peak of 5. Before the bound recorded catch heights this body
+    // published 3, and the executor reserved two slots too few.
+    const features: types.Features = .{ .exception_handling = true, .multi_value = true, .reference_types = true };
+    const bytes = comptime (hdr ++
+        sec(1, "\x02" ++ // two types: () -> (i32 i32 i32), and (i32 i32 i32) -> ()
+            "\x60\x00\x03\x7F\x7F\x7F" ++
+            "\x60\x03\x7F\x7F\x7F\x00") ++
+        func0 ++
+        sec(13, "\x01\x00\x01") ++ // one tag, attribute 0, type 1
+        code1("\x02\x00" ++ // block, blocktype = type 0 -> (i32 i32 i32)
+            "\x41\x01\x41\x02" ++ // two live operands below the try
+            "\x1F\x40\x01\x00\x00\x00" ++ // try_table void, 1 catch: catch_tag tag 0 -> label 0
+            "\x0B" ++ // end try_table
+            "\x1A\x1A\x00" ++ // drop, drop, unreachable
+            "\x0B" ++ // end block
+            "\x0B")); // end function
+    var diag: types.Diagnostic = .{};
+    const mod = try decode.decodeWithFeatures(std.testing.allocator, bytes, features, &diag);
+    defer decode.destroyModule(std.testing.allocator, mod);
+    try validate(mod, &diag);
+    try std.testing.expectEqualSlices(u32, &.{5}, mod.operand_depths);
 }
 
 test "wasm.validate publishes operand and label high-water marks per body" {
