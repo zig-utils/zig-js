@@ -734,6 +734,53 @@ jobs:
               ;;
           esac
 
+  # The complete 73-file wg-1.0 inventory, unfiltered. The per-push
+  # wasm-mvp-smoke leg above deliberately filters to `linking` and
+  # `f32_bitwise` to keep a multi-minute run off every push; that left the rest
+  # of the corpus with no gate at all, and it accumulated thirteen real
+  # failures on a green main (#877 decoder acceptance, #878 diagnostics, #879
+  # export/import property keys). It is now 18,791 pass / 0 fail / 479 skip /
+  # 0 crash, so nightly can hold it there without slowing the push path.
+  #
+  # Debug on purpose. It is what the filtered legs already use, and it is the
+  # only mode where the executor's `appendAssumeCapacity` capacity asserts
+  # exist: a revision of #465's activation-reservation work aborted 48 times
+  # under Debug while ReleaseFast reported a clean 18,778-pass sweep of the
+  # identical binary, because the asserts compile out and every abort became a
+  # silent out-of-bounds write the corpus scored as a pass.
+  nightly-wasm-spec-full:
+    name: nightly-wasm-spec-full
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: zig-js
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: zig-utils/zig-regex
+          path: zig-regex
+          ref: 87e9ca28fa14194dd1e8b4cae7461e179331efca
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: zig-utils/zig-gc
+          path: zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
+      - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
+        with:
+          packages: zig@${{ env.ZIG_VERSION }}
+      # The packed runner reads tests/wasm/spec/{manifest.json,modules.bin},
+      # which are checked in, so it needs no submodule and no wast2json.
+      - name: wasm-spec (complete inventory)
+        working-directory: zig-js
+        run: zig build wasm-spec -Dwasm-spec-out="$RUNNER_TEMP/wasm-spec-full.json"
+      - name: Upload inventory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wasm-spec-full-inventory
+          path: ${{ runner.temp }}/wasm-spec-full.json
+
   # Runs a curated test262 cross-section in GIL-free parallel contexts and asserts
   # it introduces no NEW failures vs the baseline (arena) engine — i.e. the
   # parallel-mode locked paths + GC-managed allocator are correct across a broad
