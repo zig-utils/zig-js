@@ -13803,9 +13803,15 @@ pub const Interpreter = struct {
         const next_method = record.next_method;
         const next_root = try self.pushTempRoot(next_method);
         defer self.restoreTempRoots(next_root);
-        var done = false;
-        errdefer if (!done) self.iteratorCloseKeepingThrow(self.tempRoot(iter_root, iter));
         while (true) {
+            // IteratorStepValue: `next()`, the `done` check and the `value` read
+            // are the ITERATOR's own machinery. An abrupt completion in any of
+            // them marks the record done and propagates WITHOUT closing -- the
+            // iterator that just threw is not asked to clean itself up. Only a
+            // completion this consumer produces closes, which is why the adder
+            // below is the first step wrapped. A `next()` that returns a
+            // non-object is part of the same protocol and likewise does not
+            // close (`Object.fromEntries` documents the same rule).
             const r = try self.callValueWithThis(
                 self.tempRoot(next_root, next_method),
                 &.{},
@@ -13814,17 +13820,20 @@ pub const Interpreter = struct {
             if (!builtins.isRealObject(r)) return self.throwError("TypeError", "iterator.next() did not return an object");
             const result_root = try self.pushTempRoot(r);
             defer self.restoreTempRoots(result_root);
-            if ((try self.getProperty(r, "done")).toBoolean()) {
-                done = true;
-                break;
-            }
+            if ((try self.getProperty(r, "done")).toBoolean()) break;
             const item = try self.getProperty(self.tempRoot(result_root, r), "value");
-            try self.addOneEntry(
+            // From here the abrupt completion is ours: a non-object entry, a
+            // throwing "0"/"1" getter, a throwing key coercion, or a throwing
+            // adder all close the iterator while keeping the original throw.
+            self.addOneEntry(
                 self.tempRoot(collection_root, collection).asObj(),
                 self.tempRoot(adder_root, adder),
                 item,
                 is_set,
-            );
+            ) catch |e| {
+                self.iteratorCloseKeepingThrow(self.tempRoot(iter_root, iter));
+                return e;
+            };
         }
     }
 
