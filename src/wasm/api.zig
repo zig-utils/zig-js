@@ -1936,6 +1936,19 @@ fn throwWasmTrap(self: *Interpreter, message: []const u8, proto: *Object) value.
     return error.Throw;
 }
 
+/// A wasm import/export name becomes a JS property key, and the interpreter
+/// storage-escapes any public key beginning with NUL so it cannot collide with
+/// the engine's symbol and internal-slot encodings (`value.encodeStringKey`,
+/// and see `value.isSymbolKey`). Wasm names are arbitrary UTF-8 and may
+/// legitimately begin with NUL, so they must cross this boundary escaped:
+/// stored raw, such an export lands under bytes no JS property read can
+/// produce, and it also reads as a symbol key, hiding it from `Object.keys`.
+/// Only KEYS are escaped -- a name used as a value (a function's `name`, the
+/// `WebAssembly.Module.exports()` descriptors) stays raw.
+fn wasmNameKey(self: *Interpreter, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    return value.encodeStringKey(self.arena, name);
+}
+
 fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Module, import_object: Value, descriptor: *InstanceDescriptor) value.HostError!ResolvedImports {
     if (!import_object.isUndefined() and languageObject(import_object) == null)
         return self.throwError("TypeError", "WebAssembly imports must be an object");
@@ -1972,10 +1985,10 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
     var gi: usize = 0;
     var tag_i: usize = 0;
     for (module.imports, 0..) |entry, import_index| {
-        const namespace_value = try self.getProperty(import_object, entry.module);
+        const namespace_value = try self.getProperty(import_object, try wasmNameKey(self, entry.module));
         const namespace = languageObject(namespace_value) orelse
             return throwWasmWithProto(self, "LinkError", "WebAssembly import module is not an object", descriptor.link_error_proto);
-        const imported = try self.getProperty(Value.obj(namespace), entry.name);
+        const imported = try self.getProperty(Value.obj(namespace), try wasmNameKey(self, entry.name));
         values[import_index] = imported;
         switch (entry.desc) {
             .func => |type_index| {
@@ -2449,7 +2462,7 @@ fn instantiateModuleObject(
                 break :blk tag_cache[entry.index];
             },
         };
-        try setData(self.arena, self.root_shape, exports, entry.name, exported, .{ .writable = false, .enumerable = true, .configurable = false });
+        try setData(self.arena, self.root_shape, exports, try wasmNameKey(self, entry.name), exported, .{ .writable = false, .enumerable = true, .configurable = false });
     }
     exports.setExtensible(false);
     state.exports_obj = exports;
