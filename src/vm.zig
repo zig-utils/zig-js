@@ -8428,7 +8428,17 @@ fn runChunk(
                     chunk.names.items[plan.name_index],
                     environment_limit,
                 );
-                if (reference == .static) if (plan.direct_eval_frame_depth) |frame_depth| {
+                // A `var` created by the defining frame's sloppy direct eval is
+                // nearer than anything the environment walk can still reach:
+                // `.static` means the compiler bound a slot, while
+                // `.global_object`/`.unresolvable` mean it found nothing at all.
+                // An `.environment`/`.with_object` hit is a genuinely nearer
+                // dynamic binding and keeps precedence.
+                const may_adopt_defining_frame = switch (reference) {
+                    .static, .global_object, .unresolvable => true,
+                    else => false,
+                };
+                if (may_adopt_defining_frame) if (plan.direct_eval_frame_depth) |frame_depth| {
                     var target = frame orelse
                         return vm.throwError("InternalError", "dynamic parameter reference has no frame");
                     var remaining = frame_depth;

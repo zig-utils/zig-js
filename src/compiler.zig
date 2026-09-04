@@ -2316,11 +2316,12 @@ pub const Compiler = struct {
             // direct eval lands in THIS activation, hence depth 0.
             .upval => |upvalue| if (upvalue.binding.parameter_with_eval_boundary)
                 upvalue.depth
-            else if (self.scope != null and self.scope.?.may_extend_environment)
-                0
             else
-                null,
-            .environment, .global => null,
+                self.directEvalExtendableFrameDepth(),
+            // A name with no static binding anywhere: any `var` an enclosing
+            // sloppy direct eval created is nearer than the global.
+            .global => self.directEvalExtendableFrameDepth(),
+            .environment => null,
         };
         const fallback: bc.BindingReferenceFallback = switch (resolved) {
             .local => |binding| .{
@@ -2402,10 +2403,32 @@ pub const Compiler = struct {
     /// never consults — so `var z = 1; (function(){ eval("var z = 7;"); return z; })()`
     /// read the outer 1 instead of the eval-created 7. Such reads take a
     /// binding reference whose `direct_eval_frame_depth` is this frame.
+    /// Depth of the nearest frame whose sloppy direct eval can create a `var`
+    /// this read would otherwise miss; 0 is this function's own frame. The
+    /// eval need not be in THIS function: a strict nested function with no
+    /// eval of its own still observes a binding an enclosing sloppy frame's
+    /// eval created, because that binding lands in the enclosing activation's
+    /// lazily materialized direct-eval record rather than on any environment
+    /// chain this frame can walk. `classDeferredBodiesCaptureFrame` already
+    /// walks the parent chain for the same flag.
+    fn directEvalExtendableFrameDepth(self: *Compiler) ?u32 {
+        var depth: u32 = 0;
+        var scope = self.scope;
+        while (scope) |sc| : ({
+            scope = sc.parent;
+            depth += 1;
+        }) {
+            if (sc.may_extend_environment) return depth;
+        }
+        return null;
+    }
+
     fn readMayObserveOwnDirectEvalVar(self: *Compiler, resolved: anytype) bool {
-        const scope = self.scope orelse return false;
-        if (!scope.may_extend_environment) return false;
-        return resolved == .upval;
+        if (self.directEvalExtendableFrameDepth() == null) return false;
+        // `.upval` reads a binding the eval can shadow; `.global` has no static
+        // binding at all, so an eval-created var is the nearest thing there can
+        // be. Both need a Reference that consults the defining frame.
+        return resolved == .upval or resolved == .global;
     }
 
     fn dynamicBindingReferencePlan(self: *Compiler, name: []const u8) CompileError!?u32 {
