@@ -192,7 +192,17 @@ function printWat(node) {
     }
     let out = [];
     if (rest.length && rest[0].list && rest[0].list[0]?.atom === "offset") {
-      out.push(rest[0].list.slice(1).map(printWat).join(" "));
+      // Keep the "(offset ...)" wrapper rather than inlining its contents.
+      // Inlining is only sound when the offset holds exactly one folded
+      // instruction: an abstract offset may legally hold several, and
+      // "(data (offset (nop) (i32.const 0)))" then flattens to
+      // "(data (nop) (i32.const 0))", which is two folded instructions where
+      // the text grammar admits one. wat2wasm rejects that as a PARSE error,
+      // so an assert_invalid module that should merely fail validation
+      // ("constant expression required") produced no bytes at all and its
+      // whole module was dropped from the pack. "(offset ...)" is the
+      // canonical form and needs no rewriting.
+      out.push(printWat(rest[0]));
       rest = rest.slice(1);
     }
     out = out.concat(rest.map(printWat));
