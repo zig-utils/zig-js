@@ -196,9 +196,10 @@ const Reader = struct {
         return result;
     }
 
-    /// Normative unsigned 64-bit LEB128. Memory64 uses this encoding for all
-    /// limits and memarg offsets, including memory32 values whose validator
-    /// subsequently constrains them to the i32 address range.
+    /// Normative unsigned 64-bit LEB128. Memory64 uses this encoding for
+    /// 64-bit limits and, once the feature is enabled, for memarg offsets --
+    /// including offsets on a 32-bit memory, which the validator then
+    /// constrains to the i32 address range.
     fn readU64Leb(self: *Reader) DecodeError!u64 {
         const start = self.offset();
         var result: u64 = 0;
@@ -227,7 +228,16 @@ const Reader = struct {
         const memory_index = if (has_memory_index) try self.readU32Leb() else 0;
         return .{
             .align_ = if (has_memory_index) flags - 0x40 else flags,
-            .offset = try self.readU64Leb(),
+            // Without memory64 no memory can be 64-bit, so the offset is a u32
+            // field and its encoding must satisfy the u32 constraints here:
+            // `assert_malformed` requires a DECODE failure, which deferring the
+            // range check to the validator cannot produce. With the feature on,
+            // the offset is genuinely u64 and per-memory range checking belongs
+            // to the validator, which knows each memory's address type.
+            .offset = if (self.features.memory64)
+                try self.readU64Leb()
+            else
+                @as(u64, try self.readU32Leb()),
             .memory_index = memory_index,
         };
     }
@@ -428,7 +438,13 @@ const Reader = struct {
         };
         const limit = if (kind == .memory) address.maxMemoryPages() else address.maxTableElements();
         if (min > limit) return if (kind == .memory)
-            self.failAt(min_off, "memory size exceeds address type limit", .{})
+            // The specification words the 32-bit ceiling concretely, and the
+            // corpus matches on that text; the generalized wording only fits
+            // the 64-bit address type.
+            (if (address == .i32)
+                self.failAt(min_off, "memory size must be at most 65536 pages (4GiB)", .{})
+            else
+                self.failAt(min_off, "memory size exceeds address type limit", .{}))
         else
             self.failAt(min_off, "table size exceeds address type limit", .{});
         const maximum = if (flag & 0x01 != 0) blk: {
@@ -438,7 +454,10 @@ const Reader = struct {
                 .i64 => try self.readU64Leb(),
             };
             if (max > limit) return if (kind == .memory)
-                self.failAt(max_off, "memory size exceeds address type limit", .{})
+                (if (address == .i32)
+                    self.failAt(max_off, "memory size must be at most 65536 pages (4GiB)", .{})
+                else
+                    self.failAt(max_off, "memory size exceeds address type limit", .{}))
             else
                 self.failAt(max_off, "table size exceeds address type limit", .{});
             if (max < min) return self.failAt(max_off, "size minimum must not be greater than maximum", .{});
@@ -1552,7 +1571,7 @@ test "wasm.decode malformed declarations" {
     // Limits flag 0x03 is shared memory with a maximum.
     try expectMalformed(hdr ++ "\x05\x02\x01\x03", 11, "WebAssembly feature threads is disabled");
     // Memory min 65537 pages.
-    try expectMalformed(hdr ++ "\x05\x05\x01\x00\x81\x80\x04", 12, "memory size exceeds address type limit");
+    try expectMalformed(hdr ++ "\x05\x05\x01\x00\x81\x80\x04", 12, "memory size must be at most 65536 pages (4GiB)");
     // Memory max < min.
     try expectMalformed(hdr ++ "\x05\x04\x01\x01\x02\x01", 13, "size minimum must not be greater than maximum");
     // Table max < min.
@@ -1658,6 +1677,34 @@ test "wasm.decode memory64 feature gates and malformed u64 limits" {
         "\x01\x04\x80\x80\x80\x80\x80\x80\x80\x80\x80\x02",
     ));
     try expectMalformedWithFeatures(too_large, .{ .memory64 = true }, 12, "integer too large");
+}
+
+test "wasm.decode memory32 memarg offsets reject u32-overlong encodings" {
+    // Without memory64 a memarg offset is a u32 field, so an over-long encoding
+    // and an out-of-range value are both malformed at DECODE. The upstream
+    // `assert_malformed` commands require exactly that: deferring the range
+    // check to the validator still rejects the module, but at the wrong phase
+    // and with the wrong diagnostic (binary-leb128.wast:403/460/729/748/842/861).
+    const prelude = comptime testSection(1, "\x01\x60\x00\x00") ++ // () -> ()
+        testSection(3, "\x01\x00") ++ // one function of type 0
+        testSection(5, "\x01\x00\x01"); // one 32-bit memory, min 1
+
+    // `i32.const 0; i32.load align=2 offset=<6-byte LEB>; drop; end`
+    const overlong = comptime (hdr ++ prelude ++
+        testCode("\x41\x00\x28\x02" ++ "\x82\x80\x80\x80\x80\x00" ++ "\x1A\x0B"));
+    try expectMalformed(overlong, 32, "integer representation too long");
+
+    // Five bytes, but the value is 2^32 -- in range for u64, not for u32.
+    const too_large = comptime (hdr ++ prelude ++
+        testCode("\x41\x00\x28\x02" ++ "\x82\x80\x80\x80\x10" ++ "\x1A\x0B"));
+    try expectMalformed(too_large, 32, "integer too large");
+
+    // With memory64 the offset is genuinely a u64 field, so the same bytes
+    // decode and constraining them per memory becomes the validator's job.
+    var diag: types.Diagnostic = .{};
+    const wide = try decodeWithFeatures(std.testing.allocator, overlong, .{ .memory64 = true }, &diag);
+    defer destroyModule(std.testing.allocator, wide);
+    try std.testing.expectEqual(@as(u64, 2), wide.code[0].instrs[1].imm.memarg.offset);
 }
 
 test "wasm.decode memory32 limits reject u32-overlong encodings" {

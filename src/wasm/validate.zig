@@ -2295,10 +2295,15 @@ test "wasm.validate memory64 memory instructions and offsets" {
         code1("\x20\x00\x28\x02\x00\x0B"));
     try expectInvalidAtWithFeatures(wrong_load_address, features, 0, 1, "type mismatch");
 
+    // A 32-bit memory inside a memory64-enabled module: the offset is a real
+    // u64 field, so it decodes, and constraining it to the memory's own address
+    // type is the validator's job. Without the feature the offset is a u32
+    // field and this encoding is malformed at decode instead -- covered by
+    // "wasm.decode memory32 memarg offsets reject u32-overlong encodings".
     const memory32_wide_offset = comptime (hdr ++
         sec(1, "\x01\x60\x01\x7F\x01\x7F") ++ func0 ++ mem1 ++
         code1("\x20\x00\x28\x02" ++ offset_4g ++ "\x0B"));
-    try expectInvalidAt(memory32_wide_offset, 0, 1, "memory offset exceeds address type");
+    try expectInvalidAtWithFeatures(memory32_wide_offset, features, 0, 1, "memory offset exceeds address type");
 
     const size = comptime (hdr ++
         sec(1, "\x01\x60\x00\x01\x7E") ++ func0 ++ memory64 ++ code1("\x3F\x00\x0B"));
