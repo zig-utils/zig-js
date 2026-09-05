@@ -8066,12 +8066,14 @@ fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
     };
     defer ctx.destroy();
 
+    // Promise reactions may run on different no-GIL pump threads after their
+    // jobs settle, so exact post-settlement totals need atomic sum/count pairs.
+    // The release total remains protected by the live no-function hold until
+    // each reaction calls release().
     const src = try std.fmt.allocPrint(
         gpa,
         \\(() => {{
-        \\  globalThis.__microtaskChurnJoinScore = 0;
-        \\  globalThis.__microtaskChurnWaitScore = 0;
-        \\  globalThis.__microtaskChurnAsyncHoldScore = 0;
+        \\  globalThis.__microtaskChurnScores = new Int32Array(new SharedArrayBuffer(24));
         \\  globalThis.__microtaskChurnReleaseScore = 0;
         \\  globalThis.__microtaskChurnCleanupCount = 0;
         \\  globalThis.__microtaskChurnCleanupSum = 0;
@@ -8085,18 +8087,21 @@ fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         \\  const threads = [];
         \\  for (let id = 0; id < {d}; id++) {{
         \\    const base = (id + 1) * 20000;
+        \\    const per = {d};
         \\    const waitRoot = {{ marker: base + 5000 + id, seed: {d}, label: 'microtask-churn-wait-root' }};
         \\    const waiter = Atomics.waitAsync(view, id, 0, 2000);
         \\    if (waiter.async !== true || !(waiter.value instanceof Promise))
         \\      throw new Error('bad microtask churn waitAsync shape');
         \\    waiter.value.then(
         \\      (v) => {{
-        \\        if (v === 'ok' && waitRoot.seed === {d})
-        \\          globalThis.__microtaskChurnWaitScore += waitRoot.marker;
+        \\        if (v === 'ok' && waitRoot.seed === {d}) {{
+        \\          Atomics.add(globalThis.__microtaskChurnScores, 2, waitRoot.marker);
+        \\          Atomics.add(globalThis.__microtaskChurnScores, 3, 1);
+        \\        }}
         \\        else
-        \\          globalThis.__microtaskChurnWaitScore = -1000000;
+        \\          Atomics.store(globalThis.__microtaskChurnScores, 2, -1000000);
         \\      }},
-        \\      () => {{ globalThis.__microtaskChurnWaitScore = -1000000; }});
+        \\      () => {{ Atomics.store(globalThis.__microtaskChurnScores, 2, -1000000); }});
         \\    const t = new Thread((view, id, per, registry) => {{
         \\      const base = (id + 1) * 20000;
         \\      let localSum = 0;
@@ -8111,21 +8116,31 @@ fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         \\      if (notified !== 1)
         \\        throw new Error('microtask churn notify got ' + notified);
         \\      return localSum + id + notified;
-        \\    }}, view, id, {d}, registry);
+        \\    }}, view, id, per, registry);
+        \\    const expectedJoinMarker = per * base + per * (per - 1) / 2 + id + 1;
         \\    t.asyncJoin().then(
-        \\      (v) => {{ globalThis.__microtaskChurnJoinScore += v; }},
-        \\      () => {{ globalThis.__microtaskChurnJoinScore = -1000000; }});
+        \\      (v) => {{
+        \\        if (v === expectedJoinMarker) {{
+        \\          Atomics.add(globalThis.__microtaskChurnScores, 0, v);
+        \\          Atomics.add(globalThis.__microtaskChurnScores, 1, 1);
+        \\        }} else {{
+        \\          Atomics.store(globalThis.__microtaskChurnScores, 0, -1000000);
+        \\        }}
+        \\      }},
+        \\      () => {{ Atomics.store(globalThis.__microtaskChurnScores, 0, -1000000); }});
         \\    threads.push(t);
-        \\    for (let i = 0; i < {d}; i++) {{
+        \\    for (let i = 0; i < per; i++) {{
         \\      const cbMarker = base + 1000 + i;
         \\      lock.asyncHold(() => cbMarker).then(
         \\        (v) => {{
-        \\          if (v === cbMarker)
-        \\            globalThis.__microtaskChurnAsyncHoldScore += v;
+        \\          if (v === cbMarker) {{
+        \\            Atomics.add(globalThis.__microtaskChurnScores, 4, v);
+        \\            Atomics.add(globalThis.__microtaskChurnScores, 5, 1);
+        \\          }}
         \\          else
-        \\            globalThis.__microtaskChurnAsyncHoldScore = -1000000;
+        \\            Atomics.store(globalThis.__microtaskChurnScores, 4, -1000000);
         \\        }},
-        \\        () => {{ globalThis.__microtaskChurnAsyncHoldScore = -1000000; }});
+        \\        () => {{ Atomics.store(globalThis.__microtaskChurnScores, 4, -1000000); }});
         \\      const releaseMarker = base + 2000 + i;
         \\      lock.asyncHold().then(
         \\        (release) => {{
@@ -8145,13 +8160,22 @@ fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         \\  if (joinSum !== {d})
         \\    throw new Error('bad microtask churn join sum ' + joinSum);
         \\  threads.length = 0;
-        \\  globalThis.__microtaskChurnCheck = function(expectedJoin, expectedWait, expectedAsyncHold, expectedRelease) {{
-        \\    if (globalThis.__microtaskChurnJoinScore !== expectedJoin)
-        \\      throw new Error('bad microtask churn asyncJoin score ' + globalThis.__microtaskChurnJoinScore + '/' + expectedJoin);
-        \\    if (globalThis.__microtaskChurnWaitScore !== expectedWait)
-        \\      throw new Error('bad microtask churn waitAsync score ' + globalThis.__microtaskChurnWaitScore + '/' + expectedWait);
-        \\    if (globalThis.__microtaskChurnAsyncHoldScore !== expectedAsyncHold)
-        \\      throw new Error('bad microtask churn asyncHold score ' + globalThis.__microtaskChurnAsyncHoldScore + '/' + expectedAsyncHold);
+        \\  globalThis.__microtaskChurnCheck = function(expectedJoin, expectedWait, expectedAsyncHold, expectedRelease, expectedJoinCount, expectedWaitCount, expectedAsyncHoldCount) {{
+        \\    const joinScore = Atomics.load(globalThis.__microtaskChurnScores, 0);
+        \\    const joinCount = Atomics.load(globalThis.__microtaskChurnScores, 1);
+        \\    if (joinScore !== expectedJoin || joinCount !== expectedJoinCount)
+        \\      throw new Error('bad microtask churn asyncJoin score ' + joinScore + '/' + expectedJoin +
+        \\        ' count=' + joinCount + '/' + expectedJoinCount);
+        \\    const waitScore = Atomics.load(globalThis.__microtaskChurnScores, 2);
+        \\    const waitCount = Atomics.load(globalThis.__microtaskChurnScores, 3);
+        \\    if (waitScore !== expectedWait || waitCount !== expectedWaitCount)
+        \\      throw new Error('bad microtask churn waitAsync score ' + waitScore + '/' + expectedWait +
+        \\        ' count=' + waitCount + '/' + expectedWaitCount);
+        \\    const asyncHoldScore = Atomics.load(globalThis.__microtaskChurnScores, 4);
+        \\    const asyncHoldCount = Atomics.load(globalThis.__microtaskChurnScores, 5);
+        \\    if (asyncHoldScore !== expectedAsyncHold || asyncHoldCount !== expectedAsyncHoldCount)
+        \\      throw new Error('bad microtask churn asyncHold score ' + asyncHoldScore + '/' + expectedAsyncHold +
+        \\        ' count=' + asyncHoldCount + '/' + expectedAsyncHoldCount);
         \\    if (globalThis.__microtaskChurnReleaseScore !== expectedRelease)
         \\      throw new Error('bad microtask churn release score ' + globalThis.__microtaskChurnReleaseScore + '/' + expectedRelease);
         \\    return 1;
@@ -8163,10 +8187,9 @@ fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
         .{
             nthreads,
             nthreads,
+            per_thread,
             seed,
             seed,
-            per_thread,
-            per_thread,
             expected_join_sum,
         },
     );
@@ -8195,8 +8218,8 @@ fn runMicrotaskChurnLifecycleInterleaving(gpa: std.mem.Allocator, seed: u64) !bo
     };
     const check_src = try std.fmt.allocPrint(
         gpa,
-        "globalThis.__microtaskChurnCheck({d}, {d}, {d}, {d})",
-        .{ expected_join_sum, expected_wait_score, expected_async_hold_score, expected_release_score },
+        "globalThis.__microtaskChurnCheck({d}, {d}, {d}, {d}, {d}, {d}, {d})",
+        .{ expected_join_sum, expected_wait_score, expected_async_hold_score, expected_release_score, nthreads, nthreads, expected_cleanup_count },
     );
     defer gpa.free(check_src);
     const checked = ctx.evaluate(check_src) catch |err| {
@@ -20639,64 +20662,64 @@ pub fn main(init: std.process.Init) !void {
         while (li < iters) : (li += 1) {
             const seed = base_seed +% li;
             inline for (.{
-                runMultiContextCreateDestroyInterleaving,
-                runResizableDataViewResizeInterleaving,
-                runTerminationStorm,
-                runWorkerThreadOverlap,
-                runModuleWorkerThreadOverlap,
-                runModuleWorkerGraphOverlap,
-                runModuleWorkerFanoutOverlap,
-                runWorkerCloseTerminateRace,
-                runModuleWorkerCloseTerminateRace,
-                runWorkerExceptionRecovery,
-                runWorkerThreadFinalizationInterleaving,
-                runModuleWorkerThreadFinalizationInterleaving,
-                runWorkerTerminateFinalizationInterleaving,
-                runModuleWorkerTerminateFinalizationInterleaving,
-                runWorkerTerminateThreadTeardownInterleaving,
-                runModuleWorkerTerminateThreadTeardownInterleaving,
-                runWorkerExceptionFinalizationCleanupInterleaving,
-                runModuleWorkerExceptionFinalizationCleanupInterleaving,
-                runThreadExceptionWaiterInterleaving,
-                runReturnedWaitAsyncLifecycleInterleaving,
-                runPropertyWaitAsyncLateSettlementLifecycleInterleaving,
-                runMixedWaiterRaceLifecycleInterleaving,
-                runPromisePublicationLifecycleInterleaving,
-                runFinalizationCleanupInterleaving,
-                runWeakCleanupOrderingInterleaving,
-                runFinalizationAsyncJoinCleanupInterleaving,
-                runFinalizationWaiterCleanupInterleaving,
-                runWaitAsyncFinalizationCleanupInterleaving,
-                runConditionAsyncFinalizationCleanupInterleaving,
-                runAtomicsConditionFinalizationInterleaving,
-                runAtomicsMutexLockIfAvailableFinalizationInterleaving,
-                runMicrotaskChurnLifecycleInterleaving,
-                runLateAsyncJoinCleanupInterleaving,
-                runLateAsyncJoinRejectCleanupInterleaving,
-                runAsyncHoldThrowFinalizationInterleaving,
-                runCreatorOwnedBufferLifecycleInterleaving,
-                runWorkerCreatorOwnedBufferLifecycleInterleaving,
-                runWorkerCreatorOwnedBufferCleanupInterleaving,
-                runModuleWorkerCreatorOwnedBufferCleanupInterleaving,
-                runTerminationPendingReactionInterleaving,
-                runTerminationWaiterCleanupInterleaving,
-                runWorkerTerminateConditionAsyncCleanupInterleaving,
-                runModuleWorkerTerminateConditionAsyncCleanupInterleaving,
-                runWorkerTerminateWaitAsyncCleanupInterleaving,
-                runModuleWorkerTerminateWaitAsyncCleanupInterleaving,
-                runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving,
-                runModuleWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving,
-                runAsyncHoldBargingLifecycleInterleaving,
-                runAsyncHoldReleaseWaiterCleanupInterleaving,
-                runThreadLocalAsyncHoldReleaseCleanupInterleaving,
-                runThreadRestrictLifecycleInterleaving,
-                runThreadRestrictFinalizationCleanupInterleaving,
-                runThreadLocalLifecycleInterleaving,
-                runThreadLocalFinalizationCleanupInterleaving,
-                runThreadLocalTerminationCleanupInterleaving,
-                runNestedThreadAsyncJoinCleanupInterleaving,
-            }) |case_fn| {
-                try runWatchedSeedCase(.lifecycle, "lifecycle-subcase", case_fn, gpa, seed, &lfail);
+                .{ "multi-context-create-destroy", runMultiContextCreateDestroyInterleaving },
+                .{ "resizable-data-view-resize", runResizableDataViewResizeInterleaving },
+                .{ "termination-storm", runTerminationStorm },
+                .{ "worker-thread-overlap", runWorkerThreadOverlap },
+                .{ "module-worker-thread-overlap", runModuleWorkerThreadOverlap },
+                .{ "module-worker-graph-overlap", runModuleWorkerGraphOverlap },
+                .{ "module-worker-fanout-overlap", runModuleWorkerFanoutOverlap },
+                .{ "worker-close-terminate-race", runWorkerCloseTerminateRace },
+                .{ "module-worker-close-terminate-race", runModuleWorkerCloseTerminateRace },
+                .{ "worker-exception-recovery", runWorkerExceptionRecovery },
+                .{ "worker-thread-finalization", runWorkerThreadFinalizationInterleaving },
+                .{ "module-worker-thread-finalization", runModuleWorkerThreadFinalizationInterleaving },
+                .{ "worker-terminate-finalization", runWorkerTerminateFinalizationInterleaving },
+                .{ "module-worker-terminate-finalization", runModuleWorkerTerminateFinalizationInterleaving },
+                .{ "worker-terminate-thread-teardown", runWorkerTerminateThreadTeardownInterleaving },
+                .{ "module-worker-terminate-thread-teardown", runModuleWorkerTerminateThreadTeardownInterleaving },
+                .{ "worker-exception-finalization-cleanup", runWorkerExceptionFinalizationCleanupInterleaving },
+                .{ "module-worker-exception-finalization-cleanup", runModuleWorkerExceptionFinalizationCleanupInterleaving },
+                .{ "thread-exception-waiter", runThreadExceptionWaiterInterleaving },
+                .{ "returned-wait-async-lifecycle", runReturnedWaitAsyncLifecycleInterleaving },
+                .{ "property-wait-async-late-settlement", runPropertyWaitAsyncLateSettlementLifecycleInterleaving },
+                .{ "mixed-waiter-race", runMixedWaiterRaceLifecycleInterleaving },
+                .{ "promise-publication", runPromisePublicationLifecycleInterleaving },
+                .{ "finalization-cleanup", runFinalizationCleanupInterleaving },
+                .{ "weak-cleanup-ordering", runWeakCleanupOrderingInterleaving },
+                .{ "finalization-async-join-cleanup", runFinalizationAsyncJoinCleanupInterleaving },
+                .{ "finalization-waiter-cleanup", runFinalizationWaiterCleanupInterleaving },
+                .{ "wait-async-finalization-cleanup", runWaitAsyncFinalizationCleanupInterleaving },
+                .{ "condition-async-finalization-cleanup", runConditionAsyncFinalizationCleanupInterleaving },
+                .{ "atomics-condition-finalization", runAtomicsConditionFinalizationInterleaving },
+                .{ "atomics-mutex-lock-if-available-finalization", runAtomicsMutexLockIfAvailableFinalizationInterleaving },
+                .{ "microtask-churn", runMicrotaskChurnLifecycleInterleaving },
+                .{ "late-async-join-cleanup", runLateAsyncJoinCleanupInterleaving },
+                .{ "late-async-join-reject-cleanup", runLateAsyncJoinRejectCleanupInterleaving },
+                .{ "async-hold-throw-finalization", runAsyncHoldThrowFinalizationInterleaving },
+                .{ "creator-owned-buffer-lifecycle", runCreatorOwnedBufferLifecycleInterleaving },
+                .{ "worker-creator-owned-buffer-lifecycle", runWorkerCreatorOwnedBufferLifecycleInterleaving },
+                .{ "worker-creator-owned-buffer-cleanup", runWorkerCreatorOwnedBufferCleanupInterleaving },
+                .{ "module-worker-creator-owned-buffer-cleanup", runModuleWorkerCreatorOwnedBufferCleanupInterleaving },
+                .{ "termination-pending-reaction", runTerminationPendingReactionInterleaving },
+                .{ "termination-waiter-cleanup", runTerminationWaiterCleanupInterleaving },
+                .{ "worker-terminate-condition-async-cleanup", runWorkerTerminateConditionAsyncCleanupInterleaving },
+                .{ "module-worker-terminate-condition-async-cleanup", runModuleWorkerTerminateConditionAsyncCleanupInterleaving },
+                .{ "worker-terminate-wait-async-cleanup", runWorkerTerminateWaitAsyncCleanupInterleaving },
+                .{ "module-worker-terminate-wait-async-cleanup", runModuleWorkerTerminateWaitAsyncCleanupInterleaving },
+                .{ "worker-terminate-thread-local-async-hold-cleanup", runWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving },
+                .{ "module-worker-terminate-thread-local-async-hold-cleanup", runModuleWorkerTerminateThreadLocalAsyncHoldCleanupInterleaving },
+                .{ "async-hold-barging", runAsyncHoldBargingLifecycleInterleaving },
+                .{ "async-hold-release-waiter-cleanup", runAsyncHoldReleaseWaiterCleanupInterleaving },
+                .{ "thread-local-async-hold-release-cleanup", runThreadLocalAsyncHoldReleaseCleanupInterleaving },
+                .{ "thread-restrict-lifecycle", runThreadRestrictLifecycleInterleaving },
+                .{ "thread-restrict-finalization-cleanup", runThreadRestrictFinalizationCleanupInterleaving },
+                .{ "thread-local-lifecycle", runThreadLocalLifecycleInterleaving },
+                .{ "thread-local-finalization-cleanup", runThreadLocalFinalizationCleanupInterleaving },
+                .{ "thread-local-termination-cleanup", runThreadLocalTerminationCleanupInterleaving },
+                .{ "nested-thread-async-join-cleanup", runNestedThreadAsyncJoinCleanupInterleaving },
+            }) |case| {
+                try runWatchedSeedCase(.lifecycle, case[0], case[1], gpa, seed, &lfail);
             }
             finishSeed();
         }
