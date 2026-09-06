@@ -2894,7 +2894,7 @@ pub const Object = struct {
     /// [[AlreadyResolved]] record per resolve/reject pair. The resolve function
     /// object owns that tiny record directly; the reject function points at the
     /// resolve object through `private_data`.
-    promise_resolving_already: bool = false,
+    promise_resolving_already: std.atomic.Value(bool) = .init(false),
     /// `Thread.restrict` ownership lives in the cold sidecar.
     /// True for `Error`-family instances; drives `toString` and `instanceof`.
     /// True for `RegExp` instances (carries `source`/`flags` properties; matching

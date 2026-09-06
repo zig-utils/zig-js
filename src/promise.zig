@@ -2,8 +2,9 @@
 //!
 //! A `Promise` is a `value.Object` whose `promise` field points at a `Promise`
 //! state record (pending/fulfilled/rejected + recorded reactions). Settling a
-//! promise enqueues a `Reaction` job per recorded reaction onto the Context's
-//! microtask queue, which `Context.evaluate` drains after the main script (and
+//! promise enqueues one allocation-free settlement descriptor; the queue
+//! materializes its recorded `Reaction` jobs atomically before dequeue.
+//! `Context.evaluate` drains that queue after the main script (and
 //! which `await` drains inline until the awaited promise settles — the
 //! synchronous-settling model: faithful for values, not for exact ordering).
 //!
@@ -57,6 +58,22 @@ pub const Reaction = struct {
     reject: Value = Value.undef(),
 };
 
+/// Fulfill/reject reactions are registered and consumed as one specification
+/// record. Keeping the pair together makes registration OOM-atomic and removes
+/// one overflow allocation/list from every Promise.
+pub const ReactionPair = struct {
+    fulfill: Reaction,
+    reject: Reaction,
+};
+
+/// Awaiting activations exist only after reaction registration has made a
+/// Promise handled. Rejection-tracker nodes are settled while still unhandled,
+/// so these two pointer roles are mutually exclusive and share one word.
+pub const AwaitingActivationOrRejectionLink = extern union {
+    awaiting_async_activation: ?*anyopaque,
+    rejection_next: ?*Promise,
+};
+
 pub const Promise = struct {
     lock: std.atomic.Mutex = .unlocked,
     /// Immutable after construction. Concurrent-marker and parallel-mutator
@@ -70,26 +87,27 @@ pub const Promise = struct {
     wrapper: ?*Object = null,
     /// While pending, the suspended async activation directly awaiting this
     /// Promise. Type-erased to keep promise.zig independent of vm.zig.
-    awaiting_async_activation: ?*anyopaque = null,
+    awaiting_activation_or_rejection_link: AwaitingActivationOrRejectionLink = .{ .awaiting_async_activation = null },
     /// A transparent adoption/pass-through destination. Async-stack walking
     /// follows this only when there is no direct awaiting activation.
     async_forward_to: ?*Promise = null,
     /// Reaction list buffers are owned by the GC backing allocator when this
     /// promise cell is GC-owned; arena contexts keep the legacy arena path.
     gc_owned: bool = false,
-    /// The overwhelmingly common pending-promise shape has one fulfill and one
-    /// reject reaction. Keep that pair inline and allocate overflow lists only
-    /// when more reactions are registered.
-    on_fulfill_inline: ?Reaction = null,
-    on_reject_inline: ?Reaction = null,
-    on_fulfill: std.ArrayListUnmanaged(Reaction) = .empty,
-    on_reject: std.ArrayListUnmanaged(Reaction) = .empty,
+    /// The overwhelmingly common pending-promise shape has one reaction pair.
+    /// Keep it inline and allocate one paired overflow list only for fanout.
+    reactions_inline: ?ReactionPair = null,
+    reactions: std.ArrayListUnmanaged(ReactionPair) = .empty,
     /// HostPromiseRejectionTracker state. A rejection is queued only when no
     /// reaction has handled this promise; the host checkpoint consumes it once.
     is_handled: bool = false,
     rejection_queued: bool = false,
     rejection_notified: bool = false,
     rejection_handled_notified: bool = false,
+    /// Selects the rejection-link arm above. Queue mutation and traversal are
+    /// serialized by the owning realm lock; a Promise can enter the handled
+    /// queue only after it has left the unhandled queue.
+    rejection_linked: std.atomic.Value(bool) = .init(false),
 
     pub fn lockState(self: *Promise) void {
         if (self.state_locking) {
@@ -113,6 +131,139 @@ pub const Promise = struct {
     }
 };
 
+/// Realm-owned allocation-free HostPromiseRejectionTracker FIFO. The realm
+/// lock serializes mutation/traversal under `parallel_js`; intrusive links keep
+/// append and dequeue O(1) without a fallible publication boundary.
+pub const RejectionQueue = struct {
+    head: ?*Promise = null,
+    tail: ?*Promise = null,
+    len: usize = 0,
+
+    pub fn append(self: *@This(), item: *Promise) void {
+        std.debug.assert(!item.rejection_linked.load(.acquire));
+        std.debug.assert(item.state != .pending);
+        std.debug.assert(item.awaiting_activation_or_rejection_link.awaiting_async_activation == null);
+        std.debug.assert(item.reactions_inline == null);
+        std.debug.assert(item.reactions.items.len == 0 and item.reactions.capacity == 0);
+        item.awaiting_activation_or_rejection_link = .{ .rejection_next = null };
+        item.rejection_linked.store(true, .release);
+        std.debug.assert((self.head == null) == (self.tail == null));
+        std.debug.assert((self.head == null) == (self.len == 0));
+        std.debug.assert(self.len != std.math.maxInt(usize));
+        if (self.tail) |tail| {
+            std.debug.assert(tail.rejection_linked.load(.acquire));
+            std.debug.assert(tail.awaiting_activation_or_rejection_link.rejection_next == null);
+            tail.awaiting_activation_or_rejection_link.rejection_next = item;
+        } else {
+            self.head = item;
+        }
+        self.tail = item;
+        self.len += 1;
+    }
+
+    pub fn pop(self: *@This()) ?*Promise {
+        const item = self.head orelse {
+            std.debug.assert(self.tail == null and self.len == 0);
+            return null;
+        };
+        std.debug.assert(self.tail != null and self.len != 0);
+        std.debug.assert(item.rejection_linked.load(.acquire));
+        const next = item.awaiting_activation_or_rejection_link.rejection_next;
+        if (item == self.tail.?) {
+            std.debug.assert(self.len == 1 and next == null);
+        } else {
+            std.debug.assert(self.len > 1 and next != null);
+        }
+        self.head = next;
+        item.awaiting_activation_or_rejection_link = .{ .awaiting_async_activation = null };
+        item.rejection_linked.store(false, .release);
+        self.len -= 1;
+        if (self.head == null) {
+            std.debug.assert(self.len == 0);
+            self.tail = null;
+        }
+        return item;
+    }
+
+    pub fn pendingLen(self: *const @This()) usize {
+        return self.len;
+    }
+
+    pub fn isEmpty(self: *const @This()) bool {
+        std.debug.assert((self.head == null) == (self.tail == null));
+        std.debug.assert((self.head == null) == (self.len == 0));
+        return self.head == null;
+    }
+
+    pub const Iterator = struct {
+        next_item: ?*Promise,
+        remaining: usize,
+
+        pub fn next(self: *@This()) ?*Promise {
+            if (self.remaining == 0) {
+                std.debug.assert(self.next_item == null);
+                return null;
+            }
+            const item = self.next_item orelse {
+                std.debug.assert(false);
+                self.remaining = 0;
+                return null;
+            };
+            std.debug.assert(item.rejection_linked.load(.acquire));
+            self.next_item = item.awaiting_activation_or_rejection_link.rejection_next;
+            self.remaining -= 1;
+            return item;
+        }
+    };
+
+    pub fn iterator(self: *const @This()) Iterator {
+        std.debug.assert((self.head == null) == (self.tail == null));
+        std.debug.assert((self.head == null) == (self.len == 0));
+        return .{ .next_item = self.head, .remaining = self.len };
+    }
+
+    pub fn clear(self: *@This()) void {
+        while (self.pop()) |_| {}
+        self.* = .{};
+    }
+};
+
+test "rejection queue is wide allocation-free FIFO" {
+    const width = 4096;
+    const promises = try std.testing.allocator.alloc(Promise, width + 1);
+    defer std.testing.allocator.free(promises);
+    for (promises) |*item| item.* = .{ .state = .rejected };
+
+    var queue: RejectionQueue = .{};
+    defer queue.clear();
+    try std.testing.expect(queue.pop() == null);
+    for (promises[0..width]) |*item| queue.append(item);
+
+    try std.testing.expectEqual(@as(usize, width), queue.pendingLen());
+    try std.testing.expectEqual(&promises[0], queue.head.?);
+    try std.testing.expectEqual(&promises[width - 1], queue.tail.?);
+    var iter = queue.iterator();
+    for (promises[0..width]) |*item| try std.testing.expectEqual(item, iter.next().?);
+    try std.testing.expect(iter.next() == null);
+    try std.testing.expectEqual(&promises[0], queue.pop().?);
+    try std.testing.expect(!promises[0].rejection_linked.load(.acquire));
+    try std.testing.expectEqual(@as(usize, width - 1), queue.pendingLen());
+
+    // A notification queued reentrantly follows the complete pending suffix.
+    queue.append(&promises[width]);
+    for (promises[1..width]) |*item| try std.testing.expectEqual(item, queue.pop().?);
+    try std.testing.expectEqual(&promises[width], queue.pop().?);
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expect(queue.head == null and queue.tail == null);
+
+    queue.append(&promises[0]);
+    queue.append(&promises[1]);
+    queue.clear();
+    try std.testing.expect(!promises[0].rejection_linked.load(.acquire));
+    try std.testing.expect(!promises[1].rejection_linked.load(.acquire));
+    try std.testing.expect(queue.isEmpty());
+}
+
 pub const AsyncStackLink = struct {
     state: State,
     activation: ?*anyopaque,
@@ -124,7 +275,10 @@ pub fn asyncStackLink(p: *Promise) AsyncStackLink {
     defer p.unlockState();
     return .{
         .state = p.state,
-        .activation = p.awaiting_async_activation,
+        .activation = if (p.rejection_linked.load(.acquire))
+            null
+        else
+            p.awaiting_activation_or_rejection_link.awaiting_async_activation,
         .forward_to = p.async_forward_to,
     };
 }
@@ -133,8 +287,10 @@ pub fn linkAwaitingAsyncActivation(p: *Promise, activation: *anyopaque) void {
     p.lockState();
     defer p.unlockState();
     if (p.state != .pending) return;
+    std.debug.assert(p.is_handled);
+    std.debug.assert(!p.rejection_linked.load(.acquire));
     gc_mod.barrierCellFrom(p, activation);
-    p.awaiting_async_activation = activation;
+    p.awaiting_activation_or_rejection_link.awaiting_async_activation = activation;
 }
 
 fn linkAsyncForward(source: *Promise, destination: *Promise) void {
@@ -149,7 +305,7 @@ fn linkAsyncForward(source: *Promise, destination: *Promise) void {
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
 pub const Microtask = struct {
-    kind: enum { reaction, thenable, callback, native_callback, job, next_tick } = .reaction,
+    kind: enum { reaction, settlement_batch, thenable, callback, native_callback, job, next_tick } = .reaction,
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
@@ -179,6 +335,11 @@ pub const Microtask = struct {
 pub const MicrotaskQueue = struct {
     items: std.ArrayListUnmanaged(Microtask) = .empty,
     head: usize = 0,
+    /// Capacity promised to synchronous resolving-function transactions but
+    /// not yet occupied by a published job. Ordinary producers include these
+    /// slots in every growth decision, so reentrant enqueueing cannot consume
+    /// a resolving function's allocation-free commit resource.
+    reservations: usize = 0,
     /// Serializes this queue's content mutation under no-GIL execution. The
     /// queue itself owns the lock so spawned `Thread`s with independent
     /// microtask queues do not contend on the realm queue's lock.
@@ -207,6 +368,10 @@ pub const MicrotaskQueue = struct {
 
     pub fn append(self: *MicrotaskQueue, a: std.mem.Allocator, task: Microtask) !void {
         try self.reserve(a, 1);
+        self.appendAssumeCapacity(task);
+    }
+
+    fn appendAssumeCapacity(self: *MicrotaskQueue, task: Microtask) void {
         self.items.appendAssumeCapacity(task);
         _ = self.generation.fetchAdd(1, .release);
     }
@@ -237,11 +402,28 @@ pub const MicrotaskQueue = struct {
 
     fn reserve(self: *MicrotaskQueue, a: std.mem.Allocator, additional: usize) !void {
         if (additional == 0) return;
-        const spare = self.items.capacity - self.items.items.len;
+        const occupied = std.math.add(usize, self.items.items.len, self.reservations) catch return error.OutOfMemory;
+        const spare = self.items.capacity - occupied;
         if (spare >= additional) return;
         const extra = @max(additional, microtask_queue_reserve_granularity);
+        const required = std.math.add(usize, occupied, extra) catch return error.OutOfMemory;
         promise_profile.recordMicrotaskQueueGrow();
-        try self.items.ensureTotalCapacity(a, self.items.items.len + extra);
+        try self.items.ensureTotalCapacity(a, required);
+    }
+
+    fn reserveTransactionSlot(self: *MicrotaskQueue, a: std.mem.Allocator) !void {
+        try self.reserve(a, 1);
+        self.reservations += 1;
+    }
+
+    fn cancelTransactionSlot(self: *MicrotaskQueue) void {
+        std.debug.assert(self.reservations != 0);
+        self.reservations -= 1;
+    }
+
+    fn appendInTransactionSlot(self: *MicrotaskQueue, task: Microtask) void {
+        self.cancelTransactionSlot();
+        self.appendAssumeCapacity(task);
     }
 
     pub fn pendingLen(self: *const MicrotaskQueue) usize {
@@ -346,7 +528,7 @@ test "Promise state mutex is conditional but mutations remain trace-sensitive" {
     try std.testing.expectEqual(@as(u64, 1), promise_profile.promiseStats().promise_lock_acquires);
 }
 
-test "Promise reactions keep first entry inline then reserve overflow chunks" {
+test "Promise reaction pairs keep first entry inline then reserve overflow chunks" {
     const a = std.testing.allocator;
     var live: usize = 0;
     var machine = Interpreter{
@@ -357,39 +539,40 @@ test "Promise reactions keep first entry inline then reserve overflow chunks" {
         .gc_promise_reactions_live = &live,
     };
     var p = Promise{ .gc_owned = true };
-    defer p.on_fulfill.deinit(reactionAllocator(&machine));
+    defer p.reactions.deinit(reactionAllocator(&machine));
 
     const reaction = Reaction{
         .handler = null,
         .resolve = Value.undef(),
         .reject = Value.undef(),
     };
-    try appendReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill, reaction);
-    try std.testing.expect(p.on_fulfill_inline != null);
-    try std.testing.expectEqual(@as(usize, 0), p.on_fulfill.capacity);
-    try std.testing.expectEqual(@as(usize, 1), live);
-
-    try appendReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill, reaction);
-    try std.testing.expect(p.on_fulfill.capacity >= reaction_list_reserve_granularity);
-    try std.testing.expectEqual(@as(usize, 1), p.on_fulfill.items.len);
+    const pair = ReactionPair{ .fulfill = reaction, .reject = reaction };
+    try appendReactionPairUnlocked(&machine, &p, pair);
+    try std.testing.expect(p.reactions_inline != null);
+    try std.testing.expectEqual(@as(usize, 0), p.reactions.capacity);
     try std.testing.expectEqual(@as(usize, 2), live);
 
-    const first_capacity = p.on_fulfill.capacity;
-    while (p.on_fulfill.items.len < first_capacity) {
-        try appendReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill, reaction);
+    try appendReactionPairUnlocked(&machine, &p, pair);
+    try std.testing.expect(p.reactions.capacity >= reaction_list_reserve_granularity);
+    try std.testing.expectEqual(@as(usize, 1), p.reactions.items.len);
+    try std.testing.expectEqual(@as(usize, 4), live);
+
+    const first_capacity = p.reactions.capacity;
+    while (p.reactions.items.len < first_capacity) {
+        try appendReactionPairUnlocked(&machine, &p, pair);
     }
-    try std.testing.expectEqual(first_capacity, p.on_fulfill.items.len);
-    try std.testing.expectEqual(first_capacity, p.on_fulfill.capacity);
-    try std.testing.expectEqual(first_capacity + 1, live);
+    try std.testing.expectEqual(first_capacity, p.reactions.items.len);
+    try std.testing.expectEqual(first_capacity, p.reactions.capacity);
+    try std.testing.expectEqual((first_capacity + 1) * 2, live);
 
-    try appendReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill, reaction);
-    try std.testing.expectEqual(first_capacity + 1, p.on_fulfill.items.len);
-    try std.testing.expect(p.on_fulfill.capacity > first_capacity);
-    try std.testing.expectEqual(first_capacity + 2, live);
+    try appendReactionPairUnlocked(&machine, &p, pair);
+    try std.testing.expectEqual(first_capacity + 1, p.reactions.items.len);
+    try std.testing.expect(p.reactions.capacity > first_capacity);
+    try std.testing.expectEqual((first_capacity + 2) * 2, live);
 
-    popReactionUnlocked(&machine, &p, &p.on_fulfill_inline, &p.on_fulfill);
-    try std.testing.expectEqual(first_capacity, p.on_fulfill.items.len);
-    try std.testing.expectEqual(first_capacity + 1, live);
+    popReactionPairUnlocked(&machine, &p);
+    try std.testing.expectEqual(first_capacity, p.reactions.items.len);
+    try std.testing.expectEqual((first_capacity + 1) * 2, live);
 }
 
 /// Shared aggregation state for the combinators (`Promise.all`/`allSettled`/
@@ -458,9 +641,14 @@ fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const fnobj = self.active_native orelse return Value.undef();
     const state = resolvingStateObject(fnobj) orelse return Value.undef();
     const target = resolvingTarget(state) orelse return Value.undef();
-    if (state.promise_resolving_already) return Value.undef();
-    state.promise_resolving_already = true;
-    try resolve(self, target, if (args.len > 0) args[0] else Value.undef());
+    if (state.promise_resolving_already.load(.acquire)) return Value.undef();
+    var reservation = try reserveResolvingJob(self);
+    if (state.promise_resolving_already.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+        cancelResolvingJob(self, &reservation);
+        return Value.undef();
+    }
+    try resolveWithReservation(self, target, if (args.len > 0) args[0] else Value.undef(), &reservation);
+    std.debug.assert(!reservation.active);
     return Value.undef();
 }
 
@@ -470,9 +658,20 @@ fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     const fnobj = self.active_native orelse return Value.undef();
     const state = resolvingStateObject(fnobj) orelse return Value.undef();
     const target = resolvingTarget(state) orelse return Value.undef();
-    if (state.promise_resolving_already) return Value.undef();
-    state.promise_resolving_already = true;
-    try reject(self, target, if (args.len > 0) args[0] else Value.undef());
+    if (state.promise_resolving_already.load(.acquire)) return Value.undef();
+    var reservation = try reserveResolvingJob(self);
+    if (state.promise_resolving_already.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+        cancelResolvingJob(self, &reservation);
+        return Value.undef();
+    }
+    try settleWithReservation(
+        self,
+        target,
+        .rejected,
+        if (args.len > 0) args[0] else Value.undef(),
+        &reservation,
+    );
+    std.debug.assert(!reservation.active);
     return Value.undef();
 }
 
@@ -595,9 +794,9 @@ inline fn reactionAllocator(self: *Interpreter) std.mem.Allocator {
     return self.gc_side_storage orelse self.arena;
 }
 
-fn noteReactionAdded(self: *Interpreter, p: *Promise) void {
-    if (!p.gc_owned) return;
-    if (self.gc_promise_reactions_live) |live| _ = @atomicRmw(usize, live, .Add, 1, .monotonic);
+fn noteReactionsAdded(self: *Interpreter, p: *Promise, count: usize) void {
+    if (!p.gc_owned or count == 0) return;
+    if (self.gc_promise_reactions_live) |live| _ = @atomicRmw(usize, live, .Add, count, .monotonic);
 }
 
 fn noteReactionsRemoved(self: *Interpreter, p: *Promise, count: usize) void {
@@ -607,7 +806,7 @@ fn noteReactionsRemoved(self: *Interpreter, p: *Promise, count: usize) void {
     }
 }
 
-fn reserveReactionListUnlocked(self: *Interpreter, list: *std.ArrayListUnmanaged(Reaction), additional: usize) EvalError!void {
+fn reserveReactionListUnlocked(self: *Interpreter, list: *std.ArrayListUnmanaged(ReactionPair), additional: usize) EvalError!void {
     if (additional == 0) return;
     const spare = list.capacity - list.items.len;
     if (spare >= additional) return;
@@ -616,13 +815,7 @@ fn reserveReactionListUnlocked(self: *Interpreter, list: *std.ArrayListUnmanaged
     try list.ensureTotalCapacity(reactionAllocator(self), list.items.len + extra);
 }
 
-fn appendReactionUnlocked(
-    self: *Interpreter,
-    p: *Promise,
-    inline_slot: *?Reaction,
-    list: *std.ArrayListUnmanaged(Reaction),
-    r: Reaction,
-) EvalError!void {
+fn barrierReactionFrom(p: *Promise, r: Reaction) void {
     // Incremental-GC barrier: the reaction's callbacks are stored into the live
     // promise cell (which may already be marked black). Shade them.
     if (r.handler) |h| gc_mod.barrierValueFrom(p, h);
@@ -632,23 +825,28 @@ fn appendReactionUnlocked(
         gc_mod.barrierValueFrom(p, r.resolve);
         gc_mod.barrierValueFrom(p, r.reject);
     }
-    if (inline_slot.* == null) {
-        inline_slot.* = r;
-        noteReactionAdded(self, p);
-        return;
-    }
-    try reserveReactionListUnlocked(self, list, 1);
-    list.appendAssumeCapacity(r);
-    noteReactionAdded(self, p);
 }
 
-fn popReactionUnlocked(self: *Interpreter, p: *Promise, inline_slot: *?Reaction, list: *std.ArrayListUnmanaged(Reaction)) void {
-    if (list.items.len > 0) {
-        _ = list.pop();
-    } else {
-        inline_slot.* = null;
+fn appendReactionPairUnlocked(self: *Interpreter, p: *Promise, pair: ReactionPair) EvalError!void {
+    barrierReactionFrom(p, pair.fulfill);
+    barrierReactionFrom(p, pair.reject);
+    if (p.reactions_inline == null) {
+        p.reactions_inline = pair;
+        noteReactionsAdded(self, p, 2);
+        return;
     }
-    noteReactionsRemoved(self, p, 1);
+    try reserveReactionListUnlocked(self, &p.reactions, 1);
+    p.reactions.appendAssumeCapacity(pair);
+    noteReactionsAdded(self, p, 2);
+}
+
+fn popReactionPairUnlocked(self: *Interpreter, p: *Promise) void {
+    if (p.reactions.items.len > 0) {
+        _ = p.reactions.pop();
+    } else {
+        p.reactions_inline = null;
+    }
+    noteReactionsRemoved(self, p, 2);
 }
 
 pub fn snapshot(p: *Promise) struct { state: State, value: Value } {
@@ -663,79 +861,203 @@ pub fn isPending(p: *Promise) bool {
     return p.state == .pending;
 }
 
-fn disposeMovedReactions(self: *Interpreter, p: *Promise, fulfill: *std.ArrayListUnmanaged(Reaction), reject_list: *std.ArrayListUnmanaged(Reaction), count: usize) void {
-    if (p.gc_owned) {
-        const a = reactionAllocator(self);
-        fulfill.deinit(a);
-        reject_list.deinit(a);
-    }
+fn disposeMovedReactions(self: *Interpreter, p: *Promise, pairs: *std.ArrayListUnmanaged(ReactionPair), count: usize) void {
+    if (p.gc_owned) pairs.deinit(reactionAllocator(self));
     noteReactionsRemoved(self, p, count);
 }
 
-fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!void {
+const MicrotaskReservation = struct {
+    queue: ?*MicrotaskQueue = null,
+    active: bool = false,
+};
+
+fn reserveResolvingJob(self: *Interpreter) EvalError!MicrotaskReservation {
+    const queue = self.microtasks orelse return .{};
+    self.lockMicrotasks();
+    defer self.unlockMicrotasks();
+    try queue.reserveTransactionSlot(self.arena);
+    return .{ .queue = queue, .active = true };
+}
+
+fn cancelResolvingJob(self: *Interpreter, reservation: *MicrotaskReservation) void {
+    if (!reservation.active) return;
+    const queue = reservation.queue.?;
+    self.lockJobQueue(queue);
+    queue.cancelTransactionSlot();
+    self.unlockJobQueue(queue);
+    reservation.active = false;
+}
+
+fn settleWithReservation(
+    self: *Interpreter,
+    p: *Promise,
+    state: State,
+    v: Value,
+    reservation: ?*MicrotaskReservation,
+) EvalError!void {
     std.debug.assert(state != .pending);
 
-    var fulfill: std.ArrayListUnmanaged(Reaction) = .empty;
-    var reject_list: std.ArrayListUnmanaged(Reaction) = .empty;
-    var fulfill_inline: ?Reaction = null;
-    var reject_inline: ?Reaction = null;
-    var removed_count: usize = 0;
-    var queue_unhandled = false;
-
+    const unhandled_queue = if (state == .rejected) self.unhandled_rejections else null;
+    // Scheduling is one queue -> realm -> Promise transaction. A settlement
+    // publishes one batch descriptor regardless of fanout; the Promise retains
+    // exact reaction ownership until the queue materializes the batch before
+    // dequeue. Native resolving functions reserve this one slot before they
+    // consume [[AlreadyResolved]], making their scheduling commit infallible.
+    self.lockMicrotasks();
+    const realm_locked = unhandled_queue != null and self.realm_lock != null;
+    if (realm_locked) self.lockRealm();
     p.lockState();
     if (p.state != .pending) {
         p.unlockState();
+        if (realm_locked) self.unlockRealm();
+        self.unlockMicrotasks();
+        if (reservation) |slot| cancelResolvingJob(self, slot);
         return;
     }
+    const pair_count = p.reactions.items.len + @intFromBool(p.reactions_inline != null);
+    const queue = self.microtasks;
+    if (queue != null and pair_count != 0) {
+        if (reservation) |slot| {
+            std.debug.assert(slot.active and slot.queue == queue.?);
+        } else {
+            queue.?.reserve(self.arena, 1) catch |err| {
+                p.unlockState();
+                if (realm_locked) self.unlockRealm();
+                self.unlockMicrotasks();
+                return err;
+            };
+        }
+    }
+
     p.state = state;
     gc_mod.barrierValueFrom(p, v); // settlement value stored into the live promise cell
     p.value = v;
     if (state == .rejected and !p.is_handled and !p.rejection_queued and !p.rejection_notified) {
-        p.rejection_queued = true;
-        queue_unhandled = true;
+        if (unhandled_queue) |rejections| {
+            p.rejection_queued = true;
+            rejections.append(p);
+            gc_mod.barrierCell(p);
+        }
     }
-    fulfill_inline = p.on_fulfill_inline;
-    reject_inline = p.on_reject_inline;
-    fulfill = p.on_fulfill;
-    reject_list = p.on_reject;
-    removed_count = fulfill.items.len + reject_list.items.len +
-        @intFromBool(fulfill_inline != null) + @intFromBool(reject_inline != null);
-    p.unlockState();
-
-    if (queue_unhandled) try enqueueUnhandledRejection(self, p);
-
-    errdefer {
-        p.lockState();
-        p.awaiting_async_activation = null;
-        p.async_forward_to = null;
-        p.on_fulfill_inline = null;
-        p.on_reject_inline = null;
-        p.on_fulfill = .empty;
-        p.on_reject = .empty;
-        p.unlockState();
-        disposeMovedReactions(self, p, &fulfill, &reject_list, removed_count);
+    if (queue) |jobs| {
+        if (pair_count != 0) {
+            const task = Microtask{
+                .kind = .settlement_batch,
+                .reaction = undefined,
+                .argument = Value.undef(),
+                .fulfilled = state == .fulfilled,
+                .promise = p,
+            };
+            if (reservation) |slot| {
+                jobs.appendInTransactionSlot(task);
+                slot.active = false;
+            } else {
+                jobs.appendAssumeCapacity(task);
+            }
+            for (0..pair_count) |_| promise_profile.recordMicrotaskEnqueue(false);
+        } else if (reservation) |slot| {
+            jobs.cancelTransactionSlot();
+            slot.active = false;
+        }
+    } else if (reservation) |slot| {
+        std.debug.assert(!slot.active);
     }
-    const selected_inline = if (state == .fulfilled) fulfill_inline else reject_inline;
-    const selected = if (state == .fulfilled) fulfill.items else reject_list.items;
-    if (selected_inline) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
-    for (selected) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
-    p.lockState();
-    // Keep async-stack edges alive until the selected reaction has been copied
-    // into the traced microtask queue. The promise is already settled, so the
-    // walker will not consume these links during this short handoff window.
-    p.awaiting_async_activation = null;
+    // The selected reactions remain traced by the settled Promise until batch
+    // materialization copies them into ordinary queue jobs. Their retained
+    // activation edges therefore bridge this interval directly.
+    if (!p.rejection_linked.load(.acquire))
+        p.awaiting_activation_or_rejection_link.awaiting_async_activation = null;
     p.async_forward_to = null;
-    p.on_fulfill_inline = null;
-    p.on_reject_inline = null;
-    p.on_fulfill = .empty;
-    p.on_reject = .empty;
     p.unlockState();
-    disposeMovedReactions(self, p, &fulfill, &reject_list, removed_count);
+    if (realm_locked) self.unlockRealm();
+    self.unlockMicrotasks();
 }
 
-/// Fulfill `p` with `v` (no-op if already settled). If `v` is itself a thenable,
-/// adopt its state instead (resolution).
-pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
+fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!void {
+    return settleWithReservation(self, p, state, v, null);
+}
+
+/// Expand settlement descriptors before any job leaves the protected queue.
+/// Both passes run under the queue lock. The first reserves the complete final
+/// layout; only then does the second transfer reaction ownership, so OOM leaves
+/// the descriptor and Promise graph byte-for-byte retryable.
+pub fn materializeSettlementBatches(self: *Interpreter, queue: *MicrotaskQueue) EvalError!void {
+    var pending = queue.pendingItems();
+    var expanded_len = pending.len;
+    var has_batch = false;
+    for (pending) |task| {
+        if (task.kind != .settlement_batch) continue;
+        has_batch = true;
+        const p = task.promise orelse unreachable;
+        p.lockState();
+        const count = p.reactions.items.len + @intFromBool(p.reactions_inline != null);
+        p.unlockState();
+        std.debug.assert(count != 0);
+        expanded_len = std.math.add(usize, expanded_len, count - 1) catch return error.OutOfMemory;
+    }
+    if (!has_batch) return;
+
+    if (queue.head != 0) {
+        std.mem.copyForwards(Microtask, queue.items.items[0..pending.len], pending);
+        queue.items.items.len = pending.len;
+        queue.head = 0;
+        pending = queue.items.items;
+    }
+    try queue.reserve(self.arena, expanded_len - pending.len);
+
+    const original_len = pending.len;
+    queue.items.items.len = expanded_len;
+    var read = original_len;
+    var write = expanded_len;
+    while (read != 0) {
+        read -= 1;
+        const task = queue.items.items[read];
+        if (task.kind != .settlement_batch) {
+            write -= 1;
+            queue.items.items[write] = task;
+            continue;
+        }
+
+        const p = task.promise orelse unreachable;
+        p.lockState();
+        const inline_pair = p.reactions_inline;
+        var pairs = p.reactions;
+        const count = pairs.items.len + @intFromBool(inline_pair != null);
+        std.debug.assert(count != 0 and write >= count);
+        write -= count;
+        var out = write;
+        if (inline_pair) |pair| {
+            queue.items.items[out] = .{
+                .reaction = if (task.fulfilled) pair.fulfill else pair.reject,
+                .argument = p.value,
+                .fulfilled = task.fulfilled,
+            };
+            out += 1;
+        }
+        for (pairs.items) |pair| {
+            queue.items.items[out] = .{
+                .reaction = if (task.fulfilled) pair.fulfill else pair.reject,
+                .argument = p.value,
+                .fulfilled = task.fulfilled,
+            };
+            out += 1;
+        }
+        std.debug.assert(out == write + count);
+        p.reactions_inline = null;
+        p.reactions = .empty;
+        p.unlockState();
+        disposeMovedReactions(self, p, &pairs, count * 2);
+    }
+    std.debug.assert(write == 0);
+}
+
+fn resolveWithReservation(
+    self: *Interpreter,
+    p: *Promise,
+    v: Value,
+    reservation: ?*MicrotaskReservation,
+) EvalError!void {
+    defer if (reservation) |slot| cancelResolvingJob(self, slot);
     const promise_mark = try self.pushTempPromiseRoot(p);
     defer self.restoreTempPromiseRoots(promise_mark);
     const value_mark = try self.pushTempRoot(v);
@@ -745,7 +1067,7 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
     if (promiseOf(self.tempRoot(value_mark, v))) |inner|
         if (inner == self.tempPromiseRoot(promise_mark, p)) {
             const err = try self.makeError("TypeError", "Cannot resolve promise with itself");
-            try reject(self, self.tempPromiseRoot(promise_mark, p), err);
+            try settleWithReservation(self, self.tempPromiseRoot(promise_mark, p), .rejected, err, reservation);
             return;
         };
     // Thenable assimilation: `then` is read synchronously from every object
@@ -756,13 +1078,13 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
             if (err == error.Throw) {
                 const reason = self.exception;
                 self.exception = Value.undef();
-                try reject(self, self.tempPromiseRoot(promise_mark, p), reason);
+                try settleWithReservation(self, self.tempPromiseRoot(promise_mark, p), .rejected, reason, reservation);
                 return;
             }
             return err;
         };
         if (then_fn.isCallable()) {
-            try enqueue(self, .{
+            try enqueueWithReservation(self, .{
                 .kind = .thenable,
                 .reaction = undefined,
                 .argument = Value.undef(),
@@ -770,18 +1092,25 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
                 .thenable = self.tempRoot(value_mark, v),
                 .then_fn = then_fn,
                 .promise = self.tempPromiseRoot(promise_mark, p),
-            });
+            }, reservation);
             if (promiseOf(self.tempRoot(value_mark, v))) |inner|
                 linkAsyncForward(inner, self.tempPromiseRoot(promise_mark, p));
             return;
         }
     }
-    try settle(
+    try settleWithReservation(
         self,
         self.tempPromiseRoot(promise_mark, p),
         .fulfilled,
         self.tempRoot(value_mark, v),
+        reservation,
     );
+}
+
+/// Fulfill `p` with `v` (no-op if already settled). If `v` is itself a thenable,
+/// adopt its state instead (resolution).
+pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
+    return resolveWithReservation(self, p, v, null);
 }
 
 /// Reject `p` with `reason` (no-op if already settled).
@@ -902,37 +1231,284 @@ pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError
 }
 
 fn performThenReactions(self: *Interpreter, p: *Promise, react_f: Reaction, react_r: Reaction) EvalError!void {
-    var queue_handled = false;
     p.lockState();
-    var state_locked = true;
-    errdefer if (state_locked) p.unlockState();
+    if (p.state == .pending) {
+        appendReactionPairUnlocked(self, p, .{ .fulfill = react_f, .reject = react_r }) catch |err| {
+            p.unlockState();
+            return err;
+        };
+        p.is_handled = true;
+        p.unlockState();
+        return;
+    }
+    const settled_state = p.state;
+    p.unlockState();
+    // A settled handler is one queue -> realm -> Promise transaction. Reserve
+    // its job before publishing handled/tracker state, then append infallibly.
+    self.lockMicrotasks();
+    const handled_queue = if (settled_state == .rejected) self.handled_rejections else null;
+    const realm_locked = handled_queue != null and self.realm_lock != null;
+    if (realm_locked) self.lockRealm();
+    p.lockState();
+    if (self.microtasks) |queue| {
+        queue.reserve(self.arena, 1) catch |err| {
+            p.unlockState();
+            if (realm_locked) self.unlockRealm();
+            self.unlockMicrotasks();
+            return err;
+        };
+    }
     if (!p.is_handled and p.state == .rejected and p.rejection_notified and !p.rejection_handled_notified) {
-        p.rejection_handled_notified = true;
-        queue_handled = true;
+        if (handled_queue) |queue| {
+            p.rejection_handled_notified = true;
+            queue.append(p);
+            gc_mod.barrierCell(p);
+        }
     }
     p.is_handled = true;
     const snap = .{ .state = p.state, .value = p.value };
-    switch (snap.state) {
-        .pending => {
-            try appendReactionUnlocked(self, p, &p.on_fulfill_inline, &p.on_fulfill, react_f);
-            errdefer popReactionUnlocked(self, p, &p.on_fulfill_inline, &p.on_fulfill);
-            try appendReactionUnlocked(self, p, &p.on_reject_inline, &p.on_reject, react_r);
-            p.unlockState();
-            state_locked = false;
-            if (queue_handled) try enqueueHandledRejection(self, p);
-            return;
-        },
-        .fulfilled, .rejected => {},
+    if (self.microtasks) |queue| {
+        const reaction = if (snap.state == .fulfilled) react_f else react_r;
+        queue.appendAssumeCapacity(.{ .reaction = reaction, .argument = snap.value, .fulfilled = snap.state == .fulfilled });
+        promise_profile.recordMicrotaskEnqueue(false);
     }
     p.unlockState();
-    state_locked = false;
-    if (queue_handled) try enqueueHandledRejection(self, p);
+    if (realm_locked) self.unlockRealm();
+    self.unlockMicrotasks();
+}
 
-    switch (snap.state) {
-        .pending => unreachable,
-        .fulfilled => try enqueue(self, .{ .reaction = react_f, .argument = snap.value, .fulfilled = true }),
-        .rejected => try enqueue(self, .{ .reaction = react_r, .argument = snap.value, .fulfilled = false }),
-    }
+test "rejection tracker publication is allocation-free and state exact" {
+    var unhandled: RejectionQueue = .{};
+    defer unhandled.clear();
+    var handled: RejectionQueue = .{};
+    defer handled.clear();
+    var unused_queue: RejectionQueue = .{};
+    defer unused_queue.clear();
+
+    var reject_oom = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var machine = Interpreter{
+        .arena = reject_oom.allocator(),
+        .env = undefined,
+        .root_shape = undefined,
+        .unhandled_rejections = &unhandled,
+        .handled_rejections = &handled,
+    };
+    var rejected: Promise = .{};
+
+    try settle(&machine, &rejected, .rejected, Value.num(884));
+    try std.testing.expect(!reject_oom.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), reject_oom.alloc_index);
+    try std.testing.expectEqual(State.rejected, rejected.state);
+    try std.testing.expect(rejected.rejection_queued);
+    try std.testing.expectEqual(@as(usize, 1), unhandled.pendingLen());
+    const notification = takeUnhandledRejection(&machine).?;
+    try std.testing.expectEqual(@as(f64, 884), notification.reason.asNum());
+    try std.testing.expect(notification.promise.isUndefined());
+    try std.testing.expect(!rejected.rejection_queued);
+    try std.testing.expect(rejected.rejection_notified);
+    try std.testing.expect(unhandled.isEmpty());
+
+    // Repeated settlement and a Promise handled before rejection also remain
+    // allocation-free with a fresh queue.
+    var no_queue_allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = no_queue_allocation.allocator();
+    machine.unhandled_rejections = &unused_queue;
+    try settle(&machine, &rejected, .rejected, Value.num(885));
+    try std.testing.expectEqual(@as(f64, 884), rejected.value.asNum());
+    var prehandled = Promise{ .is_handled = true };
+    try settle(&machine, &prehandled, .rejected, Value.num(886));
+    try std.testing.expectEqual(State.rejected, prehandled.state);
+    try std.testing.expectEqual(@as(f64, 886), prehandled.value.asNum());
+    try std.testing.expect(!prehandled.rejection_queued);
+    try std.testing.expect(unused_queue.isEmpty());
+    try std.testing.expect(!no_queue_allocation.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), no_queue_allocation.alloc_index);
+
+    var handled_oom = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    machine.arena = handled_oom.allocator();
+    const reaction = Reaction{ .handler = null, .detached = true };
+    try performThenReactions(&machine, &rejected, reaction, reaction);
+    try std.testing.expect(!handled_oom.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), handled_oom.alloc_index);
+    try std.testing.expect(rejected.is_handled);
+    try std.testing.expect(rejected.rejection_handled_notified);
+    try std.testing.expectEqual(@as(usize, 1), handled.pendingLen());
+    try std.testing.expect(takeHandledRejection(&machine).?.isUndefined());
+    try std.testing.expect(handled.isEmpty());
+}
+
+test "settlement reserves the complete reaction batch before state commit" {
+    const a = std.testing.allocator;
+    var queue: MicrotaskQueue = .{};
+    defer queue.items.deinit(a);
+    var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var machine = Interpreter{
+        .arena = unavailable.allocator(),
+        .env = undefined,
+        .root_shape = undefined,
+        .microtasks = &queue,
+    };
+    const first = ReactionPair{
+        .fulfill = .{ .handler = null, .extra_argument = Value.num(1), .detached = true },
+        .reject = .{ .handler = null, .extra_argument = Value.num(-1), .detached = true },
+    };
+    const second = ReactionPair{
+        .fulfill = .{ .handler = null, .extra_argument = Value.num(2), .detached = true },
+        .reject = .{ .handler = null, .extra_argument = Value.num(-2), .detached = true },
+    };
+    var overflow = [_]ReactionPair{second};
+    var p = Promise{ .reactions_inline = first, .reactions = .fromOwnedSlice(&overflow) };
+
+    try std.testing.expectError(error.OutOfMemory, settle(&machine, &p, .fulfilled, Value.num(73)));
+    try std.testing.expectEqual(State.pending, p.state);
+    try std.testing.expect(p.reactions_inline != null);
+    try std.testing.expectEqual(@as(usize, 1), p.reactions.items.len);
+    try std.testing.expect(queue.isEmpty());
+
+    machine.arena = a;
+    try settle(&machine, &p, .fulfilled, Value.num(73));
+    try std.testing.expectEqual(State.fulfilled, p.state);
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingLen());
+    try std.testing.expectEqual(.settlement_batch, queue.pendingItems()[0].kind);
+    try materializeSettlementBatches(&machine, &queue);
+    try std.testing.expectEqual(@as(usize, 2), queue.pendingLen());
+    try std.testing.expectEqual(@as(f64, 1), queue.pendingItems()[0].reaction.extra_argument.?.asNum());
+    try std.testing.expectEqual(@as(f64, 2), queue.pendingItems()[1].reaction.extra_argument.?.asNum());
+}
+
+test "settlement batch expansion is OOM-atomic between sibling jobs" {
+    const a = std.testing.allocator;
+    var fixed_bytes: [@sizeOf(Microtask)]u8 align(@alignOf(Microtask)) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&fixed_bytes);
+    const storage = try fixed.allocator().alloc(Microtask, 1);
+    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    var machine = Interpreter{
+        .arena = fixed.allocator(),
+        .env = undefined,
+        .root_shape = undefined,
+        .microtasks = &queue,
+    };
+    const pair = ReactionPair{
+        .fulfill = .{ .handler = null, .detached = true },
+        .reject = .{ .handler = null, .detached = true },
+    };
+    var overflow = [_]ReactionPair{pair};
+    var p = Promise{ .reactions_inline = pair, .reactions = .fromOwnedSlice(&overflow) };
+
+    // One physical slot commits arbitrary fanout without allocation. Expansion
+    // then fails before replacing the descriptor with even the first sibling.
+    try settle(&machine, &p, .fulfilled, Value.num(7));
+    try std.testing.expectEqual(State.fulfilled, p.state);
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingLen());
+    try std.testing.expectEqual(.settlement_batch, queue.pendingItems()[0].kind);
+    try std.testing.expectError(error.OutOfMemory, materializeSettlementBatches(&machine, &queue));
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingLen());
+    try std.testing.expectEqual(.settlement_batch, queue.pendingItems()[0].kind);
+    try std.testing.expect(p.reactions_inline != null);
+    try std.testing.expectEqual(@as(usize, 1), p.reactions.items.len);
+
+    const descriptor = queue.pop().?;
+    var recovery: MicrotaskQueue = .{};
+    defer recovery.items.deinit(a);
+    try recovery.append(a, descriptor);
+    machine.microtasks = &recovery;
+    machine.arena = a;
+    try materializeSettlementBatches(&machine, &recovery);
+    try std.testing.expectEqual(@as(usize, 2), recovery.pendingLen());
+    try std.testing.expectEqual(@as(f64, 7), recovery.pendingItems()[0].argument.asNum());
+    try std.testing.expectEqual(@as(f64, 7), recovery.pendingItems()[1].argument.asNum());
+}
+
+test "resolving capability reserves settlement publication before once-only commit" {
+    const a = std.testing.allocator;
+    const pair = ReactionPair{
+        .fulfill = .{ .handler = null, .detached = true },
+        .reject = .{ .handler = null, .detached = true },
+    };
+    var overflow = [_]ReactionPair{pair};
+    var p = Promise{ .reactions_inline = pair, .reactions = .fromOwnedSlice(&overflow) };
+    var state = Object{ .native = resolveThunk, .private_data = @ptrCast(&p) };
+
+    var no_bytes: [0]u8 = .{};
+    var unavailable = std.heap.FixedBufferAllocator.init(&no_bytes);
+    var blocked_queue: MicrotaskQueue = .{};
+    var promise_roots: [2]*Promise = undefined;
+    var value_roots: [2]Value = undefined;
+    var machine = Interpreter{
+        .arena = unavailable.allocator(),
+        .env = undefined,
+        .root_shape = undefined,
+        .microtasks = &blocked_queue,
+        .active_native = &state,
+        .gc_temp_promise_roots = .{ .items = promise_roots[0..0], .capacity = promise_roots.len },
+        .gc_temp_roots = .{ .items = value_roots[0..0], .capacity = value_roots.len },
+    };
+
+    try std.testing.expectError(error.OutOfMemory, resolveThunk(&machine, Value.undef(), &.{Value.num(885)}));
+    try std.testing.expect(!state.promise_resolving_already.load(.acquire));
+    try std.testing.expectEqual(State.pending, p.state);
+    try std.testing.expect(blocked_queue.isEmpty());
+
+    var fixed_bytes: [@sizeOf(Microtask)]u8 align(@alignOf(Microtask)) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&fixed_bytes);
+    const storage = try fixed.allocator().alloc(Microtask, 1);
+    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    machine.arena = fixed.allocator();
+    machine.microtasks = &queue;
+    _ = try resolveThunk(&machine, Value.undef(), &.{Value.num(885)});
+    try std.testing.expect(state.promise_resolving_already.load(.acquire));
+    try std.testing.expectEqual(State.fulfilled, p.state);
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingLen());
+    try std.testing.expectEqual(.settlement_batch, queue.pendingItems()[0].kind);
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+
+    // Duplicate resolve/reject calls observe the committed bit and remain a
+    // true allocation-free no-op even though the fixed queue has no spare slot.
+    _ = try resolveThunk(&machine, Value.undef(), &.{Value.num(999)});
+    try std.testing.expectEqual(@as(f64, 885), p.value.asNum());
+
+    const descriptor = queue.pop().?;
+    var recovery: MicrotaskQueue = .{};
+    defer recovery.items.deinit(a);
+    try recovery.append(a, descriptor);
+    machine.arena = a;
+    machine.microtasks = &recovery;
+    try materializeSettlementBatches(&machine, &recovery);
+    try std.testing.expectEqual(@as(usize, 2), recovery.pendingLen());
+    try std.testing.expect(p.reactions_inline == null);
+    try std.testing.expectEqual(@as(usize, 0), p.reactions.items.len);
+}
+
+test "settled then reserves its job before handled tracker publication" {
+    const a = std.testing.allocator;
+    var queue: MicrotaskQueue = .{};
+    defer queue.items.deinit(a);
+    var handled: RejectionQueue = .{};
+    defer handled.clear();
+    var unavailable = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var machine = Interpreter{
+        .arena = unavailable.allocator(),
+        .env = undefined,
+        .root_shape = undefined,
+        .microtasks = &queue,
+        .handled_rejections = &handled,
+    };
+    var p = Promise{ .state = .rejected, .value = Value.num(885), .rejection_notified = true };
+    const reaction = Reaction{ .handler = null, .detached = true };
+
+    try std.testing.expectError(error.OutOfMemory, performThenReactions(&machine, &p, reaction, reaction));
+    try std.testing.expect(!p.is_handled);
+    try std.testing.expect(!p.rejection_handled_notified);
+    try std.testing.expect(handled.isEmpty());
+    try std.testing.expect(queue.isEmpty());
+
+    machine.arena = a;
+    try performThenReactions(&machine, &p, reaction, reaction);
+    try std.testing.expect(p.is_handled);
+    try std.testing.expect(p.rejection_handled_notified);
+    try std.testing.expectEqual(@as(usize, 1), handled.pendingLen());
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingLen());
+    try std.testing.expect(takeHandledRejection(&machine).?.isUndefined());
 }
 
 /// Queue a bare callback microtask (HTML `queueMicrotask`). Runs on the same
@@ -984,26 +1560,11 @@ pub fn enqueueNextTick(self: *Interpreter, callback: Value, args: []const Value)
     try queue.append(self.arena, task);
 }
 
-fn enqueueUnhandledRejection(self: *Interpreter, rejected: *Promise) EvalError!void {
-    const queue = self.unhandled_rejections orelse return;
-    self.lockRealm();
-    defer self.unlockRealm();
-    try queue.append(self.arena, rejected);
-}
-
-fn enqueueHandledRejection(self: *Interpreter, handled: *Promise) EvalError!void {
-    const queue = self.handled_rejections orelse return;
-    self.lockRealm();
-    defer self.unlockRealm();
-    try queue.append(self.arena, handled);
-}
-
 pub fn takeHandledRejection(self: *Interpreter) ?Value {
     const queue = self.handled_rejections orelse return null;
     self.lockRealm();
     defer self.unlockRealm();
-    if (queue.items.len == 0) return null;
-    const handled = queue.orderedRemove(0);
+    const handled = queue.pop() orelse return null;
     handled.lockState();
     defer handled.unlockState();
     return if (handled.wrapper) |wrapper| Value.obj(wrapper) else Value.undef();
@@ -1020,8 +1581,7 @@ pub fn takeUnhandledRejection(self: *Interpreter) ?RejectionNotification {
     const queue = self.unhandled_rejections orelse return null;
     self.lockRealm();
     defer self.unlockRealm();
-    while (queue.items.len != 0) {
-        const rejected = queue.orderedRemove(0);
+    while (queue.pop()) |rejected| {
         rejected.lockState();
         rejected.rejection_queued = false;
         if (rejected.is_handled or rejected.rejection_notified or rejected.state != .rejected) {
@@ -1039,15 +1599,29 @@ pub fn takeUnhandledRejection(self: *Interpreter) ?RejectionNotification {
     return null;
 }
 
-fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
+fn enqueueWithReservation(
+    self: *Interpreter,
+    task: Microtask,
+    reservation: ?*MicrotaskReservation,
+) EvalError!void {
     const q = self.microtasks orelse return; // no queue wired → drop (shouldn't happen)
     // Under `parallel_js` a peer thread may drain this queue concurrently; the
     // lock makes the append atomic against the drain's pop. A no-op (single null
     // check) on the GIL-serialized default path.
     self.lockMicrotasks();
     defer self.unlockMicrotasks();
-    try q.append(self.arena, task);
+    if (reservation) |slot| {
+        std.debug.assert(slot.active and slot.queue == q);
+        q.appendInTransactionSlot(task);
+        slot.active = false;
+    } else {
+        try q.append(self.arena, task);
+    }
     promise_profile.recordMicrotaskEnqueue(task.kind == .thenable);
+}
+
+fn enqueue(self: *Interpreter, task: Microtask) EvalError!void {
+    return enqueueWithReservation(self, task, null);
 }
 
 /// Run one reaction job: invoke the handler (or pass through) and settle the
@@ -1061,6 +1635,7 @@ fn settleReaction(self: *Interpreter, r: *Reaction, fulfilled: bool, arg: Value)
 }
 
 pub fn runJob(self: *Interpreter, task: *Microtask) EvalError!void {
+    std.debug.assert(task.kind != .settlement_batch);
     if (task.kind == .native_callback) {
         promise_profile.recordMicrotaskRun(false);
         if (task.native_callback) |callback| callback(task.native_callback_context);

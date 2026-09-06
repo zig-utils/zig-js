@@ -2004,13 +2004,18 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
     defer p.unlockState();
     markValue(v, p.value);
     if (p.wrapper) |wrapper| v.mark(wrapper);
-    if (p.awaiting_async_activation) |activation|
-        v.mark(@as(*vm.Generator, @ptrCast(@alignCast(activation))));
+    if (!p.rejection_linked.load(.acquire))
+        if (p.awaiting_activation_or_rejection_link.awaiting_async_activation) |activation|
+            v.mark(@as(*vm.Generator, @ptrCast(@alignCast(activation))));
     if (p.async_forward_to) |forward| markManaged(v, forward);
-    if (p.on_fulfill_inline) |r| traceReaction(r, v);
-    if (p.on_reject_inline) |r| traceReaction(r, v);
-    for (p.on_fulfill.items) |r| traceReaction(r, v);
-    for (p.on_reject.items) |r| traceReaction(r, v);
+    if (p.reactions_inline) |pair| {
+        traceReaction(pair.fulfill, v);
+        traceReaction(pair.reject, v);
+    }
+    for (p.reactions.items) |pair| {
+        traceReaction(pair.fulfill, v);
+        traceReaction(pair.reject, v);
+    }
 }
 
 inline fn traceReaction(r: promise.Reaction, v: anytype) void {
@@ -2046,61 +2051,82 @@ inline fn relocateReaction(r: *promise.Reaction, v: anytype) void {
 pub fn relocatePromise(p: *promise.Promise, v: anytype) void {
     gc_relocation.rewriteValueSlot(v, &p.value);
     gc_relocation.rewriteOptionalSlot(v, Object, &p.wrapper);
-    gc_relocation.rewriteOptionalSlot(v, anyopaque, &p.awaiting_async_activation);
+    // Context owns the queue root; a linked Promise owns and relocates its
+    // realm-lock-protected intrusive successor while mutators are stopped.
+    if (p.rejection_linked.load(.monotonic)) {
+        gc_relocation.rewriteOptionalSlot(
+            v,
+            promise.Promise,
+            &p.awaiting_activation_or_rejection_link.rejection_next,
+        );
+    } else {
+        gc_relocation.rewriteOptionalSlot(
+            v,
+            anyopaque,
+            &p.awaiting_activation_or_rejection_link.awaiting_async_activation,
+        );
+    }
     gc_relocation.rewriteOptionalSlot(v, promise.Promise, &p.async_forward_to);
-    if (p.on_fulfill_inline) |*reaction| relocateReaction(reaction, v);
-    if (p.on_reject_inline) |*reaction| relocateReaction(reaction, v);
-    for (p.on_fulfill.items) |*reaction| relocateReaction(reaction, v);
-    for (p.on_reject.items) |*reaction| relocateReaction(reaction, v);
+    if (p.reactions_inline) |*pair| {
+        relocateReaction(&pair.fulfill, v);
+        relocateReaction(&pair.reject, v);
+    }
+    for (p.reactions.items) |*pair| {
+        relocateReaction(&pair.fulfill, v);
+        relocateReaction(&pair.reject, v);
+    }
 }
 
 test "Promise relocation rewrites inline and overflow reaction graphs" {
     var old_objects: [14]Object = undefined;
     var new_objects: [14]Object = undefined;
-    var old_promises: [3]promise.Promise = .{ .{}, .{}, .{} };
-    var new_promises: [3]promise.Promise = .{ .{}, .{}, .{} };
+    var old_promises: [4]promise.Promise = .{ .{}, .{}, .{}, .{} };
+    var new_promises: [4]promise.Promise = .{ .{}, .{}, .{}, .{} };
     var old_generators: [5]vm.Generator = undefined;
     var new_generators: [5]vm.Generator = undefined;
-    var fulfill_overflow = [_]promise.Reaction{.{
-        .handler = Value.obj(&old_objects[8]),
-        .extra_argument = Value.obj(&old_objects[9]),
-        .retained_async_activation = &old_generators[3],
-        .result = &old_promises[2],
-    }};
-    var reject_overflow = [_]promise.Reaction{.{
-        .handler = Value.obj(&old_objects[10]),
-        .extra_argument = Value.obj(&old_objects[11]),
-        .retained_async_activation = &old_generators[4],
-        .resolve = Value.obj(&old_objects[12]),
-        .reject = Value.obj(&old_objects[13]),
+    var overflow = [_]promise.ReactionPair{.{
+        .fulfill = .{
+            .handler = Value.obj(&old_objects[8]),
+            .extra_argument = Value.obj(&old_objects[9]),
+            .retained_async_activation = &old_generators[3],
+            .result = &old_promises[2],
+        },
+        .reject = .{
+            .handler = Value.obj(&old_objects[10]),
+            .extra_argument = Value.obj(&old_objects[11]),
+            .retained_async_activation = &old_generators[4],
+            .resolve = Value.obj(&old_objects[12]),
+            .reject = Value.obj(&old_objects[13]),
+        },
     }};
     var state = promise.Promise{
         .value = Value.obj(&old_objects[0]),
         .wrapper = &old_objects[1],
-        .awaiting_async_activation = &old_generators[0],
+        .awaiting_activation_or_rejection_link = .{ .awaiting_async_activation = &old_generators[0] },
         .async_forward_to = &old_promises[0],
-        .on_fulfill_inline = .{
-            .handler = Value.obj(&old_objects[2]),
-            .extra_argument = Value.obj(&old_objects[3]),
-            .retained_async_activation = &old_generators[1],
-            .result = &old_promises[1],
+        .reactions_inline = .{
+            .fulfill = .{
+                .handler = Value.obj(&old_objects[2]),
+                .extra_argument = Value.obj(&old_objects[3]),
+                .retained_async_activation = &old_generators[1],
+                .result = &old_promises[1],
+            },
+            .reject = .{
+                .handler = Value.obj(&old_objects[4]),
+                .extra_argument = Value.obj(&old_objects[5]),
+                .retained_async_activation = &old_generators[2],
+                .resolve = Value.obj(&old_objects[6]),
+                .reject = Value.obj(&old_objects[7]),
+            },
         },
-        .on_reject_inline = .{
-            .handler = Value.obj(&old_objects[4]),
-            .extra_argument = Value.obj(&old_objects[5]),
-            .retained_async_activation = &old_generators[2],
-            .resolve = Value.obj(&old_objects[6]),
-            .reject = Value.obj(&old_objects[7]),
-        },
-        .on_fulfill = .fromOwnedSlice(&fulfill_overflow),
-        .on_reject = .fromOwnedSlice(&reject_overflow),
+        .reactions = .fromOwnedSlice(&overflow),
     };
 
     const Plan = struct {
         old_objects: *[14]Object,
         new_objects: *[14]Object,
-        old_promises: *[3]promise.Promise,
-        new_promises: *[3]promise.Promise,
+        old_promises: *[4]promise.Promise,
+        new_promises: *[4]promise.Promise,
         old_generators: *[5]vm.Generator,
         new_generators: *[5]vm.Generator,
 
@@ -2129,28 +2155,42 @@ test "Promise relocation rewrites inline and overflow reaction graphs" {
 
     try std.testing.expectEqual(&new_objects[0], state.value.asObj());
     try std.testing.expectEqual(&new_objects[1], state.wrapper.?);
-    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[0])), state.awaiting_async_activation.?);
+    try std.testing.expectEqual(
+        @as(*anyopaque, @ptrCast(&new_generators[0])),
+        state.awaiting_activation_or_rejection_link.awaiting_async_activation.?,
+    );
     try std.testing.expectEqual(&new_promises[0], state.async_forward_to.?);
-    const fulfill_inline = state.on_fulfill_inline.?;
+    const fulfill_inline = state.reactions_inline.?.fulfill;
     try std.testing.expectEqual(&new_objects[2], fulfill_inline.handler.?.asObj());
     try std.testing.expectEqual(&new_objects[3], fulfill_inline.extra_argument.?.asObj());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[1])), fulfill_inline.retained_async_activation.?);
     try std.testing.expectEqual(&new_promises[1], fulfill_inline.result.?);
-    const reject_inline = state.on_reject_inline.?;
+    const reject_inline = state.reactions_inline.?.reject;
     try std.testing.expectEqual(&new_objects[4], reject_inline.handler.?.asObj());
     try std.testing.expectEqual(&new_objects[5], reject_inline.extra_argument.?.asObj());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[2])), reject_inline.retained_async_activation.?);
     try std.testing.expectEqual(&new_objects[6], reject_inline.resolve.asObj());
     try std.testing.expectEqual(&new_objects[7], reject_inline.reject.asObj());
-    try std.testing.expectEqual(&new_objects[8], fulfill_overflow[0].handler.?.asObj());
-    try std.testing.expectEqual(&new_objects[9], fulfill_overflow[0].extra_argument.?.asObj());
-    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[3])), fulfill_overflow[0].retained_async_activation.?);
-    try std.testing.expectEqual(&new_promises[2], fulfill_overflow[0].result.?);
-    try std.testing.expectEqual(&new_objects[10], reject_overflow[0].handler.?.asObj());
-    try std.testing.expectEqual(&new_objects[11], reject_overflow[0].extra_argument.?.asObj());
-    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[4])), reject_overflow[0].retained_async_activation.?);
-    try std.testing.expectEqual(&new_objects[12], reject_overflow[0].resolve.asObj());
-    try std.testing.expectEqual(&new_objects[13], reject_overflow[0].reject.asObj());
+    try std.testing.expectEqual(&new_objects[8], overflow[0].fulfill.handler.?.asObj());
+    try std.testing.expectEqual(&new_objects[9], overflow[0].fulfill.extra_argument.?.asObj());
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[3])), overflow[0].fulfill.retained_async_activation.?);
+    try std.testing.expectEqual(&new_promises[2], overflow[0].fulfill.result.?);
+    try std.testing.expectEqual(&new_objects[10], overflow[0].reject.handler.?.asObj());
+    try std.testing.expectEqual(&new_objects[11], overflow[0].reject.extra_argument.?.asObj());
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[4])), overflow[0].reject.retained_async_activation.?);
+    try std.testing.expectEqual(&new_objects[12], overflow[0].reject.resolve.asObj());
+    try std.testing.expectEqual(&new_objects[13], overflow[0].reject.reject.asObj());
+
+    var linked = promise.Promise{
+        .state = .rejected,
+        .awaiting_activation_or_rejection_link = .{ .rejection_next = &old_promises[3] },
+        .rejection_linked = .init(true),
+    };
+    relocatePromise(&linked, &plan);
+    try std.testing.expectEqual(
+        &new_promises[3],
+        linked.awaiting_activation_or_rejection_link.rejection_next.?,
+    );
 }
 
 inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
@@ -2159,6 +2199,7 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
             traceReaction(mt.reaction, v);
             markValue(v, mt.argument);
         },
+        .settlement_batch => if (mt.promise) |p| markManaged(v, p),
         .thenable => {
             markValue(v, mt.thenable);
             markValue(v, mt.then_fn);
@@ -2184,6 +2225,7 @@ inline fn relocateMicrotask(mt: *promise.Microtask, v: anytype) void {
             relocateReaction(&mt.reaction, v);
             gc_relocation.rewriteValueSlot(v, &mt.argument);
         },
+        .settlement_batch => gc_relocation.rewriteOptionalSlot(v, promise.Promise, &mt.promise),
         .thenable => {
             gc_relocation.rewriteValueSlot(v, &mt.thenable);
             gc_relocation.rewriteValueSlot(v, &mt.then_fn);
@@ -3342,8 +3384,8 @@ test "realm root relocation rewrites Context registries and embedder handles" {
 
     var old_objects: [18]Object = undefined;
     var new_objects: [18]Object = undefined;
-    var old_promises: [2]promise.Promise = .{ .{}, .{} };
-    var new_promises: [2]promise.Promise = .{ .{}, .{} };
+    var old_promises: [4]promise.Promise = .{ .{}, .{}, .{}, .{} };
+    var new_promises: [4]promise.Promise = .{ .{}, .{}, .{}, .{} };
 
     const saved_global = context.global_object;
     const saved_tdz = context.tdz_marker;
@@ -3400,8 +3442,14 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     context.next_ticks.items = .fromOwnedSlice(&next_tick_items);
     context.next_ticks.head = 0;
 
-    var unhandled = [_]*promise.Promise{&old_promises[0]};
-    var handled = [_]*promise.Promise{&old_promises[1]};
+    old_promises[0].awaiting_activation_or_rejection_link = .{ .rejection_next = &old_promises[1] };
+    old_promises[0].rejection_linked.store(true, .monotonic);
+    old_promises[1].awaiting_activation_or_rejection_link = .{ .rejection_next = null };
+    old_promises[1].rejection_linked.store(true, .monotonic);
+    old_promises[2].awaiting_activation_or_rejection_link = .{ .rejection_next = &old_promises[3] };
+    old_promises[2].rejection_linked.store(true, .monotonic);
+    old_promises[3].awaiting_activation_or_rejection_link = .{ .rejection_next = null };
+    old_promises[3].rejection_linked.store(true, .monotonic);
     var async_waiters = [_]interp.AsyncWaiterEntry{.{ .id = 1, .promise = Value.obj(&old_objects[8]) }};
     var timer_args = [_]Value{Value.obj(&old_objects[10])};
     var timer = ContextMod.Context.TimerRecord{
@@ -3453,8 +3501,8 @@ test "realm root relocation rewrites Context registries and embedder handles" {
         context.private_strong_roots = saved_strong_roots;
         context.private_weak_roots = saved_weak_roots;
     }
-    context.unhandled_rejections = .fromOwnedSlice(&unhandled);
-    context.handled_rejections = .fromOwnedSlice(&handled);
+    context.unhandled_rejections = .{ .head = &old_promises[0], .tail = &old_promises[1], .len = 2 };
+    context.handled_rejections = .{ .head = &old_promises[2], .tail = &old_promises[3], .len = 2 };
     context.async_waiters = .fromOwnedSlice(&async_waiters);
     context.timers = .fromOwnedSlice(&timers);
     context.finalization_cleanup_jobs = .fromOwnedSlice(&finalization_jobs);
@@ -3466,8 +3514,8 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     const Plan = struct {
         old_objects: *[18]Object,
         new_objects: *[18]Object,
-        old_promises: *[2]promise.Promise,
-        new_promises: *[2]promise.Promise,
+        old_promises: *[4]promise.Promise,
+        new_promises: *[4]promise.Promise,
 
         pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
             for (self.old_objects, 0..) |*object, index|
@@ -3496,8 +3544,12 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     try std.testing.expectEqual(&new_objects[5], context.env.get("__gc_relocation_context_root__").?.asObj());
     try std.testing.expectEqual(&new_objects[6], microtask_items[0].callback.asObj());
     try std.testing.expectEqual(&new_objects[7], next_tick_items[0].callback.asObj());
-    try std.testing.expectEqual(&new_promises[0], context.unhandled_rejections.items[0]);
-    try std.testing.expectEqual(&new_promises[1], context.handled_rejections.items[0]);
+    try std.testing.expectEqual(&new_promises[0], context.unhandled_rejections.head.?);
+    try std.testing.expectEqual(&new_promises[1], context.unhandled_rejections.tail.?);
+    try std.testing.expectEqual(@as(usize, 2), context.unhandled_rejections.pendingLen());
+    try std.testing.expectEqual(&new_promises[2], context.handled_rejections.head.?);
+    try std.testing.expectEqual(&new_promises[3], context.handled_rejections.tail.?);
+    try std.testing.expectEqual(@as(usize, 2), context.handled_rejections.pendingLen());
     try std.testing.expectEqual(&new_objects[8], async_waiters[0].promise.asObj());
     try std.testing.expectEqual(&new_objects[9], timer.callback.asObj());
     try std.testing.expectEqual(&new_objects[10], timer_args[0].asObj());
@@ -3646,10 +3698,10 @@ pub fn relocateContextRoots(ctx: *ContextMod.Context, v: anytype) void {
     for (ctx.microtasks.pendingItems()) |*task| relocateMicrotask(task, v);
     for (ctx.next_ticks.pendingItems()) |*task| relocateMicrotask(task, v);
 
-    for (ctx.unhandled_rejections.items) |*rejected|
-        gc_relocation.rewriteRequiredSlot(v, promise.Promise, rejected);
-    for (ctx.handled_rejections.items) |*handled|
-        gc_relocation.rewriteRequiredSlot(v, promise.Promise, handled);
+    gc_relocation.rewriteOptionalSlot(v, promise.Promise, &ctx.unhandled_rejections.head);
+    gc_relocation.rewriteOptionalSlot(v, promise.Promise, &ctx.unhandled_rejections.tail);
+    gc_relocation.rewriteOptionalSlot(v, promise.Promise, &ctx.handled_rejections.head);
+    gc_relocation.rewriteOptionalSlot(v, promise.Promise, &ctx.handled_rejections.tail);
     relocateModuleGraph(&ctx.module_registry, v);
     if (ctx.mod_cache) |cache|
         if (cache != &ctx.module_registry) relocateModuleGraph(cache, v);
@@ -4021,12 +4073,16 @@ pub const Binding = struct {
         for (ctx.next_ticks.pendingItems()) |mt| traceMicrotask(mt, v);
         if (par != null) ctx.next_ticks.release();
 
-        // `async_waiters` + public `timers` + protected/C-API handles +
-        // `finalization_cleanup_jobs` share `realm_lock` (taken by their
-        // mutators only under parallel_js).
+        // Rejection queues + `async_waiters` + public `timers` +
+        // protected/C-API handles + `finalization_cleanup_jobs` share
+        // `realm_lock` (taken by their mutators only under parallel_js). The
+        // queue traversal marks every intrusive node; `tracePromise` therefore
+        // does not treat the overlaid rejection successor as an independent edge.
         ctx.realmLock();
-        for (ctx.unhandled_rejections.items) |rejected| markManaged(v, rejected);
-        for (ctx.handled_rejections.items) |handled| markManaged(v, handled);
+        var unhandled = ctx.unhandled_rejections.iterator();
+        while (unhandled.next()) |rejected| markManaged(v, rejected);
+        var handled = ctx.handled_rejections.iterator();
+        while (handled.next()) |handled_promise| markManaged(v, handled_promise);
         traceModuleGraph(&ctx.module_registry, v);
         if (ctx.mod_cache) |cache|
             if (cache != &ctx.module_registry) traceModuleGraph(cache, v);
@@ -4329,15 +4385,12 @@ pub const Binding = struct {
             .promise => {
                 const p: *promise.Promise = @ptrCast(@alignCast(cell));
                 if (p.gc_owned) {
-                    const count = p.on_fulfill.items.len + p.on_reject.items.len +
-                        @intFromBool(p.on_fulfill_inline != null) + @intFromBool(p.on_reject_inline != null);
+                    std.debug.assert(!p.rejection_linked.load(.acquire));
+                    const count = (p.reactions.items.len + @intFromBool(p.reactions_inline != null)) * 2;
                     if (ctx.gc_finalizer_stats_out) |stats| stats.promise_reactions += count;
-                    p.on_fulfill.deinit(ctx.gpa);
-                    p.on_reject.deinit(ctx.gpa);
-                    p.on_fulfill_inline = null;
-                    p.on_reject_inline = null;
-                    p.on_fulfill = .empty;
-                    p.on_reject = .empty;
+                    p.reactions.deinit(ctx.gpa);
+                    p.reactions_inline = null;
+                    p.reactions = .empty;
                     if (count > 0) {
                         _ = @atomicRmw(usize, &ctx.gc_promise_reactions_live, .Sub, count, .monotonic);
                     }
@@ -4762,6 +4815,14 @@ test "Object fits the 128-byte GC slab and cold sidecar fits 256 bytes" {
     // GC allocation class below is the production invariant, not one raw size.
     try std.testing.expectEqual(@as(usize, 128), Heap.cellAllocationBytes(Object));
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
+}
+
+test "Promise fits the 256-byte GC slab" {
+    // The rejection successor shares the mutually-exclusive awaiting slot and
+    // fulfill/reject reactions share one paired list, preserving the exact
+    // allocation class while making both publication paths transactional.
+    try std.testing.expect(@sizeOf(promise.Promise) <= 256);
+    try std.testing.expectEqual(@as(usize, 256), Heap.cellAllocationBytes(promise.Promise));
 }
 
 fn managedCellType(comptime kind: CellKind) type {
@@ -5410,6 +5471,7 @@ test "gc traces only the active microtask variant" {
     var then_fn = Object{};
     var inactive_argument = Object{};
     var reaction_result = promise.Promise{ .gc_owned = true };
+    var settlement_result = promise.Promise{ .gc_owned = true };
     var thenable_result = promise.Promise{ .gc_owned = true };
     var inactive_result = promise.Promise{ .gc_owned = true };
 
@@ -5429,6 +5491,17 @@ test "gc traces only the active microtask variant" {
     try std.testing.expect(!reaction_marks.contains(&thenable));
     try std.testing.expect(!reaction_marks.contains(&then_fn));
     try std.testing.expect(!reaction_marks.contains(&inactive_result));
+
+    var settlement_marks = Recorder{};
+    traceMicrotask(.{
+        .kind = .settlement_batch,
+        .reaction = undefined,
+        .argument = Value.obj(&inactive_argument),
+        .fulfilled = true,
+        .promise = &settlement_result,
+    }, &settlement_marks);
+    try std.testing.expect(settlement_marks.contains(&settlement_result));
+    try std.testing.expect(!settlement_marks.contains(&inactive_argument));
 
     var thenable_marks = Recorder{};
     traceMicrotask(.{

@@ -232,6 +232,8 @@ opportunistic job checkpoints. Precise heaps use zig-gc's race-safe
 live/last-full snapshot; arena VMs report committed capacity. Seven job/registry
 shims queue exact native or encoded work,
 drain one realm or all live VM realms, notify each unhandled rejection once,
+consume rejection notifications through an allocation-free intrusive FIFO,
+and commit each queue root with its Promise tracker state,
 delete exact per-realm module keys, and invalidate all native code safely after
 active execution/compilation leases retire. Delete-all-code also clears the
 selected realm's module/source caches and leaves bytecode fallback valid. Eight

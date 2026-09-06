@@ -3300,10 +3300,10 @@ pub const Interpreter = struct {
     /// Realm-local HostPromiseRejectionTracker queue. Rejected promises remain
     /// rooted here until the explicit host notification checkpoint consumes or
     /// skips them after a later handler attachment.
-    unhandled_rejections: ?*std.ArrayListUnmanaged(*promise.Promise) = null,
+    unhandled_rejections: ?*promise.RejectionQueue = null,
     /// Promises first handled after host notification. The explicit host
     /// checkpoint consumes this queue to emit one `rejectionHandled` event.
-    handled_rejections: ?*std.ArrayListUnmanaged(*promise.Promise) = null,
+    handled_rejections: ?*promise.RejectionQueue = null,
     /// True under `parallel_js`: serialize content mutation of whichever
     /// microtask queue this interpreter is currently targeting. The lock lives
     /// on the queue itself so independent spawned-thread queues do not contend
@@ -10839,10 +10839,11 @@ pub const Interpreter = struct {
     /// Holds the current microtask queue lock only across the queue mutation — never across the
     /// job's execution — so it stays a brief leaf-lock that can't deadlock with
     /// the GIL or any per-structure lock.
-    fn microtaskDequeue(self: *Interpreter) ?promise.Microtask {
+    fn microtaskDequeue(self: *Interpreter) EvalError!?promise.Microtask {
         const q = self.microtasks orelse return null;
         self.lockMicrotasks();
         defer self.unlockMicrotasks();
+        try promise.materializeSettlementBatches(self, q);
         return q.pop();
     }
 
@@ -10857,6 +10858,7 @@ pub const Interpreter = struct {
     ) EvalError!bool {
         self.lockJobQueue(queue);
         defer self.unlockJobQueue(queue);
+        try promise.materializeSettlementBatches(self, queue);
         const pending = queue.pendingItems();
         if (pending.len == 0) {
             queue.clearRetainingCapacity();
@@ -11457,7 +11459,7 @@ pub const Interpreter = struct {
     }
 
     fn runOneMicrotask(self: *Interpreter) EvalError!bool {
-        if (self.microtaskDequeue()) |job| {
+        if (try self.microtaskDequeue()) |job| {
             self.current_microtask = job;
             promise.runJob(self, &self.current_microtask.?) catch |err| {
                 self.current_microtask = null;

@@ -32844,6 +32844,40 @@ test "private process rejection and uncaught dispatch preserve pinned events" {
     )).asBool());
 
     _ = try internal.evaluate(
+        \\globalThis.__fifo_promises_874 = [];
+        \\globalThis.__fifo_events_874 = [];
+        \\globalThis.__fifo_unhandled_874 = function (reason) {
+        \\  if (typeof reason !== "number" || reason < 874000 || reason > 874064) return;
+        \\  __fifo_events_874.push(["unhandled", reason]);
+        \\  if (reason === 874000) Promise.reject(874064);
+        \\};
+        \\globalThis.__fifo_handled_874 = function (promise) {
+        \\  const index = __fifo_promises_874.indexOf(promise);
+        \\  if (index !== -1) __fifo_events_874.push(["handled", index]);
+        \\};
+        \\process.on("unhandledRejection", __fifo_unhandled_874);
+        \\process.on("rejectionHandled", __fifo_handled_874);
+        \\for (let i = 0; i < 64; i++) __fifo_promises_874.push(Promise.reject(874000 + i));
+    );
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    try std.testing.expect((try internal.evaluate(
+        \\__fifo_events_874.length === 65 &&
+        \\__fifo_events_874.every((event, index) => event[0] === "unhandled" && event[1] === 874000 + index)
+    )).asBool());
+    _ = try internal.evaluate(
+        \\for (const promise of __fifo_promises_874) promise.catch(function () {});
+    );
+    JSC__JSGlobalObject__handleRejectedPromises(context);
+    try std.testing.expect((try internal.evaluate(
+        \\__fifo_events_874.length === 129 &&
+        \\__fifo_events_874.slice(65).every((event, index) => event[0] === "handled" && event[1] === index)
+    )).asBool());
+    _ = try internal.evaluate(
+        \\process.off("unhandledRejection", __fifo_unhandled_874);
+        \\process.off("rejectionHandled", __fifo_handled_874);
+    );
+
+    _ = try internal.evaluate(
         \\process.setUncaughtExceptionCaptureCallback(function () { throw 242; });
     );
     try std.testing.expectEqual(@as(c_int, 1), Bun__handleUncaughtException(context, uncaught, 0));

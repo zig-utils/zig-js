@@ -1021,6 +1021,10 @@ pub const RuntimeAttributionProfiler = struct {
         }
     }
 
+    pub fn abortGcCycle(self: *RuntimeAttributionProfiler) void {
+        _ = self.gc_cycle_started_ns.swap(0, .acq_rel);
+    }
+
     fn tryCounterSnapshot(self: *RuntimeAttributionProfiler) ?Snapshot {
         if (self.counter_mutations_active.load(.acquire) != 0) return null;
         const before = self.counter_mutation_epoch.load(.acquire);
@@ -1140,6 +1144,8 @@ test "RuntimeAttributionProfiler records exact backing, cell, and pause samples"
     profile.finishGcCycle(false, 175);
     profile.beginGcCycle(200);
     profile.finishGcCycle(true, 325);
+    profile.beginGcCycle(400);
+    profile.abortGcCycle();
 
     const before_free = profile.snapshot();
     try std.testing.expectEqual(@as(u64, 1), before_free.allocation.backing_allocations);
@@ -4118,9 +4124,9 @@ pub const Context = struct {
     next_ticks: @import("promise.zig").MicrotaskQueue = .{},
     /// Rejections awaiting the embedder's explicit notification checkpoint.
     /// Promise cells stay rooted until notified once or handled before notice.
-    unhandled_rejections: std.ArrayListUnmanaged(*promise.Promise) = .empty,
+    unhandled_rejections: promise.RejectionQueue = .{},
     /// Previously-notified rejections that acquired their first handler later.
-    handled_rejections: std.ArrayListUnmanaged(*promise.Promise) = .empty,
+    handled_rejections: promise.RejectionQueue = .{},
     print_buffer: std.ArrayListUnmanaged(u8) = .empty,
     /// SharedArrayBuffer storage references this realm holds (one per SAB
     /// wrapper created here). Released in `destroy` — shared bytes live in
@@ -4367,6 +4373,7 @@ pub const Context = struct {
     gc_par_finish_retries_max: std.atomic.Value(u64) = .init(0),
     gc_par_publication_timeout_aborts: std.atomic.Value(u64) = .init(0),
     gc_par_round_limit_aborts: std.atomic.Value(u64) = .init(0),
+    gc_par_mark_work_aborts: std.atomic.Value(u64) = .init(0),
     gc_par_born_growth_rounds: std.atomic.Value(u64) = .init(0),
     gc_par_round_extension_rounds: std.atomic.Value(u64) = .init(0),
     gc_par_deferred_rounds: std.atomic.Value(u64) = .init(0),
@@ -4655,6 +4662,7 @@ pub const Context = struct {
         aborts: u64,
         publication_timeout_aborts: u64,
         round_limit_aborts: u64,
+        mark_work_aborts: u64,
         generations: u64,
         peer_publications: u64,
         finish_retries: u64,
@@ -5978,8 +5986,8 @@ pub const Context = struct {
         }
         return self.microtasks.isEmpty() and
             self.next_ticks.isEmpty() and
-            self.unhandled_rejections.items.len == 0 and
-            self.handled_rejections.items.len == 0 and
+            self.unhandled_rejections.isEmpty() and
+            self.handled_rejections.isEmpty() and
             self.timers.items.len == 0 and
             self.finalization_cleanup_jobs.items.len == 0 and
             self.async_waiters.items.len == 0;
@@ -6045,12 +6053,18 @@ pub const Context = struct {
         self.private_weak_roots.deinit(self.gpa);
         for (self.private_commonjs_functions.items) |root| self.gpa.destroy(root);
         self.private_commonjs_functions.deinit(self.gpa);
+        if (self.finishConcurrentGCIfActive() == .deferred)
+            @panic("parallel collector remained active after every Context thread joined");
+        // Intrusive rejection queues store their successor in Promise cells.
+        // Unlink them while the precise heap is still live; after `h.deinit`
+        // even reading the next pointer would dereference reclaimed storage.
+        self.unhandled_rejections.clear();
+        self.handled_rejections.clear();
         // Reclaim every GC cell (running finalizers) before the arena and the
         // Context itself go away — GC cells are gpa-backed and disjoint from the
         // arena. Keep `sab_retains` alive until after finalizers run: live
         // SharedArrayBuffer wrapper cells release their tracked storage refs
         // there when GC is enabled.
-        _ = self.finishConcurrentGCIfActive(); // join any marker before heap teardown
         if (self.gc) |h| {
             if (self.gc_cell_backing) |backing| {
                 backing.beginBulkTeardown();
@@ -6106,8 +6120,6 @@ pub const Context = struct {
         self.external_string_owners.deinit(self.gpa);
         self.module_registry.deinit(self.arena());
         self.module_loader_sources.deinit(self.arena());
-        self.unhandled_rejections.deinit(self.arena());
-        self.handled_rejections.deinit(self.arena());
         if (self.locked_arena) |la| {
             la.resetLocalFor();
             self.gpa.destroy(la);
@@ -6176,8 +6188,6 @@ pub const Context = struct {
         self.external_string_owners.deinit(self.gpa);
         self.module_registry.deinit(self.arena());
         self.module_loader_sources.deinit(self.arena());
-        self.unhandled_rejections.deinit(self.arena());
-        self.handled_rejections.deinit(self.arena());
         wasm_api.teardownWasmStore(self);
         self.wasm_registry.deinit(self.gpa);
         self.sab_retains.deinit();
@@ -6192,6 +6202,11 @@ pub const Context = struct {
         self.assertOwnerThread();
         std.debug.assert(self.gc == null and self.locked_arena == null and self.gil == null);
         std.debug.assert(self.shared_jit_owner != null);
+        // Arena-backed Promise cells are still live here. Keep queue traversal
+        // out of `deinitSharedRealmState`: precise-realm retirement calls that
+        // helper only after its Promise cells have been reclaimed.
+        self.unhandled_rejections.clear();
+        self.handled_rejections.clear();
         self.deinitSharedRealmState();
         self.gpa.destroy(self);
     }
@@ -6215,10 +6230,15 @@ pub const Context = struct {
         self.teardown_stop.store(true, .release);
         agent.interruptWaiters();
         self.cancelAllTimers();
+        // The owner drives the shared heap's marker. Stop it before unlinking
+        // this realm's intrusive Promise roots; the retiring collection below
+        // starts from a stable realm graph.
+        if (owner.finishConcurrentGCIfActive() == .deferred)
+            return error.RealmNotQuiescent;
         self.microtasks.clearRetainingCapacity();
         self.next_ticks.clearRetainingCapacity();
-        self.unhandled_rejections.clearRetainingCapacity();
-        self.handled_rejections.clearRetainingCapacity();
+        self.unhandled_rejections.clear();
+        self.handled_rejections.clear();
         self.finalization_cleanup_jobs.clearRetainingCapacity();
         self.async_waiters.clearRetainingCapacity();
         for (self.protected_values.items) |handle| self.gpa.destroy(handle);
@@ -6961,6 +6981,7 @@ pub const Context = struct {
             .aborts = self.gc_par_aborts.load(.monotonic),
             .publication_timeout_aborts = self.gc_par_publication_timeout_aborts.load(.monotonic),
             .round_limit_aborts = self.gc_par_round_limit_aborts.load(.monotonic),
+            .mark_work_aborts = self.gc_par_mark_work_aborts.load(.monotonic),
             .generations = self.gc_par_generations.load(.monotonic),
             .peer_publications = self.gc_par_peer_publications.load(.monotonic),
             .finish_retries = self.gc_par_finish_retries.load(.monotonic),
@@ -6975,6 +6996,7 @@ pub const Context = struct {
         last_full_collection_bytes: usize,
         collections: usize,
         full_collections: usize,
+        aborted_collections: usize,
     };
 
     /// VM-facing heap accounting used by revision-pinned private bindings.
@@ -6988,6 +7010,7 @@ pub const Context = struct {
                 .last_full_collection_bytes = accounting.last_full_collection_bytes,
                 .collections = accounting.collections,
                 .full_collections = accounting.full_collections,
+                .aborted_collections = accounting.aborted_collections,
             };
         }
         if (self.locked_arena) |arena_lock| arena_lock.acquire();
@@ -6998,6 +7021,7 @@ pub const Context = struct {
             .last_full_collection_bytes = capacity,
             .collections = 0,
             .full_collections = 0,
+            .aborted_collections = 0,
         };
     }
 
@@ -7213,8 +7237,8 @@ pub const Context = struct {
 
     /// Lock `realm_lock` only under `parallel_js` (a no-op in GIL mode, so those
     /// realm-list mutations stay byte-identical there). Guards `async_waiters`,
-    /// public `timers`, `protected_values`, `c_api_handles`, and
-    /// `finalization_cleanup_jobs`
+    /// public `timers`, rejection tracker queues, `protected_values`, C-API
+    /// handles, and `finalization_cleanup_jobs`
     /// against the mid-script parallel collector's reads.
     fn spinLockMutex(m: *std.atomic.Mutex) void {
         var spins: usize = 0;
@@ -7588,6 +7612,7 @@ pub const Context = struct {
             return;
         }
         h.collect();
+        if (self.markWorkCollectionAborted(h)) return;
         self.noteQuiescentFullCollection(h);
         wasm_api.collectWasmGarbage(self);
         self.trimCollectedCellBacking(.ordinary_collection);
@@ -7699,7 +7724,8 @@ pub const Context = struct {
         backing.beginRelocationPlanning();
         defer backing.endRelocationPlanning();
         const result = h.collectAndCompact();
-        if (!moving_safepoint and result.status != .unsupported and result.status != .out_of_memory)
+        if (self.markWorkCollectionAborted(h)) return result;
+        if (!moving_safepoint and result.status != .unsupported)
             self.noteQuiescentFullCollection(h);
         wasm_api.collectWasmGarbage(self);
         if (result.status == .compacted or result.status == .no_candidates)
@@ -7794,7 +7820,8 @@ pub const Context = struct {
         _ = self.gc_auto_compaction_attempts.fetchAdd(1, .monotonic);
         const result = self.compactGarbageWithConductor(null);
         self.recordAutomaticCompactionResult(result);
-        if (result.status != .unsupported)
+        const mark_aborted = if (self.gc) |h| h.markWorkPublicationFailed() else false;
+        if (result.status != .unsupported and !mark_aborted)
             self.gc_auto_compaction_pending.store(false, .release);
         return result;
     }
@@ -7803,6 +7830,15 @@ pub const Context = struct {
         const state = self.gc_state orelse return;
         state.quiescent_full_promoted_bytes = h.total_minor_promoted_bytes;
         state.quiescent_full_live_bytes = h.bytes_live;
+    }
+
+    /// Collector scratch OOM deliberately leaves the heap unswept. Preserve
+    /// host pressure so the next safe boundary retries from a fresh mark rather
+    /// than accounting, trimming, or compacting an attempt that did no reclaim.
+    fn markWorkCollectionAborted(self: *Context, h: *const GcHeap) bool {
+        if (!h.markWorkPublicationFailed()) return false;
+        self.gc_requested.store(true, .release);
+        return true;
     }
 
     fn hasQuiescentPromotionDebt(self: *const Context, h: *const GcHeap) bool {
@@ -7847,11 +7883,13 @@ pub const Context = struct {
         var full_collection = false;
         if (h.shouldCollectOld() or self.hasQuiescentPromotionDebt(h)) {
             h.collect();
+            if (self.markWorkCollectionAborted(h)) return;
             self.noteQuiescentFullCollection(h);
             full_collection = true;
         } else if (h.shouldCollectYoung()) {
             const result = self.collectYoungAfterRootValidation(h);
             if (result.status == .unsupported) h.collectYoung();
+            if (self.markWorkCollectionAborted(h)) return;
         } else {
             return;
         }
@@ -7919,6 +7957,7 @@ pub const Context = struct {
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
         h.collect();
+        if (self.markWorkCollectionAborted(h)) return false;
         // The failed request may itself be larger than the ordinary headroom
         // threshold, so recovery gives up every eligible empty suffix.
         self.trimCollectedCellBacking(.allocation_failure);
@@ -8010,12 +8049,14 @@ pub const Context = struct {
                 // fresh precise collection if the caller still wants one.
                 if (self.gc_par_collector.load(.acquire) != null) return .deferred;
                 h.abortConcurrentMarkParallel();
+                _ = self.markWorkCollectionAborted(h);
                 return .aborted;
             }
             self.gc_scan_native_stack = true;
             defer self.gc_scan_native_stack = false;
             h.finishConcurrentMark();
             self.endConcurrentEnvironmentTrace();
+            if (self.markWorkCollectionAborted(h)) return .aborted;
             self.gc_concurrent_post_sweep_pending = true;
             return .finished;
         }
@@ -8095,6 +8136,7 @@ pub const Context = struct {
         const elapsed = parallelGcNowNs() -| started_ns;
         _ = self.gc_minor_pause_ns_total.fetchAdd(elapsed, .monotonic);
         self.recordParallelGcMax(&self.gc_minor_pause_ns_max, elapsed);
+        _ = self.markWorkCollectionAborted(h);
         return true;
     }
 
@@ -8328,6 +8370,10 @@ pub const Context = struct {
             if (moving_nursery_request) {
                 const result = self.collectYoungAfterRootValidation(h);
                 if (result.status == .unsupported) h.collectYoung();
+                if (self.markWorkCollectionAborted(h)) {
+                    self.deferParallelGcRetry();
+                    return;
+                }
                 const reset_bytes = backing.resetParallelCellBytesSinceCollection();
                 _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
                 self.movingCheckpointRequest().store(false, .release);
@@ -8344,8 +8390,12 @@ pub const Context = struct {
             const result = self.compactGarbageWithCooperativeStop(machine, request);
             if (automatic) {
                 self.recordAutomaticCompactionResult(result);
-                if (result.status != .unsupported)
+                if (result.status != .unsupported and !h.markWorkPublicationFailed())
                     self.gc_auto_compaction_pending.store(false, .release);
+            }
+            if (self.markWorkCollectionAborted(h)) {
+                self.deferParallelGcRetry();
+                return;
             }
             if (result.status != .unsupported) {
                 const reset_bytes = backing.resetParallelCellBytesSinceCollection();
@@ -8362,6 +8412,10 @@ pub const Context = struct {
         h.collectYoung();
         self.gc_scan_parked_stacks = false;
         self.gc_scan_native_stack = false;
+        if (self.markWorkCollectionAborted(h)) {
+            self.deferParallelGcRetry();
+            return;
+        }
         const reset_bytes = backing.resetParallelCellBytesSinceCollection();
         _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
         if (!pending_compaction)
@@ -8435,6 +8489,8 @@ pub const Context = struct {
                     h.finishConcurrentMark();
                     self.gc_scan_native_stack = false;
                     self.endConcurrentEnvironmentTrace();
+                    if (!self.markWorkCollectionAborted(h))
+                        self.gc_concurrent_post_sweep_pending = true;
                     break :blk null;
                 };
             }
@@ -8455,11 +8511,18 @@ pub const Context = struct {
         if (h.marking.load(.acquire)) {
             // Drain a bounded slice of the grey set; when it empties, close the
             // cycle (re-scan roots under the GIL, then sweep).
-            if (h.markStep(mark_budget)) h.finishMarking();
+            if (h.markStep(mark_budget)) {
+                h.finishMarking();
+                _ = self.markWorkCollectionAborted(h);
+            }
         } else if (h.shouldCollectOld()) {
             // Begin an incremental cycle: snapshot roots, then let the mutator
             // run between safepoints with the barrier shading its stores.
             h.startMarking();
+            if (h.markWorkPublicationFailed()) {
+                h.finishMarking();
+                _ = self.markWorkCollectionAborted(h);
+            }
         }
     }
 
@@ -8621,6 +8684,18 @@ pub const Context = struct {
         }
     }
 
+    fn abortParallelMarkWorkAttempt(self: *Context, h: *GcHeap) bool {
+        if (!h.markWorkPublicationFailed()) return false;
+        self.gc_scan_native_stack = true;
+        h.abortConcurrentMarkParallel();
+        self.gc_scan_native_stack = false;
+        _ = self.gc_par_aborts.fetchAdd(1, .monotonic);
+        _ = self.gc_par_mark_work_aborts.fetchAdd(1, .monotonic);
+        _ = self.markWorkCollectionAborted(h);
+        self.deferParallelGcRetry();
+        return true;
+    }
+
     fn driveParallelCollection(
         self: *Context,
         h: *GcHeap,
@@ -8639,6 +8714,7 @@ pub const Context = struct {
         self.gc_scan_native_stack = true;
         h.beginConcurrentMarkParallel();
         self.gc_scan_native_stack = false;
+        if (self.abortParallelMarkWorkAttempt(h)) return false;
 
         const base_max_rounds: u32 = 32;
         const max_rounds: u32 = 64;
@@ -8666,6 +8742,7 @@ pub const Context = struct {
                 self.gc_scan_native_stack = true;
                 _ = h.concurrentMarkRound();
                 self.gc_scan_native_stack = false;
+                if (self.abortParallelMarkWorkAttempt(h)) return false;
                 waited += 1;
                 const now_ns = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
                 if (waited >= wait_budget and now_ns >= deadline_ns) {
@@ -8691,6 +8768,7 @@ pub const Context = struct {
             self.gc_scan_native_stack = true;
             while (!h.concurrentMarkRound()) {}
             self.gc_scan_native_stack = false;
+            if (self.abortParallelMarkWorkAttempt(h)) return false;
 
             // On any one-round lull (born-cell set unchanged → peers not
             // mid-allocation, so born payloads are initialized) with nothing
@@ -8715,6 +8793,7 @@ pub const Context = struct {
                     self.gc_par_retry_after_ns.store(0, .release);
                     return true;
                 }
+                if (self.abortParallelMarkWorkAttempt(h)) return false;
                 _ = self.gc_par_finish_retries.fetchAdd(1, .monotonic);
                 attempt_finish_retries += 1;
                 self.recordParallelGcMax(&self.gc_par_finish_retries_max, attempt_finish_retries);
@@ -8873,6 +8952,7 @@ pub const Context = struct {
             .minor_prepare_begin, .full_prepare_begin => profile.beginGcCycle(now),
             .minor_post_sweep_end => profile.finishGcCycle(false, now),
             .full_post_sweep_end => profile.finishGcCycle(true, now),
+            .minor_abort, .full_abort => profile.abortGcCycle(),
             else => {},
         };
         if (!phase_profile_enabled) return;
@@ -8894,6 +8974,7 @@ pub const Context = struct {
                 _ = self.gc_full_post_sweep_ns_total.fetchAdd(elapsed, .monotonic);
                 _ = self.gc_full_profile_cycles.fetchAdd(1, .monotonic);
             },
+            .minor_abort, .full_abort => self.gc_phase_started_ns.store(0, .release),
         }
     }
 
@@ -16056,7 +16137,7 @@ test "Map/Set constructors require strict captured iterator records" {
         \\nextGets === 3 && nextCalls === 8 && replacementCalls === 0 &&
         \\set.has(3) && set.has(4) && map.get("a") === 1 && map.get("b") === 2 &&
         \\iteratorGets === 1 && receiverOk && overridden.has(9) && !overridden.has(1) &&
-        \\sameError && closeCalls === 1
+        \\sameError && closeCalls === 0
     )).asBool());
 }
 
@@ -21776,6 +21857,46 @@ test "Context runtime heap accounting tracks precise full collection" {
     try std.testing.expectEqual(collected.live_bytes, collected.last_full_collection_bytes);
     try std.testing.expectEqual(before.full_collections + 1, collected.full_collections);
     try std.testing.expect(!ctx.gc_requested.load(.acquire));
+}
+
+test "Context preserves retry pressure after fail-closed mark-work OOM" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const h = ctx.gc.?;
+
+    _ = try ctx.evaluate(
+        \\globalThis.markWorkRoot = { child: { tag: 73 } };
+        \\0
+    );
+    const old_aux = h.aux;
+    h.mark_stack.clearAndFree(old_aux);
+    h.weak_slots.clearAndFree(old_aux);
+    h.weak_atomic_slots.clearAndFree(old_aux);
+    var unavailable = std.testing.FailingAllocator.init(old_aux, .{ .fail_index = 0 });
+    h.setAuxAllocator(unavailable.allocator());
+
+    const before = ctx.runtimeHeapAccounting();
+    ctx.requestGarbageCollection();
+    ctx.collectGarbage();
+    h.setAuxAllocator(old_aux);
+
+    const aborted = ctx.runtimeHeapAccounting();
+    try std.testing.expect(unavailable.has_induced_failure);
+    try std.testing.expect(h.markWorkPublicationFailed());
+    try std.testing.expectEqual(before.collections, aborted.collections);
+    try std.testing.expectEqual(before.aborted_collections + 1, aborted.aborted_collections);
+    try std.testing.expect(ctx.gc_requested.load(.acquire));
+    // The next evaluation boundary consumes the preserved request. Reading the
+    // graph before that boundary completes is not exposed by the public API, so
+    // the successful property read simultaneously proves survival and retry.
+    try std.testing.expect((try ctx.evaluate("globalThis.markWorkRoot.child.tag === 73")).asBool());
+
+    const recovered = ctx.runtimeHeapAccounting();
+    try std.testing.expect(!h.markWorkPublicationFailed());
+    try std.testing.expectEqual(before.collections + 1, recovered.collections);
+    try std.testing.expectEqual(aborted.aborted_collections, recovered.aborted_collections);
+    try std.testing.expect(!ctx.gc_requested.load(.acquire));
+    try std.testing.expect((try ctx.evaluate("globalThis.markWorkRoot.child.tag === 73")).asBool());
 }
 
 test "Context heap_limit_bytes allocation pressure is catchable with catch binding" {
@@ -37491,6 +37612,7 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
     const aborts = ctx.gc_par_aborts.load(.monotonic);
     const publication_aborts = ctx.gc_par_publication_timeout_aborts.load(.monotonic);
     const round_aborts = ctx.gc_par_round_limit_aborts.load(.monotonic);
+    const mark_work_aborts = ctx.gc_par_mark_work_aborts.load(.monotonic);
     const pause_total = ctx.gc_par_pause_ns_total.load(.monotonic);
     const pause_max = ctx.gc_par_pause_ns_max.load(.monotonic);
     const wait_total = ctx.gc_par_publication_wait_iterations.load(.monotonic);
@@ -37506,7 +37628,7 @@ fn expectParallelGcTelemetryCoherent(ctx: *Context) !void {
 
     try std.testing.expect(attempts > 0);
     try std.testing.expectEqual(attempts, collections + aborts);
-    try std.testing.expectEqual(aborts, publication_aborts + round_aborts);
+    try std.testing.expectEqual(aborts, publication_aborts + round_aborts + mark_work_aborts);
     try std.testing.expect(generations >= attempts);
     try std.testing.expect(pause_max <= pause_total);
     try std.testing.expect(pause_total > 0);
