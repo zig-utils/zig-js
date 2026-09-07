@@ -2879,6 +2879,7 @@ pub const Parser = struct {
             return self.parseArrowBody(params, false, start, uses_direct_eval_in_parameters);
         }
 
+        const expression_start = self.pos;
         const left = try self.parseConditional();
         if (self.check(.assign)) {
             // An array/object literal on the LHS is a destructuring pattern.
@@ -2901,6 +2902,7 @@ pub const Parser = struct {
             _ = self.advance();
             const value = try self.parseAssignment();
             if (target.* == .identifier and !lhs_paren) nameAnon(value, target.identifier); // `f = function(){}`
+            if (target.* == .member) target.member.source = self.sourceFrom(expression_start);
             return self.alloc(.{ .assign = .{ .target = target, .value = value, .target_parenthesized = lhs_paren } });
         }
         // Compound assignment `a op= b` desugars to `a = a op b`.
@@ -3220,6 +3222,7 @@ pub const Parser = struct {
         }
         const t = self.cur();
         if (isKeyword(t, "delete")) {
+            const delete_start = self.pos;
             _ = self.advance();
             const operand = try self.parseUnary();
             // Strict mode: `delete` of an unqualified identifier is a SyntaxError.
@@ -3229,6 +3232,11 @@ pub const Parser = struct {
             if (operand.* == .member and operand.member.property.len > 0 and operand.member.property[0] == '#')
                 return ParseError.UnexpectedToken;
             try self.rejectExponentAfterUnary();
+            if (operand.* == .member) {
+                operand.member.source = self.sourceFrom(delete_start);
+            } else if (operand.* == .optional_chain and operand.optional_chain.* == .member) {
+                operand.optional_chain.member.source = self.sourceFrom(delete_start);
+            }
             return self.alloc(.{ .delete_expr = operand });
         }
         const op: ?ast.UnaryOp = switch (t.kind) {
@@ -3321,7 +3329,7 @@ pub const Parser = struct {
             const suffix_token = self.pos;
             if (self.match(.dot)) {
                 const name = try self.parseMemberName();
-                e = try self.alloc(.{ .member = .{ .object = e, .property = name } });
+                e = try self.alloc(.{ .member = .{ .object = e, .property = name, .source = self.sourceFrom(start_token) } });
             } else if (self.match(.question_dot)) {
                 has_optional = true;
                 if (self.check(.lparen)) {
@@ -3340,10 +3348,10 @@ pub const Parser = struct {
                     const idx = try self.parseExpression();
                     self.no_in = saved_no_in;
                     try self.expect(.rbracket);
-                    e = try self.alloc(.{ .member = .{ .object = e, .computed = idx, .optional = true } });
+                    e = try self.alloc(.{ .member = .{ .object = e, .computed = idx, .optional = true, .source = self.sourceFrom(start_token) } });
                 } else {
                     const name = try self.parseMemberName();
-                    e = try self.alloc(.{ .member = .{ .object = e, .property = name, .optional = true } });
+                    e = try self.alloc(.{ .member = .{ .object = e, .property = name, .optional = true, .source = self.sourceFrom(start_token) } });
                 }
             } else if (self.match(.lbracket)) {
                 const saved_no_in = self.no_in; // a computed key is `[+In]`
@@ -3351,7 +3359,7 @@ pub const Parser = struct {
                 const idx = try self.parseExpression();
                 self.no_in = saved_no_in;
                 try self.expect(.rbracket);
-                e = try self.alloc(.{ .member = .{ .object = e, .computed = idx } });
+                e = try self.alloc(.{ .member = .{ .object = e, .computed = idx, .source = self.sourceFrom(start_token) } });
             } else if (self.check(.lparen)) {
                 const args = try self.parseArgs();
                 if (!has_optional) self.recordDirectEvalUse(e);
@@ -3370,7 +3378,7 @@ pub const Parser = struct {
                 // Tagged template: `tag`...`` — call `tag` with the cooked-string
                 // array (carrying `raw`) and the substitution values.
                 const tmpl = self.advance();
-                e = try self.parseTaggedTemplate(e, tmpl.text, tmpl.template_substitutions);
+                e = try self.parseTaggedTemplate(e, tmpl.text, tmpl.template_substitutions, self.sourceFrom(start_token));
             } else break;
         }
         if (has_optional) e = try self.alloc(.{ .optional_chain = e });
@@ -3401,6 +3409,7 @@ pub const Parser = struct {
     /// (the first `(...)` is the constructor's argument list). Any trailing
     /// `.prop` / call chain is handled by the enclosing `parseMemberTail`.
     fn parseNew(self: *Parser) ParseError!*Node {
+        const new_start_token = self.pos;
         _ = self.advance(); // new
         if (self.in_async and isKeyword(self.cur(), "await")) return ParseError.UnexpectedToken;
         // `new.target` meta-property.
@@ -3412,6 +3421,7 @@ pub const Parser = struct {
             if (self.new_target_depth == 0) return ParseError.UnexpectedToken;
             return self.alloc(.new_target_expr);
         }
+        const callee_start_token = self.pos;
         const parenthesized_callee = self.check(.lparen);
         var callee = if (parenthesized_callee) blk: {
             _ = self.advance();
@@ -3431,7 +3441,7 @@ pub const Parser = struct {
                 // `new MemberExpression Arguments` includes private property
                 // access; it has the same lexical-name gate as ordinary access.
                 const name = try self.parseMemberName();
-                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name } });
+                callee = try self.alloc(.{ .member = .{ .object = callee, .property = name, .source = self.sourceFrom(callee_start_token) } });
             } else if (self.check(.question_dot)) {
                 // `new o?.C()` / `new C?.()` is syntactically invalid; callers
                 // must parenthesize the optional chain (`new (o?.C)()`).
@@ -3439,17 +3449,17 @@ pub const Parser = struct {
             } else if (self.match(.lbracket)) {
                 const idx = try self.parseExpression();
                 try self.expect(.rbracket);
-                callee = try self.alloc(.{ .member = .{ .object = callee, .computed = idx } });
+                callee = try self.alloc(.{ .member = .{ .object = callee, .computed = idx, .source = self.sourceFrom(callee_start_token) } });
             } else if (self.check(.template)) {
                 // `new tag`tmpl`` parses as `new (tag`tmpl`)`: a tagged template is a
                 // MemberExpression, so it binds to the `new` operand (the tag call
                 // happens first, then `new` constructs its result).
                 const tmpl = self.advance();
-                callee = try self.parseTaggedTemplate(callee, tmpl.text, tmpl.template_substitutions);
+                callee = try self.parseTaggedTemplate(callee, tmpl.text, tmpl.template_substitutions, self.sourceFrom(callee_start_token));
             } else break;
         }
         const args: []*Node = if (self.check(.lparen)) try self.parseArgs() else &.{};
-        return self.alloc(.{ .new_expr = .{ .callee = callee, .args = args } });
+        return self.alloc(.{ .new_expr = .{ .callee = callee, .args = args, .source = self.sourceFrom(new_start_token) } });
     }
 
     /// Desugar a template literal's raw inner text into string concatenation:
@@ -3607,14 +3617,14 @@ pub const Parser = struct {
     /// decoded), the raw quasis (text verbatim), and the substitution
     /// expressions, then build a `tagged_template` node. There is always one
     /// more quasi than substitution.
-    fn parseTaggedTemplate(self: *Parser, tag: *Node, raw_in: []const u8, substitution_count: usize) ParseError!*Node {
+    fn parseTaggedTemplate(self: *Parser, tag: *Node, raw_in: []const u8, substitution_count: usize, source: []const u8) ParseError!*Node {
         const raw = try normalizeTemplateRaw(self.arena, raw_in);
         if (substitution_count == 0) {
             const cooked = try self.arena.alloc(?[]const u8, 1);
             cooked[0] = try self.cookTemplateQuasi(raw, true);
             const raws = try self.arena.alloc([]const u8, 1);
             raws[0] = raw;
-            return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = &.{} } });
+            return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = &.{}, .source = source } });
         }
         // A tagged template has one more quasi than substitution. The lexer
         // records top-level boundaries during its existing nested scan, letting
@@ -3660,7 +3670,7 @@ pub const Parser = struct {
         if (substitution_index != substitution_count) return ParseError.UnexpectedToken;
         cooked[substitution_index] = try self.cookTemplateQuasi(raw[raw_start..], true);
         raws[substitution_index] = raw[raw_start..];
-        return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = exprs } });
+        return self.alloc(.{ .tagged_template = .{ .tag = tag, .cooked = cooked, .raw = raws, .exprs = exprs, .source = source } });
     }
 
     fn validateTemplateEscape(raw: []const u8, i: usize) ParseError!void {

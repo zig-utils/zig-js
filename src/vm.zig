@@ -4427,6 +4427,10 @@ inline fn vmCallSite(chunk: *const Chunk, ip: usize) interp.CallSite {
     return .{ .bytecode = .{ .chunk = chunk, .instruction = @intCast(ip - 1) } };
 }
 
+inline fn vmEvaluationSite(chunk: *const Chunk, ip: usize) interp.EvaluationSite {
+    return .{ .bytecode = .{ .chunk = chunk, .instruction = @intCast(ip - 1) } };
+}
+
 fn callEvalValue(vm: *Interpreter, callee: Value, args: []const Value, site: interp.CallSite) EvalError!Value {
     const saved = vm.direct_eval_call;
     vm.direct_eval_call = vm.isDirectEvalCallee(callee);
@@ -8745,7 +8749,7 @@ fn runChunk(
             .require_object_coercible => {
                 const input = stack.pop().?;
                 if (input.isNull() or input.isUndefined()) {
-                    if (inst.a == 1) return vm.throwError("TypeError", interp.notAnObjectMessage(input));
+                    if (inst.a == 1) return interp.throwNotAnObject(vm, input, vmEvaluationSite(chunk, ip));
                     // `b` carries 1 + the name index of the pattern's first
                     // static key, so both tiers name the same property.
                     return vm.throwDestructureError(
@@ -8994,6 +8998,8 @@ fn runChunk(
             },
             .get_private_name => {
                 const obj = stack.pop().?;
+                if (obj.isNull() or obj.isUndefined())
+                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = try resolveActivePrivateName(vm, chunk.names.items[inst.a]);
                 const result = try vm.getProperty(obj, name);
@@ -9002,6 +9008,8 @@ fn runChunk(
             },
             .get_prop => {
                 const obj = stack.pop().?;
+                if (obj.isNull() or obj.isUndefined())
+                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = chunk.names.items[inst.a];
                 var result: Value = undefined;
@@ -9085,7 +9093,7 @@ fn runChunk(
                 // RequireObjectCoercible before ToPropertyKey: `null[k]` is a
                 // TypeError before the key's `toString` runs (matches the tree-walker).
                 if (obj.isNull() or obj.isUndefined())
-                    return vm.throwError("TypeError", interp.notAnObjectMessage(obj));
+                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 fast: {
                     // A present dense element has no observable coercion,
                     // accessor, hole, or prototype work. Shared arrays take a
@@ -9287,6 +9295,8 @@ fn runChunk(
             .set_private_name => {
                 const v = stack.pop().?;
                 const obj = stack.pop().?;
+                if (obj.isNull() or obj.isUndefined())
+                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = try resolveActivePrivateName(vm, chunk.names.items[inst.a]);
                 try stack.append(stack_alloc, try nativeSetProperty(vm, null, obj, name, v));
@@ -9294,6 +9304,8 @@ fn runChunk(
             .set_prop => {
                 var v = stack.pop().?;
                 const obj = stack.pop().?;
+                if (obj.isNull() or obj.isUndefined())
+                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (obj.isObject()) try vm.checkRestricted(obj.asObj());
                 const name = chunk.names.items[inst.a];
                 fast: {
@@ -9333,7 +9345,7 @@ fn runChunk(
                 // RequireObjectCoercible before ToPropertyKey (the RHS is already
                 // evaluated); `null[k] = v` throws before the key's `toString` runs.
                 if (obj.isNull() or obj.isUndefined())
-                    return vm.throwError("TypeError", interp.notAnObjectMessage(obj));
+                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 if (try quickDenseArrayStore(vm, obj, key, v)) {
                     if (builtin.is_test) _ = quick_dense_array_store_hits.fetchAdd(1, .monotonic);
                     try stack.append(stack_alloc, v);
@@ -9384,12 +9396,16 @@ fn runChunk(
             },
             .delete_prop => {
                 const obj = stack.pop().?;
+                if (obj.isNull() or obj.isUndefined())
+                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 const deleted = try vm.deleteNamedProperty(obj, chunk.names.items[inst.a], inst.b != 0);
                 try stack.append(stack_alloc, Value.boolVal(deleted));
             },
             .delete_index => {
                 const key = stack.pop().?;
                 const obj = stack.pop().?;
+                if (obj.isNull() or obj.isUndefined())
+                    return interp.throwNotAnObject(vm, obj, vmEvaluationSite(chunk, ip));
                 const deleted = try vm.deleteComputedProperty(obj, key, inst.a != 0);
                 try stack.append(stack_alloc, Value.boolVal(deleted));
             },
@@ -9636,7 +9652,7 @@ fn runChunk(
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
-                const result = try construct(vm, callee, stack.items[base..]);
+                const result = try constructAtSite(vm, callee, stack.items[base..], vmEvaluationSite(chunk, ip));
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
@@ -9796,7 +9812,7 @@ fn runChunk(
             .new_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try construct(vm, callee, try spreadArguments(vm, args_arr)));
+                try stack.append(stack_alloc, try constructAtSite(vm, callee, try spreadArguments(vm, args_arr), vmEvaluationSite(chunk, ip)));
             },
 
             .ret => {
@@ -12906,6 +12922,10 @@ fn finishDerivedConstructor(vm: *Interpreter, exec: *Exec, result: Value) EvalEr
 /// `this` (tagged for `instanceof`); error constructors and tree-walk functions
 /// are delegated to the interpreter.
 fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
+    return constructAtSite(vm, callee, args, .none);
+}
+
+fn constructAtSite(vm: *Interpreter, callee: Value, args: []const Value, site: interp.EvaluationSite) EvalError!Value {
     if (callee.isObject()) {
         if (callee.asObj().jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
@@ -12914,7 +12934,7 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
             // bytecode chunk. Mirror the tree-walker's constructNT check before the
             // chunk shortcut (a plain-function chunk is the only constructible one).
             if (func.is_arrow or func.is_method or func.is_generator or func.is_async)
-                return vm.throwErrorFmt("TypeError", "{s} is not a constructor", .{try interp.notAConstructorSubject(vm, callee)});
+                return interp.throwNotAConstructor(vm, callee, site);
             if (func.chunk) |fchunk| {
                 const this_val = try vm.newInstance(callee.asObj());
                 const this_root = try vm.pushTempRoot(this_val);
@@ -12927,7 +12947,7 @@ fn construct(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Val
             }
         }
     }
-    return vm.construct(callee, args);
+    return vm.constructAtSite(callee, args, site);
 }
 
 /// A single JS-chunk activation for the call trampoline: its own operand

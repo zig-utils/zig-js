@@ -150,11 +150,6 @@ fn jsTrimFlat(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
     return s[lo..hi];
 }
 
-/// JavaScriptCore's wording for a null/undefined base. JSC appends the source
-/// text of the offending expression — `null is not an object (evaluating
-/// 'x.p')` — which needs spans the AST does not carry, so only the leading
-/// clause is reproduced. Distinguishing null from undefined is the part callers
-/// actually branch on, and it is what zig-js previously collapsed.
 /// How JavaScriptCore names the subject of "<x> is not iterable". It does not
 /// render the value: every object — plain, function, Date, RegExp, class
 /// instance — is reported as `{}`, a number is reported by its TYPE, a boolean
@@ -286,7 +281,8 @@ fn calculatedClassName(self: *Interpreter, o: *value.Object) EvalError![]const u
 /// JavaScriptCore-shaped "is not a function" text, so resolving it is deferred
 /// to the throw path and ordinary dispatch pays nothing for carrying it.
 /// A `[[Call]]` that no CallExpression owns — a builtin invoking a callback, the
-/// C API, `Reflect.apply` — passes `.none` and keeps the value-only wording.
+/// C API, `Reflect.apply` — passes `.none`; its diagnostic describes the value
+/// without claiming source syntax that the engine does not own.
 pub const CallSite = union(enum) {
     none,
     /// A tree-walked call: the exact source of the whole CallExpression, and the
@@ -296,21 +292,69 @@ pub const CallSite = union(enum) {
     /// callee has turned out not to be callable.
     bytecode: struct { chunk: *const bc.Chunk, instruction: u32 },
 
-    pub const Text = struct { call: []const u8, callee: []const u8 };
+    pub const Resolved = union(enum) {
+        call: struct { text: []const u8, callee: []const u8 },
+        tagged_template: []const u8,
+    };
 
-    pub fn resolve(self: CallSite) ?Text {
+    pub fn resolve(self: CallSite) ?Resolved {
         const found = switch (self) {
             .none => return null,
             .source => |site| site,
             .bytecode => |site| site.chunk.callSiteAt(site.instruction) orelse return null,
         };
-        if (found.callee_len == 0 or found.callee_len > found.text.len) return null;
-        return .{ .call = found.text, .callee = found.text[0..found.callee_len] };
+        if (found.text.len == 0) return null;
+        return switch (found.kind) {
+            .call => if (found.callee_len == 0 or found.callee_len > found.text.len)
+                null
+            else
+                .{ .call = .{ .text = found.text, .callee = found.text[0..found.callee_len] } },
+            .tagged_template => .{ .tagged_template = found.text },
+        };
     }
 };
 
+/// Source owned by a construction or member evaluation. The sparse bytecode
+/// table is resolved only after the operation has failed.
+pub const EvaluationSite = union(enum) {
+    none,
+    source: []const u8,
+    bytecode: struct { chunk: *const bc.Chunk, instruction: u32 },
+
+    pub fn resolve(self: EvaluationSite) ?[]const u8 {
+        const text = switch (self) {
+            .none => return null,
+            .source => |source| source,
+            .bytecode => |site| (site.chunk.evaluationSiteAt(site.instruction) orelse return null).text,
+        };
+        return if (text.len == 0) null else text;
+    }
+};
+
+/// JavaScriptCore's leading clause for a null/undefined property base. Parsed
+/// member operations add their source through `throwNotAnObject`; internal
+/// operations with no syntax use this clause alone.
 pub fn notAnObjectMessage(base: Value) []const u8 {
     return if (base.isNull()) "null is not an object" else "undefined is not an object";
+}
+
+pub fn throwNotAnObject(self: *Interpreter, base: Value, site: EvaluationSite) EvalError {
+    if (site.resolve()) |source| return self.throwErrorFmt(
+        "TypeError",
+        "{s} (evaluating '{s}')",
+        .{ notAnObjectMessage(base), source },
+    );
+    return self.throwError("TypeError", notAnObjectMessage(base));
+}
+
+pub fn throwNotAConstructor(self: *Interpreter, callee: Value, site: EvaluationSite) EvalError {
+    const subject = try notAConstructorSubject(self, callee);
+    if (site.resolve()) |source| return self.throwErrorFmt(
+        "TypeError",
+        "{s} is not a constructor (evaluating '{s}')",
+        .{ subject, source },
+    );
+    return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{subject});
 }
 
 fn jsTrim(s: []const u8, trim_start_: bool, trim_end_: bool) []const u8 {
@@ -5903,7 +5947,7 @@ pub const Interpreter = struct {
 
             .call => |c| try self.evalCall(c.callee, c.args, c.optional, .{ .source = .{ .text = c.source, .callee_len = c.callee_len } }),
             .tagged_template => |t| try self.evalTaggedTemplate(node, t.tag, t.exprs),
-            .new_expr => |n| try self.evalNew(n.callee, n.args),
+            .new_expr => |n| try self.evalNew(n.callee, n.args, .{ .source = n.source }),
             .member => |m| blk: {
                 const obj = try self.eval(m.object);
                 if (m.optional and (obj.isNull() or obj.isUndefined())) return error.OptShortCircuit;
@@ -5915,13 +5959,16 @@ pub const Interpreter = struct {
                     // the key's `toString` is ever called.
                     const kv = try self.eval(ce);
                     if (obj.isNull() or obj.isUndefined())
-                        return self.throwError("TypeError", notAnObjectMessage(obj));
+                        return throwNotAnObject(self, obj, .{ .source = m.source });
                     var fast_key_buf: [24]u8 = undefined;
                     const key = if (fastNumericIndex(kv)) |idx|
                         std.fmt.bufPrint(&fast_key_buf, "{d}", .{idx}) catch unreachable
                     else
                         try self.keyOf(kv);
                     break :blk try self.getProperty(obj, key);
+                }
+                if (obj.isNull() or obj.isUndefined()) {
+                    return throwNotAnObject(self, obj, .{ .source = m.source });
                 }
                 break :blk try self.getProperty(obj, m.property);
             },
@@ -7016,6 +7063,7 @@ pub const Interpreter = struct {
         receiver: Value,
         receiver_root: usize,
         property: []const u8,
+        source: []const u8 = "",
         key_value: ?Value = null,
         key_root: ?usize = null,
         is_super: bool = false,
@@ -7027,7 +7075,7 @@ pub const Interpreter = struct {
         fn coerceKey(self: *RootedPropertyReference, machine: *Interpreter) EvalError!void {
             const base = machine.tempRoot(self.base_root, self.base);
             if (base.isNull() or base.isUndefined())
-                return machine.throwError("TypeError", "Cannot access property of null or undefined");
+                return throwNotAnObject(machine, base, .{ .source = self.source });
             if (self.key_value) |original| {
                 const current = machine.tempRoot(self.key_root.?, original);
                 // Retain the existing allocation-free dense numeric-index path.
@@ -7092,6 +7140,7 @@ pub const Interpreter = struct {
                     .receiver = base,
                     .receiver_root = base_root,
                     .property = member.property,
+                    .source = member.source,
                 };
                 if (member.computed) |expression| {
                     reference.key_value = try self.eval(expression);
@@ -7254,10 +7303,13 @@ pub const Interpreter = struct {
                 key_root = try self.pushTempRoot(key_val);
                 const current_recv = self.tempRoot(recv_root, recv);
                 if (current_recv.isNull() or current_recv.isUndefined())
-                    return self.throwError("TypeError", "Cannot read properties of null or undefined");
+                    return throwNotAnObject(self, current_recv, .{ .source = member.source });
                 key_value = try self.toPropertyKeyValue(self.tempRoot(key_root.?, key_val));
                 self.setTempRoot(key_root.?, key_value.?);
             }
+            const current_recv = self.tempRoot(recv_root, recv);
+            if (current_recv.isNull() or current_recv.isUndefined())
+                return throwNotAnObject(self, current_recv, .{ .source = member.source });
             const key = if (key_value) |kv| try self.keyOf(self.tempRoot(key_root.?, kv)) else member.property;
             const update = try self.prepareNumericUpdate(try self.getProperty(self.tempRoot(recv_root, recv), key), inc);
             defer update.deinit(self);
@@ -8127,7 +8179,7 @@ pub const Interpreter = struct {
                 if (m.computed) |c| {
                     try self.rewritePrivateNamesInNode(c, map);
                 } else {
-                    node.* = .{ .member = .{ .object = m.object, .property = remapPrivateName(map, m.property), .computed = null, .optional = m.optional } };
+                    node.* = .{ .member = .{ .object = m.object, .property = remapPrivateName(map, m.property), .computed = null, .optional = m.optional, .source = m.source } };
                 }
             },
             .optional_chain => |n| try self.rewritePrivateNamesInNode(n, map),
@@ -8287,9 +8339,9 @@ pub const Interpreter = struct {
             .super_call => |args| .{ .super_call = try self.deepCopyNodes(args) },
             .super_member => |sm| .{ .super_member = .{ .property = sm.property, .computed = try self.deepCopyOpt(sm.computed) } },
             .call => |c| .{ .call = .{ .callee = try self.deepCopyNode(c.callee), .args = try self.deepCopyNodes(c.args), .optional = c.optional, .source = c.source, .callee_len = c.callee_len } },
-            .new_expr => |x| .{ .new_expr = .{ .callee = try self.deepCopyNode(x.callee), .args = try self.deepCopyNodes(x.args) } },
-            .tagged_template => |t| .{ .tagged_template = .{ .tag = try self.deepCopyNode(t.tag), .cooked = t.cooked, .raw = t.raw, .exprs = try self.deepCopyNodes(t.exprs) } },
-            .member => |m| .{ .member = .{ .object = try self.deepCopyNode(m.object), .property = m.property, .computed = try self.deepCopyOpt(m.computed), .optional = m.optional } },
+            .new_expr => |x| .{ .new_expr = .{ .callee = try self.deepCopyNode(x.callee), .args = try self.deepCopyNodes(x.args), .source = x.source } },
+            .tagged_template => |t| .{ .tagged_template = .{ .tag = try self.deepCopyNode(t.tag), .cooked = t.cooked, .raw = t.raw, .exprs = try self.deepCopyNodes(t.exprs), .source = t.source } },
+            .member => |m| .{ .member = .{ .object = try self.deepCopyNode(m.object), .property = m.property, .computed = try self.deepCopyOpt(m.computed), .optional = m.optional, .source = m.source } },
             .optional_chain => |x| .{ .optional_chain = try self.deepCopyNode(x) },
             .field_init_value => |x| .{ .field_init_value = .{ .expression = try self.deepCopyNode(x.expression), .name = x.name } },
             .private_field_def => |d| .{ .private_field_def = .{ .name = d.name, .value = try self.deepCopyNode(d.value) } },
@@ -8990,7 +9042,7 @@ pub const Interpreter = struct {
         if (m.optional and (obj.isNull() or obj.isUndefined())) return Value.boolVal(true);
         const computed_key: ?Value = if (m.computed) |ce| try self.eval(ce) else null;
         const key = if (computed_key) |raw| DeletePropertyKey{ .computed = raw } else DeletePropertyKey{ .named = try value.encodeStringKey(self.arena, m.property) };
-        return Value.boolVal(try self.deletePropertyValue(obj, key, self.strict));
+        return Value.boolVal(try self.deletePropertyValueAtSite(obj, key, self.strict, .{ .source = m.source }));
     }
 
     const DeletePropertyKey = union(enum) {
@@ -9010,16 +9062,16 @@ pub const Interpreter = struct {
     /// deliberately stays here, after RequireObjectCoercible, matching ECMA-262
     /// Delete Operator Evaluation and preserving proxy/Symbol behavior.
     pub fn deleteNamedProperty(self: *Interpreter, obj: Value, key: []const u8, strict: bool) EvalError!bool {
-        return self.deletePropertyValue(obj, .{ .named = key }, strict);
+        return self.deletePropertyValueAtSite(obj, .{ .named = key }, strict, .none);
     }
 
     pub fn deleteComputedProperty(self: *Interpreter, obj: Value, key: Value, strict: bool) EvalError!bool {
-        return self.deletePropertyValue(obj, .{ .computed = key }, strict);
+        return self.deletePropertyValueAtSite(obj, .{ .computed = key }, strict, .none);
     }
 
-    fn deletePropertyValue(self: *Interpreter, obj: Value, key_ref: DeletePropertyKey, strict: bool) EvalError!bool {
+    fn deletePropertyValueAtSite(self: *Interpreter, obj: Value, key_ref: DeletePropertyKey, strict: bool, site: EvaluationSite) EvalError!bool {
         if (obj.isNull() or obj.isUndefined())
-            return self.throwError("TypeError", "Cannot convert undefined or null to object");
+            return throwNotAnObject(self, obj, site);
         if (!obj.isObject()) {
             // ToObject succeeds for every remaining primitive. Its ordinary
             // [[Delete]] still receives a PropertyKey even when the wrapper has
@@ -9090,7 +9142,7 @@ pub const Interpreter = struct {
             // evaluated — `o.bar.gar(foo())` must not run `foo()` when `o.bar` is
             // undefined.
             if (recv.isNull() or recv.isUndefined())
-                return self.throwError("TypeError", notAnObjectMessage(recv));
+                return throwNotAnObject(self, recv, .{ .source = m.source });
             const key = if (kv) |k| try self.keyOf(k) else m.property;
             // `recv.m?.(...)`: short-circuit if the method itself is nullish.
             if (optional) {
@@ -9203,7 +9255,7 @@ pub const Interpreter = struct {
                 const key_value: ?Value = if (m.computed) |key| try self.eval(key) else null;
                 if (recv.isNull() or recv.isUndefined()) {
                     if (m.optional) return error.OptShortCircuit;
-                    return self.throwError("TypeError", notAnObjectMessage(recv));
+                    return throwNotAnObject(self, recv, .{ .source = m.source });
                 }
                 const key = if (key_value) |key_primitive| try self.keyOf(key_primitive) else m.property;
                 callee = try self.getProperty(recv, key);
@@ -9238,14 +9290,19 @@ pub const Interpreter = struct {
         var args: std.ArrayListUnmanaged(Value) = .empty;
         try args.append(self.arena, Value.obj(strings));
         for (expr_nodes) |en| try args.append(self.arena, try self.eval(en));
+        const call_site: CallSite = if (site.tagged_template.source.len == 0)
+            .none
+        else
+            .{ .source = .{ .text = site.tagged_template.source, .kind = .tagged_template } };
         return if (receiver != null)
-            self.callValueWithThis(
+            self.callValueWithThisAtSite(
                 self.tempRoot(callee_root, callee),
                 args.items,
                 self.tempRoot(receiver_root, receiver_fallback),
+                call_site,
             )
         else
-            self.callValue(self.tempRoot(callee_root, callee), args.items);
+            self.callValueWithThisAtSite(self.tempRoot(callee_root, callee), args.items, Value.undef(), call_site);
     }
 
     fn freezeTemplateArray(self: *Interpreter, obj: *value.Object) EvalError!void {
@@ -9334,15 +9391,23 @@ pub const Interpreter = struct {
     /// The TypeError for calling a non-callable value. JavaScriptCore names the
     /// callee with its exact source text and describes what it actually held:
     /// `o.m is not a function. (In 'o.m()', 'o.m' is undefined)`. A `[[Call]]`
-    /// with no owning CallExpression has no text to name, and keeps the
-    /// value-only wording.
+    /// A tagged template instead names the offending value and prints its raw
+    /// source in JSC's `(near '...source...')` form. A syntax-less `[[Call]]`
+    /// describes only its value.
     fn throwNotAFunction(self: *Interpreter, callee: Value, site: CallSite) EvalError {
-        if (site.resolve()) |text| return self.throwErrorFmt(
-            "TypeError",
-            "{s} is not a function. (In '{s}', '{s}' is {s})",
-            .{ text.callee, text.call, text.callee, try notAFunctionSubject(self, callee) },
-        );
-        return self.throwError("TypeError", "value is not a function");
+        if (site.resolve()) |resolved| switch (resolved) {
+            .call => |text| return self.throwErrorFmt(
+                "TypeError",
+                "{s} is not a function. (In '{s}', '{s}' is {s})",
+                .{ text.callee, text.text, text.callee, try notAFunctionSubject(self, callee) },
+            ),
+            .tagged_template => |source| return self.throwErrorFmt(
+                "TypeError",
+                "{s} is not a function (near '...{s}...')",
+                .{ try notAConstructorSubject(self, callee), source },
+            ),
+        };
+        return self.throwErrorFmt("TypeError", "{s} is not a function", .{try notAConstructorSubject(self, callee)});
     }
 
     /// A bound function: target + the `this`/leading args fixed by `fn.bind`.
@@ -10271,10 +10336,10 @@ pub const Interpreter = struct {
     /// JS functions get a fresh `this` object (tagged with a constructor
     /// reference for `instanceof`) and may override it by explicitly returning
     /// an object.
-    fn evalNew(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node) EvalError!Value {
+    fn evalNew(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, site: EvaluationSite) EvalError!Value {
         const callee = try self.eval(callee_node);
         const args = try self.evalArgs(arg_nodes);
-        return self.construct(callee, args);
+        return self.constructAtSite(callee, args, site);
     }
 
     /// Construct an instance from `callee` with already-evaluated `args`. Shared
@@ -10296,21 +10361,29 @@ pub const Interpreter = struct {
     }
 
     pub fn construct(self: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
-        return self.constructNT(callee, args, callee);
+        return self.constructAtSite(callee, args, .none);
+    }
+
+    pub fn constructAtSite(self: *Interpreter, callee: Value, args: []const Value, site: EvaluationSite) EvalError!Value {
+        return self.constructNTAtSite(callee, args, callee, site);
     }
 
     /// [[Construct]] with an explicit NewTarget (Reflect.construct / subclassing):
     /// `new_target` drives the new instance's prototype and the `new.target` seen
     /// by the constructor; `callee` is the function actually invoked.
     pub fn constructNT(self: *Interpreter, callee: Value, args: []const Value, new_target: Value) EvalError!Value {
-        if (!callee.isObject()) return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
+        return self.constructNTAtSite(callee, args, new_target, .none);
+    }
+
+    fn constructNTAtSite(self: *Interpreter, callee: Value, args: []const Value, new_target: Value, site: EvaluationSite) EvalError!Value {
+        if (!callee.isObject()) return throwNotAConstructor(self, callee, site);
         const obj = callee.asObj();
         if (obj.proxyHandler() != null or obj.proxy_revoked) {
             const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'construct' on a proxy that has been revoked");
             // A Proxy has a [[Construct]] method only if its target is a
             // constructor; if not, `new proxy()` is a TypeError before the
             // construct trap runs (9.5.13).
-            if (!isConstructorValue(Value.obj(target))) return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
+            if (!isConstructorValue(Value.obj(target))) return throwNotAConstructor(self, callee, site);
             if (try self.proxyTrap(obj, "construct")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.asObj().appendElement(self.arena, a);
@@ -10320,14 +10393,14 @@ pub const Interpreter = struct {
                     return self.throwError("TypeError", "proxy 'construct' trap must return an object");
                 return res;
             }
-            return self.constructNT(Value.obj(target), args, new_target);
+            return self.constructNTAtSite(Value.obj(target), args, new_target, site);
         }
         if (obj.boundFunction()) |erased| {
             // `new (fn.bind(...))(...)`: construct the target with bound args
             // prepended (the bound `this` is ignored by `new`, per spec).
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
             const nt = if (std.meta.eql(new_target, callee)) bf.target else new_target;
-            return self.constructNT(bf.target, try self.concatArgs(bf.args, args), nt);
+            return self.constructNTAtSite(bf.target, try self.concatArgs(bf.args, args), nt, site);
         }
         if (obj.errorCtor()) |name| return self.callErrorConstructor(obj, name, args, new_target);
         if (obj.hostClassHooks()) |hooks| if (hooks.construct) |construct_callback| {
@@ -10338,7 +10411,7 @@ pub const Interpreter = struct {
         };
         if (obj.native) |nf| {
             // Most built-ins aren't constructors; only flagged ones are `new`-able.
-            if (!obj.native_ctor) return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
+            if (!obj.native_ctor) return throwNotAConstructor(self, callee, site);
             // Signal [[Construct]] to the native via `new_target` (restored after),
             // so e.g. `new Number(x)` boxes a wrapper object while `Number(x)`
             // returns a primitive.
@@ -10355,7 +10428,7 @@ pub const Interpreter = struct {
             // Arrow / async / generator functions and concise methods / accessors
             // are not constructors (a class constructor is not flagged is_method).
             if (func.is_arrow or func.is_async or func.is_generator or func.is_method)
-                return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
+                return throwNotAConstructor(self, callee, site);
             // OrdinaryCreateFromConstructor: the instance proto comes from NewTarget.
             const inst = try gc_mod.allocObj(self.arena);
             inst.* = .{ .proto = if (new_target.isObject()) try self.ctorRealmIntrinsicProto(new_target.asObj(), "Object") else try self.protoObject(obj) };
@@ -10368,7 +10441,7 @@ pub const Interpreter = struct {
             // object result. A nested initializer may have moved that receiver.
             return if (builtins.isRealObject(ret)) ret else self.tempRoot(this_root, this_val);
         }
-        return self.throwErrorFmt("TypeError", "{s} is not a constructor", .{try notAConstructorSubject(self, callee)});
+        return throwNotAConstructor(self, callee, site);
     }
 
     // ---- objects, arrays, members -----------------------------------------

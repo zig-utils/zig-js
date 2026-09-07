@@ -883,10 +883,20 @@ pub const EnvironmentDeclarations = struct {
     is_script: bool = false,
 };
 
-/// The exact source text of a CallExpression plus the byte length of its callee
-/// prefix inside that text. Retained so a failed call can name its callee the
-/// way JavaScriptCore does; see `ast.Node.call`.
-pub const CallSiteSpan = struct { text: []const u8 = "", callee_len: u32 = 0 };
+/// Exact source retained for a syntax-owned `[[Call]]`. A CallExpression keeps
+/// the byte length of its callee prefix; a tagged template keeps the whole
+/// expression for JavaScriptCore's `(near '...source...')` diagnostic.
+pub const CallSiteSpan = struct {
+    pub const Kind = enum { call, tagged_template };
+
+    text: []const u8 = "",
+    callee_len: u32 = 0,
+    kind: Kind = .call,
+};
+
+/// Exact source of a member evaluation or construction used only when that
+/// operation throws, for JavaScriptCore's `(evaluating '...')` suffix.
+pub const EvaluationSiteSpan = struct { text: []const u8 = "" };
 
 pub const Chunk = struct {
     const DebugSite = struct { instruction: usize, node: *const ast.Node };
@@ -961,6 +971,9 @@ pub const Chunk = struct {
     /// once a callee has turned out not to be callable, which leaves dispatch
     /// untouched — see `Interpreter.CallSite`.
     call_sites: std.ArrayListUnmanaged(CallSiteEntry) = .empty,
+    /// Member/construction source spans keyed by their throwing opcode. Like
+    /// `call_sites`, this sparse table is searched only on the error path.
+    evaluation_sites: std.ArrayListUnmanaged(EvaluationSiteEntry) = .empty,
     /// Optional statement-boundary metadata. Chunks retain it eagerly so late
     /// debugger attachment works; a null hook keeps dispatch disabled.
     debug_sites: std.ArrayListUnmanaged(DebugSite) = .empty,
@@ -1086,6 +1099,24 @@ pub const Chunk = struct {
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
             const entry = self.call_sites.items[mid];
+            if (entry.instruction == instruction) return entry.span;
+            if (entry.instruction < instruction) lo = mid + 1 else hi = mid;
+        }
+        return null;
+    }
+
+    pub const EvaluationSiteEntry = struct { instruction: u32, span: EvaluationSiteSpan };
+
+    pub fn recordEvaluationSite(self: *Chunk, instruction: usize, span: EvaluationSiteSpan) std.mem.Allocator.Error!void {
+        try self.evaluation_sites.append(self.arena, .{ .instruction = @intCast(instruction), .span = span });
+    }
+
+    pub fn evaluationSiteAt(self: *const Chunk, instruction: u32) ?EvaluationSiteSpan {
+        var lo: usize = 0;
+        var hi: usize = self.evaluation_sites.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const entry = self.evaluation_sites.items[mid];
             if (entry.instruction == instruction) return entry.span;
             if (entry.instruction < instruction) lo = mid + 1 else hi = mid;
         }

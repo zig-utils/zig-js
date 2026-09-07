@@ -4194,17 +4194,17 @@ pub const Compiler = struct {
         return self.chunk.addName(try value_mod.encodeStringKey(self.arena, name));
     }
 
-    fn emitGetMemberName(self: *Compiler, name: []const u8) CompileError!void {
+    fn emitGetMemberName(self: *Compiler, name: []const u8) CompileError!usize {
         const unresolved = isUnresolvedPrivateName(name);
-        _ = try self.chunk.emit(
+        return self.chunk.emit(
             if (unresolved) .get_private_name else .get_prop,
             if (unresolved) try self.chunk.addName(name) else try self.addMemberName(name),
         );
     }
 
-    fn emitSetMemberName(self: *Compiler, name: []const u8) CompileError!void {
+    fn emitSetMemberName(self: *Compiler, name: []const u8) CompileError!usize {
         const unresolved = isUnresolvedPrivateName(name);
-        _ = try self.chunk.emit(
+        return self.chunk.emit(
             if (unresolved) .set_private_name else .set_prop,
             if (unresolved) try self.chunk.addName(name) else try self.addMemberName(name),
         );
@@ -4252,10 +4252,10 @@ pub const Compiler = struct {
                 if (member_ref.key) |kt| {
                     try self.emitLoadActivationTemp(kt); // [obj, key]
                     try self.emitLoadActivationTemp(val); // [obj, key, val]
-                    _ = try self.chunk.emit(.set_index, 0);
+                    try self.recordEvaluationSite(try self.chunk.emit(.set_index, 0), m.source);
                 } else {
                     try self.emitLoadActivationTemp(val); // [obj, val]
-                    try self.emitSetMemberName(m.property);
+                    try self.recordEvaluationSite(try self.emitSetMemberName(m.property), m.source);
                 }
             },
             .super => |super_ref| {
@@ -4589,6 +4589,17 @@ pub const Compiler = struct {
         try self.chunk.recordCallSite(instruction, .{ .text = call.source, .callee_len = call.callee_len });
     }
 
+    fn recordTaggedTemplateSite(self: *Compiler, instruction: usize, site: *const Node) CompileError!void {
+        const source = site.tagged_template.source;
+        if (source.len == 0) return;
+        try self.chunk.recordCallSite(instruction, .{ .text = source, .kind = .tagged_template });
+    }
+
+    fn recordEvaluationSite(self: *Compiler, instruction: usize, source: []const u8) CompileError!void {
+        if (source.len == 0) return;
+        try self.chunk.recordEvaluationSite(instruction, .{ .text = source });
+    }
+
     fn compileTailCall(self: *Compiler, c: anytype) CompileError!void {
         const spread = hasSpread(c.args);
         if (c.callee.* == .super_member) {
@@ -4601,7 +4612,7 @@ pub const Compiler = struct {
             const m = c.callee.member;
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
-            try self.emitGetMemberName(m.property);
+            try self.recordEvaluationSite(try self.emitGetMemberName(m.property), m.source);
             _ = try self.chunk.emit(.swap, 0);
             if (spread) {
                 try self.compileArgsArray(c.args);
@@ -4618,7 +4629,7 @@ pub const Compiler = struct {
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
             try self.compileExpr(m.computed.?);
-            _ = try self.chunk.emit(.get_index, 0);
+            try self.recordEvaluationSite(try self.chunk.emit(.get_index, 0), m.source);
             _ = try self.chunk.emit(.swap, 0);
             if (spread) {
                 try self.compileArgsArray(c.args);
@@ -4761,9 +4772,12 @@ pub const Compiler = struct {
         }
         if (member.computed) |key| {
             try self.compileExpr(key);
-            _ = try self.chunk.emit(.delete_index, @intFromBool(self.is_strict));
+            try self.recordEvaluationSite(try self.chunk.emit(.delete_index, @intFromBool(self.is_strict)), member.source);
         } else {
-            _ = try self.chunk.emitAB(.delete_prop, try self.addMemberName(member.property), @intFromBool(self.is_strict));
+            try self.recordEvaluationSite(
+                try self.chunk.emitAB(.delete_prop, try self.addMemberName(member.property), @intFromBool(self.is_strict)),
+                member.source,
+            );
         }
         if (optional_chain) try self.finishOptionalDeleteRegion(exits.items);
     }
@@ -4871,9 +4885,9 @@ pub const Compiler = struct {
                 if (member.optional) try self.emitOptionalExit(exits, 1);
                 if (member.computed) |key| {
                     try self.compileExpr(key);
-                    _ = try self.chunk.emit(.get_index, 0);
+                    try self.recordEvaluationSite(try self.chunk.emit(.get_index, 0), member.source);
                 } else {
-                    try self.emitGetMemberName(member.property);
+                    try self.recordEvaluationSite(try self.emitGetMemberName(member.property), member.source);
                 }
             },
             .call => |call| try self.compileOptionalCall(call, exits, false),
@@ -4894,9 +4908,9 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.dup, 0);
         if (member.computed) |key| {
             try self.compileExpr(key);
-            _ = try self.chunk.emit(.get_index, 0);
+            try self.recordEvaluationSite(try self.chunk.emit(.get_index, 0), member.source);
         } else {
-            try self.emitGetMemberName(member.property);
+            try self.recordEvaluationSite(try self.emitGetMemberName(member.property), member.source);
         }
     }
 
@@ -5037,11 +5051,11 @@ pub const Compiler = struct {
             const m = tag.member;
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
-            try self.emitGetMemberName(m.property);
+            try self.recordEvaluationSite(try self.emitGetMemberName(m.property), m.source);
             _ = try self.chunk.emit(.swap, 0); // [method, recv]
             _ = try self.chunk.emit(.template_object, ti);
             for (exprs) |e| try self.compileExpr(e);
-            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
+            try self.recordTaggedTemplateSite(try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc), site);
             return;
         }
         if (tag.* == .member) {
@@ -5057,7 +5071,7 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.swap, 0); // [method, recv]
             _ = try self.chunk.emit(.template_object, ti);
             for (exprs) |e| try self.compileExpr(e);
-            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
+            try self.recordTaggedTemplateSite(try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc), site);
             return;
         }
         if (tag.* == .super_member) {
@@ -5074,21 +5088,21 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.swap, 0); // [tag, this]
             _ = try self.chunk.emit(.template_object, ti);
             for (exprs) |e| try self.compileExpr(e);
-            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
+            try self.recordTaggedTemplateSite(try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc), site);
             return;
         }
         if (try self.emitDynamicIdentifierCallee(tag)) {
             _ = try self.chunk.emit(.swap, 0); // [tag, WithBaseObject]
             _ = try self.chunk.emit(.template_object, ti);
             for (exprs) |e| try self.compileExpr(e);
-            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc);
+            try self.recordTaggedTemplateSite(try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, argc), site);
             return;
         }
         // Plain tag (identifier / call / …): this = undefined.
         try self.compileExpr(tag);
         _ = try self.chunk.emit(.template_object, ti);
         for (exprs) |e| try self.compileExpr(e);
-        _ = try self.chunk.emit(if (is_tail) .tail_call else .call, argc);
+        try self.recordTaggedTemplateSite(try self.chunk.emit(if (is_tail) .tail_call else .call, argc), site);
     }
 
     fn compileExpr(self: *Compiler, node: *Node) CompileError!void {
@@ -5222,10 +5236,10 @@ pub const Compiler = struct {
                     if (m.computed) |ce| {
                         try self.compileExpr(ce);
                         try self.compileExpr(a.value);
-                        _ = try self.chunk.emit(.set_index, 0);
+                        try self.recordEvaluationSite(try self.chunk.emit(.set_index, 0), m.source);
                     } else {
                         try self.compileExpr(a.value);
-                        try self.emitSetMemberName(m.property);
+                        try self.recordEvaluationSite(try self.emitSetMemberName(m.property), m.source);
                     }
                 },
                 .super_member => try self.compileSuperAssign(a),
@@ -5299,7 +5313,7 @@ pub const Compiler = struct {
                         if (m.optional) return error.Unsupported;
                         try self.compileExpr(m.object);
                         _ = try self.chunk.emit(.dup, 0);
-                        try self.emitGetMemberName(m.property);
+                        try self.recordEvaluationSite(try self.emitGetMemberName(m.property), m.source);
                         _ = try self.chunk.emit(.swap, 0);
                         try self.compileArgsArray(c.args);
                         try self.recordCallSite(try self.chunk.emit(.call_with_this_spread, 0), c);
@@ -5310,7 +5324,7 @@ pub const Compiler = struct {
                         // nullish receiver throws before an argument is evaluated.
                         try self.compileExpr(m.object);
                         _ = try self.chunk.emit(.dup, 0);
-                        try self.emitGetMemberName(m.property);
+                        try self.recordEvaluationSite(try self.emitGetMemberName(m.property), m.source);
                         _ = try self.chunk.emit(.swap, 0);
                         for (c.args) |arg| try self.compileExpr(arg);
                         try self.recordCallSite(try self.chunk.emit(.call_with_this, @intCast(c.args.len)), c);
@@ -5321,7 +5335,7 @@ pub const Compiler = struct {
                     try self.compileExpr(m.object);
                     _ = try self.chunk.emit(.dup, 0);
                     try self.compileExpr(m.computed.?);
-                    _ = try self.chunk.emit(.get_index, 0);
+                    try self.recordEvaluationSite(try self.chunk.emit(.get_index, 0), m.source);
                     _ = try self.chunk.emit(.swap, 0);
                     if (spread) {
                         try self.compileArgsArray(c.args);
@@ -5402,9 +5416,9 @@ pub const Compiler = struct {
                 try self.compileExpr(m.object);
                 if (m.computed) |ce| {
                     try self.compileExpr(ce);
-                    _ = try self.chunk.emit(.get_index, 0);
+                    try self.recordEvaluationSite(try self.chunk.emit(.get_index, 0), m.source);
                 } else {
-                    try self.emitGetMemberName(m.property);
+                    try self.recordEvaluationSite(try self.emitGetMemberName(m.property), m.source);
                 }
             },
             .super_member => |m| {
@@ -5442,10 +5456,10 @@ pub const Compiler = struct {
                 try self.compileExpr(n.callee);
                 if (hasSpread(n.args)) {
                     try self.compileArgsArray(n.args);
-                    _ = try self.chunk.emit(.new_spread, 0);
+                    try self.recordEvaluationSite(try self.chunk.emit(.new_spread, 0), n.source);
                 } else {
                     for (n.args) |arg| try self.compileExpr(arg);
-                    _ = try self.chunk.emit(.new_call, @intCast(n.args.len));
+                    try self.recordEvaluationSite(try self.chunk.emit(.new_call, @intCast(n.args.len)), n.source);
                 }
             },
             .field_init_value => |value| {
@@ -5803,6 +5817,7 @@ pub const Compiler = struct {
         object: ActivationTemp,
         key: ?ActivationTemp,
         property: []const u8,
+        source: []const u8,
     };
 
     const CompiledSuperRef = struct {
@@ -5971,13 +5986,13 @@ pub const Compiler = struct {
             // PutValue cannot invoke user coercion twice.
             try self.compileExpr(key_expr);
             try self.emitLoadActivationTemp(object);
-            _ = try self.chunk.emit(.require_object_coercible, 1);
+            try self.recordEvaluationSite(try self.chunk.emit(.require_object_coercible, 1), member.source);
             _ = try self.chunk.emit(.to_property_key, 0);
             const key_temp = try self.freshActivationTemp();
             try self.emitDefineActivationTemp(key_temp);
             key = key_temp;
         }
-        return .{ .object = object, .key = key, .property = member.property };
+        return .{ .object = object, .key = key, .property = member.property, .source = member.source };
     }
 
     fn emitLoadMemberRefBase(self: *Compiler, ref: CompiledMemberRef) CompileError!void {
@@ -5988,16 +6003,16 @@ pub const Compiler = struct {
     fn emitGetMemberRef(self: *Compiler, ref: CompiledMemberRef) CompileError!void {
         try self.emitLoadMemberRefBase(ref);
         if (ref.key != null)
-            _ = try self.chunk.emit(.get_index, 0)
+            try self.recordEvaluationSite(try self.chunk.emit(.get_index, 0), ref.source)
         else
-            try self.emitGetMemberName(ref.property);
+            try self.recordEvaluationSite(try self.emitGetMemberName(ref.property), ref.source);
     }
 
     fn emitSetMemberRef(self: *Compiler, ref: CompiledMemberRef) CompileError!void {
         if (ref.key != null)
-            _ = try self.chunk.emit(.set_index, 0)
+            try self.recordEvaluationSite(try self.chunk.emit(.set_index, 0), ref.source)
         else
-            try self.emitSetMemberName(ref.property);
+            try self.recordEvaluationSite(try self.emitSetMemberName(ref.property), ref.source);
     }
 
     fn compileMemberLogicalAssign(self: *Compiler, assignment: anytype) CompileError!void {
@@ -6537,7 +6552,7 @@ pub const Compiler = struct {
     fn emitCallTargetRejection(self: *Compiler, call: *Node, shape: bc.NotAReference, as_expression: bool) CompileError!void {
         try self.compileExpr(call);
         _ = try self.chunk.emit(.pop, 0);
-        _ = try self.chunk.emit(.throw_not_a_reference, @intFromEnum(shape));
+        _ = try self.chunk.emit(.throw_not_a_reference, @backingInt(shape));
         if (as_expression) _ = try self.chunk.emit(.load_undefined, 0);
     }
 

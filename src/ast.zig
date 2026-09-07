@@ -268,17 +268,25 @@ pub const Node = union(enum) {
         source: []const u8 = "",
         callee_len: u32 = 0,
     },
-    new_expr: struct { callee: *Node, args: []*Node },
+    /// `new Callee(args)`. `source` is retained for JavaScriptCore's
+    /// `(evaluating 'new Callee(args)')` non-constructor diagnostic.
+    new_expr: struct { callee: *Node, args: []*Node, source: []const u8 = "" },
     /// A tagged template `tag`a${x}b`` — calls `tag(strings, ...exprs)` where
     /// `strings` is the cooked-string array (with a `raw` array of the
     /// unescaped text). `cooked`/`raw` have one more element than `exprs`.
+    /// `source` retains the whole expression so a non-callable tag can use
+    /// JavaScriptCore's `(near '...tag`...`...')` diagnostic. It is empty only
+    /// for synthesized nodes.
     // `cooked[k]` is null when that quasi contains an invalid escape sequence:
     // a tagged template tolerates these (the cooked value is `undefined`) while
     // the raw text is preserved. (An untagged template is a SyntaxError.)
-    tagged_template: struct { tag: *Node, cooked: []?[]const u8, raw: [][]const u8, exprs: []*Node },
+    tagged_template: struct { tag: *Node, cooked: []?[]const u8, raw: [][]const u8, exprs: []*Node, source: []const u8 = "" },
     /// `object.property` (computed == null) or `object[computed]`. `optional`
     /// marks `?.` access (short-circuits the chain when the object is nullish).
-    member: struct { object: *Node, property: []const u8 = "", computed: ?*Node = null, optional: bool = false },
+    /// `source` names the expression whose RequireObjectCoercible failed. For
+    /// simple assignment and delete targets JSC names the enclosing operation,
+    /// so the parser widens that target's otherwise-member-only span.
+    member: struct { object: *Node, property: []const u8 = "", computed: ?*Node = null, optional: bool = false, source: []const u8 = "" },
     /// Root of an optional chain (`a?.b.c`): catches the short-circuit and
     /// yields `undefined`.
     optional_chain: *Node,

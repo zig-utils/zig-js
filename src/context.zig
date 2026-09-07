@@ -13762,23 +13762,87 @@ test "a failed call names its callee the way JavaScriptCore does" {
     }
 }
 
-// A `[[Call]]` that no CallExpression owns has no callee text to name, and
-// keeps the value-only wording rather than inventing a span. A tagged template
-// is a call but not a CallExpression, and an iterator record's `next` is
-// invoked by the protocol rather than by syntax; JavaScriptCore words both
-// differently again, which #889 tracks separately.
-test "a call with no owning CallExpression keeps the value-only wording" {
-    try expectEvalStr("TypeError: value is not a function",
-        \\var caught = "";
-        \\try { var o = { m: 1 }; o.m`x`; } catch (e) { caught = e.name + ": " + e.message; }
-        \\caught
-    );
-    try expectEvalStr("TypeError: value is not a function",
-        \\var caught = "";
-        \\var it = { [Symbol.iterator]: function () { return { next: 1 }; } };
-        \\try { [...it]; } catch (e) { caught = e.name + ": " + e.message; }
-        \\caught
-    );
+// A tagged template has its own JSC `near` form rather than CallExpression's
+// `In` form. An internal [[Call]] with no syntax still describes its value.
+// Run the syntax-owned cases in both tiers so the retained span cannot diverge.
+test "failed non-CallExpression calls use JavaScriptCore diagnostics" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const tagged_cases = [_]Case{
+        .{ .source = "var tag = 1; tag`x`", .message = "1 is not a function (near '...tag`x`...')" },
+        .{ .source = "var o = {m:1}; o.m`x`", .message = "1 is not a function (near '...o.m`x`...')" },
+        .{ .source = "var o = {m:1}; o /*c*/ . m `x${2}y`", .message = "1 is not a function (near '...o /*c*/ . m `x${2}y`...')" },
+        .{ .source = "var tag = Symbol('s'); tag`x`", .message = "Symbol(s) is not a function (near '...tag`x`...')" },
+        .{ .source = "var tag = {}; tag`x`", .message = "Object is not a function (near '...tag`x`...')" },
+    };
+    var buffer: [512]u8 = undefined;
+    for (tagged_cases) |case| {
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "TypeError: {s}", .{case.message});
+        defer std.testing.allocator.free(expected);
+        const tree_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; try {{ {s} }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        const tree_ctx = try Context.create(std.testing.allocator);
+        defer tree_ctx.destroy();
+        tree_ctx.setBytecodeExecutionModeForTesting(.tree_walker);
+        try std.testing.expectEqualStrings(expected, (try tree_ctx.evaluate(tree_probe)).asStr());
+        const vm_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; function* g() {{ {s} }} try {{ g().next(); }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        const vm_ctx = try Context.create(std.testing.allocator);
+        defer vm_ctx.destroy();
+        vm_ctx.setBytecodeExecutionModeForTesting(.required);
+        try std.testing.expectEqualStrings(expected, (try vm_ctx.evaluate(vm_probe)).asStr());
+    }
+
+    const internal_cases = [_]Case{
+        .{ .source = "1", .message = "1 is not a function" },
+        .{ .source = "undefined", .message = "undefined is not a function" },
+        .{ .source = "'s'", .message = "\"s\" is not a function" },
+        .{ .source = "Symbol('s')", .message = "Symbol(s) is not a function" },
+        .{ .source = "{}", .message = "Object is not a function" },
+    };
+    for (internal_cases) |case| {
+        const probe = try std.fmt.bufPrint(&buffer, "var caught = ''; var it = {{ [Symbol.iterator]: function () {{ return {{ next: {s} }}; }} }}; try {{ [...it]; }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "TypeError: {s}", .{case.message});
+        defer std.testing.allocator.free(expected);
+        try expectEvalStr(expected, probe);
+    }
+}
+
+// Construction and property diagnostics retain the exact expression JSC names.
+// Assignment/delete spans intentionally differ from compound/update spans; the
+// expected strings below come from a system JavaScriptCore differential (#892,
+// #893), and every case is repeated through the bytecode-only generator path.
+test "construction and member TypeErrors include JavaScriptCore evaluation source" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "var v = null; v.x", .message = "null is not an object (evaluating 'v.x')" },
+        .{ .source = "var o = {}; o.m.n()", .message = "undefined is not an object (evaluating 'o.m.n')" },
+        .{ .source = "var v = null; v['x']", .message = "null is not an object (evaluating 'v['x']')" },
+        .{ .source = "var v = null; v.x = 1", .message = "null is not an object (evaluating 'v.x = 1')" },
+        .{ .source = "var o = {}; o.m.x = 1", .message = "undefined is not an object (evaluating 'o.m.x = 1')" },
+        .{ .source = "var v = null; v['x'] = 1", .message = "null is not an object (evaluating 'v['x'] = 1')" },
+        .{ .source = "var v = null; v.x += 1", .message = "null is not an object (evaluating 'v.x')" },
+        .{ .source = "var v = null; v.x ||= 1", .message = "null is not an object (evaluating 'v.x')" },
+        .{ .source = "var v = null; v.x++", .message = "null is not an object (evaluating 'v.x')" },
+        .{ .source = "var v = null; delete v.x", .message = "null is not an object (evaluating 'delete v.x')" },
+        .{ .source = "var v = null; delete v['x']", .message = "null is not an object (evaluating 'delete v['x']')" },
+        .{ .source = "var g = 1; new g()", .message = "1 is not a constructor (evaluating 'new g()')" },
+        .{ .source = "var g = {}; new g.m()", .message = "undefined is not a constructor (evaluating 'new g.m()')" },
+        .{ .source = "var g = 1; new g", .message = "1 is not a constructor (evaluating 'new g')" },
+        .{ .source = "var g = 1; new g(...[])", .message = "1 is not a constructor (evaluating 'new g(...[])')" },
+    };
+    var buffer: [512]u8 = undefined;
+    for (cases) |case| {
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "TypeError: {s}", .{case.message});
+        defer std.testing.allocator.free(expected);
+        const tree_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; try {{ {s} }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        const tree_ctx = try Context.create(std.testing.allocator);
+        defer tree_ctx.destroy();
+        tree_ctx.setBytecodeExecutionModeForTesting(.tree_walker);
+        try std.testing.expectEqualStrings(expected, (try tree_ctx.evaluate(tree_probe)).asStr());
+        const vm_probe = try std.fmt.bufPrint(&buffer, "var caught = ''; function* g() {{ {s} }} try {{ g().next(); }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught", .{case.source});
+        const vm_ctx = try Context.create(std.testing.allocator);
+        defer vm_ctx.destroy();
+        vm_ctx.setBytecodeExecutionModeForTesting(.required);
+        try std.testing.expectEqualStrings(expected, (try vm_ctx.evaluate(vm_probe)).asStr());
+    }
 }
 
 test "Error.prototype.stack accessor" {
