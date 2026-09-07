@@ -4580,6 +4580,15 @@ pub const Compiler = struct {
         return true;
     }
 
+    /// Bind a just-emitted call opcode to its CallExpression's retained source,
+    /// so a failed call names the callee on the VM exactly as it does on the
+    /// tree-walker. Only the throw path reads it. A synthesized call carries no
+    /// source and records nothing, falling back to the value-only wording.
+    fn recordCallSite(self: *Compiler, instruction: usize, call: anytype) CompileError!void {
+        if (call.source.len == 0 or call.callee_len == 0) return;
+        try self.chunk.recordCallSite(instruction, .{ .text = call.source, .callee_len = call.callee_len });
+    }
+
     fn compileTailCall(self: *Compiler, c: anytype) CompileError!void {
         const spread = hasSpread(c.args);
         if (c.callee.* == .super_member) {
@@ -4596,10 +4605,10 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.swap, 0);
             if (spread) {
                 try self.compileArgsArray(c.args);
-                _ = try self.chunk.emit(.tail_call_with_this_spread, 0);
+                try self.recordCallSite(try self.chunk.emit(.tail_call_with_this_spread, 0), c);
             } else {
                 for (c.args) |arg| try self.compileExpr(arg);
-                _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+                try self.recordCallSite(try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len)), c);
             }
             return;
         }
@@ -4613,10 +4622,10 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.swap, 0);
             if (spread) {
                 try self.compileArgsArray(c.args);
-                _ = try self.chunk.emit(.tail_call_with_this_spread, 0);
+                try self.recordCallSite(try self.chunk.emit(.tail_call_with_this_spread, 0), c);
             } else {
                 for (c.args) |arg| try self.compileExpr(arg);
-                _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+                try self.recordCallSite(try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len)), c);
             }
             return;
         }
@@ -4625,10 +4634,10 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.swap, 0);
             if (spread) {
                 try self.compileArgsArray(c.args);
-                _ = try self.chunk.emit(.tail_call_with_this_spread, 0);
+                try self.recordCallSite(try self.chunk.emit(.tail_call_with_this_spread, 0), c);
             } else {
                 for (c.args) |arg| try self.compileExpr(arg);
-                _ = try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len));
+                try self.recordCallSite(try self.chunk.emit(.tail_call_with_this, @intCast(c.args.len)), c);
             }
             return;
         }
@@ -4642,19 +4651,19 @@ pub const Compiler = struct {
             if (spread) {
                 if (is_eval and eval_plan == null) return error.Unsupported;
                 try self.compileArgsArray(c.args);
-                _ = try self.chunk.emit(
+                try self.recordCallSite(try self.chunk.emit(
                     if (eval_plan != null) .tail_call_eval_activation_with_this_spread else .tail_call_with_this_spread,
                     eval_plan orelse 0,
-                );
+                ), c);
             } else {
                 for (c.args) |arg| try self.compileExpr(arg);
                 if (eval_plan) |plan_index|
-                    _ = try self.chunk.emitAB(.tail_call_eval_activation_with_this, @intCast(c.args.len), plan_index)
+                    try self.recordCallSite(try self.chunk.emitAB(.tail_call_eval_activation_with_this, @intCast(c.args.len), plan_index), c)
                 else
-                    _ = try self.chunk.emit(
+                    try self.recordCallSite(try self.chunk.emit(
                         if (is_eval) .tail_call_eval_with_this else .tail_call_with_this,
                         @intCast(c.args.len),
-                    );
+                    ), c);
             }
             return;
         }
@@ -4662,17 +4671,17 @@ pub const Compiler = struct {
         if (spread) {
             if (is_eval and eval_plan == null) return error.Unsupported;
             try self.compileArgsArray(c.args);
-            _ = try self.chunk.emit(
+            try self.recordCallSite(try self.chunk.emit(
                 if (eval_plan != null) .tail_call_eval_activation_spread else .tail_call_spread,
                 eval_plan orelse 0,
-            );
+            ), c);
             return;
         }
         for (c.args) |arg| try self.compileExpr(arg);
         if (eval_plan) |plan_index|
-            _ = try self.chunk.emitAB(.tail_call_eval_activation, @intCast(c.args.len), plan_index)
+            try self.recordCallSite(try self.chunk.emitAB(.tail_call_eval_activation, @intCast(c.args.len), plan_index), c)
         else
-            _ = try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len));
+            try self.recordCallSite(try self.chunk.emit(if (is_eval) .tail_call_eval else .tail_call, @intCast(c.args.len)), c);
     }
 
     const OptionalExit = struct {
@@ -4955,7 +4964,7 @@ pub const Compiler = struct {
         if (spread) {
             if (is_tail and identifier_eval_with_base and eval_plan == null) return error.Unsupported;
             try self.compileArgsArray(call.args);
-            _ = try self.chunk.emit(
+            try self.recordCallSite(try self.chunk.emit(
                 if (eval_plan != null)
                     if (is_tail) .tail_call_eval_activation_with_this_spread else .call_eval_activation_with_this_spread
                 else if (identifier_eval_with_base)
@@ -4967,19 +4976,19 @@ pub const Compiler = struct {
                 else
                     .call_spread,
                 eval_plan orelse 0,
-            );
+            ), call);
             return;
         }
 
         for (call.args) |arg| try self.compileExpr(arg);
         if (eval_plan) |plan_index|
-            _ = try self.chunk.emitAB(
+            try self.recordCallSite(try self.chunk.emitAB(
                 if (is_tail) .tail_call_eval_activation_with_this else .call_eval_activation_with_this,
                 @intCast(call.args.len),
                 plan_index,
-            )
+            ), call)
         else
-            _ = try self.chunk.emit(
+            try self.recordCallSite(try self.chunk.emit(
                 if (identifier_eval_with_base)
                     if (is_tail) .tail_call_eval_with_this else .call_eval_with_this
                 else if (has_receiver)
@@ -4989,7 +4998,7 @@ pub const Compiler = struct {
                 else
                     .call,
                 @intCast(call.args.len),
-            );
+            ), call);
     }
 
     fn compileSuperCall(self: *Compiler, call: anytype, is_tail: bool) CompileError!void {
@@ -5007,11 +5016,11 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.swap, 0); // [method, this]
         if (hasSpread(call.args)) {
             try self.compileArgsArray(call.args);
-            _ = try self.chunk.emit(if (is_tail) .tail_call_with_this_spread else .call_with_this_spread, 0);
+            try self.recordCallSite(try self.chunk.emit(if (is_tail) .tail_call_with_this_spread else .call_with_this_spread, 0), call);
             return;
         }
         for (call.args) |arg| try self.compileExpr(arg);
-        _ = try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, @intCast(call.args.len));
+        try self.recordCallSite(try self.chunk.emit(if (is_tail) .tail_call_with_this else .call_with_this, @intCast(call.args.len)), call);
     }
 
     /// `tag`a${x}b`` → `tag(strings, x)`. The `template_object` opcode pushes the
@@ -5293,7 +5302,7 @@ pub const Compiler = struct {
                         try self.emitGetMemberName(m.property);
                         _ = try self.chunk.emit(.swap, 0);
                         try self.compileArgsArray(c.args);
-                        _ = try self.chunk.emit(.call_with_this_spread, 0);
+                        try self.recordCallSite(try self.chunk.emit(.call_with_this_spread, 0), c);
                     } else {
                         // Fetch the method (RequireObjectCoercible on the receiver +
                         // any getter) BEFORE the arguments, per spec order, then call
@@ -5304,7 +5313,7 @@ pub const Compiler = struct {
                         try self.emitGetMemberName(m.property);
                         _ = try self.chunk.emit(.swap, 0);
                         for (c.args) |arg| try self.compileExpr(arg);
-                        _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
+                        try self.recordCallSite(try self.chunk.emit(.call_with_this, @intCast(c.args.len)), c);
                     }
                 } else if (c.callee.* == .member) {
                     const m = c.callee.member;
@@ -5316,20 +5325,20 @@ pub const Compiler = struct {
                     _ = try self.chunk.emit(.swap, 0);
                     if (spread) {
                         try self.compileArgsArray(c.args);
-                        _ = try self.chunk.emit(.call_with_this_spread, 0);
+                        try self.recordCallSite(try self.chunk.emit(.call_with_this_spread, 0), c);
                     } else {
                         for (c.args) |arg| try self.compileExpr(arg);
-                        _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
+                        try self.recordCallSite(try self.chunk.emit(.call_with_this, @intCast(c.args.len)), c);
                     }
                 } else if (c.callee.* == .optional_chain and c.callee.optional_chain.* == .member) {
                     try self.compileParenthesizedOptionalMemberReference(c.callee.optional_chain.member);
                     _ = try self.chunk.emit(.swap, 0);
                     if (spread) {
                         try self.compileArgsArray(c.args);
-                        _ = try self.chunk.emit(.call_with_this_spread, 0);
+                        try self.recordCallSite(try self.chunk.emit(.call_with_this_spread, 0), c);
                     } else {
                         for (c.args) |arg| try self.compileExpr(arg);
-                        _ = try self.chunk.emit(.call_with_this, @intCast(c.args.len));
+                        try self.recordCallSite(try self.chunk.emit(.call_with_this, @intCast(c.args.len)), c);
                     }
                 } else {
                     const is_eval = c.callee.* == .identifier and std.mem.eql(u8, c.callee.identifier, "eval");
@@ -5341,7 +5350,7 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.swap, 0); // [callee, WithBaseObject]
                         if (spread) {
                             try self.compileArgsArray(c.args);
-                            _ = try self.chunk.emit(
+                            try self.recordCallSite(try self.chunk.emit(
                                 if (eval_plan != null)
                                     .call_eval_activation_with_this_spread
                                 else if (is_eval)
@@ -5349,23 +5358,23 @@ pub const Compiler = struct {
                                 else
                                     .call_with_this_spread,
                                 eval_plan orelse 0,
-                            );
+                            ), c);
                         } else {
                             for (c.args) |arg| try self.compileExpr(arg);
                             if (eval_plan) |plan_index|
-                                _ = try self.chunk.emitAB(.call_eval_activation_with_this, @intCast(c.args.len), plan_index)
+                                try self.recordCallSite(try self.chunk.emitAB(.call_eval_activation_with_this, @intCast(c.args.len), plan_index), c)
                             else
-                                _ = try self.chunk.emit(
+                                try self.recordCallSite(try self.chunk.emit(
                                     if (is_eval) .call_eval_with_this else .call_with_this,
                                     @intCast(c.args.len),
-                                );
+                                ), c);
                         }
                         return;
                     }
                     try self.compileExpr(c.callee);
                     if (spread) {
                         try self.compileArgsArray(c.args);
-                        _ = try self.chunk.emit(
+                        try self.recordCallSite(try self.chunk.emit(
                             if (eval_plan != null)
                                 .call_eval_activation_spread
                             else if (is_eval)
@@ -5373,15 +5382,15 @@ pub const Compiler = struct {
                             else
                                 .call_spread,
                             eval_plan orelse 0,
-                        );
+                        ), c);
                     } else {
                         for (c.args) |arg| try self.compileExpr(arg);
                         if (eval_plan) |plan_index|
-                            _ = try self.chunk.emitAB(.call_eval_activation, @intCast(c.args.len), plan_index)
+                            try self.recordCallSite(try self.chunk.emitAB(.call_eval_activation, @intCast(c.args.len), plan_index), c)
                         else
                             // A bare `eval(...)` in an env-mode body is a candidate
                             // direct eval if the callee is the eval intrinsic.
-                            _ = try self.chunk.emit(if (is_eval) .call_eval else .call, @intCast(c.args.len));
+                            try self.recordCallSite(try self.chunk.emit(if (is_eval) .call_eval else .call, @intCast(c.args.len)), c);
                     }
                 }
             },

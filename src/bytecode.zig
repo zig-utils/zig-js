@@ -883,6 +883,11 @@ pub const EnvironmentDeclarations = struct {
     is_script: bool = false,
 };
 
+/// The exact source text of a CallExpression plus the byte length of its callee
+/// prefix inside that text. Retained so a failed call can name its callee the
+/// way JavaScriptCore does; see `ast.Node.call`.
+pub const CallSiteSpan = struct { text: []const u8 = "", callee_len: u32 = 0 };
+
 pub const Chunk = struct {
     const DebugSite = struct { instruction: usize, node: *const ast.Node };
 
@@ -950,6 +955,12 @@ pub const Chunk = struct {
     consts: std.ArrayListUnmanaged(Value) = .empty,
     names: std.ArrayListUnmanaged([]const u8) = .empty,
     fns: std.ArrayListUnmanaged(*FnTemplate) = .empty,
+    /// CallExpression source spans, keyed by the instruction index of the call
+    /// opcode they belong to. The compiler appends in emission order, and
+    /// emission order is instruction order, so the list is sorted. Read only
+    /// once a callee has turned out not to be callable, which leaves dispatch
+    /// untouched — see `Interpreter.CallSite`.
+    call_sites: std.ArrayListUnmanaged(CallSiteEntry) = .empty,
     /// Optional statement-boundary metadata. Chunks retain it eagerly so late
     /// debugger attachment works; a null hook keeps dispatch disabled.
     debug_sites: std.ArrayListUnmanaged(DebugSite) = .empty,
@@ -1057,6 +1068,28 @@ pub const Chunk = struct {
             // more precise boundary (e.g. a block and its first child).
             for (self.debug_sites.items) |site| self.debug_nodes[site.instruction] = site.node;
         }
+    }
+
+    pub const CallSiteEntry = struct { instruction: u32, span: CallSiteSpan };
+
+    pub fn recordCallSite(self: *Chunk, instruction: usize, span: CallSiteSpan) std.mem.Allocator.Error!void {
+        try self.call_sites.append(self.arena, .{ .instruction = @intCast(instruction), .span = span });
+    }
+
+    /// The CallExpression span bound to `instruction`, or null when the call was
+    /// synthesized rather than parsed. Instruction indices never move after
+    /// emission (only jump operands are patched), so the sorted append order is
+    /// a usable search key.
+    pub fn callSiteAt(self: *const Chunk, instruction: u32) ?CallSiteSpan {
+        var lo: usize = 0;
+        var hi: usize = self.call_sites.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const entry = self.call_sites.items[mid];
+            if (entry.instruction == instruction) return entry.span;
+            if (entry.instruction < instruction) lo = mid + 1 else hi = mid;
+        }
+        return null;
     }
 
     pub fn markDebugStatement(self: *Chunk, node: *const ast.Node) std.mem.Allocator.Error!void {

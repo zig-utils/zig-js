@@ -3263,8 +3263,11 @@ pub const Parser = struct {
     }
 
     fn parsePostfix(self: *Parser) ParseError!*Node {
+        // The first token of the LeftHandSideExpression, so a call suffix can
+        // retain its exact source span (see `callSourceFrom`).
+        const start_token = self.pos;
         const e = try self.parsePrimary();
-        const m = try self.parseMemberTail(e);
+        const m = try self.parseMemberTail(e, start_token);
         if ((self.check(.plus_plus) or self.check(.minus_minus)) and !self.hasLineTerminatorBefore(0)) {
             // A postfix `++`/`--` target must be a simple assignment target —
             // `import(x)++`, `f()++`, `1++` are early SyntaxErrors.
@@ -3289,11 +3292,33 @@ pub const Parser = struct {
         return name.text;
     }
 
+    /// A CallExpression's own source text and the byte length of its callee.
+    const CallSource = struct { text: []const u8 = "", callee_len: u32 = 0 };
+
+    /// The exact source of a just-parsed CallExpression plus the byte length of
+    /// its callee prefix within that text. JavaScriptCore's `is not a function`
+    /// diagnostic slices the callee from its first token up to the `(` — or the
+    /// `?.` of an optional call — rather than to the end of the last callee
+    /// token, so `a  .  b  (1)` names the callee `a  .  b  `.
+    fn callSourceFrom(self: *Parser, start_token: usize, callee_end_token: usize) CallSource {
+        const text = self.sourceFrom(start_token);
+        if (text.len == 0 or start_token >= self.tokens.len or callee_end_token >= self.tokens.len)
+            return .{};
+        const lo = self.tokens[start_token].pos;
+        const hi = self.tokens[callee_end_token].pos;
+        if (hi < lo or hi - lo > text.len) return .{ .text = text };
+        return .{ .text = text, .callee_len = @intCast(hi - lo) };
+    }
+
     /// Consume a chain of `.prop`, `[expr]`, `?.…`, and `(args)` operators on `e`.
-    fn parseMemberTail(self: *Parser, start: *Node) ParseError!*Node {
+    /// `start_token` indexes the first token of `start`, so a call suffix can
+    /// slice back to the beginning of its own callee expression.
+    fn parseMemberTail(self: *Parser, start: *Node, start_token: usize) ParseError!*Node {
         var e = start;
         var has_optional = false;
         while (true) {
+            // Bounds the callee text of a call suffix opening at this token.
+            const suffix_token = self.pos;
             if (self.match(.dot)) {
                 const name = try self.parseMemberName();
                 e = try self.alloc(.{ .member = .{ .object = e, .property = name } });
@@ -3301,7 +3326,14 @@ pub const Parser = struct {
                 has_optional = true;
                 if (self.check(.lparen)) {
                     const args = try self.parseArgs();
-                    e = try self.alloc(.{ .call = .{ .callee = e, .args = args, .optional = true } });
+                    const source = self.callSourceFrom(start_token, suffix_token);
+                    e = try self.alloc(.{ .call = .{
+                        .callee = e,
+                        .args = args,
+                        .optional = true,
+                        .source = source.text,
+                        .callee_len = source.callee_len,
+                    } });
                 } else if (self.match(.lbracket)) {
                     const saved_no_in = self.no_in; // a computed key is `[+In]`
                     self.no_in = false;
@@ -3323,7 +3355,13 @@ pub const Parser = struct {
             } else if (self.check(.lparen)) {
                 const args = try self.parseArgs();
                 if (!has_optional) self.recordDirectEvalUse(e);
-                e = try self.alloc(.{ .call = .{ .callee = e, .args = args } });
+                const source = self.callSourceFrom(start_token, suffix_token);
+                e = try self.alloc(.{ .call = .{
+                    .callee = e,
+                    .args = args,
+                    .source = source.text,
+                    .callee_len = source.callee_len,
+                } });
             } else if (self.check(.template)) {
                 // A tagged template may not appear in an optional chain
                 // (`a?.b`tmpl`` is a SyntaxError) — short-circuiting a tag call is

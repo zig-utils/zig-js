@@ -13686,6 +13686,101 @@ test "Symbol constructor probes and ordinary wrapper coercion" {
     )).asBool());
 }
 
+// JavaScriptCore names the callee of a failed call with its exact source text
+// and describes the value it held, and matching that text is a drop-in-compat
+// requirement (#889). Every case below is the verbatim JSC message. The second
+// half re-runs each case inside a generator body, which only the bytecode VM
+// can execute, so the two tiers are held to the same text.
+test "a failed call names its callee the way JavaScriptCore does" {
+    const Case = struct { source: []const u8, message: []const u8 };
+    const cases = [_]Case{
+        // The callee is sliced from its first token to the `(`, so the printed
+        // text is the source, not a re-rendering of the AST.
+        .{ .source = "var a = 1; a()", .message = "a is not a function. (In 'a()', 'a' is 1)" },
+        .{ .source = "var o = {}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is undefined)" },
+        .{ .source = "var o = {n:{}}; o.n.m()", .message = "o.n.m is not a function. (In 'o.n.m()', 'o.n.m' is undefined)" },
+        .{ .source = "var o = {}; o['m']()", .message = "o['m'] is not a function. (In 'o['m']()', 'o['m']' is undefined)" },
+        .{ .source = "var o = {m:1}; (o.m)()", .message = "(o.m) is not a function. (In '(o.m)()', '(o.m)' is 1)" },
+        .{ .source = "var o = {m:1}; o.m(1, 2)", .message = "o.m is not a function. (In 'o.m(1, 2)', 'o.m' is 1)" },
+        // Interior trivia belongs to the callee text: JSC bounds it at the `(`.
+        .{ .source = "var o = {m:1}; o  .  m  (1)", .message = "o  .  m   is not a function. (In 'o  .  m  (1)', 'o  .  m  ' is 1)" },
+        .{ .source = "var o = {m:1}; o/*c*/.m()", .message = "o/*c*/.m is not a function. (In 'o/*c*/.m()', 'o/*c*/.m' is 1)" },
+        // An optional call stops the callee at the `?.`, not at the `(`.
+        .{ .source = "var o = {m:1}; o.m?.()", .message = "o.m is not a function. (In 'o.m?.()', 'o.m' is 1)" },
+        .{ .source = "var o = {m:1}; o?.m()", .message = "o?.m is not a function. (In 'o?.m()', 'o?.m' is 1)" },
+        .{ .source = "function f(){ return 1; } f()()", .message = "f() is not a function. (In 'f()()', 'f()' is 1)" },
+        .{ .source = "var o = {m(){ this.n(); }}; o.m()", .message = "this.n is not a function. (In 'this.n()', 'this.n' is undefined)" },
+        .{ .source = "class C { #p = 1; m(){ this.#p(); } } new C().m()", .message = "this.#p is not a function. (In 'this.#p()', 'this.#p' is 1)" },
+        .{ .source = "class C { m(){ super.nope(); } } new C().m()", .message = "super.nope is not a function. (In 'super.nope()', 'super.nope' is undefined)" },
+        // Value descriptions. A string keeps its raw text between bare quotes,
+        // a Symbol is named rather than printed, and every other object is
+        // reported by its calculated class name.
+        .{ .source = "var o = {m:null}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is null)" },
+        .{ .source = "var o = {m:true}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is true)" },
+        .{ .source = "var o = {m:1.5}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is 1.5)" },
+        .{ .source = "var o = {m:-0}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is 0)" },
+        .{ .source = "var o = {m:NaN}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is NaN)" },
+        .{ .source = "var o = {m:1e300}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is 1e+300)" },
+        .{ .source = "var o = {m:-1n}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is -1)" },
+        .{ .source = "var o = {m:'a\"b'}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is \"a\"b\")" },
+        .{ .source = "var o = {m:Symbol('s')}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is a Symbol)" },
+        .{ .source = "var o = {m:{}}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of Object)" },
+        .{ .source = "var o = {m:[]}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of Array)" },
+        .{ .source = "var o = {m:new Map()}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of Map)" },
+        .{ .source = "function F(){} var o = {m:new F()}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of F)" },
+        // A @@toStringTag string wins over the prototype's constructor, an
+        // anonymous constructor falls through to the generic name, and a Proxy
+        // reports its own class rather than its target's.
+        .{ .source = "var o = {m:{[Symbol.toStringTag]:'Tagged'}}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of Tagged)" },
+        .{ .source = "var o = {m:Object.create({constructor: function Nope(){}})}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of Nope)" },
+        .{ .source = "var o = {m:new (class{})()}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of Object)" },
+        .{ .source = "var o = {m:Object.create(null)}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of Object)" },
+        .{ .source = "var o = {m:new Proxy({}, {})}; o.m()", .message = "o.m is not a function. (In 'o.m()', 'o.m' is an instance of ProxyObject)" },
+    };
+    var buffer: [512]u8 = undefined;
+    for (cases) |case| {
+        const probe = try std.fmt.bufPrint(
+            &buffer,
+            "var caught = ''; try {{ {s} }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught",
+            .{case.source},
+        );
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "TypeError: {s}", .{case.message});
+        defer std.testing.allocator.free(expected);
+        try expectEvalStr(expected, probe);
+    }
+    // The same text on the bytecode tier. A generator body cannot be tree-walked,
+    // so this drives the compiler's call-site table rather than the AST.
+    for (cases) |case| {
+        const probe = try std.fmt.bufPrint(
+            &buffer,
+            "var caught = ''; function* g() {{ {s} }} try {{ g().next(); }} catch (e) {{ caught = e.name + ': ' + e.message; }} caught",
+            .{case.source},
+        );
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "TypeError: {s}", .{case.message});
+        defer std.testing.allocator.free(expected);
+        try expectEvalStr(expected, probe);
+    }
+}
+
+// A `[[Call]]` that no CallExpression owns has no callee text to name, and
+// keeps the value-only wording rather than inventing a span. A tagged template
+// is a call but not a CallExpression, and an iterator record's `next` is
+// invoked by the protocol rather than by syntax; JavaScriptCore words both
+// differently again, which #889 tracks separately.
+test "a call with no owning CallExpression keeps the value-only wording" {
+    try expectEvalStr("TypeError: value is not a function",
+        \\var caught = "";
+        \\try { var o = { m: 1 }; o.m`x`; } catch (e) { caught = e.name + ": " + e.message; }
+        \\caught
+    );
+    try expectEvalStr("TypeError: value is not a function",
+        \\var caught = "";
+        \\var it = { [Symbol.iterator]: function () { return { next: 1 }; } };
+        \\try { [...it]; } catch (e) { caught = e.name + ": " + e.message; }
+        \\caught
+    );
+}
+
 test "Error.prototype.stack accessor" {
     // An accessor on Error.prototype with get/set named "get stack"/"set stack".
     try expectEvalStr("function", "typeof Object.getOwnPropertyDescriptor(Error.prototype, 'stack').get");
@@ -13703,7 +13798,7 @@ test "Error.prototype.stack accessor" {
         \\var outerFrame = full.indexOf("\n    at outer");
         \\Error.stackTraceLimit = 1;
         \\var limited = caught.stack;
-        \\full.indexOf("TypeError: value is not a function") === 0 &&
+        \\full.indexOf("TypeError: null is not a function. (In 'null()', 'null' is null)") === 0 &&
         \\innerFrame > 0 && outerFrame > innerFrame &&
         \\limited.indexOf("\n    at inner") > 0 && limited.indexOf("\n    at outer") === -1
     )).asBool());

@@ -218,6 +218,97 @@ pub fn notAConstructorSubject(self: *Interpreter, v: Value) EvalError![]const u8
     return "Object";
 }
 
+/// How JavaScriptCore describes the value in the parenthetical of
+/// "<callee> is not a function. (In '<call>', '<callee>' is <subject>)". It
+/// differs from `notAConstructorSubject` in exactly two places: a Symbol is the
+/// bare phrase "a Symbol", and every other object is "an instance of <class>".
+///
+/// Same discipline as the constructor subject — every lookup is data-only.
+/// Building an error message must not run a `@@toStringTag` getter or a proxy
+/// trap, which could observe, mutate, or throw over the error being reported.
+pub fn notAFunctionSubject(self: *Interpreter, v: Value) EvalError![]const u8 {
+    switch (v.kind()) {
+        .undefined => return "undefined",
+        .null => return "null",
+        .boolean => return if (v.asBool()) "true" else "false",
+        .number => return try value.numberToString(self.arena, v.asNum()),
+        .string => return try std.fmt.allocPrint(self.arena, "\"{s}\"", .{try self.toStringWtf8(v)}),
+        .object => {},
+    }
+    const o = v.asObj();
+    if (o.is_symbol) return "a Symbol";
+    if (o.is_bigint) return try self.toStringWtf8(v);
+    return try std.fmt.allocPrint(self.arena, "an instance of {s}", .{try calculatedClassName(self, o)});
+}
+
+/// JavaScriptCore's `calculatedClassName`, restricted to data-only lookups: a
+/// string `@@toStringTag`, else the `name` of the `constructor` reachable on the
+/// prototype chain, else the generic class name. An anonymous constructor has an
+/// empty name and falls through to "Object", as it does in JSC. A Proxy reports
+/// its own internal class rather than its target's.
+fn calculatedClassName(self: *Interpreter, o: *value.Object) EvalError![]const u8 {
+    if (o.proxyHandler() != null or o.proxy_revoked) return "ProxyObject";
+    if (symbolToStringTagKey(self)) |tk| {
+        var cur: ?*value.Object = o;
+        while (cur) |c| {
+            if (c.proxyHandler() != null or c.proxy_revoked) break;
+            if (c.getAccessor(tk) != null) break;
+            if (c.getOwn(tk)) |tv| {
+                if (tv.isString()) return try self.toStringWtf8(tv);
+                break;
+            }
+            cur = c.protoAtomic();
+        }
+    }
+    // The constructor lives on the prototype, so start the walk one link up:
+    // `Object.create({constructor: function Nope(){}})` is "an instance of Nope".
+    var cur: ?*value.Object = o.protoAtomic();
+    while (cur) |c| {
+        if (c.proxyHandler() != null or c.proxy_revoked) break;
+        if (c.getAccessor("constructor") != null) break;
+        if (c.getOwn("constructor")) |ctor| {
+            if (ctor.isObject() and ctor.asObj().isCallableObject()) {
+                if (ctor.asObj().getOwn("name")) |n| {
+                    if (n.isString()) {
+                        const text = try self.toStringWtf8(n);
+                        if (text.len > 0) return text;
+                    }
+                }
+            }
+            break;
+        }
+        cur = c.protoAtomic();
+    }
+    return "Object";
+}
+
+/// The CallExpression a `[[Call]]` came from. Used only to build the
+/// JavaScriptCore-shaped "is not a function" text, so resolving it is deferred
+/// to the throw path and ordinary dispatch pays nothing for carrying it.
+/// A `[[Call]]` that no CallExpression owns — a builtin invoking a callback, the
+/// C API, `Reflect.apply` — passes `.none` and keeps the value-only wording.
+pub const CallSite = union(enum) {
+    none,
+    /// A tree-walked call: the exact source of the whole CallExpression, and the
+    /// byte length of the callee prefix inside it.
+    source: bc.CallSiteSpan,
+    /// A bytecode call: the chunk's sparse site table is searched only once the
+    /// callee has turned out not to be callable.
+    bytecode: struct { chunk: *const bc.Chunk, instruction: u32 },
+
+    pub const Text = struct { call: []const u8, callee: []const u8 };
+
+    pub fn resolve(self: CallSite) ?Text {
+        const found = switch (self) {
+            .none => return null,
+            .source => |site| site,
+            .bytecode => |site| site.chunk.callSiteAt(site.instruction) orelse return null,
+        };
+        if (found.callee_len == 0 or found.callee_len > found.text.len) return null;
+        return .{ .call = found.text, .callee = found.text[0..found.callee_len] };
+    }
+};
+
 pub fn notAnObjectMessage(base: Value) []const u8 {
     return if (base.isNull()) "null is not an object" else "undefined is not an object";
 }
@@ -5810,7 +5901,7 @@ pub const Interpreter = struct {
                 break :blk try self.getPropertyWithReceiver(Value.obj(parent), key, self.this_value);
             },
 
-            .call => |c| try self.evalCall(c.callee, c.args, c.optional),
+            .call => |c| try self.evalCall(c.callee, c.args, c.optional, .{ .source = .{ .text = c.source, .callee_len = c.callee_len } }),
             .tagged_template => |t| try self.evalTaggedTemplate(node, t.tag, t.exprs),
             .new_expr => |n| try self.evalNew(n.callee, n.args),
             .member => |m| blk: {
@@ -8195,7 +8286,7 @@ pub const Interpreter = struct {
             .class_expr => |c| .{ .class_expr = .{ .name = c.name, .inferred_name = c.inferred_name, .superclass = try self.deepCopyOpt(c.superclass), .members = try self.deepCopyClassMembers(c.members), .source = c.source } },
             .super_call => |args| .{ .super_call = try self.deepCopyNodes(args) },
             .super_member => |sm| .{ .super_member = .{ .property = sm.property, .computed = try self.deepCopyOpt(sm.computed) } },
-            .call => |c| .{ .call = .{ .callee = try self.deepCopyNode(c.callee), .args = try self.deepCopyNodes(c.args), .optional = c.optional } },
+            .call => |c| .{ .call = .{ .callee = try self.deepCopyNode(c.callee), .args = try self.deepCopyNodes(c.args), .optional = c.optional, .source = c.source, .callee_len = c.callee_len } },
             .new_expr => |x| .{ .new_expr = .{ .callee = try self.deepCopyNode(x.callee), .args = try self.deepCopyNodes(x.args) } },
             .tagged_template => |t| .{ .tagged_template = .{ .tag = try self.deepCopyNode(t.tag), .cooked = t.cooked, .raw = t.raw, .exprs = try self.deepCopyNodes(t.exprs) } },
             .member => |m| .{ .member = .{ .object = try self.deepCopyNode(m.object), .property = m.property, .computed = try self.deepCopyOpt(m.computed), .optional = m.optional } },
@@ -8955,7 +9046,7 @@ pub const Interpreter = struct {
         return ok;
     }
 
-    fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool) EvalError!Value {
+    fn evalCall(self: *Interpreter, callee_node: *Node, arg_nodes: []*Node, optional: bool, site: CallSite) EvalError!Value {
         if (callee_node.* == .optional_chain and callee_node.optional_chain.* == .member) {
             const m = callee_node.optional_chain.member;
             const recv_opt: ?Value = self.eval(m.object) catch |err|
@@ -8967,20 +9058,20 @@ pub const Interpreter = struct {
                 // throws for calling undefined. Do not leak OptShortCircuit past
                 // the wrapper or accidentally retain the pre-short-circuit base.
                 if (optional) return error.OptShortCircuit;
-                return self.callValueWithThis(Value.undef(), try self.evalArgs(arg_nodes), Value.undef());
+                return self.callValueWithThisAtSite(Value.undef(), try self.evalArgs(arg_nodes), Value.undef(), site);
             }
             const recv = recv_opt.?;
             const key = try self.memberKey(m.property, m.computed);
             if (optional) {
                 const method = try self.getProperty(recv, key);
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
-                return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
+                return self.callValueWithThisAtSite(method, try self.evalArgs(arg_nodes), recv, site);
             }
             // Evaluate the MemberExpression's Get before its Arguments. Keep the
             // resolved value so an accessor/proxy is observed exactly once.
             const method = try self.getProperty(recv, key);
             const args = try self.evalArgs(arg_nodes);
-            return self.callResolvedMethod(recv, key, method, args);
+            return self.callResolvedMethod(recv, key, method, args, site);
         }
         // Method call `obj.m(...)`: evaluate the receiver once so it can both
         // resolve the method and bind `this`. Array/string builtins (push,
@@ -9005,14 +9096,14 @@ pub const Interpreter = struct {
             if (optional) {
                 const method = try self.getProperty(recv, key);
                 if (method.isNull() or method.isUndefined()) return error.OptShortCircuit;
-                return self.callValueWithThis(method, try self.evalArgs(arg_nodes), recv);
+                return self.callValueWithThisAtSite(method, try self.evalArgs(arg_nodes), recv, site);
             }
             // Evaluate the MemberExpression's Get before its Arguments (ECMA-262
             // EvaluateCall), then retain that exact reference through argument
             // expansion. Re-reading here would duplicate getters/proxy traps.
             const method = try self.getProperty(recv, key);
             const args = try self.evalArgs(arg_nodes);
-            return self.callResolvedMethod(recv, key, method, args);
+            return self.callResolvedMethod(recv, key, method, args, site);
         }
         // `super.m(args)`: look the method up on the home object's prototype,
         // but invoke it with the current `this`.
@@ -9028,7 +9119,7 @@ pub const Interpreter = struct {
             const key = if (key_val) |kv| try self.keyOf(kv) else sm.property;
             const method = try self.getProperty(Value.obj(parent), key);
             const args = try self.evalArgs(arg_nodes);
-            return self.callValueWithThis(method, args, self.this_value);
+            return self.callValueWithThisAtSite(method, args, self.this_value, site);
         }
         // A bare identifier carries its exact WithBaseObject out of the same
         // ResolveBinding/GetValue operation. Root both Values across argument
@@ -9055,7 +9146,7 @@ pub const Interpreter = struct {
         const eval_named = !optional and callee_node.* == .identifier and std.mem.eql(u8, callee_node.identifier, "eval");
         self.direct_eval_call = eval_named and self.isDirectEvalCallee(rooted_callee);
         defer self.direct_eval_call = saved_direct_eval;
-        return self.callValueWithThis(rooted_callee, args, rooted_with_base);
+        return self.callValueWithThisAtSite(rooted_callee, args, rooted_with_base, site);
     }
 
     fn prepareTreeTailCall(self: *Interpreter, node: *Node) EvalError!?Value {
@@ -9176,23 +9267,30 @@ pub const Interpreter = struct {
     /// directly; JS functions push a call scope over their closure; builtin
     /// error constructors fabricate an error instance.
     pub fn callValueWithThis(self: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
-        if (!callee.isObject()) return self.throwError("TypeError", "value is not a function");
+        return self.callValueWithThisAtSite(callee, args, this_val, .none);
+    }
+
+    /// `callValueWithThis` for a `[[Call]]` a CallExpression owns. `site` is read
+    /// only when the callee turns out not to be callable, so it costs dispatch
+    /// nothing and every tier can name the callee identically.
+    pub fn callValueWithThisAtSite(self: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: CallSite) EvalError!Value {
+        if (!callee.isObject()) return self.throwNotAFunction(callee, site);
         const obj = callee.asObj();
         if (obj.proxyHandler() != null or obj.proxy_revoked) {
             const target = obj.proxyTarget() orelse return self.throwError("TypeError", "Cannot perform 'apply' on a proxy that has been revoked");
             // A Proxy has a [[Call]] method only if its target is callable; if not,
             // calling it is a TypeError BEFORE the apply trap runs (9.5.12).
-            if (!obj.behavior.proxy_callable) return self.throwError("TypeError", "value is not a function");
+            if (!obj.behavior.proxy_callable) return self.throwNotAFunction(callee, site);
             if (try self.proxyTrap(obj, "apply")) |trap| {
                 const arr = try self.newArray();
                 for (args) |a| try arr.asObj().appendElement(self.arena, a);
                 return self.callValueWithThis(trap, &.{ Value.obj(target), this_val, arr }, Value.obj(obj.proxyHandler().?));
             }
-            return self.callValueWithThis(Value.obj(target), args, this_val);
+            return self.callValueWithThisAtSite(Value.obj(target), args, this_val, site);
         }
         if (obj.boundFunction()) |erased| {
             const bf: *BoundFn = @ptrCast(@alignCast(erased));
-            return self.callValueWithThis(bf.target, try self.concatArgs(bf.args, args), bf.this);
+            return self.callValueWithThisAtSite(bf.target, try self.concatArgs(bf.args, args), bf.this, site);
         }
         if (obj.errorCtor()) |name| return self.callErrorConstructor(obj, name, args, callee);
         if (obj.hostClassHooks()) |hooks| if (hooks.call) |call| {
@@ -9230,6 +9328,20 @@ pub const Interpreter = struct {
             const func: *Function = @ptrCast(@alignCast(erased));
             return self.callFunction(func, args, this_val);
         }
+        return self.throwNotAFunction(callee, site);
+    }
+
+    /// The TypeError for calling a non-callable value. JavaScriptCore names the
+    /// callee with its exact source text and describes what it actually held:
+    /// `o.m is not a function. (In 'o.m()', 'o.m' is undefined)`. A `[[Call]]`
+    /// with no owning CallExpression has no text to name, and keeps the
+    /// value-only wording.
+    fn throwNotAFunction(self: *Interpreter, callee: Value, site: CallSite) EvalError {
+        if (site.resolve()) |text| return self.throwErrorFmt(
+            "TypeError",
+            "{s} is not a function. (In '{s}', '{s}' is {s})",
+            .{ text.callee, text.call, text.callee, try notAFunctionSubject(self, callee) },
+        );
         return self.throwError("TypeError", "value is not a function");
     }
 
@@ -16653,14 +16765,14 @@ pub const Interpreter = struct {
         // the unshadowed intrinsics and the fallback for method names that aren't
         // installed as real own properties (synthesized push/getDay/etc.).
         const method = try self.getProperty(recv, name);
-        return self.callResolvedMethod(recv, name, method, args);
+        return self.callResolvedMethod(recv, name, method, args, .none);
     }
 
-    fn callResolvedMethod(self: *Interpreter, recv: Value, name: []const u8, method: Value, args: []const Value) EvalError!Value {
+    fn callResolvedMethod(self: *Interpreter, recv: Value, name: []const u8, method: Value, args: []const Value, site: CallSite) EvalError!Value {
         if (method.isObject() and method.asObj().isCallableObject())
             return self.callValueWithThis(method, args, recv);
         if (try self.builtinMethod(recv, name, args)) |result| return result;
-        return self.callValueWithThis(method, args, recv);
+        return self.callValueWithThisAtSite(method, args, recv, site);
     }
 
     pub const IteratorRecord = struct {

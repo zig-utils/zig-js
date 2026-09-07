@@ -4419,18 +4419,26 @@ fn spreadArguments(vm: *Interpreter, args_array: Value) EvalError![]const Value 
     return args_array.asObj().internalElementsSnapshot(vm.arena);
 }
 
-fn callEvalValue(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
-    const saved = vm.direct_eval_call;
-    vm.direct_eval_call = vm.isDirectEvalCallee(callee);
-    defer vm.direct_eval_call = saved;
-    return callValue(vm, callee, args, Value.undef());
+/// The CallExpression owning the call opcode currently executing. `ip` has
+/// already advanced past that opcode, so the site is the previous instruction.
+/// The chunk's table is only searched if the callee turns out not to be
+/// callable, so building this costs dispatch nothing.
+inline fn vmCallSite(chunk: *const Chunk, ip: usize) interp.CallSite {
+    return .{ .bytecode = .{ .chunk = chunk, .instruction = @intCast(ip - 1) } };
 }
 
-fn callEvalValueWithThis(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
+fn callEvalValue(vm: *Interpreter, callee: Value, args: []const Value, site: interp.CallSite) EvalError!Value {
     const saved = vm.direct_eval_call;
     vm.direct_eval_call = vm.isDirectEvalCallee(callee);
     defer vm.direct_eval_call = saved;
-    return callValue(vm, callee, args, this_val);
+    return callValue(vm, callee, args, Value.undef(), site);
+}
+
+fn callEvalValueWithThis(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: interp.CallSite) EvalError!Value {
+    const saved = vm.direct_eval_call;
+    vm.direct_eval_call = vm.isDirectEvalCallee(callee);
+    defer vm.direct_eval_call = saved;
+    return callValue(vm, callee, args, this_val, site);
 }
 
 const MaterializedDirectEvalEnvironment = struct {
@@ -5041,6 +5049,7 @@ fn callActivationEvalValue(
     callee: Value,
     args: []const Value,
     this_value: ?Value,
+    site: interp.CallSite,
 ) EvalError!Value {
     if (plan_index >= chunk.direct_eval_plans.items.len)
         return vm.throwError("InternalError", "invalid direct-eval activation plan");
@@ -5051,13 +5060,13 @@ fn callActivationEvalValue(
     // the activation or allocate an Environment merely because the call site
     // was syntactically spelled `eval(...)`.
     if (!vm.isDirectEvalCallee(callee))
-        return callValue(vm, callee, args, this_value orelse Value.undef());
+        return callValue(vm, callee, args, this_value orelse Value.undef(), site);
 
     if (args.len == 0 or !args[0].isString())
         return if (this_value) |receiver|
-            callEvalValueWithThis(vm, callee, args, receiver)
+            callEvalValueWithThis(vm, callee, args, receiver, site)
         else
-            callEvalValue(vm, callee, args);
+            callEvalValue(vm, callee, args, site);
 
     const plan = &chunk.direct_eval_plans.items[plan_index];
     if (exec) |activation| {
@@ -5101,9 +5110,9 @@ fn callActivationEvalValue(
         vm.env = vm.tempEnvRoot(runtime_environment_root, hook_context.runtime_environment);
     }
     return if (this_value) |receiver|
-        callEvalValueWithThis(vm, callee, args, receiver)
+        callEvalValueWithThis(vm, callee, args, receiver, site)
     else
-        callEvalValue(vm, callee, args);
+        callEvalValue(vm, callee, args, site);
 }
 
 test "vm materializes direct eval environments over exact defining frames failure atomically" {
@@ -5635,6 +5644,7 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
         root.get("eval") orelse return error.TestUnexpectedResult,
         &.{Value.str("let =")},
         null,
+        .none,
     ));
     try std.testing.expectEqual(@as(?*Environment, null), syntax_frame.direct_eval_environment.load(.acquire));
     try std.testing.expectEqual(&root, machine.env);
@@ -5654,6 +5664,7 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
         root.get("eval") orelse return error.TestUnexpectedResult,
         &.{Value.num(7)},
         null,
+        .none,
     );
     try std.testing.expectEqual(@as(f64, 7), identity.asNum());
     try std.testing.expectEqual(@as(?*Environment, null), identity_frame.direct_eval_environment.load(.acquire));
@@ -5672,6 +5683,7 @@ test "vm activation eval opcode reads and mutates the exact live slot" {
         root.get("eval") orelse return error.TestUnexpectedResult,
         &.{Value.str("{}")},
         null,
+        .none,
     );
     try std.testing.expect(empty.isUndefined());
     try std.testing.expectEqual(@as(?*Environment, null), identity_frame.direct_eval_environment.load(.acquire));
@@ -5831,19 +5843,19 @@ test "vm parameter direct-eval entry allocation failure restores the caller acti
     try std.testing.expectEqual(&env, machine.env);
 }
 
-fn callSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value) EvalError!Value {
-    return callValue(vm, callee, try spreadArguments(vm, args_array), this_val);
+fn callSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value, site: interp.CallSite) EvalError!Value {
+    return callValue(vm, callee, try spreadArguments(vm, args_array), this_val, site);
 }
 
-fn callEvalSpreadValue(vm: *Interpreter, callee: Value, args_array: Value) EvalError!Value {
-    return callEvalValue(vm, callee, try spreadArguments(vm, args_array));
+fn callEvalSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, site: interp.CallSite) EvalError!Value {
+    return callEvalValue(vm, callee, try spreadArguments(vm, args_array), site);
 }
 
 fn constructSpreadValue(vm: *Interpreter, callee: Value, args_array: Value) EvalError!Value {
     return construct(vm, callee, try spreadArguments(vm, args_array));
 }
 
-fn tailCallValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
+fn tailCallValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: interp.CallSite) EvalError!Value {
     if (vm.driver_active) {
         if (jsChunkFn(callee)) |func| {
             vm.pending_activation = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
@@ -5851,20 +5863,20 @@ fn tailCallValue(vm: *Interpreter, callee: Value, args: []const Value, this_val:
             return Value.undef();
         }
     }
-    return callValue(vm, callee, args, this_val);
+    return callValue(vm, callee, args, this_val, site);
 }
 
-fn tailCallEvalValue(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
-    if (vm.isDirectEvalCallee(callee)) return callEvalValue(vm, callee, args);
-    return tailCallValue(vm, callee, args, Value.undef());
+fn tailCallEvalValue(vm: *Interpreter, callee: Value, args: []const Value, site: interp.CallSite) EvalError!Value {
+    if (vm.isDirectEvalCallee(callee)) return callEvalValue(vm, callee, args, site);
+    return tailCallValue(vm, callee, args, Value.undef(), site);
 }
 
-fn tailCallSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value) EvalError!Value {
-    return tailCallValue(vm, callee, try spreadArguments(vm, args_array), this_val);
+fn tailCallSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value, site: interp.CallSite) EvalError!Value {
+    return tailCallValue(vm, callee, try spreadArguments(vm, args_array), this_val, site);
 }
 
-fn tailCallMethodValue(vm: *Interpreter, receiver: Value, name: []const u8, args: []const Value) EvalError!Value {
-    return tailCallValue(vm, try vm.getProperty(receiver, name), args, receiver);
+fn tailCallMethodValue(vm: *Interpreter, receiver: Value, name: []const u8, args: []const Value, site: interp.CallSite) EvalError!Value {
+    return tailCallValue(vm, try vm.getProperty(receiver, name), args, receiver, site);
 }
 
 fn literalObjectTarget(vm: *Interpreter, target: Value) EvalError!*value.Object {
@@ -6420,37 +6432,37 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         const result = if (descriptor.bytecode_op == @backingInt(bc.Op.call) and values.len >= 1)
             (tryLinkedNativeCall(vm, metadata.callLinkFor(operation_id), values[0], values[1..]) catch |err|
                 return finishNativeOperation(frame, vm, operation_id, err)) orelse
-                callValue(vm, values[0], values[1..], Value.undef())
+                callValue(vm, values[0], values[1..], Value.undef(), .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_eval) and values.len >= 1)
-            callEvalValue(vm, values[0], values[1..])
+            callEvalValue(vm, values[0], values[1..], .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_method) and values.len >= 1)
             invokeMethod(vm, values[0], metadata.nameFor(operation_id) orelse
-                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..])
+                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..], .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_spread) and values.len == 2)
-            callSpreadValue(vm, values[0], values[1], Value.undef())
+            callSpreadValue(vm, values[0], values[1], Value.undef(), .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_eval_spread) and values.len == 2)
-            callEvalSpreadValue(vm, values[0], values[1])
+            callEvalSpreadValue(vm, values[0], values[1], .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this_spread) and values.len == 3)
-            callSpreadValue(vm, values[0], values[2], values[1])
+            callSpreadValue(vm, values[0], values[2], values[1], .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and values.len >= 2)
-            callValue(vm, values[0], values[2..], values[1])
+            callValue(vm, values[0], values[2..], values[1], .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.new_call) and values.len >= 1)
             construct(vm, values[0], values[1..])
         else if (descriptor.bytecode_op == @backingInt(bc.Op.new_spread) and values.len == 2)
             constructSpreadValue(vm, values[0], values[1])
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call) and values.len >= 1)
-            tailCallValue(vm, values[0], values[1..], Value.undef())
+            tailCallValue(vm, values[0], values[1..], Value.undef(), .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_eval) and values.len >= 1)
-            tailCallEvalValue(vm, values[0], values[1..])
+            tailCallEvalValue(vm, values[0], values[1..], .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_method) and values.len >= 1)
             tailCallMethodValue(vm, values[0], metadata.nameFor(operation_id) orelse
-                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..])
+                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..], .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this) and values.len >= 2)
-            tailCallValue(vm, values[0], values[2..], values[1])
+            tailCallValue(vm, values[0], values[2..], values[1], .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_spread) and values.len == 2)
-            tailCallSpreadValue(vm, values[0], values[1], Value.undef())
+            tailCallSpreadValue(vm, values[0], values[1], Value.undef(), .none)
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this_spread) and values.len == 3)
-            tailCallSpreadValue(vm, values[0], values[2], values[1])
+            tailCallSpreadValue(vm, values[0], values[2], values[1], .none)
         else
             return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, result);
@@ -9435,7 +9447,7 @@ fn runChunk(
                             const result = if (vm.vm_inline_call_depth < inline_call_depth_limit)
                                 try runInlineFunction(vm, func, func.chunk.?, stack.items[base..], Value.undef(), Value.undef())
                             else
-                                try callValueWithInlineCallsDisabled(vm, callee, stack.items[base..], Value.undef());
+                                try callValueWithInlineCallsDisabled(vm, callee, stack.items[base..], Value.undef(), vmCallSite(chunk, ip));
                             stack.shrinkRetainingCapacity(base - 1);
                             try stack.append(stack_alloc, result);
                             continue;
@@ -9457,7 +9469,7 @@ fn runChunk(
                         return acc; // driver reads `pending_activation` and ignores this value
                     }
                 }
-                const result = try callValue(vm, callee, stack.items[base..], Value.undef());
+                const result = try callValue(vm, callee, stack.items[base..], Value.undef(), vmCallSite(chunk, ip));
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
@@ -9476,7 +9488,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callValue(vm, callee, stack.items[base..], Value.undef());
+                return try callValue(vm, callee, stack.items[base..], Value.undef(), vmCallSite(chunk, ip));
             },
             .tail_call_eval => {
                 const argc = inst.a;
@@ -9493,7 +9505,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callEvalValue(vm, callee, stack.items[base..]);
+                return try callEvalValue(vm, callee, stack.items[base..], vmCallSite(chunk, ip));
             },
             .tail_call_eval_with_this => {
                 const argc = inst.a;
@@ -9511,7 +9523,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callEvalValueWithThis(vm, callee, stack.items[base..], this_val);
+                return try callEvalValueWithThis(vm, callee, stack.items[base..], this_val, vmCallSite(chunk, ip));
             },
             .tail_call_eval_activation => {
                 const argc = inst.a;
@@ -9528,7 +9540,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], null);
+                return try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], null, vmCallSite(chunk, ip));
             },
             .tail_call_eval_activation_with_this => {
                 const argc = inst.a;
@@ -9546,7 +9558,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], this_val);
+                return try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], this_val, vmCallSite(chunk, ip));
             },
             .call_eval => {
                 // A bare `eval(args)` call: mark it a DIRECT eval so, if the callee
@@ -9555,7 +9567,7 @@ fn runChunk(
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
-                const result = try callEvalValue(vm, callee, stack.items[base..]);
+                const result = try callEvalValue(vm, callee, stack.items[base..], vmCallSite(chunk, ip));
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
@@ -9563,7 +9575,7 @@ fn runChunk(
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
-                const result = try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], null);
+                const result = try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], null, vmCallSite(chunk, ip));
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
@@ -9572,7 +9584,7 @@ fn runChunk(
                 const base = stack.items.len - argc;
                 const this_val = stack.items[base - 1];
                 const callee = stack.items[base - 2];
-                const result = try callEvalValueWithThis(vm, callee, stack.items[base..], this_val);
+                const result = try callEvalValueWithThis(vm, callee, stack.items[base..], this_val, vmCallSite(chunk, ip));
                 stack.shrinkRetainingCapacity(base - 2);
                 try stack.append(stack_alloc, result);
             },
@@ -9581,7 +9593,7 @@ fn runChunk(
                 const base = stack.items.len - argc;
                 const this_val = stack.items[base - 1];
                 const callee = stack.items[base - 2];
-                const result = try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], this_val);
+                const result = try callActivationEvalValue(vm, chunk, frame, exec, inst.b, callee, stack.items[base..], this_val, vmCallSite(chunk, ip));
                 stack.shrinkRetainingCapacity(base - 2);
                 try stack.append(stack_alloc, result);
             },
@@ -9596,7 +9608,7 @@ fn runChunk(
                 const recv = stack.items[base - 1];
                 const args = stack.items[base..];
                 const name = chunk.names.items[inst.a];
-                const result = try invokeMethod(vm, recv, name, args);
+                const result = try invokeMethod(vm, recv, name, args, vmCallSite(chunk, ip));
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
@@ -9618,7 +9630,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callValue(vm, method, args, recv);
+                return try callValue(vm, method, args, recv, vmCallSite(chunk, ip));
             },
             .new_call => {
                 const argc = inst.a;
@@ -9661,18 +9673,18 @@ fn runChunk(
             .call_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try callValue(vm, callee, try spreadArguments(vm, args_arr), Value.undef()));
+                try stack.append(stack_alloc, try callValue(vm, callee, try spreadArguments(vm, args_arr), Value.undef(), vmCallSite(chunk, ip)));
             },
             .call_eval_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try callEvalValue(vm, callee, try spreadArguments(vm, args_arr)));
+                try stack.append(stack_alloc, try callEvalValue(vm, callee, try spreadArguments(vm, args_arr), vmCallSite(chunk, ip)));
             },
             .call_eval_with_this_spread => {
                 const args_arr = stack.pop().?;
                 const this_val = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try callEvalValueWithThis(vm, callee, try spreadArguments(vm, args_arr), this_val));
+                try stack.append(stack_alloc, try callEvalValueWithThis(vm, callee, try spreadArguments(vm, args_arr), this_val, vmCallSite(chunk, ip)));
             },
             .call_eval_activation_spread => {
                 const args_arr = stack.pop().?;
@@ -9686,6 +9698,7 @@ fn runChunk(
                     callee,
                     try spreadArguments(vm, args_arr),
                     null,
+                    vmCallSite(chunk, ip),
                 ));
             },
             .call_eval_activation_with_this_spread => {
@@ -9701,13 +9714,14 @@ fn runChunk(
                     callee,
                     try spreadArguments(vm, args_arr),
                     this_val,
+                    vmCallSite(chunk, ip),
                 ));
             },
             .call_with_this_spread => {
                 const args_arr = stack.pop().?;
                 const this_val = stack.pop().?;
                 const callee = stack.pop().?;
-                try stack.append(stack_alloc, try callValue(vm, callee, try spreadArguments(vm, args_arr), this_val));
+                try stack.append(stack_alloc, try callValue(vm, callee, try spreadArguments(vm, args_arr), this_val, vmCallSite(chunk, ip)));
             },
             .tail_call_spread => {
                 const args_arr = stack.items[stack.items.len - 1];
@@ -9724,7 +9738,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callValue(vm, callee, args, Value.undef());
+                return try callValue(vm, callee, args, Value.undef(), vmCallSite(chunk, ip));
             },
             .tail_call_with_this_spread => {
                 const args_arr = stack.items[stack.items.len - 1];
@@ -9742,7 +9756,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callValue(vm, callee, args, this_val);
+                return try callValue(vm, callee, args, this_val, vmCallSite(chunk, ip));
             },
             .tail_call_eval_activation_spread => {
                 const args_arr = stack.items[stack.items.len - 1];
@@ -9759,7 +9773,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callActivationEvalValue(vm, chunk, frame, exec, inst.a, callee, args, null);
+                return try callActivationEvalValue(vm, chunk, frame, exec, inst.a, callee, args, null, vmCallSite(chunk, ip));
             },
             .tail_call_eval_activation_with_this_spread => {
                 const args_arr = stack.items[stack.items.len - 1];
@@ -9777,7 +9791,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callActivationEvalValue(vm, chunk, frame, exec, inst.a, callee, args, this_val);
+                return try callActivationEvalValue(vm, chunk, frame, exec, inst.a, callee, args, this_val, vmCallSite(chunk, ip));
             },
             .new_spread => {
                 const args_arr = stack.pop().?;
@@ -9870,7 +9884,7 @@ fn runChunk(
                 const callee = stack.items[base - 2];
                 const fast_array_push = try vm.tryFastArrayPush(callee, this_val, args);
                 const res = fast_array_push orelse blk: {
-                    break :blk try callValue(vm, callee, args, this_val);
+                    break :blk try callValue(vm, callee, args, this_val, vmCallSite(chunk, ip));
                 };
                 if (builtin.is_test and fast_array_push != null)
                     _ = quick_array_push_hits.fetchAdd(1, .monotonic);
@@ -9894,7 +9908,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try callValue(vm, callee, args, this_val);
+                return try callValue(vm, callee, args, this_val, vmCallSite(chunk, ip));
             },
             .assert_iter_result => {
                 // Type(result) must be Object — a Symbol/BigInt is object-tagged here
@@ -12350,7 +12364,7 @@ test "class call guards restore direct VM entry state through allocation failure
             var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
             machine.arena = failing.allocator();
             const result = switch (entry) {
-                .value => callValue(&machine, class, &.{}, Value.undef()),
+                .value => callValue(&machine, class, &.{}, Value.undef(), .none),
                 .driver => runFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef()),
                 .inline_ => runInlineFunction(&machine, function, function_chunk, &.{}, Value.undef(), Value.undef()),
             };
@@ -12769,7 +12783,7 @@ test "nested suspendable closure allocation failure restores the defining enviro
 /// Invoke `callee` with `args` and an explicit `this`. A VM-compiled function
 /// runs in a nested VM frame; everything else (natives, error constructors,
 /// tree-walk closures) is handed to the interpreter.
-fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
+fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: interp.CallSite) EvalError!Value {
     if (callee.isObject()) {
         if (callee.asObj().jsFunction()) |erased| {
             const func: *Function = @ptrCast(@alignCast(erased));
@@ -12778,19 +12792,19 @@ fn callValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Val
             }
         }
     }
-    return vm.callValueWithThis(callee, args, this_val);
+    return vm.callValueWithThisAtSite(callee, args, this_val, site);
 }
 
 /// `recv.name(args)` — mirrors the tree-walker's `callMethod`: a real (possibly
 /// user-overridden) method property on the receiver/prototype chain wins over the
 /// engine's native fast-path, which remains the implementation of the unshadowed
 /// intrinsics and the fallback for synthesized-only method names.
-fn invokeMethod(vm: *Interpreter, recv: Value, name: []const u8, args: []const Value) EvalError!Value {
+fn invokeMethod(vm: *Interpreter, recv: Value, name: []const u8, args: []const Value, site: interp.CallSite) EvalError!Value {
     const method = try vm.getProperty(recv, name);
     if (method.isObject() and method.asObj().isCallableObject())
-        return callValue(vm, method, args, recv);
+        return callValue(vm, method, args, recv, site);
     if (try vm.builtinMethod(recv, name, args)) |r| return r;
-    return callValue(vm, method, args, recv);
+    return callValue(vm, method, args, recv, site);
 }
 
 fn activeFunction(vm: *Interpreter) ?*Function {
@@ -13521,11 +13535,11 @@ fn runInlineFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []
     return execLoop(vm, &act.exec, fchunk, act.frame, null, true);
 }
 
-fn callValueWithInlineCallsDisabled(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
+fn callValueWithInlineCallsDisabled(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: interp.CallSite) EvalError!Value {
     const saved = vm.vm_inline_calls_disabled;
     vm.vm_inline_calls_disabled = true;
     defer vm.vm_inline_calls_disabled = saved;
-    return callValue(vm, callee, args, this_val);
+    return callValue(vm, callee, args, this_val, site);
 }
 
 /// If `callee` is a plain JS-chunk function (not class/generator/async/native/

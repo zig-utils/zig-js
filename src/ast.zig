@@ -253,7 +253,21 @@ pub const Node = union(enum) {
     super_call: []*Node,
     /// `super.prop` / `super[expr]` — look up on the home object's prototype.
     super_member: struct { property: []const u8 = "", computed: ?*Node = null },
-    call: struct { callee: *Node, args: []*Node, optional: bool = false },
+    /// `callee(args)`. `source` is the exact source text of the whole
+    /// CallExpression and `callee_len` the byte length of its callee prefix
+    /// inside it, retained so a failed call can name the callee the way
+    /// JavaScriptCore does: `<callee> is not a function. (In '<call>',
+    /// '<callee>' is <value>)`. JSC bounds the callee at the `(` (or the `?.`
+    /// of an optional call) rather than at the last callee token, so trailing
+    /// trivia belongs to the callee text. Both are empty for a synthesized
+    /// call, which falls back to JSC's value-only wording.
+    call: struct {
+        callee: *Node,
+        args: []*Node,
+        optional: bool = false,
+        source: []const u8 = "",
+        callee_len: u32 = 0,
+    },
     new_expr: struct { callee: *Node, args: []*Node },
     /// A tagged template `tag`a${x}b`` — calls `tag(strings, ...exprs)` where
     /// `strings` is the cooked-string array (with a `raw` array of the
