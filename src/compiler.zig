@@ -8696,10 +8696,14 @@ test "compiler lowers ordinary spread calls and constructors across tiers" {
         .compiled => |compiled| compiled.chunk,
         .rejected => return error.TestUnexpectedResult,
     };
-    var saw_eval_activation_spread = false;
+    // The activation can contain a `var eval` created by an earlier direct
+    // eval. ResolveBinding therefore retains its exact WithBaseObject alongside
+    // the callee while the spread arguments are evaluated (#882).
+    var saw_eval_activation_with_this_spread = false;
     for (eval_barrier.code.items) |instruction|
-        saw_eval_activation_spread = saw_eval_activation_spread or instruction.op == .call_eval_activation_spread;
-    try std.testing.expect(saw_eval_activation_spread);
+        saw_eval_activation_with_this_spread = saw_eval_activation_with_this_spread or
+            instruction.op == .call_eval_activation_with_this_spread;
+    try std.testing.expect(saw_eval_activation_with_this_spread);
 
     const optional = switch (try Compiler.admitPlainFunction(arena.allocator(), program.program[4].func_decl)) {
         .compiled => |compiled| compiled.chunk,
