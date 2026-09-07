@@ -639,15 +639,47 @@ fn resolveThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return Value.undef();
-    const state = resolvingStateObject(fnobj) orelse return Value.undef();
+    const argument = if (args.len > 0) args[0] else Value.undef();
+    const roots_mark = try self.pushTempRootSlice(&.{ Value.obj(fnobj), argument });
+    defer self.restoreTempRoots(roots_mark);
+    const state = resolvingStateObject(
+        self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
+    ) orelse return Value.undef();
     const target = resolvingTarget(state) orelse return Value.undef();
-    if (state.promise_resolving_already.load(.acquire)) return Value.undef();
-    var reservation = try reserveResolvingJob(self);
-    if (state.promise_resolving_already.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+    const promise_mark = try self.pushTempPromiseRoot(target);
+    defer self.restoreTempPromiseRoots(promise_mark);
+    const initial_state = resolvingStateObject(
+        self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
+    ) orelse return Value.undef();
+    if (initial_state.promise_resolving_already.load(.acquire)) return Value.undef();
+    var reservation = reserveResolvingJob(self) catch |err| {
+        // A peer may have committed while this contender tried to reserve its
+        // own publication slot. Once that release is visible this call is the
+        // specified allocation-free no-op, not an unrelated OOM observation.
+        const current_state = resolvingStateObject(
+            self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
+        ) orelse return Value.undef();
+        if (current_state.promise_resolving_already.load(.acquire)) return Value.undef();
+        return err;
+    };
+    const current_state = resolvingStateObject(
+        self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
+    ) orelse {
+        cancelResolvingJob(self, &reservation);
+        return Value.undef();
+    };
+    if (current_state.promise_resolving_already.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
         cancelResolvingJob(self, &reservation);
         return Value.undef();
     }
-    try resolveWithReservation(self, target, if (args.len > 0) args[0] else Value.undef(), &reservation);
+    try resolveRootedWithReservation(
+        self,
+        promise_mark,
+        target,
+        roots_mark + 1,
+        argument,
+        &reservation,
+    );
     std.debug.assert(!reservation.active);
     return Value.undef();
 }
@@ -656,19 +688,41 @@ fn rejectThunk(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const fnobj = self.active_native orelse return Value.undef();
-    const state = resolvingStateObject(fnobj) orelse return Value.undef();
+    const reason = if (args.len > 0) args[0] else Value.undef();
+    const roots_mark = try self.pushTempRootSlice(&.{ Value.obj(fnobj), reason });
+    defer self.restoreTempRoots(roots_mark);
+    const state = resolvingStateObject(
+        self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
+    ) orelse return Value.undef();
     const target = resolvingTarget(state) orelse return Value.undef();
-    if (state.promise_resolving_already.load(.acquire)) return Value.undef();
-    var reservation = try reserveResolvingJob(self);
-    if (state.promise_resolving_already.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+    const promise_mark = try self.pushTempPromiseRoot(target);
+    defer self.restoreTempPromiseRoots(promise_mark);
+    const initial_state = resolvingStateObject(
+        self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
+    ) orelse return Value.undef();
+    if (initial_state.promise_resolving_already.load(.acquire)) return Value.undef();
+    var reservation = reserveResolvingJob(self) catch |err| {
+        const current_state = resolvingStateObject(
+            self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
+        ) orelse return Value.undef();
+        if (current_state.promise_resolving_already.load(.acquire)) return Value.undef();
+        return err;
+    };
+    const current_state = resolvingStateObject(
+        self.tempRoot(roots_mark, Value.obj(fnobj)).asObj(),
+    ) orelse {
+        cancelResolvingJob(self, &reservation);
+        return Value.undef();
+    };
+    if (current_state.promise_resolving_already.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
         cancelResolvingJob(self, &reservation);
         return Value.undef();
     }
     try settleWithReservation(
         self,
-        target,
+        self.tempPromiseRoot(promise_mark, target),
         .rejected,
-        if (args.len > 0) args[0] else Value.undef(),
+        self.tempRoot(roots_mark + 1, reason),
         &reservation,
     );
     std.debug.assert(!reservation.active);
@@ -1051,17 +1105,15 @@ pub fn materializeSettlementBatches(self: *Interpreter, queue: *MicrotaskQueue) 
     std.debug.assert(write == 0);
 }
 
-fn resolveWithReservation(
+fn resolveRootedWithReservation(
     self: *Interpreter,
+    promise_mark: usize,
     p: *Promise,
+    value_mark: usize,
     v: Value,
     reservation: ?*MicrotaskReservation,
 ) EvalError!void {
     defer if (reservation) |slot| cancelResolvingJob(self, slot);
-    const promise_mark = try self.pushTempPromiseRoot(p);
-    defer self.restoreTempPromiseRoots(promise_mark);
-    const value_mark = try self.pushTempRoot(v);
-    defer self.restoreTempRoots(value_mark);
 
     if (!isPending(self.tempPromiseRoot(promise_mark, p))) return;
     if (promiseOf(self.tempRoot(value_mark, v))) |inner|
@@ -1105,6 +1157,19 @@ fn resolveWithReservation(
         self.tempRoot(value_mark, v),
         reservation,
     );
+}
+
+fn resolveWithReservation(
+    self: *Interpreter,
+    p: *Promise,
+    v: Value,
+    reservation: ?*MicrotaskReservation,
+) EvalError!void {
+    const promise_mark = try self.pushTempPromiseRoot(p);
+    defer self.restoreTempPromiseRoots(promise_mark);
+    const value_mark = try self.pushTempRoot(v);
+    defer self.restoreTempRoots(value_mark);
+    try resolveRootedWithReservation(self, promise_mark, p, value_mark, v, reservation);
 }
 
 /// Fulfill `p` with `v` (no-op if already settled). If `v` is itself a thenable,
@@ -1428,21 +1493,38 @@ test "resolving capability reserves settlement publication before once-only comm
     var overflow = [_]ReactionPair{pair};
     var p = Promise{ .reactions_inline = pair, .reactions = .fromOwnedSlice(&overflow) };
     var state = Object{ .native = resolveThunk, .private_data = @ptrCast(&p) };
+    var gc_sentinel: u8 = 0;
 
     var no_bytes: [0]u8 = .{};
     var unavailable = std.heap.FixedBufferAllocator.init(&no_bytes);
-    var blocked_queue: MicrotaskQueue = .{};
-    var promise_roots: [2]*Promise = undefined;
-    var value_roots: [2]Value = undefined;
+    var preallocated_jobs: [1]Microtask = undefined;
+    var root_blocked_queue = MicrotaskQueue{
+        .items = .{ .items = preallocated_jobs[0..0], .capacity = preallocated_jobs.len },
+    };
     var machine = Interpreter{
         .arena = unavailable.allocator(),
         .env = undefined,
         .root_shape = undefined,
-        .microtasks = &blocked_queue,
+        .microtasks = &root_blocked_queue,
         .active_native = &state,
-        .gc_temp_promise_roots = .{ .items = promise_roots[0..0], .capacity = promise_roots.len },
-        .gc_temp_roots = .{ .items = value_roots[0..0], .capacity = value_roots.len },
+        .gc = &gc_sentinel,
     };
+
+    // The resolving record and inputs are rooted before [[AlreadyResolved]] is
+    // claimed. Root-registration OOM therefore leaves both the record and the
+    // already-reserved job queue untouched for an exact retry.
+    try std.testing.expectError(error.OutOfMemory, resolveThunk(&machine, Value.undef(), &.{Value.num(884)}));
+    try std.testing.expect(!state.promise_resolving_already.load(.acquire));
+    try std.testing.expectEqual(State.pending, p.state);
+    try std.testing.expect(root_blocked_queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), root_blocked_queue.reservations);
+
+    var blocked_queue: MicrotaskQueue = .{};
+    var promise_roots: [2]*Promise = undefined;
+    var value_roots: [2]Value = undefined;
+    machine.microtasks = &blocked_queue;
+    machine.gc_temp_promise_roots = .{ .items = promise_roots[0..0], .capacity = promise_roots.len };
+    machine.gc_temp_roots = .{ .items = value_roots[0..0], .capacity = value_roots.len };
 
     try std.testing.expectError(error.OutOfMemory, resolveThunk(&machine, Value.undef(), &.{Value.num(885)}));
     try std.testing.expect(!state.promise_resolving_already.load(.acquire));

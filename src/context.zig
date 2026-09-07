@@ -17399,6 +17399,68 @@ test "parallel_js: Promise combinators tolerate concurrent input settlement" {
     try std.testing.expect(result.asBool());
 }
 
+test "parallel_js: concurrent Promise attachment and resolving capability publication are exact" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const lanes = 4;
+        \\const width = 32;
+        \\const total = lanes * width + 1;
+        \\const control = new Int32Array(new SharedArrayBuffer(5 * 4));
+        \\const seen = new Int32Array(new SharedArrayBuffer(total * 4));
+        \\let resolveShared;
+        \\const source = new Promise(resolve => { resolveShared = resolve; });
+        \\function observe(index) {
+        \\  return value => {
+        \\    const winner = Atomics.compareExchange(control, 4, 0, value);
+        \\    if ((winner !== 0 && winner !== value) || Atomics.add(seen, index, 1) !== 0)
+        \\      Atomics.store(control, 2, 1);
+        \\    Atomics.add(control, 3, 1);
+        \\  };
+        \\}
+        \\const workers = [];
+        \\for (let lane = 0; lane < lanes; lane++) workers.push(new Thread(() => {
+        \\  Atomics.add(control, 1, 1);
+        \\  Atomics.notify(control, 1);
+        \\  let spins = 0;
+        \\  while (Atomics.load(control, 0) === 0 && spins++ < 10000000) {}
+        \\  if (Atomics.load(control, 0) === 0) throw new Error("Promise race start timeout");
+        \\  for (let offset = 0; offset < width; offset++) {
+        \\    source.then(observe(lane * width + offset));
+        \\    if (offset === width / 2) resolveShared(100 + lane);
+        \\  }
+        \\  return true;
+        \\}));
+        \\let readySpins = 0;
+        \\while (Atomics.load(control, 1) !== lanes && readySpins++ < 10000000) {}
+        \\if (Atomics.load(control, 1) !== lanes) throw new Error("Promise race ready timeout");
+        \\Atomics.store(control, 0, 1);
+        \\Atomics.notify(control, 0, lanes);
+        \\var promiseRaceFailure = "";
+        \\for (const worker of workers) try {
+        \\  if (worker.join() !== true) promiseRaceFailure = "bad worker result";
+        \\} catch (error) {
+        \\  promiseRaceFailure = error.name + ": " + error.message;
+        \\}
+        \\source.then(observe(total - 1));
+        \\drainMicrotasks();
+        \\let exact = Atomics.load(control, 2) === 0 && Atomics.load(control, 3) === total;
+        \\for (let i = 0; i < total; i++) exact = exact && Atomics.load(seen, i) === 1;
+        \\promiseRaceFailure === "" && exact &&
+        \\  Atomics.load(control, 4) >= 100 && Atomics.load(control, 4) < 100 + lanes
+    );
+    if (!result.asBool())
+        std.debug.print("Promise race failure: {s}\n", .{(try ctx.evaluate("promiseRaceFailure")).asStr()});
+    try std.testing.expect(result.asBool());
+}
+
 test "parallel_js: Iterator helper rejects concurrent next while running" {
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
