@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const diagnostic_site = @import("diagnostic_site.zig");
 const value = @import("value.zig");
 const jit = @import("jit.zig");
 const Shape = @import("shape.zig").Shape;
@@ -883,20 +884,8 @@ pub const EnvironmentDeclarations = struct {
     is_script: bool = false,
 };
 
-/// Exact source retained for a syntax-owned `[[Call]]`. A CallExpression keeps
-/// the byte length of its callee prefix; a tagged template keeps the whole
-/// expression for JavaScriptCore's `(near '...source...')` diagnostic.
-pub const CallSiteSpan = struct {
-    pub const Kind = enum { call, tagged_template };
-
-    text: []const u8 = "",
-    callee_len: u32 = 0,
-    kind: Kind = .call,
-};
-
-/// Exact source of a member evaluation or construction used only when that
-/// operation throws, for JavaScriptCore's `(evaluating '...')` suffix.
-pub const EvaluationSiteSpan = struct { text: []const u8 = "" };
+pub const CallSiteSpan = diagnostic_site.CallSiteSpan;
+pub const EvaluationSiteSpan = diagnostic_site.EvaluationSiteSpan;
 
 pub const Chunk = struct {
     const DebugSite = struct { instruction: usize, node: *const ast.Node };

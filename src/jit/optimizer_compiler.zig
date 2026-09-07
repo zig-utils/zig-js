@@ -176,6 +176,8 @@ pub const Program = struct {
     native_exceptional_targets: []jit.NativeExceptionalTarget = &.{},
     native_operation_names: []?[]const u8 = &.{},
     native_property_caches: []jit.NativePropertyCache = &.{},
+    native_call_sites: []bc.CallSiteSpan = &.{},
+    native_evaluation_sites: []bc.EvaluationSiteSpan = &.{},
     osr: ?*jit.OsrMetadata = null,
     execution_block: u32 = 0,
     entry_enabled: bool = true,
@@ -192,6 +194,8 @@ pub const Program = struct {
         if (self.native_exceptional_targets.len != 0) self.allocator.free(self.native_exceptional_targets);
         if (self.native_operation_names.len != 0) self.allocator.free(self.native_operation_names);
         if (self.native_property_caches.len != 0) self.allocator.free(self.native_property_caches);
+        if (self.native_call_sites.len != 0) self.allocator.free(self.native_call_sites);
+        if (self.native_evaluation_sites.len != 0) self.allocator.free(self.native_evaluation_sites);
         if (self.loop_exit_guards.len != 0) self.allocator.free(self.loop_exit_guards);
         if (self.loop_latch_guards.len != 0) self.allocator.free(self.loop_latch_guards);
         if (self.loop_branches.len != 0) self.allocator.free(self.loop_branches);
@@ -200,6 +204,52 @@ pub const Program = struct {
         self.* = undefined;
     }
 };
+
+fn collectNativeCallSites(
+    chunk: *const bc.Chunk,
+    descriptors: []const jit.NativeOperationDescriptor,
+    allocator: std.mem.Allocator,
+) ![]bc.CallSiteSpan {
+    var has_site = false;
+    for (descriptors) |descriptor| {
+        if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
+        if (chunk.callSiteAt(descriptor.origin) != null) {
+            has_site = true;
+            break;
+        }
+    }
+    if (!has_site) return &.{};
+    const sites = try allocator.alloc(bc.CallSiteSpan, descriptors.len);
+    errdefer if (sites.len != 0) allocator.free(sites);
+    for (descriptors, sites) |descriptor, *site| {
+        if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
+        site.* = chunk.callSiteAt(descriptor.origin) orelse .{};
+    }
+    return sites;
+}
+
+fn collectNativeEvaluationSites(
+    chunk: *const bc.Chunk,
+    descriptors: []const jit.NativeOperationDescriptor,
+    allocator: std.mem.Allocator,
+) ![]bc.EvaluationSiteSpan {
+    var has_site = false;
+    for (descriptors) |descriptor| {
+        if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
+        if (chunk.evaluationSiteAt(descriptor.origin) != null) {
+            has_site = true;
+            break;
+        }
+    }
+    if (!has_site) return &.{};
+    const sites = try allocator.alloc(bc.EvaluationSiteSpan, descriptors.len);
+    errdefer if (sites.len != 0) allocator.free(sites);
+    for (descriptors, sites) |descriptor, *site| {
+        if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
+        site.* = chunk.evaluationSiteAt(descriptor.origin) orelse .{};
+    }
+    return sites;
+}
 
 /// Build the exact interpreter-to-SSA import contract for every reachable loop
 /// header. This is deliberately separate from executable lowering so an
@@ -1012,6 +1062,10 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             break :name chunk.names.items[inst.a];
         } else null;
     }
+    const native_call_sites = try collectNativeCallSites(chunk, native_operations, allocator);
+    errdefer if (native_call_sites.len != 0) allocator.free(native_call_sites);
+    const native_evaluation_sites = try collectNativeEvaluationSites(chunk, native_operations, allocator);
+    errdefer if (native_evaluation_sites.len != 0) allocator.free(native_evaluation_sites);
     const native_property_caches = try allocator.alloc(jit.NativePropertyCache, native_operations.len);
     errdefer if (native_property_caches.len != 0) allocator.free(native_property_caches);
     @memset(native_property_caches, .{});
@@ -1096,6 +1150,8 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .native_exceptional_targets = native_exceptional_targets,
         .native_operation_names = native_operation_names,
         .native_property_caches = native_property_caches,
+        .native_call_sites = native_call_sites,
+        .native_evaluation_sites = native_evaluation_sites,
         .deterministic_path = deterministic_path,
     };
 }
@@ -1885,6 +1941,10 @@ fn lowerRegionOsr(
             break :name chunk.names.items[inst.a];
         } else null;
     }
+    const native_call_sites = try collectNativeCallSites(chunk, native_operations, allocator);
+    errdefer if (native_call_sites.len != 0) allocator.free(native_call_sites);
+    const native_evaluation_sites = try collectNativeEvaluationSites(chunk, native_operations, allocator);
+    errdefer if (native_evaluation_sites.len != 0) allocator.free(native_evaluation_sites);
     const native_property_caches = try allocator.alloc(jit.NativePropertyCache, native_operations.len);
     errdefer if (native_property_caches.len != 0) allocator.free(native_property_caches);
     @memset(native_property_caches, .{});
@@ -2046,6 +2106,8 @@ fn lowerRegionOsr(
         .native_exceptional_targets = native_exceptional_targets,
         .native_operation_names = native_operation_names,
         .native_property_caches = native_property_caches,
+        .native_call_sites = native_call_sites,
+        .native_evaluation_sites = native_evaluation_sites,
         .osr = osr,
         .execution_block = header_block,
         .entry_enabled = false,
@@ -3218,12 +3280,14 @@ fn compileAarch64(program: *const Program, native_observability: bool) !jit.Comp
     const stack_maps = try jit.StackMapMetadata.create(std.heap.page_allocator, program.stack_maps);
     errdefer stack_maps.destroy();
     const native_operations = if (program.native_operations.len != 0)
-        try jit.NativeOperationMetadata.createWithNamesAndPropertyCaches(
+        try jit.NativeOperationMetadata.createWithSideTables(
             std.heap.page_allocator,
             program.native_operations,
             program.native_exceptional_targets,
             program.native_operation_names,
             program.native_property_caches,
+            program.native_call_sites,
+            program.native_evaluation_sites,
         )
     else
         null;
@@ -5013,7 +5077,8 @@ test "optimizer lowering publishes an executable tail call" {
     chunk.local_count = 2;
     _ = try chunk.emit(.load_local, 0);
     _ = try chunk.emit(.load_local, 1);
-    _ = try chunk.emit(.tail_call, 1);
+    const call_ip = try chunk.emit(.tail_call, 1);
+    try chunk.recordCallSite(call_ip, .{ .text = "callee(arg)", .callee_len = 6 });
     var plan = try optimizer.build(&chunk, std.testing.allocator);
     defer plan.deinit();
     var program = try lower(&chunk, &plan, std.testing.allocator);
@@ -5025,6 +5090,8 @@ test "optimizer lowering publishes an executable tail call" {
     try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.tail_call)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 2), operation.input_count);
     try std.testing.expectEqual(@as(u32, 3), program.bytecode_steps);
+    try std.testing.expectEqualStrings("callee(arg)", program.native_call_sites[0].text);
+    try std.testing.expectEqual(@as(u32, 6), program.native_call_sites[0].callee_len);
 }
 
 test "optimizer lowering publishes an executable named property read" {
@@ -5035,7 +5102,8 @@ test "optimizer lowering publishes an executable named property read" {
     chunk.local_count = 1;
     const name = try chunk.addName("value");
     _ = try chunk.emit(.load_local, 0);
-    _ = try chunk.emit(.get_prop, name);
+    const property_ip = try chunk.emit(.get_prop, name);
+    try chunk.recordEvaluationSite(property_ip, .{ .text = "input.value" });
     _ = try chunk.emit(.ret, 0);
     try chunk.finalize();
     const root_shape = try Shape.createRoot(arena.allocator());
@@ -5056,6 +5124,7 @@ test "optimizer lowering publishes an executable named property read" {
     try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_prop)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 1), operation.input_count);
     try std.testing.expectEqualStrings("value", program.native_operation_names[0].?);
+    try std.testing.expectEqualStrings("input.value", program.native_evaluation_sites[0].text);
     const point = program.deopt_points[operation.deopt_index];
     try std.testing.expectEqual(jit.DeoptPointKind.effect, point.kind);
     try std.testing.expectEqual(@as(u32, 1), point.exit_ip);
@@ -5070,11 +5139,14 @@ test "optimizer lowering publishes an executable named property read" {
         const metadata = compiled.native_operations orelse return error.TestUnexpectedResult;
         const owned_name = metadata.nameFor(0) orelse return error.TestUnexpectedResult;
         const owned_cache = metadata.propertyCacheFor(0) orelse return error.TestUnexpectedResult;
+        const owned_site = metadata.evaluationSiteFor(0) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings("value", owned_name);
+        try std.testing.expectEqualStrings("input.value", owned_site.text);
         try std.testing.expect(owned_name.ptr != chunk.names.items[name].ptr);
         try std.testing.expectEqual(@intFromPtr(observed_shape), owned_cache.shape_tokens[0]);
         try std.testing.expectEqual(observed_shape.slot, owned_cache.slots[0]);
         try std.testing.expect(owned_cache != &program.native_property_caches[0]);
+        try std.testing.expect(owned_site.text.ptr != program.native_evaluation_sites[0].text.ptr);
     }
 }
 

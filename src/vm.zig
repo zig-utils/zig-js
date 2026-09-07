@@ -4231,10 +4231,14 @@ fn finishNativeOperation(
 }
 
 fn nativeGetIndex(vm: *Interpreter, object: Value, key: Value) EvalError!Value {
+    return nativeGetIndexAtSite(vm, object, key, .none);
+}
+
+fn nativeGetIndexAtSite(vm: *Interpreter, object: Value, key: Value, site: interp.EvaluationSite) EvalError!Value {
     // Match bytecode ordering: RequireObjectCoercible fails before an object key
     // can run observable ToPropertyKey hooks.
     if (object.isNull() or object.isUndefined())
-        return vm.throwError("TypeError", interp.notAnObjectMessage(object));
+        return interp.throwNotAnObject(vm, object, site);
     const object_root = try vm.pushTempRoot(object);
     defer vm.restoreTempRoots(object_root);
     const property = try propKey(vm, key);
@@ -4320,6 +4324,18 @@ fn nativeGetProperty(
     object_value: Value,
     name: []const u8,
 ) EvalError!Value {
+    return nativeGetPropertyAtSite(vm, cache, object_value, name, .none);
+}
+
+fn nativeGetPropertyAtSite(
+    vm: *Interpreter,
+    cache: ?*const jit.NativePropertyCache,
+    object_value: Value,
+    name: []const u8,
+    site: interp.EvaluationSite,
+) EvalError!Value {
+    if (object_value.isNull() or object_value.isUndefined())
+        return interp.throwNotAnObject(vm, object_value, site);
     if (object_value.isObject()) {
         const object = object_value.asObj();
         try vm.checkRestricted(object);
@@ -4350,6 +4366,19 @@ fn nativeSetProperty(
     name: []const u8,
     value_word: Value,
 ) EvalError!Value {
+    return nativeSetPropertyAtSite(vm, cache, object_value, name, value_word, .none);
+}
+
+fn nativeSetPropertyAtSite(
+    vm: *Interpreter,
+    cache: ?*const jit.NativePropertyCache,
+    object_value: Value,
+    name: []const u8,
+    value_word: Value,
+    site: interp.EvaluationSite,
+) EvalError!Value {
+    if (object_value.isNull() or object_value.isUndefined())
+        return interp.throwNotAnObject(vm, object_value, site);
     if (object_value.isObject()) {
         const object = object_value.asObj();
         try vm.checkRestricted(object);
@@ -4375,10 +4404,14 @@ fn nativeSetProperty(
 }
 
 fn nativeSetIndex(vm: *Interpreter, object: Value, key: Value, value_word: Value) EvalError!Value {
+    return nativeSetIndexAtSite(vm, object, key, value_word, .none);
+}
+
+fn nativeSetIndexAtSite(vm: *Interpreter, object: Value, key: Value, value_word: Value, site: interp.EvaluationSite) EvalError!Value {
     // The right-hand side is already staged, but a nullish base still fails
     // before an object key can run observable ToPropertyKey hooks.
     if (object.isNull() or object.isUndefined())
-        return vm.throwError("TypeError", interp.notAnObjectMessage(object));
+        return interp.throwNotAnObject(vm, object, site);
     const object_root = try vm.pushTempRoot(object);
     defer vm.restoreTempRoots(object_root);
     const value_root = try vm.pushTempRoot(value_word);
@@ -4429,6 +4462,14 @@ inline fn vmCallSite(chunk: *const Chunk, ip: usize) interp.CallSite {
 
 inline fn vmEvaluationSite(chunk: *const Chunk, ip: usize) interp.EvaluationSite {
     return .{ .bytecode = .{ .chunk = chunk, .instruction = @intCast(ip - 1) } };
+}
+
+inline fn nativeCallSite(metadata: *const jit.NativeOperationMetadata, operation_id: u32) interp.CallSite {
+    return .{ .native = .{ .metadata = metadata, .operation_id = operation_id } };
+}
+
+inline fn nativeEvaluationSite(metadata: *const jit.NativeOperationMetadata, operation_id: u32) interp.EvaluationSite {
+    return .{ .native = .{ .metadata = metadata, .operation_id = operation_id } };
 }
 
 fn callEvalValue(vm: *Interpreter, callee: Value, args: []const Value, site: interp.CallSite) EvalError!Value {
@@ -5856,7 +5897,11 @@ fn callEvalSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, site:
 }
 
 fn constructSpreadValue(vm: *Interpreter, callee: Value, args_array: Value) EvalError!Value {
-    return construct(vm, callee, try spreadArguments(vm, args_array));
+    return constructSpreadValueAtSite(vm, callee, args_array, .none);
+}
+
+fn constructSpreadValueAtSite(vm: *Interpreter, callee: Value, args_array: Value, site: interp.EvaluationSite) EvalError!Value {
+    return constructAtSite(vm, callee, try spreadArguments(vm, args_array), site);
 }
 
 fn tailCallValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value, site: interp.CallSite) EvalError!Value {
@@ -6272,7 +6317,13 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             frame,
             vm,
             operation_id,
-            nativeGetProperty(vm, metadata.propertyCacheFor(operation_id), Value.fromRawBits(inputs[0]), name),
+            nativeGetPropertyAtSite(
+                vm,
+                metadata.propertyCacheFor(operation_id),
+                Value.fromRawBits(inputs[0]),
+                name,
+                nativeEvaluationSite(metadata, operation_id),
+            ),
         );
     }
     if (descriptor.bytecode_op == @backingInt(bc.Op.get_index) and inputs.len == 2) {
@@ -6281,7 +6332,12 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             frame,
             vm,
             operation_id,
-            nativeGetIndex(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
+            nativeGetIndexAtSite(
+                vm,
+                Value.fromRawBits(inputs[0]),
+                Value.fromRawBits(inputs[1]),
+                nativeEvaluationSite(metadata, operation_id),
+            ),
         );
     }
     if (descriptor.bytecode_op == @backingInt(bc.Op.set_prop) and inputs.len == 2) {
@@ -6292,12 +6348,13 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             frame,
             vm,
             operation_id,
-            nativeSetProperty(
+            nativeSetPropertyAtSite(
                 vm,
                 metadata.propertyCacheFor(operation_id),
                 Value.fromRawBits(inputs[0]),
                 name,
                 Value.fromRawBits(inputs[1]),
+                nativeEvaluationSite(metadata, operation_id),
             ),
         );
     }
@@ -6307,11 +6364,12 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             frame,
             vm,
             operation_id,
-            nativeSetIndex(
+            nativeSetIndexAtSite(
                 vm,
                 Value.fromRawBits(inputs[0]),
                 Value.fromRawBits(inputs[1]),
                 Value.fromRawBits(inputs[2]),
+                nativeEvaluationSite(metadata, operation_id),
             ),
         );
     }
@@ -6436,37 +6494,37 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         const result = if (descriptor.bytecode_op == @backingInt(bc.Op.call) and values.len >= 1)
             (tryLinkedNativeCall(vm, metadata.callLinkFor(operation_id), values[0], values[1..]) catch |err|
                 return finishNativeOperation(frame, vm, operation_id, err)) orelse
-                callValue(vm, values[0], values[1..], Value.undef(), .none)
+                callValue(vm, values[0], values[1..], Value.undef(), nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_eval) and values.len >= 1)
-            callEvalValue(vm, values[0], values[1..], .none)
+            callEvalValue(vm, values[0], values[1..], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_method) and values.len >= 1)
             invokeMethod(vm, values[0], metadata.nameFor(operation_id) orelse
-                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..], .none)
+                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_spread) and values.len == 2)
-            callSpreadValue(vm, values[0], values[1], Value.undef(), .none)
+            callSpreadValue(vm, values[0], values[1], Value.undef(), nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_eval_spread) and values.len == 2)
-            callEvalSpreadValue(vm, values[0], values[1], .none)
+            callEvalSpreadValue(vm, values[0], values[1], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this_spread) and values.len == 3)
-            callSpreadValue(vm, values[0], values[2], values[1], .none)
+            callSpreadValue(vm, values[0], values[2], values[1], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and values.len >= 2)
-            callValue(vm, values[0], values[2..], values[1], .none)
+            callValue(vm, values[0], values[2..], values[1], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.new_call) and values.len >= 1)
-            construct(vm, values[0], values[1..])
+            constructAtSite(vm, values[0], values[1..], nativeEvaluationSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.new_spread) and values.len == 2)
-            constructSpreadValue(vm, values[0], values[1])
+            constructSpreadValueAtSite(vm, values[0], values[1], nativeEvaluationSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call) and values.len >= 1)
-            tailCallValue(vm, values[0], values[1..], Value.undef(), .none)
+            tailCallValue(vm, values[0], values[1..], Value.undef(), nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_eval) and values.len >= 1)
-            tailCallEvalValue(vm, values[0], values[1..], .none)
+            tailCallEvalValue(vm, values[0], values[1..], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_method) and values.len >= 1)
             tailCallMethodValue(vm, values[0], metadata.nameFor(operation_id) orelse
-                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..], .none)
+                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this) and values.len >= 2)
-            tailCallValue(vm, values[0], values[2..], values[1], .none)
+            tailCallValue(vm, values[0], values[2..], values[1], nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_spread) and values.len == 2)
-            tailCallSpreadValue(vm, values[0], values[1], Value.undef(), .none)
+            tailCallSpreadValue(vm, values[0], values[1], Value.undef(), nativeCallSite(metadata, operation_id))
         else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this_spread) and values.len == 3)
-            tailCallSpreadValue(vm, values[0], values[2], values[1], .none)
+            tailCallSpreadValue(vm, values[0], values[2], values[1], nativeCallSite(metadata, operation_id))
         else
             return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, result);
@@ -15079,7 +15137,7 @@ test "vm: computed logical assignment preserves abrupt order and suspended refer
         \\function key() { log = log + "e"; return { toString() { log = log + "k"; if (mode === "key") throw 7050; return "value"; } }; }
         \\function rhs() { log = log + "r"; if (mode === "rhs") throw 7052; return 12; }
         \\var observed = "";
-        \\try { base(true)[key()] ??= rhs(); } catch (error) { observed = observed + (error instanceof TypeError && error.message === "null is not an object") + ":" + log; }
+        \\try { base(true)[key()] ??= rhs(); } catch (error) { observed = observed + (error instanceof TypeError && error.message === "null is not an object (evaluating 'base(true)[key()]')") + ":" + log; }
         \\log = ""; mode = "key";
         \\try { base(false)[key()] ??= rhs(); } catch (error) { observed = observed + "|" + error + ":" + log; }
         \\log = ""; mode = "get";
@@ -16555,6 +16613,89 @@ test "vm: optimizer native construction resumes an exact caught exception" {
         jit.NativeExceptionalTargetKind.catch_,
         operations.exceptional_targets[operation.exceptional_target].kind,
     );
+}
+
+test "vm: optimizer native diagnostics retain call and evaluation source" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function callHot(o) { try { return o.m(); } catch (e) { return e.name + ": " + e.message; } }
+        \\function readNamed(o) { try { return o.x; } catch (e) { return e.name + ": " + e.message; } }
+        \\function readComputed(o, k) { try { return o[k]; } catch (e) { return e.name + ": " + e.message; } }
+        \\function writeNamed(o) { try { return o.x = 1; } catch (e) { return e.name + ": " + e.message; } }
+        \\function writeComputed(o, k) { try { return o[k] = 1; } catch (e) { return e.name + ": " + e.message; } }
+        \\function Good() { this.x = 1; }
+        \\function constructHot(C) { try { return new C(); } catch (e) { return e.name + ": " + e.message; } }
+        \\function constructSpreadHot(C) { try { return new C(...[]); } catch (e) { return e.name + ": " + e.message; } }
+        \\var receiver = { m: function () { return 1; }, x: 1 };
+        \\for (var i = 0; i < 12; ++i) {
+        \\  callHot(receiver); readNamed(receiver); readComputed(receiver, 'x');
+        \\  writeNamed(receiver); writeComputed(receiver, 'x');
+        \\  constructHot(Good); constructSpreadHot(Good);
+        \\}
+        \\receiver.m = 1;
+        \\[callHot(receiver), readNamed(null), readComputed(undefined, 'x'), writeNamed(null),
+        \\ writeComputed(undefined, 'x'), constructHot(1), constructSpreadHot(1)].join('|')
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = try initTestInterpreter(.{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner });
+    const attempts_before = optimizer_native_attempts.load(.monotonic);
+
+    const result = try run(&machine, root, null);
+    try std.testing.expectEqualStrings(
+        "TypeError: o.m is not a function. (In 'o.m()', 'o.m' is 1)|" ++
+            "TypeError: null is not an object (evaluating 'o.x')|" ++
+            "TypeError: undefined is not an object (evaluating 'o[k]')|" ++
+            "TypeError: null is not an object (evaluating 'o.x = 1')|" ++
+            "TypeError: undefined is not an object (evaluating 'o[k] = 1')|" ++
+            "TypeError: 1 is not a constructor (evaluating 'new C()')|" ++
+            "TypeError: 1 is not a constructor (evaluating 'new C(...[])')",
+        result.asStr(),
+    );
+    try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+
+    var call_site_count: usize = 0;
+    var evaluation_site_count: usize = 0;
+    var saw_get_prop = false;
+    var saw_get_index = false;
+    var saw_set_prop = false;
+    var saw_set_index = false;
+    var saw_new_call = false;
+    var saw_new_spread = false;
+    for (root.fns.items) |function| {
+        const chunk = function.chunk orelse continue;
+        const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse continue;
+        const metadata = artifact.native_operations orelse continue;
+        for (metadata.descriptors, 0..) |descriptor, operation_id| {
+            if (descriptor.step_delta == 0) continue;
+            if (metadata.callSiteFor(operation_id) != null) call_site_count += 1;
+            if (metadata.evaluationSiteFor(operation_id) != null) {
+                evaluation_site_count += 1;
+                if (descriptor.bytecode_op == @backingInt(bc.Op.get_prop)) saw_get_prop = true;
+                if (descriptor.bytecode_op == @backingInt(bc.Op.get_index)) saw_get_index = true;
+                if (descriptor.bytecode_op == @backingInt(bc.Op.set_prop)) saw_set_prop = true;
+                if (descriptor.bytecode_op == @backingInt(bc.Op.set_index)) saw_set_index = true;
+                if (descriptor.bytecode_op == @backingInt(bc.Op.new_call)) saw_new_call = true;
+                if (descriptor.bytecode_op == @backingInt(bc.Op.new_spread)) saw_new_spread = true;
+            }
+        }
+    }
+    try std.testing.expect(call_site_count >= 1);
+    try std.testing.expect(evaluation_site_count >= 6);
+    try std.testing.expect(saw_get_prop and saw_get_index);
+    try std.testing.expect(saw_set_prop and saw_set_index);
+    try std.testing.expect(saw_new_call and saw_new_spread);
 }
 
 test "vm: optimizer native named read composes with a caught downstream call" {

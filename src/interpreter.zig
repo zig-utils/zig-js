@@ -291,6 +291,9 @@ pub const CallSite = union(enum) {
     /// A bytecode call: the chunk's sparse site table is searched only once the
     /// callee has turned out not to be callable.
     bytecode: struct { chunk: *const bc.Chunk, instruction: u32 },
+    /// An optimized native call: the artifact's parallel side table is likewise
+    /// resolved only after dispatch has proved the callee is not callable.
+    native: struct { metadata: *const jit.NativeOperationMetadata, operation_id: u32 },
 
     pub const Resolved = union(enum) {
         call: struct { text: []const u8, callee: []const u8 },
@@ -302,6 +305,7 @@ pub const CallSite = union(enum) {
             .none => return null,
             .source => |site| site,
             .bytecode => |site| site.chunk.callSiteAt(site.instruction) orelse return null,
+            .native => |site| site.metadata.callSiteFor(site.operation_id) orelse return null,
         };
         if (found.text.len == 0) return null;
         return switch (found.kind) {
@@ -320,12 +324,14 @@ pub const EvaluationSite = union(enum) {
     none,
     source: []const u8,
     bytecode: struct { chunk: *const bc.Chunk, instruction: u32 },
+    native: struct { metadata: *const jit.NativeOperationMetadata, operation_id: u32 },
 
     pub fn resolve(self: EvaluationSite) ?[]const u8 {
         const text = switch (self) {
             .none => return null,
             .source => |source| source,
             .bytecode => |site| (site.chunk.evaluationSiteAt(site.instruction) orelse return null).text,
+            .native => |site| (site.metadata.evaluationSiteFor(site.operation_id) orelse return null).text,
         };
         return if (text.len == 0) null else text;
     }

@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const diagnostic_site = @import("diagnostic_site.zig");
 
 const aarch64 = @import("jit/aarch64.zig");
 const executable_memory = @import("jit/executable_memory.zig");
@@ -485,6 +486,10 @@ pub const NativeOperationMetadata = struct {
     exceptional_targets: []NativeExceptionalTarget,
     operation_names: []?[]const u8,
     property_caches: []NativePropertyCache,
+    /// Parser source copied into the published artifact. These parallel arrays
+    /// are immutable after publication and consulted only by a throw path.
+    call_sites: []diagnostic_site.CallSiteSpan,
+    evaluation_sites: []diagnostic_site.EvaluationSiteSpan,
     call_links: []NativeCallLink,
 
     pub fn create(
@@ -517,8 +522,30 @@ pub const NativeOperationMetadata = struct {
         operation_names: []const ?[]const u8,
         property_caches: []const NativePropertyCache,
     ) std.mem.Allocator.Error!*NativeOperationMetadata {
+        return createWithSideTables(
+            allocator,
+            descriptors,
+            exceptional_targets,
+            operation_names,
+            property_caches,
+            &.{},
+            &.{},
+        );
+    }
+
+    pub fn createWithSideTables(
+        allocator: std.mem.Allocator,
+        descriptors: []const NativeOperationDescriptor,
+        exceptional_targets: []const NativeExceptionalTarget,
+        operation_names: []const ?[]const u8,
+        property_caches: []const NativePropertyCache,
+        call_sites: []const diagnostic_site.CallSiteSpan,
+        evaluation_sites: []const diagnostic_site.EvaluationSiteSpan,
+    ) std.mem.Allocator.Error!*NativeOperationMetadata {
         std.debug.assert(operation_names.len == 0 or operation_names.len == descriptors.len);
         std.debug.assert(property_caches.len == 0 or property_caches.len == descriptors.len);
+        std.debug.assert(call_sites.len == 0 or call_sites.len == descriptors.len);
+        std.debug.assert(evaluation_sites.len == 0 or evaluation_sites.len == descriptors.len);
         const metadata = try allocator.create(NativeOperationMetadata);
         errdefer allocator.destroy(metadata);
         const owned_descriptors = try allocator.dupe(NativeOperationDescriptor, descriptors);
@@ -540,15 +567,41 @@ pub const NativeOperationMetadata = struct {
             owned_names[index] = if (name) |bytes| try allocator.dupe(u8, bytes) else null;
             owned_name_count += 1;
         }
+        const owned_call_sites = try cloneSites(diagnostic_site.CallSiteSpan, allocator, call_sites);
+        errdefer freeSites(diagnostic_site.CallSiteSpan, allocator, owned_call_sites);
+        const owned_evaluation_sites = try cloneSites(diagnostic_site.EvaluationSiteSpan, allocator, evaluation_sites);
+        errdefer freeSites(diagnostic_site.EvaluationSiteSpan, allocator, owned_evaluation_sites);
         metadata.* = .{
             .allocator = allocator,
             .descriptors = owned_descriptors,
             .exceptional_targets = owned_targets,
             .operation_names = owned_names,
             .property_caches = owned_property_caches,
+            .call_sites = owned_call_sites,
+            .evaluation_sites = owned_evaluation_sites,
             .call_links = owned_call_links,
         };
         return metadata;
+    }
+
+    fn cloneSites(comptime Site: type, allocator: std.mem.Allocator, sites: []const Site) std.mem.Allocator.Error![]Site {
+        const owned = try allocator.alloc(Site, sites.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (owned[0..initialized]) |site| if (site.text.len != 0) allocator.free(site.text);
+            if (owned.len != 0) allocator.free(owned);
+        }
+        for (sites, 0..) |site, index| {
+            owned[index] = site;
+            if (site.text.len != 0) owned[index].text = try allocator.dupe(u8, site.text);
+            initialized += 1;
+        }
+        return owned;
+    }
+
+    fn freeSites(comptime Site: type, allocator: std.mem.Allocator, sites: []Site) void {
+        for (sites) |site| if (site.text.len != 0) allocator.free(site.text);
+        if (sites.len != 0) allocator.free(sites);
     }
 
     pub fn nameFor(self: *const NativeOperationMetadata, operation_id: usize) ?[]const u8 {
@@ -561,6 +614,18 @@ pub const NativeOperationMetadata = struct {
         if (self.property_caches.len != self.descriptors.len or operation_id >= self.property_caches.len)
             return null;
         return &self.property_caches[operation_id];
+    }
+
+    pub fn callSiteFor(self: *const NativeOperationMetadata, operation_id: usize) ?diagnostic_site.CallSiteSpan {
+        if (self.call_sites.len != self.descriptors.len or operation_id >= self.call_sites.len)
+            return null;
+        return if (self.call_sites[operation_id].text.len == 0) null else self.call_sites[operation_id];
+    }
+
+    pub fn evaluationSiteFor(self: *const NativeOperationMetadata, operation_id: usize) ?diagnostic_site.EvaluationSiteSpan {
+        if (self.evaluation_sites.len != self.descriptors.len or operation_id >= self.evaluation_sites.len)
+            return null;
+        return if (self.evaluation_sites[operation_id].text.len == 0) null else self.evaluation_sites[operation_id];
     }
 
     pub fn callLinkFor(self: *NativeOperationMetadata, operation_id: usize) ?*NativeCallLink {
@@ -576,6 +641,8 @@ pub const NativeOperationMetadata = struct {
         if (self.call_links.len != 0) allocator.free(self.call_links);
         for (self.operation_names) |name| if (name) |bytes| allocator.free(bytes);
         if (self.operation_names.len != 0) allocator.free(self.operation_names);
+        freeSites(diagnostic_site.CallSiteSpan, allocator, self.call_sites);
+        freeSites(diagnostic_site.EvaluationSiteSpan, allocator, self.evaluation_sites);
         allocator.destroy(self);
     }
 };
@@ -2454,6 +2521,41 @@ test "native operation ABI preserves value exception and trap outcomes" {
         try std.testing.expectEqual(ordinal, value);
     }
     try std.testing.expect(@offsetOf(NativeFrame, "operation") > @offsetOf(NativeFrame, "moving_safepoint"));
+}
+
+test "native operation metadata owns diagnostic source side tables" {
+    const descriptor = NativeOperationDescriptor{
+        .bytecode_op = 1,
+        .first_input = 0,
+        .input_count = 1,
+        .deopt_index = 0,
+        .step_delta = 1,
+        .origin = 2,
+    };
+    var call_text = [_]u8{ 'o', '.', 'm', '(', ')' };
+    var evaluation_text = [_]u8{ 'o', '.', 'm' };
+    const metadata = try NativeOperationMetadata.createWithSideTables(
+        std.testing.allocator,
+        &.{descriptor},
+        &.{},
+        &.{},
+        &.{},
+        &.{.{ .text = &call_text, .callee_len = 3 }},
+        &.{.{ .text = &evaluation_text }},
+    );
+    defer metadata.destroy();
+
+    call_text[0] = 'x';
+    evaluation_text[0] = 'x';
+    const call_site = metadata.callSiteFor(0) orelse return error.TestUnexpectedResult;
+    const evaluation_site = metadata.evaluationSiteFor(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("o.m()", call_site.text);
+    try std.testing.expectEqual(@as(u32, 3), call_site.callee_len);
+    try std.testing.expectEqualStrings("o.m", evaluation_site.text);
+    try std.testing.expect(call_site.text.ptr != call_text[0..].ptr);
+    try std.testing.expect(evaluation_site.text.ptr != evaluation_text[0..].ptr);
+    try std.testing.expect(metadata.callSiteFor(1) == null);
+    try std.testing.expect(metadata.evaluationSiteFor(1) == null);
 }
 
 test "native entry publishes an exact result word through the stable ABI" {
