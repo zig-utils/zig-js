@@ -6038,7 +6038,8 @@ pub const Context = struct {
             for (self.js_threads.items) |rec| {
                 if (rec.thread) |t| t.join();
             }
-            jsthread.abandonPropAsync(g);
+            var property_cleanup = self.interpreter();
+            jsthread.abandonPropAsync(&property_cleanup);
             g.unregisterPark(stack_scan.parkRecord());
             g.park_records.deinit(self.gpa);
             self.gpa.destroy(g);
@@ -6046,6 +6047,8 @@ pub const Context = struct {
         } else {
             self.assertOwnerThread();
         }
+        var waiter_cleanup = self.interpreter();
+        waiter_cleanup.abandonAsyncWaiters();
         self.js_threads.deinit(self.gpa);
         self.active_interpreters.deinit(self.gpa);
         self.cancelAllTimers();
@@ -6238,12 +6241,13 @@ pub const Context = struct {
         // starts from a stable realm graph.
         if (owner.finishConcurrentGCIfActive() == .deferred)
             return error.RealmNotQuiescent;
+        var waiter_cleanup = self.interpreter();
+        waiter_cleanup.abandonAsyncWaiters();
         self.microtasks.clearRetainingCapacity();
         self.next_ticks.clearRetainingCapacity();
         self.unhandled_rejections.clear();
         self.handled_rejections.clear();
         self.finalization_cleanup_jobs.clearRetainingCapacity();
-        self.async_waiters.clearRetainingCapacity();
         for (self.protected_values.items) |handle| self.gpa.destroy(handle);
         self.protected_values.clearRetainingCapacity();
         self.private_strong_roots.clearRetainingCapacity();
@@ -42418,4 +42422,146 @@ test "Promise job returned thenable and reserved OOM survive moving getter failu
     try std.testing.expectEqual(ctx.reserved_thread_oom_error.?.asObj(), result.value.asObj());
     try std.testing.expect(ctx.microtasks.isEmpty());
     try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}
+
+test "waitAsync uses its intrinsic Promise and own result data properties" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    const result = try ctx.evaluate(
+        \\var NativeWaitPromise = Promise;
+        \\var waitRecord = {calls: 0, outcome: null, intrinsic: false};
+        \\Promise = function () { throw new Error("global Promise was called"); };
+        \\Object.defineProperty(Object.prototype, "async", {set: function () {
+        \\  throw new Error("inherited async setter was called");
+        \\}, configurable: true});
+        \\Object.defineProperty(Object.prototype, "value", {set: function () {
+        \\  throw new Error("inherited value setter was called");
+        \\}, configurable: true});
+        \\var waitView = new Int32Array(new SharedArrayBuffer(4));
+        \\var waitImmediate = Atomics.waitAsync(waitView, 0, 1);
+        \\var waitExpired = Atomics.waitAsync(waitView, 0, 0, 0);
+        \\var waitPending = Atomics.waitAsync(waitView, 0, 0, 1);
+        \\delete Object.prototype.async;
+        \\delete Object.prototype.value;
+        \\Promise = NativeWaitPromise;
+        \\if (waitImmediate.async !== false || waitImmediate.value !== "not-equal" ||
+        \\    waitExpired.async !== false || waitExpired.value !== "timed-out")
+        \\  throw new Error("incorrect synchronous wait result");
+        \\waitRecord.intrinsic = waitPending.async === true && waitPending.value instanceof NativeWaitPromise;
+        \\waitPending.value.then(function (outcome) {
+        \\  waitRecord.calls++;
+        \\  waitRecord.outcome = outcome;
+        \\});
+        \\waitRecord;
+    );
+    try std.testing.expect(result.asObj().getOwn("intrinsic").?.asBool());
+    try std.testing.expectEqual(@as(f64, 1), result.asObj().getOwn("calls").?.asNum());
+    try std.testing.expectEqualStrings("timed-out", result.asObj().getOwn("outcome").?.asStr());
+    try std.testing.expectEqual(@as(usize, 0), ctx.async_waiters.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}
+
+test "waitAsync detached nested completion roots survive moving nursery collection" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_threads = true,
+        .enable_jit = false,
+        .heap_limit_bytes = 16 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    ctx.gc_scan_native_stack = false;
+    const saved_ctx = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_ctx);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+    ctx.gc.?.collect();
+    const roots = try machine.pushTempRootSlice(&.{ Value.undef(), Value.undef(), Value.undef() });
+    var tickets: [2]jsthread.PropAsyncTicket = undefined;
+    for (&tickets, 0..) |*ticket, i| {
+        const object = try promise.newPromise(&machine);
+        machine.setTempRoot(roots + i, Value.obj(object));
+        ticket.* = .{
+            .obj = object,
+            .key = "detached",
+            .deadline_ns = null,
+            .promise = object,
+            .microtasks = &ctx.microtasks,
+            .thread = null,
+            .owner = @ptrCast(ctx.gil.?),
+            .completion = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks),
+        };
+    }
+    const native_object = try promise.newPromise(&machine);
+    machine.setTempRoot(roots + 2, Value.obj(native_object));
+    machine.async_waiter_completion = .{
+        .id = 897,
+        .promise = Value.obj(native_object),
+        .completion = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks),
+    };
+    defer machine.async_waiter_completion = null;
+    var outer = jsthread.PropAsyncRootFrame{ .head = &tickets[0], .tail = &tickets[0], .len = 1 };
+    var inner = jsthread.PropAsyncRootFrame{ .parent = &outer, .head = &tickets[1], .tail = &tickets[1], .len = 1 };
+    machine.current_prop_async_roots = &inner;
+    defer machine.current_prop_async_roots = null;
+    const before = [_]*value.Object{ tickets[0].promise, tickets[1].promise, native_object };
+    machine.restoreTempRoots(roots);
+    const moved = ctx.collectYoungAfterRootValidation(ctx.gc.?);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    for (&tickets, 0..) |*ticket, i| {
+        try std.testing.expect(before[i] != ticket.promise);
+        try std.testing.expect(ticket.obj == ticket.promise);
+        const target = promise.promiseOf(Value.obj(ticket.promise)).?;
+        try std.testing.expectEqual(promise.State.pending, target.state);
+        ticket.completion.fulfillPrimitive(&machine, target, Value.str("ok"));
+        try std.testing.expectEqualStrings("ok", target.value.asStr());
+    }
+    const entry = &machine.async_waiter_completion.?;
+    try std.testing.expect(before[2] != entry.promise.asObj());
+    const target = promise.promiseOf(entry.promise).?;
+    entry.completion.fulfillPrimitive(&machine, target, Value.str("timed-out"));
+    try std.testing.expectEqualStrings("timed-out", target.value.asStr());
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}
+
+test "property waitAsync notify races Thread exit without duplicate or orphan completion" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |parallel| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .parallel_gc = true,
+            .parallel_js = parallel,
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\var completionRace = { cell: 0, pause: 0, completed: 0, bad: 0 };
+            \\var completionThreads = [];
+            \\for (let i = 0; i < 8; i++) completionThreads.push(new Thread(function () {
+            \\  const waiter = Atomics.waitAsync(completionRace, "cell", 0);
+            \\  waiter.value.then(function (outcome) {
+            \\    if (outcome !== "ok") Atomics.add(completionRace, "bad", 1);
+            \\    Atomics.add(completionRace, "completed", 1);
+            \\  });
+            \\  return 897;
+            \\}));
+            \\var notified = 0;
+            \\while (notified < 8) {
+            \\  notified += Atomics.notify(completionRace, "cell");
+            \\  if (notified < 8) Atomics.wait(completionRace, "pause", 0, 1);
+            \\}
+            \\for (const worker of completionThreads) {
+            \\  if (worker.join() !== 897) throw new Error("wrong worker completion");
+            \\}
+            \\if (Atomics.notify(completionRace, "cell") !== 0) throw new Error("orphan ticket");
+            \\completionRace;
+        );
+        try std.testing.expectEqual(@as(f64, 8), result.asObj().getOwn("completed").?.asNum());
+        try std.testing.expectEqual(@as(f64, 0), result.asObj().getOwn("bad").?.asNum());
+        try std.testing.expectEqual(@as(usize, 0), ctx.gil.?.prop_async.items.len);
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+        for (ctx.js_threads.items) |rec| try std.testing.expect(rec.prop_async_head == null);
+    }
 }

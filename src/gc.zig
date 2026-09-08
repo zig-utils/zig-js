@@ -2935,6 +2935,8 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         defer machine.unlockRealm();
         for (waiters.items) |aw| markValue(v, aw.promise);
     }
+    if (machine.async_waiter_completion) |completion| markValue(v, completion.promise);
+    jsthread.tracePropAsyncRoots(machine.current_prop_async_roots, v);
     // NOTE: the shared realm `finalization_cleanup_jobs` is intentionally NOT
     // traced here. Unlike the per-thread lists above, every interpreter's
     // `finalization_cleanup_jobs` aliases the one Context-owned queue, which the
@@ -3092,6 +3094,9 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         for (roots.jobs) |job| jsthread.relocateHoldJobRoot(job, v);
     if (machine.async_waiters) |waiters|
         for (waiters.items) |*waiter| gc_relocation.rewriteValueSlot(v, &waiter.promise);
+    if (machine.async_waiter_completion) |*completion|
+        gc_relocation.rewriteValueSlot(v, &completion.promise);
+    jsthread.relocatePropAsyncRoots(machine.current_prop_async_roots, v);
     for (machine.gc_env_roots.items) |*environment| {
         gc_relocation.rewriteRequiredSlot(v, Environment, environment);
         relocateEnv(environment.*, v);

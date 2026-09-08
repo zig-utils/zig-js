@@ -57,7 +57,11 @@ extern "c" fn snprintf(noalias s: [*c]u8, maxlen: usize, noalias format: [*:0]co
 
 /// One outstanding `Atomics.waitAsync` of a realm: the waiter-table ticket id
 /// and the promise to settle with "ok"/"timed-out" (see `settleAsyncWaiters`).
-pub const AsyncWaiterEntry = struct { id: u64, promise: Value };
+pub const AsyncWaiterEntry = struct {
+    id: u64,
+    promise: Value,
+    completion: promise.PreparedSettlement = .{},
+};
 pub const async_waiter_reserve_granularity = 16;
 
 /// Robustness limits so adversarial input throws a catchable error instead of
@@ -3502,6 +3506,10 @@ pub const Interpreter = struct {
     /// token in the waiter table; `settleAsyncWaiters` resolves entries as
     /// their tickets settle.
     async_waiters: ?*std.ArrayListUnmanaged(AsyncWaiterEntry) = null,
+    /// A harvested waiter stays a precise root until its prepared primitive
+    /// completion commits. It has left the shared list, but not this owner.
+    async_waiter_completion: ?AsyncWaiterEntry = null,
+    current_prop_async_roots: ?*jsthread.PropAsyncRootFrame = null,
     /// Context-owned, unrefed AbortSignal timer lane. The core interpreter
     /// requests scheduling and polls at host checkpoints; only the owning
     /// Context knows native allocation, finalization, and generation state.
@@ -11178,7 +11186,7 @@ pub const Interpreter = struct {
         return listp.items.len;
     }
 
-    fn appendAsyncWaiter(self: *Interpreter, entry: AsyncWaiterEntry) !void {
+    fn enqueueAsyncWaiter(self: *Interpreter, storage: *shared_buffer.SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64, result: Value, completion: *promise.PreparedSettlement) !agent.AsyncEnqueue {
         const listp = self.async_waiters orelse return error.OutOfMemory;
         self.lockRealm();
         defer self.unlockRealm();
@@ -11186,23 +11194,43 @@ pub const Interpreter = struct {
         if (spare == 0) {
             try listp.ensureTotalCapacity(self.arena, listp.items.len + async_waiter_reserve_granularity);
         }
-        listp.appendAssumeCapacity(entry);
+        // Realm capacity precedes native publication. The waiter-table lock
+        // never calls back into the realm; publication has no fallible tail.
+        const enqueued = try agent.waitAsyncEnqueue(storage, offset, T, expected, timeout_ns, @ptrCast(listp));
+        if (enqueued == .enqueued) {
+            gc_mod.barrierValue(result);
+            listp.appendAssumeCapacity(.{ .id = enqueued.enqueued, .promise = result, .completion = completion.* });
+            completion.* = .{};
+        }
+        return enqueued;
     }
 
-    fn takeAsyncWaiter(self: *Interpreter, listp: *std.ArrayListUnmanaged(AsyncWaiterEntry), id: u64) ?AsyncWaiterEntry {
+    fn takeAsyncWaiter(self: *Interpreter, listp: *std.ArrayListUnmanaged(AsyncWaiterEntry), id: u64) ?*AsyncWaiterEntry {
+        std.debug.assert(self.async_waiter_completion == null);
         self.lockRealm();
         defer self.unlockRealm();
         var i: usize = 0;
         while (i < listp.items.len) : (i += 1) {
-            if (listp.items[i].id == id) return listp.swapRemove(i);
+            if (listp.items[i].id == id) {
+                gc_mod.barrierValue(listp.items[i].promise);
+                self.async_waiter_completion = listp.swapRemove(i);
+                return &self.async_waiter_completion.?;
+            }
         }
         return null;
     }
 
-    fn clearAsyncWaiters(self: *Interpreter, listp: *std.ArrayListUnmanaged(AsyncWaiterEntry)) void {
-        self.lockRealm();
-        defer self.unlockRealm();
-        listp.clearRetainingCapacity();
+    pub fn abandonAsyncWaiters(self: *Interpreter) void {
+        const listp = self.async_waiters orelse return;
+        agent.abandonAsync(@ptrCast(listp));
+        while (true) {
+            self.lockRealm();
+            var entry = listp.pop();
+            self.unlockRealm();
+            // Cancellation takes the queue lock; never nest it inside the
+            // realm lock, which would invert Promise rejection publication.
+            if (entry) |*waiter| waiter.completion.cancel(self) else break;
+        }
     }
 
     fn serviceRequestedGcCheckpoint(self: *Interpreter) void {
@@ -11535,16 +11563,15 @@ pub const Interpreter = struct {
             if (n == 0) break;
             for (buf[0..n]) |s| {
                 if (self.takeAsyncWaiter(listp, s.id)) |e| {
-                    if (promise.promiseOf(e.promise)) |pp| {
-                        const outcome: Value = if (s.outcome == .ok) Value.str("ok") else Value.str("timed-out");
-                        promise.resolve(self, pp, outcome) catch {};
-                    }
+                    defer self.async_waiter_completion = null;
+                    const pp = promise.promiseOf(e.promise).?;
+                    const outcome: Value = if (s.outcome == .ok) Value.str("ok") else Value.str("timed-out");
+                    e.completion.fulfillPrimitive(self, pp, outcome);
                 }
             }
             self.drainMicrotasks() catch {};
         }
-        agent.abandonAsync(owner);
-        self.clearAsyncWaiters(listp);
+        self.abandonAsyncWaiters();
     }
 
     fn evalAwait(self: *Interpreter, arg_node: *Node) EvalError!Value {
@@ -36888,10 +36915,9 @@ fn atomicsNotifyFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 }
 
 /// `Atomics.waitAsync(typedArray, index, value, timeout)` — the non-blocking
-/// form of `wait`. Like `wait`, DoWait runs ValidateSharedIntegerTypedArray, so
-/// the buffer must be shared; in this single-threaded engine no other agent can
-/// ever notify, so an actual wait yields a forever pending promise and the
-/// early-out cases resolve synchronously.
+/// form of `wait`. DoWait's synchronous exits allocate no Promise. An actual
+/// wait owns its intrinsic Promise, native ticket, precise root, and publication
+/// reservation before the result escapes to JavaScript.
 fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -36911,40 +36937,50 @@ fn atomicsWaitAsyncFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         null
     else
         @intFromFloat(timeout_ms * std.time.ns_per_ms);
-    const ab = vd.ta.buffer.arrayBuffer().?;
-    const storage = ab.shared orelse return self.throwError("TypeError", "Atomics.waitAsync requires a shared buffer");
-    const offset = vd.ta.byte_offset + vd.i * vd.ta.kind.byteSize();
-    const res = (try self.newObject()).asObj();
-    // Register the async ticket (the value re-check and the timeout-0 early-out
-    // both happen inside the waiter table's critical section).
-    const enq = if (self.async_waiters == null)
-        // No settle loop wired in this host: report "timed-out" synchronously
-        // rather than minting a promise nothing will ever resolve.
-        agent.AsyncEnqueue.timed_out
-    else if (vd.ta.kind == .i64)
-        agent.waitAsyncEnqueue(storage, offset, i64, @bitCast(expected_raw), timeout_ns, @ptrCast(self.async_waiters.?))
+    // Reload the view after argument coercion may have moved its wrapper.
+    const view = args[0].asObj().typedArray().?;
+    const storage = view.buffer.arrayBuffer().?.shared orelse return self.throwError("TypeError", "Atomics.waitAsync requires a shared buffer");
+    const offset = view.byte_offset + vd.i * view.kind.byteSize();
+    const is_bigint = view.kind == .i64;
+    const check = if (is_bigint)
+        agent.checkAsyncWait(storage, offset, i64, @bitCast(expected_raw), timeout_ns)
     else
-        agent.waitAsyncEnqueue(storage, offset, i32, @bitCast(@as(u32, @truncate(expected_raw))), timeout_ns, @ptrCast(self.async_waiters.?));
-    switch (enq) {
-        .not_equal => {
-            try self.setProp(res, "async", Value.boolVal(false));
-            try self.setProp(res, "value", Value.str("not-equal"));
-        },
-        .timed_out => {
-            try self.setProp(res, "async", Value.boolVal(false));
-            try self.setProp(res, "value", Value.str("timed-out"));
-        },
-        .enqueued => |id| {
-            const cap = try newPromiseCapability(self, self.env.get("Promise") orelse Value.undef());
-            self.appendAsyncWaiter(.{ .id = id, .promise = cap.promise }) catch {
-                agent.abandonAsync(@ptrCast(self.async_waiters.?));
-                return error.OutOfMemory;
-            };
-            try self.setProp(res, "async", Value.boolVal(true));
-            try self.setProp(res, "value", cap.promise);
+        agent.checkAsyncWait(storage, offset, i32, @bitCast(@as(u32, @truncate(expected_raw))), timeout_ns);
+    const roots = try self.pushTempRootSlice(&.{ Value.undef(), Value.undef() });
+    defer self.restoreTempRoots(roots);
+    const result = try self.newObject();
+    self.setTempRoot(roots, result);
+    if (check != .pending) {
+        try self.tempRoot(roots, result).asObj().setOwn(self.arena, self.root_shape, "async", Value.boolVal(false));
+        try self.tempRoot(roots, result).asObj().setOwn(self.arena, self.root_shape, "value", if (check == .not_equal) Value.str("not-equal") else Value.str("timed-out"));
+        return self.tempRoot(roots, result);
+    }
+    if (self.async_waiters == null)
+        return self.throwError("Error", "Atomics.waitAsync requires an async-waiter queue");
+    const queue = self.microtasks orelse
+        return self.throwError("Error", "Atomics.waitAsync requires a microtask queue");
+    const promise_value = Value.obj(try promise.newPromise(self));
+    self.setTempRoot(roots + 1, promise_value);
+    // DoWait uses the intrinsic Promise constructor and CreateDataProperty,
+    // without consulting the mutable global binding or inherited setters.
+    try self.tempRoot(roots, result).asObj().setOwn(self.arena, self.root_shape, "async", Value.boolVal(true));
+    try self.tempRoot(roots, result).asObj().setOwn(self.arena, self.root_shape, "value", self.tempRoot(roots + 1, promise_value));
+    var completion = try promise.PreparedSettlement.prepare(self, queue);
+    defer completion.cancel(self);
+    const enqueued = if (is_bigint)
+        try self.enqueueAsyncWaiter(storage, offset, i64, @bitCast(expected_raw), timeout_ns, self.tempRoot(roots + 1, promise_value), &completion)
+    else
+        try self.enqueueAsyncWaiter(storage, offset, i32, @bitCast(@as(u32, @truncate(expected_raw))), timeout_ns, self.tempRoot(roots + 1, promise_value), &completion);
+    switch (enqueued) {
+        .enqueued => {}, // Complete result and both owners are already published.
+        .not_equal, .timed_out => {
+            // The value can change while preparing the capability. No native
+            // ticket was admitted, so discard this unexposed capability only.
+            try self.tempRoot(roots, result).asObj().setOwn(self.arena, self.root_shape, "async", Value.boolVal(false));
+            try self.tempRoot(roots, result).asObj().setOwn(self.arena, self.root_shape, "value", if (enqueued == .not_equal) Value.str("not-equal") else Value.str("timed-out"));
         },
     }
-    return Value.obj(res);
+    return self.tempRoot(roots, result);
 }
 
 /// A typed-array constructor for `kind` (`new Int8Array(...)`, …).
@@ -61746,4 +61782,129 @@ test "Promise job await preparation OOM consumes its owned rejection slot" {
     try std.testing.expect(queue.isEmpty());
     try std.testing.expectEqual(@as(usize, 0), queue.reservations);
     try std.testing.expect(machine.current_microtask == null);
+}
+
+test "shared-buffer waitAsync completion survives exhausted temporary-root storage" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const saved_ctx = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_ctx);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+    const object = try promise.newPromise(&machine);
+    try ctx.env.put("waitAsyncCompletion", Value.obj(object));
+    const dependent = try promise.newPromise(&machine);
+    const pp = promise.promiseOf(Value.obj(object)).?;
+    const dependent_pp = promise.promiseOf(Value.obj(dependent)).?;
+    pp.reactions_inline = .{
+        .fulfill = .{ .handler = null, .result = dependent_pp },
+        .reject = .{ .handler = null, .result = dependent_pp },
+    };
+    const storage = try shared_buffer.SharedBufferStorage.create(4, null);
+    defer storage.release();
+    var completion = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks);
+    defer completion.cancel(&machine);
+    const admitted = try machine.enqueueAsyncWaiter(storage, 0, i32, 0, 1, Value.obj(object), &completion);
+    try std.testing.expect(admitted == .enqueued);
+    try std.testing.expect(!completion.slot.active);
+    try std.testing.expectEqual(@as(usize, 1), ctx.async_waiters.items.len);
+
+    var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = exhausted.allocator();
+    machine.settleAsyncWaiters();
+    try std.testing.expectEqual(promise.State.fulfilled, pp.state);
+    try std.testing.expectEqualStrings("timed-out", pp.value.asStr());
+    try std.testing.expect(machine.async_waiter_completion == null);
+    try std.testing.expectEqual(@as(usize, 0), ctx.async_waiters.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    machine.arena = ctx.arena();
+    try machine.drainMicrotasks();
+    try std.testing.expectEqual(promise.State.fulfilled, dependent_pp.state);
+    try std.testing.expectEqualStrings("timed-out", dependent_pp.value.asStr());
+    try std.testing.expect(ctx.microtasks.isEmpty());
+}
+
+test "shared-buffer waitAsync admission OOM preserves an existing native waiter" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const storage = try shared_buffer.SharedBufferStorage.create(4, null);
+    defer storage.release();
+    const object = try promise.newPromise(&machine);
+    const other = try promise.newPromise(&machine);
+    const list_storage = try ctx.arena().alloc(AsyncWaiterEntry, 1);
+    ctx.async_waiters = .{ .items = list_storage[0..0], .capacity = list_storage.len };
+    var first = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks);
+    defer first.cancel(&machine);
+    const admitted = try machine.enqueueAsyncWaiter(storage, 0, i32, 0, null, Value.obj(object), &first);
+    try std.testing.expect(admitted == .enqueued);
+    var second = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks);
+    defer second.cancel(&machine);
+    const reserved = ctx.microtasks.reservations;
+    var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = exhausted.allocator();
+    try std.testing.expectError(error.OutOfMemory, machine.enqueueAsyncWaiter(storage, 0, i32, 0, null, Value.obj(other), &second));
+    try std.testing.expect(exhausted.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), ctx.async_waiters.items.len);
+    try std.testing.expectEqual(admitted.enqueued, ctx.async_waiters.items[0].id);
+    try std.testing.expectEqual(reserved, ctx.microtasks.reservations);
+    try std.testing.expect(second.slot.active);
+    try std.testing.expectEqual(@as(usize, 1), agent.notify(storage, 0, 2));
+    second.cancel(&machine);
+    machine.arena = ctx.arena();
+    machine.settleAsyncWaiters();
+    try std.testing.expectEqual(promise.State.fulfilled, promise.promiseOf(Value.obj(object)).?.state);
+    try std.testing.expectEqualStrings("ok", promise.promiseOf(Value.obj(object)).?.value.asStr());
+    try std.testing.expectEqual(promise.State.pending, promise.promiseOf(Value.obj(other)).?.state);
+    try std.testing.expectEqual(@as(usize, 0), ctx.async_waiters.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}
+
+test "shared-buffer waitAsync harvest boundary retains every outcome under allocation failure" {
+    const Context = @import("context.zig").Context;
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const storage = try shared_buffer.SharedBufferStorage.create(4, null);
+    defer storage.release();
+    const count = 33;
+    var targets: [count]*promise.Promise = undefined;
+    var dependents: [count]*promise.Promise = undefined;
+    for (&targets, 0..) |*target, i| {
+        const object = try promise.newPromise(&machine);
+        target.* = promise.promiseOf(Value.obj(object)).?;
+        dependents[i] = promise.promiseOf(Value.obj(try promise.newPromise(&machine))).?;
+        target.*.reactions_inline = .{
+            .fulfill = .{ .handler = null, .result = dependents[i] },
+            .reject = .{ .handler = null, .result = dependents[i] },
+        };
+        var completion = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks);
+        defer completion.cancel(&machine);
+        const admitted = try machine.enqueueAsyncWaiter(storage, 0, i32, 0, null, Value.obj(object), &completion);
+        try std.testing.expect(admitted == .enqueued);
+    }
+    try std.testing.expectEqual(@as(usize, count), agent.notify(storage, 0, count));
+    var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = exhausted.allocator();
+    machine.settleAsyncWaiters();
+    for (targets) |target| {
+        try std.testing.expectEqual(promise.State.fulfilled, target.state);
+        try std.testing.expectEqualStrings("ok", target.value.asStr());
+    }
+    try std.testing.expectEqual(@as(usize, 0), ctx.async_waiters.items.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    try std.testing.expect(machine.async_waiter_completion == null);
+    try std.testing.expectEqual(@as(usize, 0), agent.notify(storage, 0, count));
+    machine.arena = ctx.arena();
+    try machine.drainMicrotasks();
+    try std.testing.expect(ctx.microtasks.isEmpty());
+    for (dependents) |dependent| {
+        try std.testing.expectEqual(promise.State.fulfilled, dependent.state);
+        try std.testing.expectEqualStrings("ok", dependent.value.asStr());
+    }
 }

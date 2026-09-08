@@ -434,9 +434,13 @@ var live_agents = std.atomic.Value(usize).init(0);
 /// The waiter list for (storage, offset), created on demand. Caller holds
 /// `waiters_mutex`. Null on allocation failure.
 fn listFor(key: WaitKey) ?*WaiterList {
-    const gop = waiters.getOrPut(alloc, key) catch return null;
+    return listForWithAllocator(key, alloc);
+}
+
+fn listForWithAllocator(key: WaitKey, allocator: std.mem.Allocator) ?*WaiterList {
+    const gop = waiters.getOrPut(allocator, key) catch return null;
     if (!gop.found_existing) {
-        gop.value_ptr.* = alloc.create(WaiterList) catch {
+        gop.value_ptr.* = allocator.create(WaiterList) catch {
             _ = waiters.remove(key);
             return null;
         };
@@ -473,11 +477,15 @@ fn removeEmptyListsLocked() void {
 }
 
 fn reserveTicketsLocked(list: *WaiterList, additional: usize) bool {
+    return reserveTicketsWithAllocatorLocked(list, additional, alloc);
+}
+
+fn reserveTicketsWithAllocatorLocked(list: *WaiterList, additional: usize, allocator: std.mem.Allocator) bool {
     if (additional == 0) return true;
     const spare = list.tickets.capacity - list.tickets.items.len;
     if (spare >= additional) return true;
     const extra = @max(additional, waiter_ticket_reserve_granularity);
-    list.tickets.ensureTotalCapacity(alloc, list.tickets.items.len + extra) catch return false;
+    list.tickets.ensureTotalCapacity(allocator, list.tickets.items.len + extra) catch return false;
     return true;
 }
 
@@ -678,20 +686,49 @@ fn nextAsyncWaiterIdLocked() u64 {
     }
 }
 
-/// Register an async waiter. `owner` identifies the realm that will harvest
-/// it (a stable pointer for the realm's lifetime). Returns `not_equal` /
-/// `timed_out` for the spec's synchronous early-outs.
-pub fn waitAsyncEnqueue(storage: *SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64, owner: *const anyopaque) AsyncEnqueue {
-    const io = engineIo();
-    waiters_used.store(true, .monotonic);
-    waiters_mutex.lockUncancelable(io);
-    defer waiters_mutex.unlock(io);
+pub const AsyncWaitCheck = enum { not_equal, timed_out, pending };
+
+fn asyncWaitCheckLocked(storage: *SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64) AsyncWaitCheck {
     const p: *T = @ptrCast(@alignCast(storage.slab + offset));
     if (@atomicLoad(T, p, .seq_cst) != expected) return .not_equal;
     if (timeout_ns) |ns| if (ns == 0) return .timed_out;
     if (group.stopping) return .timed_out;
-    const list = listFor(.{ .storage = storage, .offset = offset }) orelse return .timed_out;
-    const t = alloc.create(Ticket) catch return .timed_out;
+    return .pending;
+}
+
+/// Avoid preparing an asynchronous capability for DoWait's synchronous exits.
+/// A pending result is only a probe: enqueue rechecks inside the same critical
+/// section that publishes the ticket, after the engine prepares its ownership.
+pub fn checkAsyncWait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64) AsyncWaitCheck {
+    const io = engineIo();
+    waiters_mutex.lockUncancelable(io);
+    defer waiters_mutex.unlock(io);
+    return asyncWaitCheckLocked(storage, offset, T, expected, timeout_ns);
+}
+
+/// Register an async waiter. `owner` identifies the realm that will harvest
+/// it (a stable pointer for the realm's lifetime). Returns `not_equal` /
+/// `timed_out` for the spec's synchronous early-outs.
+pub fn waitAsyncEnqueue(storage: *SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64, owner: *const anyopaque) error{OutOfMemory}!AsyncEnqueue {
+    return waitAsyncEnqueueWithAllocator(storage, offset, T, expected, timeout_ns, owner, alloc);
+}
+
+/// The allocator wraps `alloc`; admitted metadata is freed by its native owner.
+fn waitAsyncEnqueueWithAllocator(storage: *SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64, owner: *const anyopaque, allocator: std.mem.Allocator) error{OutOfMemory}!AsyncEnqueue {
+    const io = engineIo();
+    waiters_used.store(true, .monotonic);
+    waiters_mutex.lockUncancelable(io);
+    defer waiters_mutex.unlock(io);
+    switch (asyncWaitCheckLocked(storage, offset, T, expected, timeout_ns)) {
+        .not_equal => return .not_equal,
+        .timed_out => return .timed_out,
+        .pending => {},
+    }
+    const key = WaitKey{ .storage = storage, .offset = offset };
+    const list = listForWithAllocator(key, allocator) orelse return error.OutOfMemory;
+    errdefer removeListIfEmptyLocked(key, list);
+    const t = try allocator.create(Ticket);
+    errdefer allocator.destroy(t);
     const id = nextAsyncWaiterIdLocked();
     const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
     t.* = .{
@@ -701,10 +738,8 @@ pub fn waitAsyncEnqueue(storage: *SharedBufferStorage, offset: usize, comptime T
         .async_id = id,
         .deadline_ns = if (timeout_ns) |ns| now + ns else null,
     };
-    if (!appendTicketLocked(list, t)) {
-        alloc.destroy(t);
-        return .timed_out;
-    }
+    if (!reserveTicketsWithAllocatorLocked(list, 1, allocator)) return error.OutOfMemory;
+    list.tickets.appendAssumeCapacity(t);
     return .{ .enqueued = id };
 }
 
@@ -1214,4 +1249,54 @@ test "waiter table tickets reserve fixed-size capacity chunks" {
     try std.testing.expect(appendTicketLocked(list, &tickets[first_capacity - 1]));
     try std.testing.expectEqual(first_capacity + 1, list.tickets.items.len);
     try std.testing.expect(list.tickets.capacity > first_capacity);
+}
+
+test "waitAsync native admission OOM rolls back ticket publication without losing another domain" {
+    const storage = try SharedBufferStorage.create(8, null);
+    defer storage.release();
+    var first_owner: u8 = 0;
+    var fault_owner: u8 = 0;
+    defer abandonAsync(&first_owner);
+    defer abandonAsync(&fault_owner);
+    const first = try waitAsyncEnqueue(storage, 0, i32, 0, null, &first_owner);
+    try std.testing.expect(first == .enqueued);
+    const io = engineIo();
+    waiters_mutex.lockUncancelable(io);
+    const before = waiters.count();
+    waiters_mutex.unlock(io);
+    var failures: usize = 0;
+    var admitted: ?u64 = null;
+    // This allocator forwards successful allocations to the waiter's actual
+    // backing allocator, so production cleanup exercises the same native graph.
+    for (0..8) |fail_index| {
+        var exhausted = std.testing.FailingAllocator.init(alloc, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+        const result = waitAsyncEnqueueWithAllocator(storage, 4, i32, 0, null, &fault_owner, exhausted.allocator());
+        if (result) |entry| {
+            try std.testing.expect(entry == .enqueued);
+            admitted = entry.enqueued;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(exhausted.has_induced_failure);
+            failures += 1;
+            waiters_mutex.lockUncancelable(io);
+            const after = waiters.count();
+            waiters_mutex.unlock(io);
+            try std.testing.expectEqual(before, after);
+            try std.testing.expectEqual(@as(usize, 0), notify(storage, 4, 1));
+        }
+    }
+    try std.testing.expect(failures >= 3);
+    try std.testing.expect(admitted != null);
+    try std.testing.expectEqual(@as(usize, 1), notify(storage, 0, 1));
+    try std.testing.expectEqual(@as(usize, 1), notify(storage, 4, 1));
+    var outcomes: [1]Settled = undefined;
+    try std.testing.expectEqual(@as(usize, 1), harvestAsync(&first_owner, &outcomes));
+    try std.testing.expectEqual(first.enqueued, outcomes[0].id);
+    try std.testing.expectEqual(WaitOutcome.ok, outcomes[0].outcome);
+    try std.testing.expectEqual(@as(usize, 1), harvestAsync(&fault_owner, &outcomes));
+    try std.testing.expectEqual(admitted.?, outcomes[0].id);
+    try std.testing.expectEqual(WaitOutcome.ok, outcomes[0].outcome);
+    try std.testing.expectEqual(@as(usize, 0), notify(storage, 0, 1));
+    try std.testing.expectEqual(@as(usize, 0), notify(storage, 4, 1));
 }

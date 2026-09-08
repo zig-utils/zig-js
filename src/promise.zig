@@ -1336,6 +1336,20 @@ pub const PreparedSettlement = struct {
         std.debug.assert(prepared.slot.active);
         rejectWithReservation(self, p, reason, &prepared.slot);
     }
+
+    /// FulfillPromise for a known primitive completion, such as waitAsync's
+    /// static outcome string. Inputs already have durable roots; this commit
+    /// neither assimilates a thenable nor allocates root or publication storage.
+    pub fn fulfillPrimitive(prepared: *PreparedSettlement, self: *Interpreter, p: *Promise, result: Value) void {
+        std.debug.assert(prepared.slot.active and !result.isObject());
+        const saved = self.microtasks;
+        self.microtasks = prepared.slot.queue.?;
+        defer self.microtasks = saved;
+        const locked = LockedSettlement.begin(self, p, .fulfilled);
+        if (p.state == .pending) locked.commit(result, &prepared.slot);
+        locked.end();
+        prepared.cancel(self);
+    }
 };
 
 fn rejectWithReservation(self: *Interpreter, p: *Promise, reason: Value, slot: *MicrotaskReservation) void {
@@ -2498,4 +2512,57 @@ test "Promise job thenable OOM after resolution preserves its committed adoption
     try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("jobThenCalls").?.asNum());
     try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("jobAdoptionCalls").?.asNum());
     try std.testing.expect(ctx.microtasks.isEmpty());
+}
+
+test "waitAsync prepared primitive completion commits without root or queue allocation" {
+    var exhausted = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    var storage: [2]Microtask = undefined;
+    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    const pair = ReactionPair{
+        .fulfill = .{ .handler = null, .detached = true },
+        .reject = .{ .handler = null, .detached = true },
+    };
+    var overflow = [_]ReactionPair{pair};
+    var target = Promise{ .reactions_inline = pair, .reactions = .fromOwnedSlice(&overflow) };
+    var gc_sentinel: u8 = 0;
+    var machine = Interpreter{
+        .arena = exhausted.allocator(),
+        .env = undefined,
+        .root_shape = undefined,
+        .microtasks = &queue,
+        .gc = &gc_sentinel,
+    };
+    try queue.append(exhausted.allocator(), .{
+        .kind = .native_callback,
+        .reaction = undefined,
+        .argument = Value.num(897),
+        .fulfilled = true,
+    });
+    var completion = try PreparedSettlement.prepare(&machine, &queue);
+    completion.fulfillPrimitive(&machine, &target, Value.str("ok"));
+    try std.testing.expectEqual(State.fulfilled, target.state);
+    try std.testing.expectEqualStrings("ok", target.value.asStr());
+    try std.testing.expect(!completion.slot.active);
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try std.testing.expectEqual(@as(usize, 2), queue.pendingLen());
+    try std.testing.expectEqual(@as(f64, 897), queue.pendingItems()[0].argument.asNum());
+    try std.testing.expectEqual(.settlement_batch, queue.pendingItems()[1].kind);
+    try std.testing.expect(queue.pendingItems()[1].payload.promise.? == &target);
+    try std.testing.expect(target.reactions_inline != null);
+    try std.testing.expectEqual(@as(usize, 1), target.reactions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), exhausted.alloc_index);
+    try std.testing.expect(!exhausted.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_roots.items.len);
+    try std.testing.expectEqual(@as(usize, 0), machine.gc_temp_promise_roots.items.len);
+
+    var repeated_storage: [1]Microtask = undefined;
+    var repeated_queue = MicrotaskQueue{ .items = .{ .items = repeated_storage[0..0], .capacity = repeated_storage.len } };
+    completion = try PreparedSettlement.prepare(&machine, &repeated_queue);
+    completion.fulfillPrimitive(&machine, &target, Value.str("timed-out"));
+    try std.testing.expectEqualStrings("ok", target.value.asStr());
+    try std.testing.expectEqual(@as(usize, 2), queue.pendingLen());
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try std.testing.expect(repeated_queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), repeated_queue.reservations);
+    try std.testing.expectEqual(@as(usize, 0), exhausted.alloc_index);
 }

@@ -52,6 +52,9 @@ pub const ThreadRecord = struct {
     /// GIL-mode joiners still release the GIL while parked, but `parallel_js`
     /// joiners wait only on this mutex/condition pair.
     join_mutex: std.Io.Mutex = .init,
+    /// Native ticket index under join_mutex, including tickets detached by a
+    /// notifier. Their JS roots belong to the waiter table or completion batch.
+    prop_async_head: ?*PropAsyncTicket = null,
     done: bool = false,
     /// True only after the OS thread has run all cleanup defers and is about
     /// to return. GC quiescence uses this, not `done`: `done` only means the JS
@@ -962,10 +965,9 @@ fn threadMain(rec: *ThreadRecord) void {
         });
         machine.drainMicrotasks() catch {};
         if (async_waiters.items.len > 0) {
-            agent.abandonAsync(@ptrCast(&async_waiters));
-            async_waiters.clearRetainingCapacity();
+            machine.abandonAsyncWaiters();
         }
-        abandonPropAsyncQueue(g, microtasks);
+        abandonPropAsyncQueue(&machine, microtasks);
         threw = true;
     }
     // Settle asyncJoin promises on this (the settling) thread, then drain
@@ -982,7 +984,7 @@ fn threadMain(rec: *ThreadRecord) void {
     // roots. Reload each result after earlier settlements may have moved it.
     settleThreadJoins(rec, &machine, pending_joins.items, threw);
     machine.drainMicrotasks() catch {};
-    transferPropAsyncQueue(g, microtasks, &rec.ctx.microtasks);
+    transferPropAsyncQueue(&machine, rec, microtasks, &rec.ctx.microtasks);
     // Pending prop-async tickets now target the realm queue, but another peer
     // may already have removed one of this thread's tickets from the global
     // table and be about to settle it. Publish "local queue closed" before the
@@ -3443,7 +3445,91 @@ pub const PropAsyncTicket = struct {
     thread: ?*ThreadRecord,
     /// The realm's gil pointer — the abandon token at Context.destroy.
     owner: *const anyopaque,
+    completion: promise.PreparedSettlement = .{},
+    exit_completion: promise.PreparedSettlement = .{},
+    thread_prev: ?*PropAsyncTicket = null,
+    thread_next: ?*PropAsyncTicket = null,
+    ready_next: ?*PropAsyncTicket = null,
 };
+
+/// Rooted before detaching any ticket. The native links keep bulk completion
+/// allocation-free and preserve the table's FIFO order without front removal.
+pub const PropAsyncRootFrame = struct {
+    parent: ?*PropAsyncRootFrame = null,
+    head: ?*PropAsyncTicket = null,
+    tail: ?*PropAsyncTicket = null,
+    len: usize = 0,
+
+    fn append(self: *PropAsyncRootFrame, ticket: *PropAsyncTicket) void {
+        std.debug.assert(ticket.ready_next == null);
+        gc_mod.barrierCell(ticket.obj);
+        gc_mod.barrierCell(ticket.promise);
+        if (self.tail) |tail| tail.ready_next = ticket else self.head = ticket;
+        self.tail = ticket;
+        self.len += 1;
+    }
+
+    fn pop(self: *PropAsyncRootFrame) ?*PropAsyncTicket {
+        const ticket = self.head orelse return null;
+        self.head = ticket.ready_next;
+        ticket.ready_next = null;
+        self.len -= 1;
+        if (self.head == null) {
+            self.tail = null;
+            std.debug.assert(self.len == 0);
+        }
+        return ticket;
+    }
+};
+
+pub fn tracePropAsyncRoots(frame: ?*PropAsyncRootFrame, v: anytype) void {
+    var current = frame;
+    while (current) |roots| : (current = roots.parent) {
+        var ticket = roots.head;
+        var remaining = roots.len;
+        while (ticket) |t| : (ticket = t.ready_next) {
+            std.debug.assert(remaining != 0);
+            remaining -= 1;
+            v.mark(t.obj);
+            v.mark(t.promise);
+        }
+        std.debug.assert(remaining == 0);
+    }
+}
+
+pub fn relocatePropAsyncRoots(frame: ?*PropAsyncRootFrame, v: anytype) void {
+    var current = frame;
+    while (current) |roots| : (current = roots.parent) {
+        var ticket = roots.head;
+        var remaining = roots.len;
+        while (ticket) |t| : (ticket = t.ready_next) {
+            std.debug.assert(remaining != 0);
+            remaining -= 1;
+            relocatePropAsyncTicketRoot(t, v);
+        }
+        std.debug.assert(remaining == 0);
+    }
+}
+
+fn linkPropAsyncOwnerLocked(ticket: *PropAsyncTicket) void {
+    const rec = ticket.thread orelse return;
+    ticket.thread_next = rec.prop_async_head;
+    if (rec.prop_async_head) |head| head.thread_prev = ticket;
+    rec.prop_async_head = ticket;
+}
+
+fn unlinkPropAsyncOwnerLocked(ticket: *PropAsyncTicket) void {
+    const rec = ticket.thread orelse return;
+    if (ticket.thread_prev) |previous| {
+        previous.thread_next = ticket.thread_next;
+    } else {
+        std.debug.assert(rec.prop_async_head == ticket);
+        rec.prop_async_head = ticket.thread_next;
+    }
+    if (ticket.thread_next) |next| next.thread_prev = ticket.thread_prev;
+    ticket.thread_prev = null;
+    ticket.thread_next = null;
+}
 
 fn propAsyncAllocator(t: *const PropAsyncTicket) std.mem.Allocator {
     const g: *const gil_mod.Gil = @ptrCast(@alignCast(t.owner));
@@ -3475,31 +3561,34 @@ fn appendPropAsyncLocked(g: *gil_mod.Gil, ticket: *PropAsyncTicket) !void {
     g.prop_async.appendAssumeCapacity(@ptrCast(ticket));
 }
 
+fn propertyKeyRootValue(self: *Interpreter, input: Value) value.HostError!Value {
+    if (input.isString() or (input.isObject() and input.asObj().is_symbol)) return input;
+    return self.toPropertyKeyValue(input);
+}
+
 /// `Atomics.waitAsync(obj, key, expected, timeout)` — the property path.
 /// Settlement: a notify resolves "ok" on the notifying thread; expiry
 /// resolves "timed-out" from the awaiters' poll points.
 pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value.HostError!Value {
-    const o = args[0].asObj();
+    const roots = try self.pushTempRootSlice(&.{ args[0], argAt(args, 2), Value.undef(), Value.undef(), Value.undef() });
+    defer self.restoreTempRoots(roots);
     const g = self.gil.?;
     const prop_alloc = g.prop_alloc;
-    const key_tmp = try self.keyOf(argAt(args, 1));
-    const expected = argAt(args, 2);
-    const cur = try ownDataOrThrow(self, o, key_tmp, "Atomics.waitAsync: object has no own data property");
-    if (!sameValueZero(cur, expected)) {
-        const res = (try self.newObject()).asObj();
-        try self.setProp(res, "async", Value.boolVal(false));
-        try self.setProp(res, "value", Value.str("not-equal"));
-        return Value.obj(res);
-    }
-    if (timeout_ns != null and timeout_ns.? == 0) {
-        const res = (try self.newObject()).asObj();
-        try self.setProp(res, "async", Value.boolVal(false));
-        try self.setProp(res, "value", Value.str("timed-out"));
-        return Value.obj(res);
+    const key_value = try propertyKeyRootValue(self, argAt(args, 1));
+    self.setTempRoot(roots + 4, key_value);
+    const key_tmp = try self.keyOf(self.tempRoot(roots + 4, key_value));
+    const cur = try ownDataOrThrow(self, self.tempRoot(roots, args[0]).asObj(), key_tmp, "Atomics.waitAsync: object has no own data property");
+    const unequal = !sameValueZero(cur, self.tempRoot(roots + 1, argAt(args, 2)));
+    if (unequal or (timeout_ns != null and timeout_ns.? == 0)) {
+        const res = try self.newObject();
+        self.setTempRoot(roots + 3, res);
+        try self.tempRoot(roots + 3, res).asObj().setOwn(self.arena, self.root_shape, "async", Value.boolVal(false));
+        try self.tempRoot(roots + 3, res).asObj().setOwn(self.arena, self.root_shape, "value", if (unequal) Value.str("not-equal") else Value.str("timed-out"));
+        return self.tempRoot(roots + 3, res);
     }
     const microtasks = self.microtasks orelse
         return self.throwError("Error", "Atomics.waitAsync requires a microtask queue");
-    const key = prop_alloc.dupe(u8, key_tmp) catch return error.OutOfMemory;
+    const key = try prop_alloc.dupe(u8, key_tmp);
     const t = prop_alloc.create(PropAsyncTicket) catch {
         prop_alloc.free(key);
         return error.OutOfMemory;
@@ -3509,117 +3598,146 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
         prop_alloc.free(key);
         prop_alloc.destroy(t);
     };
-    const p_obj = try promise.newPromise(self);
-    const res = (try self.newObject()).asObj();
-    // Build the externally visible result before publishing the ticket. These
-    // property writes may allocate; the collector traces `g.prop_async` under
-    // `prop_mutex`, so doing them after publication while still holding that
-    // mutex can self-deadlock allocation recovery. Prebuilding also makes
-    // publication failure-atomic: every queued ticket has a complete result.
-    try self.setProp(res, "async", Value.boolVal(true));
-    try self.setProp(res, "value", Value.obj(p_obj));
-    const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+    const promise_value = Value.obj(try promise.newPromise(self));
+    self.setTempRoot(roots + 2, promise_value);
+    const res = try self.newObject();
+    self.setTempRoot(roots + 3, res);
+    // Complete the intrinsic result before either native owner can observe it.
+    // CreateDataProperty must not invoke setters inherited from Object.prototype.
+    try self.tempRoot(roots + 3, res).asObj().setOwn(self.arena, self.root_shape, "async", Value.boolVal(true));
+    try self.tempRoot(roots + 3, res).asObj().setOwn(self.arena, self.root_shape, "value", self.tempRoot(roots + 2, promise_value));
+    var completion = try promise.PreparedSettlement.prepare(self, microtasks);
+    defer completion.cancel(self);
+    var exit_completion: promise.PreparedSettlement = .{};
+    defer exit_completion.cancel(self);
+    if (t_current) |rec| if (microtasks != &rec.ctx.microtasks) {
+        // Notification may win before or after the owner closes its local
+        // queue. Both possible destinations must already own publication space.
+        exit_completion = try promise.PreparedSettlement.prepare(self, &rec.ctx.microtasks);
+    };
+    const io = agent.engineIo();
+    const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
     t.* = .{
-        .obj = o,
+        .obj = self.tempRoot(roots, args[0]).asObj(),
         .key = key,
         .deadline_ns = if (timeout_ns) |ns| now + ns else null,
-        .promise = p_obj,
+        .promise = self.tempRoot(roots + 2, promise_value).asObj(),
         .microtasks = microtasks,
         .thread = t_current,
         .owner = @ptrCast(g),
     };
+    var owner_locked = t.thread != null;
+    if (t.thread) |rec| rec.join_mutex.lockUncancelable(io);
+    defer if (owner_locked) t.thread.?.join_mutex.unlock(io);
     g.lockPropWaiters();
     var locked = true;
     defer if (locked) g.unlockPropWaiters();
-    const cur_locked = try ownDataOrThrow(self, o, key_tmp, "Atomics.waitAsync: object has no own data property");
-    if (!sameValueZero(cur_locked, expected)) {
+    const cur_locked = try ownDataOrThrow(self, t.obj, key, "Atomics.waitAsync: object has no own data property");
+    if (!sameValueZero(cur_locked, self.tempRoot(roots + 1, argAt(args, 2)))) {
         g.unlockPropWaiters();
         locked = false;
-        try self.setProp(res, "async", Value.boolVal(false));
-        try self.setProp(res, "value", Value.str("not-equal"));
-        return Value.obj(res);
+        if (t.thread) |rec| rec.join_mutex.unlock(io);
+        owner_locked = false;
+        try self.tempRoot(roots + 3, res).asObj().setOwn(self.arena, self.root_shape, "async", Value.boolVal(false));
+        try self.tempRoot(roots + 3, res).asObj().setOwn(self.arena, self.root_shape, "value", Value.str("not-equal"));
+        return self.tempRoot(roots + 3, res);
     }
-    appendPropAsyncLocked(g, t) catch {
-        g.unlockPropWaiters();
-        locked = false;
-        return error.OutOfMemory;
-    };
+    try appendPropAsyncLocked(g, t);
+    t.completion = completion;
+    completion = .{};
+    t.exit_completion = exit_completion;
+    exit_completion = .{};
+    linkPropAsyncOwnerLocked(t);
+    gc_mod.barrierCell(t.obj);
+    gc_mod.barrierCell(t.promise);
     queued = true;
     bumpContention("property_wait_async_enqueued");
-    return Value.obj(res);
+    return self.tempRoot(roots + 3, res);
 }
 
-fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8) void {
-    const prop_alloc = propAsyncAllocator(t);
-    bumpContention("property_wait_async_settled");
-    const outcome_value = if (std.mem.eql(u8, outcome, "ok")) Value.str("ok") else Value.str("timed-out");
-    if (promise.promiseOf(Value.obj(t.promise))) |pp| {
-        const saved_microtasks = self.microtasks;
-        if (t.thread) |rec| {
-            const io = agent.engineIo();
-            rec.join_mutex.lockUncancelable(io);
-            // The parallel root walk takes this mutex before tracing the same
-            // completion record. Promise settlement can grow the selected job
-            // queue, so suppress collection/recovery until the queue choice and
-            // enqueue are atomically published against thread teardown.
-            gc_runtime.enterTraceSensitiveLock();
-            const target = if (rec.microtasks == t.microtasks) t.microtasks else &rec.ctx.microtasks;
-            self.microtasks = target;
-            promise.resolve(self, pp, outcome_value) catch {};
-            self.microtasks = saved_microtasks;
-            gc_runtime.leaveTraceSensitiveLock();
-            rec.join_mutex.unlock(io);
-        } else {
-            self.microtasks = t.microtasks;
-            promise.resolve(self, pp, outcome_value) catch {};
-            self.microtasks = saved_microtasks;
-        }
-    }
-    prop_alloc.free(t.key);
-    prop_alloc.destroy(t);
+/// The caller's detached batch roots this ticket until the infallible commit.
+/// Its owner's mutex also excludes local-to-host reservation handoff.
+fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: ?Value) void {
+    const io = agent.engineIo();
+    if (t.thread) |rec| rec.join_mutex.lockUncancelable(io);
+    defer if (t.thread) |rec| rec.join_mutex.unlock(io);
+    if (outcome) |result| {
+        bumpContention("property_wait_async_settled");
+        const pp = promise.promiseOf(Value.obj(t.promise)).?;
+        t.completion.fulfillPrimitive(self, pp, result);
+    } else t.completion.cancel(self);
+    t.exit_completion.cancel(self);
+    unlinkPropAsyncOwnerLocked(t);
 }
 
-fn transferPropAsyncQueue(g: *gil_mod.Gil, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
-    g.lockPropWaiters();
-    defer g.unlockPropWaiters();
-    for (g.prop_async.items) |raw| {
-        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
-        if (t.microtasks == from) t.microtasks = to;
+fn drainPropAsyncBatch(self: *Interpreter, batch: *PropAsyncRootFrame, outcome: ?Value) void {
+    while (batch.head) |ticket| {
+        settlePropAsync(self, ticket, outcome);
+        // Publication now owns the Promise's outgoing graph. Remove the old
+        // precise root before freeing its native ticket or key.
+        _ = batch.pop();
+        const prop_alloc = propAsyncAllocator(ticket);
+        prop_alloc.free(ticket.key);
+        prop_alloc.destroy(ticket);
     }
 }
 
-fn abandonPropAsyncQueue(g: *gil_mod.Gil, queue: *promise.MicrotaskQueue) void {
-    const prop_alloc = g.prop_alloc;
+fn transferPropAsyncQueue(self: *Interpreter, rec: *ThreadRecord, from: *promise.MicrotaskQueue, to: *promise.MicrotaskQueue) void {
+    if (from == to) return;
+    const io = agent.engineIo();
+    rec.join_mutex.lockUncancelable(io);
+    defer rec.join_mutex.unlock(io);
+    var ticket = rec.prop_async_head;
+    while (ticket) |t| : (ticket = t.thread_next) {
+        std.debug.assert(t.thread == rec);
+        if (t.microtasks != from) continue;
+        std.debug.assert(t.completion.slot.active and t.completion.slot.queue == from);
+        std.debug.assert(t.exit_completion.slot.active and t.exit_completion.slot.queue == to);
+        // The owner list includes tickets already detached by a peer. Release
+        // every local reservation before transferring the queue's backing.
+        t.completion.cancel(self);
+        rec.gil.lockPropWaiters();
+        t.completion = t.exit_completion;
+        t.exit_completion = .{};
+        t.microtasks = to;
+        rec.gil.unlockPropWaiters();
+    }
+}
+
+fn abandonPropAsyncQueue(self: *Interpreter, queue: *promise.MicrotaskQueue) void {
+    const g = self.gil.?;
+    var abandoned = PropAsyncRootFrame{ .parent = self.current_prop_async_roots };
+    self.current_prop_async_roots = &abandoned;
+    defer self.current_prop_async_roots = abandoned.parent;
     g.lockPropWaiters();
-    defer g.unlockPropWaiters();
     var write: usize = 0;
-    var read: usize = 0;
-    while (read < g.prop_async.items.len) : (read += 1) {
-        const raw = g.prop_async.items[read];
+    for (g.prop_async.items, 0..) |raw, read| {
         const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
         if (t.microtasks == queue) {
-            prop_alloc.free(t.key);
-            prop_alloc.destroy(t);
+            abandoned.append(t);
             continue;
         }
         if (write != read) g.prop_async.items[write] = raw;
         write += 1;
     }
     shrinkPropAsyncLocked(g, write);
+    g.unlockPropWaiters();
+    // Queue cancellation and owner unlinking happen after releasing prop_mutex.
+    drainPropAsyncBatch(self, &abandoned, null);
 }
 
 /// Resolve expired property waitAsync tickets — called from the awaiters'
 /// poll points (awaitValue's GIL-handover loop, the drain tail).
 pub fn pollPropAsync(self: *Interpreter) void {
     const g = self.gil orelse return;
-    const prop_alloc = g.prop_alloc;
     const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
-    var expired: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
-    defer expired.deinit(prop_alloc);
+    var expired = PropAsyncRootFrame{ .parent = self.current_prop_async_roots };
+    self.current_prop_async_roots = &expired;
+    defer self.current_prop_async_roots = expired.parent;
     g.lockPropWaiters();
     collectPropAsyncExpiredLocked(g, now, &expired);
     g.unlockPropWaiters();
-    for (expired.items) |t| settlePropAsync(self, t, "timed-out");
+    drainPropAsyncBatch(self, &expired, Value.str("timed-out"));
 }
 
 /// Earliest finite property `Atomics.waitAsync` deadline in this realm, or
@@ -3637,20 +3755,23 @@ pub fn nextPropAsyncDeadline(self: *Interpreter) ?i96 {
 }
 
 /// Drop tickets of a dying realm (their promises die with the arena).
-pub fn abandonPropAsync(g: *gil_mod.Gil) void {
-    const prop_alloc = g.prop_alloc;
-    const owner: *const anyopaque = @ptrCast(g);
+pub fn abandonPropAsync(self: *Interpreter) void {
+    const g = self.gil.?;
+    var abandoned = PropAsyncRootFrame{ .parent = self.current_prop_async_roots };
+    self.current_prop_async_roots = &abandoned;
+    defer self.current_prop_async_roots = abandoned.parent;
     g.lockPropWaiters();
     for (g.prop_async.items) |raw| {
         const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
-        if (t.owner == owner) {
-            prop_alloc.free(t.key);
-            prop_alloc.destroy(t);
-        }
+        std.debug.assert(t.owner == @as(*const anyopaque, @ptrCast(g)));
+        abandoned.append(t);
     }
-    g.prop_async.deinit(prop_alloc);
-    g.prop_waiters.deinit(prop_alloc);
+    g.prop_async.deinit(g.prop_alloc);
+    g.prop_async = .empty;
+    g.prop_waiters.deinit(g.prop_alloc);
+    g.prop_waiters = .empty;
     g.unlockPropWaiters();
+    drainPropAsyncBatch(self, &abandoned, null);
 }
 
 fn removePropTicketLocked(g: *gil_mod.Gil, ticket: *PropTicket) void {
@@ -3714,22 +3835,12 @@ fn notifyPropWaitersLocked(g: *gil_mod.Gil, obj: *value.Object, key: []const u8,
     return n;
 }
 
-fn countPropAsyncMatchesLocked(g: *gil_mod.Gil, obj: *value.Object, key: []const u8, limit: usize) usize {
-    var n: usize = 0;
-    for (g.prop_async.items) |raw| {
-        if (n >= limit) break;
-        const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
-        if (propTicketMatches(t, obj, key)) n += 1;
-    }
-    return n;
-}
-
 fn collectPropAsyncNotifyLocked(
     g: *gil_mod.Gil,
     obj: *value.Object,
     key: []const u8,
     limit: usize,
-    settle: *std.ArrayListUnmanaged(*PropAsyncTicket),
+    settle: *PropAsyncRootFrame,
 ) void {
     var n: usize = 0;
     var write: usize = 0;
@@ -3738,7 +3849,7 @@ fn collectPropAsyncNotifyLocked(
         const raw = g.prop_async.items[read];
         const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
         if (n < limit and propTicketMatches(t, obj, key)) {
-            settle.appendAssumeCapacity(t);
+            settle.append(t);
             n += 1;
             continue;
         }
@@ -3748,21 +3859,14 @@ fn collectPropAsyncNotifyLocked(
     shrinkPropAsyncLocked(g, write);
 }
 
-fn collectPropAsyncExpiredLocked(g: *gil_mod.Gil, now: i96, settle: *std.ArrayListUnmanaged(*PropAsyncTicket)) void {
+fn collectPropAsyncExpiredLocked(g: *gil_mod.Gil, now: i96, settle: *PropAsyncRootFrame) void {
     var write: usize = 0;
     var read: usize = 0;
     while (read < g.prop_async.items.len) : (read += 1) {
         const raw = g.prop_async.items[read];
         const t: *PropAsyncTicket = @ptrCast(@alignCast(raw));
         if (t.deadline_ns != null and t.deadline_ns.? <= now) {
-            gc_runtime.enterTraceSensitiveLock();
-            settle.append(g.prop_alloc, t) catch {
-                gc_runtime.leaveTraceSensitiveLock();
-                if (write != read) g.prop_async.items[write] = raw;
-                write += 1;
-                continue;
-            };
-            gc_runtime.leaveTraceSensitiveLock();
+            settle.append(t);
             continue;
         }
         if (write != read) g.prop_async.items[write] = raw;
@@ -3841,8 +3945,7 @@ test "property waitAsync expiry stable-compacts expired tickets" {
     var g = gil_mod.Gil{};
     const prop_alloc = g.prop_alloc;
     defer g.prop_async.deinit(prop_alloc);
-    var expired: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
-    defer expired.deinit(prop_alloc);
+    var expired = PropAsyncRootFrame{};
     var obj: value.Object = undefined;
     var t0 = PropAsyncTicket{ .obj = &obj, .key = "a", .deadline_ns = 10, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
     var t1 = PropAsyncTicket{ .obj = &obj, .key = "b", .deadline_ns = 40, .promise = undefined, .microtasks = undefined, .thread = null, .owner = undefined };
@@ -3857,18 +3960,18 @@ test "property waitAsync expiry stable-compacts expired tickets" {
     try g.prop_async.append(prop_alloc, @ptrCast(&t4));
 
     collectPropAsyncExpiredLocked(&g, 25, &expired);
-    try std.testing.expectEqual(@as(usize, 2), expired.items.len);
-    try std.testing.expectEqual(@intFromPtr(&t0), @intFromPtr(expired.items[0]));
-    try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(expired.items[1]));
+    try std.testing.expectEqual(@as(usize, 2), expired.len);
+    try std.testing.expectEqual(@intFromPtr(&t0), @intFromPtr(expired.head.?));
+    try std.testing.expectEqual(@intFromPtr(&t2), @intFromPtr(t0.ready_next.?));
     try std.testing.expectEqual(@as(usize, 3), g.prop_async.items.len);
     try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0])))));
     try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[1])))));
     try std.testing.expectEqual(@intFromPtr(&t4), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[2])))));
 
     collectPropAsyncExpiredLocked(&g, 40, &expired);
-    try std.testing.expectEqual(@as(usize, 4), expired.items.len);
-    try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(expired.items[2]));
-    try std.testing.expectEqual(@intFromPtr(&t4), @intFromPtr(expired.items[3]));
+    try std.testing.expectEqual(@as(usize, 4), expired.len);
+    try std.testing.expectEqual(@intFromPtr(&t1), @intFromPtr(t2.ready_next.?));
+    try std.testing.expectEqual(@intFromPtr(&t4), @intFromPtr(t1.ready_next.?));
     try std.testing.expectEqual(@as(usize, 1), g.prop_async.items.len);
     try std.testing.expectEqual(@intFromPtr(&t3), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0])))));
 }
@@ -3897,7 +4000,8 @@ test "property waitAsync abandon removes one owner queue" {
     try g.prop_async.append(prop_alloc, @ptrCast(t1));
     try g.prop_async.append(prop_alloc, @ptrCast(t2));
 
-    abandonPropAsyncQueue(&g, &q0);
+    var machine = Interpreter{ .arena = prop_alloc, .env = undefined, .root_shape = undefined, .gil = &g };
+    abandonPropAsyncQueue(&machine, &q0);
     try std.testing.expectEqual(@as(usize, 1), g.prop_async.items.len);
     try std.testing.expectEqual(@intFromPtr(t1), @intFromPtr(@as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0])))));
 
@@ -4095,35 +4199,29 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
 }
 
 pub fn propNotify(self: *Interpreter, args: []const Value) value.HostError!Value {
-    const o = args[0].asObj();
-    const key = try self.keyOf(argAt(args, 1));
+    const roots = try self.pushTempRootSlice(&.{ args[0], Value.undef() });
+    defer self.restoreTempRoots(roots);
+    const key_value = try propertyKeyRootValue(self, argAt(args, 1));
+    self.setTempRoot(roots + 1, key_value);
     var count: usize = std.math.maxInt(usize);
     if (args.len > 2 and !args[2].isUndefined()) {
         const n = try self.toNumberV(args[2]);
         if (std.math.isNan(n) or n <= 0) count = 0 else if (n != std.math.inf(f64) and n < 1e18) count = @intFromFloat(@trunc(n));
     }
-    const io = agent.engineIo();
-    var n: usize = 0;
+    const key = try self.keyOf(self.tempRoot(roots + 1, key_value));
+    const o = self.tempRoot(roots, args[0]).asObj();
     const g = self.gil.?;
-    const prop_alloc = g.prop_alloc;
-    var settle: std.ArrayListUnmanaged(*PropAsyncTicket) = .empty;
-    defer settle.deinit(prop_alloc);
+    var settle = PropAsyncRootFrame{ .parent = self.current_prop_async_roots };
+    self.current_prop_async_roots = &settle;
+    defer self.current_prop_async_roots = settle.parent;
     g.lockPropWaiters();
-    var locked = true;
-    defer if (locked) g.unlockPropWaiters();
-    n += notifyPropWaitersLocked(g, o, key, count, io);
+    var n = notifyPropWaitersLocked(g, o, key, count, agent.engineIo());
     if (n < count) {
-        const limit = count - n;
-        const async_matches = countPropAsyncMatchesLocked(g, o, key, limit);
-        gc_runtime.enterTraceSensitiveLock();
-        defer gc_runtime.leaveTraceSensitiveLock();
-        try settle.ensureTotalCapacity(prop_alloc, async_matches);
-        collectPropAsyncNotifyLocked(g, o, key, limit, &settle);
-        n += async_matches;
+        collectPropAsyncNotifyLocked(g, o, key, count - n, &settle);
+        n += settle.len;
     }
     g.unlockPropWaiters();
-    locked = false;
-    for (settle.items) |t| settlePropAsync(self, t, "ok"); // settling-thread rule
+    drainPropAsyncBatch(self, &settle, Value.str("ok"));
     return Value.num(@floatFromInt(n));
 }
 
@@ -4998,5 +5096,220 @@ test "Thread capped admission error OOM leaves IDs and startup reservations unto
         try std.testing.expectEqual(before_slots, ctx.microtasks.reservations);
         try std.testing.expectEqual(before_registrations, ctx.active_interpreter_reservations);
         try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    }
+}
+
+test "property waitAsync completion survives exhausted temporary-root storage" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+    });
+    defer ctx.destroy();
+    const saved_ctx = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_ctx);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+    const object = try promise.newPromise(&machine);
+    try ctx.env.put("waitAsyncCompletion", Value.obj(object));
+    const dependent = try promise.newPromise(&machine);
+    const pp = promise.promiseOf(Value.obj(object)).?;
+    const dependent_pp = promise.promiseOf(Value.obj(dependent)).?;
+    pp.reactions_inline = .{
+        .fulfill = .{ .handler = null, .result = dependent_pp },
+        .reject = .{ .handler = null, .result = dependent_pp },
+    };
+    try ctx.microtasks.items.ensureTotalCapacity(ctx.arena(), 1);
+    const g = ctx.gil.?;
+    const ticket = try g.prop_alloc.create(PropAsyncTicket);
+    ticket.* = .{
+        .obj = object,
+        .key = try g.prop_alloc.dupe(u8, "state"),
+        .deadline_ns = null,
+        .promise = object,
+        .microtasks = &ctx.microtasks,
+        .thread = null,
+        .owner = @ptrCast(g),
+    };
+    try g.prop_async.append(g.prop_alloc, @ptrCast(ticket));
+    ticket.completion = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks);
+    var detached = PropAsyncRootFrame{ .parent = machine.current_prop_async_roots };
+    machine.current_prop_async_roots = &detached;
+    defer machine.current_prop_async_roots = detached.parent;
+    g.lockPropWaiters();
+    collectPropAsyncNotifyLocked(g, object, "state", 1, &detached);
+    g.unlockPropWaiters();
+    try std.testing.expectEqual(@as(usize, 0), g.prop_async.items.len);
+    try std.testing.expectEqual(@as(usize, 1), detached.len);
+
+    var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    const saved_roots = machine.gc_temp_roots;
+    const saved_promise_roots = machine.gc_temp_promise_roots;
+    machine.gc_temp_roots = .empty;
+    machine.gc_temp_promise_roots = .empty;
+    defer {
+        machine.gc_temp_roots = saved_roots;
+        machine.gc_temp_promise_roots = saved_promise_roots;
+    }
+    machine.arena = exhausted.allocator();
+    drainPropAsyncBatch(&machine, &detached, Value.str("ok"));
+    try std.testing.expectEqual(@as(usize, 0), detached.len);
+    try std.testing.expectEqual(promise.State.fulfilled, pp.state);
+    try std.testing.expectEqualStrings("ok", pp.value.asStr());
+    try std.testing.expectEqual(promise.State.pending, dependent_pp.state);
+    try std.testing.expectEqual(@as(usize, 1), ctx.microtasks.pendingLen());
+    machine.arena = ctx.arena();
+    machine.gc_temp_roots = saved_roots;
+    machine.gc_temp_promise_roots = saved_promise_roots;
+    try machine.drainMicrotasks();
+    try std.testing.expectEqual(promise.State.fulfilled, dependent_pp.state);
+    try std.testing.expectEqualStrings("ok", dependent_pp.value.asStr());
+    try std.testing.expect(ctx.microtasks.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+}
+
+test "property waitAsync detached completion transfers every local reservation at Thread exit" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    var local = promise.MicrotaskQueue{};
+    defer local.items.deinit(ctx.arena());
+    var rec = ThreadRecord{ .id = 897, .ctx = ctx, .gil = ctx.gil.?, .microtasks = &local };
+    const g = ctx.gil.?;
+    var batch = PropAsyncRootFrame{};
+    machine.current_prop_async_roots = &batch;
+    defer machine.current_prop_async_roots = null;
+    const count = 3;
+    var targets: [count]*promise.Promise = undefined;
+    var dependents: [count]*promise.Promise = undefined;
+    for (&targets, 0..) |*target, i| {
+        const object = try promise.newPromise(&machine);
+        target.* = promise.promiseOf(Value.obj(object)).?;
+        dependents[i] = promise.promiseOf(Value.obj(try promise.newPromise(&machine))).?;
+        target.*.reactions_inline = .{
+            .fulfill = .{ .handler = null, .result = dependents[i] },
+            .reject = .{ .handler = null, .result = dependents[i] },
+        };
+        const ticket = try g.prop_alloc.create(PropAsyncTicket);
+        ticket.* = .{
+            .obj = object,
+            .key = try g.prop_alloc.dupe(u8, "state"),
+            .deadline_ns = null,
+            .promise = object,
+            .microtasks = &local,
+            .thread = &rec,
+            .owner = @ptrCast(g),
+            .completion = try promise.PreparedSettlement.prepare(&machine, &local),
+            .exit_completion = try promise.PreparedSettlement.prepare(&machine, &ctx.microtasks),
+        };
+        linkPropAsyncOwnerLocked(ticket);
+        try appendPropAsyncLocked(g, ticket);
+    }
+    collectPropAsyncNotifyLocked(g, @as(*PropAsyncTicket, @ptrCast(@alignCast(g.prop_async.items[0]))).obj, "state", 1, &batch);
+    try std.testing.expectEqual(@as(usize, 1), batch.len);
+    try std.testing.expectEqual(@as(usize, count - 1), g.prop_async.items.len);
+    var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+    machine.arena = exhausted.allocator();
+    transferPropAsyncQueue(&machine, &rec, &local, &ctx.microtasks);
+    try std.testing.expectEqual(@as(usize, 0), local.reservations);
+    try std.testing.expectEqual(@as(usize, count), ctx.microtasks.reservations);
+    try std.testing.expect(batch.head.?.microtasks == &ctx.microtasks);
+    try std.testing.expect(!batch.head.?.exit_completion.slot.active);
+    drainPropAsyncBatch(&machine, &batch, Value.str("ok"));
+    // Unnotified tickets cancel their host slot; the detached ticket has already
+    // committed one descriptor and must not be canceled or completed twice.
+    abandonPropAsyncQueue(&machine, &ctx.microtasks);
+    try std.testing.expect(rec.prop_async_head == null);
+    try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    try std.testing.expectEqual(@as(usize, 0), g.prop_async.items.len);
+    try std.testing.expectEqual(@as(usize, 1), ctx.microtasks.pendingLen());
+    try std.testing.expectEqual(promise.State.fulfilled, targets[0].state);
+    for (targets[1..]) |target| try std.testing.expectEqual(promise.State.pending, target.state);
+    try std.testing.expectEqual(@as(usize, 0), exhausted.alloc_index);
+    machine.arena = ctx.arena();
+    try machine.drainMicrotasks();
+    try std.testing.expect(ctx.microtasks.isEmpty());
+    try std.testing.expectEqual(promise.State.fulfilled, dependents[0].state);
+    for (dependents[1..]) |dependent| try std.testing.expectEqual(promise.State.pending, dependent.state);
+}
+
+test "property waitAsync admission OOM preserves prior ticket and notification order" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_threads = true, .enable_gc = true });
+    defer ctx.destroy();
+    const saved_ctx = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_ctx);
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+    const g = ctx.gil.?;
+    const cell = try machine.newObject();
+    try cell.asObj().setOwn(ctx.arena(), ctx.root_shape, "state", Value.num(0));
+    try ctx.env.put("admissionCell", cell);
+    const args = [_]Value{ cell, Value.str("state"), Value.num(0) };
+    for ([_]bool{ false, true }) |metadata| {
+        const first = try propWaitAsync(&machine, &args, null);
+        const first_promise = first.asObj().getOwn("value").?;
+        try ctx.env.put("admissionFirst", first_promise);
+        const before_roots = machine.gc_temp_roots.items.len;
+        const native_alloc = g.prop_alloc;
+        var failures: usize = 0;
+        var admitted: ?Value = null;
+        for (0..32) |fail_index| {
+            var exhausted = std.testing.FailingAllocator.init(if (metadata) native_alloc else ctx.arena(), .{
+                .fail_index = fail_index,
+                .resize_fail_index = 0,
+            });
+            const saved_roots = machine.gc_temp_roots;
+            if (metadata) {
+                g.prop_alloc = exhausted.allocator();
+            } else {
+                // Managed cells can use the heap directly and warmed shape or
+                // queue storage need not allocate. Force a fresh root vector
+                // so this sweep always reaches admission's first failure point.
+                machine.gc_temp_roots = .empty;
+                machine.arena = exhausted.allocator();
+            }
+            const attempt = propWaitAsync(&machine, &args, null);
+            machine.arena = ctx.arena();
+            g.prop_alloc = native_alloc;
+            const remaining_roots = machine.gc_temp_roots.items.len;
+            if (!metadata) {
+                machine.gc_temp_roots.deinit(ctx.arena());
+                machine.gc_temp_roots = saved_roots;
+            }
+            try std.testing.expectEqual(before_roots, remaining_roots);
+            if (attempt) |result| {
+                try std.testing.expect(result.asObj().getOwn("async").?.asBool());
+                admitted = result.asObj().getOwn("value").?;
+                break;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expect(exhausted.has_induced_failure);
+                failures += 1;
+                try std.testing.expectEqual(@as(usize, 1), g.prop_async.items.len);
+                try std.testing.expectEqual(@as(usize, 1), ctx.microtasks.reservations);
+                try std.testing.expectEqual(promise.State.pending, promise.promiseOf(ctx.env.get("admissionFirst").?).?.state);
+                try std.testing.expectEqual(before_roots, machine.gc_temp_roots.items.len);
+                try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+            }
+        }
+        try std.testing.expect(failures >= @as(usize, if (metadata) 2 else 1));
+        try std.testing.expect(admitted != null);
+        try ctx.env.put("admissionSecond", admitted.?);
+        try std.testing.expectEqual(@as(usize, 2), g.prop_async.items.len);
+        try std.testing.expectEqual(@as(usize, 2), ctx.microtasks.reservations);
+        try std.testing.expectEqual(@as(f64, 1), (try propNotify(&machine, &.{ cell, Value.str("state"), Value.num(1) })).asNum());
+        try std.testing.expectEqual(promise.State.fulfilled, promise.promiseOf(ctx.env.get("admissionFirst").?).?.state);
+        try std.testing.expectEqual(promise.State.pending, promise.promiseOf(ctx.env.get("admissionSecond").?).?.state);
+        try std.testing.expectEqual(@as(f64, 1), (try propNotify(&machine, &.{ cell, Value.str("state"), Value.num(1) })).asNum());
+        try std.testing.expectEqual(promise.State.fulfilled, promise.promiseOf(ctx.env.get("admissionSecond").?).?.state);
+        try std.testing.expectEqual(@as(usize, 0), g.prop_async.items.len);
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+        try std.testing.expect(g.prop_mutex.tryLock());
+        g.prop_mutex.unlock(agent.engineIo());
     }
 }
