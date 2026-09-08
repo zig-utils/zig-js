@@ -10569,11 +10569,11 @@ export fn Bun__handleUncaughtException(
     };
     defer context.popActiveInterpreter(&machine);
 
-    const error_value = privateDecodeWarningArgument(context, &machine, global, error_encoded, "uncaught exception") catch |err| {
+    var error_value = privateDecodeWarningArgument(context, &machine, global, error_encoded, "uncaught exception") catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return 0;
     };
-    const handled = interp.handleProcessUncaughtException(&machine, error_value, is_rejection != 0) catch |err| {
+    const handled = interp.handleProcessUncaughtException(&machine, &error_value, is_rejection != 0) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return 1;
     };

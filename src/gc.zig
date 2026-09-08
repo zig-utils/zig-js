@@ -2927,6 +2927,9 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     if (machine.current_microtask) |mt| traceMicrotask(mt, v);
     for (machine.current_microtask_batch) |mt| traceMicrotask(mt, v);
     traceOuterMicrotaskRoots(machine.outer_microtask_roots, v);
+    var uncaught_roots = machine.uncaught_exception_roots;
+    while (uncaught_roots) |roots| : (uncaught_roots = roots.parent)
+        markValue(v, roots.exception.*);
     var hold_job_roots = machine.current_hold_job_roots;
     while (hold_job_roots) |roots| : (hold_job_roots = roots.parent)
         for (roots.jobs) |job| jsthread.traceHoldJobRoot(job, v);
@@ -3089,6 +3092,9 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (roots.current) |*task| relocateMicrotask(task, v);
         for (roots.pending) |*task| relocateMicrotask(task, v);
     }
+    var uncaught_roots = machine.uncaught_exception_roots;
+    while (uncaught_roots) |roots| : (uncaught_roots = roots.parent)
+        gc_relocation.rewriteValueSlot(v, roots.exception);
     var hold_job_roots = machine.current_hold_job_roots;
     while (hold_job_roots) |roots| : (hold_job_roots = roots.parent)
         for (roots.jobs) |job| jsthread.relocateHoldJobRoot(job, v);

@@ -6877,9 +6877,9 @@ pub const Context = struct {
 
             if (call_result) |_| {} else |err| {
                 if (err != error.Throw) return err;
-                const thrown = machine.exception;
+                var thrown = machine.exception;
                 machine.exception = value.Value.undef();
-                const handled = try interp.handleProcessUncaughtException(machine, thrown, false);
+                const handled = try interp.handleProcessUncaughtException(machine, &thrown, false);
                 if (!handled) {
                     machine.exception = thrown;
                     return error.Throw;
@@ -9267,7 +9267,10 @@ pub const Context = struct {
         // their completion, so fill the pre-reserved precise root for that
         // whole interval rather than allocating here or relying on a native
         // local/register.
-        if (outcome) |result| machine.setTempRoot(result_root_mark, result) else |_| {}
+        const primary_exception = machine.exception;
+        if (outcome) |result| machine.setTempRoot(result_root_mark, result) else |_| {
+            machine.setTempRoot(result_root_mark, primary_exception);
+        }
         const top_level_failed = if (outcome) |_| false else |_| true;
         if (outcome) |_| {} else |err| {
             if (err == error.Throw) {
@@ -9388,7 +9391,7 @@ pub const Context = struct {
             return machine.tempRoot(result_root_mark, result);
         } else |err| {
             self.collectRequestedGarbage();
-            if (err == error.Throw) self.exception = machine.exception;
+            if (err == error.Throw) self.exception = machine.tempRoot(result_root_mark, primary_exception);
             self.surfaceEscapedOutOfMemory(err);
             return err;
         }
@@ -9511,6 +9514,8 @@ pub const Context = struct {
         defer self.popActiveInterpreter(&machine);
         const ai_saved = gc_mod.setActiveInterpreter(&machine);
         defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        const completion_root = try machine.pushTempRoot(Value.undef());
+        defer machine.restoreTempRoots(completion_root);
         try machine.pollAbortSignalTimeouts();
         try machine.pollTimers();
         machine.strict = true;
@@ -9534,6 +9539,8 @@ pub const Context = struct {
         // Populate any namespace objects after the whole graph has evaluated, so
         // every exported binding holds its final value.
         const outcome = self.evalModule(&machine, root);
+        const primary_exception = machine.exception;
+        if (outcome) |_| {} else |_| machine.setTempRoot(completion_root, primary_exception);
         const module_started = if (outcome) |_| true else |_| false;
         if (module_started) try self.drainUntilModuleSettled(&machine, root);
         machine.drainMicrotasks() catch {};
@@ -9543,7 +9550,7 @@ pub const Context = struct {
         machine.settleAsyncWaiters();
         if (outcome) |_| machine.keepaliveTimers() else |_| {}
         outcome catch |err| {
-            if (err == error.Throw) self.exception = machine.exception;
+            if (err == error.Throw) self.exception = machine.tempRoot(completion_root, primary_exception);
             self.surfaceEscapedOutOfMemory(err);
             return err;
         };
@@ -42564,4 +42571,138 @@ test "property waitAsync notify races Thread exit without duplicate or orphan co
         try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
         for (ctx.js_threads.items) |rec| try std.testing.expect(rec.prop_async_head == null);
     }
+}
+
+test "host checkpoint preserves the primary script exception across rejected reactions" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    try std.testing.expectError(error.Throw, ctx.evaluate(
+        \\globalThis.primaryCheckpointError = new TypeError("script-primary");
+        \\Promise.resolve().then(function () { throw new RangeError("cleanup-secondary"); });
+        \\throw primaryCheckpointError;
+    ));
+    const expected = ctx.global_object.getOwn("primaryCheckpointError").?;
+    try std.testing.expect(ctx.exception != null);
+    try std.testing.expect(ctx.exception.?.isObject());
+    try std.testing.expectEqual(expected.asObj(), ctx.exception.?.asObj());
+    try std.testing.expectEqualStrings("script-primary", ctx.exception.?.asObj().getOwn("message").?.asStr());
+}
+
+test "host checkpoint uncaught monitor preserves exact exception identity through moving GC" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .heap_limit_bytes = 16 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const Fault = struct {
+        context: *Context,
+        captured: ?*value.Object = null,
+        monitor_calls: usize = 0,
+        capture_calls: usize = 0,
+        moved: bool = false,
+        fn monitor(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.monitor_calls += 1;
+            const before = args[0].asObj();
+            fault.context.gc_scan_native_stack = false;
+            const result = fault.context.collectYoungAfterRootValidation(fault.context.gc.?);
+            fault.moved = result.status == .compacted and before != fault.context.global_object.getOwn("checkpointThrown").?.asObj();
+            return Value.undef();
+        }
+        fn capture(raw: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.capture_calls += 1;
+            // Compare pointer identity after dispatch without dereferencing a
+            // possibly stale old-generation object in the failing witness.
+            fault.captured = args[0].asObj();
+            return Value.undef();
+        }
+    };
+    var fault = Fault{ .context = ctx };
+    const saved_ctx = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved_ctx);
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointMonitor", 2, Fault.monitor);
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "checkpointCapture", 2, Fault.capture);
+    ctx.global_object.getOwn("checkpointMonitor").?.asObj().private_data = &fault;
+    ctx.global_object.getOwn("checkpointCapture").?.asObj().private_data = &fault;
+    _ = try ctx.evaluate(
+        \\process.on("uncaughtExceptionMonitor", checkpointMonitor);
+        \\process.setUncaughtExceptionCaptureCallback(checkpointCapture);
+        \\globalThis.checkpointThrown = { marker: 896 };
+    );
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    const saved_machine = gc_mod.setActiveInterpreter(&machine);
+    defer _ = gc_mod.setActiveInterpreter(saved_machine);
+    var thrown = ctx.global_object.getOwn("checkpointThrown").?;
+    const handled = try interp.handleProcessUncaughtException(&machine, &thrown, false);
+    try std.testing.expect(handled);
+    try std.testing.expect(fault.moved);
+    try std.testing.expectEqual(@as(usize, 1), fault.monitor_calls);
+    try std.testing.expectEqual(@as(usize, 1), fault.capture_calls);
+    try std.testing.expectEqual(ctx.global_object.getOwn("checkpointThrown").?.asObj(), fault.captured.?);
+}
+
+test "host checkpoint preserves the primary module exception across rejected reactions" {
+    const Loader = struct {
+        fn load(_: *anyopaque, _: []const u8, _: []const u8, _: *[]const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    for ([_]bool{ false, true }) |enable_gc| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = enable_gc });
+        defer ctx.destroy();
+        try std.testing.expectError(error.Throw, ctx.evaluateModule("/primary-checkpoint.mjs",
+            \\globalThis.primaryModuleError = new TypeError("module-primary");
+            \\Promise.resolve().then(function () { throw new RangeError("module-cleanup"); });
+            \\throw primaryModuleError;
+        , .{ .ctx = ctx, .load = Loader.load }));
+        const expected = ctx.global_object.getOwn("primaryModuleError").?;
+        try std.testing.expect(ctx.exception != null and ctx.exception.?.isObject());
+        try std.testing.expectEqual(expected.asObj(), ctx.exception.?.asObj());
+        try std.testing.expectEqualStrings("module-primary", ctx.exception.?.asObj().getOwn("message").?.asStr());
+    }
+}
+
+test "host checkpoint primary script exception remains exact through cleanup movement" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .heap_limit_bytes = 16 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+    const Fault = struct {
+        context: *Context,
+        calls: usize = 0,
+        moved: bool = false,
+        fn move(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.calls += 1;
+            const before = fault.context.global_object.getOwn("movingPrimaryError").?.asObj();
+            fault.context.gc_scan_native_stack = false;
+            const result = fault.context.collectYoungAfterRootValidation(fault.context.gc.?);
+            fault.moved = result.status == .compacted and before != fault.context.global_object.getOwn("movingPrimaryError").?.asObj();
+            return Value.undef();
+        }
+    };
+    var fault = Fault{ .context = ctx };
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "movePrimaryAtCheckpoint", 0, Fault.move);
+    ctx.global_object.getOwn("movePrimaryAtCheckpoint").?.asObj().private_data = &fault;
+    try std.testing.expectError(error.Throw, ctx.evaluate(
+        \\globalThis.movingPrimaryError = new TypeError("moving-primary");
+        \\Promise.resolve().then(movePrimaryAtCheckpoint);
+        \\throw movingPrimaryError;
+    ));
+    try std.testing.expect(fault.moved);
+    try std.testing.expectEqual(@as(usize, 1), fault.calls);
+    try std.testing.expect(ctx.exception != null and ctx.exception.?.isObject());
+    try std.testing.expectEqual(ctx.global_object.getOwn("movingPrimaryError").?.asObj(), ctx.exception.?.asObj());
+    try std.testing.expectEqualStrings("moving-primary", ctx.exception.?.asObj().getOwn("message").?.asStr());
 }

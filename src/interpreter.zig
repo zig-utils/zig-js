@@ -3240,6 +3240,13 @@ pub const InheritedPropertyObservation = struct {
     slot: u32,
 };
 
+/// Borrowed native exception slot, rooted without allocating during fatal
+/// dispatch. Nested monitors/capture callbacks retain every outer exception.
+pub const UncaughtExceptionRootFrame = struct {
+    exception: *Value,
+    parent: ?*const UncaughtExceptionRootFrame,
+};
+
 pub const MicrotaskRootFrame = struct {
     current: ?promise.Microtask,
     pending: []promise.Microtask,
@@ -3489,6 +3496,7 @@ pub const Interpreter = struct {
     /// another job. Frames live for the dynamic call scope and are rewritten by
     /// moving GC before their saved current job is restored.
     outer_microtask_roots: ?*MicrotaskRootFrame = null,
+    uncaught_exception_roots: ?*const UncaughtExceptionRootFrame = null,
     /// One dynamically nested run-loop task-pump burst. A delivered HoldJob can
     /// re-enter the run loop (including through join/await), so a single slice
     /// would forget the outer burst while it is still globally in flight. The
@@ -11043,9 +11051,9 @@ pub const Interpreter = struct {
                 promise.runJob(self, &self.current_microtask.?, &publication) catch |err| {
                     if (!publication.slot.active) reservations -= 1;
                     if (job.kind == .next_tick and err == error.Throw) {
-                        const thrown = self.exception;
+                        var thrown = self.exception;
                         self.exception = Value.undef();
-                        const handled = handleProcessUncaughtException(self, thrown, false) catch |dispatch_err| {
+                        const handled = handleProcessUncaughtException(self, &thrown, false) catch |dispatch_err| {
                             self.lockJobQueue(queue);
                             queue.restoreBatch(batch.items[i + 1 ..], reservations);
                             self.unlockJobQueue(queue);
@@ -50190,17 +50198,20 @@ pub fn processEventListenerCount(self: *Interpreter, event: []const u8) EvalErro
 /// Shared fatal-dispatch policy used by the private C ABI and process.nextTick.
 /// The monitor observes first, a capture callback takes precedence over the
 /// ordinary event, and the return value says whether userland handled it.
-pub fn handleProcessUncaughtException(self: *Interpreter, thrown: Value, is_rejection: bool) EvalError!bool {
+pub fn handleProcessUncaughtException(self: *Interpreter, thrown: *Value, is_rejection: bool) EvalError!bool {
+    const roots = UncaughtExceptionRootFrame{ .exception = thrown, .parent = self.uncaught_exception_roots };
+    gc_mod.barrierValue(thrown.*);
+    self.uncaught_exception_roots = &roots;
+    defer self.uncaught_exception_roots = roots.parent;
     const origin = if (is_rejection) Value.str("unhandledRejection") else Value.str("uncaughtException");
-    const event_args = [_]Value{ thrown, origin };
     if (try processEventListenerCount(self, "uncaughtExceptionMonitor") != 0)
-        _ = try emitProcessEvent(self, "uncaughtExceptionMonitor", &event_args);
+        _ = try emitProcessEvent(self, "uncaughtExceptionMonitor", &.{ thrown.*, origin });
     if (processCaptureCallback(self)) |capture| {
-        _ = try self.callValueWithThis(capture, &event_args, Value.undef());
+        _ = try self.callValueWithThis(capture, &.{ thrown.*, origin }, Value.undef());
         return true;
     }
     if (try processEventListenerCount(self, "uncaughtException") == 0) return false;
-    _ = try emitProcessEvent(self, "uncaughtException", &event_args);
+    _ = try emitProcessEvent(self, "uncaughtException", &.{ thrown.*, origin });
     return true;
 }
 
