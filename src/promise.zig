@@ -335,10 +335,9 @@ pub const Microtask = struct {
 pub const MicrotaskQueue = struct {
     items: std.ArrayListUnmanaged(Microtask) = .empty,
     head: usize = 0,
-    /// Capacity promised to synchronous resolving-function transactions but
-    /// not yet occupied by a published job. Ordinary producers include these
-    /// slots in every growth decision, so reentrant enqueueing cannot consume
-    /// a resolving function's allocation-free commit resource.
+    /// Capacity promised to resolving-function transactions and detached drain
+    /// batches. Every producer includes these slots in growth decisions, so
+    /// reentrant enqueueing cannot consume settlement or restoration capacity.
     reservations: usize = 0,
     /// Serializes this queue's content mutation under no-GIL execution. The
     /// queue itself owns the lock so spawned `Thread`s with independent
@@ -383,18 +382,36 @@ pub const MicrotaskQueue = struct {
         if (pending.len > 0) _ = self.generation.fetchAdd(@intCast(pending.len), .release);
     }
 
-    /// Restore jobs that were dequeued behind a throwing job. They must precede
-    /// tasks enqueued reentrantly by the throwing callback.
-    pub fn prependSlice(self: *MicrotaskQueue, a: std.mem.Allocator, tasks: []const Microtask) !void {
+    /// The batch copy must succeed before detaching. Its original occupied
+    /// slots become a reservation without allocating; every producer and nested
+    /// drain preserves that capacity until this batch finishes or restores.
+    pub fn detachBatch(self: *MicrotaskQueue) usize {
+        const count = self.pendingLen();
+        std.debug.assert(self.items.items.len + self.reservations <= self.items.capacity);
+        self.reservations += count;
+        self.clearRetainingCapacity();
+        return count;
+    }
+
+    pub fn finishBatch(self: *MicrotaskQueue, count: usize) void {
+        std.debug.assert(count <= self.reservations);
+        self.reservations -= count;
+    }
+
+    /// Consume the batch's reservation while restoring its untouched suffix
+    /// ahead of reentrant jobs. No allocator or user code runs during this
+    /// ownership handoff, even when an inner drain already restored a suffix.
+    pub fn restoreBatch(self: *MicrotaskQueue, tasks: []const Microtask, count: usize) void {
+        std.debug.assert(tasks.len <= count);
+        self.finishBatch(count);
         if (tasks.len == 0) return;
         const pending = self.pendingItems();
         const pending_len = pending.len;
+        std.debug.assert(pending_len + tasks.len + self.reservations <= self.items.capacity);
         if (self.head != 0 and pending_len != 0)
             std.mem.copyForwards(Microtask, self.items.items[0..pending_len], pending);
-        self.items.items.len = pending_len;
-        self.head = 0;
-        try self.reserve(a, tasks.len);
         self.items.items.len = pending_len + tasks.len;
+        self.head = 0;
         std.mem.copyBackwards(Microtask, self.items.items[tasks.len..], self.items.items[0..pending_len]);
         @memcpy(self.items.items[0..tasks.len], tasks);
         _ = self.generation.fetchAdd(@intCast(tasks.len), .release);
@@ -497,6 +514,48 @@ test "microtask queue is FIFO with a head cursor" {
     try std.testing.expectEqual(@as(u64, 5), q.enqueueGeneration());
     try std.testing.expectEqual(@as(usize, 1), q.pendingLen());
     try std.testing.expectEqual(@as(f64, 6), q.pop().?.argument.asNum());
+}
+
+test "microtask batch reservations survive OOM and nested restoration" {
+    const storage = try std.testing.allocator.alloc(Microtask, 8);
+    defer std.testing.allocator.free(storage);
+    var queue = MicrotaskQueue{ .items = .{ .items = storage[0..0], .capacity = storage.len } };
+    var unavailable = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    const a = unavailable.allocator();
+    const Job = struct {
+        fn make(n: f64) Microtask {
+            return .{ .kind = .native_callback, .reaction = undefined, .argument = Value.num(n), .fulfilled = true };
+        }
+    };
+    try queue.reserveTransactionSlot(a);
+    try queue.append(a, Job.make(1));
+    try queue.append(a, Job.make(2));
+    const outer = [_]Microtask{ Job.make(1), Job.make(2) };
+    const outer_count = queue.detachBatch();
+    try queue.append(a, Job.make(3));
+    try queue.append(a, Job.make(4));
+    const inner = [_]Microtask{ Job.make(3), Job.make(4) };
+    const inner_count = queue.detachBatch();
+    try queue.append(a, Job.make(5));
+    try queue.append(a, Job.make(6));
+    try queue.append(a, Job.make(7));
+    try std.testing.expectError(error.OutOfMemory, queue.append(a, Job.make(8)));
+    try std.testing.expectEqual(@as(usize, 5), queue.reservations);
+    const allocations = unavailable.alloc_index;
+    queue.restoreBatch(inner[1..], inner_count);
+    queue.restoreBatch(outer[1..], outer_count);
+    try std.testing.expectEqual(allocations, unavailable.alloc_index);
+    try std.testing.expectEqual(@as(usize, 1), queue.reservations);
+    queue.appendInTransactionSlot(Job.make(9));
+    for ([_]f64{ 2, 4, 5, 6, 7, 9 }) |n|
+        try std.testing.expectEqual(n, queue.pop().?.argument.asNum());
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try queue.append(a, Job.make(10));
+    const completed = queue.detachBatch();
+    queue.finishBatch(completed);
+    try std.testing.expectEqual(@as(usize, 0), queue.reservations);
+    try std.testing.expectEqual(@as(usize, 8), queue.items.capacity);
 }
 
 test "MicrotaskQueue lock is trace-sensitive" {

@@ -3232,6 +3232,12 @@ pub const InheritedPropertyObservation = struct {
     slot: u32,
 };
 
+pub const MicrotaskRootFrame = struct {
+    current: ?promise.Microtask,
+    pending: []promise.Microtask,
+    parent: ?*MicrotaskRootFrame,
+};
+
 pub const HoldJobRootFrame = struct {
     jobs: []const *anyopaque,
     parent: ?*const HoldJobRootFrame,
@@ -3471,6 +3477,10 @@ pub const Interpreter = struct {
     /// They are no longer present in `microtasks`, so GC must trace them while
     /// callbacks run and may trigger collection.
     current_microtask_batch: []promise.Microtask = &.{},
+    /// Outer checkpoints remain precise roots while a callback drains or awaits
+    /// another job. Frames live for the dynamic call scope and are rewritten by
+    /// moving GC before their saved current job is restored.
+    outer_microtask_roots: ?*MicrotaskRootFrame = null,
     /// One dynamically nested run-loop task-pump burst. A delivered HoldJob can
     /// re-enter the run loop (including through join/await), so a single slice
     /// would forget the outer burst while it is still globally in flight. The
@@ -4005,6 +4015,9 @@ pub const Interpreter = struct {
     /// must not retrace its whole tail for every fixed-size nursery refill.
     pub fn preciseJobRootBytes(self: *const Interpreter) usize {
         var jobs = self.current_microtask_batch.len +| @intFromBool(self.current_microtask != null);
+        var outer = self.outer_microtask_roots;
+        while (outer) |frame| : (outer = frame.parent)
+            jobs +|= frame.pending.len +| @intFromBool(frame.current != null);
         if (self.microtasks) |queue| jobs +|= queue.pendingLen();
         if (self.next_ticks) |queue| jobs +|= queue.pendingLen();
         return jobs *| @sizeOf(promise.Microtask);
@@ -10959,11 +10972,32 @@ pub const Interpreter = struct {
         abandon(self.timer_ctx, self);
     }
 
+    fn saveMicrotaskRoots(self: *Interpreter, frame: *MicrotaskRootFrame) void {
+        frame.* = .{
+            .current = self.current_microtask,
+            .pending = self.current_microtask_batch,
+            .parent = self.outer_microtask_roots,
+        };
+        self.outer_microtask_roots = frame;
+        self.current_microtask = null;
+        self.current_microtask_batch = &.{};
+    }
+
+    fn restoreMicrotaskRoots(self: *Interpreter, frame: *MicrotaskRootFrame) void {
+        std.debug.assert(self.outer_microtask_roots == frame);
+        self.current_microtask = frame.current;
+        self.current_microtask_batch = frame.pending;
+        self.outer_microtask_roots = frame.parent;
+    }
+
     /// Run one complete host checkpoint: finish the current task's next ticks
     /// and Promise jobs before selecting timer tasks. Timer callbacks may queue
     /// another microtask checkpoint, which the Context scheduler drains between
     /// timer records rather than batching multiple tasks together.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
+        var outer_roots: MicrotaskRootFrame = undefined;
+        self.saveMicrotaskRoots(&outer_roots);
+        defer self.restoreMicrotaskRoots(&outer_roots);
         if (self.microtasks != null or self.next_ticks != null) {
             var batch: std.ArrayListUnmanaged(promise.Microtask) = .empty;
             defer batch.deinit(self.arena);
@@ -10998,7 +11032,7 @@ pub const Interpreter = struct {
                         self.exception = Value.undef();
                         const handled = handleProcessUncaughtException(self, thrown, false) catch |dispatch_err| {
                             self.lockJobQueue(queue);
-                            queue.prependSlice(self.arena, batch.items[i + 1 ..]) catch {};
+                            queue.restoreBatch(batch.items[i + 1 ..], batch.items.len);
                             self.unlockJobQueue(queue);
                             self.current_microtask = null;
                             self.current_microtask_batch = &.{};
@@ -11012,7 +11046,7 @@ pub const Interpreter = struct {
                         self.exception = thrown;
                     }
                     self.lockJobQueue(queue);
-                    queue.prependSlice(self.arena, batch.items[i + 1 ..]) catch {};
+                    queue.restoreBatch(batch.items[i + 1 ..], batch.items.len);
                     self.unlockJobQueue(queue);
                     self.current_microtask = null;
                     self.current_microtask_batch = &.{};
@@ -11021,6 +11055,9 @@ pub const Interpreter = struct {
                 self.current_microtask = null;
                 self.serviceRequestedGcCheckpoint();
             }
+            self.lockJobQueue(queue);
+            queue.finishBatch(batch.items.len);
+            self.unlockJobQueue(queue);
             self.current_microtask_batch = &.{};
             batch.clearRetainingCapacity();
         }
@@ -11058,7 +11095,8 @@ pub const Interpreter = struct {
         if (batch.capacity - batch.items.len < pending.len) promise_profile.recordMicrotaskBatchGrow();
         try batch.appendSlice(self.arena, pending);
         promise_profile.recordMicrotaskPops(pending.len);
-        queue.clearRetainingCapacity();
+        const reserved = queue.detachBatch();
+        std.debug.assert(reserved == batch.items.len);
         return true;
     }
 
@@ -11650,6 +11688,9 @@ pub const Interpreter = struct {
     }
 
     fn runOneMicrotask(self: *Interpreter) EvalError!bool {
+        var outer_roots: MicrotaskRootFrame = undefined;
+        self.saveMicrotaskRoots(&outer_roots);
+        defer self.restoreMicrotaskRoots(&outer_roots);
         if (try self.microtaskDequeue()) |job| {
             self.current_microtask = job;
             promise.runJob(self, &self.current_microtask.?) catch |err| {

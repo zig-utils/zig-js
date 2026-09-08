@@ -35883,6 +35883,146 @@ test "enable_gc: precise checkpoints reclaim a cache-local nursery batch" {
     try std.testing.expect(heap.young_bytes < precise_gc_nursery_threshold_bytes);
 }
 
+test "microtask nested drain and await restore the outer current job and suffix" {
+    const State = struct {
+        machine: *interp.Interpreter,
+        use_await: bool,
+        nested_rooted: bool = false,
+        restored: bool = false,
+        suffix_calls: usize = 0,
+        failed: bool = false,
+
+        fn inner(raw: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const roots = self.machine.outer_microtask_roots orelse return;
+            self.nested_rooted = roots.current != null and
+                roots.current.?.native_callback == outer and roots.pending.len == 1 and
+                roots.pending[0].native_callback == suffix;
+        }
+
+        fn suffix(raw: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.suffix_calls += 1;
+        }
+
+        fn outer(raw: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            promise.enqueueNativeCallback(self.machine, self, inner) catch {
+                self.failed = true;
+                return;
+            };
+            if (self.use_await) {
+                _ = self.machine.awaitValueSpec(Value.num(0)) catch {
+                    self.failed = true;
+                    return;
+                };
+            } else {
+                self.machine.drainMicrotasks() catch {
+                    self.failed = true;
+                    return;
+                };
+            }
+            self.restored = self.machine.current_microtask != null and
+                self.machine.current_microtask.?.native_callback == outer and
+                self.machine.current_microtask_batch.len == 1 and
+                self.machine.current_microtask_batch[0].native_callback == suffix;
+        }
+    };
+    for ([_]bool{ false, true }) |use_await| {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        var machine = ctx.interpreter();
+        var state = State{ .machine = &machine, .use_await = use_await };
+        try promise.enqueueNativeCallback(&machine, &state, State.outer);
+        try promise.enqueueNativeCallback(&machine, &state, State.suffix);
+        try machine.drainMicrotasks();
+        try std.testing.expect(!state.failed);
+        try std.testing.expect(state.nested_rooted);
+        try std.testing.expect(state.restored);
+        try std.testing.expectEqual(@as(usize, 1), state.suffix_calls);
+        try std.testing.expect(machine.outer_microtask_roots == null);
+        try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+    }
+}
+
+test "microtask abrupt drain restores the exact suffix under exhausted allocator" {
+    const State = struct {
+        allocator: *std.testing.FailingAllocator,
+        machine: *interp.Interpreter,
+        reentrant: bool,
+        calls: usize = 0,
+        appended: usize = 0,
+        ordered: bool = true,
+
+        fn record(raw: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            self.ordered = self.ordered and self.machine.current_microtask.?.argument.asNum() == @as(f64, @floatFromInt(self.calls));
+        }
+
+        fn job(self: *@This(), n: usize) promise.Microtask {
+            return .{
+                .kind = .native_callback,
+                .reaction = undefined,
+                .argument = Value.num(@floatFromInt(n)),
+                .fulfilled = true,
+                .native_callback_context = self,
+                .native_callback = record,
+            };
+        }
+
+        fn abort(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const self: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            self.calls += 1;
+            const queue = machine.microtasks.?;
+            if (self.reentrant) {
+                machine.lockJobQueue(queue);
+                defer machine.unlockJobQueue(queue);
+                while (queue.items.items.len + queue.reservations < queue.items.capacity) {
+                    try queue.append(machine.arena, self.job(4 + self.appended));
+                    self.appended += 1;
+                }
+            }
+            self.allocator.fail_index = self.allocator.alloc_index;
+            self.allocator.resize_fail_index = self.allocator.resize_index;
+            return error.OutOfMemory;
+        }
+    };
+    for ([_]bool{ false, true }) |locked| {
+        for ([_]bool{ false, true }) |reentrant| {
+            const ctx = try Context.create(std.testing.allocator);
+            defer ctx.destroy();
+            var machine = ctx.interpreter();
+            var allocator = std.testing.FailingAllocator.init(ctx.arena(), .{});
+            machine.arena = allocator.allocator();
+            machine.lock_microtasks = locked;
+            var state = State{ .allocator = &allocator, .machine = &machine, .reentrant = reentrant };
+            const abort = try gc_mod.allocObj(ctx.arena());
+            abort.* = .{ .native = State.abort, .private_data = &state };
+            try promise.enqueueCallback(&machine, Value.obj(abort));
+            try ctx.microtasks.append(machine.arena, state.job(2));
+            try ctx.microtasks.append(machine.arena, state.job(3));
+            try std.testing.expectError(error.OutOfMemory, machine.drainMicrotasks());
+            try std.testing.expectEqual(@as(usize, 1), state.calls);
+            try std.testing.expectEqual(@as(usize, 2) + state.appended, ctx.microtasks.pendingLen());
+            try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+            for (ctx.microtasks.pendingItems(), 2..) |job, n|
+                try std.testing.expectEqual(@as(f64, @floatFromInt(n)), job.argument.asNum());
+            try std.testing.expect(machine.current_microtask == null);
+            try std.testing.expectEqual(@as(usize, 0), machine.current_microtask_batch.len);
+            try std.testing.expect(machine.outer_microtask_roots == null);
+            allocator.fail_index = std.math.maxInt(usize);
+            allocator.resize_fail_index = std.math.maxInt(usize);
+            try machine.drainMicrotasks();
+            try std.testing.expect(state.ordered);
+            try std.testing.expectEqual(@as(usize, 3) + state.appended, state.calls);
+            try std.testing.expect(ctx.microtasks.isEmpty());
+            try std.testing.expectEqual(@as(usize, 0), ctx.microtasks.reservations);
+        }
+    }
+}
+
 test "enable_gc: precise nursery cadence amortizes large microtask roots" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

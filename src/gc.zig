@@ -2246,6 +2246,14 @@ inline fn relocateMicrotask(mt: *promise.Microtask, v: anytype) void {
     }
 }
 
+fn traceOuterMicrotaskRoots(first: ?*interp.MicrotaskRootFrame, v: anytype) void {
+    var outer_microtasks = first;
+    while (outer_microtasks) |roots| : (outer_microtasks = roots.parent) {
+        if (roots.current) |mt| traceMicrotask(mt, v);
+        for (roots.pending) |mt| traceMicrotask(mt, v);
+    }
+}
+
 pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     traceChunk(g.chunk, v);
     v.mark(g.env);
@@ -2886,6 +2894,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     }
     if (machine.current_microtask) |mt| traceMicrotask(mt, v);
     for (machine.current_microtask_batch) |mt| traceMicrotask(mt, v);
+    traceOuterMicrotaskRoots(machine.outer_microtask_roots, v);
     var hold_job_roots = machine.current_hold_job_roots;
     while (hold_job_roots) |roots| : (hold_job_roots = roots.parent)
         for (roots.jobs) |job| jsthread.traceHoldJobRoot(job, v);
@@ -3040,6 +3049,11 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         for (@constCast(queue.pendingItems())) |*task| relocateMicrotask(task, v);
     if (machine.current_microtask) |*task| relocateMicrotask(task, v);
     for (@constCast(machine.current_microtask_batch)) |*task| relocateMicrotask(task, v);
+    var outer_microtasks = machine.outer_microtask_roots;
+    while (outer_microtasks) |roots| : (outer_microtasks = roots.parent) {
+        if (roots.current) |*task| relocateMicrotask(task, v);
+        for (roots.pending) |*task| relocateMicrotask(task, v);
+    }
     var hold_job_roots = machine.current_hold_job_roots;
     while (hold_job_roots) |roots| : (hold_job_roots = roots.parent)
         for (roots.jobs) |job| jsthread.relocateHoldJobRoot(job, v);
@@ -3184,6 +3198,65 @@ test "tree call roots trace and rewrite suspended caller state" {
     try std.testing.expectEqual(&new_objects[7], roots.caller_function.?);
     try std.testing.expectEqual(&new_objects[8], caller_cell.value().asObj());
     try std.testing.expectEqual(&new_objects[9], active_cell.value().asObj());
+}
+
+test "microtask nested checkpoints trace and relocate every outer job" {
+    const context = try ContextMod.Context.create(std.testing.allocator);
+    defer context.destroy();
+    var machine = context.interpreter();
+    var old_objects: [4]Object = @splat(.{});
+    var new_objects = old_objects;
+    var jobs: [4]promise.Microtask = undefined;
+    for (&jobs, &old_objects) |*job, *object| job.* = .{
+        .kind = .callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = true,
+        .callback = Value.obj(object),
+    };
+    var outer = interp.MicrotaskRootFrame{ .current = jobs[0], .pending = jobs[1..2], .parent = null };
+    var inner = interp.MicrotaskRootFrame{ .current = jobs[2], .pending = jobs[3..4], .parent = &outer };
+    machine.outer_microtask_roots = &inner;
+    const Visitor = struct {
+        old: *[4]Object,
+        new: *[4]Object,
+        seen: [4]bool = @splat(false),
+
+        pub fn concurrent(_: *@This()) bool {
+            return false;
+        }
+
+        pub fn mark(self: *@This(), maybe: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe))) {
+                .optional => maybe orelse return,
+                .pointer => maybe,
+                else => @compileError("expected cell pointer"),
+            };
+            for (self.old, 0..) |*object, i|
+                if (@intFromPtr(cell) == @intFromPtr(object)) {
+                    self.seen[i] = true;
+                };
+        }
+
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            for (self.old, 0..) |*object, i|
+                if (old == @as(*anyopaque, @ptrCast(object))) return &self.new[i];
+            return old;
+        }
+    };
+    var visitor = Visitor{ .old = &old_objects, .new = &new_objects };
+    traceInterpreterRoots(&machine, &visitor);
+    for (visitor.seen) |seen| try std.testing.expect(seen);
+    try std.testing.expectEqual(@as(usize, 4 * @sizeOf(promise.Microtask)), machine.preciseJobRootBytes());
+    relocateInterpreterRoots(&machine, &visitor);
+    try std.testing.expectEqual(&new_objects[0], outer.current.?.callback.asObj());
+    try std.testing.expectEqual(&new_objects[1], outer.pending[0].callback.asObj());
+    try std.testing.expectEqual(&new_objects[2], inner.current.?.callback.asObj());
+    try std.testing.expectEqual(&new_objects[3], inner.pending[0].callback.asObj());
+    visitor.seen = @splat(false);
+    machine.outer_microtask_roots = null;
+    traceInterpreterRoots(&machine, &visitor);
+    for (visitor.seen) |seen| try std.testing.expect(!seen);
 }
 
 test "realm root relocation rewrites active interpreter containers" {
