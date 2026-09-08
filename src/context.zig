@@ -13774,19 +13774,23 @@ test "an indirect eval does not carry the caller's new.target into global code" 
     // Still legal: a direct eval inside a function inherits that function's
     // binding, and the function's own binding survives the indirect eval above.
     try expectEvalStr("function",
-        \\function g() { return eval("typeof new.target"); }
-        \\new g()
+        \\var seen = "";
+        \\function g() { seen = eval("typeof new.target"); }
+        \\new g();
+        \\seen
     );
     try expectEvalStr("undefined",
         \\function h() { return eval("typeof new.target"); }
         \\h()
     );
     try expectEvalStr("no throw",
+        \\var result = "";
         \\function k() {
         \\  var inner = (0, eval)("1 + 1");
-        \\  return eval("typeof new.target") === "function" && inner === 2 ? "no throw" : "wrong";
+        \\  result = eval("typeof new.target") === "function" && inner === 2 ? "no throw" : "wrong";
         \\}
-        \\new k()
+        \\new k();
+        \\result
     );
 }
 
