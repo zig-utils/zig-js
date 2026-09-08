@@ -305,7 +305,7 @@ fn linkAsyncForward(source: *Promise, destination: *Promise) void {
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
 pub const Microtask = struct {
-    kind: enum { reaction, settlement_batch, transferred_batch, thenable, callback, native_callback, job, next_tick } = .reaction,
+    kind: enum { reaction, settlement_batch, transferred_batch, thenable, callback, native_callback, job, next_tick, engine_failure } = .reaction,
     reaction: Reaction,
     argument: Value,
     fulfilled: bool, // whether the source settled fulfilled (vs rejected)
@@ -314,7 +314,7 @@ pub const Microtask = struct {
     /// Selected by `kind`: transferred batches own arena-lived backing, while
     /// thenable and settlement jobs own a managed Promise. The union preserves
     /// the ordinary job's allocation density.
-    payload: extern union { promise: ?*Promise, transfer: *MicrotaskTransfer } = .{ .promise = null },
+    payload: extern union { promise: ?*Promise, transfer: *MicrotaskTransfer, error_code: u16 } = .{ .promise = null },
     /// `.callback` jobs (HTML queueMicrotask): the function to invoke with no
     /// arguments. Settles no promise; a throw propagates as a reported exception.
     callback: Value = Value.undef(),
@@ -344,6 +344,12 @@ pub const MicrotaskTransfer = struct {
     state: enum { empty, reserved, queued, consumed } = .empty,
     items: std.ArrayListUnmanaged(Microtask) = .empty,
     head: usize = 0,
+
+    /// The finishing Thread can no longer reject its already-published result.
+    /// Its reserved handoff owns an unowned final-checkpoint error ahead of the
+    /// untouched local suffix. Written by that Thread before publication, then
+    /// read/consumed only under the destination queue lock (#896).
+    failure: ?EvalError = null,
 
     pub fn pendingItems(self: *MicrotaskTransfer) []Microtask {
         return self.items.items[self.head..];
@@ -413,7 +419,7 @@ pub const MicrotaskQueue = struct {
     pub fn publishTransfer(self: *MicrotaskQueue, source: *MicrotaskQueue, transfer: *MicrotaskTransfer) void {
         std.debug.assert(source != self and source.reservations == 0);
         std.debug.assert(transfer.destination == self and transfer.state == .reserved);
-        const count = source.pendingLen();
+        const count = source.pendingLen() + @intFromBool(transfer.failure != null);
         if (count == 0) {
             self.cancelTransfer(transfer);
             return;
@@ -1390,7 +1396,7 @@ fn materializedJobCount(task: Microtask) EvalError!usize {
     if (task.kind != .transferred_batch) return settlementJobCount(task);
     const transfer = task.payload.transfer;
     std.debug.assert(transfer.state == .queued);
-    var count: usize = 0;
+    var count: usize = @intFromBool(transfer.failure != null);
     // Only the realm queue accepts transfers; a closed worker buffer contains
     // ordinary/settlement jobs, so the graph is one level deep, never recursive.
     for (transfer.pendingItems()) |child|
@@ -1469,6 +1475,16 @@ pub fn materializeSettlementBatches(self: *Interpreter, queue: *MicrotaskQueue) 
             const transfer = task.payload.transfer;
             std.debug.assert(transfer.destination == queue);
             var out: usize = 0;
+            if (transfer.failure) |err| {
+                output[out] = .{
+                    .kind = .engine_failure,
+                    .reaction = undefined,
+                    .argument = Value.undef(),
+                    .fulfilled = false,
+                    .payload = .{ .error_code = @intFromError(err) },
+                };
+                out += 1;
+            }
             for (transfer.pendingItems()) |child| {
                 const child_count = settlementJobCount(child);
                 materializeSettlement(self, child, output[out..][0..child_count]);
@@ -1478,6 +1494,7 @@ pub fn materializeSettlementBatches(self: *Interpreter, queue: *MicrotaskQueue) 
             transfer.items.deinit(self.arena);
             transfer.items = .empty;
             transfer.head = 0;
+            transfer.failure = null;
             transfer.state = .consumed;
         } else materializeSettlement(self, task, output);
     }
@@ -2156,6 +2173,7 @@ fn runThenableJob(self: *Interpreter, task: *Microtask, publication: *PreparedSe
 /// The caller owns the current job and one queue publication slot. A consumed
 /// slot follows the Promise completion; an unused slot returns to the caller.
 pub fn runJob(self: *Interpreter, task: *Microtask, publication: *PreparedSettlement) EvalError!void {
+    if (task.kind == .engine_failure) return @errorCast(@errorFromInt(task.payload.error_code));
     std.debug.assert(task.kind != .settlement_batch and task.kind != .transferred_batch);
     if (task.kind == .native_callback) {
         promise_profile.recordMicrotaskRun(false);
@@ -2565,4 +2583,73 @@ test "waitAsync prepared primitive completion commits without root or queue allo
     try std.testing.expect(repeated_queue.isEmpty());
     try std.testing.expectEqual(@as(usize, 0), repeated_queue.reservations);
     try std.testing.expectEqual(@as(usize, 0), exhausted.alloc_index);
+}
+
+test "host checkpoint transferred engine failure survives queue OOM and precedes its suffix" {
+    const Context = @import("context.zig").Context;
+    const Probe = struct {
+        machine: *Interpreter,
+        calls: usize = 0,
+        ordered: bool = true,
+        fn record(raw: ?*anyopaque) callconv(.c) void {
+            const probe: *@This() = @ptrCast(@alignCast(raw.?));
+            probe.calls += 1;
+            probe.ordered = probe.ordered and probe.machine.current_microtask.?.argument.asNum() == @as(f64, @floatFromInt(probe.calls));
+        }
+        fn job(probe: *@This(), index: usize) Microtask {
+            return .{
+                .kind = .native_callback,
+                .reaction = undefined,
+                .argument = Value.num(@floatFromInt(index)),
+                .fulfilled = true,
+                .native_callback_context = probe,
+                .native_callback = record,
+            };
+        }
+    };
+    for ([_]bool{ false, true }) |has_suffix| {
+        const ctx = try Context.create(std.testing.allocator);
+        defer ctx.destroy();
+        var machine = ctx.interpreter();
+        var probe = Probe{ .machine = &machine };
+        const destination = &ctx.microtasks;
+        var source = MicrotaskQueue{};
+        defer source.items.deinit(ctx.arena());
+        var transfer = MicrotaskTransfer{};
+        try destination.append(ctx.arena(), probe.job(1));
+        try destination.prepareTransfer(ctx.arena(), &transfer);
+        const suffix_count = if (has_suffix) destination.items.capacity + 1 else 0;
+        for (0..suffix_count) |i| try source.append(ctx.arena(), probe.job(i + 2));
+        transfer.failure = error.OutOfMemory;
+        destination.publishTransfer(&source, &transfer);
+        try destination.append(ctx.arena(), probe.job(suffix_count + 2));
+        try std.testing.expectEqual(.queued, transfer.state);
+        try std.testing.expect(source.isEmpty());
+        try std.testing.expectEqual(@as(usize, 0), destination.reservations);
+
+        var exhausted = std.testing.FailingAllocator.init(ctx.arena(), .{ .fail_index = 0, .resize_fail_index = 0 });
+        machine.arena = exhausted.allocator();
+        try std.testing.expectError(error.OutOfMemory, machine.drainMicrotasks());
+        try std.testing.expect(exhausted.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 0), probe.calls);
+        // Preparation failure must not consume the queued engine failure,
+        // whether it is still a descriptor or already a materialized job.
+        var failures: usize = 0;
+        for (destination.pendingItems()) |task| {
+            if (task.kind == .engine_failure) failures += 1;
+            if (task.kind == .transferred_batch and task.payload.transfer.failure != null) failures += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), failures);
+        machine.arena = ctx.arena();
+        try std.testing.expectError(error.OutOfMemory, machine.drainMicrotasks());
+        try std.testing.expectEqual(@as(usize, 1), probe.calls);
+        try std.testing.expectEqual(suffix_count + 1, destination.pendingLen());
+        try std.testing.expectEqual(.consumed, transfer.state);
+        try std.testing.expect(transfer.failure == null);
+        try std.testing.expectEqual(@as(usize, 0), destination.reservations);
+        try machine.drainMicrotasks();
+        try std.testing.expectEqual(suffix_count + 2, probe.calls);
+        try std.testing.expect(probe.ordered);
+        try std.testing.expect(destination.isEmpty());
+    }
 }

@@ -42952,3 +42952,52 @@ test "host checkpoint never resumes the suffix of a failed explicit script drain
         try std.testing.expectEqual(@as(f64, 1), ctx.global_object.getOwn("explicitCheckpointSuffix").?.asNum());
     }
 }
+
+test "host checkpoint receives terminal Thread drain OOM after asyncJoin publication" {
+    const Fault = struct {
+        calls: usize = 0,
+        fn fail(raw: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+            const machine: *interp.Interpreter = @ptrCast(@alignCast(raw));
+            const fault: *@This() = @ptrCast(@alignCast(machine.active_native.?.private_data.?));
+            fault.calls += 1;
+            return error.OutOfMemory;
+        }
+    };
+    for ([_]bool{ false, true }) |gil_mode| {
+        for ([_]bool{ false, true }) |has_suffix| {
+            const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true, .gil = gil_mode });
+            defer ctx.destroy();
+            var fault = Fault{};
+            const saved = gc_mod.setActiveContext(ctx);
+            defer gc_mod.restoreActiveContext(saved);
+            try interp.setNative(ctx.arena(), ctx.root_shape, ctx.global_object, "terminalCheckpointFault", 0, Fault.fail);
+            ctx.global_object.getOwn("terminalCheckpointFault").?.asObj().private_data = &fault;
+            try ctx.global_object.setOwn(ctx.arena(), ctx.root_shape, "terminalHasSuffix", Value.boolVal(has_suffix));
+            try std.testing.expectError(error.OutOfMemory, ctx.evaluate(
+                \\globalThis.terminalSuffixCalls = 0;
+                \\globalThis.terminalGate = { ready: 0 };
+                \\globalThis.terminalThread = new Thread(function() {
+                \\  Atomics.wait(terminalGate, 'ready', 0);
+                \\  return { marker: 896, get then() {
+                \\    queueMicrotask(terminalCheckpointFault);
+                \\    if (terminalHasSuffix) queueMicrotask(function() { terminalSuffixCalls++; });
+                \\    return undefined;
+                \\  }};
+                \\});
+                \\globalThis.terminalJoin = terminalThread.asyncJoin();
+                \\Atomics.store(terminalGate, 'ready', 1);
+                \\Atomics.notify(terminalGate, 'ready');
+            ));
+            try std.testing.expectEqual(@as(usize, 1), fault.calls);
+            const joined = promise.promiseOf(ctx.global_object.getOwn("terminalJoin").?).?;
+            try std.testing.expectEqual(promise.State.fulfilled, joined.state);
+            try std.testing.expectEqual(@as(f64, 896), joined.value.asObj().getOwn("marker").?.asNum());
+            try std.testing.expectEqual(@as(f64, 0), ctx.global_object.getOwn("terminalSuffixCalls").?.asNum());
+            try std.testing.expectEqual(@as(usize, @intFromBool(has_suffix)), ctx.microtasks.pendingLen());
+            _ = try ctx.evaluate("0;");
+            try std.testing.expectEqual(@as(f64, @floatFromInt(@intFromBool(has_suffix))), ctx.global_object.getOwn("terminalSuffixCalls").?.asNum());
+            try std.testing.expectEqual(@as(usize, 1), fault.calls);
+            try std.testing.expect(ctx.microtasks.isEmpty());
+        }
+    }
+}

@@ -2207,7 +2207,7 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
             if (mt.payload.promise) |p| markManaged(v, p);
         },
         .callback => markValue(v, mt.callback),
-        .native_callback => {},
+        .native_callback, .engine_failure => {},
         .job => {
             markValue(v, mt.job);
             markValue(v, mt.job_first);
@@ -2234,7 +2234,7 @@ inline fn relocateMicrotask(mt: *promise.Microtask, v: anytype) void {
             gc_relocation.rewriteOptionalSlot(v, promise.Promise, &mt.payload.promise);
         },
         .callback => gc_relocation.rewriteValueSlot(v, &mt.callback),
-        .native_callback => {},
+        .native_callback, .engine_failure => {},
         .job => {
             gc_relocation.rewriteValueSlot(v, &mt.job);
             gc_relocation.rewriteValueSlot(v, &mt.job_first);

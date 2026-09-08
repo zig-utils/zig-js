@@ -990,7 +990,12 @@ fn threadMain(rec: *ThreadRecord) void {
     // `rec.result` and `rec.settling_joins` remain the authoritative precise
     // roots. Reload each result after earlier settlements may have moved it.
     settleThreadJoins(rec, &machine, pending_joins.items, threw);
-    if (!checkpoint_failed) machine.drainMicrotasks() catch {};
+    if (!checkpoint_failed) machine.drainHostMicrotasks() catch |err| {
+        // asyncJoin already owns the original completion. Publish this distinct
+        // unowned checkpoint failure through the pre-reserved queue handoff;
+        // the realm observes it before running the untouched local suffix.
+        rec.microtask_transfer.failure = err;
+    };
     transferPropAsyncQueue(&machine, rec, microtasks, &rec.ctx.microtasks);
     // Pending prop-async tickets now target the realm queue, but another peer
     // may already have removed one of this thread's tickets from the global
