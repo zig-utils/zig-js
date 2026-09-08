@@ -145,8 +145,8 @@
     },
     {
       "path": "HOME_INTEGRATION/index.html",
-      "bytes": 247243,
-      "sha256": "8d3c5cecc8daac652e79172517d25a32318107b901e19954b575f3e55bc195e1"
+      "bytes": 247277,
+      "sha256": "8951876118449004606af8d9ca68978be517038f776a9c96a2f5b04e9ed59dd4"
     },
     {
       "path": "index.html",
@@ -274,5 +274,5 @@
       "sha256": "51a1b101a171cb21eb88f49b2b3a8c2bd032da92bcec26589423924de7f8785a"
     }
   ],
-  "tree_sha256": "5b9bf6023acfcc5591fc4a1a9177c498af825a43541c03ca43ee6cd398293f41"
+  "tree_sha256": "bbcd5e9b624b6b0aa617da0b8d181a73e268585f99be83ef579fa8abf7d67929"
 }
